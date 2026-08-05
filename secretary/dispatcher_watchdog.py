@@ -10,8 +10,8 @@ runtime that cannot supply activity timestamps, or cannot expose the pid heartbe
 
 A confirmed pid answers whether the process runs, not whether it is doing anything. A head that is
 ready for input has stopped working, and if nothing lands for the round being waited on while it
-stays that way, that ends the wait too (`secretary-1063`): otherwise a finished head sitting at its
-prompt holds a card in `waiting-worker-report` for as long as the process lives.
+stays that way, that ends the wait too (`secretary-1063`).  The destructive outcome requires two
+separate ticks that observe the same aged idle episode; the first is a degraded pending signal.
 """
 
 from __future__ import annotations
@@ -68,6 +68,37 @@ def idle_stall_seconds() -> int:
     except ValueError:
         return IDLE_STALL_DEFAULT
     return value if value > 0 else IDLE_STALL_DEFAULT
+
+
+def idle_outcome(record, status: dict[str, Any], *, kind: str, now: float) -> str:
+    """Advance one role's idle fence: ``wait``, ``pending`` or ``act``.
+
+    This is the sole owner of the continuous-idle window and its two-tick confirmation.
+    A busy pane clears both values; repaint activity intentionally does not.
+    """
+    idle_name = f"{kind}_idle_since"
+    confirmation_name = f"{kind}_idle_confirmations"
+    idle_since = float(getattr(record, idle_name) or 0.0)
+    if not status.get("idle"):
+        setattr(record, idle_name, 0.0)
+        setattr(record, confirmation_name, 0)
+        return "wait"
+    if not idle_since:
+        setattr(record, idle_name, now)
+        setattr(record, confirmation_name, 0)
+        return "wait"
+    if now - idle_since <= idle_stall_seconds():
+        setattr(record, confirmation_name, 0)
+        return "wait"
+    confirmations = int(getattr(record, confirmation_name) or 0) + 1
+    setattr(record, confirmation_name, confirmations)
+    return "act" if confirmations >= 2 else "pending"
+
+
+def reset_idle(record, kind: str) -> None:
+    """Clear an idle episode when a replacement head takes over or a wait resets."""
+    setattr(record, f"{kind}_idle_since", 0.0)
+    setattr(record, f"{kind}_idle_confirmations", 0)
 
 
 def pid_file_path(kind: str, reference: str) -> str:
@@ -158,8 +189,7 @@ def reset_wait(record, kind: str) -> None:
     setattr(record, f"{kind}_waiting_since", 0.0)
     setattr(record, f"{kind}_respawns", 0)
     setattr(record, f"{kind}_progress_at", 0.0)
-    setattr(record, f"{kind}_idle_since", 0.0)
-    setattr(record, f"{kind}_idle_confirmations", 0)
+    reset_idle(record, kind)
 
 
 def wait_cycle_token(record) -> str:

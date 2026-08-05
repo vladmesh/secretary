@@ -6348,7 +6348,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         )
         self._rewind_idle()
         bounced = self.tick()
-        self.assertEqual(bounced["action"], "waiting-worker-report")
+        self.assertEqual(bounced["action"], "worker-idle-unconfirmed")
+        self.assertEqual(bounced["status"], "degraded")
         bounced = self.tick()
         self.assertEqual(bounced["status"], "degraded")
         return bounced
@@ -6490,7 +6491,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             dict(self.host.worker_status_result),
             dict(self.host.worker_status_result, pid_confirmed=False),
         ]):
-            self.assertEqual(self.tick()["action"], "waiting-worker-report")
+            self.assertEqual(self.tick()["action"], "worker-idle-unconfirmed")
             self.assertEqual(self.tick()["action"], "waiting-worker-report")
 
         self.assertEqual(self._pilot_record()["worker_idle_since"], aged)

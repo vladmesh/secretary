@@ -39,7 +39,7 @@ from secretary.board_transport import (
     ensure_from_runtime_values,
     transport_path,
 )
-from secretary.runtime_env import RuntimeEnvError, RuntimeEnvMissing as _RuntimeEnvMissing, read_runtime_env, runtime_env_path
+from secretary.runtime_env import RuntimeEnvError, RuntimeEnvMissing, read_runtime_env, runtime_env_path
 from secretary.automations import OrcaAutomationClient, workspaces_root
 from secretary.config import validate_instance
 from secretary.data import init_layout, manifest_for
@@ -213,20 +213,6 @@ def _clone_or_reuse(remote: str, target: Path, *, recovery: bool, dry_run: bool)
         except state_repo.StateRepoError as exc:
             raise InstallError(str(exc)) from None
     return "reused checkpoint checkout"
-
-
-def _read_runtime_env(instance_dir: Path, override: str | None) -> dict[str, str]:
-    """Compatibility boundary for install's established error vocabulary."""
-    try:
-        return read_runtime_env(instance_dir, override)
-    except _RuntimeEnvMissing as exc:
-        raise RuntimeEnvMissing(str(exc)) from None
-    except RuntimeEnvError as exc:
-        raise InstallError(str(exc)) from None
-
-
-class RuntimeEnvMissing(InstallError):
-    """The optional host runtime file is absent, rather than malformed or unsafe."""
 
 
 def _runtime_env_file(instance_dir: Path, override: str | None) -> Path:
@@ -864,7 +850,7 @@ def install(args: argparse.Namespace) -> InstallResult:
 
         runtime_loaded = True
         try:
-            values = _read_runtime_env(target, args.runtime_env)
+            values = read_runtime_env(target, args.runtime_env)
         except RuntimeEnvMissing as exc:
             # A legacy board-only catalog is inert after this migration. It
             # must not force a recovery phrase merely to recreate transport.
@@ -878,6 +864,8 @@ def install(args: argparse.Namespace) -> InstallResult:
             else:
                 _restore_without_credentials(args, target, result)
                 raise _blocked_by_secrets(exc, secrets, runtime_env) from None
+        except RuntimeEnvError as exc:
+            raise InstallError(str(exc)) from None
         try:
             transport_outcome = ensure_from_runtime_values(
                 target,

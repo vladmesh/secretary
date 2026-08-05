@@ -33,8 +33,7 @@ class TransportOutcome:
 
     @property
     def changed(self) -> bool:
-        return (self.source != "existing" or self.mode_repaired or self.ignore_added
-                or self.legacy_retired or self.legacy_external)
+        return self.source != "existing" or self.mode_repaired or self.ignore_added or self.legacy_retired
 
     def render(self, *, dry_run: bool = False) -> str:
         actions: list[str] = []

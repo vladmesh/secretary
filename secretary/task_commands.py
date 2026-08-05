@@ -178,16 +178,16 @@ def not_implemented_task(args: argparse.Namespace) -> int:
 
 
 def run_task_list(args: argparse.Namespace) -> int:
-    return _run_task_read(lambda reader: reader.list(states=set(args.state or ()), project=args.project, sprint=args.sprint))
+    return _run_task_read(args, lambda reader: reader.list(states=set(args.state or ()), project=args.project, sprint=args.sprint))
 
 
 def run_task_show(args: argparse.Namespace) -> int:
-    return _run_task_read(lambda reader: reader.show(args.ref))
+    return _run_task_read(args, lambda reader: reader.show(args.ref))
 
 
-def _run_task_read(operation: Callable[[TaskReader], object]) -> int:
+def _run_task_read(args: argparse.Namespace, operation: Callable[[TaskReader], object]) -> int:
     try:
-        reader = TaskReader(KanboardClient())
+        reader = TaskReader(KanboardClient(instance_dir=getattr(args, "instance", None)))
         result = operation(reader)
     except TaskError as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
@@ -208,7 +208,7 @@ def _read_body(path: str | None) -> str:
 def _run_task_write(args: argparse.Namespace, operation: Callable[[TaskWriter, str, str], object]) -> int:
     try:
         body = _read_body(getattr(args, "body_file", None) or getattr(args, "reason_file", None))
-        writer = TaskWriter(KanboardClient(), data_dir=resolve_data_dir(args))
+        writer = TaskWriter(KanboardClient(instance_dir=getattr(args, "instance", None)), data_dir=resolve_data_dir(args))
         result = operation(writer, body, args.actor or args.role)
     except TaskError as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
@@ -225,7 +225,7 @@ def run_task_create(args: argparse.Namespace) -> int:
     try:
         _validate_codex_mode_for_create(args)
         description = _read_body(args.body_file) if args.body_file else args.description
-        writer = TaskWriter(KanboardClient(), data_dir=resolve_data_dir(args))
+        writer = TaskWriter(KanboardClient(instance_dir=getattr(args, "instance", None)), data_dir=resolve_data_dir(args))
         result = writer.create(
             role=args.role,
             actor=args.actor or args.role,
@@ -260,7 +260,7 @@ def run_task_create(args: argparse.Namespace) -> int:
 def run_task_edit(args: argparse.Namespace) -> int:
     try:
         description = _read_body(args.body_file) if args.body_file else args.description
-        writer = TaskWriter(KanboardClient(), data_dir=resolve_data_dir(args))
+        writer = TaskWriter(KanboardClient(instance_dir=getattr(args, "instance", None)), data_dir=resolve_data_dir(args))
         result = writer.edit(
             role=args.role,
             actor=args.actor or args.role,
@@ -329,7 +329,9 @@ def run_task_claim(args: argparse.Namespace) -> int:
 
 def run_task_reconcile_audit(args: argparse.Namespace) -> int:
     try:
-        repaired, unresolved = TaskWriter(KanboardClient(), data_dir=resolve_data_dir(args)).reconcile()
+        repaired, unresolved = TaskWriter(
+            KanboardClient(instance_dir=getattr(args, "instance", None)), data_dir=resolve_data_dir(args),
+        ).reconcile()
     except TaskError as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
         return exc.exit_code

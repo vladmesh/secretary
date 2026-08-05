@@ -114,9 +114,11 @@ from secretary.dispatcher_review import (
 from secretary.dispatcher_watchdog import (
     head_process_status as _head_process_status,
     idle_stall_seconds as _idle_stall_seconds,
+    idle_outcome as _idle_outcome,
     initial_output_stall_seconds as _initial_output_stall_seconds,
     pid_file_path as _pid_file_path,
     reset_wait as _reset_wait,
+    reset_idle as _reset_idle,
     stall_seconds as _stall_seconds,
     wait_cycle_token as _wait_cycle_token,
     wait_outcome as _wait_outcome,
@@ -3371,7 +3373,7 @@ class DispatcherRuntime:
             return {"status": "ok", "step": "review" if kind == "review" else "advance", "pilot_ref": task["ref"], "attempt_id": attempt_id, "action": f"{kind}-paused"}
         runtime_reason = ""
         try:
-            status = self._head_status(task, record, kind=kind)
+            status = self.host.review_status(task, record) if kind == "review" else self.host.worker_status(task, record)
         except Exception as exc:
             # Orca may be down or between reconnects.  It is not evidence that this particular
             # head died, so do not restart it merely for that.  It also cannot prove progress,
@@ -3406,19 +3408,27 @@ class DispatcherRuntime:
             # timing ceilings below do not apply here: a head that is working waits as long as it
             # needs, and one that has stopped without delivering ends the wait now rather than at a
             # ceiling.
-            idle_trigger = self._idle_wait_trigger(
-                record, records, payload, status, kind=kind, now=now
-            )
-            if idle_trigger:
-                confirmations = int(getattr(record, f"{kind}_idle_confirmations") or 0) + 1
-                setattr(record, f"{kind}_idle_confirmations", confirmations)
-                self.save_records(payload, records)
+            idle = _idle_outcome(record, status, kind=kind, now=now)
+            self.save_records(payload, records)
+            if idle != "wait":
+                expectation = _wait_expectation(kind)
+                if kind == "worker":
+                    expectation = f"{expectation} for generation {record.report_generation}"
+                state = "held in a dialog" if status.get("idle_reason") == "dialog" else "idle"
+                idle_since = float(getattr(record, f"{kind}_idle_since") or now)
+                idle_trigger = (
+                    f"the head has been {state} for {int(now - idle_since)}s with no {expectation}"
+                )
                 # Stopping a live pane needs evidence separated in time.  Do not issue a second
                 # status probe inside this tick: a turn can start between two microsecond-adjacent
                 # probes, while the next ordinary dispatcher tick observes that transition and
                 # clears the episode before anything destructive happens.
-                if confirmations < 2:
-                    return unavailable() if runtime_reason else None
+                if idle == "pending":
+                    return {
+                        "status": "degraded", "step": "review" if kind == "review" else "advance",
+                        "pilot_ref": task["ref"], "attempt_id": attempt_id,
+                        "action": f"{kind}-idle-unconfirmed", "reason": idle_trigger,
+                    }
                 # Degraded, not ok. A head that stopped without delivering is the pipeline failing
                 # to make progress on a card, and the operator learns about it from the tick's own
                 # health: an `ok` bounce would write healthy telemetry over the one signal that
@@ -3468,53 +3478,6 @@ class DispatcherRuntime:
         if outcome == "respawn":
             return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=now, trigger=f"no {_wait_expectation(kind)} within {stall}s")
         return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=stall, trigger=f"no {_wait_expectation(kind)}")
-
-    def _head_status(self, task: dict[str, Any], record: DispatcherRecord, *, kind: str) -> dict[str, Any]:
-        """Read one worker/reviewer status through the shared host boundary."""
-        return self.host.review_status(task, record) if kind == "review" else self.host.worker_status(task, record)
-
-    def _idle_wait_trigger(
-        self,
-        record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        status: dict[str, Any],
-        *,
-        kind: str,
-        now: float,
-    ) -> str:
-        """Why this wait should end because its head stopped working, or "" to keep waiting.
-
-        The invariant this enforces is that a round ends only when its own report is on the board
-        (secretary-1063). The dispatcher is here because no marker for the generation it is holding
-        has arrived, and a head that is ready for input has finished whatever it was doing without
-        producing one: the report call was never made, or it was made against a round that is over
-        and answered as that round's replay, which leaves nothing on the card and no error the
-        dispatcher can see. Both end here rather than in the report protocol, which cannot tell a
-        stale round's payload from the retry it must keep answering.
-
-        Readiness is sampled per tick and only counts once it has held for the idle window, so a
-        head between turns — a prompt delivered whose turn has not started, a conversation just
-        resumed — is not mistaken for one that has stopped. A working head is never ready, so this
-        never fires on it. A head held in a dialog is not working either and nothing in the
-        pipeline answers a dialog, so it ends the wait the same way and says so.
-        """
-        idle_since = float(getattr(record, f"{kind}_idle_since") or 0.0)
-        verdict, next_idle_since = _idle_verdict(status, idle_since, now)
-        if next_idle_since != idle_since:
-            setattr(record, f"{kind}_idle_since", next_idle_since)
-            self.save_records(payload, records)
-        if not verdict:
-            confirmation_name = f"{kind}_idle_confirmations"
-            if getattr(record, confirmation_name):
-                setattr(record, confirmation_name, 0)
-                self.save_records(payload, records)
-            return ""
-        expectation = _wait_expectation(kind)
-        if kind == "worker":
-            expectation = f"{expectation} for generation {record.report_generation}"
-        state = "held in a dialog" if status.get("idle_reason") == "dialog" else "idle"
-        return f"the head has been {state} for {int(now - next_idle_since)}s with no {expectation}"
 
     def _trigger_wait_watchdog(
         self, task, record, records, payload, attempt_id, *, kind: str, trigger: str,
@@ -3613,8 +3576,7 @@ class DispatcherRuntime:
         setattr(record, f"{kind}_waiting_since", now)
         # The replacement head owns its own readiness: whatever the one it replaces was doing when
         # the watchdog fired is not charged against it.
-        setattr(record, f"{kind}_idle_since", 0.0)
-        setattr(record, f"{kind}_idle_confirmations", 0)
+        _reset_idle(record, kind)
         respawns = int(getattr(record, f"{kind}_respawns") or 0) + 1
         setattr(record, f"{kind}_respawns", respawns)
         records[ref] = record
@@ -5025,20 +4987,6 @@ def _continuation_prompt(
 
 def _wait_expectation(kind: str) -> str:
     return "review verdict" if kind == "review" else "worker report"
-
-
-def _idle_verdict(status: dict[str, Any], idle_since: float, now: float) -> tuple[bool, float]:
-    """Evaluate one continuous idle episode without mutating dispatcher state.
-
-    Readiness is the delivery boundary: pane repainting is not work progress and must not
-    perpetually restart the idle window. A busy probe clears the episode; callers may safely
-    apply the same result to the normal status and to the pre-stop re-probe.
-    """
-    if not status.get("idle"):
-        return False, 0.0
-    if not idle_since:
-        return False, now
-    return now - idle_since > _idle_stall_seconds(), idle_since
 
 
 def _watchdog_kind(role: str) -> str:

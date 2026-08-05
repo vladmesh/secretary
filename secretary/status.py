@@ -51,7 +51,7 @@ def collect_status(report, *, host_fixture: str | None = None, offline: bool = F
             "heads": _heads(report.instance),
             "head_registry": _head_registry(report.instance_path.parent),
             "cards": {"total": _card_count(data_dir), "active_attempts": len(_attempts(production, probe_panels=False))},
-            "sprints": _sprints(data_dir, report.instance, production),
+            "sprints": _sprints(data_dir, report.instance_path.parent, report.instance, production),
         },
         "host": {
             "units": _units(expected, collected, offline=offline),
@@ -135,11 +135,13 @@ def _head_registry(instance_dir: Path) -> dict[str, Any]:
     return record
 
 
-def _sprints(data_dir: Path, instance: dict[str, Any], production: dict[str, Any]) -> dict[str, Any]:
+def _sprints(
+    data_dir: Path, instance_dir: Path, instance: dict[str, Any], production: dict[str, Any],
+) -> dict[str, Any]:
     """Read the sprint entity and live board without consulting observer context."""
     try:
         reader = SprintReader(
-            KanboardClient(), data_dir=data_dir, thresholds=budget_thresholds(instance),
+            KanboardClient(instance_dir=instance_dir), data_dir=data_dir, thresholds=budget_thresholds(instance),
         )
         observers = {row["sprint"]: row for row in observer_snapshot(production)}
         return {

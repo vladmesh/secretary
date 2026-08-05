@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
-from .paths import default_instance_path, instance_dir as normalize_instance_dir
+from .paths import instance_dir as normalize_instance_dir
 
 TRANSPORT_FILE = "board-transport.env"
 TRANSPORT_ENV = ("KANBOARD_URL", "KANBOARD_API_USER", "KANBOARD_API_TOKEN")
@@ -37,8 +37,8 @@ class BoardTransport:
 DEFAULT_TRANSPORT = BoardTransport(DEFAULT_URL, DEFAULT_USER, DEFAULT_TOKEN)
 
 
-def transport_path(instance_dir: Path | str | None = None) -> Path:
-    root = normalize_instance_dir(instance_dir) if instance_dir else default_instance_path()
+def transport_path(instance_dir: Path | str) -> Path:
+    root = normalize_instance_dir(instance_dir)
     return root / TRANSPORT_FILE
 
 
@@ -73,7 +73,7 @@ def parse(path: Path, *, require_private: bool = True) -> BoardTransport:
     return BoardTransport(fields["KANBOARD_URL"], fields["KANBOARD_API_USER"], fields["KANBOARD_API_TOKEN"])
 
 
-def resolve(instance_dir: Path | str | None = None) -> BoardTransport:
+def resolve(instance_dir: Path | str) -> BoardTransport:
     path = transport_path(instance_dir)
     return parse(path)
 

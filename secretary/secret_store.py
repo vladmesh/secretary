@@ -24,8 +24,10 @@ in the clear next to the ciphertext. Nothing about how a value was sealed lives
 only in this module's constants. The primitives are `cryptography`'s (Scrypt,
 HKDF, ChaCha20-Poly1305); there is no cryptographic math of our own here.
 
-Writes go through `state_repo.state_repo_lock` and land as one commit, so the
-catalog and the values it names can never diverge in the history.
+Store writes go through `state_repo.state_repo_lock` and land atomically in one
+store commit, so the catalog and the values it names can never diverge in history.
+The prior ignore-lifecycle commit is deliberately separate and happens before a
+local installation key can be written.
 
 A secret that some process reads as an environment variable also carries a
 `materialize` record: the variable name, which file it belongs to and which line

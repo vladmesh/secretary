@@ -100,7 +100,9 @@ def _missing(message: str):
 
 
 def _store(args: argparse.Namespace) -> ProductIssueStore:
-    return ProductIssueStore(KanboardClient(), data_dir=resolve_data_dir(args), instance=args.instance)
+    return ProductIssueStore(
+        KanboardClient(instance_dir=args.instance), data_dir=resolve_data_dir(args), instance=args.instance,
+    )
 
 
 def _run(args: argparse.Namespace, callback) -> int:

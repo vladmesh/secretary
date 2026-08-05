@@ -922,7 +922,7 @@ class MaterializeCase(EnvStoreCase):
 
     def test_the_generated_file_passes_the_installation_validator(self) -> None:
         materialize_secrets(self.instance_dir)
-        values = installation._read_runtime_env(self.instance_dir, str(self.target))
+        values = installation.read_runtime_env(self.instance_dir, str(self.target))
         self.assertEqual(
             values,
             {

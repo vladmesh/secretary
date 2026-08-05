@@ -1,10 +1,10 @@
 """The private instance repository as a shared commit target.
 
 Contract: docs/RECOVERY.md, sections "Layout" and "Writer". Five writers commit
-into `state/`: the tick writer (`state/board`, `state/runs`), the memory writer
-(`state/memory`) and the knowledge writer (`state/knowledge`). The secret store
-writes `secrets/` beside them on the same terms. The local-configuration writer
-owns `.gitignore` through :func:`ensure_ignored`. They own disjoint pathspecs and
+to the private instance repository: the tick writer (`state/board`, `state/runs`),
+the memory writer (`state/memory`), the knowledge writer (`state/knowledge`), the
+secret store (`secrets/`) and the local-configuration writer (`.gitignore` through
+:func:`ensure_ignored`). They own disjoint pathspecs and
 never `git add -A`, so none can pick up another's half-written tree, and
 `state_repo_lock` serializes the index operations git itself does not make
 concurrency-safe.
@@ -194,7 +194,7 @@ def _ensure_ignored_locked(instance_dir: Path, entry: str, *, dry_run: bool) -> 
     """Implementation for writers that already hold :func:`state_repo_lock`."""
     if is_tracked(instance_dir, entry):
         raise StateRepoError(
-            f"{entry.lstrip('/')} is tracked; remove it from the instance repository before enabling local transport"
+            f"{entry.lstrip('/')} is tracked; remove it from the instance repository before enabling this local file"
         )
     ignore = instance_dir / ".gitignore"
     try:

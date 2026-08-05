@@ -191,7 +191,7 @@ class PhraseBranchCase(RecoveryCase):
     def test_the_recovered_file_passes_the_installation_validator_unchanged(self) -> None:
         self.recover("--recovery-phrase-file", str(self.phrase_file))
 
-        values = installation._read_runtime_env(self.target, None)
+        values = installation.read_runtime_env(self.target, None)
         self.assertEqual(values["EXAMPLE_API_TOKEN"], "live-token")
         self.assertEqual(values["EXAMPLE_URL"], "http://127.0.0.1/jsonrpc.php")
 

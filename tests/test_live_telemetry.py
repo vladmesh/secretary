@@ -299,6 +299,13 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         payload["records"][ref]["worker_idle_since"] -= idle_stall_seconds() + 60
         self.runtime.production_state.save(payload)
 
+        pending = self.runtime.production_tick()
+
+        self.assertEqual(pending["status"], "degraded")
+        self.assertEqual(
+            [action["action"] for action in pending["actions"] if action.get("pilot_ref") == ref],
+            ["worker-idle-unconfirmed"],
+        )
         result = self.runtime.production_tick()
 
         self.assertEqual(result["status"], "degraded")

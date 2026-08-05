@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary import installation
+from secretary.runtime_env import RuntimeEnvError
 from secretary.cli import main
 from secretary.data import export_runs
 from secretary.installation import (
@@ -126,13 +127,14 @@ class InstallationTests(unittest.TestCase):
             mock.patch("secretary.installation._ensure_installation_user"),
             mock.patch("secretary.installation._clone_or_reuse", return_value="reused checkpoint checkout"),
             mock.patch("secretary.installation._open_secret_store", return_value=unlocked),
-            mock.patch("secretary.installation._read_runtime_env", side_effect=InstallError("unsafe mode")),
+            mock.patch("secretary.installation.read_runtime_env", side_effect=RuntimeEnvError("unsafe mode")),
             mock.patch("secretary.installation.ensure_from_runtime_values") as migrate,
         ):
             result = install(args)
 
         self.assertFalse(result.ok)
         migrate.assert_not_called()
+
     def test_recovery_materializes_pipeline_state_before_host_steps_can_start_units(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -393,8 +395,8 @@ class InstallationTests(unittest.TestCase):
                 mock.patch("secretary.installation._ensure_installation_user") as ensure_user,
                 mock.patch("secretary.installation._clone_or_reuse", return_value="reused checkpoint checkout"),
                 mock.patch(
-                    "secretary.installation._read_runtime_env",
-                    side_effect=InstallError("stop after user check"),
+                    "secretary.installation.read_runtime_env",
+                    side_effect=RuntimeEnvError("stop after user check"),
                 ),
             ):
                 result = install(args)
