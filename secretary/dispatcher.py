@@ -180,6 +180,10 @@ from triggered_agents.agents.pipeline.task_protocol import pythonpath_prefix
 # The prompts below are read and run by a head in its own shell, so the checkout fallback stays a
 # shell expression rather than a path this process resolved.
 _PYTHONPATH_PREFIX = pythonpath_prefix()
+# A TASK.md runs from the candidate worktree, while task protocol mutations belong to the live
+# dispatcher installation selected above.  ``-P`` keeps Python from prepending that worktree to
+# sys.path and shadowing the explicitly selected control plane package.
+_CONTROL_PLANE_TASK_COMMAND = f"{_PYTHONPATH_PREFIX} python3 -P -m secretary task"
 
 
 def default_data_dir(instance_path: Path) -> Path:
@@ -2134,9 +2138,9 @@ class CommandHostRuntime:
             "either way this round is left waiting. Copy the command from here, never from an",
             "earlier turn of this conversation.",
             *_body_file_instructions(body_file),
-            f'{_PYTHONPATH_PREFIX} python3 -m secretary task report --ref {task["ref"]} --role worker --kind done --request-id {request} --body-file {body_file}',
-            f'{_PYTHONPATH_PREFIX} python3 -m secretary task report --ref {task["ref"]} --role worker --kind blocked --classification external_fact --request-id {blocked_requests["external_fact"]} --body-file {body_file}',
-            f'{_PYTHONPATH_PREFIX} python3 -m secretary task report --ref {task["ref"]} --role worker --kind blocked --classification wrong_task_definition --request-id {blocked_requests["wrong_task_definition"]} --body-file {body_file}',
+            f'{_CONTROL_PLANE_TASK_COMMAND} report --ref {task["ref"]} --role worker --kind done --request-id {request} --body-file {body_file}',
+            f'{_CONTROL_PLANE_TASK_COMMAND} report --ref {task["ref"]} --role worker --kind blocked --classification external_fact --request-id {blocked_requests["external_fact"]} --body-file {body_file}',
+            f'{_CONTROL_PLANE_TASK_COMMAND} report --ref {task["ref"]} --role worker --kind blocked --classification wrong_task_definition --request-id {blocked_requests["wrong_task_definition"]} --body-file {body_file}',
             "",
             f"Base branch: {base}",
             f"Worker branch: {branch}",
@@ -2194,8 +2198,8 @@ class CommandHostRuntime:
             "",
             "Post exactly one review verdict through the secretary task protocol:",
             *_body_file_instructions(body_file),
-            f'{_PYTHONPATH_PREFIX} python3 -m secretary task verdict --ref {task["ref"]} --role reviewer --kind green --request-id {green_request} --body-file {body_file}',
-            f'{_PYTHONPATH_PREFIX} python3 -m secretary task verdict --ref {task["ref"]} --role reviewer --kind red --request-id {red_request} --body-file {body_file}',
+            f'{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task["ref"]} --role reviewer --kind green --request-id {green_request} --body-file {body_file}',
+            f'{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task["ref"]} --role reviewer --kind red --request-id {red_request} --body-file {body_file}',
             "",
         ]
         if attestation:
@@ -3408,6 +3412,11 @@ class DispatcherRuntime:
                 record, records, payload, status, kind=kind, now=now
             )
             if idle_trigger:
+                # A status is only a snapshot.  The next operation stops a live pane, so take one
+                # final reading: output can arrive or the TUI can leave its prompt between this
+                # tick's readiness probe and the destructive action.
+                if not self._idle_wait_fence(task, record, records, payload, status, kind=kind):
+                    return unavailable() if runtime_reason else None
                 # Degraded, not ok. A head that stopped without delivering is the pipeline failing
                 # to make progress on a card, and the operator learns about it from the tick's own
                 # health: an `ok` bounce would write healthy telemetry over the one signal that
@@ -3458,6 +3467,45 @@ class DispatcherRuntime:
             return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=now, trigger=f"no {_wait_expectation(kind)} within {stall}s")
         return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=stall, trigger=f"no {_wait_expectation(kind)}")
 
+    def _idle_wait_fence(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        status: dict[str, Any],
+        *,
+        kind: str,
+    ) -> bool:
+        """Confirm an idle watchdog verdict before it stops a live head.
+
+        The first reading has already aged through the idle window.  This second one is deliberately
+        narrow: only continued pid-confirmed idleness with no newer provider/terminal activity may
+        result in a stop.  Any uncertainty gets another ordinary tick instead of killing work.
+        """
+        try:
+            current = (
+                self.host.review_status(task, record)
+                if kind == "review" else self.host.worker_status(task, record)
+            )
+        except Exception:
+            return False
+        if not (current.get("live") and current.get("pid_confirmed") and current.get("idle")):
+            idle_since = float(getattr(record, f"{kind}_idle_since") or 0.0)
+            if idle_since:
+                setattr(record, f"{kind}_idle_since", 0.0)
+                self.save_records(payload, records)
+            return False
+        previous_activity = float(status.get("last_activity") or 0.0)
+        current_activity = float(current.get("last_activity") or 0.0)
+        if current_activity > previous_activity:
+            # The activity belongs to a fresh idle episode only after the probe that observed it.
+            # Retaining the old timestamp would turn a race with output into an immediate respawn.
+            setattr(record, f"{kind}_idle_since", time.time())
+            self.save_records(payload, records)
+            return False
+        return True
+
     def _idle_wait_trigger(
         self,
         record: DispatcherRecord,
@@ -3490,7 +3538,11 @@ class DispatcherRuntime:
                 setattr(record, f"{kind}_idle_since", 0.0)
                 self.save_records(payload, records)
             return ""
-        if not idle_since:
+        activity = float(status.get("last_activity") or 0.0)
+        # An idle TUI alone is not enough: Codex may be polling a test subprocess while the
+        # readiness probe incorrectly says it is ready.  The watchdog window is continuous only
+        # while neither the terminal nor the provider reports new activity.
+        if not idle_since or activity > idle_since:
             setattr(record, f"{kind}_idle_since", now)
             self.save_records(payload, records)
             return ""

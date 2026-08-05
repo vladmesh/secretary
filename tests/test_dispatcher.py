@@ -6304,6 +6304,13 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertTrue(record[f"{kind}_idle_since"], f"{kind} idleness was never stamped")
         record[f"{kind}_idle_since"] -= idle_stall_seconds() + 60
         self.runtime.production_state.save(payload)
+        # The aged window models a head that has remained quiet.  A fresh last_activity would
+        # instead be precisely the progress that restarts the continuous-idle clock.
+        status = (
+            self.host.review_status_result if kind == "review" else self.host.worker_status_result
+        )
+        assert status is not None
+        status["last_activity"] = record[f"{kind}_idle_since"]
 
     def _open_the_second_round(self) -> str:
         """Round 1 reported under its generation, round 2 opened and owns the next one.
@@ -6402,6 +6409,65 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self._head_at_its_prompt(idle=False)
         self.tick()
 
+        self.assertEqual(self._pilot_record()["worker_idle_since"], 0.0)
+        self.assertNotIn("restart_worker", self.host.calls)
+
+    def test_idle_tui_with_continuing_activity_never_respawns(self) -> None:
+        """A stale TUI readiness answer cannot override terminal/provider progress."""
+        self._open_the_second_round()
+        self._head_at_its_prompt()
+        self.tick()
+        self._rewind_idle()
+
+        for _ in range(3):
+            self.host.worker_status_result["last_activity"] = time.time()
+            result = self.tick()
+            self.assertEqual(result["action"], "waiting-worker-report")
+
+        self.assertNotIn("restart_worker", self.host.calls)
+
+    def test_idle_tui_respawns_after_activity_has_stopped_for_the_window(self) -> None:
+        self._open_the_second_round()
+        self._head_at_its_prompt()
+        self.tick()
+        self._rewind_idle()
+
+        result = self.tick()
+
+        self.assertEqual(result["action"], "worker-respawned")
+        self.assertIn("restart_worker", self.host.calls)
+
+    def test_last_moment_activity_cancels_an_idle_respawn(self) -> None:
+        """The stop fence re-probes after the idle verdict and preserves newly active work."""
+        self._open_the_second_round()
+        self._head_at_its_prompt()
+        self.tick()
+        self._rewind_idle()
+        stale_activity = self.host.worker_status_result["last_activity"]
+        fresh_status = dict(self.host.worker_status_result, last_activity=time.time())
+
+        with mock.patch.object(self.host, "worker_status", side_effect=[
+            dict(self.host.worker_status_result), fresh_status,
+        ]):
+            result = self.tick()
+
+        self.assertEqual(result["action"], "waiting-worker-report")
+        self.assertGreater(self._pilot_record()["worker_idle_since"], stale_activity)
+        self.assertNotIn("restart_worker", self.host.calls)
+
+    def test_last_moment_busy_status_cancels_an_idle_respawn(self) -> None:
+        self._open_the_second_round()
+        self._head_at_its_prompt()
+        self.tick()
+        self._rewind_idle()
+
+        with mock.patch.object(self.host, "worker_status", side_effect=[
+            dict(self.host.worker_status_result),
+            dict(self.host.worker_status_result, idle=False),
+        ]):
+            result = self.tick()
+
+        self.assertEqual(result["action"], "waiting-worker-report")
         self.assertEqual(self._pilot_record()["worker_idle_since"], 0.0)
         self.assertNotIn("restart_worker", self.host.calls)
 
@@ -6530,7 +6596,7 @@ class HeadPromptTests(unittest.TestCase):
         }
 
     def _command_lines(self, doc: str) -> list[str]:
-        return [line for line in doc.splitlines() if "python3 -m secretary task" in line]
+        return [line for line in doc.splitlines() if "python3 -P -m secretary task" in line]
 
     def test_review_prompt_names_a_concrete_body_file(self) -> None:
         doc = self.host._review_prompt(self.task, "attempt-1", 3)
@@ -6850,11 +6916,37 @@ class HeadPromptTests(unittest.TestCase):
             self.host._worker_task_doc(self.task, "main", "attempt-1"),
         ):
             for command in self._command_lines(doc):
-                arguments = command.split("python3 -m secretary task", 1)[1]
+                arguments = command.split("python3 -P -m secretary task", 1)[1]
                 for banned in ("`", "$", "'", '"', "|", ";", "&", ">", "<", "(", ")"):
                     self.assertNotIn(banned, arguments, command)
                 self.assertIn("--body-file /tmp/secretary-", command)
             self.assertIn("(no heredoc, no mktemp, no echo pipeline)", doc)
+
+    def test_report_and_verdict_commands_use_the_live_control_plane_not_the_workspace(self) -> None:
+        """A candidate's package in cwd must not shadow the installation that owns board writes."""
+        root = Path(__file__).resolve().parents[1]
+        shadow = Path(self.tmpdir.name) / "candidate"
+        package = shadow / "secretary"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("", encoding="utf-8")
+        (package / "__main__.py").write_text(
+            "raise SystemExit('SHADOW SECRETARY WAS IMPORTED')\n", encoding="utf-8"
+        )
+        env = dict(os.environ, TA_SECRETARY_REPO=str(root))
+
+        for doc in (
+            self.host._worker_task_doc(self.task, "main", "attempt-1"),
+            self.host._review_prompt(self.task, "attempt-1", 3),
+        ):
+            for command in self._command_lines(doc):
+                with self.subTest(command=command):
+                    control_plane_help = command.split(" task ", 1)[0] + " task --help"
+                    result = subprocess.run(
+                        control_plane_help, shell=True, cwd=shadow, env=env,
+                        text=True, capture_output=True,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertNotIn("SHADOW SECRETARY WAS IMPORTED", result.stderr)
 
 
 class WorkerDurabilityTests(unittest.TestCase):
