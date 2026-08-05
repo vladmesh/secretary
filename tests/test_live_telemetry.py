@@ -840,7 +840,7 @@ class PackagedStewardUnitEnvTests(unittest.TestCase):
             with self.subTest(unit=name):
                 env = role_env.runtime_env(
                     "steward", base_env=self.unit_env(name),
-                    env_file=self.instance / "runtime.env", require=True,
+                    env_file=self.instance / "runtime.env",
                 )
 
                 self.assertEqual(env["SECRETARY_INSTANCE"], str(self.instance))
@@ -880,7 +880,7 @@ class PackagedStewardUnitEnvTests(unittest.TestCase):
             with self.subTest(unit=name):
                 env = role_env.runtime_env(
                     "steward", base_env=self.unit_env(name),
-                    env_file=self.instance / "runtime.env", require=True,
+                    env_file=self.instance / "runtime.env",
                 )
 
                 self.assertEqual(env["SECRETARY_DATA_DIR"], str(env_data))

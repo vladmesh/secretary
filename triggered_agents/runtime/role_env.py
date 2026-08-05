@@ -165,7 +165,7 @@ def _is_sensitive_name(name: str) -> bool:
 
 
 def runtime_env(role: str, *, base_env: dict[str, str] | None = None,
-                env_file: Path | str | None = None, require: bool = False) -> dict[str, str]:
+                env_file: Path | str | None = None) -> dict[str, str]:
     """Return a sanitized env for `role`, with role-allowed values overlaid from the source file."""
     allowed = set(allowlist(role))
     source = load_env_file(env_file)
@@ -261,7 +261,7 @@ def _main_exec(argv: list[str], *, prog: str) -> int:
     if not command:
         parser.error("missing command after --")
     try:
-        env = runtime_env(ns.role, env_file=ns.env_file, require=True)
+        env = runtime_env(ns.role, env_file=ns.env_file)
     except RoleEnvError as e:
         print(f"role-env: {e}", file=sys.stderr)
         return 125

@@ -1,9 +1,10 @@
 """The private instance repository as a shared commit target.
 
-Contract: docs/RECOVERY.md, sections "Layout" and "Writer". Three writers commit
+Contract: docs/RECOVERY.md, sections "Layout" and "Writer". Five writers commit
 into `state/`: the tick writer (`state/board`, `state/runs`), the memory writer
 (`state/memory`) and the knowledge writer (`state/knowledge`). The secret store
-writes `secrets/` beside them on the same terms. They own disjoint pathspecs and
+writes `secrets/` beside them on the same terms. The local-configuration writer
+owns `.gitignore` through :func:`ensure_ignored`. They own disjoint pathspecs and
 never `git add -A`, so none can pick up another's half-written tree, and
 `state_repo_lock` serializes the index operations git itself does not make
 concurrency-safe.
@@ -30,6 +31,7 @@ KNOWLEDGE_PATHSPEC = ("state/knowledge",)
 # The secret store sits beside `state/`, not inside it: the tick writer must never
 # pick it up, and the store commits its own catalog and envelopes.
 SECRETS_PATHSPEC = ("secrets",)
+GITIGNORE_PATHSPEC = (".gitignore",)
 
 MEMORY_FACTS_RELATIVE = Path("state") / "memory" / "facts"
 KNOWLEDGE_RELATIVE = Path("state") / "knowledge"
@@ -139,3 +141,40 @@ def commit(instance_dir: Path, pathspec: tuple[str, ...], message: str) -> str |
         label="commit state",
     )
     return head(instance_dir)
+
+
+def ensure_ignored(
+    instance_dir: Path, entry: str, *, dry_run: bool = False, _locked: bool = False,
+) -> bool:
+    """Durably exclude one local file from an instance repository.
+
+    Returns whether the ignore file needs (or received) a change.  The caller
+    owns the semantic name of its local file; this module owns all index writes.
+    """
+    instance_dir = require_repo(instance_dir)
+    if _locked:
+        return _ensure_ignored_locked(instance_dir, entry, dry_run=dry_run)
+    with state_repo_lock(instance_dir):
+        return _ensure_ignored_locked(instance_dir, entry, dry_run=dry_run)
+
+
+def _ensure_ignored_locked(instance_dir: Path, entry: str, *, dry_run: bool) -> bool:
+    """Implementation for writers that already hold :func:`state_repo_lock`."""
+    ignore = instance_dir / ".gitignore"
+    try:
+        current = ignore.read_text(encoding="utf-8") if ignore.is_file() else ""
+    except OSError as exc:
+        raise StateRepoError(f"read gitignore failed: {exc}") from None
+    changed = entry not in current.splitlines()
+    if changed and not dry_run:
+        suffix = "" if not current or current.endswith("\n") else "\n"
+        from secretary._fsutil import write_text_atomic
+        write_text_atomic(ignore, current + suffix + entry + "\n")
+        commit(instance_dir, GITIGNORE_PATHSPEC, f"Ignore local {entry.lstrip('/')}")
+    try:
+        git(instance_dir, ["check-ignore", "--quiet", "--", entry.lstrip("/")], label="verify exclusion")
+    except StateRepoError:
+        if dry_run and changed:
+            return True
+        raise
+    return changed

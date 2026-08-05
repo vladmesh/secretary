@@ -82,9 +82,7 @@ VALUES_DIRNAME = "values"
 VALUE_SUFFIX = ".enc.json"
 
 GITIGNORE_ENTRY = "secrets/installation.key"
-# Init also commits .gitignore, because the key file is only safe once git is
-# told to ignore it.
-INIT_PATHSPEC = (*SECRETS_PATHSPEC, ".gitignore")
+INIT_PATHSPEC = SECRETS_PATHSPEC
 
 CATALOG_VERSION = 1
 
@@ -1340,15 +1338,10 @@ def _scan_open_file(name: str, text: str) -> None:
 
 
 def _ensure_gitignore(instance_dir: Path) -> None:
-    path = instance_dir / ".gitignore"
     try:
-        current = path.read_text(encoding="utf-8") if path.exists() else ""
-    except OSError as exc:
-        raise SecretStoreError(f"could not read .gitignore: {exc}") from None
-    if GITIGNORE_ENTRY in current.split():
-        return
-    updated = current if not current or current.endswith("\n") else current + "\n"
-    _publish([(path, updated + GITIGNORE_ENTRY + "\n")])
+        state_repo.ensure_ignored(instance_dir, GITIGNORE_ENTRY, _locked=True)
+    except state_repo.StateRepoError as exc:
+        raise SecretStoreError(f"could not update .gitignore: {exc}") from None
 
 
 def _assert_key_ignored(instance_dir: Path) -> None:

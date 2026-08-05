@@ -28,6 +28,7 @@ from secretary.dispatcher_launcher import (
     render_codex_command as _render_codex_command,
     render_codex_launch as _render_codex_launch,
     PYTHON_SAFE_PATH_FLAG as _PYTHON_SAFE_PATH_FLAG,
+    require_board_transport as _require_board_transport,
     role_launch_env as _role_launch_env,
     with_pid_heartbeat as _with_pid_heartbeat,
     wrap_role_shell_command as _wrap_role_shell_command,
@@ -1611,6 +1612,10 @@ class CommandHostRuntime:
             return self._launched(
                 f"noop:{head}:{Path(workspace).name}:{prompt_file}", head, task, role, workspace
             )
+        try:
+            _require_board_transport(role)
+        except HeadLaunchError as exc:
+            raise HostError(str(exc)) from None
         pid_file = _pid_file_path(_watchdog_kind(role), task["ref"]) if task else ""
         if pid_file:
             # Drop any pid a previous launch in this same workspace left behind, so a respawn

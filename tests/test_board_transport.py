@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import base64
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.board_transport import BoardTransportError, ensure, ensure_from_runtime_file, resolve
+from secretary.board_transport import BoardTransportError, ensure, ensure_from_runtime_file, resolve, transport_path
 from secretary.tasks import KanboardClient, TaskError
 from triggered_agents.runtime import kanboard
 
@@ -105,7 +106,7 @@ class BoardTransportTests(unittest.TestCase):
             _, preview = ensure_from_runtime_file(instance, runtime, dry_run=True)
             _, applied = ensure_from_runtime_file(instance, runtime)
 
-        self.assertEqual((preview, applied), ("retired-legacy", "retired-legacy"))
+        self.assertEqual((preview, applied), ("would-retire-legacy", "retired-legacy"))
 
     def test_conflicting_legacy_values_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -153,6 +154,62 @@ class BoardTransportTests(unittest.TestCase):
             transport, status = ensure_from_runtime_file(Path(tmp), allow_default=True)
         self.assertEqual(status, "created-default")
         self.assertEqual(transport.token, "secretary-local-kanboard-jsonrpc-v1")
+
+    def test_instance_yaml_spelling_and_empty_selection_never_use_the_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            instance = root / "instance"
+            instance.mkdir()
+            ensure(instance, allow_default=True)
+            self.assertEqual(transport_path(instance / "instance.yaml"), instance / "board-transport.env")
+            cwd = root / "workspace"
+            cwd.mkdir()
+            (cwd / "board-transport.env").write_text(
+                "KANBOARD_URL=http://attacker.invalid/jsonrpc.php\nKANBOARD_API_USER=evil\n"
+                "KANBOARD_API_TOKEN=evil-token\n",
+                encoding="utf-8",
+            )
+            (cwd / "board-transport.env").chmod(0o600)
+            previous = Path.cwd()
+            try:
+                os.chdir(cwd)
+                with (
+                    mock.patch("triggered_agents.runtime.board_transport.default_instance_path", return_value=instance),
+                    mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": ""}, clear=True),
+                ):
+                    self.assertEqual(KanboardClient().url, "http://127.0.0.1:8080/jsonrpc.php")
+            finally:
+                os.chdir(previous)
+
+    def test_reader_rejects_insecure_or_linked_transport_and_lifecycle_repairs_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            transport, _ = ensure(instance, allow_default=True)
+            path = instance / "board-transport.env"
+            path.chmod(0o644)
+            with self.assertRaisesRegex(BoardTransportError, "permissions are too broad"):
+                resolve(instance)
+            repaired, status = ensure(instance)
+            self.assertEqual((repaired, status), (transport, "secured"))
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            linked = instance.parent / "linked.env"
+            linked.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+            linked.chmod(0o600)
+            path.unlink()
+            path.symlink_to(linked)
+            with self.assertRaisesRegex(BoardTransportError, "regular file"):
+                resolve(instance)
+
+    def test_dry_run_reports_a_planned_durable_ignore_change(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            ensure(instance, allow_default=True)
+            for args in (("init", "--quiet"), ("config", "user.name", "Test"),
+                         ("config", "user.email", "test@example.invalid")):
+                subprocess.run(["git", "-C", str(instance), *args], check=True)
+            _, preview = ensure(instance, dry_run=True)
+            _, applied = ensure(instance)
+        self.assertEqual((preview, applied), ("would-ignore", "ignored"))
 
 
 if __name__ == "__main__":

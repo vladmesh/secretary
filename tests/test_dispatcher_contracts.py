@@ -652,7 +652,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             with self.subTest(unit=name):
                 env = role_env.runtime_env(
                     role, base_env=self.unit_env(name),
-                    env_file=self.instance / "runtime.env", require=True,
+                    env_file=self.instance / "runtime.env",
                 )
 
                 with mock.patch.dict(os.environ, env, clear=True):
@@ -685,7 +685,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             with self.subTest(module.__name__):
                 base = self.unit_env("secretary-dispatcher-production.service")
                 env = module.runtime_env(
-                    role, base_env=base, env_file=self.instance / "runtime.env", require=True
+                    role, base_env=base, env_file=self.instance / "runtime.env"
                 )
 
                 self.assertEqual(env["SECRETARY_INSTANCE"], str(self.instance))

@@ -348,7 +348,8 @@ class NoStoreCase(unittest.TestCase):
                 ])
 
             self.assertEqual(code, 1)
-            self.assertIn("runtime credentials are required", output.getvalue())
+            self.assertIn("Kanboard prerequisite failed", output.getvalue())
+            self.assertIn("skipped   runtime-env", output.getvalue())
             self.assertIn("skipped   secret-store", output.getvalue())
 
 

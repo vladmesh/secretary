@@ -69,7 +69,6 @@ class RuntimeEnvRoleTests(unittest.TestCase):
                         role,
                         base_env={"PATH": "/usr/bin", "SECRETARY_INSTANCE": str(instance)},
                         env_file=env_file,
-                        require=True,
                     )
                     self.assertNotIn("KANBOARD_API_TOKEN", env)
                     with mock.patch.dict(os.environ, env, clear=True):
@@ -80,7 +79,7 @@ class RuntimeEnvRoleTests(unittest.TestCase):
             instance = Path(tmp)
             env = role_env.runtime_env(
                 "worker", base_env={"PATH": "/usr/bin", "SECRETARY_INSTANCE": str(instance)},
-                env_file=instance / "runtime.env", require=True,
+                env_file=instance / "runtime.env",
             )
         self.assertEqual(env["SECRETARY_INSTANCE"], str(instance))
 

@@ -121,13 +121,15 @@ for the next window or operator action.
 
 ## Writers
 
-Four writers touch the repository, each with its own pathspec:
+Five writers touch the repository, each with its own pathspec:
 
 - tick writer: `state/board`, `state/runs`, at the end of a dispatcher tick under the tick lock;
 - memory writer: `state/memory`, on `propose`/`commit`/`supersede`;
 - knowledge writer: `state/knowledge`, on `secretary knowledge write`;
-- secret writer: `secrets/` (plus `.gitignore` on first `init`), on `secret init/set/import/remove`.
+- secret writer: `secrets/`, on `secret init/set/import/remove`.
   `secret list` and `secret materialize` are not part of this writer.
+- local-configuration writer: `.gitignore`, when local configuration such as
+  `board-transport.env` needs a durable exclusion.
 
 The pathspecs do not overlap, so none of them picks up another's half-written tree. Nobody uses
 `git add -A`: uncommitted manual config edits are left alone. The Git index is not built for

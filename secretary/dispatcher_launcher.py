@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from secretary.role_env import (
+    BOARD_ROLES,
     OBSERVER_GENERATION_ENV,
     OBSERVER_SPRINT_ENV,
     ROLE_ALLOWLIST,
@@ -21,6 +22,7 @@ from secretary.role_env import (
     RoleEnvError,
     runtime_env,
 )
+from secretary.board_transport import BoardTransportError, resolve as resolve_board_transport
 from triggered_agents.agents.pipeline.heads import (
     CLAUDE_EFFORTS,
     CODEX_EFFORTS,
@@ -483,6 +485,22 @@ def wrap_role_shell_command(role: str, command: str, *, identity: dict[str, str]
         f"{binding} {pythonpath_prefix(os.environ)} python3 {PYTHON_SAFE_PATH_FLAG} -m secretary.role_env exec "
         f"--role {shlex.quote(role)} -- /bin/sh -lc {shlex.quote(command)}"
     )
+
+
+def require_board_transport(role: str, *, environ: Mapping[str, str] | None = None) -> None:
+    """Fail a board-writing head launch before it can consume an autonomous turn."""
+    if role not in BOARD_ROLES:
+        return
+    env = os.environ if environ is None else environ
+    # Production units always bind an instance explicitly.  An unbound direct
+    # CommandHostRuntime is a test/manual construction, not an autonomous host
+    # launch, and keeps its existing no-instance behavior.
+    if not env.get("SECRETARY_INSTANCE"):
+        return
+    try:
+        resolve_board_transport(env.get("SECRETARY_INSTANCE") or None)
+    except BoardTransportError as exc:
+        raise HeadLaunchError(f"board transport configuration is unavailable: {exc}") from None
 
 
 def with_pid_heartbeat(command: str, pid_file: str) -> str:

@@ -16,29 +16,22 @@ from typing import Mapping
 from secretary._fsutil import write_text_atomic
 from secretary import state_repo
 from triggered_agents.runtime.board_transport import (
-    BoardTransport, BoardTransportError, DEFAULT_TOKEN, DEFAULT_URL, DEFAULT_USER,
+    BoardTransport, BoardTransportError, DEFAULT_TOKEN, DEFAULT_TRANSPORT,
     TRANSPORT_ENV, TRANSPORT_FILE, parse as _parse, resolve, transport_path,
 )
-
-LEGACY_ENV = TRANSPORT_ENV
-
-
-def default_transport() -> BoardTransport:
-    return BoardTransport(DEFAULT_URL, DEFAULT_USER, DEFAULT_TOKEN)
-
 
 def legacy_transport(values: Mapping[str, str] | None) -> BoardTransport | None:
     """Turn a complete old runtime tuple into a transport, rejecting partial state."""
     if not values:
         return None
-    present = [name for name in LEGACY_ENV if values.get(name)]
+    present = [name for name in TRANSPORT_ENV if values.get(name)]
     if not present:
         return None
-    if len(present) != len(LEGACY_ENV):
+    if len(present) != len(TRANSPORT_ENV):
         raise BoardTransportError("legacy Kanboard runtime configuration is incomplete: " + ", ".join(
-            name for name in LEGACY_ENV if name not in present
+            name for name in TRANSPORT_ENV if name not in present
         ))
-    return BoardTransport(*(str(values[name]) for name in LEGACY_ENV))
+    return BoardTransport(*(str(values[name]) for name in TRANSPORT_ENV))
 
 
 def ensure(instance_dir: Path | str, *, legacy_values: Mapping[str, str] | None = None,
@@ -46,51 +39,50 @@ def ensure(instance_dir: Path | str, *, legacy_values: Mapping[str, str] | None 
     """Create a deterministic file, or perform the one explicit legacy import."""
     path = transport_path(instance_dir)
     legacy = legacy_transport(legacy_values)
-    if path.exists():
-        configured = _parse(path)
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        mode = None
+    except OSError as exc:
+        raise BoardTransportError(f"board transport configuration is unreadable: {path}") from exc
+    if mode is not None:
+        configured = _parse(path, require_private=False)
         if legacy is not None and configured != legacy:
             raise BoardTransportError(
                 "board transport mismatch: board-transport.env and legacy runtime.env disagree; "
                 "reconcile the container and configuration explicitly"
             )
-        if not dry_run:
-            _ensure_transport_ignored(path.parent)
+        needs_mode_repair = bool(mode & 0o077)
+        try:
+            ignore_changed = state_repo.ensure_ignored(
+                path.parent, f"/{TRANSPORT_FILE}", dry_run=dry_run,
+            ) if (path.parent / ".git").exists() else False
+        except state_repo.StateRepoError as exc:
+            raise BoardTransportError("board-transport.env is not ignored by this repo") from exc
+        if needs_mode_repair and not dry_run:
+            path.chmod(0o600)
+        if needs_mode_repair:
+            return configured, "would-secure" if dry_run else "secured"
+        if ignore_changed:
+            return configured, "would-ignore" if dry_run else "ignored"
         return configured, "unchanged"
     if legacy is None and not allow_default:
         raise BoardTransportError(
             "board transport is missing and legacy runtime.env has no complete Kanboard tuple; "
             "refuse to guess or rotate the live transport"
         )
-    configured = legacy or default_transport()
+    configured = legacy or DEFAULT_TRANSPORT
     if not dry_run:
         path.parent.mkdir(parents=True, exist_ok=True)
         write_text_atomic(path, "".join(f"{key}={value}\n" for key, value in configured.as_environ().items()))
         path.chmod(0o600)
-        _ensure_transport_ignored(path.parent)
-    return configured, "imported-legacy" if legacy is not None else "created-default"
-
-
-def _ensure_transport_ignored(instance_dir: Path) -> None:
-    """Make the local transport exclusion durable in the instance repository."""
-    if not (instance_dir / ".git").exists():
-        return
-    ignore = instance_dir / ".gitignore"
-    entry = f"/{TRANSPORT_FILE}"
-    try:
-        with state_repo.state_repo_lock(instance_dir):
-            current = ignore.read_text(encoding="utf-8") if ignore.is_file() else ""
-            if entry not in current.splitlines():
-                write_text_atomic(
-                    ignore,
-                    current + ("" if not current or current.endswith("\n") else "\n") + entry + "\n",
-                )
-                state_repo.commit(instance_dir, (".gitignore",), "Ignore local board transport")
-            state_repo.git(
-                instance_dir, ["check-ignore", "--quiet", "--", TRANSPORT_FILE],
-                label="verify board transport exclusion",
-            )
-    except state_repo.StateRepoError as exc:
-        raise BoardTransportError("board-transport.env is not ignored by this repo") from exc
+        if (path.parent / ".git").exists():
+            try:
+                state_repo.ensure_ignored(path.parent, f"/{TRANSPORT_FILE}")
+            except state_repo.StateRepoError as exc:
+                raise BoardTransportError("board-transport.env is not ignored by this repo") from exc
+    status = "imported-legacy" if legacy is not None else "created-default"
+    return configured, ("would-" + status if dry_run else status)
 
 
 def ensure_from_runtime_file(instance_dir: Path | str, runtime_env: Path | str | None = None,
@@ -104,7 +96,7 @@ def ensure_from_runtime_file(instance_dir: Path | str, runtime_env: Path | str |
             if "=" in line and not line.lstrip().startswith("#"):
                 key, value = line.split("=", 1)
                 key = key.strip()
-                if key in LEGACY_ENV:
+                if key in TRANSPORT_ENV:
                     if key in values:
                         raise BoardTransportError(
                             f"legacy Kanboard runtime configuration is ambiguous: {key} appears more than once "
@@ -119,10 +111,12 @@ def ensure_from_runtime_file(instance_dir: Path | str, runtime_env: Path | str |
         # authority. Preserve unrelated runtime lines and comments verbatim.
         raw = path.read_text(encoding="utf-8")
         retained = [line for line in raw.splitlines(keepends=True)
-                    if line.split("=", 1)[0].strip() not in LEGACY_ENV]
+                    if line.split("=", 1)[0].strip() not in TRANSPORT_ENV]
         if not dry_run:
             write_text_atomic(path, "".join(retained))
-        status = "imported-legacy" if status != "unchanged" else "retired-legacy"
+        status = "would-retire-legacy" if dry_run and status == "unchanged" else (
+            "retired-legacy" if status == "unchanged" else status
+        )
     return transport, status
 
 
@@ -136,6 +130,6 @@ def _validate_runtime_file(path: Path) -> None:
 
 
 __all__ = [
-    "BoardTransport", "BoardTransportError", "DEFAULT_TOKEN", "LEGACY_ENV", "ensure",
+    "BoardTransport", "BoardTransportError", "DEFAULT_TOKEN", "DEFAULT_TRANSPORT", "ensure",
     "ensure_from_runtime_file", "resolve", "transport_path",
 ]

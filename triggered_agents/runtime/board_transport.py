@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import base64
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-from .paths import default_instance_path
+from .paths import default_instance_path, instance_dir as normalize_instance_dir
 
 TRANSPORT_FILE = "board-transport.env"
 TRANSPORT_ENV = ("KANBOARD_URL", "KANBOARD_API_USER", "KANBOARD_API_TOKEN")
@@ -32,11 +33,25 @@ class BoardTransport:
         return f"Basic {encoded}"
 
 
+DEFAULT_TRANSPORT = BoardTransport(DEFAULT_URL, DEFAULT_USER, DEFAULT_TOKEN)
+
+
 def transport_path(instance_dir: Path | str | None = None) -> Path:
-    return (Path(instance_dir).expanduser() if instance_dir is not None else default_instance_path()) / TRANSPORT_FILE
+    root = normalize_instance_dir(instance_dir) if instance_dir else default_instance_path()
+    return root / TRANSPORT_FILE
 
 
-def parse(path: Path) -> BoardTransport:
+def parse(path: Path, *, require_private: bool = True) -> BoardTransport:
+    try:
+        mode = path.lstat().st_mode
+    except FileNotFoundError:
+        raise BoardTransportError(f"board transport configuration is missing: {path}") from None
+    except OSError as exc:
+        raise BoardTransportError(f"board transport configuration is unreadable: {path}") from exc
+    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+        raise BoardTransportError("board transport configuration must be a regular file, not a symlink")
+    if require_private and mode & 0o077:
+        raise BoardTransportError("board transport configuration permissions are too broad; run chmod 0600")
     try:
         raw = path.read_text(encoding="utf-8").splitlines()
     except OSError as exc:
@@ -59,6 +74,4 @@ def parse(path: Path) -> BoardTransport:
 
 def resolve(instance_dir: Path | str | None = None) -> BoardTransport:
     path = transport_path(instance_dir)
-    if path.is_file():
-        return parse(path)
-    raise BoardTransportError(f"board transport configuration is missing: {path}")
+    return parse(path)

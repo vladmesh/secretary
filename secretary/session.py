@@ -14,8 +14,12 @@ import argparse
 import os
 import sys
 
-from secretary.role_env import RUNTIME_ENV, load_env_file
-from secretary.board_transport import BoardTransportError, resolve as resolve_board_transport
+from secretary.role_env import load_env_file
+from secretary.board_transport import (
+    BoardTransportError,
+    resolve as resolve_board_transport,
+    transport_path,
+)
 from triggered_agents.agents.pipeline import heads as head_registry
 
 
@@ -51,8 +55,9 @@ def operator_env(
     try:
         resolve_board_transport(env.get("SECRETARY_INSTANCE"))
     except BoardTransportError:
-        where = env_file or RUNTIME_ENV
-        raise SessionError(f"board transport configuration is unavailable (checked {where})")
+        raise SessionError(
+            f"board transport configuration is unavailable (checked {transport_path(env.get('SECRETARY_INSTANCE'))})"
+        )
     return env
 
 

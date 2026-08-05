@@ -26,15 +26,15 @@ disappears when the head restarts.
 The sprint and its fields:
 
 ```bash
-python3 -m secretary sprint show --ref <sprint-ref>
-python3 -m secretary sprint status --ref <sprint-ref>
+python3 -P -m secretary sprint show --ref <sprint-ref>
+python3 -P -m secretary sprint status --ref <sprint-ref>
 ```
 
 The sprint's cards, and one card:
 
 ```bash
-python3 -m secretary task list --sprint <sprint-ref>
-python3 -m secretary task show --ref <card-ref>
+python3 -P -m secretary task list --sprint <sprint-ref>
+python3 -P -m secretary task show --ref <card-ref>
 ```
 
 Roles in calls: do your own work on the sprint and its linked cards as the observer,
@@ -73,14 +73,14 @@ post-Done next-cut/close update. Keep each field to the delta a replacement head
 machine-derived CI, delivery or board telemetry.
 
 ```bash
-python3 -m secretary sprint resume --ref <sprint-ref> --role observer --body-file <file.json>
+python3 -P -m secretary sprint resume --ref <sprint-ref> --role observer --body-file <file.json>
 ```
 
 When `sprint status` shows a non-idle `observer.delivery`, its `delivery_id` and `through_event`
 belong to the turn that woke you. Add both to this command:
 
 ```bash
-python3 -m secretary sprint resume --ref <sprint-ref> --role observer --body-file <file.json> \
+python3 -P -m secretary sprint resume --ref <sprint-ref> --role observer --body-file <file.json> \
   --delivery-id <delivery_id> --through-event <through_event>
 ```
 
@@ -194,7 +194,7 @@ from the sprint's `repositories`, and linked to the sprint immediately. The spec
 (pointers, not copy-paste), checkable Acceptance criteria, Out of scope.
 
 ```bash
-python3 -m secretary task create --role observer --actor observer \
+python3 -P -m secretary task create --role observer --actor observer \
   --project <repo> --type code --title "<short title>" \
   --state ready --sprint <sprint-ref> \
   --head <worker-profile> --review-head <reviewer-profile> \
@@ -204,7 +204,7 @@ python3 -m secretary task create --role observer --actor observer \
 Then record it as the current card:
 
 ```bash
-python3 -m secretary sprint current-task --ref <sprint-ref> --role observer --actor observer --task <card-ref>
+python3 -P -m secretary sprint current-task --ref <sprint-ref> --role observer --actor observer --task <card-ref>
 ```
 
 The reviewer comes from a different family than the worker:
@@ -236,7 +236,7 @@ performs it: merge and Done for a release, a fresh worker round for a rework, Bl
 you then recut:
 
 ```bash
-python3 -m secretary task decide --role observer --actor observer --ref <card-ref> \
+python3 -P -m secretary task decide --role observer --actor observer --ref <card-ref> \
   --kind release|rework|reslice --reason-file <reason.md>
 ```
 
@@ -378,7 +378,7 @@ When the Definition of Done is confirmed by a check against the default branch a
    the hotfixes, the important conclusions.
 5. Close the sprint:
    ```bash
-   python3 -m secretary sprint close --ref <sprint-ref> --role po --actor observer
+   python3 -P -m secretary sprint close --ref <sprint-ref> --role po --actor observer
    ```
    Closing a sprint is separately authorised for the PO role only; this is neither a task write nor an
    override.

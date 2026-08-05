@@ -405,6 +405,7 @@ class ReconcilePlanTests(unittest.TestCase):
         self.assertIn(str(product_root).encode(), rendered)
         self.assertIn(str(instance).encode(), rendered)
         self.assertNotIn(b"EnvironmentFile=instance/runtime.env", rendered)
+        self.assertIn(f"EnvironmentFile=-{instance}/runtime.env".encode(), rendered)
 
     def test_plan_keeps_materialized_owner_layout_when_process_user_differs(self):
         import tempfile

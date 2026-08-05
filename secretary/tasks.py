@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from triggered_agents.runtime.board_transport import BoardTransport, BoardTransportError, resolve as resolve_board_transport
+from secretary.board_transport import BoardTransport, BoardTransportError, resolve as resolve_board_transport
 from triggered_agents.agents.pipeline.heads import CODEX_LAUNCH_MODES
 from triggered_agents.runtime.redact import redact
 from secretary.role_env import runtime_env_path
@@ -313,9 +313,7 @@ class KanboardClient:
         self, *, transport: BoardTransport | None = None, instance_dir: str | Path | None = None,
     ) -> None:
         try:
-            configured = transport or resolve_board_transport(
-                instance_dir if instance_dir is not None else os.environ.get("SECRETARY_INSTANCE")
-            )
+            configured = transport or resolve_board_transport(instance_dir or os.environ.get("SECRETARY_INSTANCE"))
         except BoardTransportError:
             raise TaskError("backend_unavailable", "Kanboard runtime configuration is unavailable", 1)
         self.url = configured.url

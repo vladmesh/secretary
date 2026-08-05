@@ -30,7 +30,7 @@ from secretary.installation import (
     provision_codex_home,
     provision_project_checkouts,
 )
-from secretary.board_transport import default_transport
+from secretary.board_transport import DEFAULT_TRANSPORT
 from secretary.upgrade import UpgradeResult, step_host
 from secretary.routing_journal import attempts
 
@@ -104,7 +104,7 @@ def _git(root: Path, *args: str) -> None:
 class InstallationTests(unittest.TestCase):
     def test_prerequisite_probe_accepts_the_planned_transport_before_it_exists_on_disk(self):
         with tempfile.TemporaryDirectory() as tmp:
-            transport = default_transport()
+            transport = DEFAULT_TRANSPORT
             with (
                 mock.patch("secretary.installation.shutil.which", return_value="/usr/bin/orca"),
                 mock.patch("secretary.installation._run"),
@@ -300,11 +300,10 @@ class InstallationTests(unittest.TestCase):
             mock.patch("secretary.installation.os.geteuid", return_value=0),
             mock.patch("secretary.installation.shutil.which", return_value="/usr/local/bin/orca"),
             mock.patch("secretary.installation._run") as run,
-            mock.patch("secretary.installation.resolve_board_transport"),
             mock.patch("secretary.installation.KanboardClient"),
             mock.patch("secretary.installation.TaskReader") as reader,
         ):
-            check_prerequisites("dev")
+            check_prerequisites(DEFAULT_TRANSPORT, "dev")
 
         self.assertIn(
             ["runuser", "--user", "dev", "--", "orca", "--version"],
@@ -312,14 +311,9 @@ class InstallationTests(unittest.TestCase):
         )
         reader.return_value.list.assert_called_once()
 
-    def test_missing_board_transport_is_reported_as_configuration(self):
-        with (
-            mock.patch("secretary.installation.shutil.which", return_value="/usr/local/bin/orca"),
-            mock.patch("secretary.installation._run"),
-            mock.patch("secretary.installation.resolve_board_transport", side_effect=installation.BoardTransportError("missing file")),
-        ):
-            with self.assertRaisesRegex(InstallError, "board transport configuration is unavailable: missing file"):
-                check_prerequisites()
+    def test_prerequisite_probe_requires_the_selected_transport(self):
+        with self.assertRaises(TypeError):
+            check_prerequisites()  # type: ignore[call-arg]
 
     def test_existing_runtime_env_is_not_a_bootstrap_marker(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -551,19 +545,6 @@ class InstallationTests(unittest.TestCase):
                 "--installation-user", getpass.getuser(),
                 "--product-root", str(PRODUCT_ROOT),
             ]
-            with mock.patch("secretary.installation._ensure_installation_user"):
-                first_code, first_output = self._cli(["install", *base])
-            self.assertEqual(first_code, 1)
-            self.assertTrue((target / ".git").exists())
-            self.assertIn("runtime credentials are required", first_output)
-
-            runtime = target / "runtime.env"
-            runtime.write_text(
-                "KANBOARD_URL=http://127.0.0.1/jsonrpc.php\n"
-                "KANBOARD_API_USER=jsonrpc\nKANBOARD_API_TOKEN=test\n",
-                encoding="utf-8",
-            )
-            runtime.chmod(0o600)
             host = SimpleNamespace(steps=[SimpleNamespace(status="changed")])
             patches = (
                 mock.patch("secretary.installation.check_prerequisites"),
@@ -575,9 +556,15 @@ class InstallationTests(unittest.TestCase):
                 mock.patch("secretary.bootstrap.ensure_pipeline_board"),
             )
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+                with mock.patch("secretary.installation._ensure_installation_user"):
+                    first_code, first_output = self._cli(["install", *base])
                 second_code, second_output = self._cli(["recover", *base])
                 third_code, third_output = self._cli(["recover", *base])
 
+            self.assertEqual(first_code, 0, first_output)
+            self.assertTrue((target / ".git").exists())
+            self.assertFalse((target / "runtime.env").exists())
+            self.assertIn("skipped   runtime-env", first_output)
             self.assertEqual(second_code, 0, second_output)
             self.assertEqual(third_code, 0, third_output)
             self.assertIn("status: ok", second_output)
@@ -638,7 +625,7 @@ class InstallationTests(unittest.TestCase):
             self.assertEqual(code, 0, output)
             self.assertIn("would-change checkpoint", output)
             self.assertIn("preview made no recovery changes", output)
-            self.assertTrue(prerequisites.call_args.kwargs["transport"].token)
+            self.assertTrue(prerequisites.call_args.args[0].token)
             after = {
                 path.relative_to(data): path.read_bytes()
                 for path in data.rglob("*")
