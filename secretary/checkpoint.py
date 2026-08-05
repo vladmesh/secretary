@@ -161,9 +161,12 @@ class CheckpointWriter:
 
         board, runs = self._regenerate()
         self._prevent_run_history_loss()
-        from secretary.secret_store import redaction_values
+        from secretary.secret_store import SecretStoreError, redaction_values
 
-        secret_values = redaction_values(self.instance_dir)
+        try:
+            secret_values = redaction_values(self.instance_dir)
+        except SecretStoreError as exc:
+            raise CheckpointBlocked(f"could not load checkpoint redaction values: {exc}") from None
         self._publish(
             "board", BOARD_ENTRIES, BOARD_REQUIRED, BOARD_IGNORE,
             lambda staging: _validate_board(staging, instance=self.instance_dir),

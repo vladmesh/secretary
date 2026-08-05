@@ -127,7 +127,7 @@ class InstallationTests(unittest.TestCase):
             mock.patch("secretary.installation._clone_or_reuse", return_value="reused checkpoint checkout"),
             mock.patch("secretary.installation._open_secret_store", return_value=unlocked),
             mock.patch("secretary.installation._read_runtime_env", side_effect=InstallError("unsafe mode")),
-            mock.patch("secretary.installation.ensure_from_runtime_file") as migrate,
+            mock.patch("secretary.installation.ensure_from_runtime_values") as migrate,
         ):
             result = install(args)
 
@@ -555,13 +555,17 @@ class InstallationTests(unittest.TestCase):
                 mock.patch("secretary.installation.restore_findings", return_value=[]),
                 mock.patch("secretary.bootstrap.ensure_pipeline_board"),
             )
-            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], \
+                    mock.patch("secretary.installation._set_installation_owner") as set_owner:
                 with mock.patch("secretary.installation._ensure_installation_user"):
                     first_code, first_output = self._cli(["install", *base])
                 second_code, second_output = self._cli(["recover", *base])
                 third_code, third_output = self._cli(["recover", *base])
 
             self.assertEqual(first_code, 0, first_output)
+            self.assertIn(
+                mock.call(target / ".gitignore", getpass.getuser()), set_owner.call_args_list,
+            )
             self.assertTrue((target / ".git").exists())
             self.assertFalse((target / "runtime.env").exists())
             self.assertIn("skipped   runtime-env", first_output)

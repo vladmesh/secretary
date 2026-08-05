@@ -24,7 +24,6 @@ import json
 import os
 import pwd
 import shutil
-import stat
 import subprocess
 import sys
 import tempfile
@@ -37,9 +36,10 @@ from secretary._fsutil import publish_component_entries, publish_state_atomic, w
 from secretary.board_transport import (
     BoardTransport,
     BoardTransportError,
-    ensure_from_runtime_file,
+    ensure_from_runtime_values,
     transport_path,
 )
+from secretary.runtime_env import RuntimeEnvError, RuntimeEnvMissing as _RuntimeEnvMissing, read_runtime_env, runtime_env_path
 from secretary.automations import OrcaAutomationClient, workspaces_root
 from secretary.config import validate_instance
 from secretary.data import init_layout, manifest_for
@@ -205,62 +205,23 @@ def _clone_or_reuse(remote: str, target: Path, *, recovery: bool, dry_run: bool)
     return "reused checkpoint checkout"
 
 
+def _read_runtime_env(instance_dir: Path, override: str | None) -> dict[str, str]:
+    """Compatibility boundary for install's established error vocabulary."""
+    try:
+        return read_runtime_env(instance_dir, override)
+    except _RuntimeEnvMissing as exc:
+        raise RuntimeEnvMissing(str(exc)) from None
+    except RuntimeEnvError as exc:
+        raise InstallError(str(exc)) from None
+
+
 class RuntimeEnvMissing(InstallError):
     """The optional host runtime file is absent, rather than malformed or unsafe."""
 
 
-def _read_runtime_env(instance_dir: Path, override: str | None) -> dict[str, str]:
-    path = Path(override).expanduser() if override else instance_dir / "runtime.env"
-    try:
-        mode = path.lstat().st_mode
-    except FileNotFoundError:
-        raise RuntimeEnvMissing(
-            f"runtime credentials are required: create {path}, chmod 0600, then rerun with --recover"
-        ) from None
-    except OSError as exc:
-        raise InstallError(f"runtime.env metadata is unreadable: {path}: {exc}") from None
-    if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
-        raise InstallError("runtime.env must be a regular file, not a symlink")
-    if mode & 0o077:
-        raise InstallError("runtime.env permissions are too broad; run chmod 0600")
-    try:
-        relative = path.resolve().relative_to(instance_dir.resolve())
-    except ValueError:
-        relative = None
-    if relative is not None:
-        try:
-            ignored = subprocess.run(
-                ["git", "-c", f"safe.directory={instance_dir}", "-C", str(instance_dir),
-                 "check-ignore", "--quiet", "--", str(relative)],
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            raise InstallError("could not verify that runtime.env is gitignored") from None
-        if ignored.returncode != 0:
-            raise InstallError("runtime.env is inside the instance checkout but is not gitignored")
-    values: dict[str, str] = {}
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeError):
-        raise InstallError("runtime.env is unreadable") from None
-    for number, raw in enumerate(lines, 1):
-        line = raw.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "=" not in line or line.startswith("export "):
-            raise InstallError(f"runtime.env line {number} must use KEY=VALUE syntax")
-        key, value = line.split("=", 1)
-        if not key or not key.replace("_", "a").isalnum() or key[0].isdigit():
-            raise InstallError(f"runtime.env line {number} has an invalid variable name")
-        values[key] = value
-    return values
-
-
 def _runtime_env_file(instance_dir: Path, override: str | None) -> Path:
     """The env file this installation runs on, override included."""
-    return Path(override).expanduser() if override else instance_dir / "runtime.env"
+    return runtime_env_path(instance_dir, override)
 
 
 def _recovery_phrase(args: argparse.Namespace, instance_dir: Path) -> str | None:
@@ -908,9 +869,10 @@ def install(args: argparse.Namespace) -> InstallResult:
                 _restore_without_credentials(args, target, result)
                 raise _blocked_by_secrets(exc, secrets, runtime_env) from None
         try:
-            transport_outcome = ensure_from_runtime_file(
+            transport_outcome = ensure_from_runtime_values(
                 target,
-                runtime_env,
+                legacy_values=values,
+                runtime_env=runtime_env,
                 dry_run=args.dry_run,
                 allow_default=detail.startswith(("cloned", "would clone")),
             )
@@ -919,6 +881,7 @@ def install(args: argparse.Namespace) -> InstallResult:
         if not args.dry_run:
             _set_installation_owner(runtime_env, args.installation_user)
             _set_installation_owner(transport_path(target), args.installation_user)
+            _set_installation_owner(target / ".gitignore", args.installation_user)
         transport = transport_outcome.transport
         result.add(
             "board-transport",

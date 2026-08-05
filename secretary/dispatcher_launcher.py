@@ -515,7 +515,7 @@ def with_pid_heartbeat(command: str, pid_file: str) -> str:
     longer this pid, so the watchdog can tell the two apart.
 
     Catalog-launched commands (`head_launch`) start with a leading `NAME=value` environment
-    assignment, e.g. `PYTHONPATH=... python3 -m secretary.role_env exec ...`. POSIX `exec` treats
+    assignment, e.g. `PYTHONPATH=... python3 -P -m secretary.role_env exec ...`. POSIX `exec` treats
     the word right after it as the program to run, not an assignment, so `exec PYTHONPATH=... python3`
     fails to find a program named `PYTHONPATH=...`. Routing the whole command through `env` instead
     keeps `exec` a single-word invocation while `env` itself parses and applies any leading

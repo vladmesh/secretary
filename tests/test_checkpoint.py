@@ -389,7 +389,7 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertNotIn("state/board/cards.ndjson", self.head_files())
 
     def test_nonsecret_board_transport_text_in_a_card_does_not_block_the_checkpoint(self):
-        transport, _ = ensure_board_transport(self.instance_dir, allow_default=True)
+        transport = ensure_board_transport(self.instance_dir, allow_default=True).transport
         contents = (self.instance_dir / "board-transport.env").read_text(encoding="utf-8")
         self.seed_board([{
             **CARD,
@@ -419,20 +419,37 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertIn(contents, json.loads(exported)["report"])
 
     def test_migrated_board_transport_token_is_redacted_from_the_checkpoint(self):
-        transport, _ = ensure_board_transport(
+        transport = ensure_board_transport(
             self.instance_dir,
             legacy_values={
                 "KANBOARD_URL": "http://legacy/jsonrpc.php",
                 "KANBOARD_API_USER": "jsonrpc",
                 "KANBOARD_API_TOKEN": "migrated-live-token",
             },
-        )
+        ).transport
         self.seed_board([{**CARD, "description": f"token {transport.token}"}])
 
         result = self.write()
 
         self.assertEqual(result.status, "blocked")
         self.assertIn("secret detected", result.reason)
+
+    def test_insecure_transport_blocks_checkpoint_before_a_token_can_publish(self):
+        transport = ensure_board_transport(
+            self.instance_dir,
+            legacy_values={
+                "KANBOARD_URL": "http://legacy/jsonrpc.php",
+                "KANBOARD_API_USER": "jsonrpc",
+                "KANBOARD_API_TOKEN": "migrated-live-token",
+            },
+        ).transport
+        (self.instance_dir / "board-transport.env").chmod(0o644)
+        self.seed_board([{**CARD, "description": f"token {transport.token}"}])
+
+        result = self.write()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("redaction values", result.reason)
 
     def test_named_runtime_secret_in_a_card_still_blocks_the_checkpoint(self):
         secret = "opaque-token-value"

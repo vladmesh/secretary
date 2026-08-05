@@ -8,16 +8,23 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.board_transport import BoardTransportError, ensure, ensure_from_runtime_file, resolve, transport_path
+from secretary.board_transport import BoardTransportError, ensure, ensure_from_runtime_values, resolve, transport_path
+from secretary.runtime_env import RuntimeEnvError, read_runtime_env
 from secretary.tasks import KanboardClient, TaskError
 from triggered_agents.runtime import kanboard
 
 
 class BoardTransportTests(unittest.TestCase):
+    @staticmethod
+    def migrate(instance: Path, runtime: Path | None = None, **kwargs):
+        runtime = runtime or instance / "runtime.env"
+        values = read_runtime_env(instance, str(runtime), require_ignored=False) if runtime.exists() else {}
+        return ensure_from_runtime_values(instance, legacy_values=values, runtime_env=runtime, **kwargs)
+
     def test_default_is_deterministic_and_matches_client_basic_auth(self) -> None:
         with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
-            one, _ = ensure(Path(first), allow_default=True)
-            two, _ = ensure(Path(second), allow_default=True)
+            one = ensure(Path(first), allow_default=True).transport
+            two = ensure(Path(second), allow_default=True).transport
             self.assertEqual(one, two)
             client = KanboardClient(transport=one)
         self.assertEqual(client.url, one.url)
@@ -29,7 +36,7 @@ class BoardTransportTests(unittest.TestCase):
     def test_both_clients_send_the_resolved_basic_auth_header(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
-            transport, _ = ensure(instance, allow_default=True)
+            transport = ensure(instance, allow_default=True).transport
             observed: list[str] = []
 
             class Response:
@@ -65,8 +72,9 @@ class BoardTransportTests(unittest.TestCase):
                 "KANBOARD_API_USER=jsonrpc\nKANBOARD_API_TOKEN=legacy-token\n", encoding="utf-8"
             )
             runtime.chmod(0o600)
-            transport, status = ensure_from_runtime_file(instance, runtime)
-            self.assertEqual(status, "imported legacy transport; retired legacy runtime values")
+            outcome = self.migrate(instance, runtime)
+            transport = outcome.transport
+            self.assertEqual(outcome.render(), "imported legacy transport; retired legacy runtime values")
             self.assertEqual(transport.token, "legacy-token")
             self.assertEqual(runtime.read_text(encoding="utf-8"), "OTHER=value\n")
             self.assertEqual(resolve(instance), transport)
@@ -83,8 +91,26 @@ class BoardTransportTests(unittest.TestCase):
             )
             runtime.chmod(0o600)
 
-            with self.assertRaisesRegex(BoardTransportError, "padded with whitespace"):
-                ensure_from_runtime_file(instance, runtime)
+            with self.assertRaisesRegex(RuntimeEnvError, "whitespace-padded legacy"):
+                self.migrate(instance, runtime)
+
+    def test_external_runtime_override_is_the_file_that_is_retired(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp) / "instance"
+            instance.mkdir()
+            external = Path(tmp) / "operator.env"
+            external.write_text(
+                "OTHER=value\nKANBOARD_URL=http://legacy/jsonrpc.php\n"
+                "KANBOARD_API_USER=jsonrpc\nKANBOARD_API_TOKEN=legacy-token\n", encoding="utf-8",
+            )
+            external.chmod(0o600)
+            values = read_runtime_env(instance, str(external), require_ignored=False)
+            outcome = ensure_from_runtime_values(
+                instance, legacy_values=values, runtime_env=external,
+            )
+            self.assertEqual(outcome.render(), "imported legacy transport; retired legacy runtime values")
+            self.assertEqual(external.read_text(encoding="utf-8"), "OTHER=value\n")
+            self.assertFalse((instance / "runtime.env").exists())
 
     def test_dry_run_truthfully_reports_retiring_a_matching_legacy_tuple(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -95,15 +121,15 @@ class BoardTransportTests(unittest.TestCase):
                 "KANBOARD_API_TOKEN=legacy-token\n", encoding="utf-8",
             )
             runtime.chmod(0o600)
-            ensure_from_runtime_file(instance, runtime)
+            self.migrate(instance, runtime)
             runtime.write_text(
                 "KANBOARD_URL=http://legacy/jsonrpc.php\nKANBOARD_API_USER=jsonrpc\n"
                 "KANBOARD_API_TOKEN=legacy-token\n", encoding="utf-8",
             )
             runtime.chmod(0o600)
 
-            preview = ensure_from_runtime_file(instance, runtime, dry_run=True)
-            applied = ensure_from_runtime_file(instance, runtime)
+            preview = self.migrate(instance, runtime, dry_run=True)
+            applied = self.migrate(instance, runtime)
 
         self.assertEqual(
             (preview.render(dry_run=True), applied.render()),
@@ -121,7 +147,7 @@ class BoardTransportTests(unittest.TestCase):
             )
             runtime.chmod(0o600)
             with self.assertRaisesRegex(BoardTransportError, "board transport mismatch"):
-                ensure_from_runtime_file(instance, runtime)
+                self.migrate(instance, runtime)
 
     def test_duplicate_legacy_values_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -131,8 +157,8 @@ class BoardTransportTests(unittest.TestCase):
                 "KANBOARD_API_USER=jsonrpc\nKANBOARD_API_TOKEN=legacy-token\n", encoding="utf-8"
             )
             runtime.chmod(0o600)
-            with self.assertRaisesRegex(BoardTransportError, "ambiguous"):
-                ensure_from_runtime_file(Path(tmp), runtime)
+            with self.assertRaisesRegex(RuntimeEnvError, "ambiguous"):
+                self.migrate(Path(tmp), runtime)
 
     def test_normal_client_does_not_use_ambient_legacy_values(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -149,11 +175,11 @@ class BoardTransportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             with self.assertRaisesRegex(BoardTransportError, "refuse to guess or rotate"):
-                ensure_from_runtime_file(instance)
+                self.migrate(instance)
 
     def test_fresh_bootstrap_may_explicitly_create_the_default_transport(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            outcome = ensure_from_runtime_file(Path(tmp), allow_default=True)
+            outcome = self.migrate(Path(tmp), allow_default=True)
         self.assertEqual(outcome.render(), "created default transport")
         self.assertEqual(outcome.transport.token, "secretary-local-kanboard-jsonrpc-v1")
 
@@ -186,13 +212,13 @@ class BoardTransportTests(unittest.TestCase):
     def test_reader_rejects_insecure_or_linked_transport_and_lifecycle_repairs_mode(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
-            transport, _ = ensure(instance, allow_default=True)
+            transport = ensure(instance, allow_default=True).transport
             path = instance / "board-transport.env"
             path.chmod(0o644)
             with self.assertRaisesRegex(BoardTransportError, "permissions are too broad"):
                 resolve(instance)
-            repaired, status = ensure(instance)
-            self.assertEqual((repaired, status), (transport, "secured transport mode"))
+            repaired = ensure(instance, legacy_values=transport.as_environ())
+            self.assertEqual((repaired.transport, repaired.render()), (transport, "secured transport mode"))
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)
             linked = instance.parent / "linked.env"
             linked.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
@@ -214,6 +240,55 @@ class BoardTransportTests(unittest.TestCase):
         self.assertEqual(
             (preview.render(dry_run=True), applied.render()),
             ("would add transport ignore", "added transport ignore"),
+        )
+
+    def test_fresh_transport_reports_the_ignore_change_in_preview_and_apply(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            for args in (("init", "--quiet"), ("config", "user.name", "Test"),
+                         ("config", "user.email", "test@example.invalid")):
+                subprocess.run(["git", "-C", str(instance), *args], check=True)
+            preview = ensure(instance, allow_default=True, dry_run=True)
+            applied = ensure(instance, allow_default=True)
+        self.assertEqual(
+            (preview.render(dry_run=True), applied.render()),
+            ("would create default transport; would add transport ignore",
+             "created default transport; added transport ignore"),
+        )
+
+    def test_insecure_transport_without_a_matching_legacy_tuple_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            path = instance / "board-transport.env"
+            path.write_text(
+                "KANBOARD_URL=http://attacker.invalid/jsonrpc.php\nKANBOARD_API_USER=attacker\n"
+                "KANBOARD_API_TOKEN=attacker-token\n", encoding="utf-8",
+            )
+            path.chmod(0o644)
+            with self.assertRaisesRegex(BoardTransportError, "contents are unconfirmed"):
+                ensure(instance)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+
+    def test_confirmed_repair_reports_every_simultaneous_lifecycle_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            for args in (("init", "--quiet"), ("config", "user.name", "Test"),
+                         ("config", "user.email", "test@example.invalid")):
+                subprocess.run(["git", "-C", str(instance), *args], check=True)
+            runtime = instance / "runtime.env"
+            body = (
+                "KANBOARD_URL=http://legacy/jsonrpc.php\nKANBOARD_API_USER=jsonrpc\n"
+                "KANBOARD_API_TOKEN=legacy-token\n"
+            )
+            runtime.write_text(body, encoding="utf-8")
+            runtime.chmod(0o600)
+            transport = instance / "board-transport.env"
+            transport.write_text(body, encoding="utf-8")
+            transport.chmod(0o644)
+            outcome = self.migrate(instance, runtime)
+        self.assertEqual(
+            outcome.render(),
+            "secured transport mode; added transport ignore; retired legacy runtime values",
         )
 
 

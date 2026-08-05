@@ -558,7 +558,7 @@ class UpgradeStepTests(unittest.TestCase):
             runtime.chmod(0o644)
             insecure = upgrade.step_board_transport(self.context(FakeUnitInstaller(), instance_path=instance))
         self.assertEqual(insecure.status, "failed")
-        self.assertIn("regular 0600", insecure.detail)
+        self.assertIn("permissions are too broad", insecure.detail)
 
     def test_board_transport_step_reports_an_already_configured_transport_as_unchanged(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -573,6 +573,23 @@ class UpgradeStepTests(unittest.TestCase):
                 encoding="utf-8",
             )
             transport.chmod(0o600)
+            result = upgrade.step_board_transport(self.context(FakeUnitInstaller(), instance_path=instance))
+        self.assertEqual((result.status, result.detail), ("unchanged", "unchanged"))
+
+    def test_board_transport_step_ignores_unrelated_padded_runtime_lines_after_migration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            subprocess.run(["git", "-C", str(instance), "init", "--quiet"], check=True)
+            (instance / ".gitignore").write_text("/board-transport.env\n", encoding="utf-8")
+            transport = instance / "board-transport.env"
+            transport.write_text(
+                "KANBOARD_URL=http://127.0.0.1:8080/jsonrpc.php\n"
+                "KANBOARD_API_USER=jsonrpc\nKANBOARD_API_TOKEN=local-token\n", encoding="utf-8",
+            )
+            transport.chmod(0o600)
+            runtime = instance / "runtime.env"
+            runtime.write_text("# host settings\n  GITHUB_TOKEN=abc\nOTHER=xyz \n", encoding="utf-8")
+            runtime.chmod(0o600)
             result = upgrade.step_board_transport(self.context(FakeUnitInstaller(), instance_path=instance))
         self.assertEqual((result.status, result.detail), ("unchanged", "unchanged"))
 

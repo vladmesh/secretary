@@ -62,7 +62,7 @@ class RuntimeEnvRoleTests(unittest.TestCase):
             instance = Path(tmp)
             env_file = instance / "runtime.env"
             env_file.write_text("EXAMPLE_API_TOKEN=secret\n", encoding="utf-8")
-            transport, _ = ensure_board_transport(instance, allow_default=True)
+            transport = ensure_board_transport(instance, allow_default=True).transport
             for role in ("worker", "reviewer", "observer", "pipeline", "steward", "retro", "curator"):
                 with self.subTest(role=role):
                     env = role_env.runtime_env(

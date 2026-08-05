@@ -3494,7 +3494,7 @@ class DispatcherRuntime:
         """
         try:
             current = self._head_status(task, record, kind=kind)
-        except HostError:
+        except Exception:
             return None
         if not current.get("live"):
             return current, ""

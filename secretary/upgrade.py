@@ -31,7 +31,8 @@ from pathlib import Path
 from typing import Any, Callable
 
 from secretary import role_skills
-from secretary.board_transport import BoardTransportError, ensure_from_runtime_file, transport_path
+from secretary.board_transport import BoardTransportError, ensure_from_runtime_values, transport_path
+from secretary.runtime_env import RuntimeEnvError, RuntimeEnvMissing, read_runtime_env
 from secretary.automations import (
     AutomationError,
     OrcaAutomationClient,
@@ -608,8 +609,15 @@ def step_verify(context: UpgradeContext) -> StepResult:
 def step_board_transport(context: UpgradeContext) -> StepResult:
     """Migrate old runtime values once, or create the deterministic local config."""
     try:
-        outcome = ensure_from_runtime_file(context.instance_path, dry_run=context.dry_run)
-    except BoardTransportError as exc:
+        try:
+            values = read_runtime_env(context.instance_path, require_ignored=False)
+        except RuntimeEnvMissing:
+            values = {}
+        outcome = ensure_from_runtime_values(
+            context.instance_path, legacy_values=values,
+            runtime_env=context.instance_path / "runtime.env", dry_run=context.dry_run,
+        )
+    except (BoardTransportError, RuntimeEnvError) as exc:
         return StepResult("board-transport", "failed", str(exc))
     if not context.dry_run:
         try:

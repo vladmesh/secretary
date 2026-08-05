@@ -536,14 +536,14 @@ class LegacyBoardSecretTests(SecretStoreCase):
 
     def test_legacy_entry_is_not_materialized_but_migrated_transport_is_redacted(self) -> None:
         self._historical_entry(materialize={"target": "runtime-env"}, value=b"still-live-old-token")
-        transport, _ = ensure_board_transport(
+        transport = ensure_board_transport(
             self.instance_dir,
             legacy_values={
                 "KANBOARD_URL": "http://legacy/jsonrpc.php",
                 "KANBOARD_API_USER": "jsonrpc",
                 "KANBOARD_API_TOKEN": "migrated-live-token",
             },
-        )
+        ).transport
 
         self.assertEqual(materialize_secrets(self.instance_dir), ())
         self.assertIn(transport.token, secret_store.redaction_values(self.instance_dir))
@@ -563,6 +563,21 @@ class LegacyBoardSecretTests(SecretStoreCase):
         values = secret_store.redaction_values(self.instance_dir)
         self.assertNotIn("http://127.0.0.1:8080/jsonrpc.php", values)
         self.assertNotIn("jsonrpc", values)
+
+    def test_insecure_migrated_transport_blocks_redaction_instead_of_dropping_its_token(self) -> None:
+        transport = ensure_board_transport(
+            self.instance_dir,
+            legacy_values={
+                "KANBOARD_URL": "http://legacy/jsonrpc.php",
+                "KANBOARD_API_USER": "jsonrpc",
+                "KANBOARD_API_TOKEN": "migrated-live-token",
+            },
+        ).transport
+        (self.instance_dir / "board-transport.env").chmod(0o644)
+
+        with self.assertRaisesRegex(SecretStoreStateError, "redaction is unavailable"):
+            secret_store.redaction_values(self.instance_dir)
+        self.assertEqual(transport.token, "migrated-live-token")
 
 
 # The three keys the live installation's runtime.env holds, in the order the live

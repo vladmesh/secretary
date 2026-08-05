@@ -21,7 +21,7 @@ from typing import Any
 import yaml
 
 from secretary._fsutil import write_text_atomic
-from secretary.board_transport import BoardTransport, ensure_from_runtime_file, transport_path
+from secretary.board_transport import BoardTransport, ensure_from_runtime_values, transport_path
 from secretary.config import validate_instance
 from secretary.host_apply import pinned_orca_executable
 from secretary.installation import (
@@ -31,6 +31,7 @@ from secretary.installation import (
     _run,
     _set_installation_owner,
 )
+from secretary.runtime_env import RuntimeEnvMissing, read_runtime_env
 from secretary.tasks import KanboardClient, TaskError, all_project_cards
 
 
@@ -442,8 +443,13 @@ def bootstrap(args: argparse.Namespace) -> int:
         # Bootstrap may be safely rerun for an existing dedicated user.
         _ensure_installation_user(args.installation_user, recovery=True, dry_run=args.dry_run)
         clone_detail = _clone_or_reuse(args.instance_remote, target, recovery=True, dry_run=args.dry_run)
-        transport_outcome = ensure_from_runtime_file(
-            target, runtime, dry_run=args.dry_run, allow_default=clone_detail.startswith(("cloned", "would clone")),
+        try:
+            values = read_runtime_env(target, require_ignored=False)
+        except RuntimeEnvMissing:
+            values = {}
+        transport_outcome = ensure_from_runtime_values(
+            target, legacy_values=values, runtime_env=runtime, dry_run=args.dry_run,
+            allow_default=clone_detail.startswith(("cloned", "would clone")),
         )
         transport = transport_outcome.transport
         if not args.dry_run:

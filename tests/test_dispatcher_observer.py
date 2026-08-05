@@ -3391,6 +3391,7 @@ class ObserverConfigurationTests(unittest.TestCase):
         self.assertIn("- codegen", prompt)
         self.assertIn("secretary-800", prompt)
         self.assertIn("/shell/skills/observe-sprint/SKILL.md", prompt)
+        self.assertIn("python3 -P -m secretary sprint show --ref sprint:9", prompt)
 
     def test_the_prompt_points_at_the_skill_instead_of_restating_it(self) -> None:
         """The launch document carries data and one pointer; the instructions live in the skill."""

@@ -63,7 +63,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from secretary import role_env, state_repo
-from secretary.board_transport import DEFAULT_TOKEN, BoardTransportError, resolve as resolve_board_transport
+from secretary.board_transport import DEFAULT_TOKEN, BoardTransportError, resolve as resolve_board_transport, transport_path
 from secretary._fsutil import publish_state_atomic
 from secretary.config import _safe_yaml_error, validate
 from secretary.secret_words import RECOVERY_WORDS
@@ -826,8 +826,10 @@ def redaction_values(instance_dir: Path) -> tuple[str, ...]:
             pass
     try:
         transport = resolve_board_transport(instance_dir)
-    except BoardTransportError:
-        pass
+    except BoardTransportError as exc:
+        path = transport_path(instance_dir)
+        if path.exists() or path.is_symlink():
+            raise SecretStoreStateError(f"board transport redaction is unavailable: {exc}") from None
     else:
         if transport.token != DEFAULT_TOKEN:
             values.append(transport.token)

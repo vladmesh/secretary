@@ -2261,7 +2261,7 @@ def render_observer_prompt(
         f"- {skill_path or OBSERVER_SKILL}",
         "",
         "Read it first. Everything below is the sprint entity as the board holds it right now; the",
-        "live copy is `python3 -m secretary sprint show --ref " + ref + "`.",
+        "live copy is `python3 -P -m secretary sprint show --ref " + ref + "`.",
         "",
         "## Reference",
         "",
