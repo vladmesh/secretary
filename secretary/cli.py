@@ -61,6 +61,7 @@ from secretary.provision import apply_provision_result, render_result, start_pro
 from secretary.restore_commands import add_restore_subcommands, run_memory_reindex
 from secretary.secret_commands import add_secret_subcommands
 from secretary.secret_store import store_findings as _secret_store_findings
+from secretary.board_transport import findings as _board_transport_findings
 from secretary.restore import RestoreError, _target, restore_findings
 from secretary.session import run_shell
 from secretary.state_repo import StateRepoError
@@ -90,6 +91,7 @@ class DoctorInspection:
     dispatcher: list[str]
     checkpoint: list[str]
     secret_store: list[str]
+    board_transport: list[str]
     expected: object | None = None
     collected: CollectResult | None = None
     diffs: dict[str, KindDiff] | None = None
@@ -494,6 +496,10 @@ def run_doctor(args: argparse.Namespace) -> int:
     )
     print_checkpoint_status(report, findings=inspection.checkpoint)
     print_secret_store_status(report, findings=inspection.secret_store)
+    if inspection.board_transport:
+        print("board transport findings:")
+        for finding in inspection.board_transport:
+            print(f"  {finding}")
 
     print("host changes: none")
     if inspection.unavailable:
@@ -604,13 +610,15 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
     dispatcher = dispatcher_findings(report, collected, inspect_live=not args.offline)
     checkpoint = checkpoint_findings(report)
     secret_store = secret_store_findings(report)
+    board_transport = _board_transport_findings(report.instance_path.parent)
     findings.extend({"code": "dispatcher", "message": finding} for finding in dispatcher)
     findings.extend({"code": "checkpoint", "message": finding} for finding in checkpoint)
     findings.extend({"code": "secret_store", "message": finding} for finding in secret_store)
+    findings.extend({"code": "board_transport", "message": finding} for finding in board_transport)
     if args.strict:
         findings.extend({"code": "config_warning", "message": str(warning)} for warning in report.warnings)
     return DoctorInspection(
-        findings, unavailable, restore, dispatcher, checkpoint, secret_store, expected, collected, diffs
+        findings, unavailable, restore, dispatcher, checkpoint, secret_store, board_transport, expected, collected, diffs
     )
 
 

@@ -40,7 +40,7 @@ verdict of "no failures" beats noise.
 ### 1. Take the batch
 
 ```
-python3 -m triggered_agents retro harvest
+python3 -P -m triggered_agents retro harvest
 ```
 
 Run it from your own workspace (the run's starting working directory is the retro worktree). **Do not `cd`**
@@ -61,8 +61,8 @@ MCP server that the fact really is in the canon. Do not draw the conclusion with
 Before wording the proposals, load the current cards:
 
 ```
-python3 -m triggered_agents pipeline list --column "Issues"
-python3 -m triggered_agents pipeline list --column "Ready"
+python3 -P -m triggered_agents pipeline list --column "Issues"
+python3 -P -m triggered_agents pipeline list --column "Ready"
 ```
 
 Do not file a card if such a proposal is already in one of those lists in meaning, not in wording (do not
@@ -77,7 +77,7 @@ Otherwise file one card per failure in `Issues` through the board CLI (board cre
 by the role environment; there is nothing to source separately):
 
 ```
-python3 -m triggered_agents pipeline --role retro idea \
+python3 -P -m triggered_agents pipeline --role retro idea \
   --project <the project whose skill or infrastructure is being fixed> \
   --title "retro: <short failure pattern>" \
   --description "$(cat <<'EOF'
@@ -105,13 +105,13 @@ the curator's work once the card is taken into `Ready`.
 Afterwards you can record what you found:
 
 ```
-python3 -m triggered_agents retro log-proposal --ref <project>-<id> [--ref <project>-<id> ...]
+python3 -P -m triggered_agents retro log-proposal --ref <project>-<id> [--ref <project>-<id> ...]
 ```
 
 ### 5. Move the watermark
 
 ```
-python3 -m triggered_agents retro advance
+python3 -P -m triggered_agents retro advance
 ```
 
 Always at the end, both when proposals were filed and when the verdict is "no failures". Otherwise the next

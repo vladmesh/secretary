@@ -36,13 +36,13 @@ watermark (step 6):
 
 - Nothing needs a human → move to Done:
   ```
-  python3 -m triggered_agents pipeline --role steward move --ref <ref> --to Done
+  python3 -P -m triggered_agents pipeline --role steward move --ref <ref> --to Done
   ```
 - There are items under "Needs a human" → instead of Done, move the report card itself to Blocked with
   the same "Needs a human" section as in the report comment:
   ```
-  python3 -m triggered_agents pipeline --role steward move --ref <ref> --to Blocked
-  python3 -m triggered_agents pipeline --role steward comment --ref <ref> --body-file <file>
+  python3 -P -m triggered_agents pipeline --role steward move --ref <ref> --to Blocked
+  python3 -P -m triggered_agents pipeline --role steward comment --ref <ref> --body-file <file>
   ```
 
 This is separate from the ordinary escalation path (`move --to Blocked`) for OTHER cards you touch
@@ -89,7 +89,7 @@ memory, shared memory wins.
 ## What woke you
 
 ```
-python3 -m triggered_agents steward scan --json
+python3 -P -m triggered_agents steward scan --json
 ```
 
 Run it from your own workspace (your starting working directory is the steward worktree). It returns
@@ -145,7 +145,7 @@ previous sweep.
 It has its own window, not the signal watermark:
 
 ```
-python3 -m triggered_agents steward deep-sweep-since
+python3 -P -m triggered_agents steward deep-sweep-since
 ```
 
 It prints the timestamp of the last sweep, or null on the very first one (in which case take a reasonable
@@ -156,11 +156,11 @@ horizon, for example the last 48 hours). That watermark is independent of the si
 
 Do not limit yourself to the five detector signals. Over the window since the previous sweep:
 
-- **Blindness in the signals themselves.** Run `python3 -m triggered_agents steward scan --json` and
+- **Blindness in the signals themselves.** Run `python3 -P -m triggered_agents steward scan --json` and
   compare it against what the signals SHOULD have caught in that window, by reading the raw sources
   directly: what is in the dispatcher's tick telemetry (is the tick sequence growing, is the last healthy
   timestamp fresh, what is in the unhealthy record), and whether the resource-health cache is fresh.
-  `python3 -m triggered_agents health` is useful too, since it reads the same live sources. Silence from
+  `python3 -P -m triggered_agents health` is useful too, since it reads the same live sources. Silence from
   a signal does not mean "all clean" — it can mean "looking in the wrong place".
 - **The whole board**, not only Blocked: cards with no movement, disagreements between the local card
   cache and the board, duplicates, columns nobody has looked into.
@@ -179,7 +179,7 @@ Do not limit yourself to the five detector signals. Over the window since the pr
 - **Drift of role skills between heads** (secretary, curator, retro and steward must get their skills
   from the product's `skills/roles`, not from scattered shell directories):
   ```
-  python3 -m triggered_agents steward role-skills --json
+  python3 -P -m triggered_agents steward role-skills --json
   ```
   It compares the product's `skills/manifest.toml` against the copies in each shell. When it is not ok,
   check the missing, drift and source-missing entries. If a copy was simply lost from the canon, you can
@@ -204,7 +204,7 @@ precheck.
 ### Move the sweep watermark
 
 ```
-python3 -m triggered_agents steward deep-sweep-advance
+python3 -P -m triggered_agents steward deep-sweep-advance
 ```
 
 Always the last step, instead of (not together with) the signal `steward advance`: the sweep touches only
@@ -260,7 +260,7 @@ on without the full review loop** (a false positive, an external cause already f
 one-off mishap), you have a `Blocked → Done` override:
 
 ```
-python3 -m triggered_agents pipeline --role steward move --ref <ref> --to Done \
+python3 -P -m triggered_agents pipeline --role steward move --ref <ref> --to Done \
   --reason "<why skipping review is legitimate>"
 ```
 
@@ -275,7 +275,7 @@ On every card you touched (fixed, created, escalated, overrode), leave a comment
 why:
 
 ```
-python3 -m triggered_agents pipeline --role steward comment --ref <ref> --body-file <file>
+python3 -P -m triggered_agents pipeline --role steward comment --ref <ref> --body-file <file>
 ```
 
 The comment is not a duplicate of the report (step 4) but a short note on the card itself, so the history is
@@ -287,7 +287,7 @@ A comment on this wake-up's report card (the `<ref>` from `--card`, see above) �
 repository:
 
 ```
-python3 -m triggered_agents pipeline --role steward comment --ref <ref> --body-file <file>
+python3 -P -m triggered_agents pipeline --role steward comment --ref <ref> --body-file <file>
 ```
 
 Report structure:
@@ -321,7 +321,7 @@ forever.
 ### 6. Move the watermark
 
 ```
-python3 -m triggered_agents steward advance
+python3 -P -m triggered_agents steward advance
 ```
 
 Always the last step, after the report has been written as a comment on the card. If you did not get to the

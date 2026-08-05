@@ -16,7 +16,7 @@ The canon is markdown facts in a Git journal. The index is derived. One fact is 
 ### 1. Take the fresh batch
 
 ```
-python3 -m triggered_agents curator harvest
+python3 -P -m triggered_agents curator harvest
 ```
 
 Run it from your own workspace (the run's starting working directory is the curator worktree). **Do not
@@ -124,7 +124,7 @@ Why: only when there is a working invariant for a future agent.
 Then write it:
 
 ```
-python3 -m triggered_agents curator memory-write \
+python3 -P -m triggered_agents curator memory-write \
   --actor curator --scope <global|project:<dir>> --slug <kebab-slug> --file /tmp/fact.md
 ```
 
@@ -151,7 +151,7 @@ carry it over — refer to it by name and location instead.
 ### 5. Move the watermark
 
 ```
-python3 -m triggered_agents curator advance
+python3 -P -m triggered_agents curator advance
 ```
 
 Order matters: move the watermark ONLY after every fact has been written through `memory-write`. If you

@@ -10,11 +10,10 @@ operations live in agents/pipeline/ops.py.
 """
 from __future__ import annotations
 
-import base64
 import json
+import os
 import urllib.error
 import urllib.request
-import os
 
 from .board_transport import BoardTransportError, resolve
 
@@ -25,22 +24,24 @@ class KanboardError(RuntimeError):
     """A JSON-RPC call failed at the transport or protocol level."""
 
 
-def _creds() -> tuple[str, str, str]:
+def _creds():
     try:
-        transport = resolve(os.environ.get("SECRETARY_INSTANCE") or None)
+        instance = os.environ.get("SECRETARY_INSTANCE")
+        if not instance:
+            raise BoardTransportError("SECRETARY_INSTANCE must name the installation")
+        transport = resolve(instance)
     except BoardTransportError as exc:
         raise KanboardError(f"board transport configuration is unavailable: {exc}") from exc
-    return transport.url, transport.user, transport.token
+    return transport
 
 
 def _post(payload, label: str):
-    url, user, token = _creds()
+    transport = _creds()
     body = json.dumps(payload).encode("utf-8")
-    auth = base64.b64encode(f"{user}:{token}".encode()).decode()
     req = urllib.request.Request(
-        url,
+        transport.url,
         data=body,
-        headers={"Content-Type": "application/json", "Authorization": f"Basic {auth}"},
+        headers={"Content-Type": "application/json", "Authorization": transport.authorization_header()},
         method="POST",
     )
     try:

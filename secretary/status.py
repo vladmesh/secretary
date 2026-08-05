@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary import head_registry
+from secretary.board_transport import findings as board_transport_findings
 from secretary.checkpoint import checkpoint_snapshot
 from secretary.dispatcher_observer import observer_snapshot
 from secretary.dispatcher_pause import ProductionPause
@@ -73,6 +74,7 @@ def collect_status(report, *, host_fixture: str | None = None, offline: bool = F
             push_state=_object(production.get("checkpoint_push")),
         ),
         "memory": _memory_status(data_dir),
+        "board_transport": {"findings": board_transport_findings(instance_dir)},
         "secret_store": store_health(report.instance_path.parent),
     }
 

@@ -22,9 +22,9 @@ wholesale. A document is read on purpose when the history of a question is neede
 ## How to write
 
 ```bash
-python3 -m secretary knowledge write --instance <instance dir> --actor secretary \
+python3 -P -m secretary knowledge write --instance <instance dir> --actor secretary \
   --path decisions/2026-07-25-sprint-1.md --file /tmp/sprint-1.md
-python3 -m secretary knowledge list --instance <instance dir>
+python3 -P -m secretary knowledge list --instance <instance dir>
 ```
 
 **Do not run raw `git add` or `git commit` in the instance repository.** The dispatcher's tick writer

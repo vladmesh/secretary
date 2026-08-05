@@ -49,6 +49,7 @@ from secretary.host_apply import resolve_packaged
 from triggered_agents.agents.pipeline import heads
 from triggered_agents.runtime import dispatch, role_env
 from secretary.tasks import KanboardClient
+from secretary.board_transport import ensure as ensure_board_transport
 
 from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard
 
@@ -596,6 +597,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             "KANBOARD_API_USER=svc\nKANBOARD_API_TOKEN=secret\n",
             encoding="utf-8",
         )
+        ensure_board_transport(self.instance, allow_default=True)
         materialize_snapshot(self.instance, upgrade.running_product_root())
         self.layout = SystemdLayout(
             product_root=self.root / "product",

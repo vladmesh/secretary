@@ -232,12 +232,6 @@ def launch_binding() -> list[str]:
 def wrap_shell_command(role: str, command: str, *, pythonpath: str | None = None,
                        env_file: Path | str | None = None) -> str:
     """Shell command that execs `command` under the role env without putting secret values in argv."""
-    if role in BOARD_ROLES and os.environ.get("SECRETARY_INSTANCE"):
-        from .board_transport import BoardTransportError, resolve
-        try:
-            resolve(os.environ.get("SECRETARY_INSTANCE") or None)
-        except BoardTransportError as exc:
-            raise RoleEnvError(f"board transport configuration is unavailable: {exc}") from None
     py_path = pythonpath or runtime_pythonpath()
     parts = [
         *launch_binding(),
@@ -269,6 +263,15 @@ def _main_exec(argv: list[str], *, prog: str) -> int:
         parser.error("missing command after --")
     try:
         env = runtime_env(ns.role, env_file=ns.env_file)
+        if ns.role in BOARD_ROLES:
+            from .board_transport import BoardTransportError, resolve
+            instance = env.get("SECRETARY_INSTANCE")
+            if not instance:
+                raise RoleEnvError("board transport configuration requires SECRETARY_INSTANCE")
+            try:
+                resolve(instance)
+            except BoardTransportError as exc:
+                raise RoleEnvError(f"board transport configuration is unavailable: {exc}") from None
     except RoleEnvError as e:
         print(f"role-env: {e}", file=sys.stderr)
         return 125

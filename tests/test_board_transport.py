@@ -205,7 +205,7 @@ class BoardTransportTests(unittest.TestCase):
                     mock.patch("triggered_agents.runtime.board_transport.default_instance_path", return_value=instance),
                     mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": ""}, clear=True),
                 ):
-                    self.assertEqual(KanboardClient().url, "http://127.0.0.1:8080/jsonrpc.php")
+                    self.assertEqual(KanboardClient(instance_dir=instance).url, "http://127.0.0.1:8080/jsonrpc.php")
             finally:
                 os.chdir(previous)
 

@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from secretary import role_env
+from secretary.board_transport import ensure as ensure_board_transport
 from secretary._fsutil import file_lock, try_file_lock
 from secretary.checkpoint import CheckpointPusher, CheckpointResult, CheckpointWriter
 from secretary.dispatcher import (
@@ -7208,10 +7209,12 @@ class DispatcherLauncherTests(unittest.TestCase):
                 "ANTHROPIC_MODEL=opus\n",
                 encoding="utf-8",
             )
+            ensure_board_transport(root, allow_default=True)
             env = {
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                 "HOME": str(home),
                 "SECRETARY_RUNTIME_ENV_FILE": str(runtime),
+                "SECRETARY_INSTANCE": str(root),
                 "TA_SECRETARY_REPO": str(repo),
                 "ANTHROPIC_MODEL": "opus",
                 "CLAUDE_MANAGED_SETTINGS": str(root / "no-managed.json"),

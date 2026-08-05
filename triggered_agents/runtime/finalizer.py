@@ -28,7 +28,7 @@ def with_finalizer(agent: str, launch: str, generation: int) -> str:
     identifies this terminal, so a late helper cannot stop a newer replacement.
     """
     finalizer = role_env.wrap_shell_command(
-        agent, f"python3 -m triggered_agents {agent} dispatch --spawn-finalizer --generation {generation}")
+        agent, f"python3 -P -m triggered_agents {agent} dispatch --spawn-finalizer --generation {generation}")
     return f"{launch}; {finalizer}"
 
 

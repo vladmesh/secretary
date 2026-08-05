@@ -4,7 +4,7 @@
 # replaced, so the branch logic is reviewable and covered by tests instead of hiding in a systemd
 # unit string (triggered-agents-276).
 #
-# Exit-code protocol of `python3 -m triggered_agents <agent> precheck` (all agents, see each cli.py
+# Exit-code protocol of `python3 -P -m triggered_agents <agent> precheck` (all agents, see each cli.py
 # and runtime/state.py PRECHECK_SKIP):
 #   0              -> there is work: exec the dispatch, the head wakes up.
 #   100            -> deliberate skip (nothing changed / paused): no new skill dispatch, but still
@@ -40,24 +40,24 @@ agent="${1:?usage: ta-gate.sh <agent> [variant]}"
 variant="${2:-}"
 
 run_role_env() {
-    python3 -m triggered_agents.runtime.role_env exec --role "$agent" -- "$@"
+    python3 -P -m triggered_agents.runtime.role_env exec --role "$agent" -- "$@"
 }
 
 exec_role_env() {
-    exec python3 -m triggered_agents.runtime.role_env exec --role "$agent" -- "$@"
+    exec python3 -P -m triggered_agents.runtime.role_env exec --role "$agent" -- "$@"
 }
 
 if [ -n "$variant" ]; then
-    exec_role_env python3 -m triggered_agents "$agent" dispatch "$variant"
+    exec_role_env python3 -P -m triggered_agents "$agent" dispatch "$variant"
 fi
 
-run_role_env python3 -m triggered_agents "$agent" precheck
+run_role_env python3 -P -m triggered_agents "$agent" precheck
 rc=$?
 if [ "$rc" -eq 0 ]; then
-    exec_role_env python3 -m triggered_agents "$agent" dispatch
+    exec_role_env python3 -P -m triggered_agents "$agent" dispatch
 elif [ "$rc" -eq 100 ]; then
     echo "[ta-$agent] precheck: no change, skill dispatch skipped"
-    exec_role_env python3 -m triggered_agents "$agent" dispatch --cleanup-only
+    exec_role_env python3 -P -m triggered_agents "$agent" dispatch --cleanup-only
 else
     echo "[ta-$agent] precheck: ERROR (rc=$rc); see runs.jsonl" >&2
     exit "$rc"

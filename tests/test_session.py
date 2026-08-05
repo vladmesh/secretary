@@ -35,7 +35,7 @@ class OperatorEnvTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env_file = _write_env(Path(tmp), "SOMETHING=else\n")
             with self.assertRaises(session.SessionError) as ctx:
-                session.operator_env(env_file, base_env={})
+                session.operator_env(env_file, base_env={"SECRETARY_INSTANCE": tmp})
         self.assertIn("board transport", str(ctx.exception))
 
 

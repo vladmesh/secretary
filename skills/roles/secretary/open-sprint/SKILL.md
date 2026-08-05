@@ -39,18 +39,18 @@ all.
 Read live sources, not your memory of them.
 
 ```bash
-python3 -m secretary sprint list --status open
-python3 -m secretary sprint list --status closed
-python3 -m secretary task list --state issues --project <project>
-python3 -m secretary task list --state ready --project <project>
-python3 -m secretary task list --sprint sprint:<ID>
+python3 -P -m secretary sprint list --status open
+python3 -P -m secretary sprint list --status closed
+python3 -P -m secretary task list --state issues --project <project>
+python3 -P -m secretary task list --state ready --project <project>
+python3 -P -m secretary task list --sprint sprint:<ID>
 ```
 
 What you need as input:
 
 - open and recently closed sprints: their goals, repositories and what was left unclosed;
 - deferred items from past sprints, which live in the resume entries and comments of their entities
-  (`python3 -m secretary sprint show --ref sprint:<ID>`), not in a separate list;
+  (`python3 -P -m secretary sprint show --ref sprint:<ID>`), not in a separate list;
 - the product roadmap and vision (`docs/ROADMAP.md`, `docs/VISION.md` of the affected repositories);
 - the Issues backlog of the affected repositories, as input material for future cards rather than as
   a plan;
@@ -65,7 +65,7 @@ An open sprint holds the projects it reserves as their only writer. A second spr
 not opened.
 
 ```bash
-python3 -m secretary sprint list --status open
+python3 -P -m secretary sprint list --status open
 ```
 
 Compare the `repositories` field of each open sprint against the repositories the new one needs. On an
@@ -74,14 +74,14 @@ overlap:
 1. Do not create the entity. A refusal here is cheaper than two writers on one repository.
 2. Name the conflicting sprint (ref, goal) to the person and offer a choice: wait for it to close, narrow
    the new sprint to the free repositories, or close the current one by an explicit decision
-   (`python3 -m secretary sprint close --role po --actor <you> --ref sprint:<ID>`).
+   (`python3 -P -m secretary sprint close --role po --actor <you> --ref sprint:<ID>`).
 3. You may not close someone else's open sprint on your own "so it stops getting in the way".
 
 Anything urgent that lands in a running sprint's repository does not become a separate sprint: it is added
 as an entry on that sprint's entity.
 
 ```bash
-python3 -m secretary sprint comment --ref sprint:<ID> --role po --actor <you> --body-file /tmp/note.md
+python3 -P -m secretary sprint comment --ref sprint:<ID> --role po --actor <you> --body-file /tmp/note.md
 ```
 
 ## 3. Finish grilling the forks
@@ -132,7 +132,7 @@ Prepare the Definition of Done text as a file so it goes into the entity whole:
 The only way is the product command. A sprint is opened by the PO.
 
 ```bash
-python3 -m secretary sprint create --role po --actor <you> \
+python3 -P -m secretary sprint create --role po --actor <you> \
   --goal "<one sentence about the end product state>" \
   --dod-file /tmp/dod.md \
   --product <product-id> --issue issue:<ID> --project <project-id> \
@@ -160,8 +160,8 @@ python3 -m secretary sprint create --role po --actor <you> \
 Read back what you created immediately and check the fields are the ones agreed:
 
 ```bash
-python3 -m secretary sprint show --ref sprint:<ID>
-python3 -m secretary sprint status --ref sprint:<ID>
+python3 -P -m secretary sprint show --ref sprint:<ID>
+python3 -P -m secretary sprint status --ref sprint:<ID>
 ```
 
 `show` returns the goal, Definition of Done, repositories, status, budget, current task, resume entry and
@@ -173,7 +173,7 @@ created sprint normally reports a missing resume entry — the first one is writ
 The document is written after the entity and references it.
 
 ```bash
-python3 -m secretary knowledge write --instance <instance dir> --actor secretary \
+python3 -P -m secretary knowledge write --instance <instance dir> --actor secretary \
   --path decisions/YYYY-MM-DD-<slug>.md --file /tmp/<slug>.md
 ```
 
@@ -202,10 +202,10 @@ Once the entity exists:
   explicit human decision, not in passing.
 
 If the observer does not appear for a long time, find the reason in data:
-`python3 -m secretary status --instance <instance dir> --json` (`installation.sprints`,
-`dispatcher.observers`) and `python3 -m secretary sprint status --ref sprint:<ID>` (the `observer` field).
+`python3 -P -m secretary status --instance <instance dir> --json` (`installation.sprints`,
+`dispatcher.observers`) and `python3 -P -m secretary sprint status --ref sprint:<ID>` (the `observer` field).
 The instance path is mandatory for `status`. A common cause is an undelivered role skill, fixed with
-`python3 -m secretary role-skills sync`.
+`python3 -P -m secretary role-skills sync`.
 
 ## Report back
 

@@ -487,22 +487,6 @@ def wrap_role_shell_command(role: str, command: str, *, identity: dict[str, str]
     )
 
 
-def require_board_transport(role: str, *, environ: Mapping[str, str] | None = None) -> None:
-    """Fail a board-writing head launch before it can consume an autonomous turn."""
-    if role not in BOARD_ROLES:
-        return
-    env = os.environ if environ is None else environ
-    # Production units always bind an instance explicitly.  An unbound direct
-    # CommandHostRuntime is a test/manual construction, not an autonomous host
-    # launch, and keeps its existing no-instance behavior.
-    if not env.get("SECRETARY_INSTANCE"):
-        return
-    try:
-        resolve_board_transport(env.get("SECRETARY_INSTANCE") or None)
-    except BoardTransportError as exc:
-        raise HeadLaunchError(f"board transport configuration is unavailable: {exc}") from None
-
-
 def with_pid_heartbeat(command: str, pid_file: str) -> str:
     """Prefix a head's launch command so its own pid lands in `pid_file` right before it execs.
 
@@ -606,3 +590,17 @@ def _codex_trust_paths(workspace: str) -> list[str]:
         seen.add(key)
         out.append(key)
     return out
+
+
+def require_board_transport(role: str, *, environ: Mapping[str, str] | None = None) -> None:
+    """Compatibility check for explicit operator launch probes; executable gates use role_env."""
+    if role not in BOARD_ROLES:
+        return
+    env = os.environ if environ is None else environ
+    instance = env.get("SECRETARY_INSTANCE")
+    if not instance:
+        raise HeadLaunchError("board transport configuration requires SECRETARY_INSTANCE")
+    try:
+        resolve_board_transport(instance)
+    except BoardTransportError as exc:
+        raise HeadLaunchError(f"board transport configuration is unavailable: {exc}") from None

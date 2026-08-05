@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import contextlib
 import fcntl
 import hashlib
@@ -313,12 +312,16 @@ class KanboardClient:
         self, *, transport: BoardTransport | None = None, instance_dir: str | Path | None = None,
     ) -> None:
         try:
-            configured = transport or resolve_board_transport(instance_dir or os.environ.get("SECRETARY_INSTANCE"))
+            selected_instance = instance_dir or os.environ.get("SECRETARY_INSTANCE")
+            if transport is None and not selected_instance:
+                raise BoardTransportError("SECRETARY_INSTANCE must name the installation")
+            configured = transport or resolve_board_transport(selected_instance)
         except BoardTransportError:
             raise TaskError("backend_unavailable", "Kanboard runtime configuration is unavailable", 1)
         self.url = configured.url
         self.user = configured.user
         self.token = configured.token
+        self._transport = configured
 
     def call(self, method: str, **params: Any) -> Any:
         payload: dict[str, Any] = {"jsonrpc": "2.0", "id": 1, "method": method}
@@ -329,9 +332,7 @@ class KanboardClient:
             data=json.dumps(payload).encode("utf-8"),
             headers={
                 "Content-Type": "application/json",
-                "Authorization": "Basic " + base64.b64encode(
-                    f"{self.user}:{self.token}".encode("utf-8")
-                ).decode("ascii"),
+                "Authorization": self._transport.authorization_header(),
             },
             method="POST",
         )
@@ -905,9 +906,12 @@ class TaskWriter:
         key = tuple(fingerprint)
         if self._redaction_cache is not None and self._redaction_cache[0] == key:
             return self._redaction_cache[1]
-        from secretary.secret_store import redaction_values
+        from secretary.secret_store import SecretStoreError, redaction_values
 
-        values = redaction_values(runtime_env.parent)
+        try:
+            values = redaction_values(runtime_env.parent)
+        except SecretStoreError as exc:
+            raise TaskError("backend_unavailable", f"board redaction configuration is unavailable: {exc}", 1) from None
         self._redaction_cache = (key, values)
         return values
 

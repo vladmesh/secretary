@@ -72,7 +72,7 @@ class RuntimeEnvRoleTests(unittest.TestCase):
                     )
                     self.assertNotIn("KANBOARD_API_TOKEN", env)
                     with mock.patch.dict(os.environ, env, clear=True):
-                        self.assertEqual(kanboard._creds(), (transport.url, transport.user, transport.token))
+                        self.assertEqual(kanboard._creds(), transport)
 
     def test_required_role_rendering_does_not_probe_board_transport(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

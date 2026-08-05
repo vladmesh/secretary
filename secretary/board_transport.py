@@ -142,7 +142,25 @@ def ensure_from_runtime_values(
     return outcome
 
 
+def findings(instance_dir: Path | str) -> list[str]:
+    """Public, non-secret transport health evidence for status and doctor."""
+    path = transport_path(instance_dir)
+    # A pre-transport checkout has no lifecycle marker yet; it is not an unhealthy
+    # configured installation. Once the durable ignore entry exists, absence is a finding.
+    if not path.exists() and not path.is_symlink():
+        try:
+            if f"/{TRANSPORT_FILE}" not in (path.parent / ".gitignore").read_text(encoding="utf-8").splitlines():
+                return []
+        except OSError:
+            return []
+    try:
+        resolve(instance_dir)
+    except BoardTransportError as exc:
+        return [f"board transport configuration: {exc}"]
+    return []
+
+
 __all__ = [
     "BoardTransport", "BoardTransportError", "DEFAULT_TOKEN", "DEFAULT_TRANSPORT", "TransportOutcome", "ensure",
-    "ensure_from_runtime_values", "resolve", "transport_path",
+    "ensure_from_runtime_values", "findings", "resolve", "transport_path",
 ]

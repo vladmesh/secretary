@@ -20,4 +20,4 @@ export PATH="$HOME/.local/bin:$HOME/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/
 export PYTHONPATH="${TA_RUNTIME_PYTHONPATH:-${TA_SECRETARY_REPO:-$HOME/secretary}}${PYTHONPATH:+:$PYTHONPATH}"
 
 head="${1:-}"
-exec python3 -m secretary shell ${head:+--head "$head"}
+exec python3 -P -m secretary shell ${head:+--head "$head"}
