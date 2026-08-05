@@ -570,7 +570,9 @@ def store_health(instance_dir: Path) -> dict[str, Any]:
         "secret_count": len(secrets),
         "last_modified_at": _mtime(catalog_path(instance_dir)),
         "installation_key": {"present": present, "usable": usable},
-        "materialize": _materialize_summary(secrets),
+        "materialize": _materialize_summary(
+            tuple(entry for entry in secrets if entry.get("id") not in LEGACY_BOARD_SECRET_IDS)
+        ),
     }
 
 

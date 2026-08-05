@@ -138,7 +138,7 @@ def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = Non
             if tasks:
                 hint = ""
                 if titles == list(LEGACY_PIPELINE_COLUMNS):
-                    hint = "; run `secretary board migrate-assessment` to add it in place"
+                    hint = f"; run `secretary board migrate-assessment --instance {instance}` to add it in place"
                 raise BootstrapError(
                     "Pipeline board has cards but an incompatible column schema: "
                     f"{', '.join(titles)} (expected: {', '.join(PIPELINE_COLUMNS)}; "

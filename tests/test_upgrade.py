@@ -550,7 +550,7 @@ class UpgradeStepTests(unittest.TestCase):
             runtime.write_text(body, encoding="utf-8")
             runtime.chmod(0o600)
             preview = upgrade.step_board_transport(self.context(FakeUnitInstaller(), instance_path=instance, dry_run=True))
-            self.assertEqual(preview.status, "changed")
+            self.assertEqual(preview.status, "would-change")
             self.assertIn("would import legacy transport", preview.detail)
             self.assertIn("would retire legacy runtime values", preview.detail)
             self.assertEqual(runtime.read_text(encoding="utf-8"), body)

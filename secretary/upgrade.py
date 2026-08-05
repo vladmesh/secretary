@@ -629,7 +629,7 @@ def step_board_transport(context: UpgradeContext) -> StepResult:
             return StepResult("board-transport", "failed", str(exc))
     return StepResult(
         "board-transport",
-        "unchanged" if not outcome.changed else "changed",
+        "unchanged" if not outcome.changed else "would-change" if context.dry_run else "changed",
         outcome.render(dry_run=context.dry_run),
     )
 

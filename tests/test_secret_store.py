@@ -546,6 +546,7 @@ class LegacyBoardSecretTests(SecretStoreCase):
         ).transport
 
         self.assertEqual(materialize_secrets(self.instance_dir), ())
+        self.assertEqual(secret_store.store_health(self.instance_dir)["materialize"], [])
         self.assertIn(transport.token, secret_store.redaction_values(self.instance_dir))
         self.assertIn("still-live-old-token", secret_store.redaction_values(self.instance_dir))
 

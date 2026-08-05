@@ -105,7 +105,7 @@ class SprintRestoreTests(unittest.TestCase):
         return [sys.executable, str(script)]
 
     def _export(self) -> None:
-        export_board(self.source_data, command=self._pipeline_command(), sprint_client=self.source)
+        export_board(self.source_data, instance_dir=self.instance, command=self._pipeline_command(), sprint_client=self.source)
         # Only the normalized export travels; the target backend starts from nothing else.
         for name in ("cards.json", "sprints.json"):
             shutil.copy(self.source_data / "board" / name, self.target_data / "board" / name)
@@ -243,7 +243,7 @@ class SprintRestoreTests(unittest.TestCase):
     def test_a_second_disaster_keeps_the_declared_observer(self) -> None:
         """The checkpoint of a recovered installation recovers the same declared row again."""
         first, _ = self._restore()
-        export_board(self.target_data, command=self._pipeline_command(), sprint_client=first)
+        export_board(self.target_data, instance_dir=self.instance, command=self._pipeline_command(), sprint_client=first)
         second_data = self.root / "second-recovery"
         shutil.copytree(self.target_data, second_data)
 
@@ -552,7 +552,7 @@ class SprintRestoreTests(unittest.TestCase):
         )
         # Its own export is stable: a second checkpoint of the restored entity still
         # carries no ownership, so the next recovery compares equal again.
-        export_board(self.target_data, command=self._pipeline_command(), sprint_client=client)
+        export_board(self.target_data, instance_dir=self.instance, command=self._pipeline_command(), sprint_client=client)
         again = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
         for field in ("product", "issues", "reservations"):
             self.assertNotIn(field, again["sprints"][0])
@@ -625,7 +625,7 @@ class SprintRestoreTests(unittest.TestCase):
         """
         first, _ = self._restore()
         # The checkpoint of the recovered instance: its own export, its own audit.
-        export_board(self.target_data, command=self._pipeline_command(), sprint_client=first)
+        export_board(self.target_data, instance_dir=self.instance, command=self._pipeline_command(), sprint_client=first)
         second_data = self.root / "second-data"
         shutil.copytree(self.target_data, second_data)
 

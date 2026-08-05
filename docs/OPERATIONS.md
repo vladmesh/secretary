@@ -917,13 +917,13 @@ renaming a column in place would change what its cards mean, and removing one mo
 holds to the trash. A live board that predates a column therefore needs one explicit repair:
 
 ```bash
-python3 -P -m secretary board migrate-assessment
+python3 -P -m secretary board migrate-assessment --instance /path/to/instance
 ```
 
 It adds the `Assessment` column at position 5 of a board that carries the earlier six-column layout,
 without moving, reordering or trashing a card and without renaming an existing column. It reads the
-Kanboard credentials from the runtime environment, like `secretary task`. Every outcome is
-retryable: a finished board reports `unchanged`, a run whose `addColumn` committed but whose answer
+board transport from that instance. Every outcome is retryable: a finished board reports `unchanged`,
+a run whose `addColumn` committed but whose answer
 was lost leaves the six columns plus a trailing `Assessment` and the next run finishes that column
 (`resumed`) instead of adding a second one, and any layout that is none of those three is refused
 with all of them named. Every run proves that each card's column and position are unchanged before

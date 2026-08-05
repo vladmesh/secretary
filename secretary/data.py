@@ -159,7 +159,7 @@ def raw_kanboard_dump(
 def export_board(
     data_dir: Path,
     *,
-    instance_dir: Path | None = None,
+    instance_dir: Path,
     pipeline_worktree: Path = PIPELINE_WORKTREE,
     command: list[str] | None = None,
     sprint_client: Any = None,
@@ -281,15 +281,13 @@ def normalize_board_card(list_card: dict[str, Any], shown_card: dict[str, Any]) 
     }
 
 
-def export_sprint_entities(instance_dir: Path | None, client: Any = None) -> list[dict[str, Any]]:
+def export_sprint_entities(instance_dir: Path, client: Any = None) -> list[dict[str, Any]]:
     """Read the sprint board into deterministic checkpoint records."""
     from secretary.sprints import SprintReader
     from secretary.tasks import KanboardClient, TaskError
 
     try:
-        board_client = client if client is not None else (
-            KanboardClient.for_instance(instance_dir) if instance_dir is not None else KanboardClient.for_environ()
-        )
+        board_client = client if client is not None else KanboardClient.for_instance(instance_dir)
         reader = SprintReader(board_client)
         return [normalize_sprint_entity(sprint) for sprint in reader.export()]
     except TaskError as exc:

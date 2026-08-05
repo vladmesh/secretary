@@ -87,7 +87,8 @@ def _column_id(pid: int, title: str) -> int:
             return int(c["id"])
     raise KanboardError(
         f"no column {title!r} on board (an empty board is reconciled by `pipeline setup`; a board "
-        "that holds cards needs `python3 -P -m secretary board migrate-assessment`)"
+        "that holds cards needs `python3 -P -m secretary board migrate-assessment "
+        "--instance \"$SECRETARY_INSTANCE\"`)"
     )
 
 
@@ -115,7 +116,8 @@ def _proposal_column(pid: int) -> str:
         f"this board's first column is {first!r}, not the Product backlog "
         f"{model.PROPOSAL_COLUMN!r}, so an agent proposal has nowhere to go. An empty board is "
         "reconciled by `pipeline setup`; a board that holds cards is repaired by hand or by "
-        "`python3 -P -m secretary board migrate-assessment`. Report the proposal in the verdict or "
+        "`python3 -P -m secretary board migrate-assessment --instance \"$SECRETARY_INSTANCE\"`. "
+        "Report the proposal in the verdict or "
         "the retro output instead."
     )
 
@@ -157,7 +159,8 @@ def ensure_structure() -> dict:
             f"board has cards but its columns are {', '.join(titles)} "
             f"(expected: {', '.join(model.COLUMNS)}). Reconciling by index here would rename "
             "columns under the cards standing in them. Run `python3 -P -m secretary board "
-            "migrate-assessment` if the board carries the earlier six-column layout; any other "
+            "migrate-assessment --instance \"$SECRETARY_INSTANCE\"` if the board carries the earlier "
+            "six-column layout; any other "
             "layout is a manual repair."
         )
     for i, title in enumerate(model.COLUMNS):

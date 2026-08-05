@@ -58,7 +58,7 @@ class BoardTransportTests(unittest.TestCase):
                 mock.patch("triggered_agents.runtime.kanboard.urllib.request.urlopen", side_effect=open_request),
                 mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(instance)}, clear=True),
             ):
-                KanboardClient.for_environ().call("getVersion")
+                KanboardClient.for_instance(instance).call("getVersion")
                 kanboard.call("getVersion")
 
         self.assertEqual(observed, [transport.authorization_header(), transport.authorization_header()])
@@ -172,7 +172,7 @@ class BoardTransportTests(unittest.TestCase):
                 "KANBOARD_API_TOKEN": "legacy-token",
             }, clear=True):
                 with self.assertRaisesRegex(TaskError, "configuration is unavailable"):
-                    KanboardClient.for_environ()
+                    KanboardClient.for_instance(Path(tmp))
 
     def test_existing_instance_without_transport_or_complete_legacy_tuple_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

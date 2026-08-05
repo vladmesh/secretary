@@ -19,8 +19,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from secretary.board_transport import (
-    BoardTransport, BoardTransportError, resolve, resolve_for_environ, transport_path,
+    BoardTransport, BoardTransportError, resolve, transport_path,
 )
+from secretary.role_env import RUNTIME_ENV_FILE_ENVS, runtime_env_path
 from triggered_agents.agents.pipeline.heads import CODEX_LAUNCH_MODES
 from triggered_agents.runtime.paths import instance_dir as normalize_instance_dir
 from triggered_agents.runtime.redact import redact
@@ -322,16 +323,6 @@ class KanboardClient:
             return cls(resolve(root), root)
         except BoardTransportError:
             raise TaskError("backend_unavailable", "Kanboard runtime configuration is unavailable", 1) from None
-
-    @classmethod
-    def for_environ(cls, environ: dict[str, str] | None = None) -> "KanboardClient":
-        env = os.environ if environ is None else environ
-        try:
-            configured = resolve_for_environ(env)
-            root = normalize_instance_dir(str(env["SECRETARY_INSTANCE"])).resolve()
-        except BoardTransportError:
-            raise TaskError("backend_unavailable", "Kanboard runtime configuration is unavailable", 1) from None
-        return cls(configured, root)
 
     def call(self, method: str, **params: Any) -> Any:
         payload: dict[str, Any] = {"jsonrpc": "2.0", "id": 1, "method": method}
@@ -933,17 +924,21 @@ class TaskWriter:
         Task events normally retain only digests, but an interrupted archive
         keeps its retry body locally and every board comment is exported into
         the checkpoint.  Scrub at the protocol boundary so both copies receive
-        the same safe text.  The role environment points at the selected
-        installation, unlike the redactor's home-directory compatibility
-        default.
+        the same safe text.  The normal file is bound to this client's
+        instance; an explicit role-env override selects its external file so
+        ``SECRETARY_RUNTIME_ENV_FILE`` and ``TA_RUNTIME_ENV_FILE`` are
+        scrubbed too.
         """
-        runtime_env = self.instance_dir / "runtime.env"
         # Keep TaskWriter importable while config is loading sprints.  The
         # store depends on that same config module and is needed only at a real
         # protocol write, long after startup imports have settled.
         return redact(
             text,
-            env_files=[runtime_env],
+            env_files=[
+                runtime_env_path()
+                if any(os.environ.get(name) for name in RUNTIME_ENV_FILE_ENVS)
+                else self.instance_dir / "runtime.env"
+            ],
             secret_values=self._redaction_values(),
         )
 

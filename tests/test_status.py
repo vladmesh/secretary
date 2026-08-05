@@ -42,11 +42,6 @@ class StatusCliTests(unittest.TestCase):
     # routes that discovery to the repo fixture for every test by default, so
     # this class no longer needs its own patch (secretary-705, secretary-738,
     # secretary-748).
-    #
-    # status's sprint read also builds a Kanboard client. tests/__init__.py
-    # routes that to a zero-network fake by default (secretary-1026), so a
-    # test only patches secretary.status.KanboardClient locally when it needs
-    # specific sprint content (see the FakeKanboard-backed tests below).
 
     def test_status_json_has_the_documented_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -208,7 +203,8 @@ class StatusCliTests(unittest.TestCase):
                 "version: 1\nname: test\n"
                 f"data_dir: {data_dir}\n"
                 "offsite:\n  instance_remote: git@example.invalid:x/y.git\n"
-                "host:\n  unit_prefix: secretary-\n",
+                "host:\n  unit_prefix: secretary-\n"
+                "sprint_budget:\n  signal: 20\n  hard: 40\n",
                 encoding="utf-8",
             )
             board = FakeKanboard()
@@ -218,7 +214,7 @@ class StatusCliTests(unittest.TestCase):
                 sprint_resume=json.dumps({
                     "selected_step": "fix", "selected_why": "blocked", "rejected_alternatives": "wait",
                     "current_task": "secretary-510-pilot", "dod_state": "pending", "next_safe_step": "test",
-                    "recorded_at": "not-a-timestamp",
+                    "recorded_at": "2020-01-01T00:00:00Z",
                 }),
             )
             board.metadata[12]["sprint_ref"] = "sprint:1"
@@ -242,6 +238,7 @@ class StatusCliTests(unittest.TestCase):
         self.assertEqual(sprint["status"], "stopped")
         self.assertEqual(sprint["stop_reason"], "budget_hard_limit")
         self.assertEqual(sprint["budget"]["by_type"]["blocked"], 2)
+        self.assertEqual(sprint["budget"]["thresholds"], {"signal": 20, "hard": 40})
         self.assertEqual(sprint["resume_freshness"]["error"], "resume_stale")
 
     def test_invalid_status_json_uses_the_documented_schema(self):

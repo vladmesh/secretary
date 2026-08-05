@@ -419,9 +419,10 @@ class TaskWriterTests(unittest.TestCase):
             self.assertEqual(len(events.readlines()), 1)
 
     def test_comment_scrubs_runtime_secret_before_board_and_audit(self) -> None:
-        runtime = Path(self.tmpdir.name) / "runtime.env"
+        runtime = Path(self.tmpdir.name) / "external" / "runtime.env"
         secret = "opaque-token-value"
         url = "https://board.example.invalid/jsonrpc.php"
+        runtime.parent.mkdir()
         runtime.write_text(
             f"KANBOARD_URL={url}\nKANBOARD_API_TOKEN={secret}\n", encoding="utf-8"
         )
@@ -1491,7 +1492,7 @@ class TaskWriterTests(unittest.TestCase):
     def test_pending_blocks_export_from_the_same_data_root(self) -> None:
         self.writer.audit.stage("pending", {"request_id": "pending", "event_id": "evt_pending"})
         with self.assertRaisesRegex(RuntimeError, "unresolved pending"):
-            export_board(Path(self.tmpdir.name), command=["pipeline"])
+            export_board(Path(self.tmpdir.name), instance_dir=Path(self.tmpdir.name), command=["pipeline"])
 
 
 class AssessmentStateTests(unittest.TestCase):

@@ -145,6 +145,8 @@ def _sprints(
     try:
         reader = SprintReader(
             client if client is not None else KanboardClient.for_instance(instance_dir),
+            data_dir=data_dir,
+            thresholds=budget_thresholds(instance),
         )
         observers = {row["sprint"]: row for row in observer_snapshot(production)}
         return {
@@ -156,9 +158,6 @@ def _sprints(
         }
     except TaskError as exc:
         return {"items": [], "error": {"code": exc.code, "message": exc.message}}
-
-
-
 
 def _units(expected, collected: CollectResult, *, offline: bool) -> list[dict[str, Any]]:
     rows = []

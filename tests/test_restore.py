@@ -111,7 +111,7 @@ class RestoreTests(unittest.TestCase):
                     stdout=json.dumps([live_card]), stderr="", returncode=0
                 ),
             ):
-                export = export_board(data_dir, command=["pipeline"], sprint_client=SprintKanboard())
+                export = export_board(data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard())
 
             self.assertEqual(export.count, 1)
             exported = json.loads((data_dir / "board" / "cards.json").read_text(encoding="utf-8"))
