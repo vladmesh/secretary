@@ -112,7 +112,7 @@ class InstallationTests(unittest.TestCase):
             ):
                 check_prerequisites(transport=transport)
 
-        self.assertEqual(reader.call_args.args[0].token, transport.token)
+        self.assertEqual(reader.call_args.args[0]._transport, transport)
 
     def test_only_an_absent_runtime_env_is_ignored_for_an_unlocked_store(self):
         target = Path(tempfile.mkdtemp())

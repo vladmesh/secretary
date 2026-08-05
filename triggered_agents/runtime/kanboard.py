@@ -15,7 +15,7 @@ import os
 import urllib.error
 import urllib.request
 
-from .board_transport import BoardTransportError, resolve
+from .board_transport import BoardTransportError, resolve_for_environ
 
 _BATCH_CHUNK = 200
 
@@ -26,10 +26,7 @@ class KanboardError(RuntimeError):
 
 def _creds():
     try:
-        instance = os.environ.get("SECRETARY_INSTANCE")
-        if not instance:
-            raise BoardTransportError("SECRETARY_INSTANCE must name the installation")
-        transport = resolve(instance)
+        transport = resolve_for_environ(os.environ)
     except BoardTransportError as exc:
         raise KanboardError(f"board transport configuration is unavailable: {exc}") from exc
     return transport

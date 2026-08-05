@@ -24,7 +24,7 @@
 # red exactly during a subscription rate-limit or an API outage, free the rest of the time (once
 # per health.PROBE_TTL_S, not per tick).
 account = "claude-subscription"
-probe = "python3 -m triggered_agents pipeline probe --resource claude-sub"
+probe = "python3 -P -m triggered_agents pipeline probe --resource claude-sub"
 
 [resources.openai-sub]
 # An OpenAI/ChatGPT subscription reached through the native `codex` CLI, mirroring claude-sub.
@@ -32,7 +32,7 @@ probe = "python3 -m triggered_agents pipeline probe --resource claude-sub"
 # holds MCP, skills, hooks and the global agent instructions. Probe: one real `codex exec` token
 # through that home (health.probe_openai_sub).
 account = "openai-subscription"
-probe = "python3 -m triggered_agents pipeline probe --resource openai-sub"
+probe = "python3 -P -m triggered_agents pipeline probe --resource openai-sub"
 
 # Claude heads. No fallback chain of their own: they ARE the fallback the codex heads below walk
 # to, so a host with only a Claude subscription still runs every role.

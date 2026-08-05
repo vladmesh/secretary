@@ -264,12 +264,9 @@ def _main_exec(argv: list[str], *, prog: str) -> int:
     try:
         env = runtime_env(ns.role, env_file=ns.env_file)
         if ns.role in BOARD_ROLES:
-            from .board_transport import BoardTransportError, resolve
-            instance = env.get("SECRETARY_INSTANCE")
-            if not instance:
-                raise RoleEnvError("board transport configuration requires SECRETARY_INSTANCE")
+            from .board_transport import BoardTransportError, resolve_for_environ
             try:
-                resolve(instance)
+                resolve_for_environ(env)
             except BoardTransportError as exc:
                 raise RoleEnvError(f"board transport configuration is unavailable: {exc}") from None
     except RoleEnvError as e:

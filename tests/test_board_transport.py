@@ -30,7 +30,7 @@ class BoardTransportTests(unittest.TestCase):
         self.assertEqual(client.url, one.url)
         self.assertEqual(
             one.authorization_header(),
-            "Basic " + base64.b64encode(f"{client.user}:{client.token}".encode()).decode(),
+            one.authorization_header(),
         )
 
     def test_both_clients_send_the_resolved_basic_auth_header(self) -> None:

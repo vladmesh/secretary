@@ -17,8 +17,7 @@ import sys
 from secretary.role_env import load_env_file
 from secretary.board_transport import (
     BoardTransportError,
-    resolve as resolve_board_transport,
-    transport_path,
+    resolve_for_environ,
 )
 from triggered_agents.agents.pipeline import heads as head_registry
 
@@ -53,11 +52,9 @@ def operator_env(
     env = {**base, **source}
     env["SECRETARY_ROLE"] = "operator"
     try:
-        resolve_board_transport(env.get("SECRETARY_INSTANCE"))
-    except BoardTransportError:
-        raise SessionError(
-            f"board transport configuration is unavailable (checked {transport_path(env.get('SECRETARY_INSTANCE'))})"
-        )
+        resolve_for_environ(env)
+    except BoardTransportError as exc:
+        raise SessionError(f"board transport configuration is unavailable: {exc}") from None
     return env
 
 

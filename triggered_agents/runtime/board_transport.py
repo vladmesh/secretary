@@ -5,6 +5,7 @@ import base64
 import stat
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Mapping
 
 from .paths import default_instance_path, instance_dir as normalize_instance_dir
 
@@ -75,3 +76,11 @@ def parse(path: Path, *, require_private: bool = True) -> BoardTransport:
 def resolve(instance_dir: Path | str | None = None) -> BoardTransport:
     path = transport_path(instance_dir)
     return parse(path)
+
+
+def resolve_for_environ(environ: Mapping[str, str]) -> BoardTransport:
+    """Resolve only the installation a caller explicitly bound itself to."""
+    instance = str(environ.get("SECRETARY_INSTANCE") or "").strip()
+    if not instance:
+        raise BoardTransportError("SECRETARY_INSTANCE must name the installation")
+    return resolve(instance)

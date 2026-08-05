@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from secretary.role_env import (
-    BOARD_ROLES,
     OBSERVER_GENERATION_ENV,
     OBSERVER_SPRINT_ENV,
     ROLE_ALLOWLIST,
@@ -22,7 +21,6 @@ from secretary.role_env import (
     RoleEnvError,
     runtime_env,
 )
-from secretary.board_transport import BoardTransportError, resolve as resolve_board_transport
 from triggered_agents.agents.pipeline.heads import (
     CLAUDE_EFFORTS,
     CODEX_EFFORTS,
@@ -590,17 +588,3 @@ def _codex_trust_paths(workspace: str) -> list[str]:
         seen.add(key)
         out.append(key)
     return out
-
-
-def require_board_transport(role: str, *, environ: Mapping[str, str] | None = None) -> None:
-    """Compatibility check for explicit operator launch probes; executable gates use role_env."""
-    if role not in BOARD_ROLES:
-        return
-    env = os.environ if environ is None else environ
-    instance = env.get("SECRETARY_INSTANCE")
-    if not instance:
-        raise HeadLaunchError("board transport configuration requires SECRETARY_INSTANCE")
-    try:
-        resolve_board_transport(instance)
-    except BoardTransportError as exc:
-        raise HeadLaunchError(f"board transport configuration is unavailable: {exc}") from None

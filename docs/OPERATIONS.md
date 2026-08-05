@@ -83,10 +83,10 @@ To migrate an existing canonical `<instance>/runtime.env` into a new store, use 
 copying values through a shell or putting them on an argument list:
 
 ```bash
-python3 -m secretary secret init --instance INSTANCE
-python3 -m secretary secret import --instance INSTANCE --file INSTANCE/runtime.env \
+python3 -P -m secretary secret init --instance INSTANCE
+python3 -P -m secretary secret import --instance INSTANCE --file INSTANCE/runtime.env \
   --scope installation --purpose runtime --materialize runtime-env
-python3 -m secretary secret materialize --instance INSTANCE --target runtime-env
+python3 -P -m secretary secret materialize --instance INSTANCE --target runtime-env
 ```
 
 `secret init` is interactive and shows the recovery phrase only once. `runtime-env` is deliberately a
@@ -120,9 +120,9 @@ merely inactive.
 ## Data plane
 
 ```bash
-python3 -m secretary data init --instance INSTANCE
-python3 -m secretary data export --instance INSTANCE [--copy-transcripts]
-python3 -m secretary data raw-kanboard-dump --instance INSTANCE \
+python3 -P -m secretary data init --instance INSTANCE
+python3 -P -m secretary data export --instance INSTANCE [--copy-transcripts]
+python3 -P -m secretary data raw-kanboard-dump --instance INSTANCE \
   [--container cp-kanboard] [--source-path /var/www/app/data]
 ```
 
@@ -325,11 +325,11 @@ Staleness is an expected status, not a breakage. Instance files are not edited b
 its own artifacts.
 
 ```bash
-python3 -m secretary project add PROJECT_PATH --instance "$INSTANCE"
-python3 -m secretary project provision-start PROJECT_ID --instance "$INSTANCE"
+python3 -P -m secretary project add PROJECT_PATH --instance "$INSTANCE"
+python3 -P -m secretary project provision-start PROJECT_ID --instance "$INSTANCE"
 # the provision agent writes result.yaml next to task.yaml, taking run_id and scanner head from the task
-python3 -m secretary project provision-apply PROJECT_ID --instance "$INSTANCE"
-python3 -m secretary project gate PROJECT_ID --instance "$INSTANCE"
+python3 -P -m secretary project provision-apply PROJECT_ID --instance "$INSTANCE"
+python3 -P -m secretary project gate PROJECT_ID --instance "$INSTANCE"
 ```
 
 Expected statuses for a clean run: `project add` prints a contract artifact with an ok scanner status and a
@@ -433,13 +433,13 @@ refused as a resource conflict.
 The entity is created by the product command, as the `po` role:
 
 ```bash
-python3 -m secretary sprint create --role po --actor <actor> \
+python3 -P -m secretary sprint create --role po --actor <actor> \
   --goal "<one sentence>" --dod-file DOD.md \
   --product <product-id> --issue issue:<ID> --project <project-id> \
   --observer <head-profile|none> \
   --repository <repo> [--repository <repo>]
-python3 -m secretary sprint show --ref sprint:<ID>
-python3 -m secretary sprint status --ref sprint:<ID>
+python3 -P -m secretary sprint show --ref sprint:<ID>
+python3 -P -m secretary sprint status --ref sprint:<ID>
 ```
 
 After that the sprint is not driven by hand: the production tick launches the observer head (see below),
@@ -580,10 +580,10 @@ whole restore with `restored open sprints are not admissible on this installatio
 
 So the procedure is:
 
-1. close the second sprint first: `python3 -m secretary sprint close --role po --ref sprint:ID`. Its
+1. close the second sprint first: `python3 -P -m secretary sprint close --role po --ref sprint:ID`. Its
    terminal Done cards are archived, its linked non-terminal cards stay on the board, and its
    reservations are released.
-2. confirm with `python3 -m secretary sprint list --status open` that exactly one sprint is open.
+2. confirm with `python3 -P -m secretary sprint list --status open` that exactly one sprint is open.
 3. set `open_sprint_limit: 1` in `instance.yaml`, or delete the key (absent means one), and commit it.
 4. verify with the read-back command above that the effective limit is `1`.
 5. let one production tick run and check that the checkpoint is written and pushed, so the next archive
@@ -917,7 +917,7 @@ renaming a column in place would change what its cards mean, and removing one mo
 holds to the trash. A live board that predates a column therefore needs one explicit repair:
 
 ```bash
-python3 -m secretary board migrate-assessment
+python3 -P -m secretary board migrate-assessment
 ```
 
 It adds the `Assessment` column at position 5 of a board that carries the earlier six-column layout,
@@ -929,7 +929,7 @@ was lost leaves the six columns plus a trailing `Assessment` and the next run fi
 with all of them named. Every run proves that each card's column and position are unchanged before
 it reports success. After it runs, install accepts the board unchanged.
 
-`python3 -m triggered_agents pipeline setup` is not a migration and never was: it reconciles columns
+`python3 -P -m triggered_agents pipeline setup` is not a migration and never was: it reconciles columns
 by index, so it refuses a board that holds cards unless the layout already matches, and points here.
 
 ## An export whose sprint rows carry no observer
@@ -976,8 +976,8 @@ commands remain diagnostic primitives, not the main runbook.
 no timer, no offsite transfer and no `doctor` gate for them.
 
 ```bash
-python3 -m secretary backup create --instance INSTANCE --kind both
-python3 -m secretary backup verify ARCHIVE.tar [--strict]
+python3 -P -m secretary backup create --instance INSTANCE --kind both
+python3 -P -m secretary backup verify ARCHIVE.tar [--strict]
 ```
 
 `create` writes a plain tar into `backups/` (`core`, `full` or `both`), unencrypted. `verify` returns `0` on
@@ -1045,10 +1045,10 @@ still reaches done, but the branch stays unmerged and needs a manual merge. The 
 An emergency stop is one product CLI command with two modes:
 
 ```bash
-python3 -m secretary pause drain  --instance INSTANCE --reason "why"
-python3 -m secretary pause freeze --instance INSTANCE --reason "why"
-python3 -m secretary resume       --instance INSTANCE
-python3 -m secretary pause-status --instance INSTANCE
+python3 -P -m secretary pause drain  --instance INSTANCE --reason "why"
+python3 -P -m secretary pause freeze --instance INSTANCE --reason "why"
+python3 -P -m secretary resume       --instance INSTANCE
+python3 -P -m secretary pause-status --instance INSTANCE
 ```
 
 `drain` stops the tick from claiming Ready cards, but cards already in flight finish their cycle: the worker
@@ -1243,7 +1243,7 @@ and the card eventually blocks with the report visible on the card, which reads 
 ## Background-role telemetry
 
 ```bash
-python3 -m triggered_agents health
+python3 -P -m triggered_agents health
 ```
 
 One line per role: whether its timer is active and how fresh its last healthy tick is. A non-zero exit means at

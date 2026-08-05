@@ -177,3 +177,12 @@ def _ensure_ignored_locked(instance_dir: Path, entry: str, *, dry_run: bool) -> 
             return True
         raise
     return changed
+
+
+def is_ignored(instance_dir: Path, entry: str) -> bool:
+    """Whether Git's canonical matcher excludes one instance-relative entry."""
+    try:
+        git(instance_dir, ["check-ignore", "--quiet", "--", entry.lstrip("/")], label="verify exclusion")
+    except StateRepoError:
+        return False
+    return True

@@ -13,7 +13,7 @@ reuse_session = true
 head = "codex"
 # Skip the run when no session has new turns since the watermark. Gated in the systemd unit,
 # not Orca's field (manual `automations run` ignores --precheck).
-precheck = "python3 -m triggered_agents retro precheck"
+precheck = "python3 -P -m triggered_agents retro precheck"
 
 [trigger]
 # Orca's own rrule does not tick in headless `orca serve`; kept for correctness but the real

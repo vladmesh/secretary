@@ -7,9 +7,9 @@ local mutable and derived runtime state.
 ## Checks and host ownership
 
 ```bash
-python3 -m secretary doctor --instance INSTANCE
-python3 -m secretary doctor --offline --instance INSTANCE
-python3 -m secretary doctor --instance INSTANCE --host-fixture DIR
+python3 -P -m secretary doctor --instance INSTANCE
+python3 -P -m secretary doctor --offline --instance INSTANCE
+python3 -P -m secretary doctor --instance INSTANCE --host-fixture DIR
 ```
 
 `doctor` is always read-only. A normal run checks config, data and live inventory; `--offline` keeps
@@ -28,8 +28,8 @@ is a finding and code `1`; a oneshot service may be inactive. Units listed in `f
 excluded from managed parity and are not conflicts.
 
 ```bash
-python3 -m secretary reconcile plan --instance INSTANCE [--host-fixture DIR]
-python3 -m secretary reconcile adopt --instance INSTANCE --logical-id ID [--yes]
+python3 -P -m secretary reconcile plan --instance INSTANCE [--host-fixture DIR]
+python3 -P -m secretary reconcile adopt --instance INSTANCE --logical-id ID [--yes]
 ```
 
 `reconcile plan` reads desired state and inventory, applies nothing and writes no manifest.
@@ -104,7 +104,7 @@ dispatcher performs it: merge and `assessment -> done` for a release, a new work
 `assessment -> in_progress` for a rework, `assessment -> blocked` for a reslice.
 
 ```bash
-python3 -m secretary task decide --role observer --ref PROJECT-N \
+python3 -P -m secretary task decide --role observer --ref PROJECT-N \
   --kind release --reason-file REASON.md --request-id REQUEST_ID
 ```
 
@@ -145,16 +145,16 @@ only the steward's `Assessment -> Blocked` escalation. `--target` is accepted as
 of `--to` on that command; both name the same destination state.
 
 ```bash
-python3 -m secretary task list --project PROJECT
-python3 -m secretary task show --ref PROJECT-N
-python3 -m secretary task list --sprint sprint:ID
-python3 -m secretary task create --role po --project PROJECT --type code \
+python3 -P -m secretary task list --project PROJECT
+python3 -P -m secretary task show --ref PROJECT-N
+python3 -P -m secretary task list --sprint sprint:ID
+python3 -P -m secretary task create --role po --project PROJECT --type code \
   --title TITLE --state ready --head codex-extra --codex-mode exec --sprint sprint:ID
-python3 -m secretary task archive --role po --ref PROJECT-N \
+python3 -P -m secretary task archive --role po --ref PROJECT-N \
   --reason-file REASON.md --request-id REQUEST_ID
-python3 -m secretary task edit --role po --ref PROJECT-N \
+python3 -P -m secretary task edit --role po --ref PROJECT-N \
   --body-file SPEC.md --head codex-terra --review-head claude-opus
-python3 -m secretary task create --role po --project PROJECT --type code --title HOTFIX \
+python3 -P -m secretary task create --role po --project PROJECT --type code --title HOTFIX \
   --sprint-override --sprint-override-reason-file REASON.md
 ```
 
@@ -199,12 +199,12 @@ not introduce a file or a second board as a competing source of truth, so normal
 checkpoint and restore carry their metadata and comments.
 
 ```bash
-python3 -m secretary product create --role po --id secretary --project secretary --title Secretary
-python3 -m secretary issue create --role po --product secretary --kind feature --priority P2 --title TITLE
-python3 -m secretary issue list --product secretary
-python3 -m secretary issue show --ref issue:123
-python3 -m secretary issue update-priority --role po --ref issue:123 --priority P1 --reason REASON
-python3 -m secretary issue close --role po --ref issue:123 --reason resolved
+python3 -P -m secretary product create --role po --id secretary --project secretary --title Secretary
+python3 -P -m secretary issue create --role po --product secretary --kind feature --priority P2 --title TITLE
+python3 -P -m secretary issue list --product secretary
+python3 -P -m secretary issue show --ref issue:123
+python3 -P -m secretary issue update-priority --role po --ref issue:123 --priority P1 --reason REASON
+python3 -P -m secretary issue close --role po --ref issue:123 --reason resolved
 ```
 
 A Product id is stable and its non-empty project set must contain only ids registered under the
@@ -234,10 +234,10 @@ it. `validation` and `closed` refusals before the first backend write end the sa
 A staged write that did reach the backend stays, and belongs to its own request id. Its supported repair is:
 
 ```bash
-python3 -m secretary product transaction list
-python3 -m secretary product transaction retry --request-id REQUEST_ID
-python3 -m secretary product transaction discard --request-id REQUEST_ID
-python3 -m secretary product transaction adopt --path FILE
+python3 -P -m secretary product transaction list
+python3 -P -m secretary product transaction retry --request-id REQUEST_ID
+python3 -P -m secretary product transaction discard --request-id REQUEST_ID
+python3 -P -m secretary product transaction adopt --path FILE
 ```
 
 `retry` finishes the staged operation exactly where it stopped and commits its one audit event; a request
@@ -254,18 +254,18 @@ is one sprint. The board is created lazily and idempotently, so a repeat call cr
 reference has the form `sprint:ID`, a separate namespace from the `PROJECT-N` card convention.
 
 ```bash
-python3 -m secretary sprint create --role po --goal GOAL --dod-file DOD.md \
+python3 -P -m secretary sprint create --role po --goal GOAL --dod-file DOD.md \
   --product PRODUCT_ID --issue issue:ID --project PROJECT_ID \
   --observer HEAD_PROFILE --repository REPO --request-id REQUEST_ID
-python3 -m secretary sprint list --status open
-python3 -m secretary sprint show --ref sprint:ID
-python3 -m secretary sprint status --ref sprint:ID
-python3 -m secretary sprint comment --role worker --ref sprint:ID --body-file NOTE.md
-python3 -m secretary sprint current-task --role dispatcher --ref sprint:ID --task PROJECT-N
-python3 -m secretary sprint budget --role dispatcher --ref sprint:ID --type red_ci
-python3 -m secretary sprint resume --role observer --ref sprint:ID --body-file RESUME.json
-python3 -m secretary sprint reopen --role po --ref sprint:ID --observer HEAD_PROFILE
-python3 -m secretary sprint close --role po --ref sprint:ID
+python3 -P -m secretary sprint list --status open
+python3 -P -m secretary sprint show --ref sprint:ID
+python3 -P -m secretary sprint status --ref sprint:ID
+python3 -P -m secretary sprint comment --role worker --ref sprint:ID --body-file NOTE.md
+python3 -P -m secretary sprint current-task --role dispatcher --ref sprint:ID --task PROJECT-N
+python3 -P -m secretary sprint budget --role dispatcher --ref sprint:ID --type red_ci
+python3 -P -m secretary sprint resume --role observer --ref sprint:ID --body-file RESUME.json
+python3 -P -m secretary sprint reopen --role po --ref sprint:ID --observer HEAD_PROFILE
+python3 -P -m secretary sprint close --role po --ref sprint:ID
 ```
 
 Stored fields are the goal, the Definition of Done text, repositories, the owning product, its issues,
@@ -914,9 +914,9 @@ event log and are restored on materialise.
 The production runtime runs as a single tick or a continuous loop:
 
 ```bash
-python3 -m secretary dispatcher production-tick --instance INSTANCE
-python3 -m secretary dispatcher production-observe --instance INSTANCE
-python3 -m secretary dispatcher production-run --instance INSTANCE
+python3 -P -m secretary dispatcher production-tick --instance INSTANCE
+python3 -P -m secretary dispatcher production-observe --instance INSTANCE
+python3 -P -m secretary dispatcher production-run --instance INSTANCE
 ```
 
 The systemd timer uses the one-shot `production-tick`. The runtime handles only supported task
@@ -929,9 +929,9 @@ unresolved audit state stops a transition instead of falling back silently.
 The pause is shared across the pipeline and sits on top of the product dispatcher:
 
 ```bash
-python3 -m secretary pause drain|freeze --instance INSTANCE --reason "why"
-python3 -m secretary resume --instance INSTANCE
-python3 -m secretary pause-status --instance INSTANCE
+python3 -P -m secretary pause drain|freeze --instance INSTANCE --reason "why"
+python3 -P -m secretary resume --instance INSTANCE
+python3 -P -m secretary pause-status --instance INSTANCE
 ```
 
 `drain` stops claiming new cards and dispatching background roles, but cards already running finish their
@@ -956,10 +956,10 @@ cards but still writes and pushes the checkpoint.
 The current low-level onboarding has these stages:
 
 ```bash
-python3 -m secretary project add ...
-python3 -m secretary project provision-start ...
-python3 -m secretary project provision-apply ...
-python3 -m secretary project gate ...
+python3 -P -m secretary project add ...
+python3 -P -m secretary project provision-start ...
+python3 -P -m secretary project provision-apply ...
+python3 -P -m secretary project gate ...
 ```
 
 A project's identity is set once by the top-level binding: `id`, `repo`, `adapter`, `default_branch`. The
@@ -978,13 +978,13 @@ fact is one distilled markdown record. The curator is the writer role; every oth
 `memory_search`, `memory_get` and `memory_list`.
 
 ```bash
-python3 -m secretary memory verify --instance INSTANCE
-python3 -m secretary memory propose --instance INSTANCE --actor ACTOR \
+python3 -P -m secretary memory verify --instance INSTANCE
+python3 -P -m secretary memory propose --instance INSTANCE --actor ACTOR \
   --scope SCOPE --slug SLUG --file FACT.md
-python3 -m secretary memory commit --instance INSTANCE --actor ACTOR --propose-id ID
-python3 -m secretary memory supersede --instance INSTANCE --actor ACTOR \
+python3 -P -m secretary memory commit --instance INSTANCE --actor ACTOR --propose-id ID
+python3 -P -m secretary memory supersede --instance INSTANCE --actor ACTOR \
   --scope SCOPE --slug SLUG --file FACT.md --supersedes OLD-ID
-python3 -m secretary memory reindex --instance INSTANCE
+python3 -P -m secretary memory reindex --instance INSTANCE
 ```
 
 Writer operations require an actor and go through the journal protocol; direct edits bypass the audit
@@ -1000,11 +1000,11 @@ differs from curated memory and the board is described in
 [Architecture](ARCHITECTURE.md#knowledge-planes).
 
 ```bash
-python3 -m secretary knowledge write --instance INSTANCE --actor ACTOR \
+python3 -P -m secretary knowledge write --instance INSTANCE --actor ACTOR \
   --path decisions/2026-07-25-sprint-1.md --file DOC.md
-python3 -m secretary knowledge write --instance INSTANCE --actor ACTOR \
+python3 -P -m secretary knowledge write --instance INSTANCE --actor ACTOR \
   --path projects/codegen-orchestrator/brainstorms/qa-node.md --file DOC.md
-python3 -m secretary knowledge list --instance INSTANCE
+python3 -P -m secretary knowledge list --instance INSTANCE
 ```
 
 Path segments are ASCII: letters, digits, `.`, `_` and `-`. A document imported from elsewhere under
@@ -1018,14 +1018,14 @@ makes no commit.
 ## Secrets
 
 ```bash
-python3 -m secretary secret init --instance INSTANCE
-python3 -m secretary secret set --instance INSTANCE --id ID --scope SCOPE --purpose PURPOSE \
+python3 -P -m secretary secret init --instance INSTANCE
+python3 -P -m secretary secret set --instance INSTANCE --id ID --scope SCOPE --purpose PURPOSE \
   --stdin [--environment VAR] [--materialize runtime-env|file [--materialize-path PATH]]
-python3 -m secretary secret list --instance INSTANCE
-python3 -m secretary secret import --instance INSTANCE --file ENV_FILE --scope SCOPE \
+python3 -P -m secretary secret list --instance INSTANCE
+python3 -P -m secretary secret import --instance INSTANCE --file ENV_FILE --scope SCOPE \
   --purpose PURPOSE [--materialize runtime-env|file [--materialize-path PATH]]
-python3 -m secretary secret remove --instance INSTANCE --id ID
-python3 -m secretary secret materialize --instance INSTANCE [--target runtime-env|file]
+python3 -P -m secretary secret remove --instance INSTANCE --id ID
+python3 -P -m secretary secret materialize --instance INSTANCE [--target runtime-env|file]
 ```
 
 A secret value never travels through argv: `set` reads it from stdin or `--file`, and `import` takes a

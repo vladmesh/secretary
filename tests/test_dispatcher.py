@@ -49,7 +49,6 @@ from secretary.dispatcher_launcher import (
     ensure_claude_workspace_ready,
     ensure_codex_workspace_trusted,
     role_launch_env,
-    require_board_transport,
     with_pid_heartbeat,
 )
 from secretary.dispatcher_review import start_review as start_reviewer
@@ -8160,18 +8159,6 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertIn("python3 -P -m secretary.role_env exec --role worker", wrapped)
         self.assertIn("/bin/sh -lc", wrapped)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", wrapped)
-
-    def test_bound_board_role_refuses_missing_or_corrupt_transport_before_launch(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            instance = Path(tmp)
-            with self.assertRaisesRegex(HeadLaunchError, "board transport configuration is unavailable"):
-                require_board_transport("worker", environ={"SECRETARY_INSTANCE": str(instance)})
-            path = instance / "board-transport.env"
-            path.write_text("not an env file\n", encoding="utf-8")
-            path.chmod(0o600)
-            with self.assertRaisesRegex(HeadLaunchError, "board transport configuration is unavailable"):
-                require_board_transport("reviewer", environ={"SECRETARY_INSTANCE": str(instance)})
-            require_board_transport("curator", environ={"SECRETARY_INSTANCE": str(instance)})
 
     def test_role_env_uses_local_board_transport_and_strips_unallowed_secrets(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

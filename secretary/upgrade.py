@@ -623,6 +623,7 @@ def step_board_transport(context: UpgradeContext) -> StepResult:
         try:
             _set_runtime_owner(transport_path(context.instance_path), context.runtime_user)
             _set_runtime_owner(context.instance_path / ".gitignore", context.runtime_user)
+            _set_runtime_owner(context.instance_path / ".git", context.runtime_user)
         except GitError as exc:
             return StepResult("board-transport", "failed", str(exc))
     return StepResult(

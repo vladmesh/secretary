@@ -17,7 +17,7 @@ from secretary._fsutil import write_text_atomic
 from secretary import state_repo
 from triggered_agents.runtime.board_transport import (
     BoardTransport, BoardTransportError, DEFAULT_TOKEN, DEFAULT_TRANSPORT,
-    TRANSPORT_ENV, TRANSPORT_FILE, parse as _parse, resolve, transport_path,
+    TRANSPORT_ENV, TRANSPORT_FILE, parse as _parse, resolve, resolve_for_environ, transport_path,
 )
 
 
@@ -99,17 +99,23 @@ def ensure(instance_dir: Path | str, *, legacy_values: Mapping[str, str] | None 
             path.parent, f"/{TRANSPORT_FILE}", dry_run=dry_run,
         ) if (path.parent / ".git").exists() else False
     except state_repo.StateRepoError as exc:
-        raise BoardTransportError("board-transport.env is not ignored by this repo") from exc
+        raise BoardTransportError(f"board transport ignore lifecycle failed: {exc}") from exc
     if mode is not None:
         if needs_mode_repair and not dry_run:
-            path.chmod(0o600)
+            try:
+                path.chmod(0o600)
+            except OSError as exc:
+                raise BoardTransportError(f"could not secure board transport configuration: {exc}") from None
         return TransportOutcome(
             configured, mode_repaired=needs_mode_repair, ignore_added=ignore_changed,
         )
     if not dry_run:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        write_text_atomic(path, "".join(f"{key}={value}\n" for key, value in configured.as_environ().items()))
-        path.chmod(0o600)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            write_text_atomic(path, "".join(f"{key}={value}\n" for key, value in configured.as_environ().items()))
+            path.chmod(0o600)
+        except OSError as exc:
+            raise BoardTransportError(f"could not write board transport configuration: {exc}") from None
     return TransportOutcome(
         configured, "imported-legacy" if legacy is not None else "created-default",
         ignore_added=ignore_changed,
@@ -147,12 +153,8 @@ def findings(instance_dir: Path | str) -> list[str]:
     path = transport_path(instance_dir)
     # A pre-transport checkout has no lifecycle marker yet; it is not an unhealthy
     # configured installation. Once the durable ignore entry exists, absence is a finding.
-    if not path.exists() and not path.is_symlink():
-        try:
-            if f"/{TRANSPORT_FILE}" not in (path.parent / ".gitignore").read_text(encoding="utf-8").splitlines():
-                return []
-        except OSError:
-            return []
+    if not path.exists() and not path.is_symlink() and not state_repo.is_ignored(path.parent, f"/{TRANSPORT_FILE}"):
+        return []
     try:
         resolve(instance_dir)
     except BoardTransportError as exc:
@@ -162,5 +164,5 @@ def findings(instance_dir: Path | str) -> list[str]:
 
 __all__ = [
     "BoardTransport", "BoardTransportError", "DEFAULT_TOKEN", "DEFAULT_TRANSPORT", "TransportOutcome", "ensure",
-    "ensure_from_runtime_values", "findings", "resolve", "transport_path",
+    "ensure_from_runtime_values", "findings", "resolve", "resolve_for_environ", "transport_path",
 ]

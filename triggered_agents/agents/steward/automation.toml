@@ -21,7 +21,7 @@ head = "codex-high"
 # in-flight card). Gated in the systemd unit, not Orca's field (manual `automations run` ignores
 # --precheck). The steward's whole reason to exist is post-merge self-
 # modification safety-netting, not a frequent LLM-cost sweep — a quiet tick costs nothing.
-precheck = "python3 -m triggered_agents steward precheck"
+precheck = "python3 -P -m triggered_agents steward precheck"
 
 [trigger]
 # systemd is the sole schedule owner. Keep the equivalent cron recorded for GUI/manual context,

@@ -882,6 +882,7 @@ def install(args: argparse.Namespace) -> InstallResult:
             _set_installation_owner(runtime_env, args.installation_user)
             _set_installation_owner(transport_path(target), args.installation_user)
             _set_installation_owner(target / ".gitignore", args.installation_user)
+            _set_installation_owner(target / ".git", args.installation_user)
         transport = transport_outcome.transport
         result.add(
             "board-transport",
