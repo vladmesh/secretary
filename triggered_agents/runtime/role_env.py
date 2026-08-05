@@ -93,10 +93,6 @@ ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
 # This gates the synthetic BOARD_ROLE value. po and dispatcher have no allowlist entry, so they
 # are rejected before reaching this gate; they remain here as the board's declared roles.
 BOARD_ROLES = {"po", "dispatcher", "worker", "reviewer", "observer", "steward", "retro"}
-# Every launched automation that can touch the board verifies transport before exec. This is
-# deliberately separate from BOARD_ROLES, which controls only the synthetic BOARD_ROLE marker.
-TRANSPORT_REQUIRED_ROLES = frozenset(ROLE_ALLOWLIST)
-
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SENSITIVE_ENV_NAME_RE = re.compile(
     r"(^|_)(TOKEN|PASSWORD|PASSWD|SECRET|PAT|KEY|IDENTITY|CREDENTIAL|AUTH|WEBHOOK)(_|$)",
@@ -197,15 +193,6 @@ def runtime_env(role: str, *, base_env: dict[str, str] | None = None,
         env["BOARD_ROLE"] = role
     else:
         env.pop("BOARD_ROLE", None)
-    if require:
-        if role in TRANSPORT_REQUIRED_ROLES:
-            from .board_transport import BoardTransportError, resolve
-            try:
-                resolve(env.get("SECRETARY_INSTANCE"))
-            except BoardTransportError as exc:
-                raise RoleEnvError(
-                    f"runtime env for role {role!r} has no usable board transport: {exc}"
-                ) from None
     return env
 
 

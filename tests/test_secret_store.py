@@ -503,14 +503,16 @@ class LegacyBoardSecretTests(SecretStoreCase):
         super().setUp()
         self.initialize()
 
-    def _historical_entry(self, *, materialize: dict | None = None) -> None:
+    def _historical_entry(
+        self, *, materialize: dict | None = None, value: bytes = b"migrated-live-token"
+    ) -> None:
         # Historical stores legitimately contain this id.  Bypass only the new-write guard to
         # construct that on-disk predecessor, then exercise the public behavior normally.
         with mock.patch.object(secret_store, "_new_secret_id", secret_store._clean_secret_id):
             set_secret(
                 self.instance_dir,
                 secret_id="kanboard_api_token",
-                value=b"migrated-live-token",
+                value=value,
                 scope="installation",
                 purpose="historic board token",
                 environment="KANBOARD_API_TOKEN",
@@ -533,7 +535,7 @@ class LegacyBoardSecretTests(SecretStoreCase):
         self.assertEqual(list_secrets(self.instance_dir), ())
 
     def test_legacy_entry_is_not_materialized_but_migrated_transport_is_redacted(self) -> None:
-        self._historical_entry(materialize={"target": "runtime-env"})
+        self._historical_entry(materialize={"target": "runtime-env"}, value=b"still-live-old-token")
         transport, _ = ensure_board_transport(
             self.instance_dir,
             legacy_values={
@@ -545,6 +547,7 @@ class LegacyBoardSecretTests(SecretStoreCase):
 
         self.assertEqual(materialize_secrets(self.instance_dir), ())
         self.assertIn(transport.token, secret_store.redaction_values(self.instance_dir))
+        self.assertIn("still-live-old-token", secret_store.redaction_values(self.instance_dir))
 
 
 # The three keys the live installation's runtime.env holds, in the order the live

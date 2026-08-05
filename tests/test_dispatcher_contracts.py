@@ -777,14 +777,21 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         found routing heads back to `/home/dev/secretary-instance`.
         """
         self.decoy_runtime_env()
-        with mock.patch.dict(
-            os.environ, self.unit_env("secretary-dispatcher-production.service"), clear=True
-        ):
+        bound = self.unit_env("secretary-dispatcher-production.service")
+        bound["TA_SECRETARY_REPO"] = str(Path(__file__).resolve().parents[1])
+        with mock.patch.dict(os.environ, bound, clear=True):
             command = wrap_role_shell_command("worker", "printenv SECRETARY_INSTANCE")
+
+        # The role wrapper starts in a worktree.  A package there must not shadow the selected
+        # control plane merely because Python's default path would put the cwd first.
+        shadow = self.root / "secretary"
+        shadow.mkdir()
+        (shadow / "__init__.py").write_text("raise RuntimeError('shadow package imported')\n")
 
         result = subprocess.run(
             ["/bin/sh", "-c", command],
             capture_output=True, text=True, timeout=120,
+            cwd=self.root,
             env={
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                 "HOME": str(self.root),
@@ -819,9 +826,9 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         """
         self.decoy_runtime_env()
         identity = observer_binding("sprint:1126", "abc123def456")
-        with mock.patch.dict(
-            os.environ, self.unit_env("secretary-dispatcher-production.service"), clear=True
-        ):
+        bound = self.unit_env("secretary-dispatcher-production.service")
+        bound["TA_SECRETARY_REPO"] = str(Path(__file__).resolve().parents[1])
+        with mock.patch.dict(os.environ, bound, clear=True):
             command = wrap_role_shell_command(
                 "observer",
                 "printenv SECRETARY_OBSERVER_SPRINT; printenv SECRETARY_OBSERVER_GENERATION",

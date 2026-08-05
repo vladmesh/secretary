@@ -300,9 +300,10 @@ class NoPhraseBranchCase(RecoveryCase):
 
         code, output = self.recover()
 
-        self.assertEqual(code, 0, output)
+        self.assertEqual(code, 1, output)
         self.assertIn("locked    secret:example_api_token", output)
         self.assertIn("3 secret(s) locked", output)
+        self.assertIn("refuse to guess or rotate", output)
 
 
 class MissingValueCase(RecoveryCase):

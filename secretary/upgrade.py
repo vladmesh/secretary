@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from secretary import role_skills
-from secretary.board_transport import BoardTransportError, ensure_from_runtime_file
+from secretary.board_transport import BoardTransportError, ensure_from_runtime_file, transport_path
 from secretary.automations import (
     AutomationError,
     OrcaAutomationClient,
@@ -611,6 +611,12 @@ def step_board_transport(context: UpgradeContext) -> StepResult:
         _transport, status = ensure_from_runtime_file(context.instance_path, dry_run=context.dry_run)
     except BoardTransportError as exc:
         return StepResult("board-transport", "failed", str(exc))
+    if not context.dry_run:
+        try:
+            _set_runtime_owner(transport_path(context.instance_path), context.runtime_user)
+            _set_runtime_owner(context.instance_path / ".gitignore", context.runtime_user)
+        except GitError as exc:
+            return StepResult("board-transport", "failed", str(exc))
     return StepResult(
         "board-transport",
         "unchanged" if status == "unchanged" else "changed",

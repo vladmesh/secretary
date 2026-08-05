@@ -10,21 +10,17 @@ action, never a silent repair.
 from __future__ import annotations
 
 import stat
-import subprocess
 from pathlib import Path
 from typing import Mapping
 
 from secretary._fsutil import write_text_atomic
+from secretary import state_repo
 from triggered_agents.runtime.board_transport import (
     BoardTransport, BoardTransportError, DEFAULT_TOKEN, DEFAULT_URL, DEFAULT_USER,
-    TRANSPORT_ENV, parse as _parse, resolve, transport_path,
+    TRANSPORT_ENV, TRANSPORT_FILE, parse as _parse, resolve, transport_path,
 )
 
-TRANSPORT_FILE = "board-transport.env"
 LEGACY_ENV = TRANSPORT_ENV
-# This authenticates only the local, host-owned Kanboard service. It is an
-# explicit transport setting, not entropy that recovery must preserve.
-DEFAULT_TOKEN = "secretary-local-kanboard-jsonrpc-v1"
 
 
 def default_transport() -> BoardTransport:
@@ -46,7 +42,7 @@ def legacy_transport(values: Mapping[str, str] | None) -> BoardTransport | None:
 
 
 def ensure(instance_dir: Path | str, *, legacy_values: Mapping[str, str] | None = None,
-           dry_run: bool = False) -> tuple[BoardTransport, str]:
+           dry_run: bool = False, allow_default: bool = False) -> tuple[BoardTransport, str]:
     """Create a deterministic file, or perform the one explicit legacy import."""
     path = transport_path(instance_dir)
     legacy = legacy_transport(legacy_values)
@@ -60,6 +56,11 @@ def ensure(instance_dir: Path | str, *, legacy_values: Mapping[str, str] | None 
         if not dry_run:
             _ensure_transport_ignored(path.parent)
         return configured, "unchanged"
+    if legacy is None and not allow_default:
+        raise BoardTransportError(
+            "board transport is missing and legacy runtime.env has no complete Kanboard tuple; "
+            "refuse to guess or rotate the live transport"
+        )
     configured = legacy or default_transport()
     if not dry_run:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -74,28 +75,26 @@ def _ensure_transport_ignored(instance_dir: Path) -> None:
     if not (instance_dir / ".git").exists():
         return
     ignore = instance_dir / ".gitignore"
-    current = ignore.read_text(encoding="utf-8") if ignore.is_file() else ""
     entry = f"/{TRANSPORT_FILE}"
-    if entry not in current.splitlines():
-        write_text_atomic(ignore, current + ("" if not current or current.endswith("\n") else "\n") + entry + "\n")
-        completed = subprocess.run(
-            ["git", "-C", str(instance_dir), "add", ".gitignore"], capture_output=True, text=True
-        )
-        if completed.returncode == 0:
-            subprocess.run(
-                ["git", "-C", str(instance_dir), "commit", "-m", "Ignore local board transport"],
-                capture_output=True, text=True,
+    try:
+        with state_repo.state_repo_lock(instance_dir):
+            current = ignore.read_text(encoding="utf-8") if ignore.is_file() else ""
+            if entry not in current.splitlines():
+                write_text_atomic(
+                    ignore,
+                    current + ("" if not current or current.endswith("\n") else "\n") + entry + "\n",
+                )
+                state_repo.commit(instance_dir, (".gitignore",), "Ignore local board transport")
+            state_repo.git(
+                instance_dir, ["check-ignore", "--quiet", "--", TRANSPORT_FILE],
+                label="verify board transport exclusion",
             )
-    checked = subprocess.run(
-        ["git", "-C", str(instance_dir), "check-ignore", "--quiet", "--", TRANSPORT_FILE],
-        capture_output=True, text=True,
-    )
-    if checked.returncode != 0:
-        raise BoardTransportError("board-transport.env is not ignored by this repo")
+    except state_repo.StateRepoError as exc:
+        raise BoardTransportError("board-transport.env is not ignored by this repo") from exc
 
 
 def ensure_from_runtime_file(instance_dir: Path | str, runtime_env: Path | str | None = None,
-                             *, dry_run: bool = False) -> tuple[BoardTransport, str]:
+                             *, dry_run: bool = False, allow_default: bool = False) -> tuple[BoardTransport, str]:
     """Migration entry point for install/upgrade; only this module reads old names."""
     path = Path(runtime_env) if runtime_env is not None else Path(instance_dir) / "runtime.env"
     values: dict[str, str] = {}
@@ -112,7 +111,9 @@ def ensure_from_runtime_file(instance_dir: Path | str, runtime_env: Path | str |
                             f"(line {number})"
                         )
                     values[key] = value
-    transport, status = ensure(instance_dir, legacy_values=values, dry_run=dry_run)
+    transport, status = ensure(
+        instance_dir, legacy_values=values, dry_run=dry_run, allow_default=allow_default,
+    )
     if values:
         # After a successful, equality-checked import the legacy tuple has no
         # authority. Preserve unrelated runtime lines and comments verbatim.

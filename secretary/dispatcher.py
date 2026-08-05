@@ -27,6 +27,7 @@ from secretary.dispatcher_launcher import (
     render_claude_command as _render_claude_command,
     render_codex_command as _render_codex_command,
     render_codex_launch as _render_codex_launch,
+    PYTHON_SAFE_PATH_FLAG as _PYTHON_SAFE_PATH_FLAG,
     role_launch_env as _role_launch_env,
     with_pid_heartbeat as _with_pid_heartbeat,
     wrap_role_shell_command as _wrap_role_shell_command,
@@ -183,7 +184,7 @@ _PYTHONPATH_PREFIX = pythonpath_prefix()
 # A TASK.md runs from the candidate worktree, while task protocol mutations belong to the live
 # dispatcher installation selected above.  ``-P`` keeps Python from prepending that worktree to
 # sys.path and shadowing the explicitly selected control plane package.
-_CONTROL_PLANE_TASK_COMMAND = f"{_PYTHONPATH_PREFIX} python3 -P -m secretary task"
+_CONTROL_PLANE_TASK_COMMAND = f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m secretary task"
 
 
 def default_data_dir(instance_path: Path) -> Path:
@@ -5059,14 +5060,13 @@ def _wait_expectation(kind: str) -> str:
 def _idle_verdict(status: dict[str, Any], idle_since: float, now: float) -> tuple[bool, float]:
     """Evaluate one continuous idle episode without mutating dispatcher state.
 
-    The TUI's readiness is only meaningful together with terminal/provider activity. A busy
-    probe clears the episode, while newer activity begins a fresh one; callers may safely apply
-    this same result to the normal status and to the pre-stop re-probe.
+    Readiness is the delivery boundary: pane repainting is not work progress and must not
+    perpetually restart the idle window. A busy probe clears the episode; callers may safely
+    apply the same result to the normal status and to the pre-stop re-probe.
     """
     if not status.get("idle"):
         return False, 0.0
-    activity = float(status.get("last_activity") or 0.0)
-    if not idle_since or activity > idle_since:
+    if not idle_since:
         return False, now
     return now - idle_since > _idle_stall_seconds(), idle_since
 

@@ -6412,19 +6412,18 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self._pilot_record()["worker_idle_since"], 0.0)
         self.assertNotIn("restart_worker", self.host.calls)
 
-    def test_idle_tui_with_continuing_activity_never_respawns(self) -> None:
-        """A stale TUI readiness answer cannot override terminal/provider progress."""
+    def test_idle_tui_repaints_do_not_restart_the_delivery_window(self) -> None:
+        """Pane bytes are not a delivery; readiness still ends a stalled round."""
         self._open_the_second_round()
         self._head_at_its_prompt()
         self.tick()
         self._rewind_idle()
 
-        for _ in range(3):
-            self.host.worker_status_result["last_activity"] = time.time()
-            result = self.tick()
-            self.assertEqual(result["action"], "waiting-worker-report")
+        self.host.worker_status_result["last_activity"] = time.time()
+        result = self.tick()
 
-        self.assertNotIn("restart_worker", self.host.calls)
+        self.assertEqual(result["action"], "worker-respawned")
+        self.assertIn("restart_worker", self.host.calls)
 
     def test_idle_tui_respawns_after_activity_has_stopped_for_the_window(self) -> None:
         self._open_the_second_round()
@@ -6437,13 +6436,12 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(result["action"], "worker-respawned")
         self.assertIn("restart_worker", self.host.calls)
 
-    def test_last_moment_activity_cancels_an_idle_respawn(self) -> None:
-        """The stop fence re-probes after the idle verdict and preserves newly active work."""
+    def test_last_moment_repaint_does_not_cancel_an_idle_respawn(self) -> None:
+        """The stop fence only accepts renewed work, not a terminal repaint."""
         self._open_the_second_round()
         self._head_at_its_prompt()
         self.tick()
         self._rewind_idle()
-        stale_activity = self.host.worker_status_result["last_activity"]
         fresh_status = dict(self.host.worker_status_result, last_activity=time.time())
 
         with mock.patch.object(self.host, "worker_status", side_effect=[
@@ -6451,9 +6449,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         ]):
             result = self.tick()
 
-        self.assertEqual(result["action"], "waiting-worker-report")
-        self.assertGreater(self._pilot_record()["worker_idle_since"], stale_activity)
-        self.assertNotIn("restart_worker", self.host.calls)
+        self.assertEqual(result["action"], "worker-respawned")
+        self.assertIn("restart_worker", self.host.calls)
 
     def test_last_moment_busy_status_cancels_an_idle_respawn(self) -> None:
         self._open_the_second_round()
@@ -7402,7 +7399,7 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertTrue(data["projects"][workspace]["hasTrustDialogAccepted"])
         self.assertEqual(data["theme"], "dark")
         self.assertIn("claude --dangerously-skip-permissions --model opus", command)
-        self.assertIn("python3 -m secretary.role_env exec --role worker", command)
+        self.assertIn("python3 -P -m secretary.role_env exec --role worker", command)
 
     def test_claude_command_pins_profile_effort(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -7420,7 +7417,7 @@ class DispatcherLauncherTests(unittest.TestCase):
             )
 
         self.assertIn("--model opus --effort medium", command)
-        self.assertIn("python3 -m secretary.role_env exec --role reviewer", command)
+        self.assertIn("python3 -P -m secretary.role_env exec --role reviewer", command)
 
     def test_claude_ready_preserves_existing_theme_and_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -8155,7 +8152,7 @@ class DispatcherLauncherTests(unittest.TestCase):
     def test_worker_command_is_wrapped_in_role_env(self) -> None:
         wrapped = _wrap_role_shell_command("worker", "CODEX_HOME=/tmp/codex-home codex exec --dangerously-bypass-approvals-and-sandbox")
 
-        self.assertIn("python3 -m secretary.role_env exec --role worker", wrapped)
+        self.assertIn("python3 -P -m secretary.role_env exec --role worker", wrapped)
         self.assertIn("/bin/sh -lc", wrapped)
         self.assertIn("--dangerously-bypass-approvals-and-sandbox", wrapped)
 

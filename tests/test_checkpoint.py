@@ -389,7 +389,7 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertNotIn("state/board/cards.ndjson", self.head_files())
 
     def test_nonsecret_board_transport_text_in_a_card_does_not_block_the_checkpoint(self):
-        transport, _ = ensure_board_transport(self.instance_dir)
+        transport, _ = ensure_board_transport(self.instance_dir, allow_default=True)
         contents = (self.instance_dir / "board-transport.env").read_text(encoding="utf-8")
         self.seed_board([{
             **CARD,

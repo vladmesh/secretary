@@ -42,6 +42,7 @@ LAUNCH_BOUND_ENV = tuple(
 CODEX_HOME_DEFAULT = str(Path.home() / ".config" / "orca" / "codex-runtime-home" / "home")
 # The file codex itself reads trust from, inside whatever CODEX_HOME the head runs with.
 CODEX_CONFIG_FILE = "config.toml"
+PYTHON_SAFE_PATH_FLAG = "-P"
 CLAUDE_JSON_DEFAULT = str(Path.home() / ".claude.json")
 CLAUDE_THEME_DEFAULT = "dark"
 # Where the `claude` CLI itself takes a model from when the head profile pins none.
@@ -479,7 +480,7 @@ def wrap_role_shell_command(role: str, command: str, *, identity: dict[str, str]
     rendered = [f"{name}={shlex.quote(value)}" for name, value in sorted((identity or {}).items())]
     binding = " ".join([*launch_binding(), *rendered])
     return (
-        f"{binding} {pythonpath_prefix(os.environ)} python3 -m secretary.role_env exec "
+        f"{binding} {pythonpath_prefix(os.environ)} python3 {PYTHON_SAFE_PATH_FLAG} -m secretary.role_env exec "
         f"--role {shlex.quote(role)} -- /bin/sh -lc {shlex.quote(command)}"
     )
 

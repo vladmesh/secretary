@@ -23,7 +23,7 @@ class OperatorEnvTest(unittest.TestCase):
                 "KANBOARD_ADMIN_PASSWORD=hunter2\n"
                 "GITHUB_TOKEN=gh-test-token\n",
             )
-            ensure_board_transport(Path(tmp))
+            ensure_board_transport(Path(tmp), allow_default=True)
             env = session.operator_env(env_file, base_env={"PATH": "/bin", "SECRETARY_INSTANCE": tmp})
         self.assertNotIn("KANBOARD_API_TOKEN", env)
         self.assertEqual(env["KANBOARD_ADMIN_PASSWORD"], "hunter2")

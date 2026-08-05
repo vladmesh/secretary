@@ -806,20 +806,26 @@ def redaction_values(instance_dir: Path) -> tuple[str, ...]:
     values: list[str] = []
     if _store_exists(instance_dir) and is_initialized(instance_dir) and key_path(instance_dir).is_file():
         try:
+            key: bytes | None = None
             for entry in list_secrets(instance_dir):
-                if entry.get("id") in LEGACY_BOARD_SECRET_IDS:
-                    # Legacy encrypted transport values deliberately stay inert until
-                    # an operator removes them. They must not block publication.
-                    continue
+                secret_id = str(entry["id"])
                 environment = str(entry.get("environment") or "")
                 try:
-                    value = read_secret(instance_dir, str(entry["id"])).decode("utf-8", errors="strict")
+                    if secret_id in LEGACY_BOARD_SECRET_IDS:
+                        # Retired board values cannot be recovered or materialized, but must keep
+                        # being scrubbed while a running container may still authenticate with one.
+                        key = key if key is not None else load_installation_key(instance_dir)
+                        plaintext = _read_value(instance_dir, secret_id, key)
+                    else:
+                        plaintext = read_secret(instance_dir, secret_id)
+                    value = plaintext.decode("utf-8", errors="strict")
                 except (SecretStoreError, UnicodeDecodeError):
                     # A valid binary secret cannot appear in text verbatim.  A
                     # missing/bad envelope remains visible through store_findings;
                     # one entry must not make us forget other readable credentials.
                     continue
-                if role_env.is_sensitive_env_name(environment) or looks_like_credential(value):
+                if (secret_id in LEGACY_BOARD_SECRET_IDS or role_env.is_sensitive_env_name(environment)
+                        or looks_like_credential(value)):
                     values.append(value)
         except SecretStoreError:
             pass

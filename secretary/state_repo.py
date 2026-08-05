@@ -74,22 +74,21 @@ def _lock_path(instance_dir: Path) -> Path:
 def commit_identity(instance_dir: Path) -> list[str]:
     """Fall back to a writer identity only when the repo declares none."""
     for key in ("user.name", "user.email"):
-        configured = subprocess.run(
-            ["git", "-C", str(instance_dir), "config", "--get", key],
-            text=True,
-            capture_output=True,
-            check=False,
-        )
-        if configured.returncode != 0 or not configured.stdout.strip():
+        try:
+            configured = git(instance_dir, ["config", "--get", key], label="inspect commit identity")
+        except StateRepoError:
+            configured = ""
+        if not configured.strip():
             name, email = FALLBACK_IDENTITY
             return ["-c", f"user.name={name}", "-c", f"user.email={email}"]
     return []
 
 
 def git(instance_dir: Path, args: list[str], *, label: str, timeout: float = 120) -> str:
+    instance_dir = Path(instance_dir).expanduser().resolve()
     try:
         result = subprocess.run(
-            ["git", "-C", str(instance_dir), *args],
+            ["git", "-c", f"safe.directory={instance_dir}", "-C", str(instance_dir), *args],
             text=True,
             capture_output=True,
             timeout=timeout,

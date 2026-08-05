@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary import installation, role_skills, upgrade
+from secretary.board_transport import ensure as ensure_board_transport
 from secretary.cli import main as cli_main
 from secretary.config import validate_instance
 from secretary.head_registry import (
@@ -235,6 +236,10 @@ class PortableFixture(unittest.TestCase):
             + f"host:\n  unit_prefix: {UNIT_PREFIX}\n",
             encoding="utf-8",
         )
+        # This fixture exercises upgrades unrelated to board migration.  Seed the explicit local
+        # transport a prior fresh install would have created, so the upgrade remains an upgrade
+        # rather than silently adopting a new live token.
+        ensure_board_transport(self.instance, allow_default=True)
 
     def own_a_canon(self) -> Path:
         canon = self.instance / "heads" / "heads.toml"

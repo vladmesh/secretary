@@ -15,8 +15,8 @@ from triggered_agents.runtime import kanboard
 class BoardTransportTests(unittest.TestCase):
     def test_default_is_deterministic_and_matches_client_basic_auth(self) -> None:
         with tempfile.TemporaryDirectory() as first, tempfile.TemporaryDirectory() as second:
-            one, _ = ensure(Path(first))
-            two, _ = ensure(Path(second))
+            one, _ = ensure(Path(first), allow_default=True)
+            two, _ = ensure(Path(second), allow_default=True)
             self.assertEqual(one, two)
             client = KanboardClient(transport=one)
         self.assertEqual(client.url, one.url)
@@ -28,7 +28,7 @@ class BoardTransportTests(unittest.TestCase):
     def test_both_clients_send_the_resolved_basic_auth_header(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
-            transport, _ = ensure(instance)
+            transport, _ = ensure(instance, allow_default=True)
             observed: list[str] = []
 
             class Response:
@@ -110,7 +110,7 @@ class BoardTransportTests(unittest.TestCase):
     def test_conflicting_legacy_values_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
-            ensure(instance)
+            ensure(instance, allow_default=True)
             runtime = instance / "runtime.env"
             runtime.write_text(
                 "KANBOARD_URL=http://other/jsonrpc.php\nKANBOARD_API_USER=jsonrpc\n"
@@ -141,6 +141,18 @@ class BoardTransportTests(unittest.TestCase):
             }, clear=True):
                 with self.assertRaisesRegex(TaskError, "configuration is unavailable"):
                     KanboardClient()
+
+    def test_existing_instance_without_transport_or_complete_legacy_tuple_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            with self.assertRaisesRegex(BoardTransportError, "refuse to guess or rotate"):
+                ensure_from_runtime_file(instance)
+
+    def test_fresh_bootstrap_may_explicitly_create_the_default_transport(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            transport, status = ensure_from_runtime_file(Path(tmp), allow_default=True)
+        self.assertEqual(status, "created-default")
+        self.assertEqual(transport.token, "secretary-local-kanboard-jsonrpc-v1")
 
 
 if __name__ == "__main__":

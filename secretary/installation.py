@@ -39,6 +39,7 @@ from secretary.board_transport import (
     BoardTransportError,
     ensure_from_runtime_file,
     resolve as resolve_board_transport,
+    transport_path,
 )
 from secretary.automations import OrcaAutomationClient, workspaces_root
 from secretary.config import validate_instance
@@ -910,13 +911,16 @@ def install(args: argparse.Namespace) -> InstallResult:
                 raise _blocked_by_secrets(exc, secrets, runtime_env) from None
         try:
             transport, transport_status = ensure_from_runtime_file(
-                target, runtime_env, dry_run=args.dry_run
+                target,
+                runtime_env,
+                dry_run=args.dry_run,
+                allow_default=detail.startswith(("cloned", "would clone")),
             )
         except BoardTransportError as exc:
             raise InstallError(str(exc)) from None
         if not args.dry_run:
             _set_installation_owner(runtime_env, args.installation_user)
-            _set_installation_owner(target / "board-transport.env", args.installation_user)
+            _set_installation_owner(transport_path(target), args.installation_user)
         result.add("board-transport", "would-change" if args.dry_run and transport_status != "unchanged" else (
             "changed" if transport_status != "unchanged" else "unchanged"
         ), transport_status)

@@ -62,7 +62,7 @@ class RuntimeEnvRoleTests(unittest.TestCase):
             instance = Path(tmp)
             env_file = instance / "runtime.env"
             env_file.write_text("EXAMPLE_API_TOKEN=secret\n", encoding="utf-8")
-            transport, _ = ensure_board_transport(instance)
+            transport, _ = ensure_board_transport(instance, allow_default=True)
             for role in ("worker", "reviewer", "observer", "pipeline", "steward", "retro", "curator"):
                 with self.subTest(role=role):
                     env = role_env.runtime_env(
@@ -75,14 +75,14 @@ class RuntimeEnvRoleTests(unittest.TestCase):
                     with mock.patch.dict(os.environ, env, clear=True):
                         self.assertEqual(kanboard._creds(), (transport.url, transport.user, transport.token))
 
-    def test_required_role_refuses_missing_board_transport_before_exec(self) -> None:
+    def test_required_role_rendering_does_not_probe_board_transport(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
-            with self.assertRaisesRegex(role_env.RoleEnvError, "board transport"):
-                role_env.runtime_env(
-                    "worker", base_env={"PATH": "/usr/bin", "SECRETARY_INSTANCE": str(instance)},
-                    env_file=instance / "runtime.env", require=True,
-                )
+            env = role_env.runtime_env(
+                "worker", base_env={"PATH": "/usr/bin", "SECRETARY_INSTANCE": str(instance)},
+                env_file=instance / "runtime.env", require=True,
+            )
+        self.assertEqual(env["SECRETARY_INSTANCE"], str(instance))
 
 
 if __name__ == "__main__":

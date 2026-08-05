@@ -40,8 +40,10 @@ check and its `--json` form returns a structured list of findings. Changing the 
 
 `board-transport.env` beside `instance.yaml` is local, non-secret configuration for Kanboard's
 JSON-RPC endpoint, application user and application token. Kanboard still requires Basic Auth, but
-this token is not a recoverable credential: bootstrap and clean recovery deterministically create the
-same default. The file is gitignored and its ordinary contents may appear in board reports.
+this token is not a recoverable credential: a fresh bootstrap or install deterministically creates the
+same default. An existing installation without this file must provide the complete legacy runtime tuple;
+upgrade and recovery refuse to guess or rotate a live transport. The file is gitignored and its ordinary
+contents may appear in board reports.
 
 During upgrade a complete legacy `KANBOARD_URL`, `KANBOARD_API_USER`, `KANBOARD_API_TOKEN` tuple is
 copied once into this file, then removed from `runtime.env`. This keeps an existing container working
@@ -52,14 +54,14 @@ For an installation from before this change, first upgrade with its existing con
 The upgrade writes the one local transport file only when the legacy tuple is complete and agrees with
 any existing file; it never guesses or rotates a token. The old encrypted
 `kanboard_url`, `kanboard_api_user` and `kanboard_api_token` entries are deliberately ignored by
-recovery, redaction and materialisation. Leave them inert until the owner can remove them through the
+recovery and materialisation, but remain in redaction until the owner removes them through the
 normal secret-store procedure after verifying the migrated installation. Do not recreate the running
 container merely to remove those entries.
 
 Installation secrets live in a recoverable store (`secretary secret init/set/import`, the `secrets/`
 directory of the private repository) and are materialised from there into env files. The `runtime.env`
-next to `instance.yaml` can be one such target: the canonical values then live in the store and the file
-is a materialised copy. Whether a given installation has been moved to materialisation is shown by
+next to `instance.yaml` can be one such target for non-board settings: their canonical values then live
+in the store and the file is a materialised copy. Whether a given installation has been moved to materialisation is shown by
 `secretary status --json` under `secret_store.materialize`; the product does not do this on its own, the
 operator runs `secret import`. Either way the file is `0600`, is gitignored in the private repository,
 and is part of no checkpoint or archive payload. `secretary shell` receives the whole file for a trusted
