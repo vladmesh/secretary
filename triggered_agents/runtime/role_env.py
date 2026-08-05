@@ -93,6 +93,9 @@ ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
 # This gates the synthetic BOARD_ROLE value. po and dispatcher have no allowlist entry, so they
 # are rejected before reaching this gate; they remain here as the board's declared roles.
 BOARD_ROLES = {"po", "dispatcher", "worker", "reviewer", "observer", "steward", "retro"}
+# Roles whose executable boundary must prove a usable board transport.  This is
+# deliberately separate from BOARD_ROLES, which controls only BOARD_ROLE injection.
+BOARD_TRANSPORT_ROLES = frozenset(ROLE_ALLOWLIST) - {"curator"}
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SENSITIVE_ENV_NAME_RE = re.compile(
     r"(^|_)(TOKEN|PASSWORD|PASSWD|SECRET|PAT|KEY|IDENTITY|CREDENTIAL|AUTH|WEBHOOK)(_|$)",
@@ -263,7 +266,7 @@ def _main_exec(argv: list[str], *, prog: str) -> int:
         parser.error("missing command after --")
     try:
         env = runtime_env(ns.role, env_file=ns.env_file)
-        if ns.role in BOARD_ROLES:
+        if ns.role in BOARD_TRANSPORT_ROLES:
             from .board_transport import BoardTransportError, resolve_for_environ
             try:
                 resolve_for_environ(env)

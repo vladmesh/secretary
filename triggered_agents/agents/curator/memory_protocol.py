@@ -107,7 +107,7 @@ def _commit_args(request: MemoryWriteRequest, propose_id: str) -> list[str]:
 
 
 def _base_args(request: MemoryWriteRequest, command: str) -> list[str]:
-    args = [sys.executable, "-m", "secretary", "memory", command, "--instance", str(request.instance)]
+    args = [sys.executable, "-P", "-m", "secretary", "memory", command, "--instance", str(request.instance)]
     if request.data_dir is not None:
         args += ["--data-dir", str(request.data_dir)]
     return args

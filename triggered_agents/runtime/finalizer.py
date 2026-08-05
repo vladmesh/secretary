@@ -38,7 +38,7 @@ def spawn_finalizer(agent: str, generation: int | None = None) -> int:
     if not dispatch._is_ephemeral(agent):
         return 0
     state = AgentState(agent)
-    command = [sys.executable, "-m", "triggered_agents", agent, "dispatch", "--finalize"]
+    command = [sys.executable, "-P", "-m", "triggered_agents", agent, "dispatch", "--finalize"]
     if generation is not None:
         command += ["--generation", str(generation)]
     try:

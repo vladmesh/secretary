@@ -90,7 +90,7 @@ def git(instance_dir: Path, args: list[str], *, label: str, timeout: float = 120
     instance_dir = Path(instance_dir).expanduser().resolve()
     try:
         result = subprocess.run(
-            ["git", "-c", f"safe.directory={instance_dir}", "-C", str(instance_dir), *args],
+            ["git", "-c", "core.hooksPath=/dev/null", "-C", str(instance_dir), *args],
             text=True,
             capture_output=True,
             timeout=timeout,
@@ -160,6 +160,10 @@ def ensure_ignored(
 
 def _ensure_ignored_locked(instance_dir: Path, entry: str, *, dry_run: bool) -> bool:
     """Implementation for writers that already hold :func:`state_repo_lock`."""
+    if is_tracked(instance_dir, entry):
+        raise StateRepoError(
+            f"{entry.lstrip('/')} is tracked; remove it from the instance repository before enabling local transport"
+        )
     ignore = instance_dir / ".gitignore"
     try:
         current = ignore.read_text(encoding="utf-8") if ignore.is_file() else ""
@@ -183,6 +187,15 @@ def is_ignored(instance_dir: Path, entry: str) -> bool:
     """Whether Git's canonical matcher excludes one instance-relative entry."""
     try:
         git(instance_dir, ["check-ignore", "--quiet", "--", entry.lstrip("/")], label="verify exclusion")
+    except StateRepoError:
+        return False
+    return True
+
+
+def is_tracked(instance_dir: Path, entry: str) -> bool:
+    """Whether an entry is already in the instance index."""
+    try:
+        git(instance_dir, ["ls-files", "--error-unmatch", "--", entry.lstrip("/")], label="inspect tracked entry")
     except StateRepoError:
         return False
     return True

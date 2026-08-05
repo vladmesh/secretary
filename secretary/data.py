@@ -648,7 +648,7 @@ def _pipeline_json(
     pipeline_worktree: Path,
     command: list[str] | None,
 ) -> Any:
-    cmd = command or [sys.executable, "-m", "triggered_agents", "pipeline"]
+    cmd = command or [sys.executable, "-P", "-m", "triggered_agents", "pipeline"]
     env = os.environ.copy()
     pythonpath = str(pipeline_worktree)
     if env.get("PYTHONPATH"):

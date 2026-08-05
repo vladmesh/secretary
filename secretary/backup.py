@@ -258,7 +258,7 @@ def _pipeline_action(
     dispatcher never read: the backup ran while cards kept being claimed. `secretary pause` is now
     the one door, and it mirrors the flag back to the legacy path for the background roles.
     """
-    cmd = command or [sys.executable, "-m", "secretary"]
+    cmd = command or [sys.executable, "-P", "-m", "secretary"]
     if action == "pause":
         args = [
             "pause",
@@ -310,7 +310,7 @@ def _pipeline_status(
     instance_file: Path,
     command: list[str] | None,
 ) -> dict[str, Any]:
-    cmd = command or [sys.executable, "-m", "secretary"]
+    cmd = command or [sys.executable, "-P", "-m", "secretary"]
     try:
         result = subprocess.run(
             [*cmd, "pause-status", "--instance", str(instance_file)],
