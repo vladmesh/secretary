@@ -63,11 +63,49 @@ class BoardTransportTests(unittest.TestCase):
                 "OTHER=value\nKANBOARD_URL=http://legacy/jsonrpc.php\n"
                 "KANBOARD_API_USER=jsonrpc\nKANBOARD_API_TOKEN=legacy-token\n", encoding="utf-8"
             )
+            runtime.chmod(0o600)
             transport, status = ensure_from_runtime_file(instance, runtime)
             self.assertEqual(status, "imported-legacy")
             self.assertEqual(transport.token, "legacy-token")
             self.assertEqual(runtime.read_text(encoding="utf-8"), "OTHER=value\n")
             self.assertEqual(resolve(instance), transport)
+            self.assertEqual((instance / "board-transport.env").stat().st_mode & 0o777, 0o600)
+
+    def test_whitespace_in_a_valid_runtime_assignment_is_migrated_consistently(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            runtime = instance / "runtime.env"
+            runtime.write_text(
+                " KANBOARD_URL=http://legacy/jsonrpc.php\n"
+                " KANBOARD_API_USER=jsonrpc\n KANBOARD_API_TOKEN=legacy-token\n",
+                encoding="utf-8",
+            )
+            runtime.chmod(0o600)
+
+            transport, status = ensure_from_runtime_file(instance, runtime)
+
+        self.assertEqual((transport.token, status), ("legacy-token", "imported-legacy"))
+
+    def test_dry_run_truthfully_reports_retiring_a_matching_legacy_tuple(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            runtime = instance / "runtime.env"
+            runtime.write_text(
+                "KANBOARD_URL=http://legacy/jsonrpc.php\nKANBOARD_API_USER=jsonrpc\n"
+                "KANBOARD_API_TOKEN=legacy-token\n", encoding="utf-8",
+            )
+            runtime.chmod(0o600)
+            ensure_from_runtime_file(instance, runtime)
+            runtime.write_text(
+                "KANBOARD_URL=http://legacy/jsonrpc.php\nKANBOARD_API_USER=jsonrpc\n"
+                "KANBOARD_API_TOKEN=legacy-token\n", encoding="utf-8",
+            )
+            runtime.chmod(0o600)
+
+            _, preview = ensure_from_runtime_file(instance, runtime, dry_run=True)
+            _, applied = ensure_from_runtime_file(instance, runtime)
+
+        self.assertEqual((preview, applied), ("retired-legacy", "retired-legacy"))
 
     def test_conflicting_legacy_values_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -78,6 +116,7 @@ class BoardTransportTests(unittest.TestCase):
                 "KANBOARD_URL=http://other/jsonrpc.php\nKANBOARD_API_USER=jsonrpc\n"
                 "KANBOARD_API_TOKEN=other-token\n", encoding="utf-8"
             )
+            runtime.chmod(0o600)
             with self.assertRaisesRegex(BoardTransportError, "board transport mismatch"):
                 ensure_from_runtime_file(instance, runtime)
 
@@ -88,6 +127,7 @@ class BoardTransportTests(unittest.TestCase):
                 "KANBOARD_URL=http://legacy/jsonrpc.php\nKANBOARD_URL=http://other/jsonrpc.php\n"
                 "KANBOARD_API_USER=jsonrpc\nKANBOARD_API_TOKEN=legacy-token\n", encoding="utf-8"
             )
+            runtime.chmod(0o600)
             with self.assertRaisesRegex(BoardTransportError, "ambiguous"):
                 ensure_from_runtime_file(Path(tmp), runtime)
 

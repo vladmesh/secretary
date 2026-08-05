@@ -272,24 +272,6 @@ def migrate_assessment_column(*, client: KanboardClient | None = None) -> dict[s
         raise BootstrapError(exc.message) from None
 
 
-def _runtime_values(path: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    if path.exists():
-        if not path.is_file() or path.is_symlink() or path.stat().st_mode & 0o077:
-            raise BootstrapError("runtime.env must be a regular 0600 file")
-        for raw in path.read_text(encoding="utf-8").splitlines():
-            if "=" in raw and not raw.lstrip().startswith("#"):
-                key, value = raw.split("=", 1)
-                values[key] = value
-    return values
-
-
-def _write_runtime(path: Path, values: dict[str, str]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_text_atomic(path, "".join(f"{key}={values[key]}\n" for key in sorted(values)))
-    path.chmod(0o600)
-
-
 def _compose_file(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     write_text_atomic(path, f"""services:

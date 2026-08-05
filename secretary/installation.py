@@ -914,6 +914,9 @@ def install(args: argparse.Namespace) -> InstallResult:
             )
         except BoardTransportError as exc:
             raise InstallError(str(exc)) from None
+        if not args.dry_run:
+            _set_installation_owner(runtime_env, args.installation_user)
+            _set_installation_owner(target / "board-transport.env", args.installation_user)
         result.add("board-transport", "would-change" if args.dry_run and transport_status != "unchanged" else (
             "changed" if transport_status != "unchanged" else "unchanged"
         ), transport_status)

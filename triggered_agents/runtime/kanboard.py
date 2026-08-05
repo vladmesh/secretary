@@ -14,6 +14,9 @@ import base64
 import json
 import urllib.error
 import urllib.request
+import os
+
+from .board_transport import BoardTransportError, resolve
 
 _BATCH_CHUNK = 200
 
@@ -23,9 +26,8 @@ class KanboardError(RuntimeError):
 
 
 def _creds() -> tuple[str, str, str]:
-    from secretary.board_transport import BoardTransportError, resolve
     try:
-        transport = resolve()
+        transport = resolve(os.environ.get("SECRETARY_INSTANCE") or None)
     except BoardTransportError as exc:
         raise KanboardError(f"board transport configuration is unavailable: {exc}") from exc
     return transport.url, transport.user, transport.token

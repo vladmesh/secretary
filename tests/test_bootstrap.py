@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import subprocess
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -454,7 +455,9 @@ class BootstrapBoardTests(unittest.TestCase):
 
             def clone(_remote: str, directory: Path, **_kwargs: object) -> str:
                 directory.mkdir()
-                (directory / ".git" / "info").mkdir(parents=True)
+                subprocess.run(["git", "init", "--quiet", str(directory)], check=True)
+                subprocess.run(["git", "-C", str(directory), "config", "user.name", "Test"], check=True)
+                subprocess.run(["git", "-C", str(directory), "config", "user.email", "test@example.invalid"], check=True)
                 (directory / "instance.yaml").write_text(
                     "version: 1\nname: bootstrap\ndata_dir: " + str(directory.parent / "data")
                     + "\noffsite:\n  instance_remote: git@example.invalid:bootstrap/instance\n"
@@ -478,18 +481,12 @@ class BootstrapBoardTests(unittest.TestCase):
             ):
                 self.assertEqual(bootstrap(args), 0)
 
-            runtime = (target / "runtime.env").read_text(encoding="utf-8")
-            self.assertNotIn("KANBOARD_API_USER=", runtime)
-            self.assertNotIn("KANBOARD_API_TOKEN=", runtime)
-            self.assertNotIn("KANBOARD_BOOTSTRAP_TOKEN", runtime)
-            self.assertNotIn("KANBOARD_IMAGE", runtime)
-            self.assertNotIn("KANBOARD_ADMIN_PASSWORD", runtime)
-            self.assertEqual((target / "runtime.env").stat().st_mode & 0o777, 0o600)
+            self.assertFalse((target / "runtime.env").exists())
             self.assertTrue((target / BOOTSTRAP_STAMP).is_file())
             exclude = (target / ".git" / "info" / "exclude").read_text(encoding="utf-8")
             self.assertIn(f"/{BOOTSTRAP_STAMP}", exclude)
             self.assertIn("/runtime.env", exclude)
-            self.assertIn("/board-transport.env", exclude)
+            self.assertIn("/board-transport.env", (target / ".gitignore").read_text(encoding="utf-8"))
             transport = (target / "board-transport.env").read_text(encoding="utf-8")
             self.assertIn("KANBOARD_API_USER=jsonrpc\n", transport)
             compose = (target.parent / "compose.yml")
