@@ -15,6 +15,7 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.cli import main
+from secretary.board_transport import BoardTransport
 from secretary.data import export_board
 from secretary.sprints import refresh_active_sprint_projects
 from secretary.routing_journal import (
@@ -273,7 +274,9 @@ class KanboardClientTests(unittest.TestCase):
         response.read.return_value = b'{"error":{"message":"super-secret"}}'
         response.__enter__.return_value = response
         with mock.patch("secretary.tasks.urllib.request.urlopen", return_value=response):
-            client = KanboardClient({"KANBOARD_URL": "https://board.invalid", "KANBOARD_API_USER": "user", "KANBOARD_API_TOKEN": "super-secret"})
+            client = KanboardClient(
+                transport=BoardTransport("https://board.invalid", "user", "super-secret")
+            )
             with self.assertRaises(TaskError) as raised:
                 client.call("getAllTasks", project_id=1)
         self.assertEqual(raised.exception.code, "backend_error")

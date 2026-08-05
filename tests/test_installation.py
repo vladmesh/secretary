@@ -6,6 +6,7 @@ import io
 import json
 import os
 import pwd
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -29,6 +30,7 @@ from secretary.installation import (
     provision_codex_home,
     provision_project_checkouts,
 )
+from secretary.board_transport import default_transport
 from secretary.upgrade import UpgradeResult, step_host
 from secretary.routing_journal import attempts
 
@@ -100,6 +102,37 @@ def _git(root: Path, *args: str) -> None:
 
 
 class InstallationTests(unittest.TestCase):
+    def test_prerequisite_probe_accepts_the_planned_transport_before_it_exists_on_disk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            transport = default_transport()
+            with (
+                mock.patch("secretary.installation.shutil.which", return_value="/usr/bin/orca"),
+                mock.patch("secretary.installation._run"),
+                mock.patch("secretary.installation.TaskReader") as reader,
+            ):
+                check_prerequisites(transport=transport)
+
+        self.assertEqual(reader.call_args.args[0].token, transport.token)
+
+    def test_only_an_absent_runtime_env_is_ignored_for_an_unlocked_store(self):
+        target = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, target)
+        args = SimpleNamespace(
+            instance_dir=str(target), instance_remote="remote", installation_user=getpass.getuser(),
+            recover=True, adopt=False, dry_run=True, runtime_env=None, product_root=str(PRODUCT_ROOT),
+        )
+        unlocked = installation.SecretRecovery(store_present=True, unlocked=True)
+        with (
+            mock.patch("secretary.installation._ensure_installation_user"),
+            mock.patch("secretary.installation._clone_or_reuse", return_value="reused checkpoint checkout"),
+            mock.patch("secretary.installation._open_secret_store", return_value=unlocked),
+            mock.patch("secretary.installation._read_runtime_env", side_effect=InstallError("unsafe mode")),
+            mock.patch("secretary.installation.ensure_from_runtime_file") as migrate,
+        ):
+            result = install(args)
+
+        self.assertFalse(result.ok)
+        migrate.assert_not_called()
     def test_recovery_materializes_pipeline_state_before_host_steps_can_start_units(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -588,7 +621,7 @@ class InstallationTests(unittest.TestCase):
             runtime.chmod(0o600)
 
             with (
-                mock.patch("secretary.installation.check_prerequisites"),
+                mock.patch("secretary.installation.check_prerequisites") as prerequisites,
                 mock.patch("secretary.installation.import_normalized_board") as board,
                 mock.patch("secretary.installation.rebuild_memory_index") as memory,
                 mock.patch("secretary.installation.materialize_host") as host,
@@ -605,6 +638,7 @@ class InstallationTests(unittest.TestCase):
             self.assertEqual(code, 0, output)
             self.assertIn("would-change checkpoint", output)
             self.assertIn("preview made no recovery changes", output)
+            self.assertTrue(prerequisites.call_args.kwargs["transport"].token)
             after = {
                 path.relative_to(data): path.read_bytes()
                 for path in data.rglob("*")

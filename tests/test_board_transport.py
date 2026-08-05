@@ -18,7 +18,7 @@ class BoardTransportTests(unittest.TestCase):
             one, _ = ensure(Path(first))
             two, _ = ensure(Path(second))
             self.assertEqual(one, two)
-            client = KanboardClient(one.as_environ())
+            client = KanboardClient(transport=one)
         self.assertEqual(client.url, one.url)
         self.assertEqual(
             one.authorization_header(),

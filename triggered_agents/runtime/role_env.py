@@ -58,7 +58,6 @@ def runtime_pythonpath() -> str:
     configured = os.environ.get(RUNTIME_PYTHONPATH_ENV) or os.environ.get(PRODUCT_ENV)
     return configured or str(REPO_ROOT)
 
-BOARD_ENV: tuple[str, ...] = ()
 # SECRETARY_DATA_DIR names the installation's data plane, not a secret. It has to survive the
 # allowlist: the production dispatcher unit imports runtime.env wholesale, so a host that moves its
 # data dir through that file moves the WRITER. A role stripped of the same name would fall back to
@@ -89,11 +88,6 @@ ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "steward": NONSECRET_ENV,
     "retro": NONSECRET_ENV,
     "curator": NONSECRET_ENV,
-}
-
-ROLE_REQUIRED: dict[str, tuple[str, ...]] = {
-    "pipeline": (), "worker": (), "reviewer": (), "observer": (), "steward": (), "retro": (),
-    "curator": (),
 }
 
 # This gates the synthetic BOARD_ROLE value. po and dispatcher have no allowlist entry, so they
@@ -175,7 +169,6 @@ def runtime_env(role: str, *, base_env: dict[str, str] | None = None,
                 env_file: Path | str | None = None, require: bool = False) -> dict[str, str]:
     """Return a sanitized env for `role`, with role-allowed values overlaid from the source file."""
     allowed = set(allowlist(role))
-    required = ROLE_REQUIRED.get(role, ())
     source = load_env_file(env_file)
     base = dict(os.environ if base_env is None else base_env)
 
@@ -202,12 +195,14 @@ def runtime_env(role: str, *, base_env: dict[str, str] | None = None,
     else:
         env.pop("BOARD_ROLE", None)
     if require:
-        missing = [key for key in required if not env.get(key)]
-        if missing:
-            names = ", ".join(missing)
-            raise RoleEnvError(
-                f"runtime env for role {role!r} missing {names}; check provisioning/launcher"
-            )
+        if role in BOARD_ROLES:
+            from secretary.board_transport import BoardTransportError, resolve
+            try:
+                resolve(env.get("SECRETARY_INSTANCE"))
+            except BoardTransportError as exc:
+                raise RoleEnvError(
+                    f"runtime env for role {role!r} has no usable board transport: {exc}"
+                ) from None
     return env
 
 

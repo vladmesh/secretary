@@ -6471,6 +6471,36 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self._pilot_record()["worker_idle_since"], 0.0)
         self.assertNotIn("restart_worker", self.host.calls)
 
+    def test_last_moment_pid_flap_preserves_the_idle_window(self) -> None:
+        self._open_the_second_round()
+        self._head_at_its_prompt()
+        self.tick()
+        self._rewind_idle()
+        aged = self._pilot_record()["worker_idle_since"]
+
+        with mock.patch.object(self.host, "worker_status", side_effect=[
+            dict(self.host.worker_status_result),
+            dict(self.host.worker_status_result, pid_confirmed=False),
+        ]):
+            self.assertEqual(self.tick()["action"], "waiting-worker-report")
+
+        self.assertEqual(self._pilot_record()["worker_idle_since"], aged)
+        self.assertEqual(self.tick()["action"], "worker-respawned")
+
+    def test_last_moment_missing_terminal_uses_the_terminal_watchdog(self) -> None:
+        self._open_the_second_round()
+        self._head_at_its_prompt()
+        self.tick()
+        self._rewind_idle()
+
+        with mock.patch.object(self.host, "worker_status", side_effect=[
+            dict(self.host.worker_status_result),
+            {"known": True, "live": False, "reason": "missing-terminal"},
+        ]):
+            result = self.tick()
+
+        self.assertEqual(result["action"], "worker-respawned")
+
     def test_an_idle_worker_is_pointed_at_the_current_command_once(self) -> None:
         """The live incident (issue:df7d0778b26357e60046): work complete, nothing on the card, and
         a head holding a live pid at its prompt. The round does not move; the command comes back."""

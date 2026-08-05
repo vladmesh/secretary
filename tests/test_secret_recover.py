@@ -137,6 +137,47 @@ class RecoveryCase(unittest.TestCase):
         _git(self.source, "commit", "-m", "lose one value")
 
 
+class LegacyBoardOnlyRecoveryTests(RecoveryCase):
+    def _add_historical_board_secret(self) -> None:
+        with mock.patch.object(secret_store, "_new_secret_id", secret_store._clean_secret_id):
+            secret_store.set_secret(
+                self.source,
+                secret_id="kanboard_api_token",
+                value=b"historic-token",
+                scope="installation",
+                purpose="historic board transport",
+                environment="KANBOARD_API_TOKEN",
+                materialize={"target": "runtime-env"},
+                actor="tester",
+            )
+
+    def test_legacy_only_store_is_inert_when_locked_or_unlocked(self) -> None:
+        # The fixture starts with unrelated secrets; make the assertion on a fresh store whose
+        # catalog has only the historical entry, as a pre-transport recovery really does.
+        root = Path(self.tmpdir.name) / "legacy-only"
+        root.mkdir()
+        _git(root, "init")
+        _git(root, "config", "user.name", "Test")
+        _git(root, "config", "user.email", "test@example.invalid")
+        with mock.patch.object(secret_store, "_new_key_params", side_effect=fast_key_params):
+            initialize_store(root, phrase=PHRASE, actor="tester")
+        with mock.patch.object(secret_store, "_new_secret_id", secret_store._clean_secret_id):
+            secret_store.set_secret(
+                root, secret_id="kanboard_api_token", value=b"historic-token",
+                scope="installation", purpose="historic board transport",
+                environment="KANBOARD_API_TOKEN", materialize={"target": "runtime-env"}, actor="tester",
+            )
+        secret_store.key_path(root).unlink()
+
+        locked = secret_recover.recover_secrets(root)
+        opened = secret_recover.recover_secrets(root, phrase=PHRASE)
+
+        self.assertEqual((locked.locked, locked.missing), ((), ()))
+        self.assertFalse(locked.unlocked)
+        self.assertTrue(opened.unlocked)
+        self.assertEqual(opened.materialized, ())
+
+
 class PhraseBranchCase(RecoveryCase):
     def test_the_phrase_rebuilds_the_key_and_puts_runtime_env_back(self) -> None:
         code, output = self.recover("--recovery-phrase-file", str(self.phrase_file))

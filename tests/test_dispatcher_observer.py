@@ -51,7 +51,6 @@ from secretary.role_env import (
     OBSERVER_GENERATION_ENV,
     OBSERVER_SPRINT_ENV,
     ROLE_ALLOWLIST,
-    ROLE_REQUIRED,
     declared_observer_sprint,
     observer_binding,
     runtime_env,
@@ -3319,7 +3318,6 @@ class ObserverConfigurationTests(unittest.TestCase):
             ROLE_ALLOWLIST["observer"],
             (*ROLE_ALLOWLIST["worker"], OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV),
         )
-        self.assertIn("observer", ROLE_REQUIRED)
 
         env_file = Path(tempfile.mkdtemp()) / "runtime.env"
         env_file.write_text(

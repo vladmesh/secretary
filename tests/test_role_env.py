@@ -75,6 +75,15 @@ class RuntimeEnvRoleTests(unittest.TestCase):
                     with mock.patch.dict(os.environ, env, clear=True):
                         self.assertEqual(kanboard._creds(), (transport.url, transport.user, transport.token))
 
+    def test_required_role_refuses_missing_board_transport_before_exec(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            with self.assertRaisesRegex(role_env.RoleEnvError, "board transport"):
+                role_env.runtime_env(
+                    "worker", base_env={"PATH": "/usr/bin", "SECRETARY_INSTANCE": str(instance)},
+                    env_file=instance / "runtime.env", require=True,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

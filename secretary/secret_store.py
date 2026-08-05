@@ -63,6 +63,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from secretary import role_env, state_repo
+from secretary.board_transport import DEFAULT_TOKEN, BoardTransportError, resolve as resolve_board_transport
 from secretary._fsutil import publish_state_atomic
 from secretary.config import _safe_yaml_error, validate
 from secretary.secret_words import RECOVERY_WORDS
@@ -714,7 +715,7 @@ def set_secret(
 ) -> SetResult:
     """Seal one value and record its metadata, as a single commit."""
     actor = _clean_actor(actor)
-    secret_id = _clean_secret_id(secret_id)
+    secret_id = _new_secret_id(secret_id)
     scope = _clean_scope(scope)
     purpose = _clean_purpose(purpose)
     environment = _clean_environment(environment)
@@ -776,6 +777,10 @@ def set_secret(
 def read_secret(instance_dir: Path, secret_id: str) -> bytes:
     """Internal API. No command in this card puts the result on stdout."""
     secret_id = _clean_secret_id(secret_id)
+    if secret_id in LEGACY_BOARD_SECRET_IDS:
+        raise SecretStoreValidationError(
+            f"{secret_id} is board transport configuration, not a recoverable secret"
+        )
     instance_dir = state_repo.require_repo(instance_dir)
     if not any(entry["id"] == secret_id for entry in list_secrets(instance_dir)):
         raise SecretStoreStateError(f"no secret named {secret_id!r} in the catalog")
@@ -798,29 +803,33 @@ def redaction_values(instance_dir: Path) -> tuple[str, ...]:
     permanent durability outage.  Runtime-file and pattern scanning still run.
     """
     instance_dir = Path(instance_dir).expanduser()
-    if not _store_exists(instance_dir):
-        return ()
-    if not is_initialized(instance_dir) or not key_path(instance_dir).is_file():
-        return ()
     values: list[str] = []
+    if _store_exists(instance_dir) and is_initialized(instance_dir) and key_path(instance_dir).is_file():
+        try:
+            for entry in list_secrets(instance_dir):
+                if entry.get("id") in LEGACY_BOARD_SECRET_IDS:
+                    # Legacy encrypted transport values deliberately stay inert until
+                    # an operator removes them. They must not block publication.
+                    continue
+                environment = str(entry.get("environment") or "")
+                try:
+                    value = read_secret(instance_dir, str(entry["id"])).decode("utf-8", errors="strict")
+                except (SecretStoreError, UnicodeDecodeError):
+                    # A valid binary secret cannot appear in text verbatim.  A
+                    # missing/bad envelope remains visible through store_findings;
+                    # one entry must not make us forget other readable credentials.
+                    continue
+                if role_env.is_sensitive_env_name(environment) or looks_like_credential(value):
+                    values.append(value)
+        except SecretStoreError:
+            pass
     try:
-        for entry in list_secrets(instance_dir):
-            if entry.get("id") in LEGACY_BOARD_SECRET_IDS:
-                # Legacy encrypted transport values deliberately stay inert until
-                # an operator removes them. They must not block publication.
-                continue
-            environment = str(entry.get("environment") or "")
-            try:
-                value = read_secret(instance_dir, str(entry["id"])).decode("utf-8", errors="strict")
-            except (SecretStoreError, UnicodeDecodeError):
-                # A valid binary secret cannot appear in text verbatim.  A
-                # missing/bad envelope remains visible through store_findings;
-                # one entry must not make us forget other readable credentials.
-                continue
-            if role_env.is_sensitive_env_name(environment) or looks_like_credential(value):
-                values.append(value)
-    except SecretStoreError:
-        return ()
+        transport = resolve_board_transport(instance_dir)
+    except BoardTransportError:
+        pass
+    else:
+        if transport.token != DEFAULT_TOKEN:
+            values.append(transport.token)
     return tuple(values)
 
 
@@ -1104,7 +1113,7 @@ def parse_env_file(text: str, *, source: str = "env file") -> dict[str, str]:
 
 def secret_id_for_variable(name: str) -> str:
     """Map an environment-variable name to its validated store identifier."""
-    return _clean_secret_id(str(name).strip().lower())
+    return _new_secret_id(str(name).strip().lower())
 
 
 # ---------------------------------------------------------------------------
@@ -1368,6 +1377,11 @@ def _clean_secret_id(secret_id: str) -> str:
         )
     if ".." in value:
         raise SecretStoreValidationError("secret id must not contain '..'")
+    return value
+
+
+def _new_secret_id(secret_id: str) -> str:
+    value = _clean_secret_id(secret_id)
     if value in LEGACY_BOARD_SECRET_IDS:
         raise SecretStoreValidationError(
             f"{value} is board transport configuration, not a recoverable secret"

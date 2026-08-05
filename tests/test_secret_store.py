@@ -35,6 +35,7 @@ from secretary.secret_store import (
     set_secret,
     store_divergence,
 )
+from secretary.board_transport import ensure as ensure_board_transport
 from secretary.secret_words import RECOVERY_WORDS
 
 
@@ -493,6 +494,57 @@ class InterruptedWriteCase(SecretStoreCase):
         self.assertEqual(
             store_divergence(self.instance_dir), ("first.secret: catalogued with no value",)
         )
+
+
+class LegacyBoardSecretTests(SecretStoreCase):
+    """Pre-transport catalog entries remain removable but never regain authority."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.initialize()
+
+    def _historical_entry(self, *, materialize: dict | None = None) -> None:
+        # Historical stores legitimately contain this id.  Bypass only the new-write guard to
+        # construct that on-disk predecessor, then exercise the public behavior normally.
+        with mock.patch.object(secret_store, "_new_secret_id", secret_store._clean_secret_id):
+            set_secret(
+                self.instance_dir,
+                secret_id="kanboard_api_token",
+                value=b"migrated-live-token",
+                scope="installation",
+                purpose="historic board token",
+                environment="KANBOARD_API_TOKEN",
+                materialize=materialize,
+                actor="tester",
+            )
+
+    def test_legacy_entries_cannot_be_created_or_read_but_can_be_removed(self) -> None:
+        with self.assertRaisesRegex(SecretStoreValidationError, "board transport"):
+            set_secret(
+                self.instance_dir, secret_id="kanboard_api_token", value=b"new",
+                scope="installation", purpose="no", actor="tester",
+            )
+        self._historical_entry()
+        with self.assertRaisesRegex(SecretStoreValidationError, "board transport"):
+            read_secret(self.instance_dir, "kanboard_api_token")
+
+        remove_secret(self.instance_dir, secret_id="kanboard_api_token", actor="tester")
+
+        self.assertEqual(list_secrets(self.instance_dir), ())
+
+    def test_legacy_entry_is_not_materialized_but_migrated_transport_is_redacted(self) -> None:
+        self._historical_entry(materialize={"target": "runtime-env"})
+        transport, _ = ensure_board_transport(
+            self.instance_dir,
+            legacy_values={
+                "KANBOARD_URL": "http://legacy/jsonrpc.php",
+                "KANBOARD_API_USER": "jsonrpc",
+                "KANBOARD_API_TOKEN": "migrated-live-token",
+            },
+        )
+
+        self.assertEqual(materialize_secrets(self.instance_dir), ())
+        self.assertIn(transport.token, secret_store.redaction_values(self.instance_dir))
 
 
 # The three keys the live installation's runtime.env holds, in the order the live

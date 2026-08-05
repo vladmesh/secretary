@@ -427,7 +427,7 @@ def _wait_for_kanboard(transport: BoardTransport, *, timeout: int = 90) -> None:
     deadline = time.monotonic() + timeout
     while True:
         try:
-            KanboardClient(transport.as_environ()).call("getVersion")
+            KanboardClient(transport=transport).call("getVersion")
             return
         except TaskError:
             if time.monotonic() >= deadline:
@@ -460,12 +460,8 @@ def bootstrap(args: argparse.Namespace) -> int:
         # Bootstrap may be safely rerun for an existing dedicated user.
         _ensure_installation_user(args.installation_user, recovery=True, dry_run=args.dry_run)
         _clone_or_reuse(args.instance_remote, target, recovery=True, dry_run=args.dry_run)
-        values = _runtime_values(runtime)
         transport, _ = ensure_from_runtime_file(target, runtime, dry_run=args.dry_run)
-        for key in transport.as_environ():
-            values.pop(key, None)
         if not args.dry_run:
-            _write_runtime(runtime, values)
             _mark_bootstrap_checkout(target)
             _set_installation_owner(target, args.installation_user)
             _install_platform(dry_run=False, runtime_user=args.installation_user)
@@ -473,7 +469,7 @@ def bootstrap(args: argparse.Namespace) -> int:
             _compose_file(compose)
             _run(["docker", "compose", "--env-file", str(transport_path(target)), "-f", str(compose), "up", "--detach"], label="start Kanboard", timeout=180)
             _wait_for_kanboard(transport)
-            ensure_pipeline_board(target, client=KanboardClient(transport.as_environ()))
+            ensure_pipeline_board(target, client=KanboardClient(transport=transport))
         print("secretary bootstrap\nstatus: " + ("preview" if args.dry_run else "ok"))
         return 0
     except (BootstrapError, InstallError, TaskError, OSError, RuntimeError) as exc:

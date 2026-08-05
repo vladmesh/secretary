@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from secretary.board_transport import BoardTransportError, resolve as resolve_board_transport
+from secretary.board_transport import BoardTransport, BoardTransportError, resolve as resolve_board_transport
 from triggered_agents.agents.pipeline.heads import CODEX_LAUNCH_MODES
 from triggered_agents.runtime.redact import redact
 from secretary.role_env import runtime_env_path
@@ -309,14 +309,18 @@ def is_significant_observer_event(
 class KanboardClient:
     """Small JSON-RPC client using local board transport configuration."""
 
-    def __init__(self, environ: dict[str, str] | None = None) -> None:
+    def __init__(
+        self, *, transport: BoardTransport | None = None, instance_dir: str | Path | None = None,
+    ) -> None:
         try:
-            transport = resolve_board_transport(environ=environ)
-        except BoardTransportError as exc:
+            configured = transport or resolve_board_transport(
+                instance_dir if instance_dir is not None else os.environ.get("SECRETARY_INSTANCE")
+            )
+        except BoardTransportError:
             raise TaskError("backend_unavailable", "Kanboard runtime configuration is unavailable", 1)
-        self.url = transport.url
-        self.user = transport.user
-        self.token = transport.token
+        self.url = configured.url
+        self.user = configured.user
+        self.token = configured.token
 
     def call(self, method: str, **params: Any) -> Any:
         payload: dict[str, Any] = {"jsonrpc": "2.0", "id": 1, "method": method}

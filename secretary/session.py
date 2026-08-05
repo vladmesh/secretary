@@ -16,7 +16,6 @@ import sys
 
 from secretary.role_env import RUNTIME_ENV, load_env_file
 from secretary.board_transport import BoardTransportError, resolve as resolve_board_transport
-from secretary.board_transport import LEGACY_ENV
 from triggered_agents.agents.pipeline import heads as head_registry
 
 
@@ -48,8 +47,6 @@ def operator_env(
     base = dict(os.environ if base_env is None else base_env)
     source = load_env_file(env_file)
     env = {**base, **source}
-    for key in LEGACY_ENV:
-        env.pop(key, None)
     env["SECRETARY_ROLE"] = "operator"
     try:
         resolve_board_transport(env.get("SECRETARY_INSTANCE"))

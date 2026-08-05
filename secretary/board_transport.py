@@ -45,11 +45,10 @@ class BoardTransport:
         return f"Basic {encoded}"
 
 
-def transport_path(instance_dir: Path | str | None = None, *, environ: Mapping[str, str] | None = None) -> Path:
+def transport_path(instance_dir: Path | str | None = None) -> Path:
     if instance_dir is not None:
         return Path(instance_dir).expanduser() / TRANSPORT_FILE
-    env = os.environ if environ is None else environ
-    return Path(env.get("SECRETARY_INSTANCE") or default_instance_path()) / TRANSPORT_FILE
+    return default_instance_path() / TRANSPORT_FILE
 
 
 def _parse(path: Path) -> BoardTransport:
@@ -91,20 +90,13 @@ def legacy_transport(values: Mapping[str, str] | None) -> BoardTransport | None:
     return BoardTransport(*(str(values[name]) for name in LEGACY_ENV))
 
 
-def resolve(instance_dir: Path | str | None = None, *, environ: Mapping[str, str] | None = None) -> BoardTransport:
-    """Read the one authoritative local transport file.
-
-    ``environ`` accepts a complete tuple only as an explicit in-process adapter.
-    A normal caller never falls back to ambient legacy variables: after migration
-    the file is the sole authority, rather than one of two competing sources.
-    """
-    path = transport_path(instance_dir, environ=environ)
+def resolve(instance_dir: Path | str | None = None) -> BoardTransport:
+    """Read the one authoritative local transport file."""
+    if instance_dir is None:
+        instance_dir = os.environ.get("SECRETARY_INSTANCE") or None
+    path = transport_path(instance_dir)
     if path.is_file():
         return _parse(path)
-    if environ is not None:
-        direct = legacy_transport(environ)
-        if direct is not None:
-            return direct
     raise BoardTransportError(f"board transport configuration is missing: {path}")
 
 
@@ -171,4 +163,7 @@ def ensure_from_runtime_file(instance_dir: Path | str, runtime_env: Path | str |
     return transport, status
 
 
-__all__ = ["BoardTransport", "BoardTransportError", "DEFAULT_TOKEN", "LEGACY_ENV", "ensure", "ensure_from_runtime_file", "resolve", "transport_path"]
+__all__ = [
+    "BoardTransport", "BoardTransportError", "DEFAULT_TOKEN", "LEGACY_ENV", "ensure",
+    "ensure_from_runtime_file", "resolve", "transport_path",
+]

@@ -35,8 +35,8 @@ from typing import Callable, Iterator
 
 from secretary._fsutil import publish_component_entries, publish_state_atomic, write_json, write_text_atomic
 from secretary.board_transport import (
+    BoardTransport,
     BoardTransportError,
-    LEGACY_ENV,
     ensure_from_runtime_file,
     resolve as resolve_board_transport,
 )
@@ -205,14 +205,20 @@ def _clone_or_reuse(remote: str, target: Path, *, recovery: bool, dry_run: bool)
     return "reused checkpoint checkout"
 
 
+class RuntimeEnvMissing(InstallError):
+    """The optional host runtime file is absent, rather than malformed or unsafe."""
+
+
 def _read_runtime_env(instance_dir: Path, override: str | None) -> dict[str, str]:
     path = Path(override).expanduser() if override else instance_dir / "runtime.env"
     try:
         mode = path.lstat().st_mode
-    except OSError:
-        raise InstallError(
+    except FileNotFoundError:
+        raise RuntimeEnvMissing(
             f"runtime credentials are required: create {path}, chmod 0600, then rerun with --recover"
         ) from None
+    except OSError:
+        raise InstallError("runtime.env metadata is unreadable") from None
     if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
         raise InstallError("runtime.env must be a regular file, not a symlink")
     if mode & 0o077:
@@ -370,7 +376,9 @@ def _runtime_environment(values: dict[str, str]) -> Iterator[None]:
                 os.environ[key] = value
 
 
-def check_prerequisites(installation_user: str | None = None) -> None:
+def check_prerequisites(
+    installation_user: str | None = None, *, transport: BoardTransport | None = None,
+) -> None:
     if shutil.which("orca") is None:
         raise InstallError(
             "Orca is not installed; install a supported Orca runtime before secretary recovery"
@@ -383,8 +391,8 @@ def check_prerequisites(installation_user: str | None = None) -> None:
     else:
         _run(["orca", "--version"], label="inspect Orca")
     try:
-        resolve_board_transport()
-        TaskReader(KanboardClient()).list()
+        configured = transport or resolve_board_transport()
+        TaskReader(KanboardClient(transport=configured)).list()
     except BoardTransportError as exc:
         raise InstallError(f"board transport configuration is unavailable: {exc}") from None
     except TaskError as exc:
@@ -888,10 +896,10 @@ def install(args: argparse.Namespace) -> InstallResult:
 
         try:
             values = _read_runtime_env(target, args.runtime_env)
-        except InstallError as exc:
+        except RuntimeEnvMissing as exc:
             # A legacy board-only catalog is inert after this migration. It
             # must not force a recovery phrase merely to recreate transport.
-            if secrets.store_present and not secrets.locked and not secrets.missing:
+            if secrets.store_present and secrets.unlocked and not secrets.locked and not secrets.missing:
                 values = {}
             elif not secrets.store_present:
                 # No store: the operator still owns this file, and the refusal
@@ -901,19 +909,17 @@ def install(args: argparse.Namespace) -> InstallResult:
                 _restore_without_credentials(args, target, result)
                 raise _blocked_by_secrets(exc, secrets, runtime_env) from None
         try:
-            _transport, transport_status = ensure_from_runtime_file(
+            transport, transport_status = ensure_from_runtime_file(
                 target, runtime_env, dry_run=args.dry_run
             )
         except BoardTransportError as exc:
             raise InstallError(str(exc)) from None
-        for name in LEGACY_ENV:
-            values.pop(name, None)
         result.add("board-transport", "would-change" if args.dry_run and transport_status != "unchanged" else (
             "changed" if transport_status != "unchanged" else "unchanged"
         ), transport_status)
         result.add("runtime-env", "unchanged", "host-only runtime configuration loaded")
         with _runtime_environment({**values, "SECRETARY_INSTANCE": str(target)}):
-            check_prerequisites(args.installation_user)
+            check_prerequisites(args.installation_user, transport=transport)
             result.add("prerequisites", "unchanged", "Kanboard and Orca are reachable")
             report = _validated_instance(target)
             data_dir = Path(report.instance["data_dir"]).expanduser().resolve()

@@ -3415,8 +3415,15 @@ class DispatcherRuntime:
                 # A status is only a snapshot.  The next operation stops a live pane, so take one
                 # final reading: output can arrive or the TUI can leave its prompt between this
                 # tick's readiness probe and the destructive action.
-                if not self._idle_wait_fence(task, record, records, payload, status, kind=kind):
+                fenced = self._idle_wait_fence(task, record, records, payload, kind=kind)
+                if fenced is None:
                     return unavailable() if runtime_reason else None
+                fenced_status, idle_trigger = fenced
+                if not fenced_status.get("live"):
+                    return self._trigger_wait_watchdog(
+                        task, record, records, payload, attempt_id, kind=kind,
+                        trigger=f"terminal {fenced_status.get('reason') or 'missing'}",
+                    )
                 # Degraded, not ok. A head that stopped without delivering is the pipeline failing
                 # to make progress on a card, and the operator learns about it from the tick's own
                 # health: an `ok` bounce would write healthy telemetry over the one signal that
@@ -3473,10 +3480,9 @@ class DispatcherRuntime:
         record: DispatcherRecord,
         records: dict[str, DispatcherRecord],
         payload: dict[str, Any],
-        status: dict[str, Any],
         *,
         kind: str,
-    ) -> bool:
+    ) -> tuple[dict[str, Any], str] | None:
         """Confirm an idle watchdog verdict before it stops a live head.
 
         The first reading has already aged through the idle window.  This second one is deliberately
@@ -3489,22 +3495,17 @@ class DispatcherRuntime:
                 if kind == "review" else self.host.worker_status(task, record)
             )
         except Exception:
-            return False
-        if not (current.get("live") and current.get("pid_confirmed") and current.get("idle")):
-            idle_since = float(getattr(record, f"{kind}_idle_since") or 0.0)
-            if idle_since:
-                setattr(record, f"{kind}_idle_since", 0.0)
-                self.save_records(payload, records)
-            return False
-        previous_activity = float(status.get("last_activity") or 0.0)
-        current_activity = float(current.get("last_activity") or 0.0)
-        if current_activity > previous_activity:
-            # The activity belongs to a fresh idle episode only after the probe that observed it.
-            # Retaining the old timestamp would turn a race with output into an immediate respawn.
-            setattr(record, f"{kind}_idle_since", time.time())
-            self.save_records(payload, records)
-            return False
-        return True
+            return None
+        if not current.get("live"):
+            return current, ""
+        # A momentary heartbeat failure cannot prove a working head and must not erase the idle
+        # episode. The regular fallback remains available on the next tick.
+        if not current.get("pid_confirmed"):
+            return None
+        trigger = self._idle_wait_trigger(
+            record, records, payload, current, kind=kind, now=time.time()
+        )
+        return (current, trigger) if trigger else None
 
     def _idle_wait_trigger(
         self,
@@ -3533,27 +3534,17 @@ class DispatcherRuntime:
         pipeline answers a dialog, so it ends the wait the same way and says so.
         """
         idle_since = float(getattr(record, f"{kind}_idle_since") or 0.0)
-        if not status.get("idle"):
-            if idle_since:
-                setattr(record, f"{kind}_idle_since", 0.0)
-                self.save_records(payload, records)
-            return ""
-        activity = float(status.get("last_activity") or 0.0)
-        # An idle TUI alone is not enough: Codex may be polling a test subprocess while the
-        # readiness probe incorrectly says it is ready.  The watchdog window is continuous only
-        # while neither the terminal nor the provider reports new activity.
-        if not idle_since or activity > idle_since:
-            setattr(record, f"{kind}_idle_since", now)
+        verdict, next_idle_since = _idle_verdict(status, idle_since, now)
+        if next_idle_since != idle_since:
+            setattr(record, f"{kind}_idle_since", next_idle_since)
             self.save_records(payload, records)
-            return ""
-        idle_for = int(now - idle_since)
-        if idle_for <= _idle_stall_seconds():
+        if not verdict:
             return ""
         expectation = _wait_expectation(kind)
         if kind == "worker":
             expectation = f"{expectation} for generation {record.report_generation}"
         state = "held in a dialog" if status.get("idle_reason") == "dialog" else "idle"
-        return f"the head has been {state} for {idle_for}s with no {expectation}"
+        return f"the head has been {state} for {int(now - next_idle_since)}s with no {expectation}"
 
     def _trigger_wait_watchdog(
         self, task, record, records, payload, attempt_id, *, kind: str, trigger: str,
@@ -5063,6 +5054,21 @@ def _continuation_prompt(
 
 def _wait_expectation(kind: str) -> str:
     return "review verdict" if kind == "review" else "worker report"
+
+
+def _idle_verdict(status: dict[str, Any], idle_since: float, now: float) -> tuple[bool, float]:
+    """Evaluate one continuous idle episode without mutating dispatcher state.
+
+    The TUI's readiness is only meaningful together with terminal/provider activity. A busy
+    probe clears the episode, while newer activity begins a fresh one; callers may safely apply
+    this same result to the normal status and to the pre-stop re-probe.
+    """
+    if not status.get("idle"):
+        return False, 0.0
+    activity = float(status.get("last_activity") or 0.0)
+    if not idle_since or activity > idle_since:
+        return False, now
+    return now - idle_since > _idle_stall_seconds(), idle_since
 
 
 def _watchdog_kind(role: str) -> str:

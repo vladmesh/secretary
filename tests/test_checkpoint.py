@@ -418,6 +418,22 @@ class CheckpointWriterTests(unittest.TestCase):
         exported = (self.instance_dir / "state" / "board" / "export.json").read_text(encoding="utf-8")
         self.assertIn(contents, json.loads(exported)["report"])
 
+    def test_migrated_board_transport_token_is_redacted_from_the_checkpoint(self):
+        transport, _ = ensure_board_transport(
+            self.instance_dir,
+            legacy_values={
+                "KANBOARD_URL": "http://legacy/jsonrpc.php",
+                "KANBOARD_API_USER": "jsonrpc",
+                "KANBOARD_API_TOKEN": "migrated-live-token",
+            },
+        )
+        self.seed_board([{**CARD, "description": f"token {transport.token}"}])
+
+        result = self.write()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("secret detected", result.reason)
+
     def test_named_runtime_secret_in_a_card_still_blocks_the_checkpoint(self):
         secret = "opaque-token-value"
         (self.instance_dir / "runtime.env").write_text(
