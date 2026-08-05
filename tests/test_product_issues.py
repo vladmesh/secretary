@@ -223,7 +223,7 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
         carried.write_text(staged.read_text(encoding="utf-8"), encoding="utf-8")
         staged.unlink()
 
-        with mock.patch("secretary.product_issue_commands.KanboardClient", return_value=client):
+        with mock.patch("secretary.product_issue_commands.KanboardClient.for_instance", return_value=client):
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
                 adopted = main([

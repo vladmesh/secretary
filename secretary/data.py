@@ -286,7 +286,7 @@ def export_sprint_entities(client: Any = None) -> list[dict[str, Any]]:
     from secretary.tasks import KanboardClient, TaskError
 
     try:
-        reader = SprintReader(client if client is not None else KanboardClient())
+        reader = SprintReader(client if client is not None else KanboardClient.for_environ())
         return [normalize_sprint_entity(sprint) for sprint in reader.export()]
     except TaskError as exc:
         raise RuntimeError(f"sprint export failed: {exc.message}") from None

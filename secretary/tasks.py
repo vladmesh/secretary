@@ -18,10 +18,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from secretary.board_transport import BoardTransport, BoardTransportError, resolve_for_environ
+from secretary.board_transport import BoardTransport, BoardTransportError, resolve, resolve_for_environ
 from triggered_agents.agents.pipeline.heads import CODEX_LAUNCH_MODES
+from triggered_agents.runtime.paths import instance_dir as normalize_instance_dir
 from triggered_agents.runtime.redact import redact
-from secretary.role_env import runtime_env_path
 
 
 class TaskError(Exception):
@@ -308,25 +308,28 @@ def is_significant_observer_event(
 class KanboardClient:
     """Small JSON-RPC client using local board transport configuration."""
 
-    def __init__(
-        self, *, transport: BoardTransport | None = None, instance_dir: str | Path | None = None,
-    ) -> None:
+    def __init__(self, transport: BoardTransport, instance_dir: Path) -> None:
+        self.instance_dir = normalize_instance_dir(instance_dir).resolve()
+        self.url = transport.url
+        self._transport = transport
+
+    @classmethod
+    def for_instance(cls, instance: str | Path) -> "KanboardClient":
         try:
-            if instance_dir is not None:
-                self.instance_dir: Path | None = Path(instance_dir).expanduser().resolve()
-            elif transport is None:
-                configured = resolve_for_environ(os.environ)
-                self.instance_dir = Path(str(os.environ["SECRETARY_INSTANCE"])).expanduser().resolve()
-                self.url = configured.url
-                self._transport = configured
-                return
-            else:
-                self.instance_dir = None
-            configured = transport or resolve_for_environ({"SECRETARY_INSTANCE": str(self.instance_dir)})
+            root = normalize_instance_dir(instance).resolve()
+            return cls(resolve(root), root)
         except BoardTransportError:
             raise TaskError("backend_unavailable", "Kanboard runtime configuration is unavailable", 1) from None
-        self.url = configured.url
-        self._transport = configured
+
+    @classmethod
+    def for_environ(cls, environ: dict[str, str] | None = None) -> "KanboardClient":
+        env = os.environ if environ is None else environ
+        try:
+            configured = resolve_for_environ(env)
+            root = normalize_instance_dir(str(env["SECRETARY_INSTANCE"])).resolve()
+        except BoardTransportError:
+            raise TaskError("backend_unavailable", "Kanboard runtime configuration is unavailable", 1) from None
+        return cls(configured, root)
 
     def call(self, method: str, **params: Any) -> Any:
         payload: dict[str, Any] = {"jsonrpc": "2.0", "id": 1, "method": method}
@@ -889,14 +892,15 @@ class TaskWriter:
         self.client = client
         self.reader = TaskReader(client)
         self.data_dir = Path(data_dir)
+        self.instance_dir = Path(client.instance_dir).expanduser().resolve()
         self.audit = TaskAudit(data_dir)
         self.workspace = Path(workspace) if workspace is not None else None
         self._redaction_cache: tuple[tuple[tuple[str, int, int], ...], tuple[str, ...]] | None = None
 
-    def _redaction_values(self, instance_dir: Path) -> tuple[str, ...]:
+    def _redaction_values(self) -> tuple[str, ...]:
         """Open the catalog at most once while its on-disk inputs are unchanged."""
-        root = instance_dir / "secrets"
-        paths = [root / "catalog.yaml", root / "installation.key", instance_dir / "board-transport.env"]
+        root = self.instance_dir / "secrets"
+        paths = [root / "catalog.yaml", root / "installation.key", self.instance_dir / "board-transport.env"]
         values_dir = root / "values"
         if values_dir.is_dir():
             paths.extend(sorted(path for path in values_dir.iterdir() if path.is_file()))
@@ -914,7 +918,7 @@ class TaskWriter:
         from secretary.secret_store import SecretStoreError, redaction_values
 
         try:
-            values = redaction_values(instance_dir)
+            values = redaction_values(self.instance_dir)
         except SecretStoreError as exc:
             raise TaskError("backend_unavailable", f"board redaction configuration is unavailable: {exc}", 1) from None
         self._redaction_cache = (key, values)
@@ -930,21 +934,14 @@ class TaskWriter:
         installation, unlike the redactor's home-directory compatibility
         default.
         """
-        instance_dir = getattr(self.client, "instance_dir", None)
-        if instance_dir is None:
-            # Test doubles do not bind an installation. Production KanboardClient always does.
-            runtime_env = runtime_env_path()
-            instance_dir = runtime_env.parent
-        else:
-            instance_dir = Path(instance_dir).expanduser().resolve()
-            runtime_env = runtime_env_path(instance_dir)
+        runtime_env = self.instance_dir / "runtime.env"
         # Keep TaskWriter importable while config is loading sprints.  The
         # store depends on that same config module and is needed only at a real
         # protocol write, long after startup imports have settled.
         return redact(
             text,
             env_files=[runtime_env],
-            secret_values=self._redaction_values(instance_dir),
+            secret_values=self._redaction_values(),
         )
 
     def create(

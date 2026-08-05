@@ -75,6 +75,7 @@ class FakeSprintReader:
 
 class FakeKanboard:
     def __init__(self) -> None:
+        self.instance_dir = Path.cwd()
         self.calls: list[tuple[str, dict]] = []
         self.tasks = [
             {
@@ -251,7 +252,7 @@ class TaskCliTests(unittest.TestCase):
             client = WriteKanboard()
             client.metadata[12]["claim"] = ""
             output, errors = io.StringIO(), io.StringIO()
-            with mock.patch("secretary.task_commands.KanboardClient", return_value=client), \
+            with mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=client), \
                  contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
                 code = main([
                     "task", "archive",
@@ -275,7 +276,7 @@ class KanboardClientTests(unittest.TestCase):
         response.__enter__.return_value = response
         with mock.patch("secretary.tasks.urllib.request.urlopen", return_value=response):
             client = KanboardClient(
-                transport=BoardTransport("https://board.invalid", "user", "super-secret")
+                BoardTransport("https://board.invalid", "user", "super-secret"), Path.cwd(),
             )
             with self.assertRaises(TaskError) as raised:
                 client.call("getAllTasks", project_id=1)
@@ -390,6 +391,7 @@ class TaskWriterTests(unittest.TestCase):
     def setUp(self) -> None:
         self.client = WriteKanboard()
         self.tmpdir = tempfile.TemporaryDirectory()
+        self.client.instance_dir = Path(self.tmpdir.name)
         self.writer = TaskWriter(self.client, data_dir=self.tmpdir.name)
 
     def tearDown(self) -> None:
@@ -2050,7 +2052,7 @@ class AssessmentStateTests(unittest.TestCase):
 
     def _move_cli(self, *arguments: str) -> tuple[int, str, str]:
         output, errors = io.StringIO(), io.StringIO()
-        with mock.patch("secretary.task_commands.KanboardClient", return_value=self.client), \
+        with mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client), \
              contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
             code = main([
                 "task", "move", "--ref", "secretary-468",
@@ -2083,7 +2085,7 @@ class AssessmentStateTests(unittest.TestCase):
         reason = Path(self.tmpdir.name) / "reason.md"
         reason.write_text("ship it", encoding="utf-8")
         output, errors = io.StringIO(), io.StringIO()
-        with mock.patch("secretary.task_commands.KanboardClient", return_value=self.client), \
+        with mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client), \
              contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
             decided = main([
                 "task", "decide", "--ref", "secretary-468", "--role", "observer",
@@ -2469,7 +2471,7 @@ class BlockedContractTests(unittest.TestCase):
         body = Path(self.tmpdir.name) / "report.md"
         body.write_text("the upstream API is down\n", encoding="utf-8")
         output, errors = io.StringIO(), io.StringIO()
-        with mock.patch("secretary.task_commands.KanboardClient", return_value=self.client), \
+        with mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client), \
              contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
             code = main([
                 "task", "report", "--role", "worker", "--ref", "secretary-468",
@@ -2485,7 +2487,7 @@ class BlockedContractTests(unittest.TestCase):
         body = Path(self.tmpdir.name) / "report.md"
         body.write_text("the card contradicts itself\n", encoding="utf-8")
         output, errors = io.StringIO(), io.StringIO()
-        with mock.patch("secretary.task_commands.KanboardClient", return_value=self.client), \
+        with mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client), \
              contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
             code = main([
                 "task", "report", "--role", "worker", "--ref", "secretary-468",
@@ -2755,7 +2757,7 @@ class RequestIdOwnershipTests(unittest.TestCase):
             "--data-dir", data_dir, "--body-file", str(body), "--request-id", "cli-round-1",
         ]
         output, errors = io.StringIO(), io.StringIO()
-        with mock.patch("secretary.task_commands.KanboardClient", return_value=self.client), \
+        with mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client), \
              mock.patch("secretary.tasks.workspace_dirt", return_value=[]), \
              contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
             self.assertEqual(main(argv), 0)

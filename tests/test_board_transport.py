@@ -10,7 +10,7 @@ from unittest import mock
 
 from secretary.board_transport import BoardTransportError, ensure, ensure_from_runtime_values, findings, resolve, transport_path
 from secretary.runtime_env import RuntimeEnvError, read_runtime_env
-from secretary.tasks import KanboardClient, TaskError
+from secretary.tasks import KanboardClient, TaskError, TaskWriter
 from triggered_agents.runtime import kanboard
 
 
@@ -26,7 +26,7 @@ class BoardTransportTests(unittest.TestCase):
             one = ensure(Path(first), allow_default=True).transport
             two = ensure(Path(second), allow_default=True).transport
             self.assertEqual(one, two)
-            client = KanboardClient(transport=one)
+            client = KanboardClient(one, Path(first))
         self.assertEqual(client.url, one.url)
         self.assertEqual(
             one.authorization_header(),
@@ -58,7 +58,7 @@ class BoardTransportTests(unittest.TestCase):
                 mock.patch("triggered_agents.runtime.kanboard.urllib.request.urlopen", side_effect=open_request),
                 mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(instance)}, clear=True),
             ):
-                KanboardClient().call("getVersion")
+                KanboardClient.for_environ().call("getVersion")
                 kanboard.call("getVersion")
 
         self.assertEqual(observed, [transport.authorization_header(), transport.authorization_header()])
@@ -172,7 +172,7 @@ class BoardTransportTests(unittest.TestCase):
                 "KANBOARD_API_TOKEN": "legacy-token",
             }, clear=True):
                 with self.assertRaisesRegex(TaskError, "configuration is unavailable"):
-                    KanboardClient()
+                    KanboardClient.for_environ()
 
     def test_existing_instance_without_transport_or_complete_legacy_tuple_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -205,7 +205,7 @@ class BoardTransportTests(unittest.TestCase):
             try:
                 os.chdir(cwd)
                 with mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": ""}, clear=True):
-                    self.assertEqual(KanboardClient(instance_dir=instance).url, "http://127.0.0.1:8080/jsonrpc.php")
+                    self.assertEqual(KanboardClient.for_instance(instance).url, "http://127.0.0.1:8080/jsonrpc.php")
             finally:
                 os.chdir(previous)
 
@@ -227,6 +227,19 @@ class BoardTransportTests(unittest.TestCase):
             path.symlink_to(linked)
             with self.assertRaisesRegex(BoardTransportError, "regular file"):
                 resolve(instance)
+
+    def test_real_client_binds_task_redaction_to_dir_and_instance_yaml(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            ensure(instance, allow_default=True)
+            (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+            for spelling in (instance, instance / "instance.yaml"):
+                with self.subTest(spelling=spelling):
+                    writer = TaskWriter(KanboardClient.for_instance(spelling), data_dir=instance / "data")
+                    secret = "MIGRATED-LIVE-TOKEN-0123456789"
+                    with mock.patch("secretary.secret_store.redaction_values", return_value=(secret,)) as values:
+                        self.assertNotIn(secret, writer._redact_for_board(f"token {secret}"))
+                    values.assert_called_once_with(instance)
 
     def test_dry_run_reports_a_planned_durable_ignore_change(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

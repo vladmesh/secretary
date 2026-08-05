@@ -141,7 +141,7 @@ def _sprints(
     """Read the sprint entity and live board without consulting observer context."""
     try:
         reader = SprintReader(
-            KanboardClient(instance_dir=instance_dir), data_dir=data_dir, thresholds=budget_thresholds(instance),
+            _board_client(instance_dir), data_dir=data_dir, thresholds=budget_thresholds(instance),
         )
         observers = {row["sprint"]: row for row in observer_snapshot(production)}
         return {
@@ -153,6 +153,11 @@ def _sprints(
         }
     except TaskError as exc:
         return {"items": [], "error": {"code": exc.code, "message": exc.message}}
+
+
+def _board_client(instance_dir: Path) -> KanboardClient:
+    """One explicit instance route for the status sprint read."""
+    return KanboardClient.for_instance(instance_dir)
 
 
 def _units(expected, collected: CollectResult, *, offline: bool) -> list[dict[str, Any]]:

@@ -58,7 +58,7 @@ _pinned_orca_patcher.start()
 # (real or live-looking) can never make a unit test read or write a real
 # board (secretary-1026). See tests/kanboard_fixtures.py.
 _status_kanboard_patcher = mock.patch(
-    "secretary.status.KanboardClient", return_value=OfflineKanboard()
+    "secretary.status._board_client", return_value=OfflineKanboard()
 )
 _status_kanboard_patcher.start()
 

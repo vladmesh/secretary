@@ -118,7 +118,7 @@ def _rename_column(api: KanboardClient, column: dict, title: str) -> None:
 def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = None) -> int:
     """Create the Pipeline board, columns and registry swimlanes without moving cards."""
     try:
-        api = client or KanboardClient()
+        api = client or KanboardClient.for_instance(instance)
         board = api.call("getProjectByName", name="Pipeline")
         if not isinstance(board, dict) or not board.get("id"):
             board_id = api.call("createProject", name="Pipeline")
@@ -208,7 +208,7 @@ def migrate_assessment_column(*, client: KanboardClient | None = None) -> dict[s
     one partial layout below, and the next run finishes that column instead of adding a second one.
     """
     try:
-        api = client or KanboardClient()
+        api = client or KanboardClient.for_environ()
         board = api.call("getProjectByName", name="Pipeline")
         if not isinstance(board, dict) or not board.get("id"):
             raise BootstrapError("Pipeline board does not exist")
@@ -406,11 +406,11 @@ def _ensure_docker_ready(*, timeout: int = 60) -> None:
         time.sleep(1)
 
 
-def _wait_for_kanboard(transport: BoardTransport, *, timeout: int = 90) -> None:
+def _wait_for_kanboard(instance: Path, *, timeout: int = 90) -> None:
     deadline = time.monotonic() + timeout
     while True:
         try:
-            KanboardClient(transport=transport).call("getVersion")
+            KanboardClient.for_instance(instance).call("getVersion")
             return
         except TaskError:
             if time.monotonic() >= deadline:
@@ -459,8 +459,8 @@ def bootstrap(args: argparse.Namespace) -> int:
             compose = Path("/opt/secretary/kanboard-compose.yml")
             _compose_file(compose)
             _run(["docker", "compose", "--env-file", str(transport_path(target)), "-f", str(compose), "up", "--detach"], label="start Kanboard", timeout=180)
-            _wait_for_kanboard(transport)
-            ensure_pipeline_board(target, client=KanboardClient(transport=transport))
+            _wait_for_kanboard(target)
+            ensure_pipeline_board(target, client=KanboardClient.for_instance(target))
         print("secretary bootstrap\nstatus: " + ("preview" if args.dry_run else "ok"))
         return 0
     except (BootstrapError, InstallError, TaskError, OSError, RuntimeError) as exc:

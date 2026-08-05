@@ -34,6 +34,7 @@ from tests.observer_identity import as_observer, bind_observer, unbound_observer
 
 class SprintKanboard:
     def __init__(self) -> None:
+        self.instance_dir = Path.cwd()
         self.calls: list[tuple[str, dict]] = []
         self.projects = {"Pipeline": 7}
         self.columns = {
@@ -1994,7 +1995,7 @@ class SprintTests(SprintFixture):
 
     def test_cli_create_and_list_return_stable_json(self) -> None:
         output, errors = io.StringIO(), io.StringIO()
-        with mock.patch("secretary.sprint_commands.KanboardClient", return_value=self.client), \
+        with mock.patch("secretary.sprint_commands.KanboardClient.for_instance", return_value=self.client), \
              contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
             code = main([
                 "sprint", "create", "--role", "po", "--data-dir", self.tmp.name,
@@ -2020,7 +2021,7 @@ class SprintTests(SprintFixture):
         )["task"]
         output, errors = io.StringIO(), io.StringIO()
 
-        with mock.patch("secretary.sprint_commands.KanboardClient", return_value=self.client), \
+        with mock.patch("secretary.sprint_commands.KanboardClient.for_instance", return_value=self.client), \
              contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
             code = main([
                 "sprint", "current-task", "--ref", ref, "--role", "observer", "--actor", "observer",

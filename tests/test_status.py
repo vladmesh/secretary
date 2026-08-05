@@ -229,7 +229,7 @@ class StatusCliTests(unittest.TestCase):
             })
             output = io.StringIO()
             report = validate_instance(instance)
-            with contextlib.redirect_stdout(output), mock.patch("secretary.status.KanboardClient", return_value=board), mock.patch(
+            with contextlib.redirect_stdout(output), mock.patch("secretary.status._board_client", return_value=board), mock.patch(
                 "secretary.status.checkpoint_snapshot", return_value={
                     "last_commit": None, "lag_minutes": None, "remote_diverged": False, "blocked_reason": None,
                 }

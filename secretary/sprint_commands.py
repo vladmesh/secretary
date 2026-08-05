@@ -99,11 +99,11 @@ def not_implemented(args: argparse.Namespace) -> int:
 
 
 def _read(
-    operation: Callable[[SprintReader], object], *, data_dir: str | None = None,
+    args: argparse.Namespace, operation: Callable[[SprintReader], object], *, data_dir: str | None = None,
     thresholds: dict | None = None,
 ) -> int:
     try:
-        result = operation(SprintReader(KanboardClient(), data_dir=data_dir, thresholds=thresholds))
+        result = operation(SprintReader(KanboardClient.for_instance(args.instance), data_dir=data_dir, thresholds=thresholds))
     except TaskError as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
         return exc.exit_code
@@ -114,7 +114,7 @@ def _read(
 def _write(args: argparse.Namespace, operation: Callable[[SprintWriter], object]) -> int:
     try:
         result = operation(SprintWriter(
-            KanboardClient(), data_dir=resolve_data_dir(args), thresholds=_thresholds(args),
+            KanboardClient.for_instance(args.instance), data_dir=resolve_data_dir(args), thresholds=_thresholds(args),
             instance=getattr(args, "instance", None) or None,
         ))
     except TaskError as exc:
@@ -125,11 +125,11 @@ def _write(args: argparse.Namespace, operation: Callable[[SprintWriter], object]
 
 
 def run_list(args: argparse.Namespace) -> int:
-    return _read(lambda reader: reader.list(statuses=set(args.status or ())))
+    return _read(args, lambda reader: reader.list(statuses=set(args.status or ())))
 
 
 def run_show(args: argparse.Namespace) -> int:
-    return _read(
+    return _read(args,
         lambda reader: reader.show(args.ref), data_dir=resolve_data_dir(args), thresholds=_thresholds(args),
     )
 
@@ -141,7 +141,7 @@ def run_status(args: argparse.Namespace) -> int:
     except (OSError, ValueError, UnicodeError):
         raw = {}
     observer = next((row for row in observer_snapshot(raw) if row.get("sprint") == args.ref), None)
-    return _read(
+    return _read(args,
         lambda reader: reader.status(args.ref, observer=observer), data_dir=data_dir, thresholds=_thresholds(args),
     )
 

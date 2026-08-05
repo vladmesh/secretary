@@ -16,7 +16,7 @@ class RuntimeEnvMissing(RuntimeEnvError):
     """The optional host runtime file is absent."""
 
 
-def runtime_env_path(instance_dir: Path, override: str | None = None) -> Path:
+def instance_runtime_env_path(instance_dir: Path, override: str | None = None) -> Path:
     return Path(override).expanduser() if override else instance_dir / "runtime.env"
 
 
@@ -30,7 +30,7 @@ def read_runtime_env(
     live duplicate behind. Other runtime settings retain the established tolerant
     whitespace behavior.
     """
-    path = runtime_env_path(instance_dir, override)
+    path = instance_runtime_env_path(instance_dir, override)
     try:
         mode = path.lstat().st_mode
     except FileNotFoundError:

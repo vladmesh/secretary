@@ -45,7 +45,7 @@ If the change is ready for a full check, run:
 
 ```bash
 python3 -m unittest
-python3 -P -m secretary role-skills audit --check
+python3 -m secretary role-skills audit --check
 ```
 
 CI runs the unit suite on every pull request. A short note about what changed and what you verified
