@@ -34,8 +34,6 @@ import os
 from pathlib import Path
 from unittest import mock
 
-from tests.kanboard_fixtures import OfflineKanboard
-
 _FIXTURE_ORCA = Path(__file__).resolve().parent / "fixtures" / "legacy-orca"
 
 _find_orca_patcher = mock.patch(
@@ -51,16 +49,6 @@ _pinned_orca_patcher = mock.patch(
     "secretary.host_apply.pinned_orca_executable", return_value=None
 )
 _pinned_orca_patcher.start()
-
-# secretary.status.collect_status's sprint read builds a KanboardClient()
-# from bare os.environ with no test seam of its own. Route it to an
-# in-memory, zero-network fake by default so ambient KANBOARD_* credentials
-# (real or live-looking) can never make a unit test read or write a real
-# board (secretary-1026). See tests/kanboard_fixtures.py.
-_status_kanboard_patcher = mock.patch(
-    "secretary.status._board_client", return_value=OfflineKanboard()
-)
-_status_kanboard_patcher.start()
 
 # `git fetch` ends with `git maintenance run --auto`, and gc detaches by default,
 # so a repository a test built in a temporary directory can still be written to

@@ -56,6 +56,7 @@ def add_restore_subcommands(subparsers) -> None:
         "migrate-assessment",
         help="add the Assessment column to a Pipeline board that already holds cards",
     )
+    migrate_assessment.add_argument("--instance", required=True)
     migrate_assessment.set_defaults(handler=run_board_migrate_assessment)
     live_board.set_defaults(handler=_board_subcommand_required)
 
@@ -115,11 +116,11 @@ def _board_subcommand_required(args: argparse.Namespace) -> int:
 
 
 def run_board_migrate_assessment(args: argparse.Namespace) -> int:
-    """Add the Assessment column to the live board. Reads Kanboard credentials from env."""
+    """Add the Assessment column to the board bound to ``--instance``."""
     from secretary.bootstrap import BootstrapError, migrate_assessment_column
 
     try:
-        result = migrate_assessment_column()
+        result = migrate_assessment_column(Path(args.instance).expanduser())
     except BootstrapError as exc:
         _print_json({"ok": False, "action": "board migrate-assessment", "error": str(exc)})
         return 2

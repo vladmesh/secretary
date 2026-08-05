@@ -913,7 +913,7 @@ def run_export_board(args: argparse.Namespace) -> int:
     if data_dir is None:
         return 1
     try:
-        result = export_board(data_dir)
+        result = export_board(data_dir, instance_dir=Path(args.instance).expanduser())
     except RuntimeError as exc:
         print(f"secretary data export-board: {exc}")
         return 1

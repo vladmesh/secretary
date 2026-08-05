@@ -196,7 +196,7 @@ def _card_placement(api: KanboardClient, board_id: int) -> dict[int, tuple[int, 
     return placement
 
 
-def migrate_assessment_column(*, client: KanboardClient | None = None) -> dict[str, object]:
+def migrate_assessment_column(instance: Path | None = None, *, client: KanboardClient | None = None) -> dict[str, object]:
     """Add the `Assessment` column to a populated Pipeline board, in place.
 
     `ensure_pipeline_board` refuses to reshape a board that holds cards, on purpose: a rename
@@ -208,7 +208,9 @@ def migrate_assessment_column(*, client: KanboardClient | None = None) -> dict[s
     one partial layout below, and the next run finishes that column instead of adding a second one.
     """
     try:
-        api = client or KanboardClient.for_environ()
+        if client is None and instance is None:
+            raise BootstrapError("board migration requires the target instance")
+        api = client or KanboardClient.for_instance(instance)
         board = api.call("getProjectByName", name="Pipeline")
         if not isinstance(board, dict) or not board.get("id"):
             raise BootstrapError("Pipeline board does not exist")

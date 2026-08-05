@@ -111,7 +111,7 @@ class InstallationTests(unittest.TestCase):
                 mock.patch("secretary.installation._run"),
                 mock.patch("secretary.installation.TaskReader") as reader,
             ):
-                check_prerequisites(transport=transport)
+                check_prerequisites(transport=transport, instance_dir=Path(tmp))
 
         self.assertEqual(reader.call_args.args[0]._transport, transport)
 
@@ -305,7 +305,7 @@ class InstallationTests(unittest.TestCase):
             mock.patch("secretary.installation.KanboardClient"),
             mock.patch("secretary.installation.TaskReader") as reader,
         ):
-            check_prerequisites(DEFAULT_TRANSPORT, "dev")
+            check_prerequisites(DEFAULT_TRANSPORT, Path("/tmp/instance"), "dev")
 
         self.assertIn(
             ["runuser", "--user", "dev", "--", "orca", "--version"],

@@ -333,7 +333,9 @@ def _runtime_environment(values: dict[str, str]) -> Iterator[None]:
                 os.environ[key] = value
 
 
-def check_prerequisites(instance_dir: Path, installation_user: str | None = None) -> None:
+def check_prerequisites(
+    transport: BoardTransport, instance_dir: Path, installation_user: str | None = None,
+) -> None:
     if shutil.which("orca") is None:
         raise InstallError(
             "Orca is not installed; install a supported Orca runtime before secretary recovery"
@@ -346,9 +348,7 @@ def check_prerequisites(instance_dir: Path, installation_user: str | None = None
     else:
         _run(["orca", "--version"], label="inspect Orca")
     try:
-        TaskReader(KanboardClient.for_instance(instance_dir)).list()
-    except BoardTransportError as exc:
-        raise InstallError(f"board transport configuration is unavailable: {exc}") from None
+        TaskReader(KanboardClient(transport, instance_dir)).list()
     except TaskError as exc:
         raise InstallError(f"Kanboard prerequisite failed: {exc.message}") from None
 
@@ -900,7 +900,7 @@ def install(args: argparse.Namespace) -> InstallResult:
             "host-only runtime configuration loaded" if runtime_loaded else "not required by this installation",
         )
         with _runtime_environment({**values, "SECRETARY_INSTANCE": str(target)}):
-            check_prerequisites(target, args.installation_user)
+            check_prerequisites(transport, target, args.installation_user)
             result.add("prerequisites", "unchanged", "Kanboard and Orca are reachable")
             report = _validated_instance(target)
             data_dir = Path(report.instance["data_dir"]).expanduser().resolve()

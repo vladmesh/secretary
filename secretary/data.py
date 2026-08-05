@@ -159,6 +159,7 @@ def raw_kanboard_dump(
 def export_board(
     data_dir: Path,
     *,
+    instance_dir: Path | None = None,
     pipeline_worktree: Path = PIPELINE_WORKTREE,
     command: list[str] | None = None,
     sprint_client: Any = None,
@@ -196,7 +197,7 @@ def export_board(
 
     # Sprint entities live on their own board and never reach `pipeline export`, so the
     # checkpoint reads them separately instead of inferring them from linked cards.
-    sprints = export_sprint_entities(sprint_client)
+    sprints = export_sprint_entities(instance_dir, sprint_client)
 
     raw_active_task_count = _latest_raw_active_task_count(
         board_dir,
@@ -280,13 +281,16 @@ def normalize_board_card(list_card: dict[str, Any], shown_card: dict[str, Any]) 
     }
 
 
-def export_sprint_entities(client: Any = None) -> list[dict[str, Any]]:
+def export_sprint_entities(instance_dir: Path | None, client: Any = None) -> list[dict[str, Any]]:
     """Read the sprint board into deterministic checkpoint records."""
     from secretary.sprints import SprintReader
     from secretary.tasks import KanboardClient, TaskError
 
     try:
-        reader = SprintReader(client if client is not None else KanboardClient.for_environ())
+        board_client = client if client is not None else (
+            KanboardClient.for_instance(instance_dir) if instance_dir is not None else KanboardClient.for_environ()
+        )
+        reader = SprintReader(board_client)
         return [normalize_sprint_entity(sprint) for sprint in reader.export()]
     except TaskError as exc:
         raise RuntimeError(f"sprint export failed: {exc.message}") from None
@@ -603,7 +607,7 @@ def export_all(
 ) -> dict[str, DataExport]:
     return {
         "memory": export_memory(data_dir, instance_dir),
-        "board": export_board(data_dir),
+        "board": export_board(data_dir, instance_dir=instance_dir),
         "runs": export_runs(data_dir),
         "transcripts": export_transcripts(data_dir, copy=copy_transcripts),
         "artifacts": export_artifacts(data_dir),

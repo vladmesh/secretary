@@ -34,7 +34,7 @@ from tests.observer_identity import as_observer, bind_observer, unbound_observer
 
 class SprintKanboard:
     def __init__(self) -> None:
-        self.instance_dir = Path.cwd()
+        self.instance_dir = Path(tempfile.gettempdir())
         self.calls: list[tuple[str, dict]] = []
         self.projects = {"Pipeline": 7}
         self.columns = {

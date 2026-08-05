@@ -183,6 +183,7 @@ class CheckpointWriter:
         try:
             board = export_board(
                 self.data_dir,
+                instance_dir=self.instance_dir,
                 pipeline_worktree=self.pipeline_worktree,
                 command=self.command,
             )

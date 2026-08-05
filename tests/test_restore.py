@@ -618,7 +618,7 @@ class RestoreTests(unittest.TestCase):
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [_restore_card()]}), encoding="utf-8"
             )
-            with self.assertRaisesRegex(RestoreError, "Kanboard runtime configuration"):
+            with self.assertRaisesRegex(RestoreError, "requires the target instance"):
                 import_normalized_board(data_dir)
 
     def test_board_restore_normalizes_legacy_routing_metadata(self):

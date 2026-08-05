@@ -75,7 +75,7 @@ class FakeSprintReader:
 
 class FakeKanboard:
     def __init__(self) -> None:
-        self.instance_dir = Path.cwd()
+        self.instance_dir = Path(tempfile.gettempdir())
         self.calls: list[tuple[str, dict]] = []
         self.tasks = [
             {

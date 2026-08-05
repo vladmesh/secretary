@@ -53,7 +53,7 @@ def resolve_data_dir(args: argparse.Namespace) -> str:
 
 def _instance(args: argparse.Namespace) -> str:
     """One explicit board-routing source for every task command."""
-    return str(getattr(args, "instance", None) or os.environ.get("SECRETARY_INSTANCE") or DEFAULT_INSTANCE)
+    return str(getattr(args, "instance", None) or DEFAULT_INSTANCE)
 
 
 def add_task_subcommands(subparsers) -> None:

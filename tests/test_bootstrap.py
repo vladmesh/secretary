@@ -477,7 +477,7 @@ class BootstrapBoardTests(unittest.TestCase):
                 mock.patch("secretary.bootstrap._set_installation_owner"),
                 mock.patch("secretary.bootstrap._compose_file"),
                 mock.patch("secretary.bootstrap._run"),
-                mock.patch("secretary.bootstrap.KanboardClient", return_value=board),
+                mock.patch("secretary.bootstrap.KanboardClient.for_instance", return_value=board),
             ):
                 self.assertEqual(bootstrap(args), 0)
 

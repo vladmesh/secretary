@@ -1,13 +1,8 @@
-"""The default Kanboard fake for `secretary.status.collect_status` is suite-wide
-and overridable.
+"""Status reads fail closed and accept an explicit in-memory board seam.
 
-secretary-1026: the default unit-test run must not read or write a live board
-merely because the process inherited a real installation's `KANBOARD_*`
-variables. `tests/__init__.py` patches `secretary.status.KanboardClient` to
-`tests.kanboard_fixtures.OfflineKanboard` before any test module is imported;
-these tests prove that default wins even when the environment holds
-live-looking credentials for a reachable-shaped URL, and that a test can
-still opt in to a real sprint board's shape locally.
+secretary-1026: ambient `KANBOARD_*` credentials must never make a unit test
+read or write a live board.  Tests that need sprint data pass their fake board
+through `collect_status(..., sprint_client=...)`.
 """
 
 from __future__ import annotations
@@ -35,13 +30,9 @@ def _report(root: Path):
 
 class HermeticKanboardTests(unittest.TestCase):
     def test_default_never_dials_out_even_with_live_looking_credentials(self):
-        # No local secretary.status.KanboardClient patch here: this exercises
-        # the process-wide default installed by tests/__init__.py, with
-        # KANBOARD_* set to a URL that looks exactly like a live
-        # installation's. If collect_status ever went back to building a real
-        # KanboardClient() from bare os.environ, the urlopen patch below would
-        # turn that network attempt into a loud test failure instead of a
-        # silent (or slow) real request.
+        # No injected board here.  Even with live-looking credentials, the
+        # temporary instance has no transport and must fail before any network
+        # request; urlopen makes an accidental dial-out loud.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report = _report(root)
@@ -55,21 +46,17 @@ class HermeticKanboardTests(unittest.TestCase):
             ):
                 snapshot = collect_status(report, offline=True)
 
-        self.assertIsNone(snapshot["installation"]["sprints"]["error"])
+        self.assertEqual(snapshot["installation"]["sprints"]["error"]["code"], "backend_unavailable")
         self.assertEqual(snapshot["installation"]["sprints"]["items"], [])
 
     def test_a_test_can_still_opt_in_to_a_real_sprint_boards_shape(self):
-        # This opt-in shadows the default fake with FakeKanboard (undoing the
-        # tests/__init__.py default for the duration of the `with` block),
-        # proving the escape hatch reaches sprint content and not just a
-        # second layer of the same empty fake.
+        # The explicit fake board is the status injection seam.
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report = _report(root)
             board = FakeKanboard()
             board.add_sprint("sprint:1")
-            with mock.patch("secretary.status.KanboardClient", return_value=board):
-                snapshot = collect_status(report, offline=True)
+            snapshot = collect_status(report, offline=True, sprint_client=board)
 
         self.assertIsNone(snapshot["installation"]["sprints"]["error"])
         self.assertEqual(len(snapshot["installation"]["sprints"]["items"]), 1)

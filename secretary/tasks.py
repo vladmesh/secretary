@@ -18,7 +18,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from secretary.board_transport import BoardTransport, BoardTransportError, resolve, resolve_for_environ
+from secretary.board_transport import (
+    BoardTransport, BoardTransportError, resolve, resolve_for_environ, transport_path,
+)
 from triggered_agents.agents.pipeline.heads import CODEX_LAUNCH_MODES
 from triggered_agents.runtime.paths import instance_dir as normalize_instance_dir
 from triggered_agents.runtime.redact import redact
@@ -895,23 +897,24 @@ class TaskWriter:
         self.instance_dir = Path(client.instance_dir).expanduser().resolve()
         self.audit = TaskAudit(data_dir)
         self.workspace = Path(workspace) if workspace is not None else None
-        self._redaction_cache: tuple[tuple[tuple[str, int, int], ...], tuple[str, ...]] | None = None
+        self._redaction_cache: tuple[tuple[tuple[str, int, int, int], ...], tuple[str, ...]] | None = None
 
     def _redaction_values(self) -> tuple[str, ...]:
         """Open the catalog at most once while its on-disk inputs are unchanged."""
         root = self.instance_dir / "secrets"
-        paths = [root / "catalog.yaml", root / "installation.key", self.instance_dir / "board-transport.env"]
+        transport = transport_path(self.instance_dir)
+        paths = [root / "catalog.yaml", root / "installation.key", transport]
         values_dir = root / "values"
         if values_dir.is_dir():
             paths.extend(sorted(path for path in values_dir.iterdir() if path.is_file()))
-        fingerprint: list[tuple[str, int, int]] = []
+        fingerprint: list[tuple[str, int, int, int]] = []
         for path in paths:
             try:
                 info = path.stat()
             except OSError:
-                fingerprint.append((str(path), -1, -1))
+                fingerprint.append((str(path), -1, -1, -1))
             else:
-                fingerprint.append((str(path), info.st_mtime_ns, info.st_size))
+                fingerprint.append((str(path), info.st_mtime_ns, info.st_size, info.st_mode))
         key = tuple(fingerprint)
         if self._redaction_cache is not None and self._redaction_cache[0] == key:
             return self._redaction_cache[1]

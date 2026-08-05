@@ -95,7 +95,7 @@ ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
 BOARD_ROLES = {"po", "dispatcher", "worker", "reviewer", "observer", "steward", "retro"}
 # Roles whose executable boundary must prove a usable board transport.  This is
 # deliberately separate from BOARD_ROLES, which controls only BOARD_ROLE injection.
-BOARD_TRANSPORT_ROLES = frozenset(("worker", "reviewer", "observer", "steward", "retro"))
+BOARD_TRANSPORT_ROLES = frozenset(("pipeline", "worker", "reviewer", "observer", "steward", "retro"))
 _KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SENSITIVE_ENV_NAME_RE = re.compile(
     r"(^|_)(TOKEN|PASSWORD|PASSWD|SECRET|PAT|KEY|IDENTITY|CREDENTIAL|AUTH|WEBHOOK)(_|$)",

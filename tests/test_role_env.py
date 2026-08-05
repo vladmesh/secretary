@@ -74,6 +74,9 @@ class RuntimeEnvRoleTests(unittest.TestCase):
                     with mock.patch.dict(os.environ, env, clear=True):
                         self.assertEqual(kanboard._creds(), transport)
 
+    def test_pipeline_is_explicitly_subject_to_the_transport_gate(self) -> None:
+        self.assertIn("pipeline", role_env.BOARD_TRANSPORT_ROLES)
+
     def test_required_role_rendering_does_not_probe_board_transport(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)

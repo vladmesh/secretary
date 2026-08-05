@@ -218,7 +218,7 @@ class StatusCliTests(unittest.TestCase):
                 sprint_resume=json.dumps({
                     "selected_step": "fix", "selected_why": "blocked", "rejected_alternatives": "wait",
                     "current_task": "secretary-510-pilot", "dod_state": "pending", "next_safe_step": "test",
-                    "recorded_at": "2020-01-01T00:00:00Z",
+                    "recorded_at": "not-a-timestamp",
                 }),
             )
             board.metadata[12]["sprint_ref"] = "sprint:1"
@@ -229,13 +229,13 @@ class StatusCliTests(unittest.TestCase):
             })
             output = io.StringIO()
             report = validate_instance(instance)
-            with contextlib.redirect_stdout(output), mock.patch("secretary.status._board_client", return_value=board), mock.patch(
+            with contextlib.redirect_stdout(output), mock.patch(
                 "secretary.status.checkpoint_snapshot", return_value={
                     "last_commit": None, "lag_minutes": None, "remote_diverged": False, "blocked_reason": None,
                 }
             ):
                 from secretary.status import collect_status
-                snapshot = collect_status(report, offline=True)
+                snapshot = collect_status(report, offline=True, sprint_client=board)
 
         self.assertEqual(validate(snapshot, "status", "status.json"), [])
         sprint = snapshot["installation"]["sprints"]["items"][0]

@@ -28,7 +28,9 @@ from secretary.tasks import KanboardClient, TaskError
 STATUS_SCHEMA_VERSION = 1
 
 
-def collect_status(report, *, host_fixture: str | None = None, offline: bool = False) -> dict[str, Any]:
+def collect_status(
+    report, *, host_fixture: str | None = None, offline: bool = False, sprint_client: KanboardClient | None = None,
+) -> dict[str, Any]:
     """Return a stable, non-mutating snapshot for one validated instance."""
     data_dir = Path(report.instance["data_dir"]).expanduser()
     instance_dir = report.instance_path.parent
@@ -51,7 +53,7 @@ def collect_status(report, *, host_fixture: str | None = None, offline: bool = F
             "heads": _heads(report.instance),
             "head_registry": _head_registry(report.instance_path.parent),
             "cards": {"total": _card_count(data_dir), "active_attempts": len(_attempts(production, probe_panels=False))},
-            "sprints": _sprints(data_dir, report.instance_path.parent, report.instance, production),
+            "sprints": _sprints(data_dir, report.instance_path.parent, report.instance, production, client=sprint_client),
         },
         "host": {
             "units": _units(expected, collected, offline=offline),
@@ -137,11 +139,12 @@ def _head_registry(instance_dir: Path) -> dict[str, Any]:
 
 def _sprints(
     data_dir: Path, instance_dir: Path, instance: dict[str, Any], production: dict[str, Any],
+    *, client: KanboardClient | None = None,
 ) -> dict[str, Any]:
     """Read the sprint entity and live board without consulting observer context."""
     try:
         reader = SprintReader(
-            _board_client(instance_dir), data_dir=data_dir, thresholds=budget_thresholds(instance),
+            client if client is not None else KanboardClient.for_instance(instance_dir),
         )
         observers = {row["sprint"]: row for row in observer_snapshot(production)}
         return {
@@ -155,9 +158,6 @@ def _sprints(
         return {"items": [], "error": {"code": exc.code, "message": exc.message}}
 
 
-def _board_client(instance_dir: Path) -> KanboardClient:
-    """One explicit instance route for the status sprint read."""
-    return KanboardClient.for_instance(instance_dir)
 
 
 def _units(expected, collected: CollectResult, *, offline: bool) -> list[dict[str, Any]]:

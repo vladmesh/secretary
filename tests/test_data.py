@@ -1230,9 +1230,9 @@ class ExportTests(unittest.TestCase):
             with (
                 mock.patch(
                     "secretary.data.export_board",
-                    side_effect=lambda data_dir_arg: calls.append("board")
+                    side_effect=lambda data_dir_arg, *, instance_dir: calls.append("board")
                     or data_module.DataExport(data_dir_arg / "board.json", 1, "board"),
-                ),
+                ) as board,
                 mock.patch(
                     "secretary.data.export_memory",
                     side_effect=lambda data_dir_arg, instance_dir_arg: calls.append("memory")
@@ -1261,6 +1261,7 @@ class ExportTests(unittest.TestCase):
                 export_all(data_dir, instance_dir, copy_transcripts=True)
 
         self.assertEqual(calls, ["memory", "board", "runs", "transcripts", "artifacts"])
+        board.assert_called_once_with(data_dir, instance_dir=instance_dir)
         transcripts.assert_called_once_with(data_dir, copy=True)
         artifacts.assert_called_once_with(data_dir)
         memory.assert_called_once_with(data_dir, instance_dir)

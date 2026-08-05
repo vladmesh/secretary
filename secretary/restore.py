@@ -116,9 +116,10 @@ def import_normalized_board(
             # board already restored behind a refusal.
             _check_restored_observers(sprints, instance)
             _check_restored_admission(sprints, instance)
-            client = client or (
-                KanboardClient.for_instance(instance) if instance is not None else KanboardClient.for_environ()
-            )
+            if client is None:
+                if instance is None:
+                    raise RestoreError("restore requires the target instance to bind its board")
+                client = KanboardClient.for_instance(instance)
             reader = TaskReader(client)
             writer = TaskWriter(client, data_dir=data_dir)
             _, unresolved = writer.reconcile()
