@@ -35,7 +35,7 @@ from pathlib import Path
 
 from secretary.dispatcher_helpers import _legacy_worker_branch, _tail, safe_one_line
 from secretary.dispatcher_gate_receipt import is_exact_sha, mint_gate_receipt
-from secretary.dispatcher_types import HostError
+from secretary.dispatcher_types import GateTransportError, HostError
 
 # How long a github CI rollup may sit non-terminal (PENDING/NONE) before the pending watchdog
 # escalates the card to Blocked — a required check nothing ever posts, a job waiting on manual
@@ -46,6 +46,11 @@ GATE_PENDING_STALL_SECONDS = int(os.environ.get("SECRETARY_GATE_PENDING_STALL_SE
 # local-gate stderr/stdout tail and the github-gate `--log-failed` fragment size read this, so
 # there is one place to widen or narrow the excerpt instead of a magic number per call site.
 GATE_LOG_FRAGMENT_LINES = int(os.environ.get("SECRETARY_GATE_LOG_FRAGMENT_LINES", "40"))
+
+# How many consecutive ticks the gate backend may fail to answer before the card is blocked
+# (secretary-1164). A blip costs the card a tick, not a round; a backend that is genuinely gone
+# still reaches a human instead of leaving the card in Validate forever.
+GATE_TRANSPORT_MAX_ATTEMPTS = max(1, int(os.environ.get("SECRETARY_GATE_TRANSPORT_MAX_ATTEMPTS", "5")))
 
 _FAIL_CONCLUSIONS = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE"}
 _RUN_URL_RE = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/actions/runs/(\d+)")
@@ -65,6 +70,25 @@ _INFRA_MARK_RE = re.compile(
     r"temporary failure in name resolution|failed to fetch|apt-get|npm err! network|"
     r"pip.{0,20}(?:could not find|could not install)|dependency resolution)\b"
 )
+# The gate asked its backend and no answer came back (secretary-1164): a timeout, a TLS or DNS
+# failure, a dropped connection, or a 5xx the backend itself served. None of these judge the code,
+# so they must not be read as a red gate — the card waits and the question is asked again. An
+# answer that arrived and says something (a 404, a rejected PR, a failed check) is not matched
+# here: the distinction is whether an answer was received, not whether it was liked.
+_TRANSPORT_MARK_RE = re.compile(
+    r"(?i)(tls handshake timeout|handshake failure|i/o timeout|timed? ?out(?: after)?|deadline "
+    r"exceeded|dial tcp|no such host|could not resolve host|temporary failure in name resolution|"
+    r"name or service not known|network is unreachable|no route to host|connection (?:reset|"
+    r"refused|closed|timed out)|connection was reset|unexpected eof|remote end hung up|"
+    r"broken pipe|server error|bad gateway|service unavailable|gateway time-?out|"
+    r"http 5\d\d|status(?: code)? 5\d\d|\bssl\b|\btls\b|certificate verify failed|"
+    r"proxy error|empty response from server|couldn't connect to server|failed to connect)"
+)
+
+
+def is_transport_failure(text: str) -> bool:
+    """Does this gate failure describe a backend that never answered? See `_TRANSPORT_MARK_RE`."""
+    return bool(_TRANSPORT_MARK_RE.search(text or ""))
 
 
 @dataclass
@@ -102,8 +126,26 @@ def _fingerprint(*parts: str) -> str:
 
 
 def gate_check(host, task: dict, record) -> GateResult:
-    """Run the mechanical gate for `task` in the worker workspace. Raises HostError on gate infra
-    failures (missing workspace, git/gh unreachable); returns a GateResult otherwise."""
+    """Run the mechanical gate for `task` in the worker workspace. Raises GateTransportError when
+    the backend never answered, HostError on any other gate infra failure (missing workspace, a
+    misconfigured mode, a repository the gate cannot resolve); returns a GateResult otherwise.
+
+    The transport classification happens here, once, rather than at each `gh`/`git` call site:
+    every network question the gate asks — fetching the base, publishing the branch, opening the
+    PR, reading the check rollup — fails by raising HostError with the tool's own text, and it is
+    that text that says whether an answer came back.
+    """
+    try:
+        return _gate_check(host, task, record)
+    except GateTransportError:
+        raise
+    except HostError as exc:
+        if is_transport_failure(str(exc)):
+            raise GateTransportError(str(exc)) from None
+        raise
+
+
+def _gate_check(host, task: dict, record) -> GateResult:
     if getattr(host, "mode", "real") == "noop":
         # A noop proves no command ran.  It may preserve dispatcher control flow, but must never
         # look like reusable validation evidence.

@@ -78,6 +78,20 @@ the fresh post-review receipt in the Assessment delivery, and writes the fresh f
 release audit after the mandatory exact-SHA pre-merge re-check. A receipt is evidence, not permission to
 skip the pre-merge check or independent review.
 
+A gate that could not reach its backend gave no verdict, and the dispatcher does not read that
+absence as a red one. A timeout, a TLS or DNS failure, a dropped connection or a 5xx served by the
+backend itself leaves the card exactly where it is — no board move, no head stopped, no verdict or
+decision spent — and the same question is asked again on the next tick. Every retry is one
+`gate-transport-retry` action in the tick output, carrying the attempt number and the transport
+error. The retries are bounded (`SECRETARY_GATE_TRANSPORT_MAX_ATTEMPTS`, five by default) and count
+consecutive silence only: any answer, green, red or pending, starts the budget over. Once the budget
+is spent the card moves to Blocked with a reason that names the transport and the last error, so an
+operator reads it as a network failure and not as a judgement on the branch. This holds on every
+path where the dispatcher asks the gate backend: the pre-review gate, the pre-merge re-check under a
+green verdict, and the release re-check of a parked decision. An answer that did arrive keeps
+deciding as before — a failed required check is still a red gate and still returns the card to its
+worker.
+
 Workers use focused checks while developing and run no more than one local broad suite for a report
 generation/unchanged SHA unless they state why it was rerun. Only an executed local/GitHub gate with a
 valid exact-SHA receipt is authoritative reusable evidence downstream. A none/noop gate or missing

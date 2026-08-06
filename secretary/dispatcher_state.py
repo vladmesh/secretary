@@ -50,6 +50,12 @@ class DispatcherRecord:
     # SHA-bound result of the last green mechanical gate.  It is an evidence receipt, not a
     # cache key: release still re-runs the gate immediately before merge.
     gate_attestation: dict[str, Any] = field(default_factory=dict)
+    # Consecutive times the gate backend failed to answer at all (secretary-1164), and the last
+    # such failure. A transport failure decides nothing about the card, so it is counted here and
+    # retried on the next tick; only the exhausted count blocks the card, naming the transport.
+    # Both reset the moment any answer — green, red or pending — comes back.
+    gate_transport_failures: int = 0
+    gate_transport_error: str = ""
     # Last checkout rejected by a mechanical gate or red review in this attempt. A worker that
     # reports done again at this exact SHA has not produced a new result, so the dispatcher can
     # return it to rework once and then escalate instead of looping forever.
@@ -159,6 +165,8 @@ class DispatcherRecord:
             "gate_pending_since": self.gate_pending_since,
             "gate_state": self.gate_state,
             "gate_attestation": dict(self.gate_attestation),
+            "gate_transport_failures": self.gate_transport_failures,
+            "gate_transport_error": self.gate_transport_error,
             "handle": self.handle,
             "head": self.head,
             "attempt_id": self.attempt_id,
@@ -254,6 +262,8 @@ class DispatcherRecord:
             gate_state=str(payload.get("gate_state") or ""),
             gate_pending_since=float(payload.get("gate_pending_since") or 0.0),
             gate_attestation=_run_snapshot(payload.get("gate_attestation")),
+            gate_transport_failures=int(payload.get("gate_transport_failures") or 0),
+            gate_transport_error=str(payload.get("gate_transport_error") or ""),
             rejected_sha=str(payload.get("rejected_sha") or ""),
             rejected_done_reports=int(payload.get("rejected_done_reports") or 0),
             review_handle=str(payload.get("review_handle") or ""),

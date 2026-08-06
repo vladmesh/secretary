@@ -31,7 +31,11 @@ from secretary.dispatcher import (
     _wrap_role_shell_command,
     default_data_dir,
 )
-from secretary.dispatcher_gate import GateResult
+from secretary.dispatcher_gate import (
+    GATE_TRANSPORT_MAX_ATTEMPTS,
+    GateResult,
+    is_transport_failure,
+)
 from secretary.dispatcher_helpers import (
     RED_REVIEW_CEILING,
     _decision_record_line,
@@ -59,6 +63,7 @@ from secretary.dispatcher_state import (
     now_rfc3339,
 )
 from secretary.dispatcher_types import (
+    GateTransportError,
     HeadLaunchAborted,
     HeadPaneNotReady,
     ReviewLaunch,
@@ -969,7 +974,12 @@ class FakeHost:
         if self.gate_error is not None:
             raise self.gate_error
         if self.gate_results:
-            return self.gate_results.pop(0)
+            scripted = self.gate_results.pop(0)
+            # A scripted gate answer may be the absence of one: an exception in the queue is
+            # raised where the real gate would have raised it.
+            if isinstance(scripted, Exception):
+                raise scripted
+            return scripted
         return GateResult("green", "gate green")
 
     def restore_workspace(self, task: dict, worker: str) -> str:
@@ -4255,6 +4265,208 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
         self.assertEqual(self.host.reviews, [])
+
+    # --- secretary-1164: a gate backend that never answered is not a red gate ---
+
+    TRANSPORT_ERROR = (
+        "gate gh api failed: Get "
+        "\"https://api.github.com/repos/example/sample/commits/d9b1ca7/check-runs\": "
+        "net/http: TLS handshake timeout"
+    )
+
+    def _blocked_reason(self) -> str:
+        return self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
+
+    def test_gate_transport_failure_leaves_the_card_waiting_and_retries(self) -> None:
+        """A question the backend never answered decides nothing: the card stays in Validate and
+        the gate is asked again on the next tick."""
+        self.start_dispatcher()
+        self.host.gate_results = [
+            GateTransportError(self.TRANSPORT_ERROR),
+            GateResult("green", "CI green"),
+        ]
+        self._run_worker_to_validate()
+
+        deferred = self.tick()
+
+        self.assertEqual(deferred["action"], "gate-transport-retry")
+        self.assertEqual(deferred["attempts"], 1)
+        self.assertIn("TLS handshake timeout", deferred["reason"])
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+        self.assertEqual(self.host.reviews, [], "an unanswered gate must not advance the card")
+
+        advanced = self.tick()
+
+        self.assertEqual(advanced["action"], "review-started")
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+
+    def test_gate_transport_failures_block_only_once_the_attempts_are_spent(self) -> None:
+        self.start_dispatcher()
+        self.host.gate_results = [
+            GateTransportError(self.TRANSPORT_ERROR) for _ in range(GATE_TRANSPORT_MAX_ATTEMPTS)
+        ]
+        self._run_worker_to_validate()
+
+        for attempt in range(1, GATE_TRANSPORT_MAX_ATTEMPTS):
+            deferred = self.tick()
+            self.assertEqual(deferred["action"], "gate-transport-retry")
+            self.assertEqual(deferred["attempts"], attempt)
+            self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+
+        blocked = self.tick()
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["reason"], "gate transport unavailable")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        reason = self._blocked_reason()
+        self.assertIn("transport failure, not a red gate", reason)
+        self.assertIn("TLS handshake timeout", reason)
+        self.assertNotIn("gate failed:", reason)
+        self.assertEqual(
+            len(self.host.gate_calls), GATE_TRANSPORT_MAX_ATTEMPTS,
+            "every attempt must actually ask the backend again",
+        )
+
+    def test_an_answered_gate_clears_earlier_transport_attempts(self) -> None:
+        """The budget counts consecutive silence: one answer, of any colour, starts it over."""
+        self.start_dispatcher()
+        self.host.gate_results = [
+            GateTransportError(self.TRANSPORT_ERROR),
+            GateResult("pending", "CI pending"),
+        ] + [GateTransportError(self.TRANSPORT_ERROR) for _ in range(GATE_TRANSPORT_MAX_ATTEMPTS - 1)]
+        self._run_worker_to_validate()
+
+        self.assertEqual(self.tick()["action"], "gate-transport-retry")
+        self.assertEqual(self.tick()["action"], "gate-pending")
+        for attempt in range(1, GATE_TRANSPORT_MAX_ATTEMPTS):
+            deferred = self.tick()
+            self.assertEqual(deferred["action"], "gate-transport-retry")
+            self.assertEqual(deferred["attempts"], attempt)
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+
+    def test_merge_gate_transport_failure_keeps_the_green_verdict_waiting(self) -> None:
+        """The pre-merge re-check under a green verdict: an unreachable backend must not bounce
+        the card to the worker the way a red gate does."""
+        self.start_dispatcher()
+        self.host.gate_results = [
+            GateResult("green", "green"),
+            GateTransportError(self.TRANSPORT_ERROR),
+            GateResult("green", "green"),
+        ]
+        self._run_worker_to_validate()
+        self.tick()
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot",
+            kind="green", body="looks good", request_id="review-green-transport",
+        )
+
+        deferred = self.tick()
+
+        self.assertEqual(deferred["action"], "gate-transport-retry")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+        self.assertEqual(self.host.completed, [])
+
+        released = self._park_and_decide("release")
+
+        self.assertEqual(released["to"], "done")
+        self.assertEqual(self.host.completed, ["secretary-510-pilot"])
+
+    def test_merge_gate_transport_blocks_with_a_transport_reason_when_spent(self) -> None:
+        self.start_dispatcher()
+        self.host.gate_results = [GateResult("green", "green")] + [
+            GateTransportError(self.TRANSPORT_ERROR) for _ in range(GATE_TRANSPORT_MAX_ATTEMPTS)
+        ]
+        self._run_worker_to_validate()
+        self.tick()
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot",
+            kind="green", body="looks good", request_id="review-green-transport-spent",
+        )
+
+        for _ in range(GATE_TRANSPORT_MAX_ATTEMPTS - 1):
+            self.assertEqual(self.tick()["action"], "gate-transport-retry")
+
+        blocked = self.tick()
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertIn("transport failure, not a red gate", self._blocked_reason())
+        self.assertEqual(self.host.completed, [])
+
+    def test_release_gate_transport_failure_keeps_the_decision_parked(self) -> None:
+        """The release re-check asks the backend once more; silence there must not turn a release
+        decision into a Blocked card while attempts remain."""
+        self.start_dispatcher()
+        self.host.gate_results = [
+            GateResult("green", "green"),
+            GateResult("green", "green"),
+            GateTransportError(self.TRANSPORT_ERROR),
+            GateResult("green", "green"),
+        ]
+        self._run_worker_to_validate()
+        self.tick()
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot",
+            kind="green", body="looks good", request_id="review-green-release-transport",
+        )
+
+        deferred = self._park_and_decide("release")
+
+        self.assertEqual(deferred["action"], "gate-transport-retry")
+        self.assertEqual(deferred["step"], "assessment")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "assessment")
+        self.assertEqual(self.host.completed, [])
+
+        released = self.tick()
+
+        self.assertEqual(released["to"], "done")
+        self.assertEqual(self.host.completed, ["secretary-510-pilot"])
+
+    def test_release_gate_transport_blocks_with_a_transport_reason_when_spent(self) -> None:
+        self.start_dispatcher()
+        self.host.gate_results = [
+            GateResult("green", "green"),
+            GateResult("green", "green"),
+        ] + [GateTransportError(self.TRANSPORT_ERROR) for _ in range(GATE_TRANSPORT_MAX_ATTEMPTS)]
+        self._run_worker_to_validate()
+        self.tick()
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot",
+            kind="green", body="looks good", request_id="review-green-release-transport-spent",
+        )
+
+        self.assertEqual(self._park_and_decide("release")["action"], "gate-transport-retry")
+        for _ in range(GATE_TRANSPORT_MAX_ATTEMPTS - 2):
+            self.assertEqual(self.tick()["action"], "gate-transport-retry")
+
+        blocked = self.tick()
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        reason = self._blocked_reason()
+        self.assertIn("Observer decision: release.", reason)
+        self.assertIn("transport failure, not a red gate", reason)
+        self.assertIn("TLS handshake timeout", reason)
+        self.assertEqual(self.host.completed, [])
+
+    def test_a_red_merge_gate_still_bounces_the_card_to_the_worker(self) -> None:
+        """The received answer keeps deciding: only the absence of one is retried."""
+        self.start_dispatcher()
+        self.host.gate_results = [
+            GateResult("green", "green"),
+            GateResult("red", "CI red: job «tests» failed", "assert False"),
+        ]
+        self._run_worker_to_validate()
+        self.tick()
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot",
+            kind="green", body="looks good", request_id="review-green-still-red",
+        )
+
+        bounced = self.tick()
+
+        self.assertEqual(bounced["action"], "merge-gate-red-rework")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
 
     def test_merge_blocked_when_gate_not_green(self) -> None:
         self.start_dispatcher()
@@ -8746,6 +8958,7 @@ class GithubGateHost(CommandHostRuntime):
         statuses: list | None = None,
         run_log: str = "",
         run_log_error: bool = False,
+        api_error: str = "",
     ) -> None:
         super().__init__(GateCatalog(adapter), root, mode="real")  # type: ignore[arg-type]
         self._pr_open = pr_open
@@ -8753,6 +8966,8 @@ class GithubGateHost(CommandHostRuntime):
         self._statuses = statuses or []
         self._run_log = run_log
         self._run_log_error = run_log_error
+        # stderr `gh api` fails with, when the test wants the backend not to answer at all.
+        self._api_error = api_error
         self.gh: list[list[str]] = []
 
     def _fake_gh(self, args):
@@ -8773,6 +8988,8 @@ class GithubGateHost(CommandHostRuntime):
                 return done("", code=1)
             return done(self._run_log)
         if args[1] == "api":
+            if self._api_error:
+                return subprocess.CompletedProcess(args, 1, "", self._api_error)
             path = args[2]
             if path.endswith("/check-runs"):
                 return done(json.dumps(self._check_runs))
@@ -8996,6 +9213,57 @@ class DispatcherGateTests(unittest.TestCase):
             result = host.gate_check(self._task(), self._record(ws))
         self.assertEqual(result.status, "red")
         self.assertIn("tests", result.summary)
+
+    def test_github_gate_transport_failure_is_not_a_verdict(self) -> None:
+        """secretary-1164: `gh api` that never got an answer raises a transport failure, so the
+        dispatcher can retry it instead of reading it as a red gate."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(), pr_open=True, check_runs=[],
+                api_error=(
+                    'Get "https://api.github.com/repos/example-org/sample/commits/d9b1ca7/'
+                    'check-runs": net/http: TLS handshake timeout'
+                ),
+            )
+            with self.assertRaises(GateTransportError) as caught:
+                host.gate_check(self._task(), self._record(ws))
+        self.assertIn("TLS handshake timeout", str(caught.exception))
+
+    def test_github_gate_answered_error_stays_a_host_failure(self) -> None:
+        """An answer that arrived and says the repository is wrong is not a transport failure:
+        retrying it forever would hide a real misconfiguration."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(), pr_open=True, check_runs=[],
+                api_error="gh: Not Found (HTTP 404)",
+            )
+            with self.assertRaises(HostError) as caught:
+                host.gate_check(self._task(), self._record(ws))
+        self.assertNotIsInstance(caught.exception, GateTransportError)
+
+    def test_transport_classification_covers_the_named_failure_modes(self) -> None:
+        for text in (
+            "net/http: TLS handshake timeout",
+            "dial tcp 140.82.121.6:443: i/o timeout",
+            "dial tcp: lookup api.github.com: no such host",
+            "fatal: unable to access ...: Could not resolve host: github.com",
+            "read tcp 10.0.0.2:52134->140.82.121.6:443: connection reset by peer",
+            "gh: Server Error (HTTP 502)",
+            "gh: Service Unavailable (HTTP 503)",
+            "gate gh api failed: unexpected EOF",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(is_transport_failure(text))
+        for text in (
+            "gh: Not Found (HTTP 404)",
+            "gate workspace is missing",
+            "local validation has no command",
+            "gate could not open a PR for 'pipeline/secretary-633': pull request already exists",
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(is_transport_failure(text))
 
     def test_github_gate_red_fragment_skips_aggregate_job_echo(self) -> None:
         """secretary-766: `--log-failed` dumps every failed job, including one that only
