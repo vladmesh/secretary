@@ -57,6 +57,7 @@ from secretary.dispatcher_helpers import (
 )
 from secretary.dispatcher_gate import (
     GATE_PENDING_STALL_SECONDS,
+    GATE_TRANSPORT_MAX_ATTEMPTS,
     GateResult,
     _fingerprint as _gate_fingerprint,
     gate_check as _gate_check,
@@ -158,6 +159,7 @@ from secretary.dispatcher_tui import (
 from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
 from secretary.dispatcher_types import (
     DispatcherError,
+    GateTransportError,
     HeadLaunchAborted,
     HeadPaneNotReady,
     HostError,
@@ -3139,6 +3141,8 @@ class DispatcherRuntime:
             # Fresh code state: the mechanical gate must re-run before this report reaches review.
             record.gate_state = ""
             record.gate_pending_since = 0.0
+            record.gate_transport_failures = 0
+            record.gate_transport_error = ""
             _reset_wait(record, "worker")
             _reset_wait(record, "review")
             records[ref] = record
@@ -3742,6 +3746,16 @@ class DispatcherRuntime:
             self.save_records(payload, records)
         try:
             result = self.host.gate_check(task, record)
+        except GateTransportError as exc:
+            retry = self._gate_transport_retry(
+                task, record, records, payload, attempt_id, exc, step="gate",
+            )
+            if retry is not None:
+                return retry
+            return self._block_gate_transport(
+                task, record, records, payload, attempt_id, step="gate",
+                action="gate-transport-blocked",
+            )
         except HostError as exc:
             self.host.stop(record)
             self.writer.move(
@@ -3755,6 +3769,7 @@ class DispatcherRuntime:
             records.pop(ref, None)
             self.save_records(payload, records)
             return {"status": "blocked", "step": "gate", "pilot_ref": ref, "reason": "validation gate failed"}
+        self._gate_answered(ref, record, records, payload)
         if result.status == "green":
             return self._accept_green_gate(
                 task, record, records, payload, attempt_id, result, stage="initial"
@@ -3998,6 +4013,8 @@ class DispatcherRuntime:
         record.gate_state = ""
         record.gate_pending_since = 0.0
         record.gate_attestation = {}
+        record.gate_transport_failures = 0
+        record.gate_transport_error = ""
         # The round the verdict judged is over here. A park keeps the reviewed commit while the
         # card waits; the rework this opens is new code, and a stale pin would refuse its merge.
         record.review_commit = ""
@@ -4247,6 +4264,99 @@ class DispatcherRuntime:
         self.save_records(payload, records)
         return {"status": "blocked", "step": step, "pilot_ref": ref, "reason": reason}
 
+    def _gate_answered(
+        self,
+        ref: str,
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+    ) -> None:
+        """The backend answered, so the transport retry budget starts over.
+
+        Any answer counts, including a red or a pending one: what the counter measures is silence,
+        not disapproval."""
+        if not record.gate_transport_failures and not record.gate_transport_error:
+            return
+        record.gate_transport_failures = 0
+        record.gate_transport_error = ""
+        records[ref] = record
+        self.save_records(payload, records)
+
+    def _gate_transport_retry(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        exc: GateTransportError,
+        *,
+        step: str,
+    ) -> dict[str, Any] | None:
+        """Count one unanswered gate question and, while the budget lasts, keep the card as it is.
+
+        Returns the tick outcome of a deferred retry, or None once the attempts are spent and the
+        caller must block the card. Nothing about the card moves here: no board move, no head is
+        stopped, no verdict or decision is spent. The same question is asked again on the next
+        tick, which is the deferral — the observer's wake retry defers the same way.
+        """
+        ref = task["ref"]
+        record.gate_transport_failures += 1
+        record.gate_transport_error = scrub_host_output(str(exc))
+        attempts = record.gate_transport_failures
+        records[ref] = record
+        self.save_records(payload, records)
+        if attempts >= GATE_TRANSPORT_MAX_ATTEMPTS:
+            return None
+        return {
+            "status": "degraded",
+            "step": step,
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "action": "gate-transport-retry",
+            "attempts": attempts,
+            "max_attempts": GATE_TRANSPORT_MAX_ATTEMPTS,
+            "reason": (
+                f"the mechanical gate could not reach its backend "
+                f"(attempt {attempts}/{GATE_TRANSPORT_MAX_ATTEMPTS}): "
+                f"{record.gate_transport_error}; the card is unchanged and the gate is asked "
+                f"again on the next tick"
+            ),
+        }
+
+    def _block_gate_transport(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        step: str,
+        action: str,
+        prefix: str = "",
+    ) -> dict[str, Any]:
+        """The gate backend stayed unreachable for the whole retry budget: Blocked, saying so.
+
+        The reason names the transport and the last error rather than "gate failed", because the
+        gate never gave a verdict: nothing is known about the code, and an operator reading this
+        has to look at the network, not at the branch.
+        """
+        attempts = record.gate_transport_failures or GATE_TRANSPORT_MAX_ATTEMPTS
+        last = record.gate_transport_error or "(no error text)"
+        reason = (
+            f"the mechanical gate could not reach its backend on {attempts} consecutive attempts, "
+            f"so it never returned a verdict; this is a transport failure, not a red gate. "
+            f"Last transport error: {last}"
+        )
+        return self._block_merge_path(
+            task, record, records, payload, attempt_id,
+            action=action,
+            reason=f"{prefix}{reason}" if prefix else reason,
+            step=step,
+            outcome="gate transport unavailable",
+        )
+
     def _gate_pending(
         self,
         task: dict[str, Any],
@@ -4312,16 +4422,22 @@ class DispatcherRuntime:
     ) -> tuple[str, GateResult | None, str]:
         """Everything that must hold before this checkout may be merged, read once.
 
-        Returns one of "drift", "failed", "pending", "red" or "green"; the gate result where
-        there is one, and the operator-facing detail where there is not. Both sides of the seam
-        ask it: Validate asks before parking a green verdict, so a card only ever parks with its
-        mechanical state green, and the release asks again immediately before the merge itself.
+        Returns one of "drift", "transport", "failed", "pending", "red" or "green"; the gate result
+        where there is one, and the operator-facing detail where there is not. Both sides of the
+        seam ask it: Validate asks before parking a green verdict, so a card only ever parks with
+        its mechanical state green, and the release asks again immediately before the merge itself.
+
+        "transport" is the question that never got an answer, and it is deliberately not "failed":
+        a backend that could not be reached says nothing about the checkout, so the caller retries
+        it rather than deciding the card on silence.
         """
         drift = self._review_drift(task, record)
         if drift:
             return "drift", None, drift
         try:
             result = self.host.gate_check(task, record)
+        except GateTransportError as exc:
+            return "transport", None, str(exc)
         except HostError as exc:
             return "failed", None, scrub_host_output(str(exc))
         if result.status == "green":
@@ -4350,10 +4466,24 @@ class DispatcherRuntime:
         # round and stays true even when the mechanical re-check bounces the card back afterwards.
         self._record_verdict_routing(ref, record, "green")
         kind, result, detail = self._merge_readiness(task, record)
+        if kind == "transport":
+            retry = self._gate_transport_retry(
+                task, record, records, payload, attempt_id,
+                GateTransportError(detail), step="review",
+            )
+            if retry is not None:
+                return retry
+            return self._block_gate_transport(
+                task, record, records, payload, attempt_id, step="review",
+                action="merge-gate-transport-blocked",
+            )
         if kind == "drift":
+            # The gate was never asked here, so nothing about the transport budget is known: the
+            # bounce clears the record's gate state on its own way to In progress.
             return self._gate_red_to_worker(
                 task, record, records, payload, attempt_id, GateResult("red", detail), phase="review-freeze"
             )
+        self._gate_answered(ref, record, records, payload)
         if kind == "failed":
             return self._block_merge_path(
                 task, record, records, payload, attempt_id,
@@ -4707,6 +4837,23 @@ class DispatcherRuntime:
         """
         ref = task["ref"]
         kind, result, detail = self._merge_readiness(task, record)
+        if kind == "transport":
+            # The decision stands and the card stays parked: a release that could not ask the gate
+            # is not a release that was refused.
+            retry = self._gate_transport_retry(
+                task, record, records, payload, attempt_id,
+                GateTransportError(detail), step="assessment",
+            )
+            if retry is not None:
+                return retry
+            return self._block_gate_transport(
+                task, record, records, payload, attempt_id, step="assessment",
+                action="release-gate-transport-blocked",
+                prefix="Observer decision: release. ",
+            )
+        if kind != "drift":
+            # `drift` is decided before the gate is asked; only an answer clears the budget.
+            self._gate_answered(ref, record, records, payload)
         if kind == "pending":
             return {"status": "ok", "step": "assessment", "pilot_ref": ref, "attempt_id": attempt_id, "action": "merge-gate-pending"}
         if kind != "green":

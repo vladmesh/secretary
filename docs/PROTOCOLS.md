@@ -78,6 +78,37 @@ the fresh post-review receipt in the Assessment delivery, and writes the fresh f
 release audit after the mandatory exact-SHA pre-merge re-check. A receipt is evidence, not permission to
 skip the pre-merge check or independent review.
 
+A gate that could not reach its backend gave no verdict, and the dispatcher does not read that
+absence as a red one. A timeout, a TLS or DNS failure, a dropped connection or a 5xx served by the
+backend itself leaves the card exactly where it is — no board move, no head stopped, no verdict or
+decision spent — and the same question is asked again on the next tick. Every retry is one
+`gate-transport-retry` action in the tick output, carrying the attempt number and the transport
+error. The retries are bounded (`SECRETARY_GATE_TRANSPORT_MAX_ATTEMPTS`, five by default) and count
+consecutive silence only: any answer, green, red or pending, starts the budget over. Once the budget
+is spent the card moves to Blocked with a reason that names the transport and the last error, so an
+operator reads it as a network failure and not as a judgement on the branch. This holds on every
+path where the dispatcher asks the gate backend: the pre-review gate, the pre-merge re-check under a
+green verdict, and the release re-check of a parked decision. An answer that did arrive keeps
+deciding as before — a failed required check is still a red gate and still returns the card to its
+worker.
+
+"No answer came back" is decided where the question is asked, not afterwards from the wording of an
+error. Every remote question the gate puts — the base fetch, the branch publish, the open-PR probe,
+the PR create, the repository name, the check rollup, the failed-job log — goes through one call
+helper, and only that helper raises the transport failure. A step that talks to nothing therefore
+cannot produce one: a local validation command that hangs past its own ceiling is a determinate
+answer about the branch and blocks the card immediately with that reason, however its message reads.
+Each call carries the tool's own output into that decision, so a probe never converts silence into a
+positive fact about the backend's state — an unanswered open-PR probe is not "there is no PR". Where
+a failed remote command still has to be sorted into answered and unanswered, that judgement lives
+inside the helper, and it recognises the answer rather than the failure: an HTTP status the tool
+quotes (unless it is a 5xx, which is the backend failing to serve one), a GraphQL error or a
+response body it parsed, or git's push report from the remote. Anything else a backend call prints —
+a transport message, an empty stderr, a wording nobody has captured yet — is silence, and the card
+waits. The default runs that way round on purpose: a wrong "no answer" costs a few retries and a
+Blocked reason that quotes the tool, while a wrong "answer" costs an immediate Blocked on a moment
+of bad network, which is the failure this contract exists to prevent.
+
 Workers use focused checks while developing and run no more than one local broad suite for a report
 generation/unchanged SHA unless they state why it was rerun. Only an executed local/GitHub gate with a
 valid exact-SHA receipt is authoritative reusable evidence downstream. A none/noop gate or missing

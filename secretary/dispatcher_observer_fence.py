@@ -52,6 +52,16 @@ FENCE_STATE = "observer_fence"
 # what a blind pass fences from, so an unreadable declaration stops the same work a dead observer
 # would rather than waving it through.
 FENCE_SNAPSHOT = "observer_fence_snapshot"
+# How many fence episodes each sprint has had. It is the identity of the current episode, and the
+# only reason it exists is that two episodes of one sprint must not share a request id: the audit
+# dedupes on that id, so a second fence raised for the same reason used to be swallowed into the
+# first whenever both fell in the same wall-clock second — losing the record of a sprint that could
+# not be observed, and making the test that checks a reappeared sprint's second lifecycle depend on
+# where a second boundary landed. A counter answers it without a clock: it advances only with the
+# durable state, so a tick that dies after committing the event and before saving its state mints
+# the same id again on the retry and is deduped on purpose, which is the one case the timestamp was
+# there for.
+FENCE_EPISODES = "observer_fence_episodes"
 
 # Why the sprint cannot be observed right now. `observer_*` reasons come from the metadata itself
 # and are corruption; the rest describe a declared head that is not there.
@@ -101,7 +111,7 @@ def observer_fence(runtime: Any, payload: dict[str, Any]) -> dict[str, Any]:
             outcomes.extend(_clear(runtime, state, ref))
             continue
         fenced[ref] = verdict
-        outcomes.append(_raise(runtime, state, open_sprints[ref], verdict))
+        outcomes.append(_raise(runtime, payload, state, open_sprints[ref], verdict))
 
     for ref in sorted(set(state) - set(fenced)):
         # A sprint that closed or vanished while fenced: the fence has nothing left to hold.
@@ -273,7 +283,8 @@ def _sprint_verdict(
 
 
 def _raise(
-    runtime: Any, state: dict[str, Any], sprint: dict[str, Any], verdict: dict[str, Any],
+    runtime: Any, payload: dict[str, Any], state: dict[str, Any], sprint: dict[str, Any],
+    verdict: dict[str, Any],
 ) -> dict[str, Any]:
     """Open or keep the fence on one sprint, writing the critical fact once per reason."""
     ref = str(sprint.get("ref") or "")
@@ -291,7 +302,8 @@ def _raise(
             "projects": sorted(_sprint_projects(sprint)),
         }
     since = now_rfc3339()
-    request_id = _fence_request_id(ref, str(verdict["reason"]), since)
+    episode = _next_episode(payload, ref)
+    request_id = _fence_request_id(ref, str(verdict["reason"]), _episode_stamp(since, episode))
     # Durable before the cards are held back, in the order every other dispatcher effect uses: the
     # log carries why a sprint stopped even if this tick does not live to save its state.
     event = stage_event(
@@ -306,8 +318,8 @@ def _raise(
     )
     audited = commit_event(runtime, event)
     state[ref] = {
-        "reason": verdict["reason"], "since": since, "head": verdict.get("head") or "",
-        "request_id": request_id,
+        "reason": verdict["reason"], "since": since, "episode": episode,
+        "head": verdict.get("head") or "", "request_id": request_id,
     }
     outcome = {
         "status": "critical",
@@ -329,7 +341,10 @@ def _clear(runtime: Any, state: dict[str, Any], ref: str) -> list[dict[str, Any]
     previous = state.pop(ref, None)
     if not isinstance(previous, dict):
         return []
-    request_id = _fence_request_id(ref, "cleared", str(previous.get("since") or ""))
+    request_id = _fence_request_id(
+        ref, "cleared",
+        _episode_stamp(str(previous.get("since") or ""), previous.get("episode")),
+    )
     event = stage_event(
         runtime, EVENT_CLEARED, ref, request_id,
         {"observer_reason": previous.get("reason"), "since": previous.get("since")},
@@ -346,6 +361,29 @@ def _clear(runtime: Any, state: dict[str, Any], ref: str) -> list[dict[str, Any]
     if not audited:
         outcome["audit"] = "pending"
     return [outcome]
+
+
+def _next_episode(payload: dict[str, Any], ref: str) -> int:
+    """The number of this sprint's fence episode, advanced durably as the fence goes up."""
+    counters = payload.get(FENCE_EPISODES)
+    counters = dict(counters) if isinstance(counters, dict) else {}
+    try:
+        current = int(counters.get(ref) or 0)
+    except (TypeError, ValueError):
+        current = 0
+    counters[ref] = current + 1
+    payload[FENCE_EPISODES] = counters
+    return current + 1
+
+
+def _episode_stamp(since: str, episode: Any) -> str:
+    """Identity of one fence episode, for the raise and its matching clear. A state entry written
+    before the counter existed carries no episode and keeps the id it was raised under."""
+    try:
+        number = int(episode)
+    except (TypeError, ValueError):
+        return since
+    return f"{since}#{number}" if number else since
 
 
 def _fence_request_id(ref: str, reason: str, since: str) -> str:

@@ -1784,15 +1784,20 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launched"])
         self.assertEqual(self.host.observers, ["sprint:1", "sprint:1"])
         events = self.audit.events("sprint:1")
+        # The reappeared sprint is fenced, launched, cleared and stopped again: a full second
+        # lifecycle, including its own fence episode. That episode used to be missing from the log
+        # whenever both lifecycles fell in the same wall-clock second, because the fence request id
+        # was built from a second-granularity timestamp and the audit deduped the collision away —
+        # which also made this test pass or fail on where a second boundary landed (secretary-1164).
         self.assertEqual(
             [event["kind"] for event in events],
             [
                 EVENT_FENCED, EVENT_LAUNCHED, EVENT_CLEARED, EVENT_STOPPED,
-                EVENT_LAUNCHED, EVENT_STOPPED,
+                EVENT_FENCED, EVENT_LAUNCHED, EVENT_CLEARED, EVENT_STOPPED,
             ],
         )
         # The second lifecycle is its own request, not a retry of the first one.
-        self.assertEqual(len({event["request_id"] for event in events}), 6)
+        self.assertEqual(len({event["request_id"] for event in events}), 8)
 
     def test_no_open_sprint_changes_nothing(self) -> None:
         before = len(self.host.calls)

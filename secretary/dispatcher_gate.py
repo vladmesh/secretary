@@ -35,7 +35,7 @@ from pathlib import Path
 
 from secretary.dispatcher_helpers import _legacy_worker_branch, _tail, safe_one_line
 from secretary.dispatcher_gate_receipt import is_exact_sha, mint_gate_receipt
-from secretary.dispatcher_types import HostError
+from secretary.dispatcher_types import GateTransportError, HostError
 
 # How long a github CI rollup may sit non-terminal (PENDING/NONE) before the pending watchdog
 # escalates the card to Blocked — a required check nothing ever posts, a job waiting on manual
@@ -46,6 +46,11 @@ GATE_PENDING_STALL_SECONDS = int(os.environ.get("SECRETARY_GATE_PENDING_STALL_SE
 # local-gate stderr/stdout tail and the github-gate `--log-failed` fragment size read this, so
 # there is one place to widen or narrow the excerpt instead of a magic number per call site.
 GATE_LOG_FRAGMENT_LINES = int(os.environ.get("SECRETARY_GATE_LOG_FRAGMENT_LINES", "40"))
+
+# How many consecutive ticks the gate backend may fail to answer before the card is blocked
+# (secretary-1164). A blip costs the card a tick, not a round; a backend that is genuinely gone
+# still reaches a human instead of leaving the card in Validate forever.
+GATE_TRANSPORT_MAX_ATTEMPTS = max(1, int(os.environ.get("SECRETARY_GATE_TRANSPORT_MAX_ATTEMPTS", "5")))
 
 _FAIL_CONCLUSIONS = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE"}
 _RUN_URL_RE = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/actions/runs/(\d+)")
@@ -65,6 +70,89 @@ _INFRA_MARK_RE = re.compile(
     r"temporary failure in name resolution|failed to fetch|apt-get|npm err! network|"
     r"pip.{0,20}(?:could not find|could not install)|dependency resolution)\b"
 )
+# How a failed backend command says that an answer *did* arrive (secretary-1164).
+#
+# The rule is positive and the default is silence: a question put to the backend counts as
+# answered only when the tool prints one of the shapes below, and anything else it prints is a
+# question that got no answer. That direction is deliberate. Guessing "no answer" costs a few
+# retries and a Blocked reason that names the transport and quotes the tool; guessing "answer"
+# costs an immediate wrong Blocked on a moment of bad network, which is the incident this card
+# exists for. Two rounds of this card were red for phrases missing from a list of failures; there
+# is no such list any more, because the failures are open-ended and the answers are not.
+#
+# Every shape below was taken from the binaries this gate runs, on this machine (gh 2.45.0,
+# git 2.43.0). The captures are in the tests next to them.
+#
+# 1. An HTTP status the tool quotes. Only the backend can produce one.
+#      gh api        -> gh: Not Found (HTTP 404)
+#      gh run view   -> failed to get run: HTTP 404: Not Found (https://api.github.com/...)
+#      git over HTTPS-> error: RPC failed; HTTP 502 ...
+#                       fatal: unable to access '...': The requested URL returned error: 503
+#    A 5xx is the exception: the backend failed to serve an answer, and this card counts that as
+#    transport (acceptance criterion 1 names it).
+_HTTP_STATUS_RE = re.compile(r"(?i)\bhttp(?:/\d(?:\.\d)?)?[ /](\d{3})\b|returned error:\s*(\d{3})\b")
+# 2. A GraphQL error: gh rendering an API response body it parsed. This is what the gate's own
+#    calls answer with when the repository or the PR is the problem.
+#      gh repo view  -> GraphQL: Could not resolve to a Repository with the name '...'. (repository)
+#      gh pr list    -> GraphQL: Could not resolve to a Repository with the name '...'. (repository)
+#      gh pr create  -> pull request create failed: GraphQL: A pull request already exists for ...
+#    A raw response body reaching the text counts for the same reason.
+# 3. git's push report, which exists only because the remote answered: the per-ref status table it
+#    prints from the server's report-status, and any line the server itself sent.
+#      git push      ->  ! [rejected]        main -> main (fetch first)
+#                        remote: policy: branch is protected
+#                        ! [remote rejected] main -> main (pre-receive hook declined)
+_ANSWERED_RE = re.compile(
+    r'(?im)(\bgraphql:\s|^\s*remote:\s|!\s*\[(?:rejected|remote rejected|deleted|no match)\]'
+    r'|^\s*\{\s*"(?:errors|message)")'
+)
+
+
+def _backend_answered(text: str) -> bool:
+    """Did the gate's backend answer this failed backend command?
+
+    Only `_backend_call` asks. An HTTP status decides first (5xx is the backend failing to answer,
+    not an answer); otherwise one of the answer shapes above must be present. Text that matches
+    none of them — a Go `url.Error`, a curl or GnuTLS transport message, gh's own
+    "error connecting to", an empty stderr, or a wording nobody has seen yet — is a question that
+    got no answer.
+    """
+    text = (text or "").strip()
+    if not text:
+        return False
+    status = _HTTP_STATUS_RE.search(text)
+    if status:
+        code = status.group(1) or status.group(2)
+        return not code.startswith("5")
+    return bool(_ANSWERED_RE.search(text))
+
+
+def _backend_call(host, args: list[str], label: str, *, cwd: Path | None = None):
+    """Ask the gate's backend, and be the one place that decides no answer came back.
+
+    Every question this gate puts to a remote — the base fetch, the branch push, the PR probe,
+    the PR create, the repository name, the check rollup, the failed-job log — goes through here,
+    and nothing else does. A path that does not call this cannot raise `GateTransportError`, which
+    is what keeps the local gate's own hanging command (a determinate answer about the branch)
+    out of the transport class no matter how its message happens to read.
+
+    Returns the CompletedProcess, including a non-zero one that carries an answer; raises
+    GateTransportError when the tool could not run to completion or its output says it never got
+    through. The tool's own text always travels with the failure — a caller that swallows it
+    leaves the classification nothing to read (secretary-1164 review).
+    """
+    try:
+        completed = host.run_capture(args, label, cwd=cwd)
+    except HostError as exc:
+        # The command never finished: it timed out waiting for the backend, or could not be run
+        # at all. Either way no answer exists, and the tool's own text travels with it.
+        raise GateTransportError(f"{label} got no answer: {exc}") from None
+    if completed.returncode == 0:
+        return completed
+    text = _tail((completed.stderr or completed.stdout or "").strip())
+    if _backend_answered(text):
+        return completed
+    raise GateTransportError(f"{label} got no answer: {text or '(no output)'}")
 
 
 @dataclass
@@ -102,8 +190,14 @@ def _fingerprint(*parts: str) -> str:
 
 
 def gate_check(host, task: dict, record) -> GateResult:
-    """Run the mechanical gate for `task` in the worker workspace. Raises HostError on gate infra
-    failures (missing workspace, git/gh unreachable); returns a GateResult otherwise."""
+    """Run the mechanical gate for `task` in the worker workspace.
+
+    Raises `GateTransportError` when a question put to the backend got no answer — decided by
+    `_backend_call`, which every such question goes through and nothing else does. Raises plain
+    `HostError` for any determinate gate failure: a missing workspace, a misconfigured mode, a
+    repository the backend answered it does not know, a local validation command that hung.
+    Returns a GateResult otherwise, red answers included.
+    """
     if getattr(host, "mode", "real") == "noop":
         # A noop proves no command ran.  It may preserve dispatcher control flow, but must never
         # look like reusable validation evidence.
@@ -156,7 +250,13 @@ def validation_ci(host, task: dict) -> str:
 def _recover_base(host, workspace: str, base: str) -> str:
     """Fast-forward the worker branch onto the latest base. Returns "clean" (already current),
     "recovered" (merged base in), or "conflict" (a textual conflict, aborted)."""
-    host._run(["git", "-C", workspace, "fetch", "origin", base], "gate base fetch")
+    fetch = _backend_call(host, ["git", "-C", workspace, "fetch", "origin", base], "gate base fetch")
+    if fetch.returncode != 0:
+        # An answered refusal (a base branch the remote does not have, a rejected credential) is
+        # a determinate gate failure, exactly as it was before this call moved here.
+        raise HostError(
+            f"gate base fetch failed: {_tail((fetch.stderr or fetch.stdout or '').strip())}"
+        )
     behind = host._run(
         ["git", "-C", workspace, "rev-list", "--count", f"HEAD..origin/{base}"],
         "gate base compare",
@@ -208,7 +308,13 @@ def _local_gate(host, task: dict, record, workspace: str) -> GateResult:
 
 def _github_gate(host, task: dict, workspace: str, base: str, required: list[str] | None = None) -> GateResult:
     branch = _legacy_worker_branch(task["ref"])
-    host._run(["git", "-C", workspace, "push", "origin", f"{branch}:{branch}"], "gate publish branch")
+    push = _backend_call(
+        host, ["git", "-C", workspace, "push", "origin", f"{branch}:{branch}"], "gate publish branch"
+    )
+    if push.returncode != 0:
+        raise HostError(
+            f"gate publish branch failed: {_tail((push.stderr or push.stdout or '').strip())}"
+        )
     _ensure_pr(host, workspace, task, branch, base)
     sha = host._run(["git", "-C", workspace, "rev-parse", "HEAD"], "gate head sha").stdout.strip()
     repo = _name_with_owner(host, workspace)
@@ -246,14 +352,19 @@ def _github_gate(host, task: dict, workspace: str, base: str, required: list[str
 
 
 def _name_with_owner(host, workspace: str) -> str:
-    completed = host.run_capture(
+    completed = _backend_call(
+        host,
         ["gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
         "gate repo view",
         cwd=Path(workspace),
     )
     name = (completed.stdout or "").strip()
     if completed.returncode != 0 or not name:
-        raise HostError("gate could not resolve the repository name")
+        # The answer travels with the failure: a message that drops the tool's own words leaves
+        # nothing behind to say what the backend said, which is how a transport failure here used
+        # to reach the dispatcher stripped of its evidence (secretary-1164 review).
+        detail = _tail((completed.stderr or completed.stdout or "").strip()) or "(no output)"
+        raise HostError(f"gate could not resolve the repository name: {detail}")
     return name
 
 
@@ -269,27 +380,49 @@ def _ensure_pr(host, workspace: str, task: dict, branch: str, base: str) -> None
         f"Automatic PR for worker branch `{branch}` of task {task['ref']}. "
         f"Opened by the CI gate so that the pull_request CI runs."
     )
-    created = host.run_capture(
+    created = _backend_call(
+        host,
         ["gh", "pr", "create", "--base", base, "--head", branch, "--title", title, "--body", body],
         "gate pr create",
         cwd=Path(workspace),
     )
-    if created.returncode == 0 or _open_pr_number(host, workspace, branch) is not None:
+    if created.returncode == 0:
         return
     text = (created.stderr or created.stdout or "").strip()
+    try:
+        # gh refusing to duplicate a PR, or a concurrent tick that opened one first: the create
+        # answered "no", and it is only tolerated when the backend also answers that a PR is open.
+        if _open_pr_number(host, workspace, branch) is not None:
+            return
+    except HostError as exc:
+        if isinstance(exc, GateTransportError):
+            raise
+        raise HostError(
+            f"gate could not open a PR for {branch!r}: {_tail(text)}; "
+            f"and the open-PR probe failed too: {exc}"
+        ) from None
     raise HostError(f"gate could not open a PR for {branch!r}: {_tail(text)}")
 
 
 def _open_pr_number(host, workspace: str, branch: str) -> int | None:
-    """Number of the open PR whose head is `branch`, or None when none is open. `gh pr list`
-    exits 0 with empty output when nothing matches, so no-PR is not confused with a gh failure."""
-    completed = host.run_capture(
+    """Number of the open PR whose head is `branch`, or None when the backend answered that none
+    is open. `gh pr list` exits 0 with empty output when nothing matches, so no-PR is not confused
+    with a gh failure.
+
+    "No PR is open" is a positive fact about the backend's state, so it may only be returned for
+    an answer. A tool that never got through raises out of `_backend_call` instead: reading that
+    as "there is no PR" used to send the gate on to open a second one (secretary-1164 review),
+    and an answered failure is still a determinate gate failure rather than a silent None."""
+    completed = _backend_call(
+        host,
         ["gh", "pr", "list", "--head", branch, "--state", "open", "--json", "number", "-q", ".[0].number"],
         "gate pr list",
         cwd=Path(workspace),
     )
     if completed.returncode != 0:
-        return None
+        raise HostError(
+            f"gate pr list failed: {_tail((completed.stderr or completed.stdout or '').strip())}"
+        )
     text = (completed.stdout or "").strip()
     try:
         return int(text) if text else None
@@ -345,7 +478,7 @@ def _base_sha(host, workspace: str, base: str) -> str:
 
 
 def _gh_api(host, path: str, *, jq: str):
-    completed = host.run_capture(["gh", "api", path, "--jq", jq], "gate gh api")
+    completed = _backend_call(host, ["gh", "api", path, "--jq", jq], "gate gh api")
     if completed.returncode != 0:
         raise HostError(f"gate gh api failed: {_tail((completed.stderr or completed.stdout or '').strip())}")
     text = (completed.stdout or "").strip()
@@ -450,9 +583,16 @@ def _failed_log(host, repo: str, item: dict, lines: int = GATE_LOG_FRAGMENT_LINE
         return _LogFragment(available=False,
                             reason="the entry is not an Actions run (no run link)")
     run_id = match.group(2)
-    completed = host.run_capture(
-        ["gh", "run", "view", run_id, "-R", repo, "--log-failed"], "gate failed log"
-    )
+    try:
+        completed = _backend_call(
+            host, ["gh", "run", "view", run_id, "-R", repo, "--log-failed"], "gate failed log"
+        )
+    except GateTransportError as exc:
+        # The one backend call whose silence is deliberately not a transport failure of the gate:
+        # the verdict is already red, decided by an answer that did arrive, and the log is only
+        # the excerpt attached to it. Turning this into a retry would send a card whose CI has
+        # genuinely failed back around the loop, so the fragment degrades and says why.
+        return _LogFragment(available=False, reason=f"the log could not be fetched: {exc}")
     if completed.returncode != 0:
         return _LogFragment(available=False, reason="`gh run view --log-failed` returned an error")
     entries = _parse_job_log((completed.stdout or "").strip())

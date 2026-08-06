@@ -18,6 +18,17 @@ class HostError(Exception):
     pass
 
 
+class GateTransportError(HostError):
+    """The gate could not reach its backend, so no verdict was received at all.
+
+    A question that never got an answer is not a red gate (secretary-1164). A TLS handshake
+    timeout, a DNS failure, a dropped connection or a 5xx from GitHub itself says nothing about
+    the code under validation, and treating the absence of an answer as a negative one blocked a
+    card whose required check was in fact green. The dispatcher keeps such a card exactly where it
+    is and asks again on the next tick, bounded, instead of deciding on silence.
+    """
+
+
 class HeadLaunchAborted(HostError):
     """A worker or reviewer bring-up that failed after its terminal was already created.
 
