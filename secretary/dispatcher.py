@@ -4477,11 +4477,13 @@ class DispatcherRuntime:
                 task, record, records, payload, attempt_id, step="review",
                 action="merge-gate-transport-blocked",
             )
-        self._gate_answered(ref, record, records, payload)
         if kind == "drift":
+            # The gate was never asked here, so nothing about the transport budget is known: the
+            # bounce clears the record's gate state on its own way to In progress.
             return self._gate_red_to_worker(
                 task, record, records, payload, attempt_id, GateResult("red", detail), phase="review-freeze"
             )
+        self._gate_answered(ref, record, records, payload)
         if kind == "failed":
             return self._block_merge_path(
                 task, record, records, payload, attempt_id,
@@ -4849,7 +4851,9 @@ class DispatcherRuntime:
                 action="release-gate-transport-blocked",
                 prefix="Observer decision: release. ",
             )
-        self._gate_answered(ref, record, records, payload)
+        if kind != "drift":
+            # `drift` is decided before the gate is asked; only an answer clears the budget.
+            self._gate_answered(ref, record, records, payload)
         if kind == "pending":
             return {"status": "ok", "step": "assessment", "pilot_ref": ref, "attempt_id": attempt_id, "action": "merge-gate-pending"}
         if kind != "green":

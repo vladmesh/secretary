@@ -1,77 +1,71 @@
-# Review secretary-1162
+# Review secretary-1164
 
 # Goal
 
-`tests.test_secret_recover.NoStoreCase.test_an_installation_without_a_store_keeps_the_hand_written_file`
-падает на любом хосте, где не установлена Orca, — в том числе на раннере GitHub Actions. Из-за этого
-`main` красный, механический гейт красный на любой ветке, и пайплайн не может довести ни одну карточку
-до ревью. Сделать этот тест независимым от того, что установлено на хосте.
+Недоступный гейт перестаёт быть красным. Транспортный сбой при обращении к бэкенду гейта оставляет
+карточку ждать и повторяется, а в Blocked уводит только исчерпание попыток — с причиной, называющей
+транспорт.
 
-# Почему это хотфикс, а не обычная карточка
+# Источник
 
-Красный `main` ломает проверку результата: гейт `pipeline/*` красный независимо от содержания ветки.
-Карточка `secretary-1161` уже встала в Blocked ровно по этой причине (`report:blocked` 2026-08-06T09:01:43Z),
-её ветка чистая на `e930a3f`. Пока это не починено, спринт не может проверить свой Definition of Done.
+`issue:f2977ff8b6175b7202b0`. Наблюдалось на канарейке `sprint:1200`, 2026-08-06 10:55:47, карточка
+`secretary-1161`:
 
-# Доказательство, что это пред-существующее и средовое
+```
+merge gate failed: gate gh api failed:
+  Get "https://api.github.com/repos/vladmesh/secretary/commits/d9b1ca7.../check-runs":
+  net/http: TLS handshake timeout
+```
 
-- CI run 31085881940, `main` @ `c1e0e8a`: `Ran 2031 tests`, `FAILED (failures=1)` — это падение.
-- CI run 31087114704, `pipeline/secretary-1161` @ `e930a3f0945a`: то же самое единственное падение.
-  Диф той ветки — 25 строк только в `tests/test_dispatcher_contracts.py`.
-- Полный прогон на хосте установки зелёный (2031 tests OK), потому что там `orca` есть в PATH.
+Ревью было зелёным, обязательный чек на точном SHA успешным (CI run 31094285685), работа принята —
+и карточка ушла в Blocked из-за моргнувшей сети. Ни одной повторной попытки. Вытащил её наблюдатель:
+сам сходил в GitHub API, подтвердил чек на точном SHA и решил release, явно отказавшись
+перезапускать широкий прогон. Полагаться на сообразительность головы здесь нельзя.
 
-# Механика падения
+# Контекст
 
 Указатели, не копипаста; читай текущее дерево.
 
-- `secretary/installation.py:check_prerequisites` сначала проверяет `shutil.which("orca")` и падает
-  `InstallError("Orca is not installed; ...")`, затем пробует `orca --version`, и только потом
-  доходит до `TaskReader(KanboardClient(...)).list()`, чей отказ даёт
-  `InstallError("Kanboard prerequisite failed: ...")`.
-- `tests/test_secret_recover.py:NoStoreCase` (проверка около строки 351) ждёт в выводе
-  `Kanboard prerequisite failed`, но патчит только `secretary.installation._ensure_installation_user`.
-  Orca-прекондишен он не контролирует, поэтому на раннере до Kanboard-ветки исполнение не доходит:
-  вывод обрывается на `failed install: Orca is not installed; install a supported Orca runtime before
-  secretary recovery`, и `assertIn` падает. `assertEqual(code, 1)` при этом проходит в обоих случаях,
-  что и маскировало связь с хостом.
-
-Это тот же класс дефекта, что и в `secretary-1161`: юнит-тест завязан на состояние хоста. Здесь —
-на наличие бинаря в PATH.
-
-# Маршрут
-
-Чинится на стороне теста: он должен сам определять исход Orca-прекондишена (так же, как уже подменяет
-`_ensure_installation_user`), чтобы детерминированно доходить до проверяемой Kanboard-ветки на любом
-хосте — и там, где Orca есть, и там, где её нет. Продуктовый контракт `check_prerequisites` и порядок
-проверок в нём не меняются: порядок правильный, Orca-прекондишен обязан быть первым.
+- Вопрос не был задан и ответа нет. Трактовать отсутствие ответа как отрицательный ответ неверно:
+  это ровно та же ошибка, что `unknown`-статус ресурса, который считался пригодным к запуску
+  (починено хотфиксом `b8c425a`), и та же, что занятая пана, читаемая как провал запуска
+  (соседняя карточка этого спринта).
+- Ищи в `secretary/`, где диспетчер спрашивает бэкенд гейта и где `gate gh api failed` становится
+  решением по карточке. Путей может быть несколько — предрелизная расписка и мердж; закрыть надо
+  все, где спрашивается бэкенд.
+- Полученный ответ с проваленным чеком — это красный гейт, и он продолжает работать как сейчас.
+  Различие проводится по тому, получен ли ответ, а не по тому, понравился ли он.
+- Форма отложенной повторной попытки уже есть в контуре — посмотри, как это сделано у наблюдателя,
+  и не изобретай третью.
 
 # Acceptance criteria
 
-1. `python3 -m unittest tests.test_secret_recover` зелёный на хосте, где `orca` отсутствует в PATH,
-   и на хосте, где присутствует. Обе ситуации проверены явно (например, прогоном с урезанным PATH),
-   и результат проверки приведён в отчёте.
-2. Тест по-прежнему проверяет содержательное: что установка без секрет-стора не трогает написанный
-   руками файл, и что до Kanboard-прекондишена дело доходит. Не ослаблять до `assertEqual(code, 1)`
-   и не удалять утверждения про `skipped   runtime-env` и `skipped   secret-store`.
-3. `secretary/installation.py` не изменён: порядок прекондишенов и текст обеих ошибок прежние.
-4. `python3 -m unittest` полностью зелёный, и CI на ветке карточки зелёный — 0 падений, не «столько же,
-   сколько на main».
+1. Транспортный сбой (таймаут, TLS, DNS, обрыв соединения, 5xx от самого бэкенда) не меняет
+   состояние карточки. Попытка повторяется на следующем тике.
+2. Число попыток ограничено. После исчерпания карточка уходит в Blocked, и причина называет
+   транспорт и последнюю ошибку, а не «gate failed».
+3. Каждая повторная попытка видна в выводе тика.
+4. Красный гейт — то есть полученный ответ с проваленным обязательным чеком — работает как прежде:
+   карточка возвращается на доработку, и это покрыто существующими тестами, которые остаются
+   зелёными без правок.
+5. Регрессия на оба случая, транспорт и красный ответ, на каждом пути, где диспетчер спрашивает
+   бэкенд гейта.
+6. `python3 -m unittest` зелёный целиком.
 
 # Вне рамок
 
-Менять `check_prerequisites`, порядок прекондишенов и тексты `InstallError`. Трогать секрет-стор,
-продакшен-конфигурацию, юниты, карточку `secretary-1161` и её ветку `pipeline/secretary-1161`.
-Чинить любые другие тесты, завязанные на хост, — если найдёшь такие, перечисли их в отчёте, но не трогай.
+Менять формат расписки гейта и правило «релиз принимается только по расписке на точном SHA».
+Трогать сам механизм мерджа.
 
 
 ## Mechanical gate attestation
 
-- validated_sha: a04c9a346dd689d20894549f545a44090fcd0137
-- base_sha: c1e0e8add9f283cfc65ae27c8a311c4df1ddee79
+- validated_sha: 0aa68325fb737b15421a678b73e26cd0d6629a1b
+- base_sha: 8c9fdce580f962f2bc2add95a5e640ef1a4e7548
 - gate_mode: github
 - required terminal checks:
-  - test: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/31088264069/job/92572812378)
-- completed_at: 2026-08-06T09:16:39+00:00
+  - test: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/31100867040/job/92613833784)
+- completed_at: 2026-08-06T12:20:57+00:00
 - command_or_check_set_digest: e05e08ff6e9e51da3be176a7b5215dfddd2f768f01036631e8a3c9ab7be723ca
 
 Independently inspect the diff, acceptance criteria and invariants. The attested broad
@@ -96,10 +90,10 @@ real behaviour you verified and how. If no end-to-end check against the real bac
 was possible, write plainly that it was not done and which assumption stays unverified.
 
 Post exactly one review verdict through the secretary task protocol:
-Write the body to /tmp/secretary-verdict-secretary-1162-4.md with your file-writing tool,
+Write the body to /tmp/secretary-verdict-secretary-1164-2.md with your file-writing tool,
 then run the command below verbatim. Do not assemble the body inside the shell command
 (no heredoc, no mktemp, no echo pipeline) and do not add `rm`: the codex runtime refuses
 rm-style commands, and quotes or backticks in the body break the call. Leave the file in
 place afterwards; the dispatcher does not read it.
-PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1162 --role reviewer --kind green --request-id dispatcher-attempt-20260806T091023Z-d1b37ee17428-review-green-secretary-1162-4 --body-file /tmp/secretary-verdict-secretary-1162-4.md
-PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1162 --role reviewer --kind red --request-id dispatcher-attempt-20260806T091023Z-d1b37ee17428-review-red-secretary-1162-4 --body-file /tmp/secretary-verdict-secretary-1162-4.md
+PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1164 --role reviewer --kind green --request-id dispatcher-attempt-20260806T120508Z-ee9a9e4e2d1b-review-green-secretary-1164-2 --body-file /tmp/secretary-verdict-secretary-1164-2.md
+PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1164 --role reviewer --kind red --request-id dispatcher-attempt-20260806T120508Z-ee9a9e4e2d1b-review-red-secretary-1164-2 --body-file /tmp/secretary-verdict-secretary-1164-2.md

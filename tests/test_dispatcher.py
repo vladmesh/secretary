@@ -34,7 +34,7 @@ from secretary.dispatcher import (
 from secretary.dispatcher_gate import (
     GATE_TRANSPORT_MAX_ATTEMPTS,
     GateResult,
-    is_transport_failure,
+    _backend_call,
 )
 from secretary.dispatcher_helpers import (
     RED_REVIEW_CEILING,
@@ -4343,6 +4343,27 @@ class DispatcherRuntimeTests(unittest.TestCase):
             self.assertEqual(deferred["action"], "gate-transport-retry")
             self.assertEqual(deferred["attempts"], attempt)
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+
+    def test_a_hung_local_gate_blocks_at_once_with_its_own_reason(self) -> None:
+        """A local validation command that ran past its ceiling asked no backend, so it must not
+        enter the retry loop: the card blocks on the first tick with the accurate reason, the way
+        it did before the transport class existed."""
+        self.start_dispatcher()
+        self.host.gate_error = HostError(
+            "local gate failed: Command '['bash', '-lc', 'python3 -m unittest']' timed out "
+            "after 900 seconds"
+        )
+        self._run_worker_to_validate()
+
+        blocked = self.tick()
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["reason"], "validation gate failed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertEqual(len(self.host.gate_calls), 1, "a hung local suite must not be re-run")
+        reason = self._blocked_reason()
+        self.assertIn("timed out after 900 seconds", reason)
+        self.assertNotIn("transport", reason)
 
     def test_merge_gate_transport_failure_keeps_the_green_verdict_waiting(self) -> None:
         """The pre-merge re-check under a green verdict: an unreachable backend must not bounce
@@ -8959,6 +8980,7 @@ class GithubGateHost(CommandHostRuntime):
         run_log: str = "",
         run_log_error: bool = False,
         api_error: str = "",
+        gh_errors: dict | None = None,
     ) -> None:
         super().__init__(GateCatalog(adapter), root, mode="real")  # type: ignore[arg-type]
         self._pr_open = pr_open
@@ -8968,6 +8990,9 @@ class GithubGateHost(CommandHostRuntime):
         self._run_log_error = run_log_error
         # stderr `gh api` fails with, when the test wants the backend not to answer at all.
         self._api_error = api_error
+        # Same, per gh subcommand: {"repo view": stderr, "pr list": stderr, ...}. Real captured
+        # tool output belongs in the tests; this only decides which call it comes out of.
+        self._gh_errors = dict(gh_errors or {})
         self.gh: list[list[str]] = []
 
     def _fake_gh(self, args):
@@ -8976,6 +9001,9 @@ class GithubGateHost(CommandHostRuntime):
         def done(out="", code=0):
             return subprocess.CompletedProcess(args, code, out, "")
 
+        failure = self._gh_errors.get(" ".join(args[1:3])) or self._gh_errors.get(args[1])
+        if failure:
+            return subprocess.CompletedProcess(args, 1, "", failure)
         if args[1:3] == ["repo", "view"]:
             return done("example-org/sample\n")
         if args[1:3] == ["pr", "list"]:
@@ -9214,23 +9242,170 @@ class DispatcherGateTests(unittest.TestCase):
         self.assertEqual(result.status, "red")
         self.assertIn("tests", result.summary)
 
-    def test_github_gate_transport_failure_is_not_a_verdict(self) -> None:
-        """secretary-1164: `gh api` that never got an answer raises a transport failure, so the
-        dispatcher can retry it instead of reading it as a red gate."""
+    # --- secretary-1164: only a call to the backend can report that no answer came back ---
+    #
+    # The tool wordings below were captured from the binaries this gate runs, on this machine:
+    #   $ gh --version                       -> gh version 2.45.0
+    #   $ gh api repos/x/y --jq .check_runs --hostname nonexistent.invalid
+    #     error connecting to nonexistent.invalid
+    #     check your internet connection or https://githubstatus.com
+    #   $ gh api repos/vladmesh/<absent>/commits/abc/check-runs --jq .check_runs
+    #     gh: Not Found (HTTP 404)
+    #   $ git --version                      -> git version 2.43.0
+    #   $ git ls-remote https://nonexistent.invalid/x/y
+    #     fatal: unable to access '...': Could not resolve host: nonexistent.invalid
+    #   $ git ls-remote http://127.0.0.1:1/x/y
+    #     fatal: unable to access '...': Failed to connect to 127.0.0.1 port 1 after 0 ms:
+    #     Couldn't connect to server
+    #   $ git ls-remote https://httpbin.org/status/502
+    #     fatal: unable to access '...': The requested URL returned error: 503
+    GH_NO_ANSWER = (
+        "error connecting to nonexistent.invalid\n"
+        "check your internet connection or https://githubstatus.com"
+    )
+    # The wording from the incident this card came from (sprint:1200 / secretary-1161).
+    GH_TLS_TIMEOUT = (
+        'Get "https://api.github.com/repos/vladmesh/secretary/commits/d9b1ca7/check-runs": '
+        "net/http: TLS handshake timeout"
+    )
+
+    GH_BACKEND_LABELS = {
+        "gate repo view", "gate pr list", "gate pr create", "gate gh api", "gate failed log",
+    }
+
+    def _spy_backend_calls(self):
+        """Record the label of every question that goes through the single backend call point."""
+        from secretary import dispatcher_gate as gate_module
+
+        seen: list[str] = []
+        real = gate_module._backend_call
+
+        def spy(host, args, label, *, cwd=None):
+            seen.append(label)
+            return real(host, args, label, cwd=cwd)
+
+        return seen, mock.patch.object(gate_module, "_backend_call", spy)
+
+    def test_every_backend_question_goes_through_the_single_call_point(self) -> None:
+        """The inventory, asserted rather than counted by hand: on a full github gate run every
+        remote question — and every `gh` invocation there is — passes through `_backend_call`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=False, check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            )
+            seen, patched = self._spy_backend_calls()
+            with patched:
+                result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "green")
+        self.assertEqual(
+            seen,
+            [
+                "gate base fetch",       # git fetch origin main
+                "gate publish branch",   # git push origin <branch>
+                "gate pr list",          # gh pr list (is a PR already open?)
+                "gate pr create",        # gh pr create
+                "gate repo view",        # gh repo view --json nameWithOwner
+                "gate gh api",           # gh api .../check-runs
+                "gate gh api",           # gh api .../status
+            ],
+        )
+        self.assertEqual(
+            len([label for label in seen if label in self.GH_BACKEND_LABELS]),
+            len(host.gh),
+            "every gh invocation of the gate must be one of these calls",
+        )
+
+    def test_a_red_run_adds_only_the_failed_log_backend_call(self) -> None:
+        run_log = "tests\tRun tests\t##[error]assert False"
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(), pr_open=True,
+                check_runs=[{
+                    "status": "COMPLETED", "conclusion": "FAILURE", "name": "tests",
+                    "details_url": "https://github.com/example-org/sample/actions/runs/7",
+                }],
+                run_log=run_log,
+            )
+            seen, patched = self._spy_backend_calls()
+            with patched:
+                result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "red")
+        self.assertEqual(seen[-1], "gate failed log")
+        self.assertEqual(
+            len([label for label in seen if label in self.GH_BACKEND_LABELS]), len(host.gh)
+        )
+
+    def test_the_local_gate_asks_the_backend_only_for_the_base(self) -> None:
+        """A path that talks to nothing cannot report that nothing answered: the local gate's own
+        command never goes through the backend call point."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
+            seen, patched = self._spy_backend_calls()
+            with patched:
+                result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "green")
+        self.assertEqual(seen, ["gate base fetch"])
+
+    def test_an_unreachable_failed_log_does_not_undo_a_red_verdict(self) -> None:
+        """The one backend call whose silence is deliberately not a transport failure: the red
+        answer already arrived, and retrying the card over a missing log excerpt would send genuinely
+        failing CI back around the loop."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(), pr_open=True,
+                check_runs=[{
+                    "status": "COMPLETED", "conclusion": "FAILURE", "name": "tests",
+                    "details_url": "https://github.com/example-org/sample/actions/runs/7",
+                }],
+                gh_errors={"run view": self.GH_NO_ANSWER},
+            )
+            result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "red")
+        self.assertIn("tests", result.summary)
+        self.assertIn("log", result.log.lower())
+
+    def test_gh_dns_failure_in_its_real_wording_is_no_answer(self) -> None:
+        """The wording gh actually prints when it cannot reach the host — its `api` command
+        special-cases DNS errors instead of surfacing the Go text, which is why a classifier
+        written against invented `dial tcp` prose passed while this path stayed broken."""
         with tempfile.TemporaryDirectory() as tmp:
             ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
             host = GithubGateHost(
                 Path(tmp), self._github_adapter(), pr_open=True, check_runs=[],
-                api_error=(
-                    'Get "https://api.github.com/repos/example-org/sample/commits/d9b1ca7/'
-                    'check-runs": net/http: TLS handshake timeout'
-                ),
+                api_error=self.GH_NO_ANSWER,
+            )
+            with self.assertRaises(GateTransportError) as caught:
+                host.gate_check(self._task(), self._record(ws))
+        self.assertIn("error connecting to", str(caught.exception))
+
+    def test_gh_tls_timeout_from_the_incident_is_no_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(), pr_open=True, check_runs=[],
+                api_error=self.GH_TLS_TIMEOUT,
             )
             with self.assertRaises(GateTransportError) as caught:
                 host.gate_check(self._task(), self._record(ws))
         self.assertIn("TLS handshake timeout", str(caught.exception))
 
-    def test_github_gate_answered_error_stays_a_host_failure(self) -> None:
+    def test_gh_backend_5xx_is_no_answer(self) -> None:
+        """A 5xx is the backend failing to serve an answer, which criterion 1 names explicitly."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(), pr_open=True, check_runs=[],
+                api_error="gh: Server Error (HTTP 502)",
+            )
+            with self.assertRaises(GateTransportError):
+                host.gate_check(self._task(), self._record(ws))
+
+    def test_gh_answered_404_stays_a_host_failure(self) -> None:
         """An answer that arrived and says the repository is wrong is not a transport failure:
         retrying it forever would hide a real misconfiguration."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -9243,27 +9418,142 @@ class DispatcherGateTests(unittest.TestCase):
                 host.gate_check(self._task(), self._record(ws))
         self.assertNotIsInstance(caught.exception, GateTransportError)
 
-    def test_transport_classification_covers_the_named_failure_modes(self) -> None:
-        for text in (
-            "net/http: TLS handshake timeout",
-            "dial tcp 140.82.121.6:443: i/o timeout",
-            "dial tcp: lookup api.github.com: no such host",
-            "fatal: unable to access ...: Could not resolve host: github.com",
-            "read tcp 10.0.0.2:52134->140.82.121.6:443: connection reset by peer",
+    def test_repo_view_carries_the_tool_text_into_the_transport_failure(self) -> None:
+        """`gh repo view` used to raise a fixed sentence and drop the tool's stderr, leaving the
+        classification nothing to read on a call made on every github gate run."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(), pr_open=True, check_runs=[],
+                gh_errors={"repo view": self.GH_NO_ANSWER},
+            )
+            with self.assertRaises(GateTransportError) as caught:
+                host.gate_check(self._task(), self._record(ws))
+        self.assertIn("error connecting to", str(caught.exception))
+
+    def test_repo_view_answered_error_stays_a_host_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(), pr_open=True, check_runs=[],
+                gh_errors={"repo view": "gh: Could not resolve to a Repository. (HTTP 404)"},
+            )
+            with self.assertRaises(HostError) as caught:
+                host.gate_check(self._task(), self._record(ws))
+        self.assertNotIsInstance(caught.exception, GateTransportError)
+        self.assertIn("HTTP 404", str(caught.exception), "the tool's own words must survive")
+
+    def test_pr_list_without_an_answer_never_opens_a_second_pr(self) -> None:
+        """"No PR is open" is a positive fact about the backend's state, so a `gh pr list` that
+        never got through must not be read as one — it used to drive a duplicate `gh pr create`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(), pr_open=True, check_runs=[],
+                gh_errors={"pr list": self.GH_NO_ANSWER},
+            )
+            with self.assertRaises(GateTransportError):
+                host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(self._pr_calls(host, "create"), [], "an unanswered probe must not create")
+
+    def test_pr_create_without_an_answer_is_a_transport_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(), pr_open=False, check_runs=[],
+                gh_errors={"pr create": self.GH_NO_ANSWER},
+            )
+            with self.assertRaises(GateTransportError):
+                host.gate_check(self._task(), self._record(ws))
+
+    def test_pr_create_answered_refusal_still_blocks(self) -> None:
+        """gh answering "I will not open that" is a determinate gate failure, as before."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(), pr_open=False, check_runs=[],
+                gh_errors={"pr create": "pull request create failed: GraphQL: No commits between "
+                                        "main and pipeline/secretary-633 (createPullRequest)"},
+            )
+            with self.assertRaises(HostError) as caught:
+                host.gate_check(self._task(), self._record(ws))
+        self.assertNotIsInstance(caught.exception, GateTransportError)
+
+    def test_base_fetch_without_an_answer_is_a_transport_failure(self) -> None:
+        """The first backend call of every gate run, made by real `git` against a port nothing
+        listens on: `fatal: unable to access ...: Couldn't connect to server`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            git(ws, "remote", "set-url", "origin", "http://127.0.0.1:1/x/y")
+            host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
+            with self.assertRaises(GateTransportError) as caught:
+                host.gate_check(self._task(), self._record(ws))
+        self.assertIn("gate base fetch", str(caught.exception))
+
+    def test_local_gate_timeout_is_never_a_transport_failure(self) -> None:
+        """A local validation command that hung is a determinate answer about the branch: no
+        backend was asked, so the local gate cannot reach the transport class at all, and the
+        card blocks at once with the accurate reason instead of re-running the hung suite."""
+
+        class HangingLocalGate(GateHost):
+            def run_capture(self, args, label, *, cwd=None):  # type: ignore[override]
+                if args[:2] == ["bash", "-lc"]:
+                    raise HostError(
+                        "local gate failed: Command '['bash', '-lc', 'python3 -m unittest']' "
+                        "timed out after 900 seconds"
+                    )
+                return super().run_capture(args, label, cwd=cwd)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = HangingLocalGate(
+                Path(tmp), {"validation": {"ci": "local", "command": "python3 -m unittest"}}
+            )
+            with self.assertRaises(HostError) as caught:
+                host.gate_check(self._task(), self._record(ws))
+        self.assertNotIsInstance(caught.exception, GateTransportError)
+        self.assertIn("timed out after 900 seconds", str(caught.exception))
+
+    def test_backend_call_reads_the_answer_out_of_what_the_tool_printed(self) -> None:
+        """The single decision point, over captured real-tool output (see the block above)."""
+
+        class Stub:
+            def __init__(self, code: int, err: str) -> None:
+                self.code, self.err = code, err
+
+            def run_capture(self, args, label, *, cwd=None):
+                return subprocess.CompletedProcess(args, self.code, "", self.err)
+
+        no_answer = (
+            self.GH_NO_ANSWER,
+            self.GH_TLS_TIMEOUT,
             "gh: Server Error (HTTP 502)",
             "gh: Service Unavailable (HTTP 503)",
-            "gate gh api failed: unexpected EOF",
-        ):
-            with self.subTest(text=text):
-                self.assertTrue(is_transport_failure(text))
-        for text in (
+            "fatal: unable to access 'https://x/y/': Could not resolve host: nonexistent.invalid",
+            "fatal: unable to access 'http://127.0.0.1:1/x/y/': Failed to connect to 127.0.0.1 "
+            "port 1 after 0 ms: Couldn't connect to server",
+            "fatal: unable to access 'https://x/y/': The requested URL returned error: 503",
+            "error: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502",
+            "",
+        )
+        for text in no_answer:
+            with self.subTest(text=text or "(empty)"):
+                with self.assertRaises(GateTransportError):
+                    _backend_call(Stub(1, text), ["gh", "api", "x"], "gate gh api")
+        answered = (
             "gh: Not Found (HTTP 404)",
-            "gate workspace is missing",
-            "local validation has no command",
-            "gate could not open a PR for 'pipeline/secretary-633': pull request already exists",
-        ):
+            "gh: Must have admin rights to Repository. (HTTP 403)",
+            "gh: Validation Failed (HTTP 422)",
+            "pull request create failed: GraphQL: A pull request already exists for x:y.",
+            "! [rejected] pipeline/secretary-633 -> pipeline/secretary-633 (non-fast-forward)",
+        )
+        for text in answered:
             with self.subTest(text=text):
-                self.assertFalse(is_transport_failure(text))
+                completed = _backend_call(Stub(1, text), ["gh", "api", "x"], "gate gh api")
+                self.assertEqual(completed.returncode, 1)
+        self.assertEqual(
+            _backend_call(Stub(0, ""), ["gh", "api", "x"], "gate gh api").returncode, 0
+        )
 
     def test_github_gate_red_fragment_skips_aggregate_job_echo(self) -> None:
         """secretary-766: `--log-failed` dumps every failed job, including one that only

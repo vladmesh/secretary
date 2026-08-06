@@ -92,6 +92,18 @@ green verdict, and the release re-check of a parked decision. An answer that did
 deciding as before — a failed required check is still a red gate and still returns the card to its
 worker.
 
+"No answer came back" is decided where the question is asked, not afterwards from the wording of an
+error. Every remote question the gate puts — the base fetch, the branch publish, the open-PR probe,
+the PR create, the repository name, the check rollup, the failed-job log — goes through one call
+helper, and only that helper raises the transport failure. A step that talks to nothing therefore
+cannot produce one: a local validation command that hangs past its own ceiling is a determinate
+answer about the branch and blocks the card immediately with that reason, however its message reads.
+Each call carries the tool's own output into that decision, so a probe never converts silence into a
+positive fact about the backend's state — an unanswered open-PR probe is not "there is no PR". Where
+a failed remote command still has to be sorted into answered and unanswered, that judgement lives
+inside the helper and reads what the tools actually print: an HTTP status is an answer unless it is
+a 5xx, and output that says the tool never got through, or says nothing at all, is silence.
+
 Workers use focused checks while developing and run no more than one local broad suite for a report
 generation/unchanged SHA unless they state why it was rerun. Only an executed local/GitHub gate with a
 valid exact-SHA receipt is authoritative reusable evidence downstream. A none/noop gate or missing
