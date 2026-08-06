@@ -79,15 +79,21 @@ from secretary.dispatcher_observer import (
 from secretary.observer_root import OBSERVER_REPO_NAME, observer_root_repo
 from secretary.dispatcher_launch import (
     WORKER_ROLE,
+    bring_up_blocked_reason as _bring_up_blocked_reason,
     clear_launch_intent as _clear_launch_intent,
     confirm_launch_intent as _confirm_launch_intent,
     forget_role_head as _forget_role_head,
     head_stop_unconfirmed as _head_stop_unconfirmed,
+    keep_reserved_round as _keep_reserved_round,
     launch_aborted as _launch_aborted,
+    launch_deferred as _launch_deferred,
+    launch_intent as _launch_intent,
     launch_intent_unwritable as _launch_intent_unwritable,
     launch_left_a_head as _launch_left_a_head,
     launch_pid_file as _launch_pid_file,
     mark_launch_aborted as _mark_launch_aborted,
+    pane_state_label as _pane_state_label,
+    reset_launch_attempts as _reset_launch_attempts,
     resolve_launch_intent as _resolve_launch_intent,
     write_launch_intent as _write_launch_intent,
 )
@@ -137,6 +143,8 @@ from secretary.dispatcher_state import (
 from secretary.dispatcher_tui import (
     DELIVERY_ACCEPTED,
     DELIVERY_CONFIRMED,
+    READINESS_BLOCKED,
+    READINESS_BUSY,
     READINESS_READY,
     READINESS_UNKNOWN,
     TuiDeliveryError,
@@ -151,6 +159,7 @@ from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
 from secretary.dispatcher_types import (
     DispatcherError,
     HeadLaunchAborted,
+    HeadPaneNotReady,
     HostError,
     ReviewLaunch,
     review_pane_label,
@@ -1651,6 +1660,14 @@ class CommandHostRuntime:
                     handle, workspace, prompt_file, run_json=self._run_json, prompt_text=launch_prompt
                 )
             except (TuiDeliveryError, HostError) as exc:
+                # What the pane was doing when it refused the prompt, asked before it is closed
+                # because afterwards there is nothing left to ask (secretary-1163). A pane that is
+                # working, or held in a dialog its head cannot leave on its own, is a launch worth
+                # making again rather than a failed round, and it goes back as `HeadPaneNotReady`
+                # so the caller can defer instead of blocking the card. A probe that goes
+                # unanswered is not that and takes the ordinary failure path below: a pane nothing
+                # can ask about is not a busy pane, it is a pane nothing can wait for.
+                readiness = _terminal_readiness(handle, run_json=self._run_json)
                 # The terminal is already up, so a failure here is not proof that no head exists.
                 # The close decides which: confirmed, nothing of this bring-up is left and the
                 # caller may treat it as a launch that did not happen; refused, the pane goes back
@@ -1664,6 +1681,13 @@ class CommandHostRuntime:
                         handle=handle,
                         workspace=workspace,
                         pid_file=pid_file,
+                    ) from None
+                if readiness in (READINESS_BUSY, READINESS_BLOCKED):
+                    raise HeadPaneNotReady(
+                        f"the head pane was {_pane_state_label(readiness)} and never took its "
+                        f"launch prompt: {exc}",
+                        readiness=readiness,
+                        pane=handle,
                     ) from None
                 raise HostError(str(exc)) from None
         return self._launched(handle, head, task, role, workspace)
@@ -2665,12 +2689,29 @@ class DispatcherRuntime:
             if aborted is not None:
                 return aborted
             _clear_launch_intent(record)
+            deferred = _launch_deferred(
+                record,
+                exc,
+                step="claim",
+                ref=ref,
+                attempt_id=record.attempt_id,
+                role=WORKER_ROLE,
+            )
+            if deferred is not None:
+                # The head did not come up, and nothing of it is running. The card keeps its claim
+                # and its record: `claim_verified` is what makes the next tick launch it again,
+                # which is the whole of the retry.
+                records[ref] = record
+                self.save_records(payload, records)
+                return deferred
             self.writer.move(
                 role="dispatcher",
                 actor=self.owner,
                 reference=ref,
                 target="blocked",
-                reason=f"dispatcher bring-up failed: {scrub_host_output(str(exc))}",
+                reason=_bring_up_blocked_reason(
+                    "dispatcher bring-up failed", exc, record, WORKER_ROLE
+                ),
                 request_id=_attempt_request_id(record.attempt_id, "bringup-blocked", ref),
             )
             records.pop(ref, None)
@@ -2696,6 +2737,7 @@ class DispatcherRuntime:
             )
         record.worker_started_at = record.worker_progress_at = time.time()
         record.state = "claimed"
+        _reset_launch_attempts(record, WORKER_ROLE)
         resume_workspaces = payload.get("resume_workspaces")
         if isinstance(resume_workspaces, dict):
             resume_workspaces.pop(ref, None)
@@ -2895,7 +2937,27 @@ class DispatcherRuntime:
             )
             if aborted is not None:
                 return None, aborted
+            intent = dict(_launch_intent(record))
             _clear_launch_intent(record)
+            deferred = _launch_deferred(
+                record,
+                exc,
+                step=step,
+                ref=ref,
+                attempt_id=record.attempt_id or attempt_id,
+                role=WORKER_ROLE,
+            )
+            if deferred is not None:
+                # A rework reserved its round before the host call, and that round is over whether
+                # or not its head lived. Carrying it onto the record is what the intent's own
+                # resolution does when a launch leaves nothing running, and the deferred relaunch
+                # then belongs to the round the rework opened rather than the one it replaced.
+                _keep_reserved_round(self, record, intent)
+                # Nothing of this launch is running and the record still names no head, so the next
+                # tick reads the card as one whose worker pane is missing and brings it up again.
+                records[ref] = record
+                self.save_records(payload, records)
+                return None, deferred
             return None, self._block_failed_worker_restart(
                 ref=ref,
                 record=record,
@@ -2918,6 +2980,7 @@ class DispatcherRuntime:
             return None, self._worker_launch_aborted(
                 payload, records, ref, record, exc, step=step, attempt_id=attempt_id
             )
+        _reset_launch_attempts(record, WORKER_ROLE)
         return launched, None
 
     def _worker_relaunch_intent(
@@ -4164,13 +4227,17 @@ class DispatcherRuntime:
         request_id: str,
         error: Exception,
     ) -> dict[str, Any]:
-        """Block a failed rework launch while retaining the workspace's resume provenance."""
+        """Block a failed rework launch while retaining the workspace's resume provenance.
+
+        `reason` is the tick's own short verdict. The card gets the longer one, which for a head
+        pane that stayed busy or held in a dialog names that pane instead of the launch.
+        """
         self.writer.move(
             role="dispatcher",
             actor=self.owner,
             reference=ref,
             target="blocked",
-            reason=f"{reason}: {scrub_host_output(str(error))}",
+            reason=_bring_up_blocked_reason(reason, error, record, WORKER_ROLE),
             request_id=request_id,
         )
         resume_workspaces = payload.setdefault("resume_workspaces", {})
