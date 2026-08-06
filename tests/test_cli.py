@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
-from secretary.cli import main
+from secretary.cli import build_parser, main
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -39,6 +39,34 @@ def init_instance_repo(instance_dir: Path) -> None:
     git(instance_dir, "config", "commit.gpgsign", "false")
     git(instance_dir, "add", "instance.yaml")
     git(instance_dir, "commit", "--quiet", "-m", "config")
+
+
+class BoardCommandInstanceTests(unittest.TestCase):
+    """Every board command names the installation it talks to, reads included.
+
+    Three of them did not, each failing differently: `task list`/`task show` fell through to
+    `Path.home()/secretary-instance` resolved at import, so on the appliance host they answered
+    from the production board no matter what the caller named; `sprint list` carried no `instance`
+    attribute at all and died with an AttributeError inside its reader. One parser-level assertion
+    covers the family, so a new subcommand cannot rejoin it quietly.
+    """
+
+    def _subparsers(self, name: str):
+        top = {
+            action.dest: action
+            for action in build_parser()._subparsers._group_actions  # type: ignore[union-attr]
+        }["command"]
+        return top.choices[name].__dict__["_subparsers"]._group_actions[0].choices  # type: ignore[union-attr]
+
+    def test_every_task_and_sprint_subcommand_takes_an_instance(self) -> None:
+        for group in ("task", "sprint"):
+            for name, parser in self._subparsers(group).items():
+                options = {
+                    option
+                    for action in parser._actions  # type: ignore[union-attr]
+                    for option in action.option_strings
+                }
+                self.assertIn("--instance", options, f"{group} {name} names no installation")
 
 
 class CliTests(unittest.TestCase):

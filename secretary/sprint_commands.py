@@ -21,6 +21,10 @@ def add_sprint_subcommands(subparsers) -> None:
     commands = sprint.add_subparsers(dest="sprint_command")
     listed = commands.add_parser("list")
     listed.add_argument("--status", action="append", choices=("open", "closed", "stopped"))
+    # `_read` names an installation like every other sprint command. Without this the namespace
+    # carries no `instance` at all and the command dies with an AttributeError before it reads
+    # anything — the same gap the task reads had, arriving as a crash rather than as the wrong board.
+    _add_data_dir_args(listed)
     listed.set_defaults(handler=run_list)
     shown = commands.add_parser("show")
     shown.add_argument("--ref", required=True)
