@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest import mock
 
 from secretary import dispatcher as dispatcher_module
+from secretary import dispatcher_observer_fence
 from secretary.dispatcher import (
     CommandHostRuntime,
     DispatcherRuntime,
@@ -2326,6 +2327,44 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launched"])
         self.assertEqual(self.host.observers, ["sprint:1"])
+
+    def test_a_fence_episode_keeps_its_request_id_across_a_second_boundary(self) -> None:
+        """The retry of a fence raise whose tick died is the same episode, whatever the clock says.
+
+        The test above is this one without the clock pinned: its first tick cannot save state, so
+        the fence state that would short-circuit the second raise never lands, and the retry is
+        deduped only by minting the request id the first pass already committed. While the id
+        carried a second-granularity timestamp, the two passes minted different ids whenever they
+        straddled a second — the retry then reached `audit.stage`, which that test has broken on
+        purpose, and the whole tick ended at the fence with no observer outcome at all. That is a
+        real lottery of about 2% per run, and it is what made the suite red on main (secretary-1167).
+        """
+        self.open_sprint()
+        seconds = iter(["2026-08-06T10:00:00Z", "2026-08-06T10:00:01Z"])
+        real_clock = dispatcher_observer_fence.now_rfc3339
+
+        def clock() -> str:
+            # The two fence passes, pinned either side of a second boundary. Anything the fence
+            # stamps after them reads the real clock again.
+            return next(seconds, "") or real_clock()
+
+        with mock.patch.object(dispatcher_observer_fence, "now_rfc3339", clock):
+            with self.failing_state_save(after=0):
+                with self.assertRaises(OSError):
+                    self.runtime.production_tick()
+
+            with self.broken_stage():
+                result = self.runtime.production_tick()
+
+        # The second pass reached the observer instead of dying at the fence, and it wrote no
+        # second fence event: one episode, one durable line, one request id.
+        self.assertEqual(
+            [action["action"] for action in self.actions(result)], ["observer-launch-deferred"]
+        )
+        fenced = [
+            event for event in self.audit.events("sprint:1") if event["kind"] == EVENT_FENCED
+        ]
+        self.assertEqual(len(fenced), 1)
 
     # crash-safe launch intent ------------------------------------------------
 
