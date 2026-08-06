@@ -3788,7 +3788,11 @@ class RealHostObserverWorkspaceTests(unittest.TestCase):
         self.addCleanup(self.tmpdir.cleanup)
         self.root = Path(self.tmpdir.name)
         env = mock.patch.dict(
-            os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.root / "workspaces")}
+            os.environ,
+            {
+                "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.root / "workspaces"),
+                "SECRETARY_DISPATCHER_BODY_DIR": str(self.root / "bodies"),
+            },
         )
         env.start()
         self.addCleanup(env.stop)
@@ -4129,7 +4133,11 @@ class RealHostTuiObserverLaunchTests(unittest.TestCase):
         self.addCleanup(self.tmpdir.cleanup)
         self.root = Path(self.tmpdir.name)
         env = mock.patch.dict(
-            os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.root / "workspaces")}
+            os.environ,
+            {
+                "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.root / "workspaces"),
+                "SECRETARY_DISPATCHER_BODY_DIR": str(self.root / "bodies"),
+            },
         )
         env.start()
         self.addCleanup(env.stop)
@@ -4200,6 +4208,7 @@ class ObserverCodexTrustTests(unittest.TestCase):
             {
                 "SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.root / "workspaces"),
                 "TA_CODEX_HOME": str(self.codex_home),
+                "SECRETARY_DISPATCHER_BODY_DIR": str(self.root / "bodies"),
             },
         )
         env.start()
