@@ -68,25 +68,27 @@ fixture or an explicit local opt-in — look for a call to
 chance to patch it, or that imports `secretary.host_apply`'s functions by value instead
 of by module attribute (which would keep an unpatched reference).
 
-## The default Kanboard fake
+## Board reads are hermetic by construction, not by a patch
 
-`secretary.status.collect_status`'s sprint read builds a `KanboardClient()` from bare
-`os.environ`, with no seam of its own to opt out. A worker, reviewer or operator shell
-that inherits a live installation's `KANBOARD_*` variables must not turn the unit suite
-into a client of that board — `test_status.py` alone cost ~231s doing exactly that
-against a live Kanboard before this was fixed (secretary-1026). `tests/__init__.py`
-patches `secretary.status.KanboardClient` to `tests.kanboard_fixtures.OfflineKanboard`
-(an in-memory stand-in that reports "no sprint board", never touching the network)
-before any test module is imported, so this default wins regardless of what the
-environment holds. `tests/test_hermetic_kanboard.py` proves that even with
-live-looking credentials present, an actual network call would fail the test rather
-than reach the real endpoint.
+There is no default Kanboard fake to install any more, because there is nothing left to
+shadow. A board client cannot be built from ambient environment variables at all: every
+client comes from `KanboardClient.for_instance(<instance dir>)`, which resolves the local
+`board-transport.env` of that instance and raises `backend_unavailable` when it is absent.
+A worker, reviewer or operator shell that inherits a live installation's `KANBOARD_*`
+variables therefore cannot turn the unit suite into a client of that board — the variables
+are simply not a source of transport configuration. This replaced the earlier defence, a
+process-wide `tests/__init__.py` patch of `secretary.status.KanboardClient`, which was put
+in after `test_status.py` spent ~231s against a live Kanboard and an exploratory CLI command
+migrated the production board (secretary-1026).
 
-A test with sprint content of its own opts in locally, the same way as the Orca seam
-above: patch `secretary.status.KanboardClient` to return
-`tests.test_dispatcher.FakeKanboard` (or another explicit fake) for the duration of its
-own `with` block. `tests/test_status.py`'s `test_status_json_includes_stopped_sprint_and_stale_resume`
-is a worked example. Do not construct a real, environment-backed `KanboardClient()` in
-a `test_*` module the default `python -m unittest` run discovers; a live canary belongs
-in an operator runbook or an explicit, separately opted-in integration test against a
-disposable endpoint instead.
+`tests/test_hermetic_kanboard.py` is the proof, and it asserts both halves: with live-looking
+`KANBOARD_*` in the environment and a temporary instance that has no transport file, the
+status read fails closed with `backend_unavailable` while a patched `urlopen` turns any
+accidental dial-out into a loud failure.
+
+A test with sprint content of its own injects it explicitly rather than patching a global:
+`collect_status(report, offline=True, sprint_client=FakeKanboard())` is the seam, and
+`tests/test_hermetic_kanboard.py:test_a_test_can_still_opt_in_to_a_real_sprint_boards_shape`
+is the worked example. Do not build a client against a real endpoint in a `test_*` module the
+default `python -m unittest` run discovers; a live canary belongs in an operator runbook or an
+explicit, separately opted-in integration test against a disposable endpoint instead.

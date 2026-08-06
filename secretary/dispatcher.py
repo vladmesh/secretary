@@ -3408,8 +3408,9 @@ class DispatcherRuntime:
             # timing ceilings below do not apply here: a head that is working waits as long as it
             # needs, and one that has stopped without delivering ends the wait now rather than at a
             # ceiling.
-            idle = _idle_outcome(record, status, kind=kind, now=now)
-            self.save_records(payload, records)
+            idle, fence_moved = _idle_outcome(record, status, kind=kind, now=now)
+            if fence_moved:
+                self.save_records(payload, records)
             if idle != "wait":
                 expectation = _wait_expectation(kind)
                 if kind == "worker":

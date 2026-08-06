@@ -20,6 +20,23 @@ from secretary.tasks import (
 )
 
 
+def _add_instance_arg(parser) -> None:
+    """Every task command names the installation it talks to, reads included.
+
+    Reads used to skip this and fall through `_instance` to `DEFAULT_INSTANCE`, which is
+    ``Path.home()/secretary-instance`` resolved at import: neither ``--instance`` nor
+    ``SECRETARY_INSTANCE`` could move them, so a process bound to one installation still read the
+    home one. On the appliance host that is the production board, reached from a cleared
+    environment — the accident class of secretary-1026, and the reason a unit-suite `task show`
+    could answer with live cards.
+    """
+    parser.add_argument(
+        "--instance",
+        default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
+        help=f"instance directory (default: SECRETARY_INSTANCE or {DEFAULT_INSTANCE})",
+    )
+
+
 def _add_data_dir_args(parser) -> None:
     """Data dir is pinned to the installation, not to the process CWD.
 
@@ -27,11 +44,7 @@ def _add_data_dir_args(parser) -> None:
     default would drop the audit trail into that workspace and leave it dirty.
     """
     parser.add_argument("--data-dir", default=os.environ.get("SECRETARY_DATA_DIR"))
-    parser.add_argument(
-        "--instance",
-        default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
-        help=f"instance directory (default: SECRETARY_INSTANCE or {DEFAULT_INSTANCE})",
-    )
+    _add_instance_arg(parser)
 
 
 def resolve_data_dir(args: argparse.Namespace) -> str:
@@ -67,9 +80,11 @@ def add_task_subcommands(subparsers) -> None:
     )
     task_list.add_argument("--project")
     task_list.add_argument("--sprint")
+    _add_instance_arg(task_list)
     task_list.set_defaults(handler=run_task_list)
     task_show = task_subcommands.add_parser("show")
     task_show.add_argument("--ref", required=True)
+    _add_instance_arg(task_show)
     task_show.set_defaults(handler=run_task_show)
     task_create = task_subcommands.add_parser("create")
     task_create.add_argument("--role", required=True, choices=("po", "worker", "reviewer", "steward", "retro", "observer"))

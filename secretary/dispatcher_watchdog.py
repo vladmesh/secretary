@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from secretary.dispatcher_state import request_token
 
@@ -70,7 +70,26 @@ def idle_stall_seconds() -> int:
     return value if value > 0 else IDLE_STALL_DEFAULT
 
 
-def idle_outcome(record, status: dict[str, Any], *, kind: str, now: float) -> str:
+class IdleOutcome(NamedTuple):
+    """One role's idle verdict plus whether reaching it changed the record.
+
+    ``changed`` exists so a caller persists state only on a real transition.  A wait that
+    observes the same head in the same idle episode is the common case, once a minute for as
+    long as a head works, and it has nothing new to write.
+    """
+    state: str
+    changed: bool
+
+
+def _fence(record, name: str, value: float | int) -> bool:
+    """Write one fence field, reporting whether it actually moved."""
+    if getattr(record, name) == value:
+        return False
+    setattr(record, name, value)
+    return True
+
+
+def idle_outcome(record, status: dict[str, Any], *, kind: str, now: float) -> IdleOutcome:
     """Advance one role's idle fence: ``wait``, ``pending`` or ``act``.
 
     This is the sole owner of the continuous-idle window and its two-tick confirmation.
@@ -80,19 +99,16 @@ def idle_outcome(record, status: dict[str, Any], *, kind: str, now: float) -> st
     confirmation_name = f"{kind}_idle_confirmations"
     idle_since = float(getattr(record, idle_name) or 0.0)
     if not status.get("idle"):
-        setattr(record, idle_name, 0.0)
-        setattr(record, confirmation_name, 0)
-        return "wait"
+        changed = _fence(record, idle_name, 0.0)
+        return IdleOutcome("wait", _fence(record, confirmation_name, 0) or changed)
     if not idle_since:
-        setattr(record, idle_name, now)
-        setattr(record, confirmation_name, 0)
-        return "wait"
+        changed = _fence(record, idle_name, now)
+        return IdleOutcome("wait", _fence(record, confirmation_name, 0) or changed)
     if now - idle_since <= idle_stall_seconds():
-        setattr(record, confirmation_name, 0)
-        return "wait"
+        return IdleOutcome("wait", _fence(record, confirmation_name, 0))
     confirmations = int(getattr(record, confirmation_name) or 0) + 1
-    setattr(record, confirmation_name, confirmations)
-    return "act" if confirmations >= 2 else "pending"
+    _fence(record, confirmation_name, confirmations)
+    return IdleOutcome("act" if confirmations >= 2 else "pending", True)
 
 
 def reset_idle(record, kind: str) -> None:

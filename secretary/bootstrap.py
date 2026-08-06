@@ -21,7 +21,7 @@ from typing import Any
 import yaml
 
 from secretary._fsutil import write_text_atomic
-from secretary.board_transport import BoardTransport, ensure_from_runtime_values, transport_path
+from secretary.board_transport import ensure_from_runtime_values, transport_path
 from secretary.config import validate_instance
 from secretary.host_apply import pinned_orca_executable
 from secretary.installation import (
@@ -449,11 +449,10 @@ def bootstrap(args: argparse.Namespace) -> int:
             values = read_runtime_env(target, require_ignored=False)
         except RuntimeEnvMissing:
             values = {}
-        transport_outcome = ensure_from_runtime_values(
+        ensure_from_runtime_values(
             target, legacy_values=values, runtime_env=runtime, dry_run=args.dry_run,
             allow_default=clone_detail.startswith(("cloned", "would clone")),
         )
-        transport = transport_outcome.transport
         if not args.dry_run:
             _mark_bootstrap_checkout(target)
             _set_installation_owner(target, args.installation_user)

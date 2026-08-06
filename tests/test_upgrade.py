@@ -667,6 +667,48 @@ class UpgradeStepTests(unittest.TestCase):
 
         self.assertIn(result.status, {"unchanged", "skipped"})
 
+    @staticmethod
+    def _venv(root: Path, direct_url: dict | None) -> Path:
+        """A product checkout whose .venv holds the product installed the given way."""
+        (root / ".venv" / "bin").mkdir(parents=True)
+        (root / ".venv" / "bin" / "python").write_text("", encoding="utf-8")
+        dist_info = root / ".venv" / "lib" / "python3.12" / "site-packages" / "secretary-0.1.0.dist-info"
+        dist_info.mkdir(parents=True)
+        if direct_url is not None:
+            (dist_info / "direct_url.json").write_text(json.dumps(direct_url), encoding="utf-8")
+        return root
+
+    def test_an_editable_install_that_moved_no_manifest_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._venv(Path(tmp), {"url": "file:///product", "dir_info": {"editable": True}})
+            context = self.context(FakeUnitInstaller(), product_root=root, dry_run=True)
+
+            result = upgrade.step_dependencies(context)
+
+        self.assertEqual(result.status, "unchanged")
+
+    def test_a_snapshot_install_is_reinstalled_even_with_no_manifest_move(self):
+        """The 2026-08-05 outage: `step_board_transport` retired the legacy KANBOARD_* tuple while
+        this venv still held a copy of the previous day's reader, and every tick failed for 26h."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._venv(Path(tmp), {"url": "file:///product", "dir_info": {}})
+            context = self.context(FakeUnitInstaller(), product_root=root, dry_run=True)
+
+            result = upgrade.step_dependencies(context)
+
+        self.assertEqual(result.status, "changed")
+        self.assertIn("snapshot install", result.detail)
+
+    def test_an_install_that_cannot_prove_it_is_editable_is_treated_as_a_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._venv(Path(tmp), None)
+            context = self.context(FakeUnitInstaller(), product_root=root, dry_run=True)
+
+            result = upgrade.step_dependencies(context)
+
+        self.assertEqual(result.status, "changed")
+        self.assertIn("snapshot install", result.detail)
+
     def test_head_registry_step_materializes_the_product_canon_idempotently(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance = Path(tmpdir)

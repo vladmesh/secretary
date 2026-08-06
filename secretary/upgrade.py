@@ -201,14 +201,37 @@ def step_pull(context: UpgradeContext) -> StepResult:
     return StepResult("pull", "changed", f"{before[:12]} -> {after[:12]}", {"paths": len(context.changed_paths)})
 
 
+def _snapshot_install(venv_python: Path) -> bool:
+    """Is the product installed into this venv as a copy rather than as the checkout itself?
+
+    A snapshot install is a silent liability: nothing that follows moves it, so the venv keeps
+    answering with whatever the code looked like when it was taken, however far the checkout has
+    since travelled. That is not academic. On 2026-08-05 this installation ran `step_board_transport`,
+    which retired the legacy `KANBOARD_*` tuple from `runtime.env` because the new resolver reads
+    `board-transport.env` — while the dispatcher on this venv was a copy from the day before that
+    still read `runtime.env` only. Every production tick failed `backend_unavailable` for 26 hours
+    and no checkpoint was written. An editable install cannot drift that way, so finding a snapshot
+    is itself a reason to reinstall, whether or not a dependency manifest moved.
+    """
+    for dist_info in (venv_python.parent.parent / "lib").glob("python*/site-packages/secretary-*.dist-info"):
+        try:
+            direct_url = json.loads((dist_info / "direct_url.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return True
+        return not bool(direct_url.get("dir_info", {}).get("editable"))
+    return True
+
+
 def step_dependencies(context: UpgradeContext) -> StepResult:
     venv_python = context.product_root / ".venv" / "bin" / "python"
     if not venv_python.is_file():
         return StepResult("dependencies", "skipped", "no .venv in the product checkout")
-    if not _touches(context.changed_paths, DEPENDENCY_PATHS):
+    snapshot = _snapshot_install(venv_python)
+    if not snapshot and not _touches(context.changed_paths, DEPENDENCY_PATHS):
         return StepResult("dependencies", "unchanged", "no dependency manifest moved")
+    reason = "the venv holds a snapshot install" if snapshot else "a dependency manifest moved"
     if context.dry_run:
-        return StepResult("dependencies", "changed", "would reinstall the product into .venv")
+        return StepResult("dependencies", "changed", f"would reinstall the product into .venv: {reason}")
     try:
         subprocess.run(
             [str(venv_python), "-m", "pip", "install", "--quiet", "-e", str(context.product_root)],
@@ -222,7 +245,7 @@ def step_dependencies(context: UpgradeContext) -> StepResult:
     except (OSError, subprocess.TimeoutExpired):
         return StepResult("dependencies", "failed", "pip install could not run")
     context.code_changed = True
-    return StepResult("dependencies", "changed", "reinstalled the product into .venv")
+    return StepResult("dependencies", "changed", f"reinstalled the product into .venv: {reason}")
 
 
 def _role_skills_manifest(context: UpgradeContext) -> Path:

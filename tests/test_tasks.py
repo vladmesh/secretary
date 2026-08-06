@@ -201,12 +201,46 @@ class TaskCliTests(unittest.TestCase):
         self.assertNotIn("super-secret", errors.getvalue())
 
     def test_missing_runtime_configuration_is_json_error(self) -> None:
+        # The instance is named explicitly and points at an empty directory. Clearing the
+        # environment is not enough on its own: `DEFAULT_INSTANCE` is `Path.home()/secretary-instance`
+        # resolved at import, so on the appliance host itself an unnamed run resolves the live
+        # installation and reads the production board.
         output, errors = io.StringIO(), io.StringIO()
-        with mock.patch.dict("os.environ", {}, clear=True), contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
-            code = main(["task", "show", "--ref", "secretary-468"])
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict("os.environ", {}, clear=True), contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                code = main(["task", "show", "--ref", "secretary-468", "--instance", tmp])
 
         self.assertEqual(code, 1)
         self.assertEqual(output.getvalue(), "")
+        self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "backend_unavailable")
+
+    def test_reads_are_bound_to_the_named_installation(self) -> None:
+        """`task list`/`task show` take an instance like every write command does.
+
+        They used to take none at all, so `_instance` fell through to the home default and no
+        flag or variable could move them: a process bound to one installation read another's
+        board. On the appliance host that other board is production (secretary-1026's class of
+        accident, arriving through the home default rather than through ambient credentials).
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict("os.environ", {}, clear=True):
+                for argv in (
+                    ["task", "list", "--instance", tmp],
+                    ["task", "show", "--ref", "secretary-468", "--instance", tmp],
+                ):
+                    errors = io.StringIO()
+                    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errors):
+                        code = main(argv)
+                    self.assertEqual(code, 1, argv)
+                    self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "backend_unavailable")
+
+            # The variable is the same source the write commands already honour.
+            with mock.patch.dict("os.environ", {"SECRETARY_INSTANCE": tmp}, clear=True):
+                errors = io.StringIO()
+                with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errors):
+                    code = main(["task", "list"])
+
+        self.assertEqual(code, 1)
         self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "backend_unavailable")
 
     def test_create_rejects_codex_mode_for_non_codex_head_before_backend(self) -> None:

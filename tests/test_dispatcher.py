@@ -6421,6 +6421,21 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self._pilot_record()["worker_idle_since"], 0.0)
         self.assertNotIn("restart_worker", self.host.calls)
 
+    def test_a_steady_idle_wait_does_not_rewrite_the_state_file(self) -> None:
+        """The fence persists transitions, not heartbeats. A head can sit inside one idle episode
+        for as long as it works, and re-reading the same window every tick has nothing to save."""
+        self._open_the_second_round()
+        self._head_at_its_prompt()
+        self.tick()
+
+        with mock.patch.object(
+            self.runtime, "save_records", wraps=self.runtime.save_records
+        ) as save:
+            result = self.tick()
+
+        self.assertEqual(result["action"], "waiting-worker-report")
+        save.assert_not_called()
+
     def test_idle_tui_repaints_do_not_restart_the_delivery_window(self) -> None:
         """Pane bytes are not a delivery; readiness still ends a stalled round."""
         self._open_the_second_round()

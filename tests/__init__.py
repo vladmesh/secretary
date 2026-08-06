@@ -1,25 +1,28 @@
-"""Hermetic defaults for the unit-test run: Orca discovery and Kanboard reads
-never leave the repo/process.
+"""Hermetic defaults for the unit-test run: Orca discovery never leaves the
+repo/process.
 
 ``python -m unittest`` imports this package before it imports any ``test_*``
 module, so the patches below are live before a single test can reach
 ``resolve_systemd_layout``/``resolve_packaged`` and discover a real host
-executable, or reach ``secretary.status.collect_status`` and dial a real
-Kanboard. Without this, the same checkout is green on a developer box with
+executable. Without this, the same checkout is green on a developer box with
 Orca installed and red on a bare CI runner (or vice versa) purely from
-process discovery order (secretary-705, secretary-738, secretary-748), and a
-worker/reviewer/operator shell that inherits a live installation's
-``KANBOARD_*`` variables turns the unit suite into a client of that board
-(secretary-1026).
+process discovery order (secretary-705, secretary-738, secretary-748).
+
+Board reads need no patch here. A client is built only by
+``KanboardClient.for_instance(<instance dir>)``, from that instance's local
+``board-transport.env``; ambient ``KANBOARD_*`` variables are not a source of
+transport configuration, so a worker/reviewer/operator shell that inherits a
+live installation's environment cannot turn the unit suite into a client of
+that board (secretary-1026). ``tests/test_hermetic_kanboard.py`` proves it.
 
 A test that needs real host resolution or a real sprint board opts in
 locally, the same way the rest of the suite already overrides other
 host-facing seams: wrap the call in its own
 ``mock.patch("secretary.host_apply.find_orca_executable", ...)`` (or
-``...pinned_orca_executable``, or ``mock.patch("secretary.status.KanboardClient", return_value=FakeKanboard())``)
-with whatever value the scenario needs. That local patch simply shadows the
-process-wide default for the duration of the ``with`` block; nothing needs
-to be undone.
+``...pinned_orca_executable``), or pass an explicit board through
+``collect_status(..., sprint_client=FakeKanboard())``. A local patch simply
+shadows the process-wide default for the duration of the ``with`` block;
+nothing needs to be undone.
 
 If a test fails with "Orca executable for <user> is unavailable", it means
 production code reached real host discovery without going through either

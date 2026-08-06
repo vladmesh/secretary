@@ -21,9 +21,10 @@ python3 -m unittest
 
 The unit suite is hermetic: it does not need Kanboard, Orca, a network or a configured instance. That
 holds even when the process inherits a live installation's `KANBOARD_*` variables, for example in a
-worker, reviewer or operator shell: `tests/__init__.py` routes `secretary status`'s sprint read to a
-zero-network fake by default (see `tests/README.md`), so credentials present in the environment cannot
-make a unit test read or write a real board by accident. This matters beyond the unit suite too: during
+worker, reviewer or operator shell: a board client is always built from an explicit instance's local
+`board-transport.env` (`KanboardClient.for_instance`), never from ambient environment variables, so a
+test without a configured instance fails closed instead of reaching a real board (see
+`tests/README.md` and `tests/test_hermetic_kanboard.py`). This matters beyond the unit suite too: during
 sprint:1024 review, a reviewer session inherited live `KANBOARD_*` credentials and an exploratory CLI
 smoke command ended up migrating the production board (secretary-1026) — the same class of ambient-
 credential risk that hermetic tests protect against. A live canary belongs in an operator runbook or an
