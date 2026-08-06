@@ -1201,9 +1201,20 @@ been restarted, without waiting for the final Blocked.
 - `SECRETARY_WORKER_REPORT_STALL_SECONDS` — the ceiling for a report after first output, default 21600 seconds.
 - `SECRETARY_HEAD_IDLE_STALL_SECONDS` — how long a head ready for input with nothing delivered is left alone,
   default 300 seconds.
+- `SECRETARY_BRINGUP_DEFER_ATTEMPTS` — how many bring-ups of one role's head are deferred over a pane that is not
+  ready for its launch prompt before the card is blocked over that pane, default 5 attempts.
 
-All four are read at check time; garbage or a zero value falls back to the default, so a typo in a unit file does
+All five are read at check time; garbage or a zero value falls back to the default, so a typo in a unit file does
 not stop the dispatcher from starting.
+
+A bring-up can also fail before the head has said anything at all: the pane it was launched into is working, or is
+held in a dialog the head cannot leave on its own — a codex update prompt is the one seen in production. The launch
+prompt then goes nowhere, and the pane is closed behind it. That is not a failed round. The card keeps its claim and
+its record, the tick reports `worker-launch-deferred` or `review-launch-deferred` with the pane's state and which
+attempt it was, and the next tick makes the same bring-up again. Once the attempts above are spent the card does go
+to Blocked, and the reason names the pane and the state it stayed in rather than saying the bring-up failed. A probe
+Orca does not answer is deliberately not deferred: a pane nothing can ask about is not a busy pane, and it takes the
+ordinary failure path immediately.
 
 A head writes report and verdict bodies to a file outside the workspace
 (`/tmp/secretary-report-<ref>-<round>.md`, `/tmp/secretary-verdict-<ref>-<round>.md`, with the directory overridden

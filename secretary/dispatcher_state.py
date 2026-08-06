@@ -125,6 +125,14 @@ class DispatcherRecord:
     attempt_round: int = 0
     worker_run: dict[str, Any] = field(default_factory=dict)
     review_run: dict[str, Any] = field(default_factory=dict)
+    # Deferred bring-ups (secretary-1163): how many launches of this role's head have been parked
+    # over a pane that was not ready for its prompt. The same shape the observer's record carries
+    # (`launch_attempts`), without its retry deadline: a worker or reviewer launch is retried by the
+    # next dispatcher tick rather than on a backoff of its own, so the count is the whole fence.
+    # Reset whenever that role's head does come up, so the bound covers one episode, not a card's
+    # whole history.
+    worker_launch_attempts: int = 0
+    review_launch_attempts: int = 0
     # Durable launch intent (secretary-820): the bring-up this record is in the middle of, written
     # before the host is asked for a head and cleared once the host has answered. Empty at rest.
     # `dispatcher_launch` owns its shape and its recovery; nothing else reads inside it.
@@ -187,6 +195,8 @@ class DispatcherRecord:
             "worker_started_at": self.worker_started_at,
             "worker_run": self.worker_run,
             "review_run": self.review_run,
+            "worker_launch_attempts": self.worker_launch_attempts,
+            "review_launch_attempts": self.review_launch_attempts,
             "launch_intent": dict(self.launch_intent),
             "worker_waiting_since": self.worker_waiting_since,
             "workspace": self.workspace,
@@ -254,6 +264,8 @@ class DispatcherRecord:
             worker_leaf=str(payload.get("worker_leaf") or ""),
             worker_pid_file=str(payload.get("worker_pid_file") or ""),
             review_pid_file=str(payload.get("review_pid_file") or ""),
+            worker_launch_attempts=int(payload.get("worker_launch_attempts") or 0),
+            review_launch_attempts=int(payload.get("review_launch_attempts") or 0),
             worker_waiting_since=float(payload.get("worker_waiting_since") or 0.0),
             worker_respawns=int(payload.get("worker_respawns") or 0),
             worker_started_at=float(payload.get("worker_started_at") or 0.0),

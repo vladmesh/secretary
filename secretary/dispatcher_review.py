@@ -9,13 +9,16 @@ from secretary.dispatcher_helpers import scrub_host_output
 from secretary.dispatcher_launch import (
     REVIEW_ROLE,
     WORKER_ROLE,
+    bring_up_blocked_reason,
     clear_launch_intent,
     confirm_launch_intent,
     forget_role_head,
     launch_aborted,
+    launch_deferred,
     launch_intent_unwritable,
     launch_left_a_head,
     mark_launch_aborted,
+    reset_launch_attempts,
     write_launch_intent,
 )
 from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _attempt_request_id
@@ -323,12 +326,28 @@ def start_review(
                 reason=scrub_host_output(str(exc)),
             )
         clear_launch_intent(record)
+        deferred = launch_deferred(
+            record,
+            exc,
+            step="review",
+            ref=ref,
+            attempt_id=record.attempt_id or attempt_id,
+            role=REVIEW_ROLE,
+        )
+        if deferred is not None:
+            # No reviewer came up and none is running. The card keeps its record in
+            # `review_starting`, which is the state the next tick recovers the launch from, so the
+            # verdict this card is waiting for is delayed by a tick rather than lost to Blocked.
+            record.state = "review_starting"
+            records[ref] = record
+            runtime.save_records(payload, records)
+            return deferred
         runtime.writer.move(
             role="dispatcher",
             actor=runtime.owner,
             reference=ref,
             target="blocked",
-            reason=f"review bring-up failed: {scrub_host_output(str(exc))}",
+            reason=bring_up_blocked_reason("review bring-up failed", exc, record, REVIEW_ROLE),
             request_id=_attempt_request_id(
                 record.attempt_id or attempt_id, "review-blocked", ref, _wait_cycle_token(record)
             ),
@@ -351,6 +370,7 @@ def start_review(
     runtime.record_review_routing(task, record, launch.run)
     clear_launch_intent(record)
     record.review_started_at = record.review_progress_at = time.time()
+    reset_launch_attempts(record, REVIEW_ROLE)
     # A retained worker is suspended, not gone: it keeps its pane and its heartbeat so a red
     # verdict can continue that same conversation, and the reviewer still judges a checkout
     # nothing is editing. Without retention the worker head was shut down for the reviewer, and

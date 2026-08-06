@@ -44,6 +44,27 @@ class HeadLaunchAborted(HostError):
         self.pid_file = pid_file
 
 
+class HeadPaneNotReady(HostError):
+    """A bring-up that left nothing running because its head pane would not take the prompt.
+
+    Orca answers the readiness question in three states, and two of them are this one: a pane that
+    is working, and a pane held in a dialog its head cannot leave on its own — the codex update
+    prompt that ate two bring-ups in 33 minutes on `sprint:1200` (secretary-1163). Neither is a
+    failed round. The head never received its prompt and the pane was closed behind it, so the same
+    launch is worth making again on the next tick, the way the observer's lifecycle already defers
+    its own.
+
+    The state travels with the failure because it is what the card is eventually blocked over: an
+    operator reading "bring-up failed" goes looking for a broken head or a broken host, and the
+    answer is a dialog nobody answered.
+    """
+
+    def __init__(self, message: str, *, readiness: str, pane: str = "") -> None:
+        super().__init__(message)
+        self.readiness = readiness
+        self.pane = pane
+
+
 @dataclass(frozen=True)
 class ReviewLaunch:
     """What a reviewer bring-up hands back to the runtime: the pane the reviewer runs in and the

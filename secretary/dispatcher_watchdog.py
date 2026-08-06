@@ -36,6 +36,11 @@ INITIAL_OUTPUT_STALL_DEFAULT = 3 * 60
 # just resumed — so this is a window rather than a single reading. It is short next to the silence
 # ceilings above because it is not measuring silence: readiness says the head is not working.
 IDLE_STALL_DEFAULT = 5 * 60
+# How many bring-ups of one role's head are parked over a pane that is not ready for its launch
+# prompt before the card is blocked over that pane (secretary-1163). A count rather than a window,
+# because the retry is the dispatcher tick itself: the deferred launch is made again on the next
+# one, so this is also how many ticks a head is given to get past whatever is holding its pane.
+BRING_UP_DEFER_ATTEMPTS_DEFAULT = 5
 
 
 def stall_seconds(kind: str) -> int:
@@ -68,6 +73,17 @@ def idle_stall_seconds() -> int:
     except ValueError:
         return IDLE_STALL_DEFAULT
     return value if value > 0 else IDLE_STALL_DEFAULT
+
+
+def bring_up_defer_attempts() -> int:
+    """How many deferred bring-ups one role's head gets before its card is blocked."""
+    try:
+        value = int(
+            os.environ.get("SECRETARY_BRINGUP_DEFER_ATTEMPTS", "") or BRING_UP_DEFER_ATTEMPTS_DEFAULT
+        )
+    except ValueError:
+        return BRING_UP_DEFER_ATTEMPTS_DEFAULT
+    return value if value > 0 else BRING_UP_DEFER_ATTEMPTS_DEFAULT
 
 
 class IdleOutcome(NamedTuple):

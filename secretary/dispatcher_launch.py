@@ -58,9 +58,12 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from secretary.dispatcher_helpers import scrub_host_output
 from secretary.dispatcher_state import DispatcherRecord
-from secretary.dispatcher_types import HeadLaunchAborted, HostError
+from secretary.dispatcher_tui import READINESS_BLOCKED, READINESS_BUSY
+from secretary.dispatcher_types import HeadLaunchAborted, HeadPaneNotReady, HostError
 from secretary.dispatcher_watchdog import (
+    bring_up_defer_attempts,
     head_process_status,
     initial_output_stall_seconds,
     pid_file_path,
@@ -68,6 +71,9 @@ from secretary.dispatcher_watchdog import (
 
 WORKER_ROLE = "worker"
 REVIEW_ROLE = "review"
+# What each readiness state reads as in a line an operator has to act on. Orca's own words for the
+# two are `busy` and `blocked`, and "blocked" is already the name of a board column here.
+PANE_STATE_LABELS = {READINESS_BUSY: "busy", READINESS_BLOCKED: "held in a dialog"}
 
 # What "the data plane refused this write" looks like. Deliberately not bare `Exception`: a launch
 # that cannot be recorded is answered by not launching, and anything that is not a storage failure
@@ -257,6 +263,87 @@ def launch_aborted(
         "action": f"{role}-launch-aborted",
         "reason": f"launch may have left a head running: {reason}",
     }
+
+
+def role_label(role: str) -> str:
+    """What this role's head is called in a line an operator reads."""
+    return "reviewer" if role == REVIEW_ROLE else "worker"
+
+
+def pane_state_label(readiness: str) -> str:
+    return PANE_STATE_LABELS.get(readiness, readiness or "not ready")
+
+
+def launch_attempts(record: DispatcherRecord, role: str) -> int:
+    return int(getattr(record, role_field(role, "launch_attempts"), 0) or 0)
+
+
+def reset_launch_attempts(record: DispatcherRecord, role: str) -> None:
+    """This role's head came up. The deferrals before it belong to an episode that is over."""
+    setattr(record, role_field(role, "launch_attempts"), 0)
+
+
+def launch_deferred(
+    record: DispatcherRecord,
+    exc: Exception,
+    *,
+    step: str,
+    ref: str,
+    attempt_id: str,
+    role: str,
+) -> dict[str, Any] | None:
+    """Park a bring-up whose head pane would not take its prompt. None when it cannot be parked.
+
+    None means the ordinary failure path owns this failure: either it is not a pane that was busy
+    or held in a dialog — a probe nobody answered is deliberately not one, since a pane that cannot
+    be asked is not a pane anything can wait for — or this role has spent its attempts and the card
+    is blocked over that pane.
+
+    A parked launch changes nothing else on the record. The state it is in is what the next tick
+    relaunches from, exactly as it would have without this failure, and only the counter moves. The
+    caller persists it: a deferral nobody wrote down is an unbounded retry.
+    """
+    if not isinstance(exc, HeadPaneNotReady):
+        return None
+    limit = bring_up_defer_attempts()
+    attempts = launch_attempts(record, role) + 1
+    if attempts > limit:
+        return None
+    setattr(record, role_field(role, "launch_attempts"), attempts)
+    return {
+        "status": "skipped",
+        "step": step,
+        "pilot_ref": ref,
+        "attempt_id": attempt_id,
+        "action": f"{role}-launch-deferred",
+        "readiness": exc.readiness,
+        "attempts": attempts,
+        # Every deferred attempt says which one it is, so an operator reading the tick can tell a
+        # head that is still coming up from a head that has not come up for ten minutes.
+        "reason": (
+            f"the {role_label(role)} head pane is {pane_state_label(exc.readiness)}; bring-up "
+            f"attempt {attempts} of {limit} is deferred to the next tick: "
+            f"{scrub_host_output(str(exc))}"
+        ),
+    }
+
+
+def bring_up_blocked_reason(
+    default: str, exc: Exception, record: DispatcherRecord, role: str
+) -> str:
+    """The card's Blocked reason for a bring-up that will not be retried.
+
+    A pane that never became ready is named, with the state it stayed in and how many bring-ups it
+    cost. `default` is the caller's own wording for every other failure, which is what "bring-up
+    failed" means and all it should ever have meant.
+    """
+    if not isinstance(exc, HeadPaneNotReady):
+        return f"{default}: {scrub_host_output(str(exc))}"
+    return (
+        f"the {role_label(role)} head pane was {pane_state_label(exc.readiness)} on all "
+        f"{launch_attempts(record, role) + 1} bring-up attempts and never took its launch prompt: "
+        f"{scrub_host_output(str(exc))}"
+    )
 
 
 def head_stop_unconfirmed(

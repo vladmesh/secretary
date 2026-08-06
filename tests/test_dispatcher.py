@@ -58,7 +58,12 @@ from secretary.dispatcher_state import (
     attempt_request_id as _attempt_request_id,
     now_rfc3339,
 )
-from secretary.dispatcher_types import HeadLaunchAborted, ReviewLaunch, review_pane_label
+from secretary.dispatcher_types import (
+    HeadLaunchAborted,
+    HeadPaneNotReady,
+    ReviewLaunch,
+    review_pane_label,
+)
 from secretary.head_registry import canonical_heads
 from secretary.routing_journal import (
     HeadRun,
@@ -68,10 +73,12 @@ from secretary.routing_journal import (
 from secretary.head_health import HeadReadiness
 from secretary.sprints import SPRINT_BOARD_NAME, instance_open_sprint_limit
 from secretary.dispatcher_watchdog import (
+    BRING_UP_DEFER_ATTEMPTS_DEFAULT,
     IDLE_STALL_DEFAULT,
     INITIAL_OUTPUT_STALL_DEFAULT,
     REVIEW_VERDICT_STALL_DEFAULT,
     WORKER_REPORT_STALL_DEFAULT,
+    bring_up_defer_attempts,
     head_process_status,
     idle_stall_seconds,
     initial_output_stall_seconds,
@@ -672,6 +679,9 @@ class FakeHost:
         # Failure hooks for host calls the real runtime can fail on: a rework workspace removed
         # out of band, a merge push the remote rejects, an orca terminal inventory that errors.
         self.fail_restart_reason = ""
+        # The relaunch twin of `fail_prepare_error`: a rework or respawn bring-up whose failure the
+        # caller has to read for more than its message, e.g. a head pane that was not ready.
+        self.fail_restart_error: Exception | None = None
         self.fail_complete_reason = ""
         self.review_running_error: Exception | None = None
         # None keeps the default "a review started in this process is live"; set a bool to model a
@@ -903,6 +913,11 @@ class FakeHost:
 
     def restart_worker(self, task: dict, record) -> LaunchedHead:
         self.calls.append("restart_worker")
+        if self.fail_restart_error is not None:
+            if isinstance(self.fail_restart_error, HeadLaunchAborted):
+                # The pane stayed up, so the head's heartbeat is there for recovery to find.
+                self._write_head_pid("worker", task["ref"])
+            raise self.fail_restart_error
         if self.fail_restart_reason:
             raise HostError(self.fail_restart_reason)
         self._write_task_doc(
@@ -5057,6 +5072,195 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertNotIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
         self.assertEqual(self.host.torn_down, [], "a failed reviewer must not remove the checkout")
 
+    # secretary-1163: a head pane that is not ready for its launch prompt defers the bring-up.
+    # Twice in 33 minutes on the `sprint:1200` canary a codex update dialog held the pane a worker
+    # or a reviewer had just been launched into. The card went straight to Blocked with "bring-up
+    # failed", and the observer pulled it back out by hand both times.
+    def _pane_not_ready(self, readiness: str = "blocked") -> HeadPaneNotReady:
+        return HeadPaneNotReady(
+            f"the head pane was held in a dialog and never took its launch prompt: "
+            f'"blockedReason": "codex-update-prompt"',
+            readiness=readiness,
+            pane="term-head",
+        )
+
+    def _record_of(self, ref: str = "secretary-510-pilot") -> DispatcherRecord:
+        return self.runtime.production_state.records(self.runtime.production_state.load())[ref]
+
+    def _bound_bring_up_attempts(self, limit: int) -> int:
+        """Pin the deferral bound for this test, so the assertions do not ride on the default."""
+        patch = mock.patch.dict(os.environ, {"SECRETARY_BRINGUP_DEFER_ATTEMPTS": str(limit)})
+        patch.start()
+        self.addCleanup(patch.stop)
+        return limit
+
+    def test_a_busy_worker_pane_defers_the_claim_launch_instead_of_failing_the_round(self) -> None:
+        """The pane is working, so the launch prompt went nowhere. The card keeps its claim and the
+        same bring-up is made again on the next tick, which is what the observer path already does
+        with a busy observer pane."""
+        limit = self._bound_bring_up_attempts(3)
+        self.start_dispatcher()
+        self.host.fail_prepare_error = self._pane_not_ready("busy")
+
+        deferred = self.tick()
+
+        self.assertEqual(deferred["status"], "skipped")
+        self.assertEqual(deferred["action"], "worker-launch-deferred")
+        self.assertEqual(deferred["readiness"], "busy")
+        self.assertEqual(deferred["attempts"], 1)
+        self.assertIn("worker head pane is busy", deferred["reason"])
+        self.assertIn(f"attempt 1 of {limit}", deferred["reason"])
+        task = self.reader.show("secretary-510-pilot")
+        self.assertEqual(task["state"], "in_progress", "a deferred launch is not a failed round")
+        record = self._record_of()
+        self.assertEqual(record.state, "claim_verified", "the next tick launches from this state")
+        self.assertEqual(record.worker_launch_attempts, 1)
+        self.assertEqual(record.launch_intent, {}, "no head came up, so no intent is left open")
+
+    def test_a_worker_pane_held_in_a_dialog_defers_the_claim_launch(self) -> None:
+        """The canary's own failure: a codex update prompt nothing in the pipeline answers."""
+        self.start_dispatcher()
+        self.host.fail_prepare_error = self._pane_not_ready("blocked")
+
+        deferred = self.tick()
+
+        self.assertEqual(deferred["action"], "worker-launch-deferred")
+        self.assertEqual(deferred["readiness"], "blocked")
+        self.assertIn("worker head pane is held in a dialog", deferred["reason"])
+        self.assertIn("codex-update-prompt", deferred["reason"])
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+
+    def test_a_deferred_worker_launch_is_retried_and_the_count_resets(self) -> None:
+        """The retry is the next tick, and a head that does come up ends the episode: the deferrals
+        before it must not count against the next one."""
+        self.start_dispatcher()
+        self.host.fail_prepare_error = self._pane_not_ready("blocked")
+        self.tick()
+        self.host.fail_prepare_error = None
+
+        launched = self.tick()
+
+        self.assertEqual(launched["status"], "ok")
+        self.assertEqual(launched["step"], "claim")
+        self.assertEqual(self.host.prepared, ["secretary-510-pilot"])
+        record = self._record_of()
+        self.assertEqual(record.state, "claimed")
+        self.assertEqual(record.worker_launch_attempts, 0)
+
+    def test_a_worker_pane_that_never_frees_up_blocks_the_card_over_that_pane(self) -> None:
+        """The deferral is bounded, and what the card is blocked over is the pane and its state:
+        "bring-up failed" sends an operator looking for a broken head or a broken host."""
+        limit = self._bound_bring_up_attempts(3)
+        self.start_dispatcher()
+        self.host.fail_prepare_error = self._pane_not_ready("blocked")
+
+        for attempt in range(limit):
+            deferred = self.tick()
+            self.assertEqual(deferred["action"], "worker-launch-deferred")
+            self.assertEqual(deferred["attempts"], attempt + 1)
+
+        blocked = self.tick()
+
+        self.assertEqual(blocked["status"], "blocked")
+        task = self.reader.show("secretary-510-pilot")
+        self.assertEqual(task["state"], "blocked")
+        reason = task["comments"][-1]["body"]
+        self.assertIn("worker head pane was held in a dialog", reason)
+        self.assertIn(f"all {limit + 1} bring-up attempts", reason)
+        self.assertNotIn("dispatcher bring-up failed", reason)
+        self.assertNotIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
+
+    def test_an_ordinary_worker_bringup_failure_still_blocks_at_once(self) -> None:
+        """Only a pane that is busy or held in a dialog is worth another tick. Everything else is
+        the failure it always was."""
+        self.start_dispatcher()
+        self.host.fail_prepare_reason = "resume workspace is missing"
+
+        blocked = self.tick()
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertIn(
+            "dispatcher bring-up failed", self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
+        )
+
+    def test_a_busy_reviewer_pane_defers_the_review_launch(self) -> None:
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.host.fail_review_error = self._pane_not_ready("busy")
+
+        deferred = self.tick()
+
+        self.assertEqual(deferred["status"], "skipped")
+        self.assertEqual(deferred["action"], "review-launch-deferred")
+        self.assertEqual(deferred["readiness"], "busy")
+        self.assertIn("reviewer head pane is busy", deferred["reason"])
+        task = self.reader.show("secretary-510-pilot")
+        self.assertEqual(task["state"], "validate", "a deferred reviewer is not a failed round")
+        record = self._record_of()
+        self.assertEqual(record.state, "review_starting", "the next tick recovers this launch")
+        self.assertEqual(record.review_launch_attempts, 1)
+        self.assertEqual(self.host.torn_down, [], "a deferred reviewer must not touch the checkout")
+
+    def test_a_deferred_review_launch_is_retried_on_the_next_tick(self) -> None:
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.host.fail_review_error = self._pane_not_ready("blocked")
+        deferred = self.tick()
+        self.assertEqual(deferred["readiness"], "blocked")
+        self.host.fail_review_error = None
+
+        started = self.tick()
+
+        self.assertEqual(started["status"], "ok")
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+        record = self._record_of()
+        self.assertEqual(record.state, "reviewing")
+        self.assertEqual(record.review_launch_attempts, 0)
+
+    def test_a_reviewer_pane_that_never_frees_up_blocks_the_card_over_that_pane(self) -> None:
+        limit = self._bound_bring_up_attempts(3)
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.host.fail_review_error = self._pane_not_ready("blocked")
+
+        for attempt in range(limit):
+            deferred = self.tick()
+            self.assertEqual(deferred["attempts"], attempt + 1)
+
+        blocked = self.tick()
+
+        self.assertEqual(blocked["status"], "blocked")
+        task = self.reader.show("secretary-510-pilot")
+        self.assertEqual(task["state"], "blocked")
+        reason = task["comments"][-1]["body"]
+        self.assertIn("reviewer head pane was held in a dialog", reason)
+        self.assertNotIn("review bring-up failed", reason)
+
+    def test_a_rework_bringup_defers_on_a_pane_that_is_not_ready(self) -> None:
+        """A rework is a bring-up like any other: a red gate that lands while the head's pane is
+        held in a dialog must not turn the rework into a Blocked card either."""
+        self.start_dispatcher()
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self.host.fail_restart_error = self._pane_not_ready("blocked")
+        self._run_worker_to_validate()
+
+        deferred = self.tick()
+
+        self.assertEqual(deferred["status"], "skipped")
+        self.assertEqual(deferred["action"], "worker-launch-deferred")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertEqual(self._record_of().worker_launch_attempts, 1)
+        # And the next tick brings the rework up again. The record names no head, which is what the
+        # dispatcher reads as a worker pane that is not there and replaces.
+        self.host.fail_restart_error = None
+        self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
+        self.tick()
+        record = self._record_of()
+        self.assertEqual(record.state, "claimed")
+        self.assertEqual(record.worker_launch_attempts, 0)
+        self.assertEqual(self.host.calls.count("restart_worker"), 2)
+
     def _worker_report_request_id(self, kind: str = "done", classification: str = "") -> str:
         """The report request-id the worker in the checkout is actually holding, read out of its
         TASK.md rather than recomputed here: a test that recomputes it cannot catch the document
@@ -7091,7 +7295,18 @@ class WaitWatchdogTests(unittest.TestCase):
             "SECRETARY_REVIEW_VERDICT_STALL_SECONDS",
             "SECRETARY_WORKER_REPORT_STALL_SECONDS",
             "SECRETARY_HEAD_IDLE_STALL_SECONDS",
+            "SECRETARY_BRINGUP_DEFER_ATTEMPTS",
         )
+
+    def test_the_bringup_deferral_bound_comes_from_the_env_at_call_time(self) -> None:
+        with mock.patch.dict(os.environ, {"SECRETARY_BRINGUP_DEFER_ATTEMPTS": "2"}):
+            self.assertEqual(bring_up_defer_attempts(), 2)
+        self.assertEqual(bring_up_defer_attempts(), BRING_UP_DEFER_ATTEMPTS_DEFAULT)
+
+    def test_an_unparseable_bringup_deferral_bound_falls_back_to_the_default(self) -> None:
+        for bogus in ("", "a few", "0", "-1"):
+            with mock.patch.dict(os.environ, {"SECRETARY_BRINGUP_DEFER_ATTEMPTS": bogus}):
+                self.assertEqual(bring_up_defer_attempts(), BRING_UP_DEFER_ATTEMPTS_DEFAULT)
 
     def test_the_idle_window_comes_from_the_env_at_call_time(self) -> None:
         with mock.patch.dict(os.environ, {"SECRETARY_HEAD_IDLE_STALL_SECONDS": "30"}):
@@ -9326,6 +9541,182 @@ class ReviewPaneTests(unittest.TestCase):
 
         self.assertEqual(host.ops(), ["close"])
         self.assertEqual(host.call_for("close")[host.call_for("close").index("--terminal") + 1], "term-review")
+
+
+class PromptAfterStartCatalog(ReviewCatalog):
+    """A catalog whose heads take their prompt after the pane is up, the way a TUI provider does."""
+
+    def head_launch(
+        self,
+        head: str,
+        prompt_file: str,
+        *,
+        workspace: str,
+        role: str,
+        codex_mode: str | None = None,
+        launch_prompt: str | None = None,
+        identity: dict[str, str] | None = None,
+    ):
+        from secretary.dispatcher_launcher import HeadLaunch
+
+        return HeadLaunch(f"run-{role}", prompt_after_start=True)
+
+
+class ScriptedWaitHost(CommandHostRuntime):
+    """CommandHostRuntime whose Orca answers each `terminal wait` from a script.
+
+    The first answer is the delivery's own wait for the pane; the second is the readiness question
+    the bring-up asks about the pane it is about to close. An entry that is an exception is raised,
+    which is how the real CLI reports a condition it could not satisfy.
+    """
+
+    def __init__(self, root: Path, *, waits: list) -> None:
+        super().__init__(PromptAfterStartCatalog(), root, mode="real")  # type: ignore[arg-type]
+        self.waits = list(waits)
+        self.ops: list[str] = []
+        self.closed: list[str] = []
+
+    def _run_json(self, args: list[str]) -> dict:
+        op = args[2] if args[:2] == ["orca", "terminal"] else ""
+        self.ops.append(op)
+        if op == "wait":
+            answer = self.waits.pop(0)
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        if op == "create":
+            return {"terminal": {"handle": "term-head"}}
+        if op == "close":
+            self.closed.append(args[args.index("--terminal") + 1])
+        if op == "list":
+            return {"terminals": []}
+        return {}
+
+    def _run(self, args: list[str], label: str, *, cwd: Path | None = None):
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+
+class LaunchPaneReadinessTests(unittest.TestCase):
+    """secretary-1163: a bring-up classifies the pane that would not take its launch prompt.
+
+    Orca answers readiness in three states and the bring-up path used none of them: every refused
+    delivery came back as one undifferentiated failure, and the card went to Blocked for a codex
+    update dialog that would have been gone a minute later.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.workspace = self.root / "ws"
+        self.workspace.mkdir()
+        _clear_env(self, "SECRETARY_DISPATCHER_WORKER_COMMAND")
+        os.environ["SECRETARY_DISPATCHER_BODY_DIR"] = str(self.root)
+        self.task = {
+            "ref": "secretary-1163",
+            "project": "secretary",
+            "description": "spec",
+            "workspace": {"base_branch": "main"},
+            "routing": {},
+        }
+
+    def _launch(self, host: ScriptedWaitHost):
+        return host._launch(
+            str(self.workspace),
+            "secretary-1163 worker",
+            "codex",
+            "TASK.md",
+            role="worker",
+            env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
+            launch_prompt="go",
+            task=self.task,
+        )
+
+    def _refused(self, body: dict) -> HostError:
+        """A `terminal wait` the CLI exited non-zero on, carrying the body Orca printed with it."""
+        return HostError(
+            "orca terminal wait --terminal term-head --for tui-idle --timeout-ms 60000 failed: "
+            + json.dumps(body)
+        )
+
+    def test_a_pane_held_in_a_dialog_is_a_deferrable_failure(self) -> None:
+        """The canary's own failure: codex came up behind its update prompt, so the launch prompt
+        went nowhere and the pane never reached idle."""
+        blocked = {
+            "wait": {
+                "condition": "tui-idle",
+                "satisfied": False,
+                "status": "running",
+                "blockedReason": "codex-update-prompt",
+            }
+        }
+        host = ScriptedWaitHost(self.root, waits=[self._refused(blocked), blocked])
+
+        with self.assertRaises(HeadPaneNotReady) as caught:
+            self._launch(host)
+
+        self.assertEqual(caught.exception.readiness, "blocked")
+        self.assertEqual(caught.exception.pane, "term-head")
+        self.assertIn("held in a dialog", str(caught.exception))
+        self.assertIn("codex-update-prompt", str(caught.exception))
+        self.assertEqual(host.closed, ["term-head"], "a deferred launch leaves no pane behind")
+
+    def test_a_working_pane_is_a_deferrable_failure(self) -> None:
+        busy = {"wait": {"condition": "tui-idle", "satisfied": False, "status": "running"}}
+        host = ScriptedWaitHost(self.root, waits=[self._refused(busy), busy])
+
+        with self.assertRaises(HeadPaneNotReady) as caught:
+            self._launch(host)
+
+        self.assertEqual(caught.exception.readiness, "busy")
+        self.assertIn("busy", str(caught.exception))
+
+    def test_a_pane_that_cannot_be_probed_stays_an_ordinary_failure(self) -> None:
+        """A probe nobody answers is not a busy pane. Deferring on it would park the card on a
+        readiness that can never arrive, so it keeps the failure path it always had."""
+        host = ScriptedWaitHost(
+            self.root,
+            waits=[HostError("orca terminal wait failed: connection refused"),
+                   HostError("orca terminal wait failed: connection refused")],
+        )
+
+        with self.assertRaises(HostError) as caught:
+            self._launch(host)
+
+        self.assertNotIsInstance(caught.exception, HeadPaneNotReady)
+        self.assertEqual(host.closed, ["term-head"])
+
+    def test_a_pane_that_went_ready_after_the_failure_stays_an_ordinary_failure(self) -> None:
+        """The delivery failed and the pane is idle: nothing is holding it, so there is nothing to
+        wait for and the failure is about the delivery itself."""
+        host = ScriptedWaitHost(
+            self.root,
+            waits=[
+                self._refused({"wait": {"condition": "tui-idle", "satisfied": False}}),
+                {"wait": {"condition": "tui-idle", "satisfied": True}},
+            ],
+        )
+
+        with self.assertRaises(HostError) as caught:
+            self._launch(host)
+
+        self.assertNotIsInstance(caught.exception, HeadPaneNotReady)
+
+    def test_a_pane_that_will_not_close_still_outranks_its_readiness(self) -> None:
+        """A head that may still be running is the worse ambiguity: the caller has to keep its
+        launch intent for it, which a deferred relaunch would throw away."""
+        blocked = {"wait": {"satisfied": False, "blockedReason": "codex-update-prompt"}}
+
+        class RefusingHost(ScriptedWaitHost):
+            def _run_json(self, args: list[str]) -> dict:
+                if args[:3] == ["orca", "terminal", "close"]:
+                    raise HostError("orca terminal close failed: tab_not_found")
+                return super()._run_json(args)
+
+        host = RefusingHost(self.root, waits=[self._refused(blocked), blocked])
+
+        with self.assertRaises(HeadLaunchAborted):
+            self._launch(host)
 
 
 class ReviewLivenessTests(unittest.TestCase):
