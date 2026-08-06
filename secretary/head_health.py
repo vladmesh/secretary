@@ -93,6 +93,15 @@ class HeadHealth:
         text = " ".join((completed.stdout or "", completed.stderr or "")).lower()
         if any(marker in text for marker in ("login", "not authenticated", "unauthorized", "authentication", " 401", " 403")):
             return HeadReadiness(resource, "unauthenticated", "resource authentication failed", now)
+        # A spent subscription answers in its own words, and none of them is "rate limit": codex
+        # says "You've hit your usage limit … purchase more credits or try again at <date>".
+        # Classified before the provider-unavailable markers because the two read differently to an
+        # operator — this resource is not flaky, it is out until the quota resets — and because
+        # leaving it unclassified made it `unknown`, which `launch_allowed` treats as usable. On
+        # 2026-08-06 that cost sprint:1200 two launches and a round into a dead resource before the
+        # watchdog ceiling stopped it.
+        if any(marker in text for marker in ("usage limit", "quota", "credits", "insufficient_quota", "billing")):
+            return HeadReadiness(resource, "exhausted", "resource quota is spent", now)
         if any(marker in text for marker in ("503", "circuit_open", "unavailable", "rate limit", " 429", "connection", "network")):
             return HeadReadiness(resource, "unavailable", "resource provider is unavailable", now)
         return HeadReadiness(resource, "unknown", "probe returned an unclassified failure", now)

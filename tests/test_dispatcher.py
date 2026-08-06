@@ -6813,6 +6813,15 @@ class HeadPromptTests(unittest.TestCase):
         self.assertIn("name the test, what it", doc)
         self.assertIn("silently rewritten assertion", doc)
 
+    def test_worker_prompt_keeps_checks_in_the_foreground(self) -> None:
+        """A head has no way to wait: a background job answers at the start of its next turn, and
+        any tool call keeps the current one open. Backgrounding a check is therefore a stall."""
+        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
+
+        self.assertIn("Run every check in the foreground", doc)
+        self.assertIn("do not write a loop that waits for it", doc)
+        self.assertIn("keeps the turn open", doc)
+
     def test_worker_prompt_does_not_call_none_or_noop_validation_authoritative(self) -> None:
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
 
