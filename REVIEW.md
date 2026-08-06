@@ -58,14 +58,26 @@ merge gate failed: gate gh api failed:
 Трогать сам механизм мерджа.
 
 
+## Re-review packet
+
+previous_reviewed_sha: 0aa68325fb737b15421a678b73e26cd0d6629a1b
+current_sha: 838fdcfbf99139b75c01f8b0ff4a27a9d4378824
+Changed paths / delta from the prior review:
+REVIEW.md docs/PROTOCOLS.md secretary/dispatcher.py secretary/dispatcher_gate.py secretary/dispatcher_observer_fence.py tests/test_dispatcher.py tests/test_dispatcher_observer.py
+REVIEW.md | 102 +++++----- docs/PROTOCOLS.md | 12 ++ secretary/dispatcher.py | 8 +- secretary/dispatcher_gate.py | 192 +++++++++++++----- secretary/dispatcher_observer_fence.py | 50 ++++- tests/test_dispatcher.py | 342 ++++++++++++++++++++++++++++++--- tests/test_dispatcher_observer.py | 9 +- 7 files changed, 576 insertions(+), 139 deletions(-)
+Previous blockers (close or explicitly retain these stable IDs):
+# Reviewer verdict: RED — secretary-1164 Reviewed `0aa68325fb737b15421a678b73e26cd0d6629a1b` against base `8c9fdce`. The dispatcher-side machinery is right: `GateTransportError` is raised ahead of `HostError` at both `host.gate_check` call sites, the retry leaves the record, the board and the heads untouched, the budget counts consecutive silence and resets on any answer, the card re-enters through the standing board marker (Validate) and the standing audit decision (Assessment) so nothing is consumed, the tick emits `gate-transport-retry` with the attempt number and the error, and the exhausted budget blocks with a reason that names the transport. All three paths that ask the backend are wired (`_run_gate`, `_park_green_verdict`, `_release_parked`) and there is no fourth `gate_check` caller. Red answers still return a `GateResult`, never an exception, so criterion 4 holds and the existing red tests are untouched. What is wrong is the single place the whole feature turns on: the decision of *what counts as a backend that never answered* is made by regex-sniffing rendered error prose in `secretary/dispatcher_gate.py:75` (`_TRANSPORT_MARK_RE` / `is_transport_failure`). Three concrete reachable defects follow from that, all introduced by this branch. --- ## BLOCKER-gh-dns-not-classified **Scenario.** DNS fails while the github gate reads the check rollup. `_gh_api` (`dispatcher_gate.py:389`) raises `HostError("gate gh api failed: <gh stderr>")`. Real `gh` does not print a Go DNS error there — its `api` command special-cases `*net.DNSError` and prints its own message instead. Observed on this machine with the real binary (`gh version 2.45.0`), no fixture: ``` $ gh api repos/x/y --jq .check_runs --hostname nonexistent.invalid error connecting to nonexistent.invalid check your internet connection or https://githubstatus.com ``` `is_transport_failure()` returns **False** for that text (verified against the branch tree). The error is therefore re-raised as a plain `HostErro
+Review this delta, the closure of prior blockers and collateral impact; do not restart
+from the original base unless a concrete suspicion requires the historical diff.
+
 ## Mechanical gate attestation
 
-- validated_sha: 0aa68325fb737b15421a678b73e26cd0d6629a1b
+- validated_sha: 838fdcfbf99139b75c01f8b0ff4a27a9d4378824
 - base_sha: 8c9fdce580f962f2bc2add95a5e640ef1a4e7548
 - gate_mode: github
 - required terminal checks:
-  - test: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/31100867040/job/92613833784)
-- completed_at: 2026-08-06T12:20:57+00:00
+  - test: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/31103832401/job/92623814996)
+- completed_at: 2026-08-06T13:01:37+00:00
 - command_or_check_set_digest: e05e08ff6e9e51da3be176a7b5215dfddd2f768f01036631e8a3c9ab7be723ca
 
 Independently inspect the diff, acceptance criteria and invariants. The attested broad
@@ -90,10 +102,10 @@ real behaviour you verified and how. If no end-to-end check against the real bac
 was possible, write plainly that it was not done and which assumption stays unverified.
 
 Post exactly one review verdict through the secretary task protocol:
-Write the body to /tmp/secretary-verdict-secretary-1164-2.md with your file-writing tool,
+Write the body to /tmp/secretary-verdict-secretary-1164-15.md with your file-writing tool,
 then run the command below verbatim. Do not assemble the body inside the shell command
 (no heredoc, no mktemp, no echo pipeline) and do not add `rm`: the codex runtime refuses
 rm-style commands, and quotes or backticks in the body break the call. Leave the file in
 place afterwards; the dispatcher does not read it.
-PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1164 --role reviewer --kind green --request-id dispatcher-attempt-20260806T120508Z-ee9a9e4e2d1b-review-green-secretary-1164-2 --body-file /tmp/secretary-verdict-secretary-1164-2.md
-PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1164 --role reviewer --kind red --request-id dispatcher-attempt-20260806T120508Z-ee9a9e4e2d1b-review-red-secretary-1164-2 --body-file /tmp/secretary-verdict-secretary-1164-2.md
+PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1164 --role reviewer --kind green --request-id dispatcher-attempt-20260806T120508Z-ee9a9e4e2d1b-review-green-secretary-1164-15 --body-file /tmp/secretary-verdict-secretary-1164-15.md
+PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1164 --role reviewer --kind red --request-id dispatcher-attempt-20260806T120508Z-ee9a9e4e2d1b-review-red-secretary-1164-15 --body-file /tmp/secretary-verdict-secretary-1164-15.md

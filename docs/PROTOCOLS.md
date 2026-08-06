@@ -101,8 +101,13 @@ answer about the branch and blocks the card immediately with that reason, howeve
 Each call carries the tool's own output into that decision, so a probe never converts silence into a
 positive fact about the backend's state — an unanswered open-PR probe is not "there is no PR". Where
 a failed remote command still has to be sorted into answered and unanswered, that judgement lives
-inside the helper and reads what the tools actually print: an HTTP status is an answer unless it is
-a 5xx, and output that says the tool never got through, or says nothing at all, is silence.
+inside the helper, and it recognises the answer rather than the failure: an HTTP status the tool
+quotes (unless it is a 5xx, which is the backend failing to serve one), a GraphQL error or a
+response body it parsed, or git's push report from the remote. Anything else a backend call prints —
+a transport message, an empty stderr, a wording nobody has captured yet — is silence, and the card
+waits. The default runs that way round on purpose: a wrong "no answer" costs a few retries and a
+Blocked reason that quotes the tool, while a wrong "answer" costs an immediate Blocked on a moment
+of bad network, which is the failure this contract exists to prevent.
 
 Workers use focused checks while developing and run no more than one local broad suite for a report
 generation/unchanged SHA unless they state why it was rerun. Only an executed local/GitHub gate with a

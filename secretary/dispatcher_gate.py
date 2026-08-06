@@ -70,48 +70,52 @@ _INFRA_MARK_RE = re.compile(
     r"temporary failure in name resolution|failed to fetch|apt-get|npm err! network|"
     r"pip.{0,20}(?:could not find|could not install)|dependency resolution)\b"
 )
-# What a failed backend command says about whether the backend answered at all (secretary-1164).
-# These are subordinate to `_backend_call` below: they are consulted only for a command that was
-# aimed at the backend and came back non-zero, and they never decide on their own that some code
-# path is "the network one".
+# How a failed backend command says that an answer *did* arrive (secretary-1164).
 #
-# An HTTP status in the tool's own output is proof an answer arrived. `gh` renders one as
-# `gh: Not Found (HTTP 404)`; git-over-HTTPS as `error: RPC failed; HTTP 502 ...`, as a status
-# line (`HTTP/1.1 503 ...`), or as `fatal: unable to access '...': The requested URL returned
-# error: 503`. All of those forms are read here; a bare `https://…` URL is not one of them.
+# The rule is positive and the default is silence: a question put to the backend counts as
+# answered only when the tool prints one of the shapes below, and anything else it prints is a
+# question that got no answer. That direction is deliberate. Guessing "no answer" costs a few
+# retries and a Blocked reason that names the transport and quotes the tool; guessing "answer"
+# costs an immediate wrong Blocked on a moment of bad network, which is the incident this card
+# exists for. Two rounds of this card were red for phrases missing from a list of failures; there
+# is no such list any more, because the failures are open-ended and the answers are not.
+#
+# Every shape below was taken from the binaries this gate runs, on this machine (gh 2.45.0,
+# git 2.43.0). The captures are in the tests next to them.
+#
+# 1. An HTTP status the tool quotes. Only the backend can produce one.
+#      gh api        -> gh: Not Found (HTTP 404)
+#      gh run view   -> failed to get run: HTTP 404: Not Found (https://api.github.com/...)
+#      git over HTTPS-> error: RPC failed; HTTP 502 ...
+#                       fatal: unable to access '...': The requested URL returned error: 503
+#    A 5xx is the exception: the backend failed to serve an answer, and this card counts that as
+#    transport (acceptance criterion 1 names it).
 _HTTP_STATUS_RE = re.compile(r"(?i)\bhttp(?:/\d(?:\.\d)?)?[ /](\d{3})\b|returned error:\s*(\d{3})\b")
-# Wordings that say the tool never got an answer, taken from the tools this gate actually runs
-# (gh 2.45.0, git 2.43.0) rather than invented:
-#   gh api / pr list / pr create / run view against an unreachable host
-#     error connecting to <host>
-#     check your internet connection or https://githubstatus.com
-#   gh surfacing the raw Go transport error (the sprint:1200 incident)
-#     Get "https://api.github.com/...": net/http: TLS handshake timeout
-#   git fetch/push
-#     fatal: unable to access '...': Could not resolve host: <host>
-#     fatal: unable to access '...': Failed to connect to <host> port 443 after 0 ms: Couldn't
-#       connect to server
-_NO_ANSWER_RE = re.compile(
-    r"(?i)(error connecting to|check your internet connection|"
-    r"net/http|tls handshake timeout|i/o timeout|dial tcp|no such host|"
-    r"could not resolve host|temporary failure in name resolution|name or service not known|"
-    r"network is unreachable|no route to host|couldn't connect to server|failed to connect|"
-    r"connection (?:reset|refused|closed|timed out)|connection was reset|operation timed out|"
-    r"context deadline exceeded|unexpected eof|remote end hung up|broken pipe|empty reply from "
-    r"server|gnutls_handshake|ssl_error_syscall|certificate verify failed|proxy error|"
-    r"bad gateway|service unavailable|gateway time-?out)"
+# 2. A GraphQL error: gh rendering an API response body it parsed. This is what the gate's own
+#    calls answer with when the repository or the PR is the problem.
+#      gh repo view  -> GraphQL: Could not resolve to a Repository with the name '...'. (repository)
+#      gh pr list    -> GraphQL: Could not resolve to a Repository with the name '...'. (repository)
+#      gh pr create  -> pull request create failed: GraphQL: A pull request already exists for ...
+#    A raw response body reaching the text counts for the same reason.
+# 3. git's push report, which exists only because the remote answered: the per-ref status table it
+#    prints from the server's report-status, and any line the server itself sent.
+#      git push      ->  ! [rejected]        main -> main (fetch first)
+#                        remote: policy: branch is protected
+#                        ! [remote rejected] main -> main (pre-receive hook declined)
+_ANSWERED_RE = re.compile(
+    r'(?im)(\bgraphql:\s|^\s*remote:\s|!\s*\[(?:rejected|remote rejected|deleted|no match)\]'
+    r'|^\s*\{\s*"(?:errors|message)")'
 )
 
 
 def _backend_answered(text: str) -> bool:
     """Did the gate's backend answer this failed backend command?
 
-    Only `_backend_call` asks. Three signals, in order: an HTTP status the tool printed is an
-    answer — except a 5xx, which is the backend failing to serve one and which this card counts
-    as transport; a wording from the list above is a tool that never got through; and a command
-    that failed while saying nothing at all is treated as unanswered, because nothing in its
-    output claims the backend was reached. Anything else — a rejected push, a refused duplicate
-    PR, `gh: Not Found (HTTP 404)` — is an answer, and it keeps blocking the card as before.
+    Only `_backend_call` asks. An HTTP status decides first (5xx is the backend failing to answer,
+    not an answer); otherwise one of the answer shapes above must be present. Text that matches
+    none of them — a Go `url.Error`, a curl or GnuTLS transport message, gh's own
+    "error connecting to", an empty stderr, or a wording nobody has seen yet — is a question that
+    got no answer.
     """
     text = (text or "").strip()
     if not text:
@@ -120,7 +124,7 @@ def _backend_answered(text: str) -> bool:
     if status:
         code = status.group(1) or status.group(2)
         return not code.startswith("5")
-    return not _NO_ANSWER_RE.search(text)
+    return bool(_ANSWERED_RE.search(text))
 
 
 def _backend_call(host, args: list[str], label: str, *, cwd: Path | None = None):

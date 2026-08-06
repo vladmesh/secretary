@@ -9244,14 +9244,30 @@ class DispatcherGateTests(unittest.TestCase):
 
     # --- secretary-1164: only a call to the backend can report that no answer came back ---
     #
-    # The tool wordings below were captured from the binaries this gate runs, on this machine:
-    #   $ gh --version                       -> gh version 2.45.0
+    # Everything below was captured from the binaries this gate runs, on this machine
+    # (gh version 2.45.0, git version 2.43.0). Nothing here is invented prose.
+    #
+    # Answers — the shapes that say the backend replied:
+    #   $ gh api repos/vladmesh/<absent>/commits/abc/check-runs --jq .check_runs
+    #     gh: Not Found (HTTP 404)
+    #   $ gh run view 1 -R vladmesh/secretary --log-failed
+    #     failed to get run: HTTP 404: Not Found (https://api.github.com/repos/.../runs/1?...)
+    #   $ gh repo view --json nameWithOwner -q .nameWithOwner   (origin = an absent repository)
+    #     GraphQL: Could not resolve to a Repository with the name 'vladmesh/...'. (repository)
+    #   $ gh pr list --head foo --state open --json number -q .[0].number   (same origin)
+    #     GraphQL: Could not resolve to a Repository with the name 'vladmesh/...'. (repository)
+    #   $ git push origin main:main            (the remote moved on)
+    #     To ../bare.git
+    #      ! [rejected]        main -> main (fetch first)
+    #     error: failed to push some refs to '../bare.git'
+    #   $ git push origin main:main --force    (a pre-receive hook refused it)
+    #     remote: policy: branch is protected
+    #      ! [remote rejected] main -> main (pre-receive hook declined)
+    #
+    # Silence — the tool never got an answer:
     #   $ gh api repos/x/y --jq .check_runs --hostname nonexistent.invalid
     #     error connecting to nonexistent.invalid
     #     check your internet connection or https://githubstatus.com
-    #   $ gh api repos/vladmesh/<absent>/commits/abc/check-runs --jq .check_runs
-    #     gh: Not Found (HTTP 404)
-    #   $ git --version                      -> git version 2.43.0
     #   $ git ls-remote https://nonexistent.invalid/x/y
     #     fatal: unable to access '...': Could not resolve host: nonexistent.invalid
     #   $ git ls-remote http://127.0.0.1:1/x/y
@@ -9259,9 +9275,25 @@ class DispatcherGateTests(unittest.TestCase):
     #     Couldn't connect to server
     #   $ git ls-remote https://httpbin.org/status/502
     #     fatal: unable to access '...': The requested URL returned error: 503
+    # and the three connection-drop texts the observer reproduced on the branch tree, which the
+    # phrase list of round 3 read as answers (GNUTLS_DROP, HTTP2_DROP, GO_EOF below).
     GH_NO_ANSWER = (
         "error connecting to nonexistent.invalid\n"
         "check your internet connection or https://githubstatus.com"
+    )
+    # A connection dropped mid-transfer: git's HTTPS transport here is libcurl-gnutls, and this is
+    # what it prints when the TLS connection dies after the handshake.
+    GNUTLS_DROP = (
+        "fatal: unable to access 'https://github.com/vladmesh/secretary/': GnuTLS recv error "
+        "(-110): The TLS connection was non-properly terminated."
+    )
+    # The same drop over HTTP/2, which is what GitHub negotiates.
+    HTTP2_DROP = (
+        "error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly: INTERNAL_ERROR (err 2)"
+    )
+    # Go rendering a bare io.EOF as a url.Error, which is how gh surfaces a dropped round trip.
+    GO_EOF = (
+        'Get "https://api.github.com/repos/vladmesh/secretary/commits/d9b1ca7/check-runs": EOF'
     )
     # The wording from the incident this card came from (sprint:1200 / secretary-1161).
     GH_TLS_TIMEOUT = (
@@ -9393,6 +9425,72 @@ class DispatcherGateTests(unittest.TestCase):
             with self.assertRaises(GateTransportError) as caught:
                 host.gate_check(self._task(), self._record(ws))
         self.assertIn("TLS handshake timeout", str(caught.exception))
+
+    def test_a_dropped_connection_on_the_base_fetch_is_no_answer(self) -> None:
+        """`git fetch origin <base>` is the first backend call of every gate run, on both ci modes
+        and from all three dispatcher paths. A connection dropped mid-transfer used to reach the
+        card as `validation gate failed:` on the first tick — the very shape this card removes."""
+
+        class DroppedFetch(GateHost):
+            def __init__(self, root, adapter, text):
+                super().__init__(root, adapter)
+                self.text = text
+
+            def run_capture(self, args, label, *, cwd=None):  # type: ignore[override]
+                if args[:1] == ["git"] and "fetch" in args:
+                    return subprocess.CompletedProcess(args, 128, "", self.text)
+                return super().run_capture(args, label, cwd=cwd)
+
+        for text in (self.GNUTLS_DROP, self.HTTP2_DROP):
+            with self.subTest(text=text[:40]):
+                with tempfile.TemporaryDirectory() as tmp:
+                    ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+                    host = DroppedFetch(
+                        Path(tmp), {"validation": {"ci": "local", "command": "true"}}, text
+                    )
+                    with self.assertRaises(GateTransportError) as caught:
+                        host.gate_check(self._task(), self._record(ws))
+                self.assertIn("gate base fetch", str(caught.exception))
+
+    def test_a_dropped_round_trip_from_gh_is_no_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(), pr_open=True, check_runs=[],
+                api_error=self.GO_EOF,
+            )
+            with self.assertRaises(GateTransportError) as caught:
+                host.gate_check(self._task(), self._record(ws))
+        self.assertIn("EOF", str(caught.exception))
+
+    def test_an_answered_refusal_from_the_remote_still_blocks(self) -> None:
+        """The push report exists only because the remote answered, so a rejected ref stays a
+        determinate gate failure and does not enter the retry budget."""
+
+        class RejectedPush(GithubGateHost):
+            def _run(self, args, label, *, cwd=None):  # type: ignore[override]
+                return super()._run(args, label, cwd=cwd)
+
+            def run_capture(self, args, label, *, cwd=None):  # type: ignore[override]
+                if args[:1] == ["git"] and "push" in args:
+                    return subprocess.CompletedProcess(
+                        args, 1, "",
+                        "To https://github.com/example-org/sample.git\n"
+                        " ! [remote rejected] pipeline/secretary-633 -> pipeline/secretary-633 "
+                        "(protected branch hook declined)\n"
+                        "error: failed to push some refs",
+                    )
+                return super().run_capture(args, label, cwd=cwd)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = RejectedPush(
+                Path(tmp), self._github_adapter(), pr_open=True, check_runs=[],
+            )
+            with self.assertRaises(HostError) as caught:
+                host.gate_check(self._task(), self._record(ws))
+        self.assertNotIsInstance(caught.exception, GateTransportError)
+        self.assertIn("remote rejected", str(caught.exception))
 
     def test_gh_backend_5xx_is_no_answer(self) -> None:
         """A 5xx is the backend failing to serve an answer, which criterion 1 names explicitly."""
@@ -9527,6 +9625,10 @@ class DispatcherGateTests(unittest.TestCase):
         no_answer = (
             self.GH_NO_ANSWER,
             self.GH_TLS_TIMEOUT,
+            # The three the phrase list of round 3 called answers, verbatim.
+            self.GNUTLS_DROP,
+            self.HTTP2_DROP,
+            self.GO_EOF,
             "gh: Server Error (HTTP 502)",
             "gh: Service Unavailable (HTTP 503)",
             "fatal: unable to access 'https://x/y/': Could not resolve host: nonexistent.invalid",
@@ -9534,7 +9636,9 @@ class DispatcherGateTests(unittest.TestCase):
             "port 1 after 0 ms: Couldn't connect to server",
             "fatal: unable to access 'https://x/y/': The requested URL returned error: 503",
             "error: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502",
+            # Nothing at all, and a wording nobody has captured yet: the default is silence.
             "",
+            "fatal: something no one has seen before",
         )
         for text in no_answer:
             with self.subTest(text=text or "(empty)"):
@@ -9544,8 +9648,14 @@ class DispatcherGateTests(unittest.TestCase):
             "gh: Not Found (HTTP 404)",
             "gh: Must have admin rights to Repository. (HTTP 403)",
             "gh: Validation Failed (HTTP 422)",
+            "failed to get run: HTTP 404: Not Found "
+            "(https://api.github.com/repos/x/y/actions/runs/1?exclude_pull_requests=true)",
+            "GraphQL: Could not resolve to a Repository with the name 'x/y'. (repository)",
             "pull request create failed: GraphQL: A pull request already exists for x:y.",
-            "! [rejected] pipeline/secretary-633 -> pipeline/secretary-633 (non-fast-forward)",
+            "To ../bare.git\n ! [rejected]        main -> main (fetch first)\n"
+            "error: failed to push some refs to '../bare.git'",
+            "remote: policy: branch is protected\nTo ../bare.git\n"
+            " ! [remote rejected] main -> main (pre-receive hook declined)",
         )
         for text in answered:
             with self.subTest(text=text):
