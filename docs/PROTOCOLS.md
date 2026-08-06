@@ -917,6 +917,12 @@ A review is worth having because someone other than the worker reads the work, s
 that is refused rather than performed; two roles pointed at one head by the registry itself is an
 installation's own decision and is claimed as before.
 
+Both are claim-skips, and a claim-skip is a statement about one card. The Ready pass records it and
+considers the next card, so an unclaimable card never stops work that has somewhere to go. Every kind of
+claim-skip is named in one set the pass reads, rather than compared against by hand: a skip missing from
+that set does not degrade the pass, it ends it, and the cards behind the skipped one are not considered
+that tick or any following one while the resource stays dead.
+
 A head reached by failover is never a silent substitution. The claim writes the pair onto the card as
 `resolved_worker_head` / `resolved_review_head`, adds one comment naming the head, the preference it
 replaced and the resource verdict that caused it, reports both in the tick, and the reviewer's document

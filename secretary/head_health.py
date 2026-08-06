@@ -118,13 +118,16 @@ def resolve_head_chain(
     nothing; a head launched into a spent subscription costs an attempt and a round).
 
     ``fallback_of`` returns None for a head the registry does not describe, and a *chain entry*
-    that answers None is dropped rather than launched: ``readiness_of`` cannot probe a resource it
-    cannot find and answers ``unknown``, which is launch-allowed, so a chain naming a deleted
-    profile would otherwise pin the claim to a head nothing can start. ``preferred`` itself is not
-    filtered that way — whoever chose it (a card override, a role default) validates it against the
-    registry before asking, and a second check here with different manners would answer a question
-    that caller has already answered. Chains may be cyclic — the codex heads name the claude ones
-    and back — so every candidate is read once.
+    that answers None is dropped without ever reaching ``readiness_of``. Existence is asked here
+    because it cannot be asked there: a readiness check reads the profile to find the resource to
+    probe, so a head that is not in the registry either raises out of that call (the dispatcher's
+    catalog) or answers about nothing at all. Neither is a verdict a claim may act on, and the
+    chain is exactly where a deleted profile survives — the registry validates chain targets when
+    it is loaded, so what reaches here is whatever a later edit left behind. ``preferred`` itself
+    is not filtered that way: whoever chose it (a card override, a role default) resolves it
+    against the registry before asking, so a second check here with different manners would answer
+    a question that caller has already answered, and answer it more quietly. Chains may be cyclic —
+    the codex heads name the claude ones and back — so every candidate is read once.
     """
     seen: set[str] = set()
     rejected: list[tuple[str, HeadReadiness]] = []

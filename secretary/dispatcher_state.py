@@ -12,6 +12,27 @@ from secretary.dispatcher_types import DispatcherError
 from secretary.dispatcher_worker_lifecycle import WorkerContinuation
 
 
+# Every way a claim can answer "not this card". A claim-skip is about the card in front of the
+# scan and says nothing about the ones behind it, so the Ready pass records it and moves on to the
+# next card — halting the pass would let one unclaimable card stop work that has somewhere to go,
+# which is the failure this family-failover work exists to remove, only at queue scale.
+#
+# This set is the registry, not a convenience: the Ready scan reads it rather than comparing
+# against one action, so adding a new kind of claim-skip means adding it here and nowhere else. A
+# skip that is missing from it does not degrade, it stops the tick's whole Ready pass.
+CLAIM_SKIP_RESOURCE_NOT_READY = "resource-not-ready"
+CLAIM_SKIP_FAILOVER_COLLAPSE = "failover-collapses-roles"
+CLAIM_SKIP_ACTIONS = frozenset({
+    CLAIM_SKIP_RESOURCE_NOT_READY,
+    CLAIM_SKIP_FAILOVER_COLLAPSE,
+})
+
+
+def is_claim_skip(outcome: dict[str, Any]) -> bool:
+    """Whether a claim outcome is "not this card, next card" rather than the pass's answer."""
+    return str(outcome.get("action") or "") in CLAIM_SKIP_ACTIONS
+
+
 @dataclass
 class DispatcherRecord:
     worker: str

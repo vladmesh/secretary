@@ -30,6 +30,7 @@ from secretary.dispatcher_state import (
     attempt_request_id as _attempt_request_id,
     close_divergence,
     divergence_is_open,
+    is_claim_skip,
     new_attempt_id,
     now_rfc3339,
     record_divergence,
@@ -1323,7 +1324,11 @@ def _production_claim_ready(
                 skipped.append({"ref": task["ref"], "reason": exc.message})
                 continue
             raise
-        if outcome.get("action") == "resource-not-ready":
+        # Every claim-skip, not one of them: the pass moves to the next Ready card whatever made
+        # this one unclaimable. A skip the scan does not recognise falls through to the return
+        # below and ends the pass, which stops cards that had somewhere to go — see
+        # CLAIM_SKIP_ACTIONS for the registry a new skip has to join.
+        if is_claim_skip(outcome):
             skipped.append({
                 "ref": task["ref"],
                 "reason": str(outcome.get("reason") or "head resource is not ready"),

@@ -1535,7 +1535,10 @@ counterpart. The transfer is not silent: the tick names both heads, the card get
 which and on what verdict, and the reviewer's document says who wrote the branch. Two cases end in no claim at all, and
 both leave the card in Ready with the reason on the tick rather than in Blocked: no launchable head anywhere in the
 chain, and a transfer that would give the worker and the reviewer the same head, which is a review by the author and is
-refused. Neither occupies a project slot, so a temporary provider problem never becomes an operator's Blocked card.
+refused. Neither occupies a project slot, so a temporary provider problem never becomes an operator's Blocked card, and
+neither ends the tick's Ready pass: every claim-skip is about the card in front of the scan, which records it under
+`skipped_ready` and goes on to consider the next card. A card that cannot be claimed never costs the cards behind it
+their tick.
 
 If a resource shows `unauthenticated`, re-authenticate that runtime's CLI in the runtime home the profile names, then
 wait out the TTL or check the next tick. On `unavailable` do not restart cards: check the provider's status, wait for

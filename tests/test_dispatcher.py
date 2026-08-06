@@ -579,22 +579,6 @@ class FakeCatalog:
         chain = self.profiles[head].get("fallback")
         return [str(entry) for entry in chain] if isinstance(chain, list) else []
 
-    def reaches_fallback(self, preferred: str, head: str) -> bool:
-        seen = {preferred}
-        queue = [preferred]
-        while queue:
-            try:
-                chain = self.head_fallback(queue.pop(0))
-            except HostError:
-                continue
-            for entry in chain:
-                if entry == head:
-                    return True
-                if entry not in seen:
-                    seen.add(entry)
-                    queue.append(entry)
-        return False
-
     def claimed_worker_head(self, task: dict) -> str:
         # Same rule as InstanceCatalog: the head the claim wrote onto the card wins over whatever
         # the override and the role default say now, and a claimed head that has left the registry
@@ -613,11 +597,15 @@ class FakeCatalog:
             raise HostError(f"head {head!r} recorded at claim is unavailable")
         return head
 
-    def head_run(self, task: dict, *, role: str, head: str = "", workspace: str = "") -> HeadRun:
+    def head_run(
+        self, task: dict, *, role: str, head: str = "", workspace: str = "",
+        failover: bool = False,
+    ) -> HeadRun:
         """Mirror InstanceCatalog.head_run over a four-profile registry: `codex` for the worker,
         `codex-reviewer` for the reviewer, `claude-opus` as the other family and `claude-default` as
         the profile that pins no model. Same rule as the real catalog: the head comes from the
-        bring-up, its configuration from the registry as it reads right now."""
+        bring-up, its configuration from the registry as it reads right now, and only the caller's
+        own record can say the claim reached this head by walking a chain."""
         routing = task.get("routing") or {}
         if role == "worker":
             override = routing.get("head_override")
@@ -628,10 +616,10 @@ class FakeCatalog:
             asked = str(override or self.role_defaults["reviewer"])
             codex_mode = ""
         launched = str(head) if head else asked
-        # Same rule as InstanceCatalog: a launched head the registry's chains reach from the asked
-        # one is a claim-time failover and says so; anything else that differs is the record's.
+        # Same rule as InstanceCatalog: a head the claim reached by walking a chain says so, and
+        # anything else that differs from the asked head is the record's older decision.
         source = (
-            ("fallback" if self.reaches_fallback(asked, launched) else "record")
+            ("fallback" if failover else "record")
             if launched != asked
             else ("card" if override else "role_default")
         )
@@ -827,6 +815,7 @@ class FakeHost:
         attempt_id: str = "",
         require_existing_workspace: bool = False,
         generation: int = 0,
+        failover: bool = False,
     ) -> dict[str, str]:
         self.calls.append("prepare_worker")
         self.prepare_requires_existing.append(require_existing_workspace)
@@ -843,7 +832,7 @@ class FakeHost:
         self._write_task_doc(task, workspace, attempt_id, generation)
         self.prepared.append(task["ref"])
         self._write_head_pid("worker", task["ref"])
-        launched = self._launched(f"term:{worker_id}", head, task, "worker")
+        launched = self._launched(f"term:{worker_id}", head, task, "worker", failover=failover)
         return {
             "workspace": str(workspace),
             "handle": launched.handle,
@@ -921,7 +910,8 @@ class FakeHost:
         # pinning the commit the reviewer judges.
         self.split_from.append(record.handle)
         launched = self._launched(
-            f"review:{task['ref']}", record.review_head, task, "reviewer", record.workspace
+            f"review:{task['ref']}", record.review_head, task, "reviewer", record.workspace,
+            failover=bool(record.preferred_review_head),
         )
         try:
             if record.worker_continuation.retained:
@@ -961,15 +951,21 @@ class FakeHost:
         )
         self.prepared.append(task["ref"])
         self._write_head_pid("worker", task["ref"])
-        return self._launched(f"rework:{task['ref']}", record.head, task, "worker")
+        return self._launched(
+            f"rework:{task['ref']}", record.head, task, "worker",
+            failover=bool(record.preferred_head),
+        )
 
     def _launched(
-        self, handle: str, head: str, task: dict, role: str, workspace: str = ""
+        self, handle: str, head: str, task: dict, role: str, workspace: str = "",
+        failover: bool = False,
     ) -> LaunchedHead:
         return LaunchedHead(
             handle=handle,
             head=head,
-            run=self.catalog.head_run(task, role=role, head=head, workspace=workspace).to_json(),
+            run=self.catalog.head_run(
+                task, role=role, head=head, workspace=workspace, failover=failover
+            ).to_json(),
         )
 
     def review_running(self, task: dict, record) -> bool:
@@ -2322,6 +2318,69 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(
             claimed["skipped_ready"][0],
             {"ref": "secretary-510-pilot", "reason": "claude login expired"},
+        )
+
+    def test_production_scan_continues_after_a_refused_failover(self) -> None:
+        """secretary-1165, second round. A claim-skip is about the card in front of the scan and
+        says nothing about the ones behind it. The refusal to review a card with its own author is
+        a claim-skip like any other, and a Ready pass that ended on it would reproduce the failure
+        this card exists to remove — a dead resource stopping work that had somewhere to go — one
+        layer up, at queue scale, every tick for as long as the resource stays dead.
+        """
+        self.catalog.profiles["codex"] = dict(
+            self.catalog.profiles["codex"], fallback=["claude-default"]
+        )
+        self.catalog.profiles["codex-reviewer"] = dict(
+            self.catalog.profiles["codex-reviewer"], fallback=["claude-opus"]
+        )
+        # The pilot pins its worker onto the live family by hand — an ordinary hard-card override —
+        # so only its reviewer fails over, straight onto the head its own worker is already on.
+        self.board.metadata[12]["head"] = "claude-opus"
+
+        def readiness(head: str) -> HeadReadiness:
+            resource = str(self.catalog.profiles.get(head, {}).get("resource") or "openai-sub")
+            if resource == "openai-sub":
+                return HeadReadiness(resource, "exhausted", "resource quota is spent", 1.0)
+            return HeadReadiness(resource, "ready", "probe succeeded", 1.0)
+
+        self.runtime.head_readiness = readiness
+        result = self.runtime.production_tick()
+
+        claimed = [action for action in result["actions"] if action.get("step") == "claim"][0]
+        self.assertEqual(claimed["pilot_ref"], "secretary-510-neighbor")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "ready")
+        self.assertEqual(self.reader.show("secretary-510-neighbor")["state"], "in_progress")
+        self.assertEqual(claimed["skipped_ready"][0]["ref"], "secretary-510-pilot")
+        self.assertIn(
+            "worker and reviewer on the same head claude-opus",
+            claimed["skipped_ready"][0]["reason"],
+        )
+
+    def test_production_scan_continues_after_a_dead_chain(self) -> None:
+        """The other claim-skip, at the same level: nothing launchable anywhere for the first card
+        must not cost the second card its tick either."""
+        self.runtime.catalog.worker_head = (  # type: ignore[method-assign]
+            lambda task: "claude-opus" if task["ref"] == "secretary-510-pilot" else "codex"
+        )
+        self.catalog.profiles["claude-opus"] = dict(
+            self.catalog.profiles["claude-opus"], fallback=["claude-default"]
+        )
+
+        def readiness(head: str) -> HeadReadiness:
+            resource = str(self.catalog.profiles.get(head, {}).get("resource") or "openai-sub")
+            if resource == "claude-sub":
+                return HeadReadiness(resource, "exhausted", "resource quota is spent", 1.0)
+            return HeadReadiness(resource, "ready", "probe succeeded", 1.0)
+
+        self.runtime.head_readiness = readiness
+        result = self.runtime.production_tick()
+
+        claimed = [action for action in result["actions"] if action.get("step") == "claim"][0]
+        self.assertEqual(claimed["pilot_ref"], "secretary-510-neighbor")
+        self.assertEqual(self.reader.show("secretary-510-neighbor")["state"], "in_progress")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "ready")
+        self.assertIn(
+            "claude-default on claude-sub is exhausted", claimed["skipped_ready"][0]["reason"]
         )
 
     def test_production_scan_skips_ready_steward_report(self) -> None:
@@ -8962,6 +9021,7 @@ class GitBranchHost(CommandHostRuntime):
         launch_prompt: str | None = None,
         split_from: str = "",
         task: dict | None = None,
+        failover: bool = False,
     ) -> LaunchedHead:
         self.launched.append((head, prompt_file))
         self.launch_prompts.append(launch_prompt)

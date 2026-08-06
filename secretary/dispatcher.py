@@ -131,6 +131,8 @@ from secretary.dispatcher_watchdog import (
     wait_outcome as _wait_outcome,
 )
 from secretary.dispatcher_state import (
+    CLAIM_SKIP_FAILOVER_COLLAPSE,
+    CLAIM_SKIP_RESOURCE_NOT_READY,
     DispatcherRecord,
     attempt_request_id as _attempt_request_id,
     claim_actual as _claim_actual,
@@ -326,29 +328,6 @@ class InstanceCatalog:
             return []
         return [str(entry) for entry in chain if isinstance(entry, str) and entry]
 
-    def reaches_fallback(self, preferred: str, head: str) -> bool:
-        """Whether `head` is reachable from `preferred` through the registry's fallback chains.
-
-        This is what separates the two ways a launched head can differ from the requested one:
-        a claim that walked the chain because the preferred resource was dead, and a card whose
-        record simply pins an older decision. Read from the registry as it stands now, so a chain
-        edited since the claim degrades the label rather than inventing a substitution.
-        """
-        seen = {preferred}
-        queue = [preferred]
-        while queue:
-            try:
-                chain = self.head_fallback(queue.pop(0))
-            except HostError:
-                continue
-            for entry in chain:
-                if entry == head:
-                    return True
-                if entry not in seen:
-                    seen.add(entry)
-                    queue.append(entry)
-        return False
-
     def claimed_worker_head(self, task: dict[str, Any]) -> str:
         return self._claimed_head(task, "resolved_worker_head", self.worker_head)
 
@@ -382,7 +361,8 @@ class InstanceCatalog:
         return head
 
     def head_run(
-        self, task: dict[str, Any], *, role: str, head: str = "", workspace: str = ""
+        self, task: dict[str, Any], *, role: str, head: str = "", workspace: str = "",
+        failover: bool = False,
     ) -> HeadRun:
         """The launch record for one head of `role`: the profile id plus the configuration it is
         launched with, read from the same snapshot the launcher renders its command from.
@@ -390,10 +370,12 @@ class InstanceCatalog:
         `head` is the profile the bring-up handed to the launcher. There is still no substitution
         between the routing decision and the launch — the head is decided once, at claim — but that
         decision may itself have walked the canon's fallback chain, because the preferred head's
-        resource was red or spent (secretary-1165). A launched head that differs from what the role
-        default or the card asks for is labelled `fallback` when the registry's chains reach it and
-        `record` otherwise, so the journal says which of the two happened rather than filing a
-        failover under a stale record. Passing the head explicitly keeps the record describing the
+        resource was red or spent (secretary-1165). `failover` is the claim saying it did: the
+        dispatcher record kept the preference it left behind, and that record is the only thing
+        that knows. It is not re-derived from the chains here, because the shipped chains are
+        cyclic and reachability would make nearly every head reachable from nearly every other,
+        labelling an ordinary record-pinned head `fallback` and losing exactly the distinction the
+        journal promises to keep. Passing the head explicitly keeps the record describing the
         process that runs even when the card's metadata is edited afterwards.
         """
         routing = task.get("routing") or {}
@@ -411,9 +393,7 @@ class InstanceCatalog:
             codex_mode = ""
         launched = str(head) if head else asked
         if launched != asked:
-            head_source = (
-                HEAD_FROM_FALLBACK if self.reaches_fallback(asked, launched) else HEAD_FROM_RECORD
-            )
+            head_source = HEAD_FROM_FALLBACK if failover else HEAD_FROM_RECORD
         else:
             head_source = HEAD_FROM_CARD if override else HEAD_FROM_ROLE_DEFAULT
         profile = self._head_profile(launched)
@@ -572,6 +552,7 @@ class CommandHostRuntime:
         attempt_id: str = "",
         require_existing_workspace: bool = False,
         generation: int = 0,
+        failover: bool = False,
     ) -> dict[str, Any]:
         project = task["project"]
         base = self.catalog.default_branch(project, task.get("workspace", {}).get("base_branch"))
@@ -601,6 +582,7 @@ class CommandHostRuntime:
             codex_mode=task.get("routing", {}).get("codex_launch_mode"),
             launch_prompt=self._worker_launch_prompt(),
             task=task,
+            failover=failover,
         )
         return {
             "workspace": workspace,
@@ -638,6 +620,7 @@ class CommandHostRuntime:
             codex_mode=task.get("routing", {}).get("codex_launch_mode"),
             launch_prompt=self._worker_launch_prompt(),
             task=task,
+            failover=bool(record.preferred_head),
         )
 
     def observer_workspace(self, reference: str) -> str:
@@ -1039,6 +1022,7 @@ class CommandHostRuntime:
             env_name="SECRETARY_DISPATCHER_REVIEW_COMMAND",
             split_from=self._split_anchor(record),
             task=task,
+            failover=bool(record.preferred_review_head),
         )
         try:
             if record.worker_continuation.retained:
@@ -1655,16 +1639,19 @@ class CommandHostRuntime:
         launch_prompt: str | None = None,
         split_from: str = "",
         task: dict[str, Any] | None = None,
+        failover: bool = False,
     ) -> LaunchedHead:
         """Bring one head up and hand back the pane together with the configuration it started with.
 
         The snapshot is taken here, on the bring-up path itself, so every route out of this call
         (the real launcher, the `SECRETARY_DISPATCHER_*_COMMAND` override, noop mode) reports the
-        same thing, and no caller has to re-read the registry afterwards.
+        same thing, and no caller has to re-read the registry afterwards. `failover` travels with
+        it because only the caller's record knows the claim walked a chain to reach this head.
         """
         if self.mode == "noop":
             return self._launched(
-                f"noop:{head}:{Path(workspace).name}:{prompt_file}", head, task, role, workspace
+                f"noop:{head}:{Path(workspace).name}:{prompt_file}", head, task, role, workspace,
+                failover,
             )
         pid_file = _pid_file_path(_watchdog_kind(role), task["ref"]) if task else ""
         if pid_file:
@@ -1734,7 +1721,7 @@ class CommandHostRuntime:
                         pane=handle,
                     ) from None
                 raise HostError(str(exc)) from None
-        return self._launched(handle, head, task, role, workspace)
+        return self._launched(handle, head, task, role, workspace, failover)
 
     def _close_launched_pane(self, handle: str, pid_file: str) -> None:
         """Close a pane this bring-up opened and confirm nothing of its head survived.
@@ -1754,7 +1741,8 @@ class CommandHostRuntime:
         self._confirm_head_process_gone(pid_file)
 
     def _launched(
-        self, handle: str, head: str, task: dict[str, Any] | None, role: str, workspace: str = ""
+        self, handle: str, head: str, task: dict[str, Any] | None, role: str, workspace: str = "",
+        failover: bool = False,
     ) -> LaunchedHead:
         """Pair the pane with the launch snapshot of the head running in it.
 
@@ -1766,7 +1754,9 @@ class CommandHostRuntime:
         if task is None:
             return LaunchedHead(handle=handle, head=head)
         try:
-            run = self.catalog.head_run(task, role=role, head=head, workspace=workspace).to_json()
+            run = self.catalog.head_run(
+                task, role=role, head=head, workspace=workspace, failover=failover
+            ).to_json()
         except (HostError, AttributeError, KeyError, TypeError):
             run = HeadRun(
                 role=role, head=head, adapter="unknown", model_source=MODEL_UNKNOWN
@@ -2433,9 +2423,12 @@ class DispatcherRuntime:
     def _head_fallback(self, head: str) -> list[str] | None:
         """`head`'s fallback chain, or None when the registry does not describe it at all.
 
-        None is not an empty chain. A head that is not in the registry cannot be launched, and
-        `head_readiness` cannot tell anyone so: with no profile to read it answers `unknown`, which
-        is launch-allowed. The walk needs that distinction before it trusts a readiness verdict.
+        None is not an empty chain, and asking about such a head is not a cheap question: against
+        the real catalog `head_readiness` reads the profile through `head_profile`, which raises
+        `HostError` for a head that is not there — `HeadHealth.check` catches only the shapes a
+        malformed registry entry can take, so that exception would leave the walk and take the
+        tick's Ready pass with it. The walk answers the existence question here, where it is one
+        lookup, and never puts it to a readiness probe.
         """
         try:
             return self.catalog.head_fallback(head)
@@ -2561,7 +2554,7 @@ class DispatcherRuntime:
         return {
             "status": "skipped",
             "step": "head-preflight",
-            "action": "failover-collapses-roles",
+            "action": CLAIM_SKIP_FAILOVER_COLLAPSE,
             "head": worker.head,
             "review_head": review.head,
             "readiness": worker.readiness.to_json(),
@@ -2615,7 +2608,7 @@ class DispatcherRuntime:
             return {
                 "status": "skipped",
                 "step": "head-preflight",
-                "action": "resource-not-ready",
+                "action": CLAIM_SKIP_RESOURCE_NOT_READY,
                 "pilot_ref": ref,
                 "head": worker_choice.preferred,
                 "readiness": worker_choice.readiness.to_json(),
@@ -2839,6 +2832,7 @@ class DispatcherRuntime:
                 attempt_id=record.attempt_id,
                 require_existing_workspace=require_existing_workspace,
                 generation=record.report_generation,
+                failover=bool(record.preferred_head),
             )
         except (HeadLaunchAborted, HostError) as exc:
             aborted = self._worker_launch_failure(
@@ -5114,7 +5108,8 @@ class DispatcherRuntime:
         )
 
     def head_run_snapshot(
-        self, task: dict[str, Any], *, role: str, head: str = "", workspace: str = ""
+        self, task: dict[str, Any], *, role: str, head: str = "", workspace: str = "",
+        failover: bool = False,
     ) -> dict[str, Any]:
         """The launch snapshot for a head the runtime has no launcher record of, or a marked
         minimal one when its profile can no longer be read.
@@ -5122,10 +5117,14 @@ class DispatcherRuntime:
         Only an adopted card takes this path: its bring-up happened in a previous dispatcher life,
         so the configuration is re-read now. A registry edited since must still leave a usable
         attempt record rather than take the tick down: the point of the journal is that it keeps
-        working when `heads.toml` moves.
+        working when `heads.toml` moves. `failover` comes from the record's kept preference, which
+        survives the dispatcher that wrote it, so an adopted card still says why its head is not
+        the one the card asks for.
         """
         try:
-            return self.catalog.head_run(task, role=role, head=head, workspace=workspace).to_json()
+            return self.catalog.head_run(
+                task, role=role, head=head, workspace=workspace, failover=failover
+            ).to_json()
         except (HostError, AttributeError, KeyError, TypeError):
             return HeadRun(
                 role=role, head=str(head), adapter="unknown", model_source=MODEL_UNKNOWN
@@ -5165,7 +5164,8 @@ class DispatcherRuntime:
         if not record.attempt_round:
             record.attempt_round = self._journal_round(ref) + 1
         record.worker_run = run or self.head_run_snapshot(
-            task, role="worker", head=record.head, workspace=record.workspace
+            task, role="worker", head=record.head, workspace=record.workspace,
+            failover=bool(record.preferred_head),
         )
         self._record_routing(ref, record, phase="worker", heads=[record.worker_run])
 
@@ -5182,7 +5182,8 @@ class DispatcherRuntime:
         if not record.attempt_round:
             record.attempt_round = self._journal_round(ref) + 1
         record.review_run = run or self.head_run_snapshot(
-            task, role="reviewer", head=record.review_head, workspace=record.workspace
+            task, role="reviewer", head=record.review_head, workspace=record.workspace,
+            failover=bool(record.preferred_review_head),
         )
         self._record_routing(ref, record, phase="review", heads=[record.review_run])
 
