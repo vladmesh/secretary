@@ -213,9 +213,34 @@ class HostBehaviourContractTests(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.root = Path(self.tmpdir.name)
+        self.shared_body_dir = Path(os.environ.get("SECRETARY_DISPATCHER_BODY_DIR", "/tmp"))
+        self.shared_body_files = self._body_files(self.shared_body_dir)
+        env = mock.patch.dict(
+            os.environ,
+            {"SECRETARY_DISPATCHER_BODY_DIR": str(self.root / "bodies")},
+        )
+        env.start()
+        self.addCleanup(env.stop)
         self.real = CommandHostRuntime(FakeCatalog(), self.root / "data", mode="noop")  # type: ignore[arg-type]
         self.fake = FakeHost(self.root / "fake")
         (self.root / "fake").mkdir(parents=True, exist_ok=True)
+
+    def tearDown(self) -> None:
+        self.assertEqual(
+            self._body_files(self.shared_body_dir),
+            self.shared_body_files,
+            "the noop host contract test changed the shared dispatcher body directory",
+        )
+
+    @staticmethod
+    def _body_files(root: Path) -> dict[str, bytes]:
+        """Snapshot only dispatcher-managed files, including ones that existed before this test."""
+        return {
+            path.name: path.read_bytes()
+            for pattern in ("secretary-*.md", "secretary-*-pid-*.pid")
+            for path in root.glob(pattern)
+            if path.is_file()
+        }
 
     def _task(self) -> dict:
         return {
