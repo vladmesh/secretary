@@ -338,6 +338,8 @@ class NoStoreCase(unittest.TestCase):
             with (
                 mock.patch("sys.stdin", io.StringIO()),
                 mock.patch("secretary.installation._ensure_installation_user"),
+                mock.patch("secretary.installation.shutil.which", return_value="/usr/bin/orca"),
+                mock.patch("secretary.installation._run"),
                 contextlib.redirect_stdout(output),
             ):
                 code = main([
