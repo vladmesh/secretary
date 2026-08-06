@@ -29,6 +29,10 @@ PHASES = ("worker", "review", "verdict")
 HEAD_FROM_CARD = "card"
 HEAD_FROM_ROLE_DEFAULT = "role_default"
 HEAD_FROM_RECORD = "record"
+# The claim walked the canon's fallback chain because the preferred head's resource was red or
+# spent (secretary-1165). It is a source of its own rather than a flavour of `record`: "a weaker or
+# simply other head did this work" is the one thing a reader of the journal must not have to infer.
+HEAD_FROM_FALLBACK = "fallback"
 # Where `model` was read at bring-up. `cli_default` means no configuration pinned a model and the
 # adapter's CLI picked one itself at startup, which is the only case where `model` may be empty.
 MODEL_FROM_PROFILE = "profile"
@@ -41,10 +45,11 @@ RUNTIME_MODEL_SOURCES = (MODEL_FROM_CLI_DEFAULT, MODEL_UNKNOWN)
 class HeadRun:
     """One head as it was actually launched.
 
-    There is one head per role per bring-up and no substitution mechanism between the decision and
-    the launch: `head` is both what the card asked for and what started. `head_source` says where
-    that id came from: the card's own override, the role default, or the dispatcher record of a
-    card claimed earlier.
+    There is one head per role per bring-up and no substitution between the decision and the
+    launch: `head` is what started, and it is what the claim decided. `head_source` says where that
+    id came from: the card's own override, the role default, the dispatcher record of a card
+    claimed earlier, or the canon's fallback chain when the claim had to walk it because the
+    preferred head's resource was red or spent.
 
     `model` may be empty only under a `model_source` that says the CLI resolved it at startup, so a
     profile that pins no model (`claude-default`) can never be recorded as a silent blank.

@@ -7,13 +7,17 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable, Sequence
 
 from secretary._fsutil import write_json
 
 
 PROBE_TTL_SECONDS = 300
 PROBE_TIMEOUT_SECONDS = 20
+# A head named in a fallback chain that the registry no longer describes. It is a readiness status
+# rather than a silent skip because it is the same kind of fact as a red resource — this head
+# cannot be launched — and the tick has to be able to say so.
+MISSING_HEAD = "missing"
 
 
 @dataclass(frozen=True)
@@ -36,6 +40,113 @@ class HeadReadiness:
             "checked_at": self.checked_at,
             "cached": self.cached,
         }
+
+
+@dataclass(frozen=True)
+class HeadChoice:
+    """Which head a role is actually launched on, once resource health has had its say.
+
+    ``head`` is empty when nothing reachable from ``preferred`` can be launched — that is the
+    claim-skip: the card stays in Ready and no head is put into a dead resource. ``rejected``
+    carries every candidate the walk turned down, in the order it read them, so the tick can name
+    which resource is dead and why rather than only reporting that nothing was claimed.
+    """
+
+    preferred: str
+    head: str
+    readiness: HeadReadiness
+    rejected: tuple[tuple[str, HeadReadiness], ...] = ()
+
+    @property
+    def resolved(self) -> bool:
+        return bool(self.head)
+
+    @property
+    def substituted(self) -> bool:
+        """Whether the launch is on a head the card did not ask for."""
+        return bool(self.head) and self.head != self.preferred
+
+    @property
+    def reason(self) -> str:
+        """One line for the tick: why this is the head, or why there is none.
+
+        A preferred head with no chain behind it reads exactly as it did before there were chains —
+        the resource's own reason and nothing else — because that is the whole story there. The
+        chain is spelled out only when one was actually walked, so the line grows only where this
+        card added something to say.
+        """
+        if not self.head and len(self.rejected) < 2:
+            return self.readiness.reason
+        rejected = "; ".join(
+            f"{head} on {readiness.resource or '(no resource)'} is {readiness.status}"
+            f" ({readiness.reason})"
+            for head, readiness in self.rejected
+        )
+        if not self.head:
+            return f"no launchable head for {self.preferred}: {rejected}"
+        if not self.substituted:
+            return self.readiness.reason
+        return (
+            f"head {self.preferred} is not launchable ({rejected}); "
+            f"falling back to {self.head} on {self.readiness.resource}"
+        )
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "preferred": self.preferred,
+            "head": self.head,
+            "substituted": self.substituted,
+            "readiness": self.readiness.to_json(),
+            "rejected": [
+                dict(readiness.to_json(), head=head) for head, readiness in self.rejected
+            ],
+            "reason": self.reason,
+        }
+
+
+def resolve_head_chain(
+    preferred: str,
+    readiness_of: Callable[[str], HeadReadiness],
+    fallback_of: Callable[[str], Sequence[str] | None],
+) -> HeadChoice:
+    """The first launchable head at or below ``preferred``, breadth-first over the fallback chains.
+
+    A red or spent resource is a property of the account, not of the profile drawing on it, so the
+    answer to "the preferred head cannot run" is another head on a *different* resource — the
+    chain the canon writes down, and only that chain. Nothing is inferred: a head with no chain
+    and a dead resource is a claim-skip, which is the point (a card waiting in Ready costs
+    nothing; a head launched into a spent subscription costs an attempt and a round).
+
+    ``fallback_of`` returns None for a head the registry does not describe, and a *chain entry*
+    that answers None is dropped rather than launched: ``readiness_of`` cannot probe a resource it
+    cannot find and answers ``unknown``, which is launch-allowed, so a chain naming a deleted
+    profile would otherwise pin the claim to a head nothing can start. ``preferred`` itself is not
+    filtered that way — whoever chose it (a card override, a role default) validates it against the
+    registry before asking, and a second check here with different manners would answer a question
+    that caller has already answered. Chains may be cyclic — the codex heads name the claude ones
+    and back — so every candidate is read once.
+    """
+    seen: set[str] = set()
+    rejected: list[tuple[str, HeadReadiness]] = []
+    queue = [preferred]
+    while queue:
+        candidate = queue.pop(0)
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        chain = fallback_of(candidate)
+        if chain is None and candidate != preferred:
+            rejected.append((candidate, HeadReadiness(
+                "", MISSING_HEAD, f"head {candidate} is not in the registry", time.time())))
+            continue
+        readiness = readiness_of(candidate)
+        if readiness.launch_allowed:
+            return HeadChoice(preferred, candidate, readiness, tuple(rejected))
+        rejected.append((candidate, readiness))
+        queue.extend(chain or ())
+    first = rejected[0][1] if rejected else HeadReadiness(
+        "", MISSING_HEAD, f"head {preferred} is not in the registry", time.time())
+    return HeadChoice(preferred, "", first, tuple(rejected))
 
 
 class HeadHealth:

@@ -9,7 +9,10 @@
 # resource, run on a TTL by pipeline/health.py — red lives on the resource, every profile drawing
 # from it inherits that redness). A profile names its resource, an adapter (which render_<adapter>
 # in heads.py turns role+prompt into a launch command), and an ordered fallback chain of other
-# profile ids health.resolve_head walks at claim time when the preferred profile's resource is red.
+# profile ids walked at claim time when the preferred profile's resource is red or spent — by
+# health.resolve_head for the triggered agents, by the dispatcher's own resolver for cards. Both
+# walk it breadth-first and both stop at the same answer: nothing launchable in the chain means the
+# card is not claimed at all, rather than a head being started into a dead account.
 # [role_defaults] names the head each role runs on; every consumer — the dispatcher's worker,
 # reviewer and observer routing and the curator/retro/steward launch selection — reads that one
 # table, so no two of them can disagree about which head a role is on.
@@ -34,34 +37,38 @@ probe = "python3 -P -m triggered_agents pipeline probe --resource claude-sub"
 account = "openai-subscription"
 probe = "python3 -P -m triggered_agents pipeline probe --resource openai-sub"
 
-# Claude heads. No fallback chain of their own: they ARE the fallback the codex heads below walk
-# to, so a host with only a Claude subscription still runs every role.
+# Claude heads. They are the fallback the codex heads below walk to, and since 2026-08-06 they
+# name the return chain too: a spent claude-sub sends a card to the codex head of comparable class
+# rather than leaving it in Ready until the subscription resets (secretary-1165). Comparable is the
+# whole of the rule. A chain to a head that is merely cheaper is what burned three worker attempts
+# overnight on 2026-07-04, and that decision stands: what changed is that a head of another family
+# at the same class is not the weaker head that decision was about.
 
 [profiles.claude-default]
 # Bare `claude --dangerously-skip-permissions <prompt>`, no --model flag: whatever the CLI's own
 # default model is. The one profile that keeps working when a named model is retired.
 resource = "claude-sub"
 adapter = "claude"
-fallback = []
+fallback = ["codex"]
 
 [profiles.claude-sonnet]
 resource = "claude-sub"
 adapter = "claude"
 model = "sonnet"
-fallback = []
+fallback = ["codex"]
 
 [profiles.claude-opus]
 resource = "claude-sub"
 adapter = "claude"
 model = "opus"
-fallback = []
+fallback = ["codex-high"]
 
 [profiles.claude-opus-medium]
 resource = "claude-sub"
 adapter = "claude"
 model = "opus"
 effort = "medium"
-fallback = []
+fallback = ["codex"]
 
 [profiles.claude-observer]
 # The observer's Claude head is a profile of its own rather than a pointer at claude-opus: the
@@ -70,14 +77,14 @@ fallback = []
 resource = "claude-sub"
 adapter = "claude"
 model = "opus"
-fallback = []
+fallback = ["codex-observer"]
 
 [profiles.claude-observer-medium]
 resource = "claude-sub"
 adapter = "claude"
 model = "opus"
 effort = "medium"
-fallback = []
+fallback = ["codex-observer"]
 
 # Codex heads. Each falls back to its Claude counterpart, so a host whose OpenAI subscription is
 # red — or that never had one — keeps running without editing this file.

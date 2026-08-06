@@ -169,6 +169,7 @@ from secretary.dispatcher_types import (
 from secretary.head_registry import HeadRegistryConfigError, installed_heads
 from secretary.routing_journal import (
     HEAD_FROM_CARD,
+    HEAD_FROM_FALLBACK,
     HEAD_FROM_RECORD,
     HEAD_FROM_ROLE_DEFAULT,
     MODEL_UNKNOWN,
@@ -178,7 +179,7 @@ from secretary.routing_journal import (
     routing_payload as _routing_payload,
     run_key as _run_key,
 )
-from secretary.head_health import HeadHealth, HeadReadiness
+from secretary.head_health import HeadChoice, HeadHealth, HeadReadiness, resolve_head_chain
 from secretary.sprints import SprintReader, budget_thresholds
 from secretary.tasks import (
     KanboardClient,
@@ -312,6 +313,42 @@ class InstanceCatalog:
         self._head_profile(head)
         return head
 
+    def head_fallback(self, head: str) -> list[str]:
+        """The ordered fallback chain `head` names in the registry, empty when it names none.
+
+        The chain is the canon's own statement of which other head is an acceptable stand-in for
+        this one; the dispatcher walks it at claim and never invents an entry. A profile that
+        writes no chain is the canon saying "this head or nothing", which is a claim-skip.
+        """
+        profile = self._head_profile(head)
+        chain = profile.get("fallback")
+        if not isinstance(chain, list):
+            return []
+        return [str(entry) for entry in chain if isinstance(entry, str) and entry]
+
+    def reaches_fallback(self, preferred: str, head: str) -> bool:
+        """Whether `head` is reachable from `preferred` through the registry's fallback chains.
+
+        This is what separates the two ways a launched head can differ from the requested one:
+        a claim that walked the chain because the preferred resource was dead, and a card whose
+        record simply pins an older decision. Read from the registry as it stands now, so a chain
+        edited since the claim degrades the label rather than inventing a substitution.
+        """
+        seen = {preferred}
+        queue = [preferred]
+        while queue:
+            try:
+                chain = self.head_fallback(queue.pop(0))
+            except HostError:
+                continue
+            for entry in chain:
+                if entry == head:
+                    return True
+                if entry not in seen:
+                    seen.add(entry)
+                    queue.append(entry)
+        return False
+
     def claimed_worker_head(self, task: dict[str, Any]) -> str:
         return self._claimed_head(task, "resolved_worker_head", self.worker_head)
 
@@ -350,11 +387,14 @@ class InstanceCatalog:
         """The launch record for one head of `role`: the profile id plus the configuration it is
         launched with, read from the same snapshot the launcher renders its command from.
 
-        `head` is the profile the bring-up handed to the launcher. There is no substitution between
-        the routing decision and the launch: the head is decided once, at claim, from the card's
-        override or the role default, so it normally equals what the card asks for. Passing it
-        explicitly keeps the record describing the process that runs even when the card's metadata
-        is edited afterwards.
+        `head` is the profile the bring-up handed to the launcher. There is still no substitution
+        between the routing decision and the launch — the head is decided once, at claim — but that
+        decision may itself have walked the canon's fallback chain, because the preferred head's
+        resource was red or spent (secretary-1165). A launched head that differs from what the role
+        default or the card asks for is labelled `fallback` when the registry's chains reach it and
+        `record` otherwise, so the journal says which of the two happened rather than filing a
+        failover under a stale record. Passing the head explicitly keeps the record describing the
+        process that runs even when the card's metadata is edited afterwards.
         """
         routing = task.get("routing") or {}
         if role == "worker":
@@ -371,7 +411,9 @@ class InstanceCatalog:
             codex_mode = ""
         launched = str(head) if head else asked
         if launched != asked:
-            head_source = HEAD_FROM_RECORD
+            head_source = (
+                HEAD_FROM_FALLBACK if self.reaches_fallback(asked, launched) else HEAD_FROM_RECORD
+            )
         else:
             head_source = HEAD_FROM_CARD if override else HEAD_FROM_ROLE_DEFAULT
         profile = self._head_profile(launched)
@@ -2263,6 +2305,18 @@ class CommandHostRuntime:
                 "gates: run appropriate focused or broad validation when the review needs that evidence.",
                 "",
             ]
+        if record and record.preferred_head:
+            sections[4:4] = [
+                "## Head failover",
+                "",
+                f"This branch was written by `{_safe_one_line(record.head)}`, not by the head this "
+                f"card asks for (`{_safe_one_line(record.preferred_head)}`): that head's resource "
+                "was red or spent when the card was claimed, so the claim walked the registry's "
+                "fallback chain onto another family.",
+                "Review the work on its merits. This is here because who wrote it is a fact you are",
+                "entitled to have, not an invitation to grade the head.",
+                "",
+            ]
         if record and record.previous_reviewed_sha:
             sections[4:4] = [
                 "## Re-review packet",
@@ -2376,6 +2430,30 @@ class DispatcherRuntime:
     def head_readiness(self, head: str) -> HeadReadiness:
         return self.head_health.check(head)
 
+    def _head_fallback(self, head: str) -> list[str] | None:
+        """`head`'s fallback chain, or None when the registry does not describe it at all.
+
+        None is not an empty chain. A head that is not in the registry cannot be launched, and
+        `head_readiness` cannot tell anyone so: with no profile to read it answers `unknown`, which
+        is launch-allowed. The walk needs that distinction before it trusts a readiness verdict.
+        """
+        try:
+            return self.catalog.head_fallback(head)
+        except HostError:
+            return None
+
+    def resolve_head(self, preferred: str) -> HeadChoice:
+        """The head to actually launch for `preferred`, walking the canon's fallback chain.
+
+        Red is a property of the resource, so a head whose subscription is spent can still be
+        replaced by one of another family drawing on another account — but only along the chain the
+        canon writes down, and only at claim, where the decision is recorded on the card. When
+        nothing in the chain is launchable the answer is an empty head: the caller claim-skips and
+        the card waits in Ready, which is what the 2026-08-06 canary paid two launches and a round
+        to learn is cheaper than a head in a dead resource.
+        """
+        return resolve_head_chain(preferred, self.head_readiness, self._head_fallback)
+
     def _require_head_ready(self, head: str) -> None:
         readiness = self.head_readiness(head)
         if not readiness.launch_allowed:
@@ -2463,6 +2541,61 @@ class DispatcherRuntime:
             "attempt_id": attempt_id,
         }
 
+    def _failover_collapse(
+        self, worker: HeadChoice, review: HeadChoice
+    ) -> dict[str, Any] | None:
+        """The refusal when a failover would hand both roles to one head, else None.
+
+        A review is worth having because someone other than the worker reads the work. A transfer
+        that lands the worker and the reviewer on the same profile does not weaken that rule a
+        little, it removes it — so it is not a transfer at all, and the card waits in Ready with
+        the reason on the tick instead of being reviewed by its own author. Only a failover can
+        collapse the pair here: two roles pointed at one head by the canon itself is an
+        installation's own decision, made with its eyes open, and this is not where it is
+        overruled.
+        """
+        if not review.resolved or review.head != worker.head:
+            return None
+        if not (worker.substituted or review.substituted):
+            return None
+        return {
+            "status": "skipped",
+            "step": "head-preflight",
+            "action": "failover-collapses-roles",
+            "head": worker.head,
+            "review_head": review.head,
+            "readiness": worker.readiness.to_json(),
+            "reason": (
+                f"failover would run worker and reviewer on the same head {worker.head}: "
+                f"worker {worker.reason}; reviewer {review.reason}"
+            ),
+            "failover": {"worker": worker.to_json(), "review": review.to_json()},
+        }
+
+    def _comment_head_failover(
+        self, ref: str, attempt_id: str, worker: HeadChoice, review: HeadChoice
+    ) -> None:
+        """Write the substitution onto the card, once per claim, or do nothing.
+
+        Its own comment rather than a phrase inside the claim comment: this is the sentence a
+        reviewer or an observer looks for when the work reads unlike the head the card asked for,
+        and it must be findable whether or not the claim comment is read.
+        """
+        lines = [
+            f"{role} head {choice.head} instead of {choice.preferred}: {choice.reason}"
+            for role, choice in (("Worker", worker), ("Reviewer", review))
+            if choice.substituted
+        ]
+        if not lines:
+            return
+        self.writer.comment(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            body="Head failover at claim. " + " ".join(lines),
+            request_id=_attempt_request_id(attempt_id, "head-failover-comment", ref),
+        )
+
     def _claim(
         self,
         task: dict[str, Any],
@@ -2473,18 +2606,31 @@ class DispatcherRuntime:
         resume_workspace: bool = False,
     ) -> dict[str, Any]:
         ref = task["ref"]
-        head = self.catalog.worker_head(task)
-        readiness = self.head_readiness(head)
-        if not readiness.launch_allowed:
+        # Both heads are decided here, before anything is claimed, and both may be decided against
+        # the card's preference: a dead resource sends the walk down the canon's chain onto another
+        # family. Nothing launchable at the end of either walk is a claim-skip — the card stays in
+        # Ready and the outcome below names the dead resource.
+        worker_choice = self.resolve_head(self.catalog.worker_head(task))
+        if not worker_choice.resolved:
             return {
                 "status": "skipped",
                 "step": "head-preflight",
                 "action": "resource-not-ready",
                 "pilot_ref": ref,
-                "head": head,
-                "readiness": readiness.to_json(),
-                "reason": readiness.reason,
+                "head": worker_choice.preferred,
+                "readiness": worker_choice.readiness.to_json(),
+                "reason": worker_choice.reason,
+                "failover": {"worker": worker_choice.to_json()},
             }
+        # The reviewer is resolved at claim too, because the claim is what writes its head onto the
+        # card. A reviewer chain that is entirely dead does not stop the work: the preferred head
+        # stays recorded and the reviewer's own preflight waits for its resource, exactly as before.
+        review_choice = self.resolve_head(self.catalog.review_head(task))
+        collapse = self._failover_collapse(worker_choice, review_choice)
+        if collapse is not None:
+            return dict(collapse, pilot_ref=ref)
+        head = worker_choice.head
+        review_head = review_choice.head or review_choice.preferred
         # A card the dispatcher still holds a record for, back in Ready with its claim already
         # committed under the current attempt, is a re-run: an operator-approved retry after
         # Blocked, or a plain preempt/requeue out of in_progress or validate. An attempt id
@@ -2546,7 +2692,6 @@ class DispatcherRuntime:
             _record_attempt(payload, attempt_id, ref, self.owner, self.owner)
             payload["attempt_id"] = attempt_id
         claim_request_id = _attempt_request_id(attempt_id, "claim", ref)
-        review_head = self.catalog.review_head(task)
         worker_id = _worker_id(task)
         self.writer.claim(
             role="dispatcher",
@@ -2559,6 +2704,10 @@ class DispatcherRuntime:
             base_branch=task.get("workspace", {}).get("base_branch") or "",
             request_id=claim_request_id,
         )
+        # Before the card is read back, so the comment is inside the baseline the record takes: a
+        # head chosen by failover is written onto the card itself, where the reviewer and the
+        # observer read it, rather than living only in this tick's stdout.
+        self._comment_head_failover(ref, attempt_id, worker_choice, review_choice)
         claimed = self.reader.show(ref)
         record = DispatcherRecord(
             worker=worker_id,
@@ -2574,6 +2723,13 @@ class DispatcherRuntime:
             report_generation=1,
             state="claim_verified",
             claimed_at=time.time(),
+            # Empty unless the walk had to leave the card's preference behind. The pair is what
+            # lets the review document name the head that actually did the work without
+            # re-resolving a role default that may have moved since the claim.
+            preferred_head=worker_choice.preferred if worker_choice.substituted else "",
+            preferred_review_head=(
+                review_choice.preferred if review_choice.substituted else ""
+            ),
         )
         # A re-claimed card continues its own round numbering: the journal, not the board, knows
         # how many rounds it has had, so a return to Ready adds a round instead of resetting.
@@ -2763,14 +2919,23 @@ class DispatcherRuntime:
             ),
             request_id=_attempt_request_id(record.attempt_id, "claimed-comment", ref),
         )
-        return {
+        outcome = {
             "status": "ok",
             "step": "claim",
             "pilot_ref": ref,
             "attempt_id": record.attempt_id,
             "worker": record.worker,
             "workspace": prepared["workspace"],
+            "head": record.head,
+            "review_head": record.review_head,
         }
+        if record.preferred_head or record.preferred_review_head:
+            # The tick says a head was substituted, in the same line that says the card was
+            # claimed. An operator reading the tick must not have to open the card to find out
+            # that the work is running somewhere other than where the card asked for it.
+            outcome["preferred_head"] = record.preferred_head
+            outcome["preferred_review_head"] = record.preferred_review_head
+        return outcome
 
     def _end_review_pane_confirmed(
         self,

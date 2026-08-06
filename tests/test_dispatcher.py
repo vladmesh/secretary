@@ -570,6 +570,31 @@ class FakeCatalog:
             task.get("routing", {}).get("review_head_override") or self.role_defaults["reviewer"]
         )
 
+    def head_fallback(self, head: str) -> list[str]:
+        # Same rule as InstanceCatalog: the chain is whatever the registry writes down, and an
+        # unknown head is an error rather than an empty chain, so the claim-time walk can tell
+        # "this head names no stand-in" from "this head does not exist".
+        if head not in self.profiles:
+            raise HostError(f"unknown head {head!r}")
+        chain = self.profiles[head].get("fallback")
+        return [str(entry) for entry in chain] if isinstance(chain, list) else []
+
+    def reaches_fallback(self, preferred: str, head: str) -> bool:
+        seen = {preferred}
+        queue = [preferred]
+        while queue:
+            try:
+                chain = self.head_fallback(queue.pop(0))
+            except HostError:
+                continue
+            for entry in chain:
+                if entry == head:
+                    return True
+                if entry not in seen:
+                    seen.add(entry)
+                    queue.append(entry)
+        return False
+
     def claimed_worker_head(self, task: dict) -> str:
         # Same rule as InstanceCatalog: the head the claim wrote onto the card wins over whatever
         # the override and the role default say now, and a claimed head that has left the registry
@@ -603,6 +628,13 @@ class FakeCatalog:
             asked = str(override or self.role_defaults["reviewer"])
             codex_mode = ""
         launched = str(head) if head else asked
+        # Same rule as InstanceCatalog: a launched head the registry's chains reach from the asked
+        # one is a claim-time failover and says so; anything else that differs is the record's.
+        source = (
+            ("fallback" if self.reaches_fallback(asked, launched) else "record")
+            if launched != asked
+            else ("card" if override else "role_default")
+        )
         profile = self.profiles.get(launched, {"adapter": "codex", "resource": "openai-sub"})
         model: str | None = None
         model_source = ""
@@ -615,9 +647,7 @@ class FakeCatalog:
         return head_run_from_profile(
             role=role,
             head=launched,
-            head_source=(
-                "record" if launched != asked else ("card" if override else "role_default")
-            ),
+            head_source=source,
             profile=profile,
             resources=self.resources,
             codex_mode=codex_mode,
@@ -1335,6 +1365,171 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["action"], "review-resource-not-ready")
         self.assertFalse(self.host.reviews)
+
+    # secretary-1165. A dead resource used to end every one of these the same way — the card sat in
+    # Ready until an operator moved it by hand — because the claim read one head and stopped there.
+    # It now walks the chain the canon writes down, and the cases below are the four answers that
+    # walk can have: another family, another family after a spent quota, nothing, and a transfer
+    # that would have left the card reviewing itself.
+
+    def chained_heads(self) -> None:
+        """Give the codex heads the cross-family chain a canon writes for them, distinct per role.
+
+        Distinct is the point: the reviewer's chain lands somewhere other than the worker's, so a
+        transfer of both roles is still two heads. A canon that collapses them is a different case,
+        and it has its own test below.
+        """
+        self.catalog.profiles["codex"] = dict(
+            self.catalog.profiles["codex"], fallback=["claude-opus"]
+        )
+        self.catalog.profiles["codex-reviewer"] = dict(
+            self.catalog.profiles["codex-reviewer"], fallback=["claude-default"]
+        )
+
+    def readiness_by_resource(self, dead: dict[str, tuple[str, str]]):
+        """Readiness read off the head's own resource, so a test can kill an account, not a head."""
+        def readiness(head: str) -> HeadReadiness:
+            resource = str(self.catalog.profiles.get(head, {}).get("resource") or "openai-sub")
+            status, reason = dead.get(resource, ("ready", "probe succeeded"))
+            return HeadReadiness(resource, status, reason, 1.0)
+
+        return readiness
+
+    def card_comments(self) -> list[str]:
+        return [comment.get("comment", "") for comment in self.board.comments.get(12, [])]
+
+    def test_a_red_resource_claims_the_card_on_the_live_family(self) -> None:
+        self.start_dispatcher()
+        self.chained_heads()
+        self.runtime.head_readiness = self.readiness_by_resource(
+            {"openai-sub": ("unavailable", "resource provider is unavailable")}
+        )
+
+        result = self.tick()
+
+        self.assertEqual(result["step"], "claim")
+        self.assertEqual((result["head"], result["preferred_head"]), ("claude-opus", "codex"))
+        routing = self.reader.show("secretary-510-pilot")["routing"]
+        self.assertEqual(routing["resolved_worker_head"], "claude-opus")
+        self.assertEqual(routing["resolved_review_head"], "claude-default")
+        self.assertIn("prepare_worker", self.host.calls)
+
+    def test_a_spent_quota_claims_the_card_on_the_live_family(self) -> None:
+        """The 2026-08-06 canary exactly: openai-sub out of quota mid-sprint. Two launches and a
+        round went into it then; the card now starts on the other subscription instead."""
+        self.start_dispatcher()
+        self.chained_heads()
+        self.runtime.head_readiness = self.readiness_by_resource(
+            {"openai-sub": ("exhausted", "resource quota is spent")}
+        )
+
+        result = self.tick()
+
+        self.assertEqual(result["head"], "claude-opus")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        record = self.runtime.production_state.records(
+            self.runtime.production_state.load()
+        )["secretary-510-pilot"]
+        self.assertEqual((record.head, record.preferred_head), ("claude-opus", "codex"))
+        self.assertEqual(record.preferred_review_head, "codex-reviewer")
+
+    def test_the_substituted_head_is_written_onto_the_card_and_the_journal(self) -> None:
+        """Whoever reads the card afterwards — the reviewer, the observer, a retro — has to be able
+        to see that this work was not done by the head the card asks for."""
+        self.start_dispatcher()
+        self.chained_heads()
+        self.runtime.head_readiness = self.readiness_by_resource(
+            {"openai-sub": ("exhausted", "resource quota is spent")}
+        )
+
+        self.tick()
+
+        failover = [line for line in self.card_comments() if "Head failover" in line]
+        self.assertEqual(len(failover), 1)
+        self.assertIn("Worker head claude-opus instead of codex", failover[0])
+        self.assertIn("resource quota is spent", failover[0])
+        worker = self.routing_history()[-1].worker
+        self.assertEqual((worker.head, worker.head_source), ("claude-opus", "fallback"))
+
+    def test_no_live_family_leaves_the_card_in_ready_and_names_the_dead_resources(self) -> None:
+        self.start_dispatcher()
+        self.chained_heads()
+        self.runtime.head_readiness = self.readiness_by_resource({
+            "openai-sub": ("exhausted", "resource quota is spent"),
+            "claude-sub": ("unavailable", "resource provider is unavailable"),
+        })
+
+        result = self.tick()
+
+        self.assertEqual(result["action"], "resource-not-ready")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "ready")
+        self.assertNotIn("prepare_worker", self.host.calls)
+        self.assertIn("codex on openai-sub is exhausted (resource quota is spent)", result["reason"])
+        self.assertIn(
+            "claude-opus on claude-sub is unavailable (resource provider is unavailable)",
+            result["reason"],
+        )
+        self.assertEqual(
+            [entry["head"] for entry in result["failover"]["worker"]["rejected"]],
+            ["codex", "claude-opus"],
+        )
+
+    def test_a_transfer_that_would_review_its_own_work_is_refused(self) -> None:
+        """Both roles' chains land on one head. That is not a weaker review, it is no review, so
+        the card waits in Ready with the reason rather than being claimed."""
+        self.start_dispatcher()
+        self.catalog.profiles["codex"] = dict(
+            self.catalog.profiles["codex"], fallback=["claude-opus"]
+        )
+        self.catalog.profiles["codex-reviewer"] = dict(
+            self.catalog.profiles["codex-reviewer"], fallback=["claude-opus"]
+        )
+        self.runtime.head_readiness = self.readiness_by_resource(
+            {"openai-sub": ("exhausted", "resource quota is spent")}
+        )
+
+        result = self.tick()
+
+        self.assertEqual(result["action"], "failover-collapses-roles")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "ready")
+        self.assertNotIn("prepare_worker", self.host.calls)
+        self.assertIn(
+            "worker and reviewer on the same head claude-opus", result["reason"]
+        )
+
+    def test_one_canon_head_for_both_roles_is_still_claimed(self) -> None:
+        """The refusal above is about failover, not about role routing: an installation that points
+        both roles at one head has decided that itself, and a green resource still claims."""
+        self.start_dispatcher()
+        self.catalog.role_defaults = dict(
+            self.catalog.role_defaults, new_card="claude-opus", reviewer="claude-opus"
+        )
+
+        result = self.tick()
+
+        self.assertEqual(result["step"], "claim")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+
+    def test_a_chain_entry_that_left_the_registry_is_not_launched(self) -> None:
+        """A canon may name a profile that a later edit removed. The walk drops it rather than
+        pinning the claim to a head nothing can start: an unknown head has no resource to probe,
+        and its readiness reads `unknown`, which is launch-allowed."""
+        self.start_dispatcher()
+        self.catalog.profiles["codex"] = dict(
+            self.catalog.profiles["codex"], fallback=["claude-retired", "claude-opus"]
+        )
+        self.runtime.head_readiness = self.readiness_by_resource(
+            {"openai-sub": ("exhausted", "resource quota is spent")}
+        )
+
+        choice = self.runtime.resolve_head("codex")
+        result = self.tick()
+
+        self.assertEqual(result["head"], "claude-opus")
+        self.assertEqual(
+            [(head, readiness.status) for head, readiness in choice.rejected],
+            [("codex", "exhausted"), ("claude-retired", "missing")],
+        )
 
     def append_committed_claim(self, attempt_id: str) -> str:
         request_id = _attempt_request_id(attempt_id, "claim", "secretary-510-pilot")
@@ -7105,6 +7300,26 @@ class HeadPromptTests(unittest.TestCase):
         for command in commands:
             self.assertIn("--body-file /tmp/secretary-verdict-secretary-510-pilot-3.md", command)
             self.assertNotIn("<file>", command)
+
+    def test_review_prompt_names_a_worker_head_chosen_by_failover(self) -> None:
+        """secretary-1165: the reviewer is told which head wrote the branch when it is not the one
+        the card asks for. A record with no substitution says nothing at all — a section that
+        appeared on every review would stop being read by the round it matters on."""
+        record = DispatcherRecord(
+            worker="secretary-510-pilot-pilot", workspace="", handle="", head="claude-opus",
+            review_head="codex-reviewer", attempt_id="attempt-1", comment_baseline=0,
+            review_baseline=0, state="review_starting", claimed_at=1.0,
+            preferred_head="codex",
+        )
+
+        substituted = self.host._review_prompt(self.task, "attempt-1", 1, record=record)
+        record.preferred_head = ""
+        plain = self.host._review_prompt(self.task, "attempt-1", 1, record=record)
+
+        self.assertIn("## Head failover", substituted)
+        self.assertIn("`claude-opus`", substituted)
+        self.assertIn("`codex`", substituted)
+        self.assertNotIn("Head failover", plain)
 
     def test_worker_prompt_names_a_concrete_body_file(self) -> None:
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")

@@ -32,6 +32,14 @@ class DispatcherRecord:
     # this one, instead of deduping this round's report into silence the way one shared id did.
     # `review_baseline` used to carry this as well as its own job of indexing review markers; the
     # two are separate values now because a comment count is not a round.
+    # The head each role was preferred on when the claim had to leave that preference behind
+    # (secretary-1165), empty when it did not. The claim walks the canon's fallback chain when the
+    # preferred head's resource is red or spent, and `head`/`review_head` above then name another
+    # family. Kept here because the preference is a claim-time fact: re-reading `role_defaults` at
+    # document-build time would answer a different question, and an operator who repoints a role
+    # mid-attempt would turn a faithful record into a false one.
+    preferred_head: str = ""
+    preferred_review_head: str = ""
     report_generation: int = 0
     # The observer decision that opened the round `report_generation` names, empty when no decision
     # opened it (secretary-1064). Frozen here with the generation, in the same write, because the
@@ -169,6 +177,8 @@ class DispatcherRecord:
             "gate_transport_error": self.gate_transport_error,
             "handle": self.handle,
             "head": self.head,
+            "preferred_head": self.preferred_head,
+            "preferred_review_head": self.preferred_review_head,
             "attempt_id": self.attempt_id,
             "attempt_round": self.attempt_round,
             "paused_reviewer_at": self.paused_reviewer_at,
@@ -242,6 +252,8 @@ class DispatcherRecord:
             handle=str(payload.get("handle") or ""),
             head=str(payload.get("head") or ""),
             review_head=str(payload.get("review_head") or ""),
+            preferred_head=str(payload.get("preferred_head") or ""),
+            preferred_review_head=str(payload.get("preferred_review_head") or ""),
             attempt_id=str(payload.get("attempt_id") or ""),
             attempt_round=int(payload.get("attempt_round") or 0),
             worker_run=_run_snapshot(payload.get("worker_run")),
