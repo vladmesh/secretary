@@ -131,6 +131,8 @@ from secretary.dispatcher_watchdog import (
     wait_outcome as _wait_outcome,
 )
 from secretary.dispatcher_state import (
+    CLAIM_SKIP_FAILOVER_COLLAPSE,
+    CLAIM_SKIP_RESOURCE_NOT_READY,
     DispatcherRecord,
     attempt_request_id as _attempt_request_id,
     claim_actual as _claim_actual,
@@ -169,6 +171,7 @@ from secretary.dispatcher_types import (
 from secretary.head_registry import HeadRegistryConfigError, installed_heads
 from secretary.routing_journal import (
     HEAD_FROM_CARD,
+    HEAD_FROM_FALLBACK,
     HEAD_FROM_RECORD,
     HEAD_FROM_ROLE_DEFAULT,
     MODEL_UNKNOWN,
@@ -178,7 +181,7 @@ from secretary.routing_journal import (
     routing_payload as _routing_payload,
     run_key as _run_key,
 )
-from secretary.head_health import HeadHealth, HeadReadiness
+from secretary.head_health import HeadChoice, HeadHealth, HeadReadiness, resolve_head_chain
 from secretary.sprints import SprintReader, budget_thresholds
 from secretary.tasks import (
     KanboardClient,
@@ -312,6 +315,19 @@ class InstanceCatalog:
         self._head_profile(head)
         return head
 
+    def head_fallback(self, head: str) -> list[str]:
+        """The ordered fallback chain `head` names in the registry, empty when it names none.
+
+        The chain is the canon's own statement of which other head is an acceptable stand-in for
+        this one; the dispatcher walks it at claim and never invents an entry. A profile that
+        writes no chain is the canon saying "this head or nothing", which is a claim-skip.
+        """
+        profile = self._head_profile(head)
+        chain = profile.get("fallback")
+        if not isinstance(chain, list):
+            return []
+        return [str(entry) for entry in chain if isinstance(entry, str) and entry]
+
     def claimed_worker_head(self, task: dict[str, Any]) -> str:
         return self._claimed_head(task, "resolved_worker_head", self.worker_head)
 
@@ -345,16 +361,22 @@ class InstanceCatalog:
         return head
 
     def head_run(
-        self, task: dict[str, Any], *, role: str, head: str = "", workspace: str = ""
+        self, task: dict[str, Any], *, role: str, head: str = "", workspace: str = "",
+        failover: bool = False,
     ) -> HeadRun:
         """The launch record for one head of `role`: the profile id plus the configuration it is
         launched with, read from the same snapshot the launcher renders its command from.
 
-        `head` is the profile the bring-up handed to the launcher. There is no substitution between
-        the routing decision and the launch: the head is decided once, at claim, from the card's
-        override or the role default, so it normally equals what the card asks for. Passing it
-        explicitly keeps the record describing the process that runs even when the card's metadata
-        is edited afterwards.
+        `head` is the profile the bring-up handed to the launcher. There is still no substitution
+        between the routing decision and the launch — the head is decided once, at claim — but that
+        decision may itself have walked the canon's fallback chain, because the preferred head's
+        resource was red or spent (secretary-1165). `failover` is the claim saying it did: the
+        dispatcher record kept the preference it left behind, and that record is the only thing
+        that knows. It is not re-derived from the chains here, because the shipped chains are
+        cyclic and reachability would make nearly every head reachable from nearly every other,
+        labelling an ordinary record-pinned head `fallback` and losing exactly the distinction the
+        journal promises to keep. Passing the head explicitly keeps the record describing the
+        process that runs even when the card's metadata is edited afterwards.
         """
         routing = task.get("routing") or {}
         if role == "worker":
@@ -371,7 +393,7 @@ class InstanceCatalog:
             codex_mode = ""
         launched = str(head) if head else asked
         if launched != asked:
-            head_source = HEAD_FROM_RECORD
+            head_source = HEAD_FROM_FALLBACK if failover else HEAD_FROM_RECORD
         else:
             head_source = HEAD_FROM_CARD if override else HEAD_FROM_ROLE_DEFAULT
         profile = self._head_profile(launched)
@@ -530,6 +552,7 @@ class CommandHostRuntime:
         attempt_id: str = "",
         require_existing_workspace: bool = False,
         generation: int = 0,
+        failover: bool = False,
     ) -> dict[str, Any]:
         project = task["project"]
         base = self.catalog.default_branch(project, task.get("workspace", {}).get("base_branch"))
@@ -559,6 +582,7 @@ class CommandHostRuntime:
             codex_mode=task.get("routing", {}).get("codex_launch_mode"),
             launch_prompt=self._worker_launch_prompt(),
             task=task,
+            failover=failover,
         )
         return {
             "workspace": workspace,
@@ -596,6 +620,7 @@ class CommandHostRuntime:
             codex_mode=task.get("routing", {}).get("codex_launch_mode"),
             launch_prompt=self._worker_launch_prompt(),
             task=task,
+            failover=bool(record.preferred_head),
         )
 
     def observer_workspace(self, reference: str) -> str:
@@ -997,6 +1022,7 @@ class CommandHostRuntime:
             env_name="SECRETARY_DISPATCHER_REVIEW_COMMAND",
             split_from=self._split_anchor(record),
             task=task,
+            failover=bool(record.preferred_review_head),
         )
         try:
             if record.worker_continuation.retained:
@@ -1613,16 +1639,19 @@ class CommandHostRuntime:
         launch_prompt: str | None = None,
         split_from: str = "",
         task: dict[str, Any] | None = None,
+        failover: bool = False,
     ) -> LaunchedHead:
         """Bring one head up and hand back the pane together with the configuration it started with.
 
         The snapshot is taken here, on the bring-up path itself, so every route out of this call
         (the real launcher, the `SECRETARY_DISPATCHER_*_COMMAND` override, noop mode) reports the
-        same thing, and no caller has to re-read the registry afterwards.
+        same thing, and no caller has to re-read the registry afterwards. `failover` travels with
+        it because only the caller's record knows the claim walked a chain to reach this head.
         """
         if self.mode == "noop":
             return self._launched(
-                f"noop:{head}:{Path(workspace).name}:{prompt_file}", head, task, role, workspace
+                f"noop:{head}:{Path(workspace).name}:{prompt_file}", head, task, role, workspace,
+                failover,
             )
         pid_file = _pid_file_path(_watchdog_kind(role), task["ref"]) if task else ""
         if pid_file:
@@ -1692,7 +1721,7 @@ class CommandHostRuntime:
                         pane=handle,
                     ) from None
                 raise HostError(str(exc)) from None
-        return self._launched(handle, head, task, role, workspace)
+        return self._launched(handle, head, task, role, workspace, failover)
 
     def _close_launched_pane(self, handle: str, pid_file: str) -> None:
         """Close a pane this bring-up opened and confirm nothing of its head survived.
@@ -1712,7 +1741,8 @@ class CommandHostRuntime:
         self._confirm_head_process_gone(pid_file)
 
     def _launched(
-        self, handle: str, head: str, task: dict[str, Any] | None, role: str, workspace: str = ""
+        self, handle: str, head: str, task: dict[str, Any] | None, role: str, workspace: str = "",
+        failover: bool = False,
     ) -> LaunchedHead:
         """Pair the pane with the launch snapshot of the head running in it.
 
@@ -1724,7 +1754,9 @@ class CommandHostRuntime:
         if task is None:
             return LaunchedHead(handle=handle, head=head)
         try:
-            run = self.catalog.head_run(task, role=role, head=head, workspace=workspace).to_json()
+            run = self.catalog.head_run(
+                task, role=role, head=head, workspace=workspace, failover=failover
+            ).to_json()
         except (HostError, AttributeError, KeyError, TypeError):
             run = HeadRun(
                 role=role, head=head, adapter="unknown", model_source=MODEL_UNKNOWN
@@ -2263,6 +2295,18 @@ class CommandHostRuntime:
                 "gates: run appropriate focused or broad validation when the review needs that evidence.",
                 "",
             ]
+        if record and record.preferred_head:
+            sections[4:4] = [
+                "## Head failover",
+                "",
+                f"This branch was written by `{_safe_one_line(record.head)}`, not by the head this "
+                f"card asks for (`{_safe_one_line(record.preferred_head)}`): that head's resource "
+                "was red or spent when the card was claimed, so the claim walked the registry's "
+                "fallback chain onto another family.",
+                "Review the work on its merits. This is here because who wrote it is a fact you are",
+                "entitled to have, not an invitation to grade the head.",
+                "",
+            ]
         if record and record.previous_reviewed_sha:
             sections[4:4] = [
                 "## Re-review packet",
@@ -2376,6 +2420,33 @@ class DispatcherRuntime:
     def head_readiness(self, head: str) -> HeadReadiness:
         return self.head_health.check(head)
 
+    def _head_fallback(self, head: str) -> list[str] | None:
+        """`head`'s fallback chain, or None when the registry does not describe it at all.
+
+        None is not an empty chain, and asking about such a head is not a cheap question: against
+        the real catalog `head_readiness` reads the profile through `head_profile`, which raises
+        `HostError` for a head that is not there — `HeadHealth.check` catches only the shapes a
+        malformed registry entry can take, so that exception would leave the walk and take the
+        tick's Ready pass with it. The walk answers the existence question here, where it is one
+        lookup, and never puts it to a readiness probe.
+        """
+        try:
+            return self.catalog.head_fallback(head)
+        except HostError:
+            return None
+
+    def resolve_head(self, preferred: str) -> HeadChoice:
+        """The head to actually launch for `preferred`, walking the canon's fallback chain.
+
+        Red is a property of the resource, so a head whose subscription is spent can still be
+        replaced by one of another family drawing on another account — but only along the chain the
+        canon writes down, and only at claim, where the decision is recorded on the card. When
+        nothing in the chain is launchable the answer is an empty head: the caller claim-skips and
+        the card waits in Ready, which is what the 2026-08-06 canary paid two launches and a round
+        to learn is cheaper than a head in a dead resource.
+        """
+        return resolve_head_chain(preferred, self.head_readiness, self._head_fallback)
+
     def _require_head_ready(self, head: str) -> None:
         readiness = self.head_readiness(head)
         if not readiness.launch_allowed:
@@ -2463,6 +2534,61 @@ class DispatcherRuntime:
             "attempt_id": attempt_id,
         }
 
+    def _failover_collapse(
+        self, worker: HeadChoice, review: HeadChoice
+    ) -> dict[str, Any] | None:
+        """The refusal when a failover would hand both roles to one head, else None.
+
+        A review is worth having because someone other than the worker reads the work. A transfer
+        that lands the worker and the reviewer on the same profile does not weaken that rule a
+        little, it removes it — so it is not a transfer at all, and the card waits in Ready with
+        the reason on the tick instead of being reviewed by its own author. Only a failover can
+        collapse the pair here: two roles pointed at one head by the canon itself is an
+        installation's own decision, made with its eyes open, and this is not where it is
+        overruled.
+        """
+        if not review.resolved or review.head != worker.head:
+            return None
+        if not (worker.substituted or review.substituted):
+            return None
+        return {
+            "status": "skipped",
+            "step": "head-preflight",
+            "action": CLAIM_SKIP_FAILOVER_COLLAPSE,
+            "head": worker.head,
+            "review_head": review.head,
+            "readiness": worker.readiness.to_json(),
+            "reason": (
+                f"failover would run worker and reviewer on the same head {worker.head}: "
+                f"worker {worker.reason}; reviewer {review.reason}"
+            ),
+            "failover": {"worker": worker.to_json(), "review": review.to_json()},
+        }
+
+    def _comment_head_failover(
+        self, ref: str, attempt_id: str, worker: HeadChoice, review: HeadChoice
+    ) -> None:
+        """Write the substitution onto the card, once per claim, or do nothing.
+
+        Its own comment rather than a phrase inside the claim comment: this is the sentence a
+        reviewer or an observer looks for when the work reads unlike the head the card asked for,
+        and it must be findable whether or not the claim comment is read.
+        """
+        lines = [
+            f"{role} head {choice.head} instead of {choice.preferred}: {choice.reason}"
+            for role, choice in (("Worker", worker), ("Reviewer", review))
+            if choice.substituted
+        ]
+        if not lines:
+            return
+        self.writer.comment(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            body="Head failover at claim. " + " ".join(lines),
+            request_id=_attempt_request_id(attempt_id, "head-failover-comment", ref),
+        )
+
     def _claim(
         self,
         task: dict[str, Any],
@@ -2473,18 +2599,31 @@ class DispatcherRuntime:
         resume_workspace: bool = False,
     ) -> dict[str, Any]:
         ref = task["ref"]
-        head = self.catalog.worker_head(task)
-        readiness = self.head_readiness(head)
-        if not readiness.launch_allowed:
+        # Both heads are decided here, before anything is claimed, and both may be decided against
+        # the card's preference: a dead resource sends the walk down the canon's chain onto another
+        # family. Nothing launchable at the end of either walk is a claim-skip — the card stays in
+        # Ready and the outcome below names the dead resource.
+        worker_choice = self.resolve_head(self.catalog.worker_head(task))
+        if not worker_choice.resolved:
             return {
                 "status": "skipped",
                 "step": "head-preflight",
-                "action": "resource-not-ready",
+                "action": CLAIM_SKIP_RESOURCE_NOT_READY,
                 "pilot_ref": ref,
-                "head": head,
-                "readiness": readiness.to_json(),
-                "reason": readiness.reason,
+                "head": worker_choice.preferred,
+                "readiness": worker_choice.readiness.to_json(),
+                "reason": worker_choice.reason,
+                "failover": {"worker": worker_choice.to_json()},
             }
+        # The reviewer is resolved at claim too, because the claim is what writes its head onto the
+        # card. A reviewer chain that is entirely dead does not stop the work: the preferred head
+        # stays recorded and the reviewer's own preflight waits for its resource, exactly as before.
+        review_choice = self.resolve_head(self.catalog.review_head(task))
+        collapse = self._failover_collapse(worker_choice, review_choice)
+        if collapse is not None:
+            return dict(collapse, pilot_ref=ref)
+        head = worker_choice.head
+        review_head = review_choice.head or review_choice.preferred
         # A card the dispatcher still holds a record for, back in Ready with its claim already
         # committed under the current attempt, is a re-run: an operator-approved retry after
         # Blocked, or a plain preempt/requeue out of in_progress or validate. An attempt id
@@ -2546,7 +2685,6 @@ class DispatcherRuntime:
             _record_attempt(payload, attempt_id, ref, self.owner, self.owner)
             payload["attempt_id"] = attempt_id
         claim_request_id = _attempt_request_id(attempt_id, "claim", ref)
-        review_head = self.catalog.review_head(task)
         worker_id = _worker_id(task)
         self.writer.claim(
             role="dispatcher",
@@ -2559,6 +2697,10 @@ class DispatcherRuntime:
             base_branch=task.get("workspace", {}).get("base_branch") or "",
             request_id=claim_request_id,
         )
+        # Before the card is read back, so the comment is inside the baseline the record takes: a
+        # head chosen by failover is written onto the card itself, where the reviewer and the
+        # observer read it, rather than living only in this tick's stdout.
+        self._comment_head_failover(ref, attempt_id, worker_choice, review_choice)
         claimed = self.reader.show(ref)
         record = DispatcherRecord(
             worker=worker_id,
@@ -2574,6 +2716,13 @@ class DispatcherRuntime:
             report_generation=1,
             state="claim_verified",
             claimed_at=time.time(),
+            # Empty unless the walk had to leave the card's preference behind. The pair is what
+            # lets the review document name the head that actually did the work without
+            # re-resolving a role default that may have moved since the claim.
+            preferred_head=worker_choice.preferred if worker_choice.substituted else "",
+            preferred_review_head=(
+                review_choice.preferred if review_choice.substituted else ""
+            ),
         )
         # A re-claimed card continues its own round numbering: the journal, not the board, knows
         # how many rounds it has had, so a return to Ready adds a round instead of resetting.
@@ -2683,6 +2832,7 @@ class DispatcherRuntime:
                 attempt_id=record.attempt_id,
                 require_existing_workspace=require_existing_workspace,
                 generation=record.report_generation,
+                failover=bool(record.preferred_head),
             )
         except (HeadLaunchAborted, HostError) as exc:
             aborted = self._worker_launch_failure(
@@ -2763,14 +2913,23 @@ class DispatcherRuntime:
             ),
             request_id=_attempt_request_id(record.attempt_id, "claimed-comment", ref),
         )
-        return {
+        outcome = {
             "status": "ok",
             "step": "claim",
             "pilot_ref": ref,
             "attempt_id": record.attempt_id,
             "worker": record.worker,
             "workspace": prepared["workspace"],
+            "head": record.head,
+            "review_head": record.review_head,
         }
+        if record.preferred_head or record.preferred_review_head:
+            # The tick says a head was substituted, in the same line that says the card was
+            # claimed. An operator reading the tick must not have to open the card to find out
+            # that the work is running somewhere other than where the card asked for it.
+            outcome["preferred_head"] = record.preferred_head
+            outcome["preferred_review_head"] = record.preferred_review_head
+        return outcome
 
     def _end_review_pane_confirmed(
         self,
@@ -4949,7 +5108,8 @@ class DispatcherRuntime:
         )
 
     def head_run_snapshot(
-        self, task: dict[str, Any], *, role: str, head: str = "", workspace: str = ""
+        self, task: dict[str, Any], *, role: str, head: str = "", workspace: str = "",
+        failover: bool = False,
     ) -> dict[str, Any]:
         """The launch snapshot for a head the runtime has no launcher record of, or a marked
         minimal one when its profile can no longer be read.
@@ -4957,10 +5117,14 @@ class DispatcherRuntime:
         Only an adopted card takes this path: its bring-up happened in a previous dispatcher life,
         so the configuration is re-read now. A registry edited since must still leave a usable
         attempt record rather than take the tick down: the point of the journal is that it keeps
-        working when `heads.toml` moves.
+        working when `heads.toml` moves. `failover` comes from the record's kept preference, which
+        survives the dispatcher that wrote it, so an adopted card still says why its head is not
+        the one the card asks for.
         """
         try:
-            return self.catalog.head_run(task, role=role, head=head, workspace=workspace).to_json()
+            return self.catalog.head_run(
+                task, role=role, head=head, workspace=workspace, failover=failover
+            ).to_json()
         except (HostError, AttributeError, KeyError, TypeError):
             return HeadRun(
                 role=role, head=str(head), adapter="unknown", model_source=MODEL_UNKNOWN
@@ -5000,7 +5164,8 @@ class DispatcherRuntime:
         if not record.attempt_round:
             record.attempt_round = self._journal_round(ref) + 1
         record.worker_run = run or self.head_run_snapshot(
-            task, role="worker", head=record.head, workspace=record.workspace
+            task, role="worker", head=record.head, workspace=record.workspace,
+            failover=bool(record.preferred_head),
         )
         self._record_routing(ref, record, phase="worker", heads=[record.worker_run])
 
@@ -5017,7 +5182,8 @@ class DispatcherRuntime:
         if not record.attempt_round:
             record.attempt_round = self._journal_round(ref) + 1
         record.review_run = run or self.head_run_snapshot(
-            task, role="reviewer", head=record.review_head, workspace=record.workspace
+            task, role="reviewer", head=record.review_head, workspace=record.workspace,
+            failover=bool(record.preferred_review_head),
         )
         self._record_routing(ref, record, phase="review", heads=[record.review_run])
 

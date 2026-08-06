@@ -1,83 +1,69 @@
-# Review secretary-1164
+# Review secretary-1165
 
 # Goal
 
-Недоступный гейт перестаёт быть красным. Транспортный сбой при обращении к бэкенду гейта оставляет
-карточку ждать и повторяется, а в Blocked уводит только исчерпание попыток — с причиной, называющей
-транспорт.
+Мёртвый ресурс головы уводит карточку на живую семью. Пока живых семей нет — честный claim-skip с
+записью в тик, а не запуск голов в пустоту и не молчаливое ожидание.
 
 # Источник
 
-`issue:f2977ff8b6175b7202b0`. Наблюдалось на канарейке `sprint:1200`, 2026-08-06 10:55:47, карточка
-`secretary-1161`:
+`issue:bd7dc1bdadb194f7308b`, вторая половина. Первая половина уже раскатана хотфиксом `b8c425a`:
+исчерпанная квота теперь классифицируется как `exhausted`, а не `unknown`, и `launch_allowed` её не
+пропускает. Эта карточка про то, что делать дальше.
 
-```
-merge gate failed: gate gh api failed:
-  Get "https://api.github.com/repos/vladmesh/secretary/commits/d9b1ca7.../check-runs":
-  net/http: TLS handshake timeout
-```
-
-Ревью было зелёным, обязательный чек на точном SHA успешным (CI run 31094285685), работа принята —
-и карточка ушла в Blocked из-за моргнувшей сети. Ни одной повторной попытки. Вытащил её наблюдатель:
-сам сходил в GitHub API, подтвердил чек на точном SHA и решил release, явно отказавшись
-перезапускать широкий прогон. Полагаться на сообразительность головы здесь нельзя.
+Наблюдалось на канарейке `sprint:1200`, 2026-08-06 09:42–09:44: подписка openai-sub кончилась
+посреди спринта, диспетчер заклеймил `secretary-1161`, голова умерла мгновенно, вотчдог сделал
+респавн, второй столл увёл карточку в Blocked. Два запуска и раунд в никуда. Карточку пришлось
+вручную переводить на claude-профиль.
 
 # Контекст
 
 Указатели, не копипаста; читай текущее дерево.
 
-- Вопрос не был задан и ответа нет. Трактовать отсутствие ответа как отрицательный ответ неверно:
-  это ровно та же ошибка, что `unknown`-статус ресурса, который считался пригодным к запуску
-  (починено хотфиксом `b8c425a`), и та же, что занятая пана, читаемая как провал запуска
-  (соседняя карточка этого спринта).
-- Ищи в `secretary/`, где диспетчер спрашивает бэкенд гейта и где `gate gh api failed` становится
-  решением по карточке. Путей может быть несколько — предрелизная расписка и мердж; закрыть надо
-  все, где спрашивается бэкенд.
-- Полученный ответ с проваленным чеком — это красный гейт, и он продолжает работать как сейчас.
-  Различие проводится по тому, получен ли ответ, а не по тому, понравился ли он.
-- Форма отложенной повторной попытки уже есть в контуре — посмотри, как это сделано у наблюдателя,
-  и не изобретай третью.
+- `triggered_agents/agents/pipeline/health.py:resolve_head` уже умеет обходить цепочку фолбэка в
+  ширину и возвращать `None` — это и есть claim-skip. Механизм есть; у продуктовых профилей просто
+  пустые цепочки.
+- Пустые `fallback` у продуктовых профилей в `heads.toml` — осознанное решение от 2026-07-04, и
+  причина записана прямо там: ночью 4 июля фолбэк на дешёвый gemini-flash сжёг три попытки воркера,
+  ни разу не дойдя до отчёта. Решение принималось против головы заведомо слабее, а не против
+  равноценной головы другой семьи. Эта карточка его пересматривает — но не отменяет: качество
+  головы в цепочке остаётся требованием.
+- Правило «воркер и ревьюер — не одна и та же голова» должно пережить любой перевод. Сейчас, при
+  исчерпанном openai-sub, оно и так ослаблено до разницы в усилии (см. `role_defaults` в
+  `heads.toml` и записанную там причину) — не ослабляй его дальше.
+- Канон голов живёт в `secretary-instance/heads/heads.toml` и материализуется через
+  `secretary upgrade`. Если карточка меняет форму цепочек, а не только код — правка канона это
+  часть работы, но раскатка на живую установку в неё не входит.
 
 # Acceptance criteria
 
-1. Транспортный сбой (таймаут, TLS, DNS, обрыв соединения, 5xx от самого бэкенда) не меняет
-   состояние карточки. Попытка повторяется на следующем тике.
-2. Число попыток ограничено. После исчерпания карточка уходит в Blocked, и причина называет
-   транспорт и последнюю ошибку, а не «gate failed».
-3. Каждая повторная попытка видна в выводе тика.
-4. Красный гейт — то есть полученный ответ с проваленным обязательным чеком — работает как прежде:
-   карточка возвращается на доработку, и это покрыто существующими тестами, которые остаются
-   зелёными без правок.
-5. Регрессия на оба случая, транспорт и красный ответ, на каждом пути, где диспетчер спрашивает
-   бэкенд гейта.
+1. Красный или исчерпанный ресурс предпочитаемой головы приводит к запуску на живой семье
+   сопоставимого класса, а не к claim-skip, если такая голова есть.
+2. Перевод сохраняет правило «воркер и ревьюер — разные головы». Если единственная живая семья
+   даёт для обоих одну и ту же голову, это не перевод, а отказ: claim-skip с причиной.
+3. Если живых семей не осталось — claim-skip, карточка ждёт в Ready, и тик пишет, какой ресурс
+   мёртв и почему. Ни одного запуска головы в такой ресурс.
+4. Слабая голова не подставляется молча: цепочка фолбэка задаётся в каноне явно, и выбор
+   не-предпочитаемой головы записывается на карточку так, чтобы ревью и наблюдатель видели, кто
+   на самом деле делал работу.
+5. Регрессия: ресурс красный, ресурс исчерпан, обе семьи мертвы, перевод ломающий правило разных
+   голов. Существующие тесты `resolve_head` остаются зелёными.
 6. `python3 -m unittest` зелёный целиком.
 
 # Вне рамок
 
-Менять формат расписки гейта и правило «релиз принимается только по расписке на точном SHA».
-Трогать сам механизм мерджа.
+Раскатывать изменённый канон на живую установку. Трогать классификацию проб — она уже сделана
+хотфиксом. Выпиливание exec-режима у codex.
 
-
-## Re-review packet
-
-previous_reviewed_sha: 0aa68325fb737b15421a678b73e26cd0d6629a1b
-current_sha: 838fdcfbf99139b75c01f8b0ff4a27a9d4378824
-Changed paths / delta from the prior review:
-REVIEW.md docs/PROTOCOLS.md secretary/dispatcher.py secretary/dispatcher_gate.py secretary/dispatcher_observer_fence.py tests/test_dispatcher.py tests/test_dispatcher_observer.py
-REVIEW.md | 102 +++++----- docs/PROTOCOLS.md | 12 ++ secretary/dispatcher.py | 8 +- secretary/dispatcher_gate.py | 192 +++++++++++++----- secretary/dispatcher_observer_fence.py | 50 ++++- tests/test_dispatcher.py | 342 ++++++++++++++++++++++++++++++--- tests/test_dispatcher_observer.py | 9 +- 7 files changed, 576 insertions(+), 139 deletions(-)
-Previous blockers (close or explicitly retain these stable IDs):
-# Reviewer verdict: RED — secretary-1164 Reviewed `0aa68325fb737b15421a678b73e26cd0d6629a1b` against base `8c9fdce`. The dispatcher-side machinery is right: `GateTransportError` is raised ahead of `HostError` at both `host.gate_check` call sites, the retry leaves the record, the board and the heads untouched, the budget counts consecutive silence and resets on any answer, the card re-enters through the standing board marker (Validate) and the standing audit decision (Assessment) so nothing is consumed, the tick emits `gate-transport-retry` with the attempt number and the error, and the exhausted budget blocks with a reason that names the transport. All three paths that ask the backend are wired (`_run_gate`, `_park_green_verdict`, `_release_parked`) and there is no fourth `gate_check` caller. Red answers still return a `GateResult`, never an exception, so criterion 4 holds and the existing red tests are untouched. What is wrong is the single place the whole feature turns on: the decision of *what counts as a backend that never answered* is made by regex-sniffing rendered error prose in `secretary/dispatcher_gate.py:75` (`_TRANSPORT_MARK_RE` / `is_transport_failure`). Three concrete reachable defects follow from that, all introduced by this branch. --- ## BLOCKER-gh-dns-not-classified **Scenario.** DNS fails while the github gate reads the check rollup. `_gh_api` (`dispatcher_gate.py:389`) raises `HostError("gate gh api failed: <gh stderr>")`. Real `gh` does not print a Go DNS error there — its `api` command special-cases `*net.DNSError` and prints its own message instead. Observed on this machine with the real binary (`gh version 2.45.0`), no fixture: ``` $ gh api repos/x/y --jq .check_runs --hostname nonexistent.invalid error connecting to nonexistent.invalid check your internet connection or https://githubstatus.com ``` `is_transport_failure()` returns **False** for that text (verified against the branch tree). The error is therefore re-raised as a plain `HostErro
-Review this delta, the closure of prior blockers and collateral impact; do not restart
-from the original base unless a concrete suspicion requires the historical diff.
 
 ## Mechanical gate attestation
 
-- validated_sha: 838fdcfbf99139b75c01f8b0ff4a27a9d4378824
-- base_sha: 8c9fdce580f962f2bc2add95a5e640ef1a4e7548
+- validated_sha: f7e7818fb3f19e027c8840d01a0027fce4716fbb
+- base_sha: a61689c6c67cf5c9a38553318f7fa44045aba8ff
 - gate_mode: github
 - required terminal checks:
-  - test: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/31103832401/job/92623814996)
-- completed_at: 2026-08-06T13:01:37+00:00
+  - test: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/31109244959/job/92642389345)
+- completed_at: 2026-08-06T14:09:33+00:00
 - command_or_check_set_digest: e05e08ff6e9e51da3be176a7b5215dfddd2f768f01036631e8a3c9ab7be723ca
 
 Independently inspect the diff, acceptance criteria and invariants. The attested broad
@@ -102,10 +88,10 @@ real behaviour you verified and how. If no end-to-end check against the real bac
 was possible, write plainly that it was not done and which assumption stays unverified.
 
 Post exactly one review verdict through the secretary task protocol:
-Write the body to /tmp/secretary-verdict-secretary-1164-15.md with your file-writing tool,
+Write the body to /tmp/secretary-verdict-secretary-1165-3.md with your file-writing tool,
 then run the command below verbatim. Do not assemble the body inside the shell command
 (no heredoc, no mktemp, no echo pipeline) and do not add `rm`: the codex runtime refuses
 rm-style commands, and quotes or backticks in the body break the call. Leave the file in
 place afterwards; the dispatcher does not read it.
-PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1164 --role reviewer --kind green --request-id dispatcher-attempt-20260806T120508Z-ee9a9e4e2d1b-review-green-secretary-1164-15 --body-file /tmp/secretary-verdict-secretary-1164-15.md
-PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1164 --role reviewer --kind red --request-id dispatcher-attempt-20260806T120508Z-ee9a9e4e2d1b-review-red-secretary-1164-15 --body-file /tmp/secretary-verdict-secretary-1164-15.md
+PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1165 --role reviewer --kind green --request-id dispatcher-attempt-20260806T133627Z-de63149988b5-review-green-secretary-1165-3 --body-file /tmp/secretary-verdict-secretary-1165-3.md
+PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1165 --role reviewer --kind red --request-id dispatcher-attempt-20260806T133627Z-de63149988b5-review-red-secretary-1165-3 --body-file /tmp/secretary-verdict-secretary-1165-3.md

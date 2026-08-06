@@ -899,11 +899,34 @@ carrying both heads), so worker/reviewer pairs group by outcome without a join. 
 reviewed it. If the reviewer already returned green and the merge gate then bounced the card, both events
 stay in the journal.
 
-The actual head matches the requested one. The decision is made once, at claim time, from the card override
-or from `role_defaults`, and there is no substitution at launch: the dispatcher has no health-based
-switching and no fallback chains. So a record carries one head per role plus `head_source`, saying where
-its id came from: `card`, `role_default`, or `record` (the head pinned in the card's dispatcher record when
-it was claimed earlier).
+The decision is made once, at claim time, and there is no substitution at launch: the head that starts is
+the head the claim decided. That decision reads the card override or `role_defaults` and then resource
+health, and it may end somewhere else than it started. A preferred head whose resource is red or spent is
+replaced by the first launchable head along the fallback chain the registry writes for it, breadth-first,
+cycles read once. Only that chain: nothing is inferred, and a chain entry the registry no longer describes
+is dropped rather than launched, because an unreadable profile has no resource to probe and its readiness
+reads `unknown`, which is launch-allowed. So a record carries one head per role plus `head_source`, saying
+where its id came from: `card`, `role_default`, `fallback` (the claim walked the chain), or `record` (the
+head pinned in the card's dispatcher record when it was claimed earlier).
+
+Two answers end that walk without a claim, and both leave the card in Ready with the reason on the tick,
+naming the dead resource and its probe verdict. Nothing launchable anywhere in the chain is one: a head
+started into a spent subscription costs an attempt, a watchdog respawn and a round, and a card waiting in
+Ready costs nothing. The other is a transfer that would hand the worker and the reviewer the same head.
+A review is worth having because someone other than the worker reads the work, so a failover that removes
+that is refused rather than performed; two roles pointed at one head by the registry itself is an
+installation's own decision and is claimed as before.
+
+Both are claim-skips, and a claim-skip is a statement about one card. The Ready pass records it and
+considers the next card, so an unclaimable card never stops work that has somewhere to go. Every kind of
+claim-skip is named in one set the pass reads, rather than compared against by hand: a skip missing from
+that set does not degrade the pass, it ends it, and the cards behind the skipped one are not considered
+that tick or any following one while the resource stays dead.
+
+A head reached by failover is never a silent substitution. The claim writes the pair onto the card as
+`resolved_worker_head` / `resolved_review_head`, adds one comment naming the head, the preference it
+replaced and the resource verdict that caused it, reports both in the tick, and the reviewer's document
+says which head wrote the branch when it is not the one the card asks for.
 
 Because the decision is made once, the attempt keeps it. A dispatcher that lost its record takes the head
 pair from the card's own resolved worker and reviewer fields when adopting, rather than resolving the

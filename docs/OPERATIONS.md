@@ -1520,16 +1520,29 @@ secretary dispatcher resource-health --instance <dir>
 ```
 
 The check is cached for 300 seconds. That limits probe spend to one cheap call per resource per window, even though the
-production tick may run more often. `ready` allows a launch. `unauthenticated` and `unavailable` leave a new card in
-Ready until the next check, without a claim and without occupying a project slot. That choice avoids a claim/refuse
-loop and does not turn a temporary provider problem into an operator's Blocked card. For a card already taken, a repeat
-worker launch blocks it with the reason, preserving the attempt's context. For an observer head the same two verdicts
-mean a deferred launch: the sprint stays open, the reason is visible in the observer record, and the next tick tries
-again.
+production tick may run more often. `ready` allows a launch. `unauthenticated`, `unavailable` and `exhausted` (a spent
+quota, which reads differently to an operator: the account is not flaky, it is out until it resets) do not. For a card
+already taken, a repeat worker launch blocks it with the reason, preserving the attempt's context. For an observer head
+those verdicts mean a deferred launch: the sprint stays open, the reason is visible in the observer record, and the next
+tick tries again.
 
 `unknown` means the probe itself could not be run or classified reliably. It is visible in the snapshot but does not
 forbid a launch: a failure to observe does not prove the resource is down and must not stop the queue forever.
 
+For a card still in Ready, a verdict that forbids a launch sends the claim down the fallback chain the registry writes
+for that head, and the card is claimed on the first head whose own resource allows one — normally the other family's
+counterpart. The transfer is not silent: the tick names both heads, the card gets a comment saying which head replaced
+which and on what verdict, and the reviewer's document says who wrote the branch. Two cases end in no claim at all, and
+both leave the card in Ready with the reason on the tick rather than in Blocked: no launchable head anywhere in the
+chain, and a transfer that would give the worker and the reviewer the same head, which is a review by the author and is
+refused. Neither occupies a project slot, so a temporary provider problem never becomes an operator's Blocked card, and
+neither ends the tick's Ready pass: every claim-skip is about the card in front of the scan, which records it under
+`skipped_ready` and goes on to consider the next card. A card that cannot be claimed never costs the cards behind it
+their tick.
+
 If a resource shows `unauthenticated`, re-authenticate that runtime's CLI in the runtime home the profile names, then
 wait out the TTL or check the next tick. On `unavailable` do not restart cards: check the provider's status, wait for
-the next TTL and re-read the readiness snapshot. Fallback routing is not part of this.
+the next TTL and re-read the readiness snapshot. On `exhausted` the wait is until the quota resets or is topped up;
+cards that have somewhere to go are already going there, and the ones that stayed in Ready are the ones with nowhere.
+Which chains exist is a canon decision — see the head registry section — and a chain to a head of a lower class buys
+attempts that never reach a report, which is why the shipped chains cross families at comparable class.

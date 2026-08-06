@@ -853,6 +853,25 @@ class UpgradeStepTests(unittest.TestCase):
                         f"{role} resolved onto the red resource",
                     )
 
+    def test_the_shipped_registry_keeps_worker_and_reviewer_apart_on_one_subscription(self):
+        """secretary-1165: a card whose preferred family is dead is transferred, not collapsed.
+
+        The chains are written by hand, so nothing but a test stops a canon from routing both roles
+        onto one head the moment a resource goes red — and the dispatcher refuses to claim that
+        card, which turns a transfer into a stall the shipped registry should never cause.
+        """
+        canon = canonical_heads(upgrade.running_product_root())
+        registry = heads.Registry(canon["resources"], canon["profiles"], canon["role_defaults"])
+
+        for red in ("claude-sub", "openai-sub"):
+            with self.subTest(red=red):
+                statuses = {red: health.RED}
+                worker = health.resolve_head(registry.role_default("new_card"), statuses, registry)
+                reviewer = health.resolve_head(registry.role_default("reviewer"), statuses, registry)
+                self.assertIsNotNone(worker)
+                self.assertIsNotNone(reviewer)
+                self.assertNotEqual(worker, reviewer, "the review would be the worker's own")
+
     def test_the_shipped_registry_carries_no_installation_account_policy(self):
         """Account policy and model routing are the private canon's, not the product's."""
         canon = canonical_heads(upgrade.running_product_root())
