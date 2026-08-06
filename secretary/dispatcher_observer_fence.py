@@ -57,10 +57,11 @@ FENCE_SNAPSHOT = "observer_fence_snapshot"
 # dedupes on that id, so a second fence raised for the same reason used to be swallowed into the
 # first whenever both fell in the same wall-clock second — losing the record of a sprint that could
 # not be observed, and making the test that checks a reappeared sprint's second lifecycle depend on
-# where a second boundary landed. A counter answers it without a clock: it advances only with the
-# durable state, so a tick that dies after committing the event and before saving its state mints
-# the same id again on the retry and is deduped on purpose, which is the one case the timestamp was
-# there for.
+# where a second boundary landed. A counter answers it without a clock, and it is the whole answer:
+# it advances only with the durable state, so a tick that dies after committing the event and before
+# saving its state mints the same id again on the retry and is deduped on purpose. That retry is the
+# one case the id is load-bearing for, and it is why no timestamp may enter the id — a clock reading
+# taken again on the retry is a *different* id exactly when the two passes straddle a second.
 FENCE_EPISODES = "observer_fence_episodes"
 
 # Why the sprint cannot be observed right now. `observer_*` reasons come from the metadata itself
@@ -377,17 +378,29 @@ def _next_episode(payload: dict[str, Any], ref: str) -> int:
 
 
 def _episode_stamp(since: str, episode: Any) -> str:
-    """Identity of one fence episode, for the raise and its matching clear. A state entry written
-    before the counter existed carries no episode and keeps the id it was raised under."""
+    """Identity of one fence episode, for the raise and its matching clear.
+
+    The counter alone, without the timestamp beside it. `since` is minted fresh by every pass that
+    raises, so a tick that committed the event and then died before saving its state used to mint a
+    *different* id on the retry as soon as the two passes fell either side of a second boundary —
+    and the retry then wrote a second `observer_fence_raised` for one episode instead of being
+    deduped into the first. That is the one case this id exists to answer, and the timestamp was
+    what broke it. The counter is durable, so it is the same across such a retry and different
+    across two real episodes, which is the whole of what the identity has to say.
+
+    A state entry written before the counter existed carries no episode and keeps the id it was
+    raised under.
+    """
     try:
         number = int(episode)
     except (TypeError, ValueError):
         return since
-    return f"{since}#{number}" if number else since
+    return f"#{number}" if number else since
 
 
-def _fence_request_id(ref: str, reason: str, since: str) -> str:
-    digest = hashlib.sha256(f"{ref}\n{reason}\n{since}".encode("utf-8")).hexdigest()[:32]
+def _fence_request_id(ref: str, reason: str, stamp: str) -> str:
+    """`stamp` is `_episode_stamp`'s answer, never a raw clock reading: see why there."""
+    digest = hashlib.sha256(f"{ref}\n{reason}\n{stamp}".encode("utf-8")).hexdigest()[:32]
     return f"dispatcher-observer-fence-{digest}"
 
 
