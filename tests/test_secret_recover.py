@@ -335,9 +335,20 @@ class NoStoreCase(unittest.TestCase):
             _git(source, "commit", "-m", "checkpoint")
 
             output = io.StringIO()
+            real_run = installation._run
+
+            def run_orca_version(
+                argv: list[str], *, label: str, timeout: int = 120, cwd: Path | None = None,
+            ) -> str:
+                if argv[-2:] == ["orca", "--version"]:
+                    return ""
+                return real_run(argv, label=label, timeout=timeout, cwd=cwd)
+
             with (
                 mock.patch("sys.stdin", io.StringIO()),
                 mock.patch("secretary.installation._ensure_installation_user"),
+                mock.patch("secretary.installation.shutil.which", return_value="/usr/bin/orca"),
+                mock.patch("secretary.installation._run", side_effect=run_orca_version),
                 contextlib.redirect_stdout(output),
             ):
                 code = main([
@@ -348,6 +359,9 @@ class NoStoreCase(unittest.TestCase):
                 ])
 
             self.assertEqual(code, 1)
+            self.assertTrue((target / ".git").is_dir())
+            self.assertTrue((target / "instance.yaml").is_file())
+            self.assertTrue((target / "state").is_dir())
             self.assertIn("Kanboard prerequisite failed", output.getvalue())
             self.assertIn("skipped   runtime-env", output.getvalue())
             self.assertIn("skipped   secret-store", output.getvalue())
