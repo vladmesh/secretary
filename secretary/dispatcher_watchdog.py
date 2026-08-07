@@ -42,6 +42,14 @@ IDLE_STALL_DEFAULT = 5 * 60
 # one, so this is also how many ticks a head is given to get past whatever is holding its pane.
 BRING_UP_DEFER_ATTEMPTS_DEFAULT = 5
 
+# How many consecutive `review-launch-aborted` ticks a card is given before one operator
+# escalation is emitted (issue:aa9a8ae4). Unlike a deferral this abort never blocks the card on its
+# own, because the reviewer pane came up and its worker could not be confirmed gone, so the loop is
+# otherwise silent to everyone but the steward's degraded-health line. The count is one tick each,
+# so this is also how many ticks the recovery path is given to freeze or adopt before an operator
+# is asked to look.
+REVIEW_LAUNCH_ABORT_STUCK_DEFAULT = 10
+
 
 def stall_seconds(kind: str) -> int:
     """Ceiling for a wait, read per call. A typo in the env var falls back to the default rather
@@ -84,6 +92,18 @@ def bring_up_defer_attempts() -> int:
     except ValueError:
         return BRING_UP_DEFER_ATTEMPTS_DEFAULT
     return value if value > 0 else BRING_UP_DEFER_ATTEMPTS_DEFAULT
+
+
+def review_launch_abort_stuck_ticks() -> int:
+    """How many consecutive aborted reviewer launches pass before an operator is escalated to."""
+    try:
+        value = int(
+            os.environ.get("SECRETARY_REVIEW_LAUNCH_ABORT_STUCK", "")
+            or REVIEW_LAUNCH_ABORT_STUCK_DEFAULT
+        )
+    except ValueError:
+        return REVIEW_LAUNCH_ABORT_STUCK_DEFAULT
+    return value if value > 0 else REVIEW_LAUNCH_ABORT_STUCK_DEFAULT
 
 
 class IdleOutcome(NamedTuple):

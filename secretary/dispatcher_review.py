@@ -37,6 +37,7 @@ from secretary.dispatcher_watchdog import (
     head_process_status as _head_process_status,
     initial_output_stall_seconds as _initial_output_stall_seconds,
     pid_file_path as _pid_file_path,
+    review_launch_abort_stuck_ticks as _review_launch_abort_stuck_ticks,
     wait_cycle_token as _wait_cycle_token,
 )
 
@@ -229,6 +230,9 @@ def recover_review_launch(
         return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": "review inventory failed"}
     if running:
         record.state = "reviewing"
+        # A reviewer is on the checkout: whatever stuck launches came before belong to an episode
+        # that is over, so the abort ceiling starts fresh for the next one (issue:aa9a8ae4).
+        record.review_launch_aborts = 0
         return {
             "status": "ok",
             "step": "review",
@@ -238,6 +242,51 @@ def recover_review_launch(
         }
     return start_review(
         runtime, task, records, record, attempt_id, action="review-restarted", payload=payload
+    )
+
+
+def _escalate_stuck_review_launch(
+    runtime: Any,
+    task: dict[str, Any],
+    record: DispatcherRecord,
+    attempt_id: str,
+) -> None:
+    """Comment once when a reviewer launch has aborted past the stuck ceiling.
+
+    The abort keeps the record on purpose — the reviewer pane is up and its worker could not be
+    confirmed gone, so nothing here may block or drop the card. That safety is also what makes the
+    loop silent: every tick looks like the last, and only the steward's degraded-health line marks
+    it at all. Past the ceiling this leaves one durable, operator-addressed note on the card so the
+    stall is something a person is pointed at, not just an unhealthy tick that repeats. The request
+    id is stable within the stuck episode and distinct across episodes, so the board carries one
+    such note per episode however long it lasts, never one per tick.
+    """
+    ceiling = _review_launch_abort_stuck_ticks()
+    if record.review_launch_aborts < ceiling:
+        return
+    ref = task["ref"]
+    # The body is fixed for the episode on purpose: TaskWriter answers a repeated request id only
+    # when its payload is unchanged, and a re-post that differed would raise instead. So nothing
+    # that can vary tick to tick goes in — not the live count, and not the abort reason, which the
+    # bring-up can word differently across ticks (a freeze that would not confirm, then a pane
+    # identity that would not read). The ceiling is the whole stable body; the per-tick reason
+    # stays where it already is, on the degraded tick the steward reads.
+    runtime.writer.comment(
+        role="dispatcher",
+        actor=runtime.owner,
+        reference=ref,
+        body=(
+            f"⚠️ Reviewer launch has aborted for at least {ceiling} ticks running and is not "
+            "recovering on its own: the reviewer pane came up but its worker session could not be "
+            "confirmed frozen or gone, so the card is stuck before review. An operator should "
+            "look, and the dispatcher tick's own reason field carries what each attempt failed on."
+        ),
+        request_id=_attempt_request_id(
+            record.attempt_id or attempt_id,
+            "review-launch-stuck",
+            ref,
+            _wait_cycle_token(record),
+        ),
     )
 
 
@@ -297,6 +346,14 @@ def start_review(
         # record instead would leave a live reviewer with nothing pointing at it.
         mark_launch_aborted(runtime, payload, records, ref, record, exc)
         record.state = "review_starting"
+        # Count this abort and, once it has repeated past the ceiling, pull an operator in once.
+        # The record and its intent are untouched — a head may still be running, so this never
+        # blocks or drops the card — but a launch that cannot freeze its worker for this many ticks
+        # is no longer a transient the steward's degraded line covers on its own (issue:aa9a8ae4).
+        record.review_launch_aborts += 1
+        _escalate_stuck_review_launch(runtime, task, record, attempt_id)
+        records[ref] = record
+        runtime.save_records(payload, records)
         return launch_aborted(
             step="review",
             ref=ref,
@@ -371,6 +428,9 @@ def start_review(
     clear_launch_intent(record)
     record.review_started_at = record.review_progress_at = time.time()
     reset_launch_attempts(record, REVIEW_ROLE)
+    # The reviewer took the checkout, so any stuck-launch episode before it is over and its abort
+    # ceiling starts fresh for the next one (issue:aa9a8ae4).
+    record.review_launch_aborts = 0
     # A retained worker is suspended, not gone: it keeps its pane and its heartbeat so a red
     # verdict can continue that same conversation, and the reviewer still judges a checkout
     # nothing is editing. Without retention the worker head was shut down for the reviewer, and
