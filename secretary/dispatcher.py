@@ -1025,7 +1025,16 @@ class CommandHostRuntime:
             failover=bool(record.preferred_review_head),
         )
         try:
-            if record.worker_continuation.retained:
+            if record.worker_continuation.retained and self.worker_retained_vanished(record):
+                # The retained worker's process is provably gone: orca has no session for it and
+                # its pid heartbeat resolves to a pid the OS no longer knows. A vanished session
+                # cannot touch the checkout the reviewer judges, so there is no second writer to
+                # freeze — the commit it left stands on its own and the reviewer takes it. A red
+                # verdict on this round finds no session to resume and opens a replacement. Taking
+                # the freeze path here instead would raise over a head that will never confirm
+                # suspended and loop `review-launch-aborted` forever (issue:aa9a8ae4).
+                pass
+            elif record.worker_continuation.retained:
                 # A retained worker is already SIGSTOPed: it cannot touch the checkout the reviewer
                 # judges, and its conversation is what a red verdict continues. Confirm that
                 # suspension rather than trusting the record; anything else takes the freeze path.
@@ -1936,6 +1945,22 @@ class CommandHostRuntime:
             return
         if not self.worker_retained_alive(record):
             raise HostError("retained worker session is no longer confirmably suspended")
+
+    def worker_retained_vanished(self, record: DispatcherRecord) -> bool:
+        """Whether this card's retained worker is provably gone, so nothing is left to freeze.
+
+        The distinction `worker_retained_alive` folds away: a worker that is neither frozen nor
+        alive is a different thing from one that is alive but woke up. Only the first has no second
+        writer the reviewer could collide with, so only the first is safe to launch review over
+        without a freeze. This asks the pid heartbeat for the *definitive* death signal — a pid the
+        OS has no record of (`known and not alive`) — and never the ambiguous `known: False` of a
+        heartbeat that was never written or has been removed: an unproven death stays on the
+        cautious confirm-or-freeze path, where the launch aborts rather than risk a live writer.
+        """
+        if self.mode == "noop" or not record.worker_continuation.retained:
+            return False
+        status = _head_process_status(record.worker_pid_file)
+        return bool(status.get("known") and not status.get("alive"))
 
     def resume_worker(self, task: dict[str, Any], record: DispatcherRecord) -> None:
         """Resume an addressable retained worker and deliver its updated rework task.

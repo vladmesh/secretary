@@ -168,6 +168,13 @@ class DispatcherRecord:
     # whole history.
     worker_launch_attempts: int = 0
     review_launch_attempts: int = 0
+    # Aborted reviewer bring-ups (issue:aa9a8ae4): consecutive ticks whose reviewer launch came up
+    # but could not confirm the worker was frozen, so it handed the pane back as
+    # `review-launch-aborted` and kept its intent. Unlike a deferral this never blocks the card on
+    # its own — the head may still be running — so without a bound it repeats silently. Past the
+    # stuck ceiling one operator escalation is emitted. Reset the moment a reviewer does take the
+    # checkout, so the count covers one stuck episode rather than the card's whole history.
+    review_launch_aborts: int = 0
     # Durable launch intent (secretary-820): the bring-up this record is in the middle of, written
     # before the host is asked for a head and cleared once the host has answered. Empty at rest.
     # `dispatcher_launch` owns its shape and its recovery; nothing else reads inside it.
@@ -236,6 +243,7 @@ class DispatcherRecord:
             "review_run": self.review_run,
             "worker_launch_attempts": self.worker_launch_attempts,
             "review_launch_attempts": self.review_launch_attempts,
+            "review_launch_aborts": self.review_launch_aborts,
             "launch_intent": dict(self.launch_intent),
             "worker_waiting_since": self.worker_waiting_since,
             "workspace": self.workspace,
@@ -309,6 +317,7 @@ class DispatcherRecord:
             review_pid_file=str(payload.get("review_pid_file") or ""),
             worker_launch_attempts=int(payload.get("worker_launch_attempts") or 0),
             review_launch_attempts=int(payload.get("review_launch_attempts") or 0),
+            review_launch_aborts=int(payload.get("review_launch_aborts") or 0),
             worker_waiting_since=float(payload.get("worker_waiting_since") or 0.0),
             worker_respawns=int(payload.get("worker_respawns") or 0),
             worker_started_at=float(payload.get("worker_started_at") or 0.0),

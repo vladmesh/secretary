@@ -1670,6 +1670,128 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual((record.handle, record.worker_pid_file), ("", ""))
         self.assertFalse(self.head_alive("worker"), "the freeze is what recovery had to finish")
 
+    def _abort_review_into_recovery(self) -> None:
+        """Leave the card in `review_starting` with its worker retained and its reviewer dead.
+
+        The first review tick brings a reviewer pane up but cannot confirm the worker, so it aborts
+        and stores the intent. Killing that reviewer's heartbeat and ageing the intent past its
+        grace window is what the incident's unstable reviewer did on its own: every later tick then
+        re-enters `start_review` from `review_starting` instead of adopting a live pane.
+        """
+        self.run_to_validate()
+        self.host.fail_freeze_worker_reason = "orca refused to close the worker pane"
+        aborted = self.tick()
+        self.assertEqual(aborted["action"], "review-launch-aborted")
+        self.host.fail_freeze_worker_reason = ""
+        Path(pid_file_path("review", REF)).unlink(missing_ok=True)
+        self.age_intent(initial_output_stall_seconds() + 60)
+        self.host.review_running_result = False
+
+    def test_a_reviewer_whose_worker_vanished_launches_review_instead_of_looping(self) -> None:
+        """A retained worker that is provably gone leaves nothing to freeze: review goes ahead.
+
+        This is issue:aa9a8ae4. The worker session disappeared while the card waited, so every
+        recovery tick used to re-enter `start_review`, fail to confirm a suspension that no longer
+        existed, and abort — 113 identical `review-launch-aborted` ticks with no escalation. With
+        the vanished session recognised, the reviewer takes the commit the worker left instead.
+        """
+        self._abort_review_into_recovery()
+        # The retained worker's process is now provably gone, not merely unconfirmable.
+        self.host.retained_worker_alive = False
+        self.host.worker_retained_gone = True
+
+        restarted = self.tick()
+
+        self.assertNotEqual(
+            restarted["action"], "review-launch-aborted", "a vanished worker must not loop"
+        )
+        self.assertEqual(self.host.reviews, [REF, REF], "the reviewer is relaunched, not aborted")
+        self.assertEqual(self.reader.show(REF)["state"], "validate", "the card is not blocked")
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.state, "reviewing", "the reviewer took the checkout")
+
+    def test_a_red_verdict_after_a_vanished_worker_review_opens_a_replacement(self) -> None:
+        """The round kept naming a gone worker; a red verdict resumes nothing and replaces it.
+
+        The vanished worker launched review over the commit it left, but its record still carries
+        `retained` and a dead heartbeat. A red verdict must not try to resume that conversation —
+        there is none — and must not strand the card either: it opens a fresh worker for round 2.
+        """
+        self._abort_review_into_recovery()
+        self.host.retained_worker_alive = False
+        self.host.worker_retained_gone = True
+        self.assertEqual(self.tick()["action"], "review-restarted")  # review over the gone worker
+
+        self.host.review_running_result = True
+        self.verdict("red", "needs work", "verdict-red-vanished")
+        self.tick()  # the verdict parks the card in Assessment
+        self.decide("rework")
+
+        outcome = self.tick()
+
+        self.assertEqual(outcome["action"], "rework-started")
+        self.assertEqual(self.host.calls.count("resume_worker"), 0, "a gone session is not resumed")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1, "a replacement opens instead")
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.attempt_round, 2)
+
+    def test_a_reviewer_whose_worker_is_only_unconfirmable_still_aborts(self) -> None:
+        """The fix is for a *proven* death, never an ambiguous heartbeat.
+
+        A worker that cannot be confirmed suspended but is not confirmably gone either — a pid file
+        that was never written, a raw command override — is still a possible second writer, so the
+        launch stays on the cautious abort path rather than judging a checkout a live worker may be
+        editing.
+        """
+        self._abort_review_into_recovery()
+        # Unconfirmable, but not provably gone: worker_retained_vanished stays False.
+        self.host.retained_worker_alive = False
+        self.host.worker_retained_gone = False
+
+        stuck = self.tick()
+
+        self.assertEqual(stuck["action"], "review-launch-aborted", "an unproven death is not safe")
+        self.assertIsNotNone(self.record(), "the record still points at that launch")
+
+    def test_a_reviewer_launch_stuck_past_the_ceiling_escalates_to_the_operator_once(self) -> None:
+        """A launch that keeps aborting past the ceiling leaves one operator note, not a per-tick one."""
+        self.run_to_validate()
+        self.host.fail_freeze_worker_reason = "orca refused to close the worker pane"
+        with mock.patch.dict(os.environ, {"SECRETARY_REVIEW_LAUNCH_ABORT_STUCK": "3"}):
+            aborts = self.tick()  # first abort, count 1
+            self.assertEqual(aborts["action"], "review-launch-aborted")
+            for _ in range(4):
+                Path(pid_file_path("review", REF)).unlink(missing_ok=True)
+                self.age_intent(initial_output_stall_seconds() + 60)
+                self.host.review_running_result = False
+                self.assertEqual(self.tick()["action"], "review-launch-aborted")
+
+        notes = [
+            comment
+            for comment in self.reader.show(REF)["comments"]
+            if "Reviewer launch has aborted" in comment["body"]
+        ]
+        self.assertEqual(len(notes), 1, "one operator note for the whole stuck episode")
+        record = self.record()
+        assert record is not None
+        self.assertGreaterEqual(record.review_launch_aborts, 3)
+
+    def test_a_reviewer_launch_below_the_ceiling_does_not_escalate(self) -> None:
+        """Below the ceiling the abort is still just a degraded tick the steward already carries."""
+        self.run_to_validate()
+        self.host.fail_freeze_worker_reason = "orca refused to close the worker pane"
+        with mock.patch.dict(os.environ, {"SECRETARY_REVIEW_LAUNCH_ABORT_STUCK": "5"}):
+            self.assertEqual(self.tick()["action"], "review-launch-aborted")
+
+        notes = [
+            comment
+            for comment in self.reader.show(REF)["comments"]
+            if "Reviewer launch has aborted" in comment["body"]
+        ]
+        self.assertEqual(notes, [], "no operator note for a single abort")
+
     # a failure raised after the head is up, over an intent the tick still holds -----------------
 
     def pane_identity_fails(self):

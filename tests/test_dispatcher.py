@@ -767,6 +767,10 @@ class FakeHost:
         # A retained session the heartbeat can no longer confirm as suspended: set False to model
         # the head dying while the reviewer judged its checkout.
         self.retained_worker_alive = True
+        # A retained session whose process is *provably* gone (`known and not alive`), not merely
+        # unconfirmable: set True to model orca having lost the head entirely, where there is
+        # nothing left to freeze before the reviewer takes the checkout.
+        self.worker_retained_gone = False
         # A dispatcher death in the gap between the round's document reaching disk and the head
         # being woken or launched. Both bring-ups write the document and then, separately, wake or
         # launch, so both can be interrupted there. Fires once and clears itself, so the tick that
@@ -914,7 +918,12 @@ class FakeHost:
             failover=bool(record.preferred_review_head),
         )
         try:
-            if record.worker_continuation.retained:
+            if record.worker_continuation.retained and self.worker_retained_vanished(record):
+                # Mirror the real host: a retained worker whose session is provably gone leaves
+                # nothing to freeze, so the reviewer takes the checkout it left rather than the
+                # launch aborting forever over a head that will never confirm suspended.
+                pass
+            elif record.worker_continuation.retained:
                 # Mirror the real host: a retained worker is already suspended, so the reviewer
                 # judges a checkout nothing is editing without ending that conversation.
                 self.confirm_worker_retained(record)
@@ -1064,6 +1073,11 @@ class FakeHost:
         if not record.worker_continuation.retained:
             return False
         return bool(self.retained_worker_alive and (record.handle or record.worker_pid_file))
+
+    def worker_retained_vanished(self, record) -> bool:
+        if not record.worker_continuation.retained:
+            return False
+        return bool(self.worker_retained_gone)
 
     def confirm_worker_retained(self, record) -> None:
         self.calls.append("confirm_worker_retained")
