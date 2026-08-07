@@ -11,3 +11,7 @@ runtime.env
 
 # Runtime state under role worktrees, for example secretary/pipeline/state.
 /state/
+
+# Local secret drop-box: plaintext owner credentials, never committed.
+.env
+*.pem
