@@ -19,6 +19,7 @@ behaviour — the real host is run in `mode="noop"`, which needs no orca/git/gh,
 from __future__ import annotations
 
 import ast
+import hashlib
 import inspect
 import os
 import pwd
@@ -43,7 +44,7 @@ from secretary.role_env import observer_binding
 from secretary import role_env as head_role_env
 from secretary.dispatcher_state import DispatcherRecord
 from secretary import upgrade
-from secretary.head_registry import canonical_heads, materialize_snapshot
+from secretary.head_registry import canonical_heads, materialize_snapshot, record_source, snapshot_header
 from secretary.host import SHIPPED_PACKAGING_ROOT, SystemdLayout, render_systemd_unit
 from secretary.host_apply import resolve_packaged
 from triggered_agents.agents.pipeline import heads
@@ -422,7 +423,17 @@ class HeadRegistrySourceContractTests(unittest.TestCase):
             encoding="utf-8",
         )
         (root / "heads").mkdir()
-        (root / "heads" / "heads.yaml").write_text(snapshot, encoding="utf-8")
+        canonical = root / "heads" / "heads.toml"
+        rendered = snapshot_header(canonical) + snapshot
+        (root / "heads" / "heads.yaml").write_text(rendered, encoding="utf-8")
+        (root / "heads" / "source.yaml").write_text(
+            "canonical: " + str(canonical) + "\n"
+            "canonical_owner: instance\n"
+            "product_root: /fixture/product\n"
+            "revision: fixture\n"
+            "snapshot_sha256: " + hashlib.sha256(rendered.encode("utf-8")).hexdigest() + "\n",
+            encoding="utf-8",
+        )
         return root
 
     def snapshot(self, *, role_default: str = "installed-head") -> str:
@@ -501,6 +512,7 @@ class RoleRoutingGenerationTests(unittest.TestCase):
         if canon is not None:
             (self.instance / "heads" / "heads.toml").write_text(canon, encoding="utf-8")
         materialize_snapshot(self.instance, upgrade.running_product_root())
+        record_source(self.instance, upgrade.running_product_root())
 
     def test_the_installations_own_canon_routes_every_role(self) -> None:
         self.materialize(self.CANON)

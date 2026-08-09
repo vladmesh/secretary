@@ -978,6 +978,136 @@ class UpgradeStepTests(unittest.TestCase):
             self.assertNotIn(linked, owned)
 
 
+class HeadRegistryCheckpointTests(unittest.TestCase):
+    """The generated registry is a pair in the private recovery repository."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.remote = self.root / "instance-remote.git"
+        self.instance = self.root / "instance"
+        self.instance.mkdir()
+        self._git(self.root, "init", "--quiet", "--bare", "--initial-branch", "main", str(self.remote))
+        self._git(self.instance, "init", "--quiet", "--initial-branch", "main")
+        self._git(self.instance, "config", "user.name", "test operator")
+        self._git(self.instance, "config", "user.email", "test@example.invalid")
+        (self.instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+        self._git(self.instance, "add", "instance.yaml")
+        self._git(self.instance, "commit", "--quiet", "-m", "instance config")
+        self._git(self.instance, "remote", "add", "origin", str(self.remote))
+        self.context = upgrade.UpgradeContext(
+            instance_path=self.instance,
+            product_root=upgrade.running_product_root(),
+            base_branch="main",
+            dry_run=False,
+            units=FakeUnitInstaller(),
+            orca=FakeRegistrar(),
+            automations=None,
+            report=_Report(),
+        )
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    @staticmethod
+    def _git(root: Path, *args: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(root), *args], check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    def _publish(self) -> tuple[upgrade.StepResult, upgrade.StepResult]:
+        return upgrade.step_head_registry(self.context), upgrade.step_publish_head_registry(self.context)
+
+    def test_changed_pair_is_scoped_committed_published_and_cleanly_restored(self):
+        # These are deliberately all outside the registry writer's pathspec.
+        for relative in (
+            "state/board/foreign.ndjson", "state/memory/facts/foreign.md",
+            "state/knowledge/foreign.md", "secrets/foreign.age", "operator-note.txt",
+        ):
+            path = self.instance / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("foreign\n", encoding="utf-8")
+
+        generated, published = self._publish()
+
+        self.assertEqual(generated.status, "changed")
+        self.assertEqual(published.status, "changed", published.detail)
+        changed = self._git(self.instance, "show", "--format=", "--name-only", "HEAD").splitlines()
+        self.assertEqual(changed, ["heads/heads.yaml", "heads/source.yaml"])
+        self.assertEqual(self._git(self.instance, "diff", "--cached", "--name-only"), "")
+        self.assertEqual(
+            self._git(self.instance, "status", "--porcelain", "--untracked-files=all").splitlines(),
+            [
+                "?? operator-note.txt",
+                "?? secrets/foreign.age",
+                "?? state/board/foreign.ndjson",
+                "?? state/knowledge/foreign.md",
+                "?? state/memory/facts/foreign.md",
+            ],
+        )
+        remote_files = self._git(self.remote, "show", "--format=", "--name-only", "main").splitlines()
+        self.assertIn("heads/heads.yaml", remote_files)
+        self.assertIn("heads/source.yaml", remote_files)
+        self.assertEqual(read_source(self.instance)["revision"], product_revision(self.context.product_root))
+
+        recovered = self.root / "recovered"
+        self._git(self.root, "clone", "--quiet", str(self.remote), str(recovered))
+        self.assertEqual(installed_heads(recovered), installed_heads(self.instance))
+        self.assertEqual(read_source(recovered), read_source(self.instance))
+
+    def test_unchanged_pair_still_confirms_the_remote_checkpoint(self):
+        self._publish()
+
+        generated, published = self._publish()
+
+        self.assertEqual(generated.status, "unchanged")
+        self.assertEqual(published.status, "unchanged", published.detail)
+        self.assertEqual(
+            self._git(self.remote, "rev-parse", "main"),
+            self._git(self.instance, "rev-parse", "HEAD"),
+        )
+
+    def test_commit_or_push_failure_refuses_success_and_keeps_an_actionable_checkpoint(self):
+        generated = upgrade.step_head_registry(self.context)
+        self.assertEqual(generated.status, "changed")
+        with mock.patch("secretary.upgrade.state_repo.commit", side_effect=upgrade.state_repo.StateRepoError("index locked")):
+            failed_commit = upgrade.step_publish_head_registry(self.context)
+        self.assertEqual(failed_commit.status, "failed")
+        self.assertIn("index locked", failed_commit.detail)
+
+        failed_push = upgrade.step_publish_head_registry(self.context)
+        self.assertEqual(failed_push.status, "changed", failed_push.detail)
+        self._git(self.instance, "remote", "set-url", "origin", str(self.root / "missing.git"))
+        (self.instance / "heads" / "heads.toml").write_text(
+            (self.context.product_root / "triggered_agents" / "agents" / "pipeline" / "heads.toml").read_text(
+                encoding="utf-8"
+            ),
+            encoding="utf-8",
+        )
+        upgrade.step_head_registry(self.context)
+        failed_push = upgrade.step_publish_head_registry(self.context)
+        self.assertEqual(failed_push.status, "failed")
+        self.assertIn("local checkpoint", failed_push.detail)
+        self.assertNotEqual(
+            self._git(self.instance, "rev-parse", "HEAD"), self._git(self.remote, "rev-parse", "main")
+        )
+
+    def test_incomplete_or_stale_pair_fails_closed_before_routing(self):
+        self._publish()
+        source = self.instance / "heads" / "source.yaml"
+        source.unlink()
+        with self.assertRaisesRegex(HeadRegistryConfigError, "source pin .* is missing"):
+            installed_heads(self.instance)
+
+        upgrade.step_head_registry(self.context)
+        (self.instance / "heads" / "heads.yaml").write_text(
+            (self.instance / "heads" / "heads.yaml").read_text(encoding="utf-8") + "# stale\n",
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(HeadRegistryConfigError, "stale or mismatched"):
+            installed_heads(self.instance)
+
+
 class CommandSurfaceTests(unittest.TestCase):
     """The health and materialize commands as an operator and a gate see them."""
 

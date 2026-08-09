@@ -34,6 +34,10 @@ KNOWLEDGE_PATHSPEC = ("state/knowledge",)
 # pick it up, and the store commits its own catalog and envelopes.
 SECRETS_PATHSPEC = ("secrets",)
 GITIGNORE_PATHSPEC = (".gitignore",)
+# The installed head registry is a recovery-canon pair.  Keep the two files in
+# one writer's deliberately narrow ownership: no checkpoint or configuration
+# writer may pick either one up by accident.
+HEADS_PATHSPEC = ("heads/heads.yaml", "heads/source.yaml")
 
 MEMORY_FACTS_RELATIVE = Path("state") / "memory" / "facts"
 KNOWLEDGE_RELATIVE = Path("state") / "knowledge"

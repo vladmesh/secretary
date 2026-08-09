@@ -13,6 +13,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -178,6 +179,7 @@ class PortableFixture(unittest.TestCase):
         self.units = RecordingUnits(self.host_fixture)
         self.write_product()
         self.write_instance()
+        self._initialize_instance_repo()
         # A fully replaced environment: an inherited SECRETARY_INSTANCE, TA_* or KANBOARD_* would
         # point some part of the run back at the live installation, which is exactly the failure
         # this fixture exists to rule out.
@@ -240,6 +242,21 @@ class PortableFixture(unittest.TestCase):
         # transport a prior fresh install would have created, so the upgrade remains an upgrade
         # rather than silently adopting a new live token.
         ensure_board_transport(self.instance, allow_default=True)
+
+    def _initialize_instance_repo(self) -> None:
+        """Give the materializer the private checkpoint it requires in production."""
+        remote = self.root / "instance-remote.git"
+        for command in (
+            ["git", "init", "--quiet", "--bare", "--initial-branch", "main", str(remote)],
+            ["git", "-C", str(self.instance), "init", "--quiet", "--initial-branch", "main"],
+            ["git", "-C", str(self.instance), "config", "user.name", "portable operator"],
+            ["git", "-C", str(self.instance), "config", "user.email", "portable@example.invalid"],
+            ["git", "-C", str(self.instance), "add", "instance.yaml"],
+            ["git", "-C", str(self.instance), "commit", "--quiet", "-m", "instance config"],
+            ["git", "-C", str(self.instance), "remote", "add", "origin", str(remote)],
+            ["git", "-C", str(self.instance), "push", "--quiet", "-u", "origin", "main"],
+        ):
+            subprocess.run(command, check=True)
 
     def own_a_canon(self) -> Path:
         canon = self.instance / "heads" / "heads.toml"
@@ -670,6 +687,16 @@ class InstallationOwnedLayersTests(PortableFixture):
         super().setUp()
         self.canon = self.own_a_canon()
         self.overlay = self.own_a_skill()
+        # These are installation configuration, not upgrade output.  A recovered
+        # installation gets them from its private repository, so make the fixture
+        # start in the same clean state rather than asking upgrade to clean up
+        # operator-owned untracked files.
+        for command in (
+            ["git", "-C", str(self.instance), "add", "--", "heads/heads.toml", "skills"],
+            ["git", "-C", str(self.instance), "commit", "--quiet", "-m", "instance head and skill config"],
+            ["git", "-C", str(self.instance), "push", "--quiet", "origin", "main"],
+        ):
+            subprocess.run(command, check=True)
 
     def test_an_upgrade_from_another_checkout_keeps_both_skill_layers(self) -> None:
         result = self.run_upgrade()
