@@ -2912,7 +2912,8 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         reconciled = [a for a in self.actions(result) if a["step"] == "production-reconcile"]
         self.assertEqual([a["action"] for a in reconciled], ["record-removed"])
         self.assertEqual(reconciled[0]["stopped_launch"], "claim")
-        self.assertIn("stop_workspace", self.host.calls)
+        self.assertIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("stop_workspace", self.host.calls)
         self.assertFalse(self.head_alive("worker"), "the head of the unresolved launch is gone")
         self.assertNotIn(REF, self.records())
 
@@ -2955,7 +2956,8 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         result = self.tick()
 
         self.assertEqual(self.reader.show(REF)["state"], "in_progress")
-        self.assertIn("stop_workspace", self.host.calls)
+        self.assertIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("stop_workspace", self.host.calls)
         self.assertEqual(self.host.prepared.count(REF), 2)
         self.assertEqual(self.stored_intent(), {})
 

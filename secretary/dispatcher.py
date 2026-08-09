@@ -788,6 +788,7 @@ class CommandHostRuntime:
             return {
                 "workspace": str(workspace),
                 "handle": f"noop:{head}:{workspace.name}:{OBSERVER_PROMPT_FILE}",
+                "leaf": "",
                 "pid_file": pid_file,
                 "run": run,
             }

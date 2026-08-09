@@ -1628,7 +1628,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertNotIn("secretary-510-pilot", payload["records"])
         # The record owns the live head. It must be stopped before the record can disappear, or a
         # later requeue will open another writer in the same workspace.
-        self.assertEqual(self.host.stopped, ["secretary-510-pilot-pilot"])
+        self.assertIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("stop_workspace", self.host.calls)
         self.assertEqual(self.host.torn_down, [])
         self.assertNotIn("secretary-510-pilot", self.host.prepared)
 
@@ -1642,7 +1643,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             reason="park it",
             request_id="move-to-blocked-stop-refused",
         )
-        self.host.fail_stop_workspace_reason = "orca terminal stop failed"
+        self.host.fail_stop_head_reason = "orca terminal close failed"
 
         result = self.runtime.production_tick()
 
@@ -1667,7 +1668,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         claim = [a for a in result["actions"] if a.get("step") == "claim"]
         self.assertEqual(len(claim), 1)
-        self.assertIn("stop_workspace", self.host.calls, result)
+        self.assertIn("stop_head:worker", self.host.calls, result)
+        self.assertNotIn("stop_workspace", self.host.calls, result)
         self.assertEqual(self.host.prepared.count("secretary-510-pilot"), 2)
 
     def test_fresh_claim_stops_an_unowned_live_worker_before_launch(self) -> None:
@@ -1739,7 +1741,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         actions = [a for a in result["actions"] if a.get("ref") == "secretary-510-pilot"]
         self.assertEqual([a["action"] for a in actions], ["record-removed"])
-        self.assertIn("stop_workspace", self.host.calls)
+        self.assertIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("stop_workspace", self.host.calls)
         self.assertNotIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
 
     def test_production_tick_does_not_reconcile_a_card_that_races_back_to_in_progress(self) -> None:
@@ -11218,7 +11221,8 @@ class ProductionPauseTests(unittest.TestCase):
         status = self.pause("freeze")
 
         self.assertEqual(status["stopped_worker"], [self.ref])
-        self.assertEqual(self.host.stopped, [f"{self.ref}-pilot"])
+        self.assertIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("stop_workspace", self.host.calls)
         self.assertEqual(self.host.torn_down, [])
         self.assertTrue(Path(workspace).is_dir())
         record = self.record()
