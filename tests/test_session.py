@@ -63,6 +63,33 @@ class ResolveHeadTest(unittest.TestCase):
         with self.assertRaises(head_registry.HeadRegistryError):
             session.resolve_profile_id("bogus")
 
+    def test_an_old_codex_id_republished_as_claude_does_not_open_a_claude_session(self):
+        """`--head codex-terra` is an operator asking for Codex, whatever now answers to that id."""
+        registry = head_registry.Registry(
+            {"openai-sub": {"account": "openai-subscription"}},
+            {
+                "codex-terra": {"resource": "openai-sub", "adapter": "claude", "model": "opus"},
+                "codex": {"resource": "openai-sub", "adapter": "codex"},
+            },
+        )
+
+        resolved = session.resolve_profile_id("codex-terra", registry=registry)
+
+        self.assertEqual(resolved, "codex")
+        self.assertIn(
+            "codex --dangerously-bypass-approvals-and-sandbox",
+            session.render_interactive(resolved, workspace="/tmp/ws", registry=registry),
+        )
+
+    def test_an_old_codex_id_with_no_codex_head_left_is_refused(self):
+        registry = head_registry.Registry(
+            {"openai-sub": {"account": "openai-subscription"}},
+            {"codex-terra": {"resource": "openai-sub", "adapter": "claude", "model": "opus"}},
+        )
+
+        with self.assertRaises(head_registry.HeadRegistryError):
+            session.resolve_profile_id("codex-terra", registry=registry)
+
 
 class RenderInteractiveTest(unittest.TestCase):
     def test_no_seeded_prompt_per_adapter(self):

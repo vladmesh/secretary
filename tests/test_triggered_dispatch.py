@@ -11,6 +11,7 @@ from unittest import mock
 
 from triggered_agents.runtime import dispatch
 from triggered_agents.runtime import state as runtime_state
+from triggered_agents.runtime import tui_delivery
 
 
 class TriggeredDispatchReuseTests(unittest.TestCase):
@@ -171,21 +172,71 @@ class TriggeredCodexHeadTests(unittest.TestCase):
         self.assertNotIn("codex exec", launch)
         self.assertNotIn("/retro", launch)
 
+    def _orca_calls(self, calls: list[list[str]]):
+        """Answer the shared interactive delivery path's Orca calls: idle pane, accepted send."""
+        def run(args: list[str]) -> dict:
+            calls.append(list(args))
+            if "wait" in args:
+                return {"wait": {"satisfied": True}}
+            return {}
+
+        return run
+
+    def _sent_text(self, calls: list[list[str]]) -> list[str]:
+        return [call[call.index("--text") + 1] for call in calls if "send" in call]
+
     def test_the_fresh_terminal_is_given_its_skill_once_the_pane_is_ready(self) -> None:
+        """Through the product's one interactive delivery path, not a launch-only one."""
         command = dispatch.DispatchCommand("/retro", "codex", "codex", None, prompt_after_start=True)
-        sent: list[list[str]] = []
+        calls: list[list[str]] = []
         state = mock.Mock()
 
         with mock.patch.object(dispatch, "_dispatch_command", return_value=command), \
              mock.patch.object(dispatch, "_ensure_claude_ready"), \
              mock.patch.object(dispatch, "_create_terminal", return_value="term-codex"), \
-             mock.patch.object(dispatch, "_is_idle", side_effect=[False, True]), \
-             mock.patch.object(dispatch, "_orca", side_effect=sent.append), \
+             mock.patch.object(dispatch, "_orca_json", side_effect=self._orca_calls(calls)), \
+             mock.patch.object(dispatch, "_orca") as legacy_send, \
              mock.patch.object(dispatch, "_codex_turn_after", return_value=True), \
-             mock.patch("triggered_agents.runtime.dispatch.time.sleep"):
+             mock.patch("triggered_agents.runtime.tui_delivery.time.sleep"):
             dispatch._spawn_fresh_terminal("retro", None, self.workspace, state, "dispatch")
 
-        self.assertEqual([call[call.index("--text") + 1] for call in sent], ["/retro"])
+        self.assertEqual(self._sent_text(calls), ["/retro"])
+        self.assertIn(["terminal", "wait", "--terminal", "term-codex", "--for", "tui-idle",
+                       "--timeout-ms", str(tui_delivery.TUI_IDLE_TIMEOUT_MS)], calls)
+        legacy_send.assert_not_called()
+
+    def test_a_warm_codex_head_is_prompted_through_the_same_path(self) -> None:
+        """Warm reuse is the same delivery contract: no second transport for an older pane."""
+        command = dispatch.DispatchCommand("/retro", "codex", "codex", None, prompt_after_start=True)
+        calls: list[list[str]] = []
+
+        with mock.patch.object(dispatch, "_dispatch_command", return_value=command), \
+             mock.patch.object(dispatch, "_orca_json", side_effect=self._orca_calls(calls)), \
+             mock.patch.object(dispatch, "_orca") as legacy_send, \
+             mock.patch.object(dispatch, "_codex_turn_after", return_value=True), \
+             mock.patch.object(dispatch, "_claude_user_turn_after", return_value=False), \
+             mock.patch("triggered_agents.runtime.tui_delivery.time.sleep"):
+            dispatch._send_reuse_dispatch(
+                "retro", None, "term-codex", self.workspace, mock.Mock(), "dispatch"
+            )
+
+        self.assertEqual(self._sent_text(calls), ["/retro"])
+        legacy_send.assert_not_called()
+
+    def test_an_unconfirmed_codex_prompt_fails_on_the_shared_delivery_contract(self) -> None:
+        """A pane that takes the prompt but never records a turn is the shared path's failure."""
+        command = dispatch.DispatchCommand("/retro", "codex", "codex", None, prompt_after_start=True)
+
+        with mock.patch.object(dispatch, "_dispatch_command", return_value=command), \
+             mock.patch.object(dispatch, "_ensure_claude_ready"), \
+             mock.patch.object(dispatch, "_create_terminal", return_value="term-codex"), \
+             mock.patch.object(dispatch, "_orca_json", side_effect=self._orca_calls([])), \
+             mock.patch.object(dispatch, "_codex_turn_after", return_value=False), \
+             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.05), \
+             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01), \
+             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0):
+            with self.assertRaises(tui_delivery.TuiDeliveryError):
+                dispatch._spawn_fresh_terminal("retro", None, self.workspace, mock.Mock(), "dispatch")
 
     def test_a_claude_service_head_is_not_typed_at_after_its_launch(self) -> None:
         """Its command already seeds the skill; sending it again would run the agent twice."""
@@ -204,18 +255,25 @@ class TriggeredCodexHeadTests(unittest.TestCase):
         """The terminal is left up on purpose: the next tick finds it idle and re-sends there,
         instead of a second head being created beside a silent one."""
         command = dispatch.DispatchCommand("/retro", "codex", "codex", None, prompt_after_start=True)
+        state = mock.Mock()
+
+        def never_ready(args: list[str]) -> dict:
+            if "wait" in args:
+                raise RuntimeError('orca wait failed: {"error": {"code": "timeout"}}')
+            raise AssertionError("a pane that never came up must not be sent a prompt")
 
         with mock.patch.object(dispatch, "_dispatch_command", return_value=command), \
              mock.patch.object(dispatch, "_ensure_claude_ready"), \
              mock.patch.object(dispatch, "_create_terminal", return_value="term-codex"), \
-             mock.patch.object(dispatch, "_is_idle", return_value=False), \
-             mock.patch.object(dispatch, "LAUNCH_PROMPT_READY_TIMEOUT_S", 0), \
+             mock.patch.object(dispatch, "_orca_json", side_effect=never_ready), \
              mock.patch.object(dispatch, "_orca") as orca, \
-             mock.patch("triggered_agents.runtime.dispatch.time.sleep"):
-            with self.assertRaisesRegex(dispatch.ReuseDeliveryError, "never ready"):
-                dispatch._spawn_fresh_terminal("retro", None, self.workspace, mock.Mock(), "dispatch")
+             mock.patch.object(dispatch, "_stop_and_confirm") as stop:
+            with self.assertRaises(RuntimeError):
+                dispatch._spawn_fresh_terminal("retro", None, self.workspace, state, "dispatch")
 
         orca.assert_not_called()
+        stop.assert_not_called()
+        state.save_active_report.assert_not_called()
 
     def test_an_agent_pinned_to_an_old_codex_id_still_resolves(self) -> None:
         """The spec's last-resort head is a product-side id; the installation republished its own."""
@@ -227,3 +285,30 @@ class TriggeredCodexHeadTests(unittest.TestCase):
         with mock.patch.object(pipeline_heads, "load_registry", return_value=registry):
             self.assertEqual(dispatch._preferred_head("retro", {"head": "codex-terra"}), "codex")
             self.assertIsNone(dispatch._preferred_head("retro", {}))
+
+    def test_a_service_head_pinned_to_an_old_codex_id_stays_in_family(self) -> None:
+        """The same registry a worker can meet: an old Codex id republished as a Claude profile.
+
+        A service agent pinned to that id asked for Codex, so it reaches the interactive Codex
+        head this registry does publish — and when it publishes none, the dispatch is refused
+        rather than quietly rendered as some other family's launch command.
+        """
+        from triggered_agents.agents.pipeline import heads as pipeline_heads
+        resources = self.REGISTRY["resources"]
+        with_codex = pipeline_heads.Registry(resources, {
+            "codex-terra": {"resource": "openai-sub", "adapter": "claude", "fallback": []},
+            "codex": {"resource": "openai-sub", "adapter": "codex", "fallback": []},
+        }, {})
+        claude_only = pipeline_heads.Registry(resources, {
+            "codex-terra": {"resource": "openai-sub", "adapter": "claude", "fallback": []},
+        }, {})
+
+        with mock.patch.object(pipeline_heads, "load_registry", return_value=with_codex):
+            self.assertEqual(dispatch._preferred_head("retro", {"head": "codex-terra"}), "codex")
+        with mock.patch.object(pipeline_heads, "load_registry", return_value=claude_only), \
+             mock.patch.object(dispatch, "_load_spec", return_value={"skill": "/retro", "head": "codex-terra"}), \
+             mock.patch.object(dispatch, "_workspace", return_value=self.workspace):
+            with self.assertRaises(pipeline_heads.HeadRegistryError):
+                dispatch._preferred_head("retro", {"head": "codex-terra"})
+            with self.assertRaises(pipeline_heads.HeadRegistryError):
+                dispatch._launch_cmd("retro")

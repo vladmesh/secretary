@@ -194,6 +194,7 @@ from secretary.tasks import (
 )
 from triggered_agents.agents.pipeline.heads import (
     CODEX_TUI_MODE,
+    HeadRegistryError,
     resolve_head_id as _resolve_head_id,
 )
 from triggered_agents.agents.pipeline.task_protocol import pythonpath_prefix
@@ -343,14 +344,22 @@ class InstanceCatalog:
         """The profile in this snapshot that serves a head id somebody else wrote down.
 
         A card's `head_override`, a dispatcher record and this catalog's own last-resort ids all
-        outlive the registry generation that defined them. An id the snapshot still defines is
-        used as written; a declared old Codex id resolves to the equivalent interactive Codex
-        profile the snapshot does define, so already-recorded overrides are not orphaned by an
-        installation republishing its Codex heads. Every other unknown id is returned unchanged
+        outlive the registry generation that defined them. An ordinary id the snapshot still
+        defines is used as written; a declared old Codex id resolves to the equivalent interactive
+        Codex profile the snapshot does define, so already-recorded overrides are not orphaned by
+        an installation republishing its Codex heads. Every other unknown id is returned unchanged
         and fails at the profile lookup that follows.
+
+        A Codex id whose snapshot holds no interactive Codex profile for it — including one this
+        snapshot published as another family's profile — is refused here, as the same unavailable
+        head the profile lookup below refuses. Launching what that name happens to point at now
+        would move a claimed attempt onto another model family.
         """
         profiles = self._heads.get("profiles")
-        return _resolve_head_id(head, profiles if isinstance(profiles, dict) else {})
+        try:
+            return _resolve_head_id(head, profiles if isinstance(profiles, dict) else {})
+        except HeadRegistryError as exc:
+            raise HostError(f"head {head!r} is unavailable: {exc}") from None
 
     def head_fallback(self, head: str) -> list[str]:
         """The ordered fallback chain `head` names in the registry, empty when it names none.

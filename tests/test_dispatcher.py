@@ -61,9 +61,9 @@ from secretary.dispatcher_launcher import (
 from secretary.dispatcher_review import start_review as start_reviewer
 from secretary.dispatcher_tui import (
     DELIVERY_CONFIRMED,
-    TUI_IDLE_PROBE_TIMEOUT_MS,
     TuiDeliveryError,
 )
+from triggered_agents.runtime.tui_delivery import TUI_IDLE_PROBE_TIMEOUT_MS
 from secretary.dispatcher_state import (
     DispatcherRecord,
     attempt_request_id as _attempt_request_id,
@@ -8540,6 +8540,73 @@ class DispatcherLauncherTests(unittest.TestCase):
 
         self.assertEqual(head, "pinned-terra")
         self.assertIn("-m gpt-5.6-terra", command)
+
+    # A registry an installation can publish and `validate_registry` accepts, in which one of the
+    # old Codex ids has been reused for a Claude profile. Profile ids are not reserved by adapter,
+    # so this is valid input, and every persisted override naming `codex-terra` was written when
+    # that id meant Codex.
+    COLLIDING_REGISTRY = {
+        "resources": {"openai-sub": {"account": "openai-subscription"}},
+        "profiles": {
+            "codex-terra": {"resource": "openai-sub", "adapter": "claude", "model": "opus"},
+            "codex": {"resource": "openai-sub", "adapter": "codex"},
+        },
+        "role_defaults": {"new_card": "codex", "reviewer": "codex"},
+    }
+    CLAUDE_ONLY_REGISTRY = {
+        "resources": {"openai-sub": {"account": "openai-subscription"}},
+        "profiles": {
+            "codex-terra": {"resource": "openai-sub", "adapter": "claude", "model": "opus"},
+        },
+        "role_defaults": {},
+    }
+
+    def test_an_old_codex_override_never_launches_the_claude_profile_on_that_id(self) -> None:
+        """The reviewer's reproduction: worker, reviewer and claimed routes all stay in family."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            catalog = object.__new__(InstanceCatalog)
+            catalog._heads = self.COLLIDING_REGISTRY  # type: ignore[attr-defined]
+
+            routes = {
+                "worker": catalog.worker_head(  # type: ignore[attr-defined]
+                    {"routing": {"head_override": "codex-terra"}}),
+                "review": catalog.review_head(  # type: ignore[attr-defined]
+                    {"routing": {"review_head_override": "codex-terra"}}),
+                "claimed-worker": catalog.claimed_worker_head(  # type: ignore[attr-defined]
+                    {"routing": {"resolved_worker_head": "codex-terra"}}),
+                "claimed-review": catalog.claimed_review_head(  # type: ignore[attr-defined]
+                    {"routing": {"resolved_review_head": "codex-terra"}}),
+            }
+            command = catalog.head_command(  # type: ignore[attr-defined]
+                routes["worker"], "TASK.md", workspace=str(workspace), role="worker"
+            )
+
+        for route, head in routes.items():
+            with self.subTest(route=route):
+                self.assertEqual(head, "codex")
+        self.assertIn("codex", command)
+        self.assertNotIn("claude", command)
+
+    def test_an_old_codex_override_with_no_codex_head_left_fails_closed(self) -> None:
+        """Nothing in family to serve the name is a refused head, not a Claude launch."""
+        catalog = object.__new__(InstanceCatalog)
+        catalog._heads = self.CLAUDE_ONLY_REGISTRY  # type: ignore[attr-defined]
+
+        for route, task in (
+            ("worker", {"routing": {"head_override": "codex-terra"}}),
+            ("review", {"routing": {"review_head_override": "codex-terra"}}),
+            ("claimed-worker", {"routing": {"resolved_worker_head": "codex-terra"}}),
+        ):
+            with self.subTest(route=route):
+                with self.assertRaisesRegex(HostError, "unavailable"):
+                    if route == "worker":
+                        catalog.worker_head(task)  # type: ignore[attr-defined]
+                    elif route == "review":
+                        catalog.review_head(task)  # type: ignore[attr-defined]
+                    else:
+                        catalog.claimed_worker_head(task)  # type: ignore[attr-defined]
 
     def test_head_run_snapshots_the_launched_profiles_configuration(self) -> None:
         """The launch record must carry the configuration, not just the profile id: two profiles

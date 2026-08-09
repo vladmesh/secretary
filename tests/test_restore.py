@@ -797,6 +797,46 @@ class RestoredCodexLaunchModeTests(unittest.TestCase):
     def test_the_interactive_mode_round_trips_unchanged(self) -> None:
         self.assertEqual(restore_module._restore_fields(self._card("tui"))["codex_launch_mode"], "tui")
 
+    def _import_legacy_card(self, mode: str):
+        """Restore one card carrying `mode` and return the backend it was restored into.
+
+        The normalized views are not the boundary this asks about: `_restore_board_metadata`
+        starts from the raw export, so what `saveTaskMetadata` writes is the only place the
+        retirement can be proved.
+        """
+        card = _restore_card()
+        card["metadata"]["codex_launch_mode"] = mode
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            init_layout(data_dir)
+            board = data_dir / "board"
+            (board / "cards.json").write_text(
+                json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
+            )
+            (board / "cards.ndjson").write_text(json.dumps(card) + "\n", encoding="utf-8")
+            (board / "export.json").write_text("{}", encoding="utf-8")
+
+            client = _EmptyWriteKanboard()
+            self.assertEqual(import_normalized_board(data_dir, client=client), 1)
+            return client
+
+    def test_a_restored_legacy_card_persists_no_retired_mode_in_the_backend(self) -> None:
+        """End to end: import an `exec` card and read the metadata the restore wrote."""
+        client = self._import_legacy_card("exec")
+
+        stored = client.metadata[12].get("codex_launch_mode")
+        self.assertNotEqual(stored, "exec")
+        self.assertFalse(stored)
+        self.assertIsNone(TaskReader(client).show("secretary-1")["routing"]["codex_launch_mode"])
+
+    def test_a_restored_interactive_card_keeps_its_mode_in_the_backend(self) -> None:
+        """Only the retired value is removed; compatible routing data restores untouched."""
+        client = self._import_legacy_card("tui")
+
+        self.assertEqual(client.metadata[12].get("codex_launch_mode"), "tui")
+        self.assertEqual(TaskReader(client).show("secretary-1")["routing"]["codex_launch_mode"], "tui")
+
     def test_the_export_and_live_views_of_a_legacy_card_agree(self) -> None:
         """Both sides of the restore comparison read that card as carrying no mode, so a
         legitimately restored card is never reported as a parity mismatch."""

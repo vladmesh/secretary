@@ -2650,8 +2650,8 @@ class HostLaunchContourTests(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(self.data_dir / "none")}), \
              mock.patch.object(self.host, "_run_json", run_json), \
-             mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_TIMEOUT_S", 1), \
-             mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_POLL_S", 0.01):
+             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 1), \
+             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01):
             self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
 
         sends = [command for command in calls if command[2] == "send"]

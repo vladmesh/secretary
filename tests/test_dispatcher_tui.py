@@ -242,8 +242,8 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 ],
             )
 
-            with mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RESEND_GRACE_S", 0), \
-                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_POLL_S", 0.01):
+            with mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0), \
+                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01):
                 host._launch(
                     str(workspace),
                     "title",
@@ -264,10 +264,10 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             (workspace / "TASK.md").write_text("Read TASK.md\n", encoding="utf-8")
             host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["\u203a Read TASK.md"]}}])
 
-            with mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_TIMEOUT_S", 0.03), \
-                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_POLL_S", 0.01), \
-                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RESEND_GRACE_S", 0), \
-                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RETRIES", 1), \
+            with mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.03), \
+                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01), \
+                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0), \
+                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 1), \
                  self.assertRaises(HostError):
                 host._launch(
                     str(workspace),
@@ -319,7 +319,7 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["idle"]}}])
 
             with mock.patch.dict(os.environ, {"SECRETARY_CODEX_SESSIONS": str(Path(tmp) / "sessions")}), \
-                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_POLL_S", 0.01):
+                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01):
                 handle = host._launch(
                     str(workspace),
                     "title",

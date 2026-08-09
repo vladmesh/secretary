@@ -542,10 +542,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         )
 
         with mock.patch.object(real_host, "_run_json", side_effect=run_json), \
-             mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_TIMEOUT_S", 0.3), \
-             mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_POLL_S", 0.01), \
-             mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RESEND_GRACE_S", 0), \
-             mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RETRIES", 2):
+             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3), \
+             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01), \
+             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0), \
+             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2):
             self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
             self.host.nudge_observer = real_host.nudge_observer  # type: ignore[method-assign]
             result = self.runtime.production_tick()
@@ -3667,10 +3667,10 @@ class ObserverConfigurationTests(unittest.TestCase):
                 raise AssertionError(args)
 
             with mock.patch.object(host, "_run_json", side_effect=run_json), \
-                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_TIMEOUT_S", 0.3), \
-                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_POLL_S", 0.01), \
-                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RESEND_GRACE_S", 0), \
-                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RETRIES", 2), \
+                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3), \
+                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01), \
+                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0), \
+                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2), \
                  self.assertRaises(HostError) as raised:
                 host.nudge_observer(record)
 

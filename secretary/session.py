@@ -62,9 +62,10 @@ def resolve_profile_id(head: str | None, *, registry: head_registry.Registry | N
     """Resolve a user-supplied head name to a real heads.toml profile id."""
     reg = registry or head_registry.load_registry()
     name = head or DEFAULT_HEAD
-    # `resolve` keeps a Codex id from before the TUI-only rule pointing at the profile the
-    # installation publishes now; anything it does not recognise is handed to the lookup unchanged
-    # and still fails by name.
+    # `resolve` keeps a Codex id from before the TUI-only rule pointing at the interactive Codex
+    # profile the installation publishes now, and refuses the name outright when it has none left
+    # rather than opening an operator session on whatever other family now answers to it. Anything
+    # it does not recognise is handed to the lookup unchanged and still fails by name.
     candidate = reg.resolve(ADAPTER_DEFAULT_PROFILE.get(name, name))
     reg.profile(candidate)  # raises HeadRegistryError listing known ids if unknown
     return candidate

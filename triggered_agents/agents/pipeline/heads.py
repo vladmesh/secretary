@@ -115,8 +115,14 @@ CODEX_LAUNCH_MODES = {CODEX_TUI_MODE}
 # own — a card's `head_override` or `review_head_override`, a dispatcher record, an agent's
 # automation.toml — so an installation that republishes its Codex heads under interactive ids must
 # not orphan them. Each maps to the ids an equivalent profile may be published under, closest
-# first. The id itself always wins when the registry still defines it, and only a `codex` profile
-# is ever accepted as the stand-in, so nothing here can move a head to another model family.
+# first.
+#
+# The names below are a compatibility namespace reserved for Codex, not ordinary ids: every one of
+# them, the id itself included, is only usable when the profile behind it is an interactive Codex
+# head. A registry is free to define `codex-terra` as a Claude profile — the validator does not
+# reserve ids by adapter — and an override written in the Codex generation must not follow that id
+# onto another model family. So the id itself wins only on that condition, the stand-ins are held
+# to the same one, and a name here with no interactive Codex profile left behind it fails closed.
 LEGACY_CODEX_HEADS: dict[str, tuple[str, ...]] = {
     "codex": ("codex-tui", "codex-terra"),
     "codex-sol": ("codex", "codex-tui"),
@@ -134,26 +140,50 @@ LEGACY_CODEX_HEADS: dict[str, tuple[str, ...]] = {
 }
 
 
+class HeadRegistryError(RuntimeError):
+    """heads.toml is missing/malformed, or a profile/resource/adapter/fallback it names is unknown."""
+
+
+def is_interactive_codex(profile: Any) -> bool:
+    """Whether a registry entry is a Codex head this product can still launch.
+
+    An absent `codex_mode` is the interactive one, so a profile written before the mode existed
+    reads as what it always was; a profile pinning anything else names a launch shape no renderer
+    produces and is not a head at all here.
+    """
+    return (
+        isinstance(profile, Mapping)
+        and profile.get("adapter") == "codex"
+        and str(profile.get("codex_mode", CODEX_TUI_MODE)) == CODEX_TUI_MODE
+    )
+
+
 def resolve_head_id(profile_id: str, profiles: Mapping[str, Any]) -> str:
     """The profile id that actually serves `profile_id` in a registry's `profiles` table.
 
     A head id outlives the registry generation that defined it, so this is what keeps an
-    already-recorded override pointing at something launchable. An id the registry still defines
-    is returned untouched; a declared old Codex id resolves to the closest interactive Codex
-    profile that registry does define; anything else comes back unchanged so the lookup that needs
-    it fails closed by name.
+    already-recorded override pointing at something launchable.
+
+    An ordinary id is returned untouched, whatever it names: the lookup that follows either finds
+    it or fails closed by name, which is the only behaviour anything outside the Codex
+    compatibility namespace has. A name in `LEGACY_CODEX_HEADS` is resolved instead of looked up:
+    the id itself is taken only when it still holds an interactive Codex profile, then the declared
+    stand-ins in order, and a name with none of them left raises rather than handing back an id
+    that would launch some other model family under a Codex head's name.
     """
-    if not isinstance(profiles, Mapping) or profile_id in profiles:
+    if not isinstance(profiles, Mapping):
         return profile_id
-    for candidate in LEGACY_CODEX_HEADS.get(profile_id, ()):
-        profile = profiles.get(candidate)
-        if isinstance(profile, dict) and profile.get("adapter") == "codex":
+    candidates = LEGACY_CODEX_HEADS.get(profile_id)
+    if candidates is None:
+        return profile_id
+    for candidate in (profile_id, *candidates):
+        if is_interactive_codex(profiles.get(candidate)):
             return candidate
-    return profile_id
-
-
-class HeadRegistryError(RuntimeError):
-    """heads.toml is missing/malformed, or a profile/resource/adapter/fallback it names is unknown."""
+    known = ", ".join(sorted(profiles)) or "(none)"
+    raise HeadRegistryError(
+        f"codex head {profile_id!r} has no interactive Codex profile left to run on "
+        f"(known: {known})"
+    )
 
 
 def _render_claude(profile: dict, *, prompt: str, workspace: str | None = None) -> str:

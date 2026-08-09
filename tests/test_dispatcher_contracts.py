@@ -1034,13 +1034,78 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
                     registry.profile(registry.resolve(unknown))
 
     def test_an_old_id_is_never_resolved_onto_another_family(self) -> None:
-        """A registry that reused one of the candidate ids for a Claude profile is not a stand-in."""
+        """A registry that reused one of the candidate ids for a Claude profile is not a stand-in.
+
+        Previously this asserted the id came back unchanged, which was fail-closed only because
+        nothing in that registry answered to it either. The contract this card owes is stronger:
+        an old Codex id resolves to an interactive Codex profile or to nothing at all.
+        """
         profiles = {
             "codex-tui": {"resource": "openai-sub", "adapter": "claude", "fallback": []},
         }
         registry = heads.Registry(self.RESOURCES, profiles)
 
-        self.assertEqual(registry.resolve("codex-terra"), "codex-terra")
+        with self.assertRaisesRegex(heads.HeadRegistryError, "no interactive Codex profile"):
+            registry.resolve("codex-terra")
+
+    def test_an_old_codex_id_republished_as_a_claude_profile_does_not_win(self) -> None:
+        """The id itself is held to the same family check as every stand-in behind it.
+
+        `validate_registry` reserves no id by adapter, so an installation can validly publish a
+        Claude profile called `codex-terra` — by accident or because it reused a retired name. A
+        `head_override` written in the Codex generation still says Codex, so it must reach the
+        interactive Codex head this registry does have, never the Claude profile now sitting on
+        that name.
+        """
+        profiles = {
+            "codex-terra": {"resource": "openai-sub", "adapter": "claude", "fallback": []},
+            "codex": {"resource": "openai-sub", "adapter": "codex", "fallback": []},
+        }
+        heads.validate_registry(self.RESOURCES, profiles)
+        registry = heads.Registry(self.RESOURCES, profiles)
+
+        resolved = registry.resolve("codex-terra")
+
+        self.assertEqual(resolved, "codex")
+        self.assertEqual(registry.profile(resolved)["adapter"], "codex")
+
+    def test_an_old_codex_id_with_only_another_family_left_fails_closed(self) -> None:
+        """No Codex head to serve the name is a refusal, not a Claude launch under a Codex id."""
+        profiles = {
+            "codex-terra": {"resource": "openai-sub", "adapter": "claude", "fallback": []},
+            "claude-default": {"resource": "openai-sub", "adapter": "claude", "fallback": []},
+        }
+        heads.validate_registry(self.RESOURCES, profiles)
+        registry = heads.Registry(self.RESOURCES, profiles)
+
+        with self.assertRaises(heads.HeadRegistryError):
+            registry.resolve("codex-terra")
+
+    def test_a_codex_profile_pinning_a_retired_mode_is_not_a_stand_in(self) -> None:
+        """Family alone is not enough: the stand-in has to be a head the product can launch."""
+        profiles = {
+            "codex": {
+                "resource": "openai-sub", "adapter": "codex", "codex_mode": "exec", "fallback": [],
+            },
+        }
+        registry = heads.Registry(self.RESOURCES, profiles)
+
+        with self.assertRaises(heads.HeadRegistryError):
+            registry.resolve("codex-terra")
+        with self.assertRaises(heads.HeadRegistryError):
+            registry.resolve("codex")
+
+    def test_an_ordinary_id_keeps_its_direct_lookup(self) -> None:
+        """The family constraint covers the declared old Codex names, not every profile id."""
+        profiles = {
+            "claude-default": {"resource": "openai-sub", "adapter": "claude", "fallback": []},
+            "hermes": {"resource": "openai-sub", "adapter": "hermes", "fallback": []},
+        }
+        registry = heads.Registry(self.RESOURCES, profiles)
+
+        for pid in ("claude-default", "hermes"):
+            with self.subTest(head=pid):
+                self.assertEqual(registry.resolve(pid), pid)
 
 
 if __name__ == "__main__":

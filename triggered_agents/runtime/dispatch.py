@@ -106,6 +106,7 @@ import tomllib
 
 from . import claude_env, finalizer, orca_rpc, role_env
 from .state import AgentState
+from .tui_delivery import TuiDeliveryError, deliver_interactive_prompt
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 ORCA = os.environ.get("ORCA_BIN") or shutil.which("orca") or str(Path.home() / ".local/bin/orca")
@@ -133,10 +134,6 @@ REPORT_VISIBILITY_GAP_SECONDS = 60
 # scheduler invocation.
 REUSE_DELIVERY_TIMEOUT_S = float(os.environ.get("TA_REUSE_DELIVERY_TIMEOUT_S", "12"))
 REUSE_DELIVERY_POLL_S = float(os.environ.get("TA_REUSE_DELIVERY_POLL_S", "0.25"))
-# How long a head whose command carries no prompt gets to come up before its prompt is typed in.
-# Generous next to a TUI's startup and still far inside a tick, so a slow first paint costs a wait
-# rather than a dispatch.
-LAUNCH_PROMPT_READY_TIMEOUT_S = float(os.environ.get("TA_LAUNCH_PROMPT_READY_TIMEOUT_S", "60"))
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _SHELL_PROMPT_RE = re.compile(
     r"(?:^[^\n]*@[^\n:]+:[^\n]*[#$](?:\s|$)|^(?:bash|zsh|fish|sh)[^\n]*[#$](?:\s|$))",
@@ -157,8 +154,12 @@ class DispatchCommand:
     prompt_after_start: bool = False
 
 
-class ReuseDeliveryError(RuntimeError):
-    """A warm terminal did not visibly accept its next skill command."""
+class ReuseDeliveryError(TuiDeliveryError):
+    """A warm terminal did not visibly accept its next skill command.
+
+    A kind of the delivery failure the shared interactive path raises, not a second one: a caller
+    catching either sees the same thing, a head that was not proven to have taken its prompt.
+    """
 
 
 def _orca_json(args: list[str]) -> dict:
@@ -276,13 +277,17 @@ def _codex_turn_after(workspace: str, since: float) -> bool:
     return latest is not None and latest > since
 
 
-def _confirm_delivery(handle: str, workspace: str, sent_at: float, *, codex: bool = False) -> None:
-    """Wait until the head durably records the command just sent into its live session."""
+def _confirm_delivery(handle: str, workspace: str, sent_at: float) -> None:
+    """Wait until the head durably records the command just sent into its live session.
+
+    For a head whose launch command seeds its own prompt, which is a Claude or Hermes one. An
+    interactive head is delivered to — and confirmed — through the shared interactive path
+    instead, so nothing here decides between two providers' records any more.
+    """
     deadline = time.monotonic() + REUSE_DELIVERY_TIMEOUT_S
     last_reason = "no-user-turn"
-    turn_after = _codex_turn_after if codex else _claude_user_turn_after
     while time.monotonic() < deadline:
-        if turn_after(workspace, sent_at):
+        if _claude_user_turn_after(workspace, sent_at):
             return
         screen = _terminal_screen(handle)
         if not screen:
@@ -336,6 +341,10 @@ def _preferred_head(agent: str, spec: dict) -> str | None:
     found in, so it goes through the registry's own resolution: an agent pinned to a Codex id from
     before every Codex head became interactive still reaches the equivalent profile the
     installation publishes now, instead of falling back to a bare `claude` invocation nobody chose.
+
+    Resolution refusing that id reaches the caller rather than becoming the bare invocation: a
+    Codex-pinned service agent whose registry has no interactive Codex head left for that name is
+    a dispatch that must not happen, not one to quietly run on another family.
     """
     try:
         from ..agents.pipeline import heads as pipeline_heads
@@ -624,29 +633,41 @@ def _recover_steward_dispatch_failure(state: AgentState, event: str, cmd: Dispat
                       reference=cmd.card_ref, error=str(recovery_error))
 
 
-def _deliver_launch_prompt(handle: str, workspace: str, skill: str) -> None:
-    """Type a freshly created interactive head's prompt into it, once its pane is ready.
+def _tui_run_json(args: list[str]) -> dict:
+    """Run the shared delivery path's Orca calls the way this module runs every other one.
 
-    A Codex head starts with an empty composer: nothing has been asked of it until this lands, so
-    the dispatch is not finished when `terminal create` returns. The pane is given a bounded while
-    to come up — a TUI paints, reads its config and answers Orca's readiness probe well after the
-    pty exists — and the same durable-turn confirmation a warm reuse gets is required afterwards.
+    That path speaks full `orca … --json` argument vectors, since its other caller hands it a
+    runner that executes them verbatim; `_orca_json` supplies the binary and the flag itself, so
+    they are stripped back off here rather than a second Orca runner being kept for one caller.
+    """
+    argv = list(args)
+    if argv and argv[0] == "orca":
+        argv = argv[1:]
+    if argv and argv[-1] == "--json":
+        argv = argv[:-1]
+    return _orca_json(argv)
+
+
+def _deliver_interactive_skill(handle: str, workspace: str, skill: str) -> None:
+    """Put a service head's skill in front of it, on the product's one interactive delivery path.
+
+    A Codex head starts with an empty composer, fresh or warm: nothing has been asked of it until
+    this lands, so the dispatch is not finished when `terminal create` (or `/clear`) returns. The
+    delivery itself — waiting for the pane to answer Orca's readiness probe, sending, re-entering
+    a prompt a dialog swallowed, and failing when the pane cannot be probed at all — is the same
+    primitive a worker, a reviewer and an observer are given their prompt through. The criterion
+    this side proves it with stays this side's: Codex having durably recorded the turn for this
+    workspace after the send boundary.
 
     A failure raises, exactly like a warm reuse that was never taken: the terminal stays up and
     idle, so the next tick recognises it and re-sends the skill through the reuse path rather than
     piling a second head beside a silent one.
     """
-    deadline = time.monotonic() + LAUNCH_PROMPT_READY_TIMEOUT_S
-    while time.monotonic() < deadline:
-        if _is_idle(handle):
-            sent_at = time.time()
-            _orca(["terminal", "send", "--terminal", handle, "--text", skill, "--enter"])
-            _confirm_delivery(handle, workspace, sent_at, codex=True)
-            return
-        time.sleep(max(REUSE_DELIVERY_POLL_S, 0.01))
-    raise ReuseDeliveryError(
-        f"the new head's pane was never ready for its prompt within "
-        f"{LAUNCH_PROMPT_READY_TIMEOUT_S:.1f}s"
+    deliver_interactive_prompt(
+        handle,
+        skill,
+        run_json=_tui_run_json,
+        confirm=lambda sent_at: _codex_turn_after(workspace, sent_at),
     )
 
 
@@ -657,7 +678,7 @@ def _spawn_fresh_terminal(agent: str, variant: str | None, ws: str, state: Agent
         _ensure_claude_ready(ws)
         handle = _create_terminal(agent, ws, cmd.launch, state, cmd.profile)
         if cmd.prompt_after_start:
-            _deliver_launch_prompt(handle, ws, cmd.skill)
+            _deliver_interactive_skill(handle, ws, cmd.skill)
     except Exception as exc:
         _recover_steward_dispatch_failure(state, event, cmd, exc)
         raise
@@ -669,10 +690,15 @@ def _send_reuse_dispatch(agent: str, variant: str | None, terminal_handle: str, 
                          state: AgentState, event: str) -> DispatchCommand:
     cmd = _dispatch_command(agent, variant)
     try:
-        sent_at = time.time()
-        _orca(["terminal", "send", "--terminal", terminal_handle,
-               "--text", cmd.skill, "--enter"])
-        _confirm_delivery(terminal_handle, workspace, sent_at, codex=cmd.prompt_after_start)
+        if cmd.prompt_after_start:
+            # An interactive head is prompted the one way the product prompts one, whether this
+            # is the terminal's first skill or its fifth.
+            _deliver_interactive_skill(terminal_handle, workspace, cmd.skill)
+        else:
+            sent_at = time.time()
+            _orca(["terminal", "send", "--terminal", terminal_handle,
+                   "--text", cmd.skill, "--enter"])
+            _confirm_delivery(terminal_handle, workspace, sent_at)
     except Exception as exc:
         _recover_steward_dispatch_failure(state, event, cmd, exc)
         raise
@@ -1093,7 +1119,10 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False) -> i
         time.sleep(1.0)  # let /clear settle before the skill lands
         try:
             cmd = _send_reuse_dispatch(agent, variant, survivor["handle"], ws, state, event)
-        except ReuseDeliveryError as exc:
+        except TuiDeliveryError as exc:
+            # Both shapes of unconfirmed delivery — a seeded head's own record never appearing and
+            # the interactive path never proving the prompt landed — are the same warm-reuse
+            # failure to this tick, and are recorded as it.
             state.log_run(event, action="reuse-delivery-unconfirmed", result="error", error=str(exc))
             print(f"dispatch[{agent}]: warm-reuse delivery was not confirmed ({exc})", file=sys.stderr)
             raise

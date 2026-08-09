@@ -1,63 +1,38 @@
-# Review secretary-1170
+# Review secretary-1173
 
 # Goal
 
-Make `secretary upgrade` publish the tracked `heads/heads.yaml` and `heads/source.yaml` as one
-durable recovery-canon update. A successful upgrade must leave the instance worktree clean, place a
-checkpoint containing the actual source revision on the configured remote, and let a clean recovery
-load the same registry before another upgrade runs.
+Make every Codex worker, reviewer and service-head launch through an interactive TUI only. No routing input, missing profile field or legacy card may reach `codex exec`; existing head overrides that name former Codex profile IDs must still resolve to an equivalent TUI profile.
 
 # Context
 
-`secretary/upgrade.py:324-350` regenerates the installed snapshot and source pin, but neither it
-nor `CheckpointWriter` commits those tracked files. `secretary/checkpoint.py:58-70,288-317` already
-provides scoped instance-repository commits, while `secretary/state_repo.py:29-64,133-174` supplies
-the common writer lock, scoped path ownership, safe Git execution and commit identity. The live
-registry reader in `secretary/head_registry.py:277-306` intentionally reads only the installed
-snapshot, so a recovered stale pair silently routes the wrong heads until an upgrade.
+The precondition from `issue:de0d51816838530cbb5b` is resolved on main: worker and reviewer bring-up now defer and retry a pane held in a dialog, with bounded failure, instead of requiring the former exec bypass. The live portable registry still leaves `codex`, `codex-high` and `codex-reviewer` without `codex_mode = "tui"`; `secretary/dispatcher_launcher.py:161-175,242-254,292-297` defaults a missing mode to `exec` and retains the exec renderer. `secretary/task_commands.py:108`, `secretary/tasks.py:1012`, `secretary/dispatcher.py`, `secretary/routing_journal.py` and restore parsing retain a per-card `codex_launch_mode` whose old default can select exec.
 
-The selected route is to reuse this existing recovery-writer model. The snapshot and pin remain
-tracked canon, are published under `state_repo_lock` through a narrow owned pathspec, and the
-upgrade's success condition includes its checkpoint publication. Do not replace them with ignored
-derivatives: that would require a separate recovery/bootstrap design before the first upgrade and
-would not satisfy this sprint's clean-target invariant. Do not add a second writer lock, a new
-dependency, or a broad `git add`.
+The sprint contract requires an absence of `codex_mode` to mean TUI, rejects `--codex-mode exec`, removes the production exec-renderer/launch branch, and preserves old Codex profile IDs rather than orphaning already-recorded `head_override` or `review_head_override`. Treat a persisted old exec field as legacy routing data that must resolve safely to TUI, not as authority to launch exec. Reuse the existing registry normalization/alias and TUI prompt-delivery paths; do not add a second launch transport, timeout workaround, compatibility process, or a new profile family.
 
 # Acceptance criteria
 
-- When `step_head_registry` changes either generated file, upgrade publishes the pair through the
-  existing common instance-repository writer lock with a pathspec limited to the two `heads/` files;
-  no state, secret, memory, knowledge or unrelated worktree change is staged.
-- A successful non-dry-run upgrade leaves the instance checkout clean and its remote checkpoint
-  contains the matching `heads.yaml` and `source.yaml`; `source.yaml` records the actual canonical
-  source path and product revision used for that snapshot.
-- If the required commit or remote publication cannot complete, the upgrade does not report success
-  and retains a durable, actionable failure. It must never claim a published recovery pair while the
-  remote still has a different one.
-- A fresh clean target restored from the published checkpoint loads the same validated head registry
-  before its first subsequent `secretary upgrade`; a stale or incomplete pair fails closed with a
-  bounded diagnostic instead of silently routing from an unrelated product checkout.
-- Focused tests cover paired changed/unchanged upgrades, scoped staging in a dirty instance tree,
-  commit or push failure, source-revision accuracy, and clean-target recovery. Preserve existing
-  checkpoint serialization and no-foreign-divergence behaviour. Report focused checks, clean diff,
-  committed SHA and clean worktree; a fresh exact-SHA mechanical gate remains required before
-  review.
+- Every Codex profile in the portable registry and its generated installation registry is explicit TUI, including role defaults and fallback targets. Missing `codex_mode` resolves to TUI only.
+- No production launcher can render or invoke `codex exec`: delete the exec renderer and mode branch, and make the launch result use the existing post-start TUI prompt delivery for Codex roles.
+- `task create --codex-mode exec` is rejected before any board write. Persisted or restored legacy `codex_launch_mode=exec` cannot re-enable exec and the routing journal records the effective TUI mode. Preserve compatible non-exec legacy routing data only where needed to read existing records.
+- Former IDs `codex`, `codex-sol`, `codex-terra`, `codex-luna`, `codex-5-4`, `codex-mini`, `codex-spark`, `codex-high`, `codex-extra`, `codex-reviewer`, `codex-curator`, `codex-steward` and `codex-retro` resolve to an equivalent available TUI profile for persisted worker/reviewer/service overrides. An unavailable or invalid non-Codex id still fails closed; do not silently substitute a different model family.
+- Focused tests prove the default, explicit old exec and restored legacy routes all launch TUI; no command contains `codex exec`; create rejects exec without a write; the declared old IDs do not orphan overrides; and the dialog-deferred worker/reviewer TUI bring-up and current role-family routing remain covered. Update affected checkpoint/restore/journal fixtures rather than preserving an exec assertion.
+- Report the committed SHA, clean worktree, clean diff and focused checks. A fresh exact-SHA mechanical gate remains required before review.
 
 # Out of scope
 
-Untracking or regenerating the pair as a new derivative bootstrap model; redesigning global
-checkpoint cadence; changing product head routing, Codex TUI policy, terminal lifecycle, secret
-store, or the live Orca installation.
+Changing Claude launch behavior, worker/reviewer family-selection policy, watchdog timing, red-review continuation, pane identity, Orca itself, the recovery-canon path, live installation deployment, or rewriting any existing branch history.
+
 
 
 ## Mechanical gate attestation
 
-- validated_sha: ae3050c4c2ada8731e46f88d9347927bec547327
-- base_sha: 9fa8dc95c98a3b7b45577820108a26924efd1bf3
+- validated_sha: 0b237071a57b583499e2865c9f04ee342f67c70f
+- base_sha: 5762fdbe15a189b30c6e014bbed396c5b011c854
 - gate_mode: github
 - required terminal checks:
-  - test: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/31335680007/job/93301015034)
-- completed_at: 2026-08-09T21:02:05+00:00
+  - test: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/31340157551/job/93312498764)
+- completed_at: 2026-08-09T22:46:42+00:00
 - command_or_check_set_digest: e05e08ff6e9e51da3be176a7b5215dfddd2f768f01036631e8a3c9ab7be723ca
 
 Independently inspect the diff, acceptance criteria and invariants. The attested broad
@@ -82,10 +57,10 @@ real behaviour you verified and how. If no end-to-end check against the real bac
 was possible, write plainly that it was not done and which assumption stays unverified.
 
 Post exactly one review verdict through the secretary task protocol:
-Write the body to /tmp/secretary-verdict-secretary-1170-11.md with your file-writing tool,
+Write the body to /tmp/secretary-verdict-secretary-1173-2.md with your file-writing tool,
 then run the command below verbatim. Do not assemble the body inside the shell command
 (no heredoc, no mktemp, no echo pipeline) and do not add `rm`: the codex runtime refuses
 rm-style commands, and quotes or backticks in the body break the call. Leave the file in
 place afterwards; the dispatcher does not read it.
-PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1170 --role reviewer --kind green --request-id dispatcher-attempt-20260809T204829Z-397ef30b5877-review-green-secretary-1170-11 --body-file /tmp/secretary-verdict-secretary-1170-11.md
-PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1170 --role reviewer --kind red --request-id dispatcher-attempt-20260809T204829Z-397ef30b5877-review-red-secretary-1170-11 --body-file /tmp/secretary-verdict-secretary-1170-11.md
+PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1173 --role reviewer --kind green --request-id dispatcher-attempt-20260809T215934Z-a9a75bad7c73-review-green-secretary-1173-2 --body-file /tmp/secretary-verdict-secretary-1173-2.md
+PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1173 --role reviewer --kind red --request-id dispatcher-attempt-20260809T215934Z-a9a75bad7c73-review-red-secretary-1173-2 --body-file /tmp/secretary-verdict-secretary-1173-2.md
