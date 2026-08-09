@@ -3012,6 +3012,35 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
         self.assertEqual(len(self.host.reviews), 2, "escalation must not start a third reviewer")
 
+    def test_second_reviewer_stall_retries_an_unconfirmed_stop_before_blocking(self) -> None:
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self.assertEqual(self.tick()["action"], "waiting-review-verdict")
+        self._rewind_wait("review", seconds=stall_seconds("review") + 60)
+        self.assertEqual(self.tick()["action"], "review-respawned")
+        record = self._record_of()
+        identity = (record.review_handle, record.review_leaf, record.review_pid_file)
+        self._rewind_wait("review", seconds=stall_seconds("review") + 60)
+        self.host.fail_stop_review_reason = "Orca cannot confirm terminal stop"
+
+        refused = self.tick()
+
+        self.assertEqual(refused["action"], "review-stop-unconfirmed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+        record = self._record_of()
+        self.assertEqual((record.review_handle, record.review_leaf, record.review_pid_file), identity)
+        self.assertEqual(self.host.calls.count("stop_review"), 2)
+        self.assertNotIn("stop", self.host.calls)
+
+        self.host.fail_stop_review_reason = ""
+        blocked = self.tick()
+
+        self.assertEqual(blocked["to"], "blocked")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertNotIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
+        self.assertIn("stop_head:worker", self.host.calls)
+
     def test_live_reviewer_keeps_waiting_inside_the_stall_ceiling(self) -> None:
         self.start_dispatcher()
         self._run_worker_to_validate()
@@ -3282,6 +3311,38 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(
             self.host.calls.count("restart_worker"), 1, "escalation must not respawn again"
         )
+
+    def test_second_worker_stall_retries_an_unconfirmed_stop_before_blocking(self) -> None:
+        self.start_dispatcher()
+        self.tick()
+        self.assertEqual(self.tick()["action"], "waiting-worker-report")
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
+        self.assertEqual(self.tick()["action"], "worker-respawned")
+        record = self._record_of()
+        identity = (record.handle, record.worker_leaf, record.worker_pid_file)
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
+        self.host.fail_stop_head_reason = "Orca cannot confirm terminal stop"
+
+        refused = self.tick()
+
+        self.assertEqual(refused["action"], "worker-stop-unconfirmed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        record = self._record_of()
+        self.assertEqual((record.handle, record.worker_leaf, record.worker_pid_file), identity)
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertEqual(self.host.prepared, ["secretary-510-pilot", "secretary-510-pilot"])
+        self.assertEqual(self.host.calls.count("stop_head:worker"), 2)
+        self.assertNotIn("stop_workspace", self.host.calls)
+        self.assertNotIn("stop", self.host.calls)
+
+        self.host.fail_stop_head_reason = ""
+        blocked = self.tick()
+
+        self.assertEqual(blocked["to"], "blocked")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertNotIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertEqual(self.host.calls.count("stop_head:worker"), 3)
 
     def _stall_worker_wait_to_blocked(self) -> dict:
         """Drive one full stall cycle: wait past the ceiling, respawn, stall again, escalate."""
@@ -4496,6 +4557,35 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
         self.assertIn("reported done twice", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
 
+    def test_repeated_rejected_done_retries_an_unconfirmed_stop_before_blocking(self) -> None:
+        self.start_dispatcher()
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "gate-red-rework")
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="nothing changed", request_id=self._worker_report_request_id(),
+        )
+        self.assertEqual(self.tick()["action"], "stale-done-rework")
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="still nothing changed", request_id=self._worker_report_request_id(),
+        )
+        self.host.fail_stop_head_reason = "Orca cannot confirm terminal stop"
+
+        refused = self.tick()
+
+        self.assertEqual(refused["action"], "worker-stop-unconfirmed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertEqual(self._record_of().rejected_done_reports, 1)
+
+        self.host.fail_stop_head_reason = ""
+        blocked = self.tick()
+
+        self.assertEqual(blocked["reason"], "worker repeatedly reported rejected SHA")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertNotIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
+
     def test_gate_red_scrubs_secrets_in_bounce_comment(self) -> None:
         self.start_dispatcher()
         self.host.gate_results = [
@@ -5183,6 +5273,67 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(history[0].worker.head, "codex")
         self.assertEqual(history[1].worker.head, "claude-opus")
         self.assertEqual(history[1].worker.head_source, "card")
+
+    def test_blocked_report_retries_an_unconfirmed_stop_before_terminal_move(self) -> None:
+        """A blocked report keeps its live writer and record until the stop is confirmed."""
+        self.start_dispatcher()
+        self.tick()
+        first = self._record_of()
+        identity = (first.handle, first.worker_leaf, first.worker_pid_file)
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot",
+            kind="blocked", classification="external_fact", body="the dependency is down",
+            request_id=self._worker_report_request_id("blocked", "external_fact"),
+        )
+        self.host.fail_stop_head_reason = "Orca cannot confirm terminal stop"
+
+        refused = self.tick()
+
+        self.assertEqual(refused["action"], "worker-stop-unconfirmed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        record = self._record_of()
+        self.assertEqual((record.handle, record.worker_leaf, record.worker_pid_file), identity)
+        self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
+        self.assertNotIn("stop_workspace", self.host.calls)
+        self.assertNotIn("stop", self.host.calls)
+        self.assertEqual(self.host.prepared, ["secretary-510-pilot"])
+
+        self.host.fail_stop_head_reason = ""
+        blocked = self.tick()
+
+        self.assertEqual(blocked["to"], "blocked")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertNotIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
+        self.assertEqual(self.host.calls.count("stop_head:worker"), 2)
+        self.assertEqual(self.host.prepared, ["secretary-510-pilot"])
+
+    def test_blocked_report_refusal_stops_a_po_requeue_from_starting_a_second_worker(self) -> None:
+        """A PO requeue cannot claim the checkout while the blocked report's head is unconfirmed."""
+        self.start_dispatcher()
+        self.tick()
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot",
+            kind="blocked", classification="external_fact", body="the dependency is down",
+            request_id=self._worker_report_request_id("blocked", "external_fact"),
+        )
+        self.host.fail_stop_head_reason = "Orca cannot confirm terminal stop"
+        self.assertEqual(self.tick()["action"], "worker-stop-unconfirmed")
+        self.writer.move(
+            role="po", actor="operator", reference="secretary-510-pilot", target="ready",
+            reason="attempt requeue while the original worker may still be alive",
+            sprint_override=True,
+            sprint_override_reason="the operator is resolving a blocked worker handoff",
+            request_id="po-requeue-before-worker-stop-confirmed",
+        )
+        self.host.calls.clear()
+
+        requeue = self.tick()
+
+        self.assertEqual(requeue["action"], "worker-stop-unconfirmed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "ready")
+        self.assertIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
+        self.assertEqual(self.host.prepared, ["secretary-510-pilot"])
+        self.assertEqual(self.host.calls, ["stop_head:worker"])
 
     def test_active_card_preempted_back_to_ready_starts_a_new_attempt(self) -> None:
         """A preempt out of in_progress is part of the documented workflow and nothing about it is
@@ -5895,6 +6046,31 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(task["state"], "blocked")
         self.assertIn("uncommitted changes", task["comments"][-1]["body"])
         self.assertEqual(self.host.reviews, [])
+
+    def test_not_durable_worker_result_retries_an_unconfirmed_stop_before_blocking(self) -> None:
+        self.start_dispatcher()
+        self.tick()
+        self.host.fail_result_reason = "worker reported done with uncommitted changes"
+        self.host.fail_stop_head_reason = "Orca cannot confirm terminal stop"
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body="tests pass", request_id=self._worker_report_request_id(),
+        )
+
+        refused = self.tick()
+
+        self.assertEqual(refused["action"], "worker-stop-unconfirmed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
+        self.assertIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("stop_workspace", self.host.calls)
+
+        self.host.fail_stop_head_reason = ""
+        blocked = self.tick()
+
+        self.assertEqual(blocked["reason"], "worker result is not durable")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertNotIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
 
     def test_validate_adoption_restores_workspace_from_claim(self) -> None:
         self.start_dispatcher()
