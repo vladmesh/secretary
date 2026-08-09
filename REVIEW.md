@@ -25,14 +25,26 @@ Changing Claude launch behavior, worker/reviewer family-selection policy, watchd
 
 
 
+## Re-review packet
+
+previous_reviewed_sha: 0b237071a57b583499e2865c9f04ee342f67c70f
+current_sha: d67d2704eedb5f96ff6ebf0101faf9299da68a2a
+Changed paths / delta from the prior review:
+REVIEW.md secretary/dispatcher.py secretary/dispatcher_tui.py secretary/session.py secretary/task_restore.py tests/test_dispatcher.py tests/test_dispatcher_contracts.py tests/test_dispatcher_launch_intent.py tests/test_dispatcher_observer.py tests/test_dispatcher_tui.py tests/test_restore.py tests/test_session.py tests/test_triggered_dispatch.py triggered_agents/agents/pipeline/heads.py triggered_agents/runtime/dispatch.py triggered_agents/runtime/tui_delivery.py
+REVIEW.md | 63 +++----- secretary/dispatcher.py | 19 ++- secretary/dispatcher_tui.py | 247 +++++------------------------- secretary/session.py | 7 +- secretary/task_restore.py | 23 +++ tests/test_dispatcher.py | 69 ++++++++- tests/test_dispatcher_contracts.py | 69 ++++++++- tests/test_dispatcher_launch_intent.py | 4 +- tests/test_dispatcher_observer.py | 16 +- tests/test_dispatcher_tui.py | 14 +- tests/test_restore.py | 40 +++++ tests/test_session.py | 27 ++++ tests/test_triggered_dispatch.py | 105 +++++++++++-- triggered_agents/agents/pipeline/heads.py | 60 ++++++-- triggered_agents/runtime/dispatch.py | 95 ++++++++---- triggered_agents/runtime/tui_delivery.py | 234 ++++++++++++++++++++++++++++ 16 files changed, 757 insertions(+), 335 deletions(-)
+Previous blockers (close or explicitly retain these stable IDs):
+# Review secretary-1173 Verdict: RED BLOCKER-legacy-alias-cross-family Reachable scenario: an installation registry can validly contain both a current `codex` TUI profile and a Claude profile named `codex-terra`; the registry validator does not reserve profile ids by adapter. A persisted worker or reviewer override of `codex-terra` then reaches `resolve_head_id`. Because that id is present, the resolver returns it before checking its adapter. `InstanceCatalog.worker_head` consequently returns `codex-terra`, whose adapter is Claude, and the launcher renders Claude rather than either resolving to a Codex TUI profile or failing closed. I reproduced this with a registry accepted by `validate_registry`; the result was `{"accepted_registry": true, "resolved_head": "codex-terra", "adapter": "claude"}`. This violates the former-Codex-id acceptance criterion: those ids must resolve to an equivalent available TUI profile, and an invalid non-Codex id must fail closed rather than silently move model family. The material assumption is supported by the public registry contract: profile ids and adapters are independently valid fields, so an installation can republish or accidentally reuse this id without failing validation. The cross-family resolution is introduced by this branch's legacy alias resolver; the pre-existing validator did permit the input but did not promise this substitution. Repair appears local to the alias resolver and its tests, with corresponding use through `session.resolve_profile_id`; it must make a direct legacy-id profile subject to the same Codex-family check as an alias candidate. This does not require a new profile family or a policy change. BLOCKER-restore-rewrites-retired-exec Reachable scenario: restore a checkpoint card whose metadata has `codex_launch_mode=exec`. `_restore_fields` correctly turns it into an empty mode for `TaskWriter.create`, but `import_normalized_board` then calls `writer.restore_card(metadata=_restore_board_metadata(card), ...)`.
+Review this delta, the closure of prior blockers and collateral impact; do not restart
+from the original base unless a concrete suspicion requires the historical diff.
+
 ## Mechanical gate attestation
 
-- validated_sha: 0b237071a57b583499e2865c9f04ee342f67c70f
+- validated_sha: d67d2704eedb5f96ff6ebf0101faf9299da68a2a
 - base_sha: 5762fdbe15a189b30c6e014bbed396c5b011c854
 - gate_mode: github
 - required terminal checks:
-  - test: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/31340157551/job/93312498764)
-- completed_at: 2026-08-09T22:46:42+00:00
+  - test: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/31341728500/job/93316518263)
+- completed_at: 2026-08-09T23:24:25+00:00
 - command_or_check_set_digest: e05e08ff6e9e51da3be176a7b5215dfddd2f768f01036631e8a3c9ab7be723ca
 
 Independently inspect the diff, acceptance criteria and invariants. The attested broad
@@ -57,10 +69,10 @@ real behaviour you verified and how. If no end-to-end check against the real bac
 was possible, write plainly that it was not done and which assumption stays unverified.
 
 Post exactly one review verdict through the secretary task protocol:
-Write the body to /tmp/secretary-verdict-secretary-1173-2.md with your file-writing tool,
+Write the body to /tmp/secretary-verdict-secretary-1173-10.md with your file-writing tool,
 then run the command below verbatim. Do not assemble the body inside the shell command
 (no heredoc, no mktemp, no echo pipeline) and do not add `rm`: the codex runtime refuses
 rm-style commands, and quotes or backticks in the body break the call. Leave the file in
 place afterwards; the dispatcher does not read it.
-PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1173 --role reviewer --kind green --request-id dispatcher-attempt-20260809T215934Z-a9a75bad7c73-review-green-secretary-1173-2 --body-file /tmp/secretary-verdict-secretary-1173-2.md
-PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1173 --role reviewer --kind red --request-id dispatcher-attempt-20260809T215934Z-a9a75bad7c73-review-red-secretary-1173-2 --body-file /tmp/secretary-verdict-secretary-1173-2.md
+PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1173 --role reviewer --kind green --request-id dispatcher-attempt-20260809T215934Z-a9a75bad7c73-review-green-secretary-1173-10 --body-file /tmp/secretary-verdict-secretary-1173-10.md
+PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1173 --role reviewer --kind red --request-id dispatcher-attempt-20260809T215934Z-a9a75bad7c73-review-red-secretary-1173-10 --body-file /tmp/secretary-verdict-secretary-1173-10.md
