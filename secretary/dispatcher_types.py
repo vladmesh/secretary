@@ -46,11 +46,13 @@ class HeadLaunchAborted(HostError):
         message: str,
         *,
         handle: str = "",
+        leaf: str = "",
         workspace: str = "",
         pid_file: str = "",
     ) -> None:
         super().__init__(message)
         self.handle = handle
+        self.leaf = leaf
         self.workspace = workspace
         self.pid_file = pid_file
 

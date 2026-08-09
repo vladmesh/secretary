@@ -1,69 +1,38 @@
-# Review secretary-1165
+# Review secretary-1168
 
 # Goal
 
-Мёртвый ресурс головы уводит карточку на живую семью. Пока живых семей нет — честный claim-skip с
-записью в тик, а не запуск голов в пустоту и не молчаливое ожидание.
+Сохранить устойчивую identity панели из ответа `orca terminal create`/`split` и использовать её для worker, reviewer и observer, чтобы alias create-time handle не мог потерять живую голову или направить lifecycle-операцию в другую пану.
 
-# Источник
+# Context
 
-`issue:bd7dc1bdadb194f7308b`, вторая половина. Первая половина уже раскатана хотфиксом `b8c425a`:
-исчерпанная квота теперь классифицируется как `exhausted`, а не `unknown`, и `launch_allowed` её не
-пропускает. Эта карточка про то, что делать дальше.
+`CommandHostRuntime._create_terminal` и `_split_pane` в `secretary/dispatcher.py` сейчас возвращают только handle и отбрасывают `paneKey`; `_pane_leaf` затем пытается восстановить leaf через inventory по тому же нестабильному handle. Это затрагивает `_settle_worker_pane`, `prepare_worker`, review launch, `dispatcher_pause_ops`, `dispatcher_launch._adopt_launch_intent` и `dispatcher_observer._launch_observer`. `stop_head` и `_split_anchor` также адресуют worker по create-time handle. Живое измерение и исходный issue `issue:41284657c3e732f04f7f` показали, что inventory может не перечислить этот alias при существующей pane, тогда как `paneKey` содержит тот же `leafId`, что и inventory.
 
-Наблюдалось на канарейке `sprint:1200`, 2026-08-06 09:42–09:44: подписка openai-sub кончилась
-посреди спринта, диспетчер заклеймил `secretary-1161`, голова умерла мгновенно, вотчдог сделал
-респавн, второй столл увёл карточку в Blocked. Два запуска и раунд в никуда. Карточку пришлось
-вручную переводить на claude-профиль.
+# Selected route
 
-# Контекст
-
-Указатели, не копипаста; читай текущее дерево.
-
-- `triggered_agents/agents/pipeline/health.py:resolve_head` уже умеет обходить цепочку фолбэка в
-  ширину и возвращать `None` — это и есть claim-skip. Механизм есть; у продуктовых профилей просто
-  пустые цепочки.
-- Пустые `fallback` у продуктовых профилей в `heads.toml` — осознанное решение от 2026-07-04, и
-  причина записана прямо там: ночью 4 июля фолбэк на дешёвый gemini-flash сжёг три попытки воркера,
-  ни разу не дойдя до отчёта. Решение принималось против головы заведомо слабее, а не против
-  равноценной головы другой семьи. Эта карточка его пересматривает — но не отменяет: качество
-  головы в цепочке остаётся требованием.
-- Правило «воркер и ревьюер — не одна и та же голова» должно пережить любой перевод. Сейчас, при
-  исчерпанном openai-sub, оно и так ослаблено до разницы в усилии (см. `role_defaults` в
-  `heads.toml` и записанную там причину) — не ослабляй его дальше.
-- Канон голов живёт в `secretary-instance/heads/heads.toml` и материализуется через
-  `secretary upgrade`. Если карточка меняет форму цепочек, а не только код — правка канона это
-  часть работы, но раскатка на живую установку в неё не входит.
+Переиспользовать уже возвращаемый `paneKey`: разобрать из него `leafId` на launch boundary, пронести его в launch result/intent и сразу записать в persistent worker, reviewer и observer records. Для адресации находить текущий inventory handle по сохранённому leaf, а handle и PID оставить fallback для legacy/adopted records без leaf. Новых зависимостей, external protocol или migration не вводить: старые реально сохранённые records могут пережить upgrade и обязаны оставаться управляемыми по существующему handle/PID пути.
 
 # Acceptance criteria
 
-1. Красный или исчерпанный ресурс предпочитаемой головы приводит к запуску на живой семье
-   сопоставимого класса, а не к claim-skip, если такая голова есть.
-2. Перевод сохраняет правило «воркер и ревьюер — разные головы». Если единственная живая семья
-   даёт для обоих одну и ту же голову, это не перевод, а отказ: claim-skip с причиной.
-3. Если живых семей не осталось — claim-skip, карточка ждёт в Ready, и тик пишет, какой ресурс
-   мёртв и почему. Ни одного запуска головы в такой ресурс.
-4. Слабая голова не подставляется молча: цепочка фолбэка задаётся в каноне явно, и выбор
-   не-предпочитаемой головы записывается на карточку так, чтобы ревью и наблюдатель видели, кто
-   на самом деле делал работу.
-5. Регрессия: ресурс красный, ресурс исчерпан, обе семьи мертвы, перевод ломающий правило разных
-   голов. Существующие тесты `resolve_head` остаются зелёными.
-6. `python3 -m unittest` зелёный целиком.
+- Worker, reviewer и observer получают непустой leaf напрямую из create/split `paneKey`; test fixtures с create-time handle, отсутствующим в inventory, и совпадающим inventory `leafId` доказывают сохранение identity без повторного поиска по handle.
+- Лiveness, точечный stop/close и worker split-review anchor сначала разрешают текущую пану по сохранённому leaf и работают, когда inventory показывает только alias; операция для одной worker/reviewer head не заменяется workspace-wide stop.
+- Crash/adoption между launch и state commit сохраняет доступную launch identity в intent, а records, у которых исторически нет paneKey/leaf, продолжают fail-closed управляться существующим handle/PID fallback без второго writer.
+- Существующие handle-alias и adopted-head tests остаются зелёными; добавить focused sequence tests для worker, reviewer и observer, включая stop/anchor alias path.
+- Не менять режимы Codex, routing policy, single-owner security boundary, Orca или жизненный цикл whole-workspace observer, который изолирован отдельным observer workspace.
 
-# Вне рамок
+# Out of scope
 
-Раскатывать изменённый канон на живую установку. Трогать классификацию проб — она уже сделана
-хотфиксом. Выпиливание exec-режима у codex.
+Удаление Codex exec-mode, manual Blocked/stop recovery, red-review continuation, lifecycle telemetry и upgrade recovery canon. Эти изменения идут отдельными cuts после этого общего identity foundation.
 
 
 ## Mechanical gate attestation
 
-- validated_sha: f7e7818fb3f19e027c8840d01a0027fce4716fbb
-- base_sha: a61689c6c67cf5c9a38553318f7fa44045aba8ff
+- validated_sha: d1ede894f726de8dcfd922f4106acee7d6f6b82d
+- base_sha: 2a1151a434c44a4588323553895b3b64d8bd9f1b
 - gate_mode: github
 - required terminal checks:
-  - test: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/31109244959/job/92642389345)
-- completed_at: 2026-08-06T14:09:33+00:00
+  - test: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/31326153418/job/93276744724)
+- completed_at: 2026-08-09T17:22:52+00:00
 - command_or_check_set_digest: e05e08ff6e9e51da3be176a7b5215dfddd2f768f01036631e8a3c9ab7be723ca
 
 Independently inspect the diff, acceptance criteria and invariants. The attested broad
@@ -88,10 +57,10 @@ real behaviour you verified and how. If no end-to-end check against the real bac
 was possible, write plainly that it was not done and which assumption stays unverified.
 
 Post exactly one review verdict through the secretary task protocol:
-Write the body to /tmp/secretary-verdict-secretary-1165-3.md with your file-writing tool,
+Write the body to /tmp/secretary-verdict-secretary-1168-10.md with your file-writing tool,
 then run the command below verbatim. Do not assemble the body inside the shell command
 (no heredoc, no mktemp, no echo pipeline) and do not add `rm`: the codex runtime refuses
 rm-style commands, and quotes or backticks in the body break the call. Leave the file in
 place afterwards; the dispatcher does not read it.
-PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1165 --role reviewer --kind green --request-id dispatcher-attempt-20260806T133627Z-de63149988b5-review-green-secretary-1165-3 --body-file /tmp/secretary-verdict-secretary-1165-3.md
-PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1165 --role reviewer --kind red --request-id dispatcher-attempt-20260806T133627Z-de63149988b5-review-red-secretary-1165-3 --body-file /tmp/secretary-verdict-secretary-1165-3.md
+PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1168 --role reviewer --kind green --request-id dispatcher-attempt-20260809T170434Z-b85b4e55a1b7-review-green-secretary-1168-10 --body-file /tmp/secretary-verdict-secretary-1168-10.md
+PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1168 --role reviewer --kind red --request-id dispatcher-attempt-20260809T170434Z-b85b4e55a1b7-review-red-secretary-1168-10 --body-file /tmp/secretary-verdict-secretary-1168-10.md

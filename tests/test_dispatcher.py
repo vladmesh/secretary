@@ -840,6 +840,7 @@ class FakeHost:
         return {
             "workspace": str(workspace),
             "handle": launched.handle,
+            "leaf": launched.leaf,
             "base_branch": task.get("workspace", {}).get("base_branch") or "main",
             "run": launched.run,
         }
@@ -874,6 +875,7 @@ class FakeHost:
         return {
             "workspace": str(workspace),
             "handle": handle,
+            "leaf": f"leaf:{handle}",
             "pid_file": str(pid_file),
             "run": self.catalog.observer_run(head, workspace=str(workspace)).to_json(),
         }
@@ -935,6 +937,7 @@ class FakeHost:
             raise HeadLaunchAborted(
                 f"worker freeze failed: {exc}",
                 handle=launched.handle,
+                leaf=launched.leaf,
                 workspace=record.workspace,
                 pid_file=pid_file_path("review", task["ref"]),
             ) from None
@@ -975,6 +978,7 @@ class FakeHost:
             run=self.catalog.head_run(
                 task, role=role, head=head, workspace=workspace, failover=failover
             ).to_json(),
+            leaf=f"leaf:{handle}",
         )
 
     def review_running(self, task: dict, record) -> bool:
@@ -1046,7 +1050,8 @@ class FakeHost:
             raise HostError(self.fail_stop_head_reason)
         handle = record.review_handle if kind == "review" else record.handle
         pid_file = record.review_pid_file if kind == "review" else record.worker_pid_file
-        if not handle and not pid_file:
+        leaf = record.review_leaf if kind == "review" else record.worker_leaf
+        if not handle and not leaf and not pid_file:
             raise HostError(f"{kind} head has neither a pane handle nor a pid heartbeat")
         self._kill_head(kind, record)
 
@@ -1054,7 +1059,7 @@ class FakeHost:
         self.calls.append("freeze_worker")
         if self.fail_freeze_worker_reason:
             raise HostError(self.fail_freeze_worker_reason)
-        if record.handle or record.worker_pid_file:
+        if record.handle or record.worker_leaf or record.worker_pid_file:
             self.stop_head(record, "worker")
 
     def retain_worker(self, record) -> None:
@@ -1121,7 +1126,7 @@ class FakeHost:
 
     def stop_review(self, record) -> None:
         self.calls.append("stop_review")
-        if not record.review_handle and not record.review_pid_file:
+        if not record.review_handle and not record.review_leaf and not record.review_pid_file:
             return
         if self.fail_stop_review_reason:
             raise HostError(self.fail_stop_review_reason)
@@ -1623,7 +1628,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertNotIn("secretary-510-pilot", payload["records"])
         # The record owns the live head. It must be stopped before the record can disappear, or a
         # later requeue will open another writer in the same workspace.
-        self.assertEqual(self.host.stopped, ["secretary-510-pilot-pilot"])
+        self.assertIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("stop_workspace", self.host.calls)
         self.assertEqual(self.host.torn_down, [])
         self.assertNotIn("secretary-510-pilot", self.host.prepared)
 
@@ -1637,7 +1643,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
             reason="park it",
             request_id="move-to-blocked-stop-refused",
         )
-        self.host.fail_stop_workspace_reason = "orca terminal stop failed"
+        self.host.fail_stop_head_reason = "orca terminal close failed"
 
         result = self.runtime.production_tick()
 
@@ -1662,7 +1668,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         claim = [a for a in result["actions"] if a.get("step") == "claim"]
         self.assertEqual(len(claim), 1)
-        self.assertIn("stop_workspace", self.host.calls, result)
+        self.assertIn("stop_head:worker", self.host.calls, result)
+        self.assertNotIn("stop_workspace", self.host.calls, result)
         self.assertEqual(self.host.prepared.count("secretary-510-pilot"), 2)
 
     def test_fresh_claim_stops_an_unowned_live_worker_before_launch(self) -> None:
@@ -1734,7 +1741,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         actions = [a for a in result["actions"] if a.get("ref") == "secretary-510-pilot"]
         self.assertEqual([a["action"] for a in actions], ["record-removed"])
-        self.assertIn("stop_workspace", self.host.calls)
+        self.assertIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("stop_workspace", self.host.calls)
         self.assertNotIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
 
     def test_production_tick_does_not_reconcile_a_card_that_races_back_to_in_progress(self) -> None:
@@ -10332,10 +10340,12 @@ class RecordingReviewHost(CommandHostRuntime):
         *,
         terminals: list[dict] | None = None,
         fail_ops: set[str] | None = None,
+        split_pane_key: str = "",
     ) -> None:
         super().__init__(ReviewCatalog(), root, mode="real")  # type: ignore[arg-type]
         self.calls: list[list[str]] = []
         self.fail_ops = fail_ops or set()
+        self.split_pane_key = split_pane_key
         self.terminals = [
             {"handle": "term-worker", "leafId": "leaf-worker", "title": "codex", "connected": True}
         ] if terminals is None else terminals
@@ -10356,9 +10366,16 @@ class RecordingReviewHost(CommandHostRuntime):
             self.terminals.append(
                 {"handle": "term-review", "leafId": "leaf-review", "title": None, "connected": True}
             )
-            return {"split": {"handle": "term-review", "tabId": "tab-1", "paneRuntimeId": -1}}
+            split = {
+                "handle": "term-review",
+                "tabId": "tab-1",
+                "paneRuntimeId": -1,
+            }
+            if self.split_pane_key:
+                split["paneKey"] = self.split_pane_key
+            return {"split": split}
         if op == "create":
-            return {"terminal": {"handle": "term-created"}}
+            return {"terminal": {"handle": "term-created", "paneKey": "tab-1:leaf-created"}}
         if op == "wait":
             return self.wait_answer
         return {}
@@ -10407,7 +10424,8 @@ class ReviewPaneTests(unittest.TestCase):
             claimed_at=0.0,
         )
 
-    def test_reviewer_is_split_off_the_worker_pane_and_labelled(self) -> None:
+    def test_reviewer_is_split_off_the_worker_pane_and_gets_its_leaf_from_inventory(self) -> None:
+        """Real `terminal split --json` omits paneKey, so the fresh inventory supplies its leaf."""
         host = RecordingReviewHost(self.root)
 
         launch = host.start_review(self.task, self._record())
@@ -10426,6 +10444,14 @@ class ReviewPaneTests(unittest.TestCase):
             [call for call in host.calls if "worktree" in call and "create" in call],
             "the reviewer must reuse the worker's worktree, never make its own",
         )
+
+    def test_split_uses_pane_key_directly_when_the_backend_supplies_one(self) -> None:
+        host = RecordingReviewHost(self.root, split_pane_key="tab-1:leaf-from-reply")
+
+        launch = host.start_review(self.task, self._record())
+
+        self.assertEqual(launch.leaf, "leaf-from-reply")
+        self.assertEqual(host.ops().count("list"), 1, "the split leaf needed no inventory fallback")
 
     def test_reviewer_pane_carries_the_reference_and_the_role(self) -> None:
         host = RecordingReviewHost(self.root)
@@ -10454,7 +10480,54 @@ class ReviewPaneTests(unittest.TestCase):
         launch = host.start_review(self.task, self._record(handle=""))
 
         self.assertEqual(launch.handle, "term-created")
+        self.assertEqual(launch.leaf, "leaf-created")
         self.assertNotIn("split", host.ops())
+
+    def test_create_terminal_returns_the_leaf_from_its_pane_key(self) -> None:
+        host = RecordingReviewHost(self.root)
+
+        pane = host._create_terminal(str(self.workspace), "worker", "run-worker")
+
+        self.assertEqual((pane.handle, pane.leaf), ("term-created", "leaf-created"))
+
+    def test_worker_leaf_selects_the_split_anchor_after_handle_aliasing(self) -> None:
+        host = RecordingReviewHost(
+            self.root,
+            terminals=[
+                {"handle": "term-alias", "leafId": "leaf-worker", "connected": True},
+                {"handle": "term-other", "leafId": "leaf-other", "connected": True},
+            ],
+        )
+        record = self._record(handle="term-create")
+        record.worker_leaf = "leaf-worker"
+
+        host.start_review(self.task, record)
+
+        split = host.call_for("split")
+        self.assertEqual(split[split.index("--terminal") + 1], "term-alias")
+
+    def test_leaf_resolves_the_current_alias_for_worker_and_reviewer_stop(self) -> None:
+        host = RecordingReviewHost(
+            self.root,
+            terminals=[
+                {"handle": "term-worker-alias", "leafId": "leaf-worker", "connected": True},
+                {"handle": "term-review-alias", "leafId": "leaf-review", "connected": True},
+            ],
+        )
+        record = self._record(handle="term-worker-create")
+        record.worker_leaf = "leaf-worker"
+        record.review_handle = "term-review-create"
+        record.review_leaf = "leaf-review"
+
+        host.stop_head(record, "worker")
+        host.stop_review(record)
+
+        closed = [
+            call[call.index("--terminal") + 1]
+            for call in host.calls
+            if call[:3] == ["orca", "terminal", "close"]
+        ]
+        self.assertEqual(closed, ["term-worker-alias", "term-review-alias"])
 
     def test_dead_worker_pane_is_not_used_as_the_split_anchor(self) -> None:
         host = RecordingReviewHost(
@@ -11159,7 +11232,8 @@ class ProductionPauseTests(unittest.TestCase):
         status = self.pause("freeze")
 
         self.assertEqual(status["stopped_worker"], [self.ref])
-        self.assertEqual(self.host.stopped, [f"{self.ref}-pilot"])
+        self.assertIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("stop_workspace", self.host.calls)
         self.assertEqual(self.host.torn_down, [])
         self.assertTrue(Path(workspace).is_dir())
         record = self.record()

@@ -280,8 +280,8 @@ def _head_line(ref: str, record: DispatcherRecord) -> dict[str, Any]:
     return {
         "ref": ref,
         "state": record.state,
-        "worker": _head_state(record.handle, record.paused_worker_at),
-        "reviewer": _head_state(record.review_handle, record.paused_reviewer_at),
+        "worker": _head_state(record.handle or record.worker_leaf, record.paused_worker_at),
+        "reviewer": _head_state(record.review_handle or record.review_leaf, record.paused_reviewer_at),
         "workspace": record.workspace,
     }
 
@@ -345,16 +345,16 @@ def _freeze_heads(
             else:
                 record.paused_worker_at = now
                 stopped_worker.append(ref)
-        if record.review_handle or record.review_pid_file:
+        if record.review_handle or record.review_leaf or record.review_pid_file:
             try:
                 end_review_pane(runtime.host, record)
             except HostError:
                 continue
             record.paused_reviewer_at = now
             stopped_reviewer.append(ref)
-        if record.handle or record.worker_pid_file:
+        if record.handle or record.worker_leaf or record.worker_pid_file:
             try:
-                runtime.host.stop_workspace(record)
+                runtime.host.stop_head(record, WORKER_ROLE)
             except HostError:
                 continue
             forget_role_head(record, WORKER_ROLE)
@@ -378,7 +378,7 @@ def _resume_heads(
         if record is None:
             skipped.append(f"{ref}:reviewer")
             continue
-        if record.review_handle or launch_intent(record):
+        if record.review_handle or record.review_leaf or launch_intent(record):
             # A resume that got this far and then failed to drop the flag is retried by the next
             # tick's TTL check; relaunching a head that is already back would double it. An
             # unresolved launch intent says the same thing with less certainty: the tick's own
@@ -411,7 +411,7 @@ def _resume_heads(
         if record is None:
             skipped.append(f"{ref}:worker")
             continue
-        if record.handle or launch_intent(record):
+        if record.handle or record.worker_leaf or launch_intent(record):
             parked.append(f"{ref}:worker")
             continue
         record.paused_worker_at = 0.0
@@ -463,26 +463,11 @@ def _resume_heads(
         # The head is up, so its pane and launch snapshot are fixed on disk before the record is
         # told about them: everything left to do here can fail over a worker that already runs.
         confirm_launch_intent(
-            runtime, payload, records, ref, record, handle=launched.handle, run=launched.run
+            runtime, payload, records, ref, record,
+            handle=launched.handle, leaf=launched.leaf, run=launched.run,
         )
         record.handle = launched.handle
-        try:
-            record.worker_leaf = runtime.host.pane_leaf(record.workspace, record.handle)
-        except Exception as exc:  # noqa: BLE001 — a failure over a head that already exists
-            mark_launch_aborted(
-                runtime,
-                payload,
-                records,
-                ref,
-                record,
-                HeadLaunchAborted(
-                    f"worker pane identity could not be read: {exc}",
-                    handle=launched.handle,
-                    workspace=record.workspace,
-                ),
-            )
-            skipped.append(f"{ref}:worker")
-            continue
+        record.worker_leaf = launched.leaf
         clear_launch_intent(record)
         record.state = "claimed"
         # A resume is a real bring-up: the round records the head that came back, which a registry

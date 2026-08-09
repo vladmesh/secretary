@@ -66,17 +66,19 @@ def command_terminal_status(
     if kind == "review":
         label = review_pane_label(task["ref"])
         pane_known = bool(record.review_handle or record.review_leaf)
-        matches = lambda terminal: bool(
-            (record.review_handle and terminal.get("handle") == record.review_handle)
-            or (record.review_leaf and terminal.get("leafId") == record.review_leaf)
-            or (not pane_known and terminal.get("title") == label)
-        )
+        if record.review_leaf:
+            matches = lambda terminal: terminal.get("leafId") == record.review_leaf
+        elif record.review_handle:
+            matches = lambda terminal: terminal.get("handle") == record.review_handle
+        else:
+            matches = lambda terminal: terminal.get("title") == label
     else:
-        pane_known = bool(record.handle or record.worker_leaf)
-        matches = lambda terminal: bool(
-            (record.handle and terminal.get("handle") == record.handle)
-            or (record.worker_leaf and terminal.get("leafId") == record.worker_leaf)
-        )
+        if record.worker_leaf:
+            matches = lambda terminal: terminal.get("leafId") == record.worker_leaf
+        else:
+            matches = lambda terminal: bool(
+                record.handle and terminal.get("handle") == record.handle
+            )
     for terminal in terminals:
         if not isinstance(terminal, dict) or not matches(terminal):
             continue
@@ -415,7 +417,8 @@ def start_review(
     # the record is told anything about it, so a tick that dies from here on is adopted with the
     # routing history of the head that actually ran.
     confirm_launch_intent(
-        runtime, payload, records, ref, record, handle=launch.handle, run=launch.run
+        runtime, payload, records, ref, record,
+        handle=launch.handle, leaf=launch.leaf, run=launch.run,
     )
     record.review_handle = launch.handle
     record.review_leaf = launch.leaf

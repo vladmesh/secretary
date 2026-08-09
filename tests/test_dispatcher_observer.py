@@ -2371,9 +2371,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def failing_state_save(self, *, after: int = 0):
         """Production state that stops accepting writes after `after` of them landed.
 
-        `after=0` is a data plane that is down before the tick touches the host; `after=1` lets
-        the launch intent land and then kills every write after it, which is a tick that dies
-        between opening the head and recording that it did.
+        `after=0` is a data plane that is down before the tick touches the host; `after=1` leaves
+        only the pre-launch intent; `after=2` also persists the create-time pane identity and then
+        kills the ordinary outcome commit.
         """
         real = self.runtime.production_state.save
         landed = {"count": 0}
@@ -2449,6 +2449,24 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         live = self.runtime.production_tick()
 
         self.assertEqual([action["action"] for action in self.actions(live)], ["observer-live"])
+        self.assertEqual(self.host.observers, ["sprint:1"])
+
+    def test_an_observer_launch_persists_its_returned_leaf_before_outcome_commit(self) -> None:
+        """A crash after `terminal create` retains the leaf that identifies its alias pane."""
+        self.open_sprint()
+        with self.failing_state_save(after=2):
+            with self.assertRaises(OSError):
+                self.runtime.production_tick()
+
+        intent = self.observers()["sprint:1"]
+        self.assertEqual(
+            (intent.state, intent.pending_launch, intent.handle, intent.leaf),
+            ("launching", 1, "observer:sprint:1", "leaf:observer:sprint:1"),
+        )
+
+        adopted = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(adopted)], ["observer-adopted"])
         self.assertEqual(self.host.observers, ["sprint:1"])
 
     def test_no_tick_after_a_refused_confirmation_ever_opens_a_second_head(self) -> None:
@@ -3574,6 +3592,37 @@ class ObserverConfigurationTests(unittest.TestCase):
             [["terminal", "list"], ["terminal", "wait"], ["terminal", "send"], ["terminal", "wait"]],
         )
 
+    def test_real_host_nudge_resolves_an_observer_alias_by_its_saved_leaf(self) -> None:
+        """The create-time handle need not occur in inventory after the observer is running."""
+        with tempfile.TemporaryDirectory() as root:
+            host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
+            record = ObserverRecord(
+                sprint="sprint:1",
+                workspace="/workspace",
+                handle="observer:create-time",
+                leaf="leaf-observer",
+            )
+            calls: list[list[str]] = []
+
+            def run_json(args: list[str]) -> dict:
+                calls.append(args)
+                if args[1:3] == ["terminal", "list"]:
+                    return {"terminals": [{
+                        "handle": "observer:alias", "leafId": "leaf-observer", "connected": True,
+                    }]}
+                if args[1:3] == ["terminal", "send"]:
+                    return {}
+                if args[1:3] == ["terminal", "wait"]:
+                    sent = any(call[1:3] == ["terminal", "send"] for call in calls)
+                    return {"wait": {"condition": "tui-idle", "satisfied": not sent}}
+                raise AssertionError(args)
+
+            with mock.patch.object(host, "_run_json", side_effect=run_json):
+                self.assertEqual(host.nudge_observer(record), "accepted")
+
+        sent = next(args for args in calls if args[1:3] == ["terminal", "send"])
+        self.assertEqual(sent[sent.index("--terminal") + 1], "observer:alias")
+
     def test_real_host_nudge_api_rejects_a_synchronous_confirm_callback(self) -> None:
         """Observer acknowledgement is out of band and cannot re-enter prompt delivery."""
         with tempfile.TemporaryDirectory() as root:
@@ -3875,7 +3924,7 @@ class RealHostObserverWorkspaceTests(unittest.TestCase):
             Path(path).mkdir(parents=True, exist_ok=True)
             return {"worktree": {"path": path}}
         if args[1:3] == ["terminal", "create"]:
-            return {"handle": "term-obs"}
+            return {"handle": "term-obs", "paneKey": "tab-1:leaf-obs"}
         return {}
 
     def _prepare(self) -> dict[str, object]:
@@ -3912,6 +3961,7 @@ class RealHostObserverWorkspaceTests(unittest.TestCase):
         )
         self.assertEqual(launched["workspace"], self.workspace)
         self.assertEqual(launched["handle"], "term-obs")
+        self.assertEqual(launched["leaf"], "leaf-obs")
 
     def test_the_observer_repo_is_its_own_and_not_a_checkout_of_the_project(self) -> None:
         """The observer reads the board and writes no code. Its workspace is cut from an empty

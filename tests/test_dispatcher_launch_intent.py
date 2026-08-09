@@ -335,10 +335,11 @@ class LaunchIntentTests(unittest.TestCase):
         relaunched = self.tick()
 
         self.assertEqual(relaunched["step"], "claim")
-        # Whatever the lost tick left in that workspace is closed before the replacement opens.
+        # The lost launch carried no durable leaf, so the heartbeat remains the legacy fallback
+        # that stops it before a replacement opens.
         self.assertEqual(
-            [call for call in self.host.calls if call in ("prepare_worker", "stop")],
-            ["prepare_worker", "stop", "prepare_worker"],
+            [call for call in self.host.calls if call in ("prepare_worker", "stop_head:worker")],
+            ["prepare_worker", "stop_head:worker", "prepare_worker"],
         )
         self.assertEqual(self.stored_intent(), {})
 
@@ -1617,6 +1618,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.host.fail_prepare_error = HeadLaunchAborted(
             "prompt delivery failed; head terminal stop failed: orca refused",
             handle="term:leftover",
+            leaf="leaf:leftover",
             workspace=str(self.data_dir / "workspaces" / f"{REF}-pilot"),
             pid_file=pid_file_path("worker", REF),
         )
@@ -1627,8 +1629,10 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(outcome["status"], "degraded")
         self.assertEqual(self.reader.show(REF)["state"], "in_progress", "the card is not blocked")
         intent = self.stored_intent()
-        self.assertEqual((intent["role"], intent["handle"], intent["aborted"]),
-                         ("worker", "term:leftover", True))
+        self.assertEqual(
+            (intent["role"], intent["handle"], intent["leaf"], intent["aborted"]),
+            ("worker", "term:leftover", "leaf:leftover", True),
+        )
 
         # And the head that terminal is running is adopted, pane included, rather than doubled.
         self.host.fail_prepare_error = None
@@ -1639,6 +1643,7 @@ class LaunchIntentTests(unittest.TestCase):
         record = self.record()
         assert record is not None
         self.assertEqual(record.handle, "term:leftover")
+        self.assertEqual(record.worker_leaf, "leaf:leftover")
 
     def test_a_reviewer_whose_worker_will_not_freeze_keeps_its_intent(self) -> None:
         """The reviewer pane is up and the worker would not go: neither head may be forgotten."""
@@ -1653,6 +1658,7 @@ class LaunchIntentTests(unittest.TestCase):
         intent = self.stored_intent()
         self.assertEqual((intent["role"], intent["aborted"]), ("review", True))
         self.assertTrue(intent["handle"])
+        self.assertEqual(intent["leaf"], f"leaf:review:{REF}")
 
         # Recovery retries the freeze; while it keeps failing, no second reviewer is started.
         stuck = self.tick()
@@ -1668,6 +1674,7 @@ class LaunchIntentTests(unittest.TestCase):
         record = self.record()
         assert record is not None
         self.assertEqual((record.handle, record.worker_pid_file), ("", ""))
+        self.assertEqual(record.review_leaf, f"leaf:review:{REF}")
         self.assertFalse(self.head_alive("worker"), "the freeze is what recovery had to finish")
 
     def _abort_review_into_recovery(self) -> None:
@@ -1792,89 +1799,70 @@ class LaunchIntentTests(unittest.TestCase):
         ]
         self.assertEqual(notes, [], "no operator note for a single abort")
 
-    # a failure raised after the head is up, over an intent the tick still holds -----------------
+    # A launch takes its leaf from Orca's create/split reply, not a second inventory lookup. -----
 
-    def pane_identity_fails(self):
-        """Orca answers the bring-up and then refuses the inventory the pane leaf is read from.
+    def legacy_pane_lookup_is_unavailable(self):
+        """The obsolete handle-to-leaf inventory lookup must not be part of a launch.
 
-        The narrow window the record used to lose a head in: the launch succeeded, and the tick
-        failed on the next thing it did with it. Anything that treats that as a launch that did not
-        happen blocks the card and drops the record over a worker that is running.
+        `pane_leaf` models the removed pre-1168 seam. Keeping it unavailable makes the test prove
+        that a launch records the leaf handed back by its host result rather than querying Orca
+        again by the create-time handle, which may never appear in inventory.
         """
         return mock.patch.object(
             self.host, "pane_leaf", mock.Mock(side_effect=HostError("orca terminal list failed"))
         )
 
-    def test_a_claim_whose_pane_identity_fails_keeps_the_worker_it_launched(self) -> None:
-        with self.pane_identity_fails():
+    def test_a_claim_records_its_returned_leaf_without_an_inventory_lookup(self) -> None:
+        with self.legacy_pane_lookup_is_unavailable():
             outcome = self.tick()
 
-        self.assertEqual(outcome["action"], "worker-launch-aborted")
+        self.assertEqual(outcome["step"], "claim")
         self.assertEqual(self.host.prepared, [REF])
-        self.assertEqual(self.reader.show(REF)["state"], "in_progress", "the card is not blocked")
-        self.assertIsNotNone(self.record(), "the record is the only pointer to that worker")
-        intent = self.stored_intent()
-        self.assertEqual((intent["role"], intent["aborted"]), ("worker", True))
-        self.assertTrue(intent["handle"], "the pane the launch did report is kept")
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.worker_leaf, f"leaf:{record.handle}")
+        self.assertEqual(self.stored_intent(), {})
 
-        adopted = self.tick()
-
-        self.assertEqual(adopted["action"], "worker-launch-adopted")
-        self.assertEqual(self.host.prepared, [REF], "the live head must not be launched twice")
-
-    def test_a_rework_whose_pane_identity_fails_keeps_the_worker_it_launched(self) -> None:
+    def test_a_rework_records_its_returned_leaf_without_an_inventory_lookup(self) -> None:
         self.rework_after_red_review()
 
-        with self.pane_identity_fails():
+        with self.legacy_pane_lookup_is_unavailable():
             outcome = self.tick()
 
-        self.assertEqual(outcome["action"], "worker-launch-aborted")
+        self.assertEqual(outcome["action"], "rework-started")
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
         self.assertEqual(self.reader.show(REF)["state"], "in_progress")
-        self.assertIsNotNone(self.record())
-        self.assertEqual(self.stored_intent()["action"], "review-red-rework")
-
-        adopted = self.tick()
-
-        self.assertEqual(adopted["action"], "worker-launch-adopted")
-        self.assertEqual(self.host.calls.count("restart_worker"), 1)
         record = self.record()
         assert record is not None
         self.assertEqual((record.state, record.attempt_round), ("claimed", 2))
+        self.assertEqual(record.worker_leaf, f"leaf:{record.handle}")
 
-    def test_a_respawn_whose_pane_identity_fails_keeps_the_worker_it_launched(self) -> None:
+    def test_a_respawn_records_its_returned_leaf_without_an_inventory_lookup(self) -> None:
         self.tick()
         self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
 
-        with self.pane_identity_fails():
+        with self.legacy_pane_lookup_is_unavailable():
             outcome = self.tick()
 
-        self.assertEqual(outcome["action"], "worker-launch-aborted")
+        self.assertEqual(outcome["action"], "worker-respawned")
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
-        self.assertIsNotNone(self.record(), "a respawned head may not lose its record")
+        record = self.record()
+        assert record is not None
         self.assertTrue(self.head_alive("worker"))
-        self.assertEqual(self.stored_intent()["action"], "worker-respawn")
+        self.assertEqual(record.worker_leaf, f"leaf:{record.handle}")
 
-        adopted = self.tick()
-
-        self.assertEqual(adopted["action"], "worker-launch-adopted")
-        self.assertEqual(self.host.calls.count("restart_worker"), 1)
-
-    def test_a_gate_red_rework_whose_pane_identity_fails_keeps_its_worker(self) -> None:
+    def test_a_gate_red_rework_records_its_returned_leaf_without_an_inventory_lookup(self) -> None:
         self.run_to_validate()
         self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
 
-        with self.pane_identity_fails():
+        with self.legacy_pane_lookup_is_unavailable():
             outcome = self.tick()
 
-        self.assertEqual(outcome["action"], "worker-launch-aborted")
-        self.assertIsNotNone(self.record())
-        self.assertEqual(self.stored_intent()["action"], "gate-red-rework")
-
-        adopted = self.tick()
-
-        self.assertEqual(adopted["action"], "worker-launch-adopted")
+        self.assertEqual(outcome["action"], "gate-red-rework")
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.worker_leaf, f"leaf:{record.handle}")
 
     def test_a_review_bring_up_that_fails_over_its_own_heartbeat_keeps_its_intent(self) -> None:
         """An ordinary failure is only believed while the heartbeat agrees with it.
@@ -1958,6 +1946,23 @@ class LaunchIntentTests(unittest.TestCase):
 
         self.assertEqual(respawned["action"], "worker-respawned")
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
+
+    def test_leaf_stop_with_unreadable_inventory_and_no_heartbeat_keeps_the_record(self) -> None:
+        """A list failure is not evidence a leaf-scoped head vanished before its heartbeat exists."""
+        self.tick()
+        Path(pid_file_path("worker", REF)).unlink()
+        self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
+        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")  # type: ignore[arg-type]
+        real_host._run_json = mock.Mock(side_effect=HostError("orca terminal list unavailable"))
+
+        with mock.patch.object(self.host, "stop_head", real_host.stop_head):
+            outcome = self.tick()
+
+        self.assertEqual(outcome["action"], "worker-stop-unconfirmed")
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        record = self.record()
+        assert record is not None
+        self.assertTrue(record.worker_leaf, "the unconfirmed stop must retain the named head")
 
     def test_a_reviewer_respawn_after_an_unconfirmed_stop_starts_nothing(self) -> None:
         self.run_to_validate()
@@ -2379,7 +2384,13 @@ class HostLaunchContourTests(unittest.TestCase):
 
     def split_answers(self, rename: Exception) -> dict[str, Any]:
         return {
-            "terminal split": {"split": {"handle": "term:review"}},
+            # Production `terminal split --json` has no paneKey. Its just-created terminal is
+            # still present in the fresh inventory under the returned handle, so the host can
+            # persist its stable leaf before the reviewer reaches state.
+            "terminal split": {
+                "split": {"handle": "term:review", "tabId": "tab-1", "paneRuntimeId": -1}
+            },
+            "terminal list": {"terminals": [{"handle": "term:review", "leafId": "leaf:review"}]},
             "terminal rename": rename,
         }
 
@@ -2924,7 +2935,8 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         reconciled = [a for a in self.actions(result) if a["step"] == "production-reconcile"]
         self.assertEqual([a["action"] for a in reconciled], ["record-removed"])
         self.assertEqual(reconciled[0]["stopped_launch"], "claim")
-        self.assertIn("stop_workspace", self.host.calls)
+        self.assertIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("stop_workspace", self.host.calls)
         self.assertFalse(self.head_alive("worker"), "the head of the unresolved launch is gone")
         self.assertNotIn(REF, self.records())
 
@@ -2967,7 +2979,8 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         result = self.tick()
 
         self.assertEqual(self.reader.show(REF)["state"], "in_progress")
-        self.assertIn("stop_workspace", self.host.calls)
+        self.assertIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("stop_workspace", self.host.calls)
         self.assertEqual(self.host.prepared.count(REF), 2)
         self.assertEqual(self.stored_intent(), {})
 
@@ -3043,7 +3056,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
     def test_a_stop_the_host_refuses_keeps_the_record_and_its_intent(self) -> None:
         self.leave_a_post_launch_intent()
         self.move_card("blocked", "PO parked it mid-launch", "move-to-blocked")
-        self.host.fail_stop_workspace_reason = "orca terminal stop failed"
+        self.host.fail_stop_head_reason = "orca terminal close failed"
 
         result = self.tick()
 
@@ -3053,7 +3066,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.stored_intent().get("role"), "worker", "the pointer survives")
 
         # The next tick retries the same stop, and only then lets the record go.
-        self.host.fail_stop_workspace_reason = ""
+        self.host.fail_stop_head_reason = ""
 
         retried = self.tick()
 
@@ -3082,7 +3095,8 @@ class ProductionLaunchIntentTests(unittest.TestCase):
 
         mismatch = [a for a in self.actions(result) if a.get("step") == "production-recovery"]
         self.assertEqual([a["status"] for a in mismatch], ["blocked"])
-        self.assertIn("stop_workspace", self.host.calls)
+        self.assertIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("stop_workspace", self.host.calls)
         self.assertFalse(self.head_alive("worker"), "the head of the unresolved launch is gone")
         self.assertNotIn(REF, self.records())
         self.assertEqual(self.reader.show(REF)["state"], "blocked")
@@ -3090,7 +3104,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
     def test_a_mismatch_over_a_head_that_will_not_stop_keeps_the_record(self) -> None:
         self.leave_a_post_launch_intent()
         self.claim_moved_to("someone-else")
-        self.host.fail_stop_workspace_reason = "orca terminal stop failed"
+        self.host.fail_stop_head_reason = "orca terminal close failed"
 
         result = self.tick()
 
@@ -3104,7 +3118,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         )
 
         # Once the host confirms the stop, the mismatch is resolved the ordinary way.
-        self.host.fail_stop_workspace_reason = ""
+        self.host.fail_stop_head_reason = ""
 
         retried = self.tick()
 
@@ -3159,7 +3173,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
 
     def test_a_freeze_that_cannot_stop_an_unresolved_launch_keeps_its_intent(self) -> None:
         self.leave_a_post_launch_intent()
-        self.host.fail_stop_workspace_reason = "orca terminal stop failed"
+        self.host.fail_stop_head_reason = "orca terminal close failed"
 
         paused = self.runtime.pause_pipeline(mode="freeze", actor="operator", reason="maintenance")
 
@@ -3169,7 +3183,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
 
         # The resume launches nothing beside it, and the tick's own recovery still owns that head.
         self.runtime.resume_pipeline(actor="operator")
-        self.host.fail_stop_workspace_reason = ""
+        self.host.fail_stop_head_reason = ""
 
         self.assertEqual(self.host.calls.count("restart_worker"), 0)
         self.assertEqual(
@@ -3225,7 +3239,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
     def test_a_freeze_that_cannot_stop_an_adopted_worker_does_not_relaunch_it(self) -> None:
         self.leave_a_post_launch_intent()
         self.tick()
-        self.host.fail_stop_workspace_reason = "orca terminal stop failed"
+        self.host.fail_stop_head_reason = "orca terminal close failed"
 
         paused = self.runtime.pause_pipeline(
             mode="freeze", actor="operator", reason="maintenance"
