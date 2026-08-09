@@ -1084,16 +1084,23 @@ def _stop_record_heads(
                 "record_state": record.state,
                 "card_state": card_state,
             }
+        # `stop_launch_intent` either settled the role through its saved identity or used the
+        # legacy workspace fallback itself. Do not turn the former back into a workspace-wide
+        # stop after it has just closed the one named head.
+        record.workspace_settled = True
     if not record.needs_settling():
         return None
     try:
-        if record.workspace:
+        # A recorded pane identity is narrower than the workspace. In particular a create-time
+        # handle can alias to another head, so the host resolves a saved leaf to its current handle
+        # before closing it. Keep the workspace-wide stop only for legacy records that never got
+        # any role identity at all: there is no other safe way to settle an unnamed possible head.
+        if record.owns_head(REVIEW_ROLE):
+            runtime.host.stop_head(record, REVIEW_ROLE)
+        if record.owns_head(WORKER_ROLE):
+            runtime.host.stop_head(record, WORKER_ROLE)
+        if not record.owns_head() and record.workspace and not record.workspace_settled:
             runtime.host.stop_workspace(record)
-        else:
-            if record.owns_head(REVIEW_ROLE):
-                runtime.host.stop_head(record, REVIEW_ROLE)
-            if record.owns_head(WORKER_ROLE):
-                runtime.host.stop_head(record, WORKER_ROLE)
     except HostError as exc:
         return {
             "status": "degraded",

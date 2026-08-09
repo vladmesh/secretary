@@ -142,12 +142,14 @@ class ObserverLaunchAborted(HostError):
         message: str,
         *,
         handle: str = "",
+        leaf: str = "",
         workspace: str = "",
         pid_file: str = "",
         run: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.handle = handle
+        self.leaf = leaf
         self.workspace = workspace
         self.pid_file = pid_file
         self.run = dict(run or {})
@@ -1660,6 +1662,7 @@ def _launch_observer(
             _defer_delivery(record, ref, f"observer replacement launch failed: {exc}")
         if exc.handle:
             record.handle = exc.handle
+            record.leaf = exc.leaf
             record.workspace = exc.workspace or record.workspace
             record.pid_file = exc.pid_file or record.pid_file
             record.run = exc.run or record.run
@@ -1688,15 +1691,15 @@ def _launch_observer(
     record.head = head
     record.workspace = str(launched.get("workspace") or "")
     record.handle = str(launched.get("handle") or "")
-    try:
-        record.leaf = str(runtime.host.pane_leaf(record.workspace, record.handle) or "")
-    except (HostError, OSError, TypeError, ValueError, AttributeError):
-        # The returned handle is still enough when an older host cannot expose a leaf.  Retaining
-        # the launch is safer than treating an identity lookup failure as a failed bring-up.
-        record.leaf = ""
-    record.abandoned_handle = False
+    record.leaf = str(launched.get("leaf") or "")
     record.pid_file = str(launched.get("pid_file") or observer_pid_file(ref))
     record.run = launched.get("run") if isinstance(launched.get("run"), dict) else {}
+    # The host has answered, so the create-time pane identity belongs on the durable launch intent
+    # before the ordinary state commit below.  A crash in the rest of this branch then adopts this
+    # exact pane rather than falling back to the create-time handle or another inventory lookup.
+    observers[ref] = record
+    _persist_quietly(runtime, payload, observers)
+    record.abandoned_handle = False
     record.launches = attempt
     record.pending_launch = 0
     record.bound = True
@@ -1948,6 +1951,7 @@ def stop_observer_head(runtime: Any, record: ObserverRecord) -> bool:
     except HostError:
         return False
     record.handle = ""
+    record.leaf = ""
     record.head_possible = False
     record.workspace_live = False
     record.abandoned_handle = False
@@ -2004,6 +2008,7 @@ def _stop_for_pause(runtime: Any, ref: str, record: ObserverRecord, reason: str)
 def _mark_stopped_by_pause(record: ObserverRecord, reason: str) -> None:
     now = time.time()
     record.handle = ""
+    record.leaf = ""
     record.abandoned_handle = False
     record.state = STATE_STOPPED_BY_PAUSE
     record.stopped_reason = reason

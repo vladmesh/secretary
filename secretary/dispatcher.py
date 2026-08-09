@@ -243,6 +243,14 @@ def _same_repo(first: Path, second: Path) -> bool:
         return first.expanduser().absolute() == second.expanduser().absolute()
 
 
+def _pane_key_leaf(value: Any) -> str:
+    """Read Orca's stable leaf id from its create-time `tabId:leafId` pane key."""
+    if not isinstance(value, str):
+        return ""
+    _tab, separator, leaf = value.partition(":")
+    return leaf if separator and leaf else ""
+
+
 @dataclass(frozen=True)
 class LaunchedHead:
     """One head bring-up as it happened: the pane it runs in and the configuration it runs with."""
@@ -250,6 +258,18 @@ class LaunchedHead:
     handle: str
     head: str = ""
     run: dict[str, Any] = field(default_factory=dict)
+    # `terminal create` / `split` returns paneKey synchronously.  Its leaf survives Orca's handle
+    # aliasing, so launch callers carry it instead of trying to recover it from an inventory keyed
+    # by the already-unstable handle.
+    leaf: str = ""
+
+
+@dataclass(frozen=True)
+class PaneIdentity:
+    """The identity Orca returns while creating one pane."""
+
+    handle: str
+    leaf: str = ""
 
 
 class InstanceCatalog:
@@ -587,6 +607,7 @@ class CommandHostRuntime:
         return {
             "workspace": workspace,
             "handle": launched.handle,
+            "leaf": launched.leaf,
             "base_branch": base,
             # The launch configuration of the head that went up. The caller records this instead of
             # re-reading the registry, which a later edit would answer differently.
@@ -780,13 +801,13 @@ class CommandHostRuntime:
             launch_prompt=_observer_launch_prompt(),
             identity=identity,
         )
-        handle = self._create_terminal(
+        pane = self._create_terminal(
             str(workspace), f"{reference} observer", _with_pid_heartbeat(launch.command, pid_file)
         )
         if launch.prompt_after_start:
             try:
                 _deliver_tui_prompt(
-                    handle,
+                    pane.handle,
                     str(workspace),
                     OBSERVER_PROMPT_FILE,
                     run_json=self._run_json,
@@ -802,13 +823,20 @@ class CommandHostRuntime:
                     # head beside a head that is already running.
                     raise ObserverLaunchAborted(
                         f"{exc}; observer terminal stop failed: {stop_exc}",
-                        handle=handle,
+                        handle=pane.handle,
+                        leaf=pane.leaf,
                         workspace=str(workspace),
                         pid_file=pid_file,
                         run=run,
                     ) from None
                 raise ObserverLaunchAborted(str(exc)) from None
-        return {"workspace": str(workspace), "handle": handle, "pid_file": pid_file, "run": run}
+        return {
+            "workspace": str(workspace),
+            "handle": pane.handle,
+            "leaf": pane.leaf,
+            "pid_file": pid_file,
+            "run": run,
+        }
 
     def stop_observer(self, record: Any) -> None:
         """End one observer head and give back what its bring-up took.
@@ -865,13 +893,14 @@ class CommandHostRuntime:
             raise HostError("observer record names no terminal to read")
         terminals = self._worktree_terminals(str(record.workspace))
         terminal = next(
-            (
-                item for item in terminals
-                if (record.handle and item.get("handle") == record.handle)
-                or (record.leaf and item.get("leafId") == record.leaf)
-            ),
+            (item for item in terminals if record.leaf and item.get("leafId") == record.leaf),
             None,
         )
+        if terminal is None and not record.leaf:
+            terminal = next(
+                (item for item in terminals if record.handle and item.get("handle") == record.handle),
+                None,
+            )
         if terminal is None:
             raise HostError("observer terminal is not in the inventory of its workspace")
         if terminal.get("connected") is False:
@@ -907,13 +936,9 @@ class CommandHostRuntime:
         if not workspace or not (handle or leaf):
             raise HostError("observer has no terminal handle for an event wake")
         terminals = self._worktree_terminals(workspace)
-        terminal = next(
-            (
-                item for item in terminals
-                if (handle and item.get("handle") == handle) or (leaf and item.get("leafId") == leaf)
-            ),
-            None,
-        )
+        terminal = next((item for item in terminals if leaf and item.get("leafId") == leaf), None)
+        if terminal is None and not leaf:
+            terminal = next((item for item in terminals if handle and item.get("handle") == handle), None)
         current = str(terminal.get("handle") or "") if isinstance(terminal, dict) else ""
         if not current:
             raise HostError("observer terminal is unavailable for an event wake")
@@ -966,9 +991,6 @@ class CommandHostRuntime:
             return HeadRun(
                 role=OBSERVER_ROLE, head=head, adapter="unknown", model_source=MODEL_UNKNOWN
             ).to_json()
-
-    def pane_leaf(self, workspace: str, handle: str) -> str:
-        return self._pane_leaf(workspace, handle)
 
     def codex_tui_activity(
         self, task: dict[str, Any], record: DispatcherRecord, kind: str
@@ -1049,24 +1071,13 @@ class CommandHostRuntime:
             raise HeadLaunchAborted(
                 f"worker freeze failed: {exc}",
                 handle=launched.handle,
-                workspace=record.workspace,
-                pid_file=_pid_file_path("review", task["ref"]),
-            ) from None
-        try:
-            leaf = self._pane_leaf(record.workspace, launched.handle)
-        except Exception as exc:  # noqa: BLE001 — a failure over a reviewer that is already up
-            # Both heads are settled by now and only the pane's leaf id is missing, so this is not
-            # a bring-up that left no reviewer: it goes back with the pane it opened, and the caller
-            # keeps the launch intent instead of blocking the card over a live head.
-            raise HeadLaunchAborted(
-                f"review pane identity could not be read: {exc}",
-                handle=launched.handle,
+                leaf=launched.leaf,
                 workspace=record.workspace,
                 pid_file=_pid_file_path("review", task["ref"]),
             ) from None
         return ReviewLaunch(
             handle=launched.handle,
-            leaf=leaf,
+            leaf=launched.leaf,
             commit=self.head_commit(record),
             run=launched.run,
         )
@@ -1088,7 +1099,9 @@ class CommandHostRuntime:
         A reviewer adopted from a launch intent is stopped by its pid heartbeat, for the same
         reason the worker freeze is: without it the red-verdict bounce, the reviewer respawn and
         the pipeline freeze would all leave a live reviewer behind and start a head beside it."""
-        if self.mode == "noop" or not (record.review_handle or record.review_pid_file):
+        if self.mode == "noop" or not (
+            record.review_handle or record.review_leaf or record.review_pid_file
+        ):
             return
         self.stop_head(record, "review")
 
@@ -1393,10 +1406,10 @@ class CommandHostRuntime:
     def stop_head(self, record: DispatcherRecord, kind: str) -> None:
         """Stop one role's head and confirm it is gone, or raise.
 
-        Identity is the pane handle when the record has one and the pid heartbeat when it does not:
-        a head adopted from a launch intent lost its handle with the tick that opened it, and
-        without the heartbeat every stop for it would be a silent no-op — the worker left editing
-        the checkout under review, the reviewer left running beside its replacement.
+        A saved leaf is resolved to the inventory's current handle before any close.  Orca can
+        alias a create-time handle away while leaving that leaf stable, and using the stale handle
+        could close a different pane.  The create-time handle and pid heartbeat remain the legacy
+        fallback only when no leaf was ever persisted.
 
         The pane close stays best-effort because Orca answers `tab_not_found` for a pane it never
         gave a UI tab, which is every pane a dispatcher-launched head gets on a headless serve. The
@@ -1404,15 +1417,24 @@ class CommandHostRuntime:
         that did not happen, and it raises rather than letting a replacement start.
         """
         handle = record.review_handle if kind == "review" else record.handle
+        leaf = record.review_leaf if kind == "review" else record.worker_leaf
         pid_file = record.review_pid_file if kind == "review" else record.worker_pid_file
         if self.mode == "noop":
             return
-        if handle:
+        if leaf:
+            current = self._pane_handle_for_leaf(record.workspace, leaf)
+            if not current and not pid_file:
+                raise HostError(f"{kind} head leaf is not in the terminal inventory")
+            if current:
+                _close_tui_terminal(current, run_json=self._run_json)
+        elif handle:
             _close_tui_terminal(handle, run_json=self._run_json)
         elif not pid_file:
             # Neither identity: nothing here can name that head, so nothing here can promise it is
             # gone. The caller answers by not launching a replacement.
-            raise HostError(f"{kind} head has neither a pane handle nor a pid heartbeat")
+            raise HostError(
+                f"{kind} head has neither a pane handle nor a pid heartbeat (and no pane leaf)"
+            )
         self._confirm_head_process_gone(pid_file)
 
     def _confirm_head_process_gone(self, pid_file: str) -> None:
@@ -1689,15 +1711,20 @@ class CommandHostRuntime:
             if pid_file:
                 command = _with_pid_heartbeat(command, pid_file)
         if split_from:
-            handle = self._split_pane(
+            pane = self._split_pane(
                 split_from, title, command, workspace=workspace, pid_file=pid_file
             )
         else:
-            handle = self._create_terminal(workspace, title, command)
+            pane = self._create_terminal(workspace, title, command)
+        # A few in-process host seams predate paneKey and still return a bare handle.  They model
+        # an older Orca response, so retain that as an explicitly leafless legacy launch rather
+        # than looking it up again through the unstable alias.
+        if isinstance(pane, str):
+            pane = PaneIdentity(pane)
         if launch and launch.prompt_after_start:
             try:
                 _deliver_tui_prompt(
-                    handle, workspace, prompt_file, run_json=self._run_json, prompt_text=launch_prompt
+                    pane.handle, workspace, prompt_file, run_json=self._run_json, prompt_text=launch_prompt
                 )
             except (TuiDeliveryError, HostError) as exc:
                 # What the pane was doing when it refused the prompt, asked before it is closed
@@ -1707,18 +1734,19 @@ class CommandHostRuntime:
                 # so the caller can defer instead of blocking the card. A probe that goes
                 # unanswered is not that and takes the ordinary failure path below: a pane nothing
                 # can ask about is not a busy pane, it is a pane nothing can wait for.
-                readiness = _terminal_readiness(handle, run_json=self._run_json)
+                readiness = _terminal_readiness(pane.handle, run_json=self._run_json)
                 # The terminal is already up, so a failure here is not proof that no head exists.
                 # The close decides which: confirmed, nothing of this bring-up is left and the
                 # caller may treat it as a launch that did not happen; refused, the pane goes back
                 # with the failure so the caller keeps its launch intent and the next tick settles
                 # the head instead of opening a second one beside it.
                 try:
-                    self._close_launched_pane(handle, pid_file)
+                    self._close_launched_pane(pane.handle, pid_file)
                 except HostError as stop_exc:
                     raise HeadLaunchAborted(
                         f"{exc}; head terminal stop failed: {stop_exc}",
-                        handle=handle,
+                        handle=pane.handle,
+                        leaf=pane.leaf,
                         workspace=workspace,
                         pid_file=pid_file,
                     ) from None
@@ -1727,10 +1755,10 @@ class CommandHostRuntime:
                         f"the head pane was {_pane_state_label(readiness)} and never took its "
                         f"launch prompt: {exc}",
                         readiness=readiness,
-                        pane=handle,
+                        pane=pane.handle,
                     ) from None
                 raise HostError(str(exc)) from None
-        return self._launched(handle, head, task, role, workspace, failover)
+        return self._launched(pane.handle, head, task, role, workspace, failover, leaf=pane.leaf)
 
     def _close_launched_pane(self, handle: str, pid_file: str) -> None:
         """Close a pane this bring-up opened and confirm nothing of its head survived.
@@ -1751,7 +1779,7 @@ class CommandHostRuntime:
 
     def _launched(
         self, handle: str, head: str, task: dict[str, Any] | None, role: str, workspace: str = "",
-        failover: bool = False,
+        failover: bool = False, leaf: str = "",
     ) -> LaunchedHead:
         """Pair the pane with the launch snapshot of the head running in it.
 
@@ -1761,7 +1789,7 @@ class CommandHostRuntime:
         already succeeded.
         """
         if task is None:
-            return LaunchedHead(handle=handle, head=head)
+            return LaunchedHead(handle=handle, head=head, leaf=leaf)
         try:
             run = self.catalog.head_run(
                 task, role=role, head=head, workspace=workspace, failover=failover
@@ -1770,9 +1798,9 @@ class CommandHostRuntime:
             run = HeadRun(
                 role=role, head=head, adapter="unknown", model_source=MODEL_UNKNOWN
             ).to_json()
-        return LaunchedHead(handle=handle, head=head, run=run)
+        return LaunchedHead(handle=handle, head=head, run=run, leaf=leaf)
 
-    def _create_terminal(self, workspace: str, title: str, command: str) -> str:
+    def _create_terminal(self, workspace: str, title: str, command: str) -> PaneIdentity:
         result = self._run_json([
             "orca", "terminal", "create",
             "--worktree", f"path:{workspace}",
@@ -1784,7 +1812,7 @@ class CommandHostRuntime:
         handle = terminal.get("handle") or terminal.get("id") if isinstance(terminal, dict) else None
         if not isinstance(handle, str) or not handle:
             raise HostError("orca did not return a terminal handle")
-        return handle
+        return PaneIdentity(handle=handle, leaf=_pane_key_leaf(terminal.get("paneKey")))
 
     def _split_pane(
         self,
@@ -1794,7 +1822,7 @@ class CommandHostRuntime:
         *,
         workspace: str = "",
         pid_file: str = "",
-    ) -> str:
+    ) -> PaneIdentity:
         """Run `command` in a new pane beside an existing one. `terminal split` takes no --title,
         so the label goes on afterwards; a label that will not stick is a failed bring-up rather
         than an unlabelled pane, because the operator has no other way to tell the panes apart.
@@ -1814,6 +1842,7 @@ class CommandHostRuntime:
         handle = split.get("handle") if isinstance(split, dict) else None
         if not isinstance(handle, str) or not handle:
             raise HostError("orca did not return a split terminal handle")
+        leaf = _pane_key_leaf(split.get("paneKey"))
         try:
             self._run_json([
                 "orca", "terminal", "rename",
@@ -1828,11 +1857,12 @@ class CommandHostRuntime:
                 raise HeadLaunchAborted(
                     f"{exc}; head terminal stop failed: {stop_exc}",
                     handle=handle,
+                    leaf=leaf,
                     workspace=workspace,
                     pid_file=pid_file,
                 ) from None
             raise
-        return handle
+        return PaneIdentity(handle=handle, leaf=leaf)
 
     def _split_anchor(self, record: DispatcherRecord) -> str:
         """Pane to split the reviewer off. The worker's own pane when it is still connected, so
@@ -1843,15 +1873,20 @@ class CommandHostRuntime:
         connected = [
             terminal for terminal in terminals if terminal.get("connected") is not False
         ]
-        for terminal in connected:
-            if record.handle and terminal.get("handle") == record.handle:
-                return record.handle
+        if record.worker_leaf:
+            for terminal in connected:
+                if terminal.get("leafId") == record.worker_leaf:
+                    return str(terminal.get("handle") or "")
+        elif record.handle:
+            for terminal in connected:
+                if terminal.get("handle") == record.handle:
+                    return record.handle
         return str(connected[0].get("handle") or "") if connected else ""
 
-    def _pane_leaf(self, workspace: str, handle: str) -> str:
+    def _pane_handle_for_leaf(self, workspace: str, leaf: str) -> str:
         for terminal in self._worktree_terminals(workspace):
-            if terminal.get("handle") == handle:
-                return str(terminal.get("leafId") or "")
+            if terminal.get("leafId") == leaf:
+                return str(terminal.get("handle") or "")
         return ""
 
     def _worktree_terminals(self, workspace: str) -> list[dict[str, Any]]:
@@ -1878,7 +1913,7 @@ class CommandHostRuntime:
         A worker adopted from a launch intent has no pane handle, so the stop goes by its pid
         heartbeat instead: a freeze that quietly did nothing for want of a handle would leave that
         worker editing the tree the reviewer is judging."""
-        if self.mode == "noop" or not (record.handle or record.worker_pid_file):
+        if self.mode == "noop" or not (record.handle or record.worker_leaf or record.worker_pid_file):
             return
         self.stop_head(record, "worker")
 
@@ -2904,10 +2939,16 @@ class DispatcherRuntime:
             ref,
             record,
             handle=str(prepared.get("handle") or ""),
+            leaf=str(prepared.get("leaf") or ""),
             run=prepared.get("run"),
         )
         try:
-            self._settle_worker_pane(ref, record, prepared["handle"])
+            self._settle_worker_pane(
+                ref,
+                record,
+                str(prepared.get("handle") or ""),
+                str(prepared.get("leaf") or ""),
+            )
         except HeadLaunchAborted as exc:
             return self._worker_launch_aborted(
                 payload, records, ref, record, exc, step="claim", attempt_id=record.attempt_id
@@ -2995,7 +3036,7 @@ class DispatcherRuntime:
     ) -> dict[str, Any] | None:
         """Stop this card's worker head before a replacement opens, or answer with the refusal."""
         try:
-            if record.handle or record.worker_pid_file:
+            if record.handle or record.worker_leaf or record.worker_pid_file:
                 self.host.stop_head(record, "worker")
             else:
                 # A preempted head can lose its own identity with a dispatcher crash while the
@@ -3074,7 +3115,9 @@ class DispatcherRuntime:
             payload, records, ref, record, exc, step=step, attempt_id=attempt_id
         )
 
-    def _settle_worker_pane(self, ref: str, record: DispatcherRecord, handle: str) -> None:
+    def _settle_worker_pane(
+        self, ref: str, record: DispatcherRecord, handle: str, leaf: str
+    ) -> None:
         """Put the pane identity of a worker head that is already up onto its record.
 
         Everything from here runs against a live process, so a failure is ambiguous rather than a
@@ -3083,15 +3126,7 @@ class DispatcherRuntime:
         being dropped out from under it.
         """
         record.handle = handle
-        try:
-            record.worker_leaf = self.host.pane_leaf(record.workspace, handle)
-        except Exception as exc:  # noqa: BLE001 — any failure over a head that already exists
-            raise HeadLaunchAborted(
-                f"worker pane identity could not be read: {scrub_host_output(str(exc))}",
-                handle=handle,
-                workspace=record.workspace,
-                pid_file=_launch_pid_file(WORKER_ROLE, ref),
-            ) from None
+        record.worker_leaf = leaf
 
     def _bring_up_worker_head(
         self,
@@ -3158,10 +3193,11 @@ class DispatcherRuntime:
         # The head is up. Its pane and its launch configuration go into the intent before anything
         # else is attempted with them, so an adoption gets the run that actually launched.
         _confirm_launch_intent(
-            self, payload, records, ref, record, handle=launched.handle, run=launched.run
+            self, payload, records, ref, record,
+            handle=launched.handle, leaf=launched.leaf, run=launched.run,
         )
         try:
-            self._settle_worker_pane(ref, record, launched.handle)
+            self._settle_worker_pane(ref, record, launched.handle, launched.leaf)
         except HeadLaunchAborted as exc:
             return None, self._worker_launch_aborted(
                 payload, records, ref, record, exc, step=step, attempt_id=attempt_id

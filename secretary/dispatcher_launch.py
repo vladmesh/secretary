@@ -149,6 +149,7 @@ def confirm_launch_intent(
     record: DispatcherRecord,
     *,
     handle: str = "",
+    leaf: str = "",
     run: dict[str, Any] | None = None,
 ) -> None:
     """Put what the finished host call knows about the head into its intent, on disk.
@@ -167,6 +168,8 @@ def confirm_launch_intent(
         return
     if handle:
         intent["handle"] = handle
+    if leaf:
+        intent["leaf"] = leaf
     if run:
         intent["run"] = dict(run)
     intent["launched"] = True
@@ -245,6 +248,8 @@ def mark_launch_aborted(
         return
     if exc.handle:
         intent["handle"] = exc.handle
+    if exc.leaf:
+        intent["leaf"] = exc.leaf
     intent["aborted"] = True
     record.launch_intent = intent
     records[ref] = record
@@ -487,10 +492,11 @@ def stop_launch_intent(
     """
     _remember_launch_identity(record, intent, role)
     handle = getattr(record, "review_handle" if role == REVIEW_ROLE else "handle", "")
+    leaf = getattr(record, "review_leaf" if role == REVIEW_ROLE else "worker_leaf", "")
     pid_file = getattr(record, role_field(role, "pid_file"), "")
     # The path is known before the head exists, so it says nothing on its own; a heartbeat that can
     # be read is what proves this launch left something a role-scoped stop can address.
-    named = bool(handle) or bool(head_process_status(pid_file).get("known"))
+    named = bool(handle or leaf) or bool(head_process_status(pid_file).get("known"))
     try:
         if role == REVIEW_ROLE and named:
             # Imported here rather than at module scope: `dispatcher_review` writes the reviewer's
@@ -498,10 +504,12 @@ def stop_launch_intent(
             from secretary.dispatcher_review import end_review_pane
 
             end_review_pane(runtime.host, record)
+        elif named:
+            runtime.host.stop_head(record, WORKER_ROLE)
+            forget_role_head(record, WORKER_ROLE)
         else:
-            # Everything this card runs in that workspace. For the worker that is the ordinary
-            # answer; for a reviewer nothing can name, it is the last one, and it costs only the
-            # worker head that a reviewer bring-up shuts down anyway.
+            # A legacy launch without a role identity can only be settled by its workspace.  A
+            # worker or reviewer that has a leaf is always stopped through that exact pane above.
             runtime.host.stop_workspace(record)
             forget_role_head(record, WORKER_ROLE)
             forget_role_head(record, REVIEW_ROLE)
@@ -517,17 +525,18 @@ def _remember_launch_identity(
     """Put the launch's own identity on the record, so the stop paths can reach its head."""
     pid_file = str(intent.get("pid_file") or "")
     handle = str(intent.get("handle") or "")
+    leaf = str(intent.get("leaf") or "")
     # A first claim writes its intent before the record knows where the head runs, so the
     # workspace comes back off the intent here: without it the stop has no worktree to address.
     record.workspace = record.workspace or str(intent.get("workspace") or "")
     if pid_file:
         setattr(record, role_field(role, "pid_file"), pid_file)
-    if not handle:
-        return
     if role == REVIEW_ROLE:
         record.review_handle = record.review_handle or handle
+        record.review_leaf = record.review_leaf or leaf
     else:
         record.handle = record.handle or handle
+        record.worker_leaf = record.worker_leaf or leaf
 
 
 def _adopt_launch_intent(
@@ -545,12 +554,14 @@ def _adopt_launch_intent(
     launched_at = float(intent.get("at") or 0.0) or time.time()
     record.workspace = record.workspace or str(intent.get("workspace") or "")
     handle = str(intent.get("handle") or "")
+    leaf = str(intent.get("leaf") or "")
     if role == REVIEW_ROLE:
         # A reviewer bring-up shuts the worker head down before it hands the pane back, and an
         # adopted one has to do the same: a worker still editing the checkout would leave the
         # verdict describing a tree that no longer exists. It goes through the same confirmed stop,
         # so a worker that will not die keeps the intent instead of being assumed gone.
         record.review_handle = handle
+        record.review_leaf = leaf
         record.review_pid_file = str(intent.get("pid_file") or "")
         try:
             runtime.host.freeze_worker(record)
@@ -565,7 +576,6 @@ def _adopt_launch_intent(
             )
         forget_role_head(record, WORKER_ROLE)
         record.state = "reviewing"
-        record.review_leaf = ""
         record.review_started_at = record.review_progress_at = launched_at
         if not record.review_commit:
             # The worker is down and the reviewer writes no commits, so the checkout still sits
@@ -589,7 +599,7 @@ def _adopt_launch_intent(
         # before the host answered. The heartbeat `clear_launch_intent` keeps is what the freeze,
         # the respawn and the red-verdict bounce then stop this head by.
         record.handle = handle
-        record.worker_leaf = ""
+        record.worker_leaf = leaf
         record.worker_started_at = record.worker_progress_at = launched_at
         deferred = _record_adopted_routing(
             runtime, task, records, payload, record, intent, role, step
