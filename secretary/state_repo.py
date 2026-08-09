@@ -95,9 +95,45 @@ def commit_identity(instance_dir: Path) -> list[str]:
     return []
 
 
-def git(instance_dir: Path, args: list[str], *, label: str, timeout: float = 120) -> str:
+def git_command(instance_dir: Path, args: list[str]) -> list[str]:
+    """The only Git invocation shape allowed for an instance repository.
+
+    An instance checkout is runtime-user-owned even when install, recovery or
+    an operator's repair is root-initiated.  Git reads repository configuration
+    before it executes its subcommand, so crossing to that owner must happen
+    before every operation, including a harmless-looking reachability probe.
+    """
     instance_dir = Path(instance_dir).expanduser().resolve()
-    command = ["git", "-c", "core.hooksPath=/dev/null", "-C", str(instance_dir), *args]
+    return [
+        "git",
+        "-c", f"safe.directory={instance_dir}",
+        "-c", "core.hooksPath=/dev/null",
+        "-C", str(instance_dir),
+        *args,
+    ]
+
+
+def _noninteractive_git_env() -> dict[str, str]:
+    """Make every instance-repository Git operation bounded and prompt-free."""
+    env = dict(os.environ)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+    return env
+
+
+def run_git(
+    instance_dir: Path, args: list[str], *, label: str, timeout: float = 120,
+) -> subprocess.CompletedProcess[str]:
+    """Run one instance-repository Git command through its privilege boundary.
+
+    Unlike :func:`git`, this returns non-zero results for callers such as the
+    checkpoint pusher that need to distinguish an expected false predicate
+    from a command failure.  It still owns command construction, identity
+    crossing, hook suppression and noninteractive execution for all callers.
+    """
+    instance_dir = Path(instance_dir).expanduser().resolve()
+    command = git_command(instance_dir, args)
+    env = _noninteractive_git_env()
     # The instance checkout is runtime-user-owned.  Root install/upgrade may need to reconcile
     # it, but Git reads repository configuration before a command (including fsmonitor), so a
     # root Git process would execute runtime-user-controlled configuration.  Cross that boundary
@@ -109,7 +145,17 @@ def git(instance_dir: Path, args: list[str], *, label: str, timeout: float = 120
         try:
             owner = instance_dir.stat()
             if owner.st_uid != 0:
-                command = ["runuser", "--user", pwd.getpwuid(owner.st_uid).pw_name, "--", *command]
+                # `runuser` resets the calling environment. Pass the two
+                # noninteractive settings as command arguments too, so a root
+                # install cannot regain a credential prompt after the owner
+                # crossing.
+                command = [
+                    "runuser", "--user", pwd.getpwuid(owner.st_uid).pw_name, "--",
+                    "env",
+                    f"GIT_TERMINAL_PROMPT={env['GIT_TERMINAL_PROMPT']}",
+                    f"GIT_SSH_COMMAND={env['GIT_SSH_COMMAND']}",
+                    *command,
+                ]
         except (KeyError, OSError) as exc:
             raise StateRepoError(f"{label} failed: could not select instance runtime user: {exc}") from None
     try:
@@ -119,9 +165,16 @@ def git(instance_dir: Path, args: list[str], *, label: str, timeout: float = 120
             capture_output=True,
             timeout=timeout,
             check=False,
+            env=env,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise StateRepoError(f"{label} failed: {exc}") from None
+    return result
+
+
+def git(instance_dir: Path, args: list[str], *, label: str, timeout: float = 120) -> str:
+    """Run a required instance-repository Git command and return its stdout."""
+    result = run_git(instance_dir, args, label=label, timeout=timeout)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip().splitlines()
         raise StateRepoError(f"{label} failed: {detail[-1] if detail else 'git error'}")

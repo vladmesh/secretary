@@ -677,15 +677,13 @@ def step_verify(context: UpgradeContext) -> StepResult:
     except HeadRegistryConfigError as exc:
         return StepResult("verify", "failed", str(exc))
     try:
-        dirty = state_repo.git(
-            context.instance_path,
-            ["status", "--porcelain", "--untracked-files=all"],
-            label="inspect instance checkout after upgrade",
-        ).strip()
+        dirty = state_repo.status(context.instance_path, state_repo.HEADS_PATHSPEC)
     except state_repo.StateRepoError as exc:
         return StepResult("verify", "failed", str(exc))
     if dirty:
-        return StepResult("verify", "failed", f"instance checkout remains dirty: {dirty.splitlines()[0]}")
+        return StepResult(
+            "verify", "failed", f"head registry recovery pair remains dirty: {dirty.splitlines()[0]}"
+        )
     return StepResult("verify", "unchanged", "host reconciled and role skills in sync")
 
 

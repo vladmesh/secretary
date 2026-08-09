@@ -1074,6 +1074,32 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
             self._git(self.instance, "rev-parse", "HEAD"),
         )
 
+    def test_verify_accepts_a_published_pair_with_unrelated_instance_dirt(self):
+        tracked = self.instance / "projects" / "operator.yaml"
+        tracked.parent.mkdir(parents=True)
+        tracked.write_text("id: operator\n", encoding="utf-8")
+        self._git(self.instance, "add", "projects/operator.yaml")
+        self._git(self.instance, "commit", "--quiet", "-m", "operator project")
+        foreign = self.instance / "skills" / "operator-overlay.toml"
+        foreign.parent.mkdir(parents=True)
+        foreign.write_text("[roles]\n", encoding="utf-8")
+        generated, published = self._publish()
+        self.assertEqual(generated.status, "changed")
+        self.assertEqual(published.status, "changed", published.detail)
+        tracked.write_text("id: operator\nname: changed locally\n", encoding="utf-8")
+
+        with (
+            mock.patch("secretary.upgrade.step_host", return_value=upgrade.StepResult("host", "unchanged")),
+            mock.patch("secretary.upgrade.role_skills.audit", return_value={"ok": True}),
+        ):
+            verified = upgrade.step_verify(self.context)
+
+        self.assertEqual(verified.status, "unchanged", verified.detail)
+        self.assertEqual(
+            self._git(self.instance, "status", "--porcelain", "--untracked-files=all").splitlines(),
+            ["M projects/operator.yaml", "?? skills/operator-overlay.toml"],
+        )
+
     def test_commit_or_push_failure_refuses_success_and_keeps_an_actionable_checkpoint(self):
         generated = upgrade.step_head_registry(self.context)
         self.assertEqual(generated.status, "changed")

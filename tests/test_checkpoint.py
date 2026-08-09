@@ -1,6 +1,8 @@
+import contextlib
 import json
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -623,6 +625,87 @@ class FakeClock:
 
     def advance(self, seconds: float) -> None:
         self.now += seconds
+
+
+class CheckpointPusherPrivilegeTests(unittest.TestCase):
+    """Every pusher probe shares the owner-safe instance-repository runner."""
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.instance = Path(self.tmpdir.name) / "instance"
+        (self.instance / ".git").mkdir(parents=True)
+
+    @staticmethod
+    def result(args: list[str], *, returncode: int = 0, stdout: str = "", stderr: str = ""):
+        return subprocess.CompletedProcess(args, returncode, stdout, stderr)
+
+    def test_branch_probe_reachability_and_push_all_use_state_repo_runner(self):
+        head = "a" * 40
+        remote = "b" * 40
+        commands: list[list[str]] = []
+
+        def run_git(command: list[str], **_kwargs):
+            commands.append(command)
+            args = command[command.index("-C") + 2:]
+            if args[:3] == ["symbolic-ref", "--quiet", "--short"]:
+                return self.result(args, stdout="main\n")
+            if args == ["remote"]:
+                return self.result(args, stdout="origin\n")
+            if args == ["rev-parse", "HEAD"]:
+                return self.result(args, stdout=f"{head}\n")
+            if args[:3] == ["ls-remote", "--heads", "origin"]:
+                return self.result(args, stdout=f"{remote}\trefs/heads/main\n")
+            if args[:2] == ["cat-file", "-e"]:
+                return self.result(args)
+            if args[:2] == ["merge-base", "--is-ancestor"]:
+                return self.result(args)
+            if args == ["push", "--quiet", "origin", "HEAD:refs/heads/main"]:
+                return self.result(args)
+            self.fail(f"unexpected pusher Git command: {args}")
+
+        with (
+            mock.patch("secretary.checkpoint.state_repo.state_repo_lock", return_value=contextlib.nullcontext()),
+            mock.patch("secretary.state_repo.os.getuid", return_value=0),
+            mock.patch("secretary.state_repo.pwd.getpwuid", return_value=SimpleNamespace(pw_name="runtime")),
+            mock.patch("secretary.state_repo.subprocess.run", side_effect=run_git),
+        ):
+            state = CheckpointPusher(self.instance).push()
+
+        self.assertEqual(state["status"], "pushed")
+        self.assertEqual(
+            [command[command.index("-C") + 2:] for command in commands],
+            [
+                ["symbolic-ref", "--quiet", "--short", "HEAD"],
+                ["remote"],
+                ["rev-parse", "HEAD"],
+                ["ls-remote", "--heads", "origin", "refs/heads/main"],
+                ["cat-file", "-e", f"{remote}^{{commit}}"],
+                ["merge-base", "--is-ancestor", remote, head],
+                ["push", "--quiet", "origin", "HEAD:refs/heads/main"],
+            ],
+        )
+        for command in commands:
+            git = command.index("git")
+            self.assertEqual(command[:5], ["runuser", "--user", "runtime", "--", "env"])
+            self.assertIn("GIT_TERMINAL_PROMPT=0", command)
+            self.assertIn("GIT_SSH_COMMAND=ssh -o BatchMode=yes", command)
+            self.assertEqual(command[git + 1:git + 5], [
+                "-c", f"safe.directory={self.instance.resolve()}", "-c", "core.hooksPath=/dev/null",
+            ])
+
+    def test_branch_discovery_failure_remains_actionable_not_no_branch(self):
+        failure = self.result(
+            ["symbolic-ref", "--quiet", "--short", "HEAD"],
+            returncode=128,
+            stderr="fatal: detected dubious ownership\n",
+        )
+        with mock.patch("secretary.checkpoint.state_repo.run_git", return_value=failure):
+            state = CheckpointPusher(self.instance).push()
+
+        self.assertEqual(state["status"], "failed")
+        self.assertIn("dubious ownership", state["reason"])
+        self.assertNotIn("no checked-out branch", state["reason"])
 
 
 class CheckpointPusherTests(unittest.TestCase):
