@@ -682,6 +682,9 @@ class _ProbeHost:
         "freeze_worker",
         "retain_worker",
         "resume_worker",
+        # Typing into a live head is an effect even though it stops nothing: a probe that ran it
+        # would interrupt a working worker with a prompt about a round the probe is only modelling.
+        "prompt_worker_report",
         "verify_worker_result",
         "gate_check",
         "complete_green",

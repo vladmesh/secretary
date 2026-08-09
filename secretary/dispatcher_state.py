@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from secretary.dispatcher_types import DispatcherError
-from secretary.dispatcher_worker_lifecycle import WorkerContinuation
+from secretary.dispatcher_worker_lifecycle import WorkerContinuation, WorkerReportNudge
 
 
 # Every way a claim can answer "not this card". A claim-skip is about the card in front of the
@@ -137,6 +137,10 @@ class DispatcherRecord:
     # observe the same aged idle episode.  It replaces the former second, microsecond-adjacent
     # probe: a fresh tick gives a resumed turn a real chance to report busy.
     worker_idle_confirmations: int = 0
+    # The one report prompt this round may spend on a confirmed-idle worker (secretary-1172),
+    # before the watchdog stops or replaces it. Durable and keyed on the report generation, so the
+    # bound survives a restart and belongs to the round rather than to a tick.
+    worker_report_nudge: WorkerReportNudge = field(default_factory=WorkerReportNudge)
     # Durable worker ownership while validation has the checkout. This is deliberately one typed
     # state value rather than four optional fields whose combinations callers would have to infer.
     worker_continuation: WorkerContinuation = field(default_factory=WorkerContinuation)
@@ -235,6 +239,7 @@ class DispatcherRecord:
             "review_pid_file": self.review_pid_file,
             "worker_idle_since": self.worker_idle_since,
             "worker_idle_confirmations": self.worker_idle_confirmations,
+            "worker_report_nudge": self.worker_report_nudge.to_json(),
             "worker_progress_at": self.worker_progress_at,
             "worker_continuation": self.worker_continuation.to_json(),
             "worker_respawns": self.worker_respawns,
@@ -324,6 +329,9 @@ class DispatcherRecord:
             worker_progress_at=float(payload.get("worker_progress_at") or 0.0),
             worker_idle_since=float(payload.get("worker_idle_since") or 0.0),
             worker_idle_confirmations=int(payload.get("worker_idle_confirmations") or 0),
+            # Absent on every record written before the prompt existed, which is exactly a round
+            # that has not spent one: the empty value opens the same single prompt for it.
+            worker_report_nudge=WorkerReportNudge.from_json(payload.get("worker_report_nudge")),
             worker_continuation=WorkerContinuation.from_json(
                 payload.get("worker_continuation")
             ),
