@@ -3375,7 +3375,11 @@ class DispatcherRuntime:
             try:
                 self.host.verify_worker_result(task, record)
             except HostError as exc:
-                self.host.stop(record)
+                unconfirmed = self._stop_worker_confirmed(
+                    record, ref, step="advance", attempt_id=attempt_id
+                )
+                if unconfirmed is not None:
+                    return unconfirmed
                 self.writer.move(
                     role="dispatcher",
                     actor=self.owner,
@@ -3439,7 +3443,11 @@ class DispatcherRuntime:
             self.save_records(payload, records)
             return {"status": "ok", "step": "advance", "pilot_ref": ref, "attempt_id": attempt_id, "to": "validate"}
         if marker == "report:blocked":
-            self.host.stop(record)
+            unconfirmed = self._stop_worker_confirmed(
+                record, ref, step="advance", attempt_id=attempt_id
+            )
+            if unconfirmed is not None:
+                return unconfirmed
             self.writer.move(
                 role="dispatcher",
                 actor=self.owner,
@@ -3474,8 +3482,12 @@ class DispatcherRuntime:
         ref = task["ref"]
         rejected = record.rejected_done_reports + 1
         if rejected >= 2:
+            unconfirmed = self._stop_worker_confirmed(
+                record, ref, step="advance", attempt_id=attempt_id
+            )
+            if unconfirmed is not None:
+                return unconfirmed
             record.rejected_done_reports = rejected
-            self.host.stop(record)
             self.writer.move(
                 role="dispatcher",
                 actor=self.owner,
