@@ -1048,7 +1048,14 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
         remote_files = self._git(self.remote, "show", "--format=", "--name-only", "main").splitlines()
         self.assertIn("heads/heads.yaml", remote_files)
         self.assertIn("heads/source.yaml", remote_files)
-        self.assertEqual(read_source(self.instance)["revision"], product_revision(self.context.product_root))
+        source = read_source(self.instance)
+        self.assertIsNotNone(source)
+        self.assertEqual(
+            source["canonical"],
+            str(canonical_path(self.context.product_root, self.instance)[0].resolve()),
+        )
+        self.assertEqual(source["product_root"], str(self.context.product_root.resolve()))
+        self.assertEqual(source["revision"], product_revision(self.context.product_root))
 
         recovered = self.root / "recovered"
         self._git(self.root, "clone", "--quiet", str(self.remote), str(recovered))
