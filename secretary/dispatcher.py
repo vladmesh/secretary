@@ -2050,6 +2050,60 @@ class CommandHostRuntime:
         status = _head_process_status(record.worker_pid_file)
         return bool(status.get("known") and not status.get("alive"))
 
+    def worker_addressable(self, record: DispatcherRecord) -> bool:
+        """Whether this card's worker is a live conversation a prompt could be typed into.
+
+        The same question `resume_worker` answers for itself, asked before anything durable is
+        written: a head that cannot take a prompt at all must not have an intent reserved against
+        it, or the round would spend its one report prompt on a delivery that was never possible.
+        """
+        if self.mode == "noop":
+            return False
+        return self._continuation_addressable(record)
+
+    def prompt_worker_report(self, task: dict[str, Any], record: DispatcherRecord) -> None:
+        """Ask a live worker to run the open round's ordinary report command. Nothing else.
+
+        Deliberately not a small `resume_worker`. That one hands a conversation a *new* round: it
+        rewrites TASK.md, drops the report bodies and wakes a suspended process. This one arrives in
+        the middle of a round nobody has closed, so it touches none of that — the document the head
+        already has is the document it is being pointed back at, and rewriting it under a head that
+        may be mid-turn would replace the instructions it is working from.
+
+        A suspended head is refused rather than continued for the same reason: waking one is a
+        lifecycle transition with its own durable boundary, and this is not it.
+        """
+        status = _head_process_status(record.worker_pid_file)
+        if not status.get("known") or not status.get("alive"):
+            raise HostError("worker session exited")
+        if status.get("stopped"):
+            raise HostError("worker session is suspended and cannot take a report prompt")
+        if not self._continuation_addressable(record):
+            raise HostError("worker session cannot accept a report prompt")
+        workspace = Path(record.workspace)
+        if not workspace.is_dir():
+            raise HostError("worker workspace is missing")
+        adapter = record.worker_run.get("adapter")
+        prompt = _report_nudge_prompt(record.report_generation, task["ref"])
+        try:
+            if adapter == "codex":
+                _deliver_tui_prompt(
+                    record.handle, str(workspace), "TASK.md", run_json=self._run_json,
+                    prompt_text=prompt,
+                )
+            else:
+                _deliver_interactive_prompt(
+                    record.handle,
+                    prompt,
+                    run_json=self._run_json,
+                    confirm=_turn_started_confirm(
+                        record.handle, str(workspace), str(adapter or ""),
+                        run_json=self._run_json,
+                    ),
+                )
+        except (TuiDeliveryError, HostError) as exc:
+            raise HostError(f"worker report prompt was not delivered: {exc}") from None
+
     def resume_worker(self, task: dict[str, Any], record: DispatcherRecord) -> None:
         """Resume an addressable retained worker and deliver its updated rework task.
 
@@ -3791,6 +3845,18 @@ class DispatcherRuntime:
                         "pilot_ref": task["ref"], "attempt_id": attempt_id,
                         "action": f"{kind}-idle-unconfirmed", "reason": idle_trigger,
                     }
+                if kind == "worker":
+                    # The confirmed-idle boundary, and the last point before something destructive
+                    # happens to a head that may simply have finished without reporting. The round
+                    # spends one prompt here; everything below is what it has always been, and is
+                    # what this returns to the moment that prompt is spent, refused or impossible.
+                    # A prompt that was attempted and failed travels on in the trigger, so the
+                    # respawn or Blocked that follows says so rather than reporting only silence.
+                    prompted, idle_trigger = self._prompt_worker_report(
+                        task, record, records, payload, attempt_id, trigger=idle_trigger
+                    )
+                    if prompted is not None:
+                        return prompted
                 # Degraded, not ok. A head that stopped without delivering is the pipeline failing
                 # to make progress on a card, and the operator learns about it from the tick's own
                 # health: an `ok` bounce would write healthy telemetry over the one signal that
@@ -3840,6 +3906,85 @@ class DispatcherRuntime:
         if outcome == "respawn":
             return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=now, trigger=f"no {_wait_expectation(kind)} within {stall}s")
         return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=stall, trigger=f"no {_wait_expectation(kind)}")
+
+    def _prompt_worker_report(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        trigger: str,
+    ) -> tuple[dict[str, Any] | None, str]:
+        """Spend this round's one report prompt on a confirmed-idle worker, or decline to.
+
+        Hands back the tick's outcome and the trigger the caller carries on with. A `None` outcome
+        means the watchdog carries on into the stop-and-replace path it always had, and every way
+        this declines is a way that path is the right one:
+
+          * the round already spent its prompt — a second confirmed-idle episode, or a restart over
+            an intent nobody confirmed. Either way the head has had its reminder or cannot be given
+            a second one, and the escalation is what is left;
+          * the head is not a conversation anything can be typed into (a spent Codex exec turn, a
+            head with no pane). Asked before the intent is written, so an unaddressable worker
+            neither burns the round's prompt nor writes a record nobody can act on;
+          * the delivery failed or could not be confirmed. Nothing here recovers from that: an
+            unconfirmed prompt intent is precisely when a second writer must not be opened, and the
+            caller's next step is `_stop_worker_confirmed`, which either confirms the head is gone
+            or ends the tick without a replacement.
+
+        The order is the durability contract, the same one the red continuation uses: intent on
+        disk, then the send, then the confirmation. A tick that dies in the middle leaves an intent
+        that reads as spent, which is what stops a restart from typing the same prompt twice.
+        """
+        ref = task["ref"]
+        nudge = record.worker_report_nudge
+        generation = record.report_generation
+        if nudge.spent(generation):
+            return None, trigger
+        if not self.host.worker_addressable(record):
+            return None, trigger
+        nudge.begin(generation, time.time())
+        records[ref] = record
+        self.save_records(payload, records)
+        try:
+            self.host.prompt_worker_report(task, record)
+        except HostError as exc:
+            return None, f"{trigger}, and the report prompt was refused: {scrub_host_output(str(exc))}"
+        nudge.confirm()
+        # The prompted head owns a fresh idle window: it has just been given something to do, and
+        # charging it with the episode that produced the prompt would escalate on the next tick
+        # before the worker could possibly have answered.
+        _reset_idle(record, "worker")
+        records[ref] = record
+        self.save_records(payload, records)
+        # Persisted before the comment, for the reason the respawn is: an exception out of the
+        # writer must not leave the prompt delivered and the record saying it was not.
+        self.writer.comment(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            body=(
+                f"Dispatcher wait watchdog: {trigger}. The worker head was asked once to run the "
+                f"report command for generation {generation}. The round, its TASK.md and its owner "
+                "are unchanged. Another idle episode in this round stops the head instead."
+            ),
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id, "worker-report-prompt", ref, str(generation)
+            ),
+        )
+        return {
+            # Degraded for the same reason the respawn below is: a card whose worker had to be
+            # reminded is a card the pipeline is not moving on its own, and an `ok` here would write
+            # healthy telemetry over the one signal an operator has before this reaches Blocked.
+            "status": "degraded",
+            "step": "advance",
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "action": "worker-report-prompted",
+            "reason": trigger,
+        }, trigger
 
     def _trigger_wait_watchdog(
         self, task, record, records, payload, attempt_id, *, kind: str, trigger: str,
@@ -5517,6 +5662,31 @@ def _continuation_prompt(
         "an earlier turn of this conversation ends in a different number and belongs to a round "
         "that is over: that id already names that round's report and its body file is gone, so "
         "running it reports nothing here, whether it fails or answers from the old round's record."
+    )
+
+
+def _report_nudge_prompt(generation: int, reference: str) -> str:
+    """What a worker that stopped working without reporting is told, once per round.
+
+    It opens no round and carries no instruction about the work: the round, its TASK.md and its
+    ownership are exactly what they were a moment before this was sent. The generation is spelled
+    out for the same reason the continuation prompt spells it out — the conversation's own scrollback
+    holds earlier rounds' commands, and a number is what makes a replayed one visibly wrong.
+
+    The last sentence is the point of the whole prompt. The incident this answers was a head that
+    had committed its work and gone back to its prompt believing it was finished, so a reminder that
+    only named the command would have been read as something already done. A commit, a push or a
+    green test run is not a report, and the pipeline is holding this card until the command runs.
+    """
+    card = f" for {reference}" if reference else ""
+    return (
+        f"The dispatcher is still waiting for the worker report of generation {generation}{card}, "
+        "and this head is sitting at its prompt with nothing delivered for that round. If the work "
+        "is done, report it now with the report command in TASK.md at the workspace root: its "
+        f"--request-id and its body file both end in {generation}. If it is not done, carry on — "
+        "this changes nothing about the task, the round or what the round owes. Committing, "
+        "pushing, a green test run or an earlier round's report command is not a report of this "
+        "round: the card moves only when that command runs."
     )
 
 
