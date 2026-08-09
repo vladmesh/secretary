@@ -4378,7 +4378,11 @@ class ObserverCodexTrustTests(unittest.TestCase):
                 launch = self.host.catalog.head_launch(
                     head, "TASK.md", workspace=str(workspace), role=role
                 )
-                self.assertIn(f"CODEX_HOME={self.codex_home} codex exec", launch.command)
+                self.assertIn(
+                    f"CODEX_HOME={self.codex_home} codex --dangerously-bypass-approvals-and-sandbox",
+                    launch.command,
+                )
+                self.assertNotIn("codex exec", launch.command)
                 self.assertIn(f"--role {role}", launch.command)
                 self.assertFalse(self.codex_home.exists())
 
@@ -4393,7 +4397,6 @@ class _ObserverCatalog(FakeCatalog):
         *,
         workspace: str,
         role: str,
-        codex_mode: str | None = None,
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
     ):
@@ -4410,7 +4413,6 @@ class _TuiCatalog(FakeCatalog):
         *,
         workspace: str,
         role: str,
-        codex_mode: str | None = None,
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
     ):

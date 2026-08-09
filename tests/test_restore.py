@@ -776,6 +776,48 @@ class RestoredNonTaskSwimlaneTests(unittest.TestCase):
                 import_normalized_board(data_dir, client=RefusingBoard())
 
 
+class RestoredCodexLaunchModeTests(unittest.TestCase):
+    """A checkpoint older than the TUI-only rule still restores, and restores nothing exec.
+
+    The export is read without failing — a restore must never stop on a field an old board
+    legitimately carried — but the mode is not put back on the live card: `TaskWriter.create`
+    refuses it, and a card carrying it would be claiming a launch shape the product removed.
+    """
+
+    @staticmethod
+    def _card(mode: str) -> dict[str, object]:
+        return {
+            "fields": {}, "metadata": {"project": "secretary", "task_type": "code",
+                                       "codex_launch_mode": mode},
+        }
+
+    def test_a_legacy_exec_card_restores_with_no_launch_mode(self) -> None:
+        self.assertEqual(restore_module._restore_fields(self._card("exec"))["codex_launch_mode"], "")
+
+    def test_the_interactive_mode_round_trips_unchanged(self) -> None:
+        self.assertEqual(restore_module._restore_fields(self._card("tui"))["codex_launch_mode"], "tui")
+
+    def test_the_export_and_live_views_of_a_legacy_card_agree(self) -> None:
+        """Both sides of the restore comparison read that card as carrying no mode, so a
+        legitimately restored card is never reported as a parity mismatch."""
+        exported = restore_module._core_from_export({
+            "reference": "secretary-1", "title": "t", "description": "d", "column": "Ready",
+            "fields": {}, "metadata": {"project": "secretary", "task_type": "code",
+                                       "codex_launch_mode": "exec"},
+        })
+        live = restore_module._core_from_live({
+            "ref": "secretary-1", "title": "t", "description": "d", "state": "ready",
+            "project": "secretary", "type": "code",
+            "routing": {"complexity": "standard", "family_preference": "auto",
+                        "codex_launch_mode": None},
+        })
+
+        self.assertIsNone(exported["routing"]["codex_launch_mode"])
+        self.assertEqual(
+            exported["routing"]["codex_launch_mode"], live["routing"]["codex_launch_mode"]
+        )
+
+
 class RestoredOrderParityTests(unittest.TestCase):
     """Паритет расположения сверяет порядок, а не абсолютные номера позиций.
 

@@ -44,7 +44,7 @@ from secretary.role_env import observer_binding
 from secretary import role_env as head_role_env
 from secretary.dispatcher_state import DispatcherRecord
 from secretary import upgrade
-from secretary.head_registry import canonical_heads, materialize_snapshot, record_source, snapshot_header
+from secretary.head_registry import canonical_heads, installed_heads, materialize_snapshot, record_source, snapshot_header
 from secretary.host import SHIPPED_PACKAGING_ROOT, SystemdLayout, render_systemd_unit
 from secretary.host_apply import resolve_packaged
 from triggered_agents.agents.pipeline import heads
@@ -558,11 +558,13 @@ class RoleRoutingGenerationTests(unittest.TestCase):
         heads.validate_registry(resources, profiles)
         registry = heads.Registry(resources, profiles)
 
-        command = heads.render_command(
+        rendered = heads.render_command(
             "opus-medium", role="reviewer", prompt="review", registry=registry
         )
 
-        self.assertIn("--model opus --effort medium", command)
+        self.assertIn("--model opus --effort medium", rendered.command)
+        # A claude command seeds its own prompt, so there is nothing left to deliver into it.
+        self.assertFalse(rendered.prompt_after_start)
         with self.assertRaisesRegex(heads.HeadRegistryError, "unknown claude effort"):
             heads.validate_registry(
                 resources,
@@ -894,6 +896,151 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             wrap_role_shell_command(
                 "worker", "true", identity=observer_binding("sprint:1126", "abc123def456"),
             )
+
+
+class CodexIsInteractiveOnlyTests(unittest.TestCase):
+    """Every Codex head the product can launch is one interactive session (secretary-1173)."""
+
+    RESOURCES = {"openai-sub": {"account": "openai-subscription", "probe": "true"}}
+
+    def test_the_portable_registry_states_the_mode_on_every_codex_profile(self) -> None:
+        """Stated, not defaulted: the generated installation snapshot is a copy of these tables,
+        so an operator reading the snapshot sees the mode rather than having to know the default."""
+        canon = canonical_heads(upgrade.running_product_root())
+
+        codex = {
+            pid: profile for pid, profile in canon["profiles"].items()
+            if profile.get("adapter") == "codex"
+        }
+        self.assertTrue(codex, "the portable registry is expected to ship Codex heads")
+        for pid, profile in codex.items():
+            with self.subTest(profile=pid):
+                self.assertEqual(profile.get("codex_mode"), "tui")
+
+    def test_the_generated_installation_registry_carries_the_mode_too(self) -> None:
+        """What a live tick actually reads is the snapshot, not this checkout's canon."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        instance = Path(tmp.name)
+        (instance / "instance.yaml").write_text(
+            "version: 1\nname: modes\ndata_dir: " + str(instance / "data") + "\n", encoding="utf-8"
+        )
+        (instance / "heads").mkdir()
+
+        materialize_snapshot(instance, upgrade.running_product_root())
+        record_source(instance, upgrade.running_product_root())
+        installed = installed_heads(instance)
+
+        codex = {
+            pid: profile for pid, profile in installed["profiles"].items()
+            if profile.get("adapter") == "codex"
+        }
+        self.assertTrue(codex)
+        for pid, profile in codex.items():
+            with self.subTest(profile=pid):
+                self.assertEqual(profile.get("codex_mode"), "tui")
+
+    def test_every_role_default_and_fallback_target_is_reachable_and_interactive(self) -> None:
+        """Role defaults and fallback chains reach nothing that would launch another way."""
+        canon = canonical_heads(upgrade.running_product_root())
+        profiles = canon["profiles"]
+
+        reachable = set(canon["role_defaults"].values())
+        for profile in profiles.values():
+            reachable.update(profile.get("fallback") or [])
+        for pid in sorted(reachable):
+            with self.subTest(profile=pid):
+                profile = profiles[pid]
+                if profile.get("adapter") == "codex":
+                    self.assertEqual(profile.get("codex_mode"), "tui")
+
+    def test_a_missing_mode_resolves_to_the_interactive_one(self) -> None:
+        profiles = {"bare": {"resource": "openai-sub", "adapter": "codex", "fallback": []}}
+        heads.validate_registry(self.RESOURCES, profiles)
+        registry = heads.Registry(self.RESOURCES, profiles)
+
+        rendered = heads.render_command(
+            "bare", role="worker", prompt="do the card", workspace="/tmp/ws", registry=registry
+        )
+
+        self.assertTrue(rendered.prompt_after_start)
+        self.assertNotIn("codex exec", rendered.command)
+        self.assertIn("codex --dangerously-bypass-approvals-and-sandbox", rendered.command)
+        self.assertNotIn("do the card", rendered.command)
+        self.assertEqual(registry.profile("bare").get("codex_mode"), None)
+
+    def test_a_registry_that_still_pins_exec_is_refused(self) -> None:
+        """Fail closed rather than launch: there is no renderer left for what it asks for."""
+        with self.assertRaisesRegex(heads.HeadRegistryError, "unknown codex launch mode 'exec'"):
+            heads.validate_registry(
+                self.RESOURCES,
+                {"old": {
+                    "resource": "openai-sub", "adapter": "codex",
+                    "codex_mode": "exec", "fallback": [],
+                }},
+            )
+
+    def test_no_role_can_be_rendered_a_codex_exec_command(self) -> None:
+        """Sweep the shipped registry: every profile, every role that launches one."""
+        canon = canonical_heads(upgrade.running_product_root())
+        registry = heads.Registry(canon["resources"], canon["profiles"], canon["role_defaults"])
+
+        for pid in registry.known():
+            for role in ("worker", "reviewer", "observer", "curator", "retro", "steward"):
+                with self.subTest(profile=pid, role=role):
+                    rendered = heads.render_command(
+                        pid, role=role, prompt="skill", workspace="/tmp/ws", registry=registry
+                    )
+                    self.assertNotIn("codex exec", rendered.command)
+
+    def test_a_declared_old_codex_id_resolves_instead_of_orphaning_an_override(self) -> None:
+        """A head id already written onto a card or a spec keeps pointing at a launchable head.
+
+        The installation republishes its Codex heads under interactive ids; the ids the old exec
+        profiles had are still sitting in `head_override`, `review_head_override` and an agent's
+        automation spec, and each one has to reach the equivalent profile that exists now.
+        """
+        profiles = {
+            "codex": {"resource": "openai-sub", "adapter": "codex", "fallback": []},
+            "codex-high": {
+                "resource": "openai-sub", "adapter": "codex", "effort": "high", "fallback": [],
+            },
+            "codex-extra": {
+                "resource": "openai-sub", "adapter": "codex", "effort": "extra", "fallback": [],
+            },
+        }
+        heads.validate_registry(self.RESOURCES, profiles)
+        registry = heads.Registry(self.RESOURCES, profiles)
+
+        for old in (
+            "codex", "codex-sol", "codex-terra", "codex-luna", "codex-5-4", "codex-mini",
+            "codex-spark", "codex-high", "codex-extra", "codex-reviewer", "codex-curator",
+            "codex-steward", "codex-retro",
+        ):
+            with self.subTest(head=old):
+                resolved = registry.resolve(old)
+                self.assertIn(resolved, profiles, f"{old} would orphan its override")
+                self.assertEqual(registry.profile(resolved)["adapter"], "codex")
+
+    def test_an_unavailable_non_codex_id_still_fails_closed(self) -> None:
+        """No substitution across model families, and no substitution for an id nobody declared."""
+        profiles = {"codex": {"resource": "openai-sub", "adapter": "codex", "fallback": []}}
+        registry = heads.Registry(self.RESOURCES, profiles)
+
+        for unknown in ("claude-opus", "hermes", "codex-does-not-exist", ""):
+            with self.subTest(head=unknown):
+                self.assertEqual(registry.resolve(unknown), unknown)
+                with self.assertRaises(heads.HeadRegistryError):
+                    registry.profile(registry.resolve(unknown))
+
+    def test_an_old_id_is_never_resolved_onto_another_family(self) -> None:
+        """A registry that reused one of the candidate ids for a Claude profile is not a stand-in."""
+        profiles = {
+            "codex-tui": {"resource": "openai-sub", "adapter": "claude", "fallback": []},
+        }
+        registry = heads.Registry(self.RESOURCES, profiles)
+
+        self.assertEqual(registry.resolve("codex-terra"), "codex-terra")
 
 
 if __name__ == "__main__":

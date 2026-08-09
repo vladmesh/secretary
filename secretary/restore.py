@@ -49,6 +49,7 @@ from secretary.tasks import (
     all_project_cards,
 )
 from secretary.product_issues import ProductIssueValidationError, registered_projects, validate_product_issue_records
+from triggered_agents.agents.pipeline.heads import CODEX_LAUNCH_MODES
 
 
 @dataclass(frozen=True)
@@ -811,7 +812,13 @@ def _restore_fields(card: dict[str, Any]) -> dict[str, str]:
         "base_branch": value("base_branch"),
         "complexity": _enum_or_default(value("complexity"), {"cheap", "standard", "hard", "frontier"}, "standard"),
         "family_preference": _enum_or_default(value("family_preference"), {"auto", "claude", "codex"}, "auto"),
-        "codex_launch_mode": _enum_or_default(value("codex_launch_mode"), {"", "exec", "tui"}, ""),
+        # A checkpoint older than the TUI-only rule still carries `exec` here. It is read without
+        # failing and restored as no mode at all: recreating the card with it would put a launch
+        # shape the product removed back on a live board, and `TaskWriter.create` refuses it
+        # anyway. Every mode the product still has round-trips unchanged.
+        "codex_launch_mode": _enum_or_default(
+            value("codex_launch_mode"), {"", *CODEX_LAUNCH_MODES}, ""
+        ),
     }
 
 

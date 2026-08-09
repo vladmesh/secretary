@@ -192,6 +192,10 @@ from secretary.tasks import (
     durability_dirt,
     standing_decision,
 )
+from triggered_agents.agents.pipeline.heads import (
+    CODEX_TUI_MODE,
+    resolve_head_id as _resolve_head_id,
+)
 from triggered_agents.agents.pipeline.task_protocol import pythonpath_prefix
 
 # The prompts below are read and run by a head in its own shell, so the checkout fallback stays a
@@ -321,19 +325,32 @@ class InstanceCatalog:
 
     def worker_head(self, task: dict[str, Any]) -> str:
         requested = task.get("routing", {}).get("head_override")
-        head = str(requested) if requested else str(
+        head = self._resolved_head(str(requested) if requested else str(
             self._heads.get("role_defaults", {}).get("new_card") or "codex"
-        )
+        ))
         self._head_profile(head)
         return head
 
     def review_head(self, task: dict[str, Any]) -> str:
         requested = task.get("routing", {}).get("review_head_override")
-        head = str(requested) if requested else str(
+        head = self._resolved_head(str(requested) if requested else str(
             self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer"
-        )
+        ))
         self._head_profile(head)
         return head
+
+    def _resolved_head(self, head: str) -> str:
+        """The profile in this snapshot that serves a head id somebody else wrote down.
+
+        A card's `head_override`, a dispatcher record and this catalog's own last-resort ids all
+        outlive the registry generation that defined them. An id the snapshot still defines is
+        used as written; a declared old Codex id resolves to the equivalent interactive Codex
+        profile the snapshot does define, so already-recorded overrides are not orphaned by an
+        installation republishing its Codex heads. Every other unknown id is returned unchanged
+        and fails at the profile lookup that follows.
+        """
+        profiles = self._heads.get("profiles")
+        return _resolve_head_id(head, profiles if isinstance(profiles, dict) else {})
 
     def head_fallback(self, head: str) -> list[str]:
         """The ordered fallback chain `head` names in the registry, empty when it names none.
@@ -373,7 +390,7 @@ class InstanceCatalog:
         claimed = (task.get("routing") or {}).get(key)
         if not claimed:
             return current(task)
-        head = str(claimed)
+        head = self._resolved_head(str(claimed))
         try:
             self._head_profile(head)
         except HostError as exc:
@@ -401,16 +418,14 @@ class InstanceCatalog:
         routing = task.get("routing") or {}
         if role == "worker":
             override = routing.get("head_override")
-            asked = str(override) if override else str(
+            asked = self._resolved_head(str(override) if override else str(
                 self._heads.get("role_defaults", {}).get("new_card") or "codex"
-            )
-            codex_mode = str(routing.get("codex_launch_mode") or "")
+            ))
         else:
             override = routing.get("review_head_override")
-            asked = str(override) if override else str(
+            asked = self._resolved_head(str(override) if override else str(
                 self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer"
-            )
-            codex_mode = ""
+            ))
         launched = str(head) if head else asked
         if launched != asked:
             head_source = HEAD_FROM_FALLBACK if failover else HEAD_FROM_RECORD
@@ -433,7 +448,6 @@ class InstanceCatalog:
             head_source=head_source,
             profile=profile,
             resources=resources if isinstance(resources, dict) else {},
-            codex_mode=codex_mode,
             model=model,
             model_source=model_source,
         )
@@ -490,7 +504,6 @@ class InstanceCatalog:
         *,
         workspace: str,
         role: str,
-        codex_mode: str | None = None,
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
     ) -> HeadLaunch:
@@ -502,7 +515,7 @@ class InstanceCatalog:
                 launch = HeadLaunch(_render_claude_command(profile, prompt_file, launch_prompt=launch_prompt))
             else:
                 launch = _render_codex_launch(
-                    profile, prompt_file, workspace=workspace, mode=codex_mode, launch_prompt=launch_prompt
+                    profile, prompt_file, workspace=workspace, launch_prompt=launch_prompt
                 )
         except HeadLaunchError as exc:
             raise HostError(str(exc)) from None
@@ -599,7 +612,6 @@ class CommandHostRuntime:
             "TASK.md",
             role="worker",
             env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
-            codex_mode=task.get("routing", {}).get("codex_launch_mode"),
             launch_prompt=self._worker_launch_prompt(),
             task=task,
             failover=failover,
@@ -638,7 +650,6 @@ class CommandHostRuntime:
             "TASK.md",
             role="worker",
             env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
-            codex_mode=task.get("routing", {}).get("codex_launch_mode"),
             launch_prompt=self._worker_launch_prompt(),
             task=task,
             failover=bool(record.preferred_head),
@@ -1006,11 +1017,10 @@ class CommandHostRuntime:
             # Head snapshots can change while a card is waiting.  That makes the optional TUI
             # supplement unavailable, not the terminal inventory itself unavailable.
             return None
-        mode = (
-            task.get("routing", {}).get("codex_launch_mode")
-            or profile.get("codex_mode", "exec")
-        )
-        if profile.get("adapter") != "codex" or mode != "tui" or not record.workspace:
+        # Every Codex head is one interactive session, so the rollout supplement applies to all of
+        # them. Neither the card's retired `codex_launch_mode` nor the profile's own mode is
+        # consulted: there is no second launch shape left for either to select.
+        if profile.get("adapter") != "codex" or not record.workspace:
             return None
         from triggered_agents.agents.pipeline.codex_sessions import latest_activity_for
         return latest_activity_for(record.workspace)
@@ -1668,7 +1678,6 @@ class CommandHostRuntime:
         *,
         role: str,
         env_name: str,
-        codex_mode: str | None = None,
         launch_prompt: str | None = None,
         split_from: str = "",
         task: dict[str, Any] | None = None,
@@ -1706,7 +1715,6 @@ class CommandHostRuntime:
                 prompt_file,
                 workspace=workspace,
                 role=role,
-                codex_mode=codex_mode,
                 launch_prompt=launch_prompt,
             )
             command = launch.command
@@ -2006,13 +2014,20 @@ class CommandHostRuntime:
     def _continuation_addressable(self, record: DispatcherRecord) -> bool:
         """Whether this worker head is a live provider conversation a prompt can be sent into.
 
-        Codex TUI and Claude's interactive terminal are; a one-shot Codex exec worker has already
-        spent its turn, and a head with no pane handle cannot be typed into at all.
+        Codex TUI and Claude's interactive terminal are; a head with no pane handle cannot be
+        typed into at all.
+
+        The record is read, not the registry: it describes the head that actually started for this
+        card. Every Codex head the product launches now is interactive, but a record written
+        before that says `exec`, and that worker really was one-shot — its turn is spent, so it is
+        refused here. This is the record being read as it was written; nothing on this path can
+        make a new head launch that way.
         """
         run = record.worker_run
         adapter = run.get("adapter")
         return bool(record.handle) and (
-            adapter == "claude" or (adapter == "codex" and run.get("codex_mode") == "tui")
+            adapter == "claude"
+            or (adapter == "codex" and str(run.get("codex_mode") or CODEX_TUI_MODE) == CODEX_TUI_MODE)
         )
 
     def worker_retained_alive(self, record: DispatcherRecord) -> bool:
@@ -2107,9 +2122,11 @@ class CommandHostRuntime:
     def resume_worker(self, task: dict[str, Any], record: DispatcherRecord) -> None:
         """Resume an addressable retained worker and deliver its updated rework task.
 
-        Codex TUI and Claude's interactive terminal are both live provider conversations.  A
-        Codex exec worker has already spent its turn, so it deliberately follows the replacement
-        path. A running process after a crash is only known to have received the prompt when its
+        Codex TUI and Claude's interactive terminal are both live provider conversations. A worker
+        whose own record says it ran one-shot has already spent its turn, so it deliberately
+        follows the replacement path — see `_continuation_addressable`, which reads that record
+        rather than deciding from a registry the head no longer runs off. A running process after
+        a crash is only known to have received the prompt when its
         provider turn is visibly underway; otherwise replay resumes at the SIGCONT/send boundary.
         """
         status = _head_process_status(record.worker_pid_file)

@@ -88,6 +88,12 @@ fallback = ["codex-observer"]
 
 # Codex heads. Each falls back to its Claude counterpart, so a host whose OpenAI subscription is
 # red — or that never had one — keeps running without editing this file.
+#
+# Every one of them is `codex_mode = "tui"`: an interactive session the launcher brings up empty
+# and then sends the prompt into. It is stated on each profile rather than left to the default so
+# the generated installation snapshot says it too, and it is the only mode there is — the one-shot
+# `codex exec` head is gone from the product (secretary-1173), so a profile naming it is refused
+# when the registry is validated.
 
 [profiles.codex]
 # Stable default id for the native OpenAI head, at the model's own default reasoning effort. No
@@ -96,6 +102,7 @@ fallback = ["codex-observer"]
 resource = "openai-sub"
 adapter = "codex"
 effort = "default"
+codex_mode = "tui"
 fallback = ["claude-sonnet"]
 
 [profiles.codex-high]
@@ -103,6 +110,7 @@ fallback = ["claude-sonnet"]
 resource = "openai-sub"
 adapter = "codex"
 effort = "high"
+codex_mode = "tui"
 fallback = ["claude-opus"]
 
 [profiles.codex-reviewer]
@@ -111,13 +119,14 @@ fallback = ["claude-opus"]
 resource = "openai-sub"
 adapter = "codex"
 effort = "extra"
+codex_mode = "tui"
 fallback = ["claude-opus"]
 
 [profiles.codex-observer]
 # Sprint observer: one long-lived head per open sprint, launched by the dispatcher and held until
-# the sprint closes. TUI rather than exec, because the observer is one continuous session for the
-# whole sprint — a one-shot `codex exec` would exit after its first turn and the tick would read
-# that as a dead head every time.
+# the sprint closes. It was the first head held to an interactive session, because the observer is
+# one continuous session for the whole sprint — a one-shot head would exit after its first turn and
+# the tick would read that as a dead head every time.
 resource = "openai-sub"
 adapter = "codex"
 effort = "extra"

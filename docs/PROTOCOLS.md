@@ -180,7 +180,7 @@ python3 -P -m secretary task list --project PROJECT
 python3 -P -m secretary task show --ref PROJECT-N
 python3 -P -m secretary task list --sprint sprint:ID
 python3 -P -m secretary task create --role po --project PROJECT --type code \
-  --title TITLE --state ready --head codex-extra --codex-mode exec --sprint sprint:ID
+  --title TITLE --state ready --head codex-extra --sprint sprint:ID
 python3 -P -m secretary task archive --role po --ref PROJECT-N \
   --reason-file REASON.md --request-id REQUEST_ID
 python3 -P -m secretary task edit --role po --ref PROJECT-N \
@@ -205,8 +205,11 @@ legacy blank-reference rules. An older id-less pending create has no automatic a
 it remains fail-closed for manual resolution rather than searching for a plausible live row or creating a
 duplicate.
 
-`--codex-mode` is valid only for a worker profile on a `codex` adapter. Without an
-override, launch mode comes from the head profile.
+`--codex-mode` is valid only for a worker profile on a `codex` adapter, and `tui` is the only
+value it takes. Every Codex head is one interactive session that the launcher brings up empty and
+then sends the prompt into; the one-shot `codex exec` head is gone, so `--codex-mode exec` is
+rejected before the board is touched, a head profile that names it fails registry validation, and a
+card restored or read with it carries no launch mode at all.
 
 `archive` closes an execution task in the backend and removes it from ordinary active listings without
 deleting board history. It is PO-only, requires a non-empty reason, writes append-only audit and
@@ -888,7 +891,7 @@ the round too: the merge tears the worktree down, waking the suspended head befo
   "attempt": 2, "attempt_id": "...", "phase": "verdict", "outcome": "red",
   "heads": [{"role": "worker", "head": "codex", "head_source": "card",
              "adapter": "codex", "model": "gpt-5.6-terra", "model_source": "profile",
-             "effort": "default", "codex_mode": "exec",
+             "effort": "default", "codex_mode": "tui",
              "resource": "openai-sub", "account": "openai-subscription"}]}}
 ```
 

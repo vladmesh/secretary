@@ -24,8 +24,11 @@ import json
 import os
 import shlex
 import tomllib
+from collections.abc import Mapping
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -102,14 +105,58 @@ CODEX_EFFORTS = {
 
 CLAUDE_EFFORTS = {"default", "low", "medium", "high", "xhigh", "max"}
 
-CODEX_LAUNCH_MODES = {"exec", "tui"}
+# Every Codex head is an interactive TUI session; `exec` is gone from the product. A profile that
+# says nothing means this, and a registry that still names another mode is refused rather than
+# quietly launched as something the product can no longer render.
+CODEX_TUI_MODE = "tui"
+CODEX_LAUNCH_MODES = {CODEX_TUI_MODE}
+
+# Codex profile ids from before that rule. They are written down in places the registry does not
+# own — a card's `head_override` or `review_head_override`, a dispatcher record, an agent's
+# automation.toml — so an installation that republishes its Codex heads under interactive ids must
+# not orphan them. Each maps to the ids an equivalent profile may be published under, closest
+# first. The id itself always wins when the registry still defines it, and only a `codex` profile
+# is ever accepted as the stand-in, so nothing here can move a head to another model family.
+LEGACY_CODEX_HEADS: dict[str, tuple[str, ...]] = {
+    "codex": ("codex-tui", "codex-terra"),
+    "codex-sol": ("codex", "codex-tui"),
+    "codex-terra": ("codex", "codex-tui"),
+    "codex-luna": ("codex", "codex-tui"),
+    "codex-5-4": ("codex", "codex-tui"),
+    "codex-mini": ("codex", "codex-tui"),
+    "codex-spark": ("codex", "codex-tui"),
+    "codex-high": ("codex-high-tui", "codex-extra", "codex", "codex-tui"),
+    "codex-extra": ("codex-extra-tui", "codex-high", "codex-high-tui", "codex", "codex-tui"),
+    "codex-reviewer": ("codex-reviewer-tui", "codex-extra", "codex-extra-tui", "codex-high", "codex"),
+    "codex-curator": ("codex-extra", "codex-reviewer", "codex-high", "codex"),
+    "codex-steward": ("codex-high", "codex-extra", "codex-reviewer", "codex"),
+    "codex-retro": ("codex-high", "codex", "codex-tui"),
+}
+
+
+def resolve_head_id(profile_id: str, profiles: Mapping[str, Any]) -> str:
+    """The profile id that actually serves `profile_id` in a registry's `profiles` table.
+
+    A head id outlives the registry generation that defined it, so this is what keeps an
+    already-recorded override pointing at something launchable. An id the registry still defines
+    is returned untouched; a declared old Codex id resolves to the closest interactive Codex
+    profile that registry does define; anything else comes back unchanged so the lookup that needs
+    it fails closed by name.
+    """
+    if not isinstance(profiles, Mapping) or profile_id in profiles:
+        return profile_id
+    for candidate in LEGACY_CODEX_HEADS.get(profile_id, ()):
+        profile = profiles.get(candidate)
+        if isinstance(profile, dict) and profile.get("adapter") == "codex":
+            return candidate
+    return profile_id
 
 
 class HeadRegistryError(RuntimeError):
     """heads.toml is missing/malformed, or a profile/resource/adapter/fallback it names is unknown."""
 
 
-def _render_claude(profile: dict, *, prompt: str) -> str:
+def _render_claude(profile: dict, *, prompt: str, workspace: str | None = None) -> str:
     model = profile.get("model")
     model_flag = f" --model {model}" if model else ""
     effort = profile.get("effort", "default")
@@ -117,7 +164,7 @@ def _render_claude(profile: dict, *, prompt: str) -> str:
     return f"claude --dangerously-skip-permissions{model_flag}{effort_flag} {prompt!r}"
 
 
-def _render_hermes(profile: dict, *, prompt: str) -> str:
+def _render_hermes(profile: dict, *, prompt: str, workspace: str | None = None) -> str:
     """Hermes' one-shot-seeded-session equivalent of `claude --dangerously-skip-permissions
     <prompt>`: `-z` seeds an autonomous session with the initial message (not `-q`/`chat`'s
     single-turn query mode), `--yolo` is Hermes' skip-permissions, `--cli` forces the plain REPL
@@ -129,25 +176,6 @@ def _render_hermes(profile: dict, *, prompt: str) -> str:
         parts += ["--provider", profile["provider"]]
     parts += ["--yolo", "--cli"]
     return " ".join(parts)
-
-
-def _render_codex(profile: dict, *, prompt: str) -> str:
-    """Codex' non-interactive equivalent of `claude --dangerously-skip-permissions <prompt>`:
-    `exec` runs one-shot (prints the agent turn, no TUI), `--dangerously-bypass-approvals-and-sandbox`
-    is codex' skip-permissions (the Orca worktree is the external sandbox; it also lets the memory
-    MCP tool run without an interactive approval prompt), `--skip-git-repo-check` keeps a
-    not-yet-a-repo workspace from aborting. `CODEX_HOME` is pinned to the ChatGPT-authed home
-    (see CODEX_HOME above) so the head finds its login, memory MCP, and global AGENTS.md regardless
-    of the launching terminal's env. `codex_home` on the profile overrides it (e.g. for an e2e)."""
-    home = profile.get("codex_home") or CODEX_HOME
-    model = profile.get("model")
-    model_flag = f" -m {model}" if model else ""
-    effort = CODEX_EFFORTS.get(profile.get("effort", "default"))
-    effort_flag = ""
-    if effort:
-        effort_flag = " -c " + shlex.quote(f'model_reasoning_effort="{effort}"')
-    return (f"CODEX_HOME={home} codex exec --dangerously-bypass-approvals-and-sandbox "
-            f"--skip-git-repo-check{model_flag}{effort_flag} {prompt!r}")
 
 
 def _toml_basic_string(value: str) -> str:
@@ -223,8 +251,11 @@ def _codex_trust_flag(path: str) -> str:
     return " -c " + shlex.quote(key)
 
 
-def _render_codex_tui(profile: dict, *, workspace: str | None = None) -> str:
+def _render_codex_tui(profile: dict, *, prompt: str | None = None, workspace: str | None = None) -> str:
     """Interactive Codex TUI command. The prompt is sent after Orca reports `tui-idle`.
+
+    `prompt` is accepted and never used: this is the only shape a Codex head has, and the caller
+    that renders a command for one delivers its prompt into the live session afterwards.
 
     `--skip-git-repo-check` is an `exec`-only flag in Codex 0.143; the top-level TUI rejects it.
     Pipeline worker/reviewer workspaces are git worktrees already, so the TUI path does not need
@@ -250,8 +281,20 @@ def _render_codex_tui(profile: dict, *, workspace: str | None = None) -> str:
 ADAPTERS = {
     "claude": _render_claude,
     "hermes": _render_hermes,
-    "codex": _render_codex,
+    "codex": _render_codex_tui,
 }
+
+# Adapters whose command carries no prompt at all: the caller brings the head up and then delivers
+# the prompt into the live session.
+PROMPT_AFTER_START_ADAPTERS = {"codex"}
+
+
+@dataclass(frozen=True)
+class HeadCommand:
+    """One head's launch command, and whether its prompt still has to be delivered into it."""
+
+    command: str
+    prompt_after_start: bool = False
 
 
 class Registry:
@@ -269,6 +312,10 @@ class Registry:
         """
         head = self.role_defaults.get(role)
         return str(head) if head else None
+
+    def resolve(self, profile_id: str) -> str:
+        """The profile id that actually serves `profile_id` here. See `resolve_head_id`."""
+        return resolve_head_id(profile_id, self.profiles)
 
     def profile(self, profile_id: str) -> dict:
         """The profile dict for `profile_id`, or HeadRegistryError with the known ids — the text
@@ -386,7 +433,10 @@ def validate_registry(resources: dict, profiles: dict) -> None:
                 known = ", ".join(sorted(CODEX_EFFORTS))
                 raise HeadRegistryError(f"profile {pid!r} has unknown codex effort {effort!r} "
                                         f"(known: {known})")
-            mode = _named(prof.get("codex_mode", "exec"), f"profile {pid!r} codex launch mode")
+            # An absent mode is the interactive one: a Codex head has no other launch shape, and a
+            # registry that still pins the retired `exec` is refused here rather than launched as
+            # something no renderer can produce.
+            mode = _named(prof.get("codex_mode", CODEX_TUI_MODE), f"profile {pid!r} codex launch mode")
             if mode not in CODEX_LAUNCH_MODES:
                 known = ", ".join(sorted(CODEX_LAUNCH_MODES))
                 raise HeadRegistryError(f"profile {pid!r} has unknown codex launch mode {mode!r} "
@@ -469,13 +519,29 @@ def _load_registry(path: Path) -> Registry:
     return Registry(resources=resources, profiles=profiles, role_defaults=role_defaults)
 
 
-def render_command(profile_id: str, *, role: str, prompt: str, registry: Registry | None = None) -> str:
-    """The full shell command for `orca terminal create --command`.
+def render_command(
+    profile_id: str,
+    *,
+    role: str,
+    prompt: str,
+    workspace: str = "",
+    registry: Registry | None = None,
+) -> HeadCommand:
+    """The full shell command for `orca terminal create --command`, and how its prompt is delivered.
 
     The role env wrapper sets BOARD_ROLE and the minimal role-specific runtime env before the
     adapter command execs. Secret values stay out of the command string Orca stores.
+
+    A Codex head is an interactive session, so its command carries no prompt: `prompt_after_start`
+    says the caller still has to send `prompt` into the live pane once it is ready. `workspace` is
+    what that head's directory-trust override names and is required for one.
     """
     reg = registry or load_registry()
     profile = reg.profile(profile_id)
-    render = ADAPTERS[profile["adapter"]]
-    return role_env.wrap_shell_command(role, render(profile, prompt=prompt))
+    adapter = profile["adapter"]
+    render = ADAPTERS[adapter]
+    command = render(profile, prompt=prompt, workspace=workspace)
+    return HeadCommand(
+        role_env.wrap_shell_command(role, command),
+        prompt_after_start=adapter in PROMPT_AFTER_START_ADAPTERS,
+    )

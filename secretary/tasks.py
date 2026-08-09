@@ -103,6 +103,10 @@ _KNOWN_METADATA = {
 _TASK_TYPES = {"code", "research"}
 _COMPLEXITIES = {"cheap", "standard", "hard", "frontier"}
 _FAMILY_PREFERENCES = {"auto", "claude", "codex"}
+# The launch modes a card may carry. It is the registry's own set, so a card can never ask for a
+# mode no head can be launched in. Cards written before Codex became TUI-only still hold the
+# retired `exec`; it is outside this set, so `_normalize` reads such a card as carrying no mode at
+# all rather than as a card that asked for a launch shape the product no longer has.
 _CODEX_LAUNCH_MODES = CODEX_LAUNCH_MODES
 _ROLES = {"po", "dispatcher", "worker", "reviewer", "steward", "retro", "observer"}
 _COMMENT_ROLES = _ROLES
@@ -1010,7 +1014,12 @@ class TaskWriter:
         if family_preference not in _FAMILY_PREFERENCES:
             raise TaskError("validation", "family preference must be one of: " + ", ".join(sorted(_FAMILY_PREFERENCES)), 2)
         if codex_launch_mode and codex_launch_mode not in _CODEX_LAUNCH_MODES:
-            raise TaskError("validation", "codex launch mode must be exec or tui", 2)
+            # Refused here, before any board call: a card must not be able to carry a launch mode
+            # the product cannot launch. `exec` is the one this rejects in practice, and it is
+            # rejected rather than downgraded, so nobody is left believing the card asked for
+            # something that then quietly ran as something else.
+            known = ", ".join(sorted(_CODEX_LAUNCH_MODES))
+            raise TaskError("validation", f"codex launch mode must be {known}", 2)
         if priority:
             raise TaskError("validation", "tasks do not accept product priority", 2)
         if slug and not _SLUG_RE.match(slug):
@@ -2263,6 +2272,8 @@ class TaskWriter:
         )
         normalized = self._pending_create_task(event)
         expected_mode = _text(payload.get("codex_launch_mode"))
+        if expected_mode not in _CODEX_LAUNCH_MODES:
+            expected_mode = ""
         if expected_mode and normalized["routing"]["codex_launch_mode"] != expected_mode:
             raise TaskError("backend_error", "pending create metadata remains incomplete", 1)
 
@@ -2444,6 +2455,12 @@ def _create_metadata_values(payload: dict[str, Any]) -> dict[str, str]:
         ("sprint", "sprint_ref"),
     ):
         value = _text(payload.get(payload_key))
+        if metadata_key == "codex_launch_mode" and value not in _CODEX_LAUNCH_MODES:
+            # A create recorded before Codex became TUI-only can still be replayed by the repair
+            # path. Its retired launch mode is dropped rather than written back: the reader no
+            # longer accepts it, so writing it would leave the repair unable to confirm the
+            # metadata it just wrote, and the card is launched interactively either way.
+            continue
         if value:
             values[metadata_key] = value
     return values

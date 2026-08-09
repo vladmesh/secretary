@@ -24,7 +24,6 @@ from secretary.role_env import (
 from triggered_agents.agents.pipeline.heads import (
     CLAUDE_EFFORTS,
     CODEX_EFFORTS,
-    CODEX_LAUNCH_MODES,
 )
 from triggered_agents.agents.pipeline.task_protocol import pythonpath_prefix
 
@@ -150,11 +149,10 @@ def render_codex_command(
     prompt_file: str,
     *,
     workspace: str,
-    mode: str | None = None,
     launch_prompt: str | None = None,
 ) -> str:
     return render_codex_launch(
-        profile, prompt_file, workspace=workspace, mode=mode, launch_prompt=launch_prompt
+        profile, prompt_file, workspace=workspace, launch_prompt=launch_prompt
     ).command
 
 
@@ -163,16 +161,22 @@ def render_codex_launch(
     prompt_file: str,
     *,
     workspace: str,
-    mode: str | None = None,
     launch_prompt: str | None = None,
 ) -> HeadLaunch:
-    launch_mode = _codex_launch_mode(profile, mode)
-    if launch_mode == "tui":
-        # The TUI carries no prompt on its command line; the caller delivers launch_prompt
-        # (or the prompt_file contents) through `orca terminal send` once the TUI is idle.
-        return HeadLaunch(_render_codex_tui_command(profile, workspace=workspace), prompt_after_start=True)
+    """The command that brings one Codex head up. There is one shape and it is interactive.
+
+    Nothing selects it: no profile field, no card, no caller argument. The one-shot `codex exec`
+    head is gone (secretary-1173), so a launch mode carried by routing data or by a registry that
+    predates that has nothing left to select and is not consulted here at all.
+
+    The TUI carries no prompt on its command line, which is what `prompt_after_start` says: the
+    caller delivers `launch_prompt` (or the prompt_file contents) through `orca terminal send`
+    once the pane is ready. `prompt_file` and `launch_prompt` are still named on the signature
+    because they are the caller's own prompt inputs, and the caller resolves them the same way for
+    every adapter.
+    """
     return HeadLaunch(
-        _render_codex_exec_command(profile, prompt_file, workspace=workspace, launch_prompt=launch_prompt)
+        _render_codex_tui_command(profile, workspace=workspace), prompt_after_start=True
     )
 
 
@@ -239,21 +243,6 @@ def _settings_model(path: Path) -> str:
     return str(loaded.get("model") or "").strip()
 
 
-def _render_codex_exec_command(
-    profile: dict[str, Any],
-    prompt_file: str,
-    *,
-    workspace: str,
-    launch_prompt: str | None = None,
-) -> str:
-    args = _codex_base_args(profile)
-    args.insert(1, "exec")
-    args.append("--skip-git-repo-check")
-    for path in _codex_trust_paths(workspace):
-        args += ["-c", f"projects.{json.dumps(path)}.trust_level=\"trusted\""]
-    return f"CODEX_HOME={shlex.quote(_codex_home(profile))} {shlex.join(args)} {_delivered_prompt(prompt_file, launch_prompt)}"
-
-
 def _render_codex_tui_command(profile: dict[str, Any], *, workspace: str) -> str:
     # The `projects` overrides below state the intent on the command line; what the TUI actually
     # checks before it asks about trust is `config.toml`, written by `ensure_codex_workspace_trusted`.
@@ -287,14 +276,6 @@ def _codex_effort(profile: dict[str, Any]) -> str | None:
         known = ", ".join(sorted(CODEX_EFFORTS))
         raise HeadLaunchError(f"codex profile has unknown effort {effort_name!r} (known: {known})")
     return CODEX_EFFORTS[effort_name]
-
-
-def _codex_launch_mode(profile: dict[str, Any], override: str | None) -> str:
-    mode = (override or str(profile.get("codex_mode") or "exec")).strip()
-    if mode not in CODEX_LAUNCH_MODES:
-        known = ", ".join(sorted(CODEX_LAUNCH_MODES))
-        raise HeadLaunchError(f"codex profile has unknown launch mode {mode!r} (known: {known})")
-    return mode
 
 
 def _load_claude_config(config: Path) -> dict[str, Any]:

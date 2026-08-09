@@ -20,6 +20,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
+from triggered_agents.agents.pipeline.heads import CODEX_TUI_MODE
+
 
 ROUTING_KIND = "routing"
 WORKER = "worker"
@@ -118,14 +120,15 @@ def head_run_from_profile(
     head_source: str,
     profile: dict[str, Any],
     resources: dict[str, Any],
-    codex_mode: str = "",
     model: str | None = None,
     model_source: str = "",
 ) -> HeadRun:
     """Snapshot the profile that was launched.
 
-    `codex_mode` overrides the profile's own launch mode (a card can pin `codex_launch_mode`), so
-    the record shows the mode the head really started in.
+    A Codex head is recorded under the one launch mode the product has, and it is written here
+    rather than copied from the profile or from the card: `codex_launch_mode` on a card is retired
+    routing data that selects nothing, and a legacy `exec` in either place would put a mode in the
+    journal that no head of this bring-up could have run in.
 
     `model` overrides the profile's own field for a head whose model the profile does not decide: a
     claude profile without `model` renders a command without `--model` and the CLI resolves one at
@@ -142,7 +145,7 @@ def head_run_from_profile(
     mode = ""
     effort = ""
     if adapter == "codex":
-        mode = str(codex_mode or profile.get("codex_mode") or "exec")
+        mode = CODEX_TUI_MODE
         effort = str(profile.get("effort") or "default")
     elif adapter == "claude":
         effort = str(profile.get("effort") or "default")
