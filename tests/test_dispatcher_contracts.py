@@ -636,6 +636,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         )
         ensure_board_transport(self.instance, allow_default=True)
         materialize_snapshot(self.instance, upgrade.running_product_root())
+        record_source(self.instance, upgrade.running_product_root())
         self.layout = SystemdLayout(
             product_root=self.root / "product",
             instance_path=self.instance,

@@ -29,6 +29,7 @@ from secretary.sprints import (
     sprint_admission_lock,
 )
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
+from tests.head_registry import write_installed_pair
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
 
 
@@ -215,10 +216,7 @@ HEAD_SNAPSHOT = "\n".join([
 
 
 def _write_head_registry(instance: Path) -> Path:
-    (instance / "heads").mkdir(parents=True, exist_ok=True)
-    path = instance / "heads" / "heads.yaml"
-    path.write_text(HEAD_SNAPSHOT, encoding="utf-8")
-    return path
+    return write_installed_pair(instance, HEAD_SNAPSHOT)
 
 
 class SprintFixture(unittest.TestCase):

@@ -39,7 +39,7 @@ from secretary.dispatcher_observer import (
 )
 from secretary.dispatcher_watchdog import idle_stall_seconds
 from secretary.head_health import HeadHealth
-from secretary.head_registry import materialize_snapshot
+from secretary.head_registry import materialize_snapshot, record_source
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard
 
@@ -737,6 +737,7 @@ class EnvDataDirConflictTests(unittest.TestCase):
         # A real instance the dispatcher will accept, so the writer path is resolved by the same
         # code the unit runs, not by a stub standing in for it.
         materialize_snapshot(self.instance, Path(__file__).resolve().parents[1])
+        record_source(self.instance, Path(__file__).resolve().parents[1])
         env = mock.patch.dict(
             os.environ,
             {"SECRETARY_INSTANCE": str(self.instance), "SECRETARY_DATA_DIR": str(self.env_data)},
