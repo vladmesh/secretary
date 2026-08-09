@@ -1,6 +1,6 @@
 """The private instance repository as a shared commit target.
 
-Contract: docs/RECOVERY.md, sections "Layout" and "Writer". Five writers commit
+Contract: docs/RECOVERY.md, sections "Layout" and "Writer". Six writers commit
 to the private instance repository: the tick writer (`state/board`, `state/runs`),
 the memory writer (`state/memory`), the knowledge writer (`state/knowledge`), the
 secret store (`secrets/`) and the local-configuration writer (`.gitignore` through
