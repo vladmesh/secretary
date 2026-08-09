@@ -26,8 +26,33 @@ class StateRepoPrivilegeTests(unittest.TestCase):
 
         command = run.call_args.args[0]
         self.assertEqual(command[:4], ["runuser", "--user", "runtime", "--"])
-        self.assertEqual(command[4], "git")
-        self.assertNotIn("safe.directory", command)
+        self.assertEqual(command[4], "env")
+        self.assertIn("GIT_TERMINAL_PROMPT=0", command)
+        self.assertIn("GIT_SSH_COMMAND=ssh -o BatchMode=yes", command)
+        self.assertIn("git", command)
+        self.assertIn(f"safe.directory={instance.resolve()}", command)
+        self.assertIn("core.hooksPath=/dev/null", command)
+        self.assertEqual(run.call_args.kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
+
+    def test_root_boundary_never_runs_runtime_hooks_or_config_as_root(self) -> None:
+        """The pusher shares this boundary before any Git subcommand starts."""
+        with tempfile.TemporaryDirectory() as tmp:
+            instance = Path(tmp)
+            result = SimpleNamespace(returncode=0, stdout="", stderr="")
+            account = SimpleNamespace(pw_name="runtime")
+            with (
+                mock.patch("secretary.state_repo.os.getuid", return_value=0),
+                mock.patch("secretary.state_repo.pwd.getpwuid", return_value=account),
+                mock.patch("secretary.state_repo.subprocess.run", return_value=result) as run,
+            ):
+                state_repo.run_git(instance, ["push", "origin", "HEAD:main"], label="test")
+
+        command = run.call_args.args[0]
+        git = command.index("git")
+        self.assertEqual(command[:4], ["runuser", "--user", "runtime", "--"])
+        self.assertEqual(command[git + 1:git + 5], [
+            "-c", f"safe.directory={instance.resolve()}", "-c", "core.hooksPath=/dev/null",
+        ])
 
     def test_non_root_calls_git_directly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

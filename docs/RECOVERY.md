@@ -121,13 +121,15 @@ for the next window or operator action.
 
 ## Writers
 
-Five writers touch the repository, each with its own pathspec:
+Six writers touch the repository, each with its own pathspec:
 
 - tick writer: `state/board`, `state/runs`, at the end of a dispatcher tick under the tick lock;
 - memory writer: `state/memory`, on `propose`/`commit`/`supersede`;
 - knowledge writer: `state/knowledge`, on `secretary knowledge write`;
 - secret writer: `secrets/`, on `secret init/set/import/remove`.
   `secret list` and `secret materialize` are not part of this writer.
+- head-registry writer: `heads/heads.yaml`, `heads/source.yaml`, on `secretary upgrade`; it commits
+  and immediately pushes the matching pair rather than waiting for the tick's 30-minute window.
 - local-configuration writer: `.gitignore`, when local configuration such as
   `board-transport.env` needs a durable exclusion.
 

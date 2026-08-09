@@ -75,6 +75,7 @@ from secretary.dispatcher_types import (
     review_pane_label,
 )
 from secretary.head_registry import canonical_heads
+from tests.head_registry import write_installed_pair
 from secretary.routing_journal import (
     HeadRun,
     attempts as routing_attempts,
@@ -495,8 +496,7 @@ class TwoOpenSprintAdmission:
             (instance / "projects" / f"{project}.yaml").write_text(
                 f"id: {project}\n", encoding="utf-8",
             )
-        (instance / "heads").mkdir(parents=True, exist_ok=True)
-        (instance / "heads" / "heads.yaml").write_text(SPRINT_HEAD_SNAPSHOT, encoding="utf-8")
+        write_installed_pair(instance, SPRINT_HEAD_SNAPSHOT)
         # The setting is in force before either create runs: it is what the second one is
         # admitted by, and admission reads it live.
         (instance / "instance.yaml").write_text("open_sprint_limit: 2\n", encoding="utf-8")

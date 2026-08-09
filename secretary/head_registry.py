@@ -2,10 +2,10 @@
 
 Two files live side by side under the installation's ``heads/`` directory. ``heads.yaml`` is the
 registry the running installation uses; ``source.yaml`` records which canonical file, which product
-checkout and which revision ``secretary upgrade`` generated it from. The pair is the whole point: a
-live tick reads only the installation's own files, so a product checkout that moves — a branch, an
-uncommitted edit, a half-finished refactor — cannot change or stop a running installation. Only an
-upgrade moves the installation, and the pin says what it moved to.
+checkout and which revision ``secretary upgrade`` generated it from. The pin also fingerprints the
+snapshot, so a live tick accepts only a matching installed pair. It reads no product checkout: a
+branch, an uncommitted edit or a half-finished refactor cannot change or stop a running installation.
+Only an upgrade moves the installation, and it durably publishes the pair before reporting success.
 
 Which heads exist is installation configuration, not product code: the accounts, models and
 fallback chains one host pays for are not the ones another host has. So an installation may own
@@ -19,6 +19,7 @@ the operator never chose.
 
 from __future__ import annotations
 
+import hashlib
 import stat
 import subprocess
 import tomllib
@@ -48,6 +49,7 @@ SOURCE_HEADER = (
 UNKNOWN_REVISION = "unknown"
 PRODUCT_ORIGIN = "product"
 INSTANCE_ORIGIN = "instance"
+SOURCE_REQUIRED_FIELDS = ("canonical", "canonical_owner", "product_root", "revision", "snapshot_sha256")
 
 
 def snapshot_header(canonical: Path) -> str:
@@ -213,6 +215,52 @@ def read_source(instance_path: Path) -> dict[str, Any] | None:
     return loaded
 
 
+def _snapshot_sha256(snapshot: str) -> str:
+    return hashlib.sha256(snapshot.encode("utf-8")).hexdigest()
+
+
+def _validated_source_pair(instance_path: Path, snapshot: str) -> dict[str, Any]:
+    """Validate the source pin that makes an installed snapshot recoverable.
+
+    A snapshot is intentionally self-contained at runtime, but it is not a
+    recovery-canon update on its own.  The pin records the exact source checkout
+    and fingerprint of the generated file, so a restore cannot combine a new
+    snapshot with an old pin (or silently accept a snapshot copied from some
+    unrelated checkout).
+    """
+    path = source_path(instance_path)
+    source = read_source(instance_path)
+    if source is None:
+        raise HeadRegistryConfigError(
+            f"installation head registry source pin {path} is missing; run `secretary upgrade --instance "
+            f"{_instance_dir(instance_path)}` to regenerate the recovery pair"
+        )
+    missing = [key for key in SOURCE_REQUIRED_FIELDS if not isinstance(source.get(key), str) or not source[key]]
+    if missing:
+        raise HeadRegistryConfigError(
+            f"head registry source pin {path} is incomplete ({', '.join(missing)}); run `secretary upgrade --instance "
+            f"{_instance_dir(instance_path)}` to regenerate the recovery pair"
+        )
+    if source["canonical_owner"] not in (PRODUCT_ORIGIN, INSTANCE_ORIGIN):
+        raise HeadRegistryConfigError(
+            f"head registry source pin {path} has an invalid canonical_owner; run `secretary upgrade --instance "
+            f"{_instance_dir(instance_path)}` to regenerate the recovery pair"
+        )
+    try:
+        expected_header = snapshot_header(Path(source["canonical"]))
+    except (TypeError, ValueError):
+        raise HeadRegistryConfigError(
+            f"head registry source pin {path} has an invalid canonical path; run `secretary upgrade --instance "
+            f"{_instance_dir(instance_path)}` to regenerate the recovery pair"
+        ) from None
+    if not snapshot.startswith(expected_header) or source["snapshot_sha256"] != _snapshot_sha256(snapshot):
+        raise HeadRegistryConfigError(
+            f"head registry recovery pair {snapshot_path(instance_path)} and {path} is stale or mismatched; "
+            f"run `secretary upgrade --instance {_instance_dir(instance_path)}` to regenerate it"
+        )
+    return source
+
+
 def pinned_product_root(instance_path: Path) -> Path:
     """Which checkout this installation runs: the recorded pin, else the configured one.
 
@@ -239,12 +287,15 @@ def record_source(instance_path: Path, product_root: Path, *, dry_run: bool = Fa
     """
     target = source_path(instance_path)
     canonical, origin = canonical_path(product_root, instance_path)
+    canonical = canonical.expanduser().resolve(strict=False)
+    snapshot = render_snapshot(canonical_heads(product_root, instance_path), canonical)
     desired = SOURCE_HEADER + yaml.safe_dump(
         {
             "canonical": str(canonical),
             "canonical_owner": origin,
             "product_root": str(Path(product_root).expanduser().resolve(strict=False)),
             "revision": product_revision(product_root),
+            "snapshot_sha256": _snapshot_sha256(snapshot),
         },
         allow_unicode=True,
         default_flow_style=False,
@@ -267,20 +318,29 @@ def record_source(instance_path: Path, product_root: Path, *, dry_run: bool = Fa
 
 
 def installed_heads(instance_path: Path) -> dict[str, Any]:
-    """The registry this installation runs off, validated. No product checkout is consulted.
+    """The registry this installation runs off, validated as a recovery pair.
 
     This is what a live tick reads. It deliberately does not compare against any checkout's
     ``heads.toml``: the installation moves when `secretary upgrade` moves it and at no other time.
     A snapshot that is itself broken — missing a table, naming an unknown resource or adapter,
     routing a role to a head that does not exist — still stops the caller, by name.
     """
-    return _validated_registry(load_snapshot(instance_path), snapshot_path(instance_path))
+    path = snapshot_path(instance_path)
+    try:
+        snapshot = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise HeadRegistryConfigError(f"cannot load installation head snapshot {path}: {exc}") from None
+    loaded = load_snapshot(instance_path)
+    registry = _validated_registry(loaded, path)
+    _validated_source_pair(instance_path, snapshot)
+    return registry
 
 
 def materialize_snapshot(instance_path: Path, product_root: Path, *, dry_run: bool = False) -> bool:
     """Write the canonical snapshot. Returns whether the target differs."""
     target = snapshot_path(instance_path)
     canonical, _ = canonical_path(product_root, instance_path)
+    canonical = canonical.expanduser().resolve(strict=False)
     desired = render_snapshot(canonical_heads(product_root, instance_path), canonical)
     try:
         current = target.read_text(encoding="utf-8")

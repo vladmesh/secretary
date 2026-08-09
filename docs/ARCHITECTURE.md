@@ -23,9 +23,11 @@ the file becomes a materialised copy.
 Product configuration reaches an installation one way: `secretary upgrade` generates
 `heads/heads.yaml` from the installation's head canon — its own `heads/heads.toml` when it has one,
 else the product's small portable default — and writes `heads/source.yaml` next to it, recording
-that canon, which side owns it, and the checkout and revision it was taken from. A live tick reads only the snapshot, so
-editing the canon in a product working tree neither changes installation behaviour nor stops it. The
-cost is that a change reaches the installation only through `upgrade`, and the gap is visible in
+that canon, which side owns it, the checkout and revision it was taken from, and a digest of the
+snapshot. Upgrade commits and pushes the two generated files as one recovery-canon update. A live
+tick reads and validates that installed pair without consulting a product checkout, so editing the
+canon in a product working tree neither changes installation behaviour nor stops it. The cost is
+that a change reaches the installation only through `upgrade`, and the gap is visible in
 `secretary status` under `installation.head_registry`.
 
 No path in the product names a user or a checkout. An installation is named by `--instance` or

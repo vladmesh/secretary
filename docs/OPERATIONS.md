@@ -1361,7 +1361,8 @@ The steps, in order; each prints `changed`, `unchanged`, `skipped` or `failed`, 
 | `pull` | `git fetch` plus `merge --ff-only` of the product checkout. A dirty checkout is refused. |
 | `registries` | read the selected checkout's skill manifest, this installation's optional overlay and the head canon, and decide the whole skill delivery; a registry that cannot be read or cannot be delivered stops the run here, before the first write |
 | `dependencies` | reinstall into the virtualenv if the pull moved the dependency manifest |
-| `head-registry` | generate `heads/heads.yaml` from this installation's canon plus `heads/source.yaml`, naming that canon, its owner, and the checkout and revision it came from |
+| `head-registry` | generate `heads/heads.yaml` from this installation's canon plus `heads/source.yaml`, naming that canon, its owner, the checkout and revision it came from, and the snapshot digest |
+| `head-registry-checkpoint` | commit only the generated pair under the shared instance-repository writer lock and fast-forward publish it; an unavailable or diverged remote stops the upgrade with the retained local checkpoint named |
 | `role-skills` | `role_skills sync` into the shells' skill directories |
 | `role-worktrees` | fast-forward the role worktrees onto the base branch |
 | `host` | `reconcile apply`: units from `packaging/systemd` plus session-manager registrations |
@@ -1450,11 +1451,12 @@ the code the operator happened to run it from.
 
 ### The installation's head registry
 
-A live tick reads the head registry only from the installation's own `heads/heads.yaml` and never looks into a product
-checkout. The only operation that moves that file is `secretary upgrade`, which writes `heads/source.yaml` next to it
-with the canon it generated the snapshot from and the checkout path and revision of the product that generated it. So
-editing the product's head canon in a working tree (a branch, an uncommitted change, a half-finished refactor) has no
-effect at all on a running installation.
+A live tick reads the head registry only from the installation's own `heads/heads.yaml` and matching
+`heads/source.yaml`, never from a product checkout. The pin carries the canon, checkout path,
+revision and snapshot digest, so a stale or incomplete pair fails before routing any role. The only
+operation that moves and immediately checkpoint-publishes that pair is `secretary upgrade`. Editing
+the product's head canon in a working tree (a branch, an uncommitted change, a half-finished
+refactor) therefore has no effect at all on a running installation.
 
 Which heads exist is installation configuration. An installation owns its registry by keeping `heads/heads.toml` in its
 instance directory; that file is then the canon `upgrade` materialises from. An installation without one materialises

@@ -20,7 +20,6 @@ operations from overlapping.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import tempfile
 import time
@@ -470,7 +469,15 @@ class CheckpointPusher:
 
     def _branch(self) -> str:
         result = self._run(["symbolic-ref", "--quiet", "--short", "HEAD"], timeout=120)
-        return result.stdout.strip() if result.returncode == 0 else ""
+        if result.returncode == 0:
+            return result.stdout.strip()
+        # `symbolic-ref --quiet` uses 1 for the expected detached-HEAD case.
+        # Any other result is a Git failure, not evidence that the repository
+        # has no branch.  In particular, a root process that cannot read a
+        # runtime-user checkout must preserve that actionable cause.
+        if result.returncode == 1:
+            return ""
+        self._raise_git_failure(result, "checkpoint branch discovery")
 
     def _has_remote(self) -> bool:
         remotes = self._git(["remote"], "checkpoint remote").split()
@@ -495,32 +502,48 @@ class CheckpointPusher:
         A tip the local repo has never even seen is divergence, not a missing
         object: the remote moved on without us.
         """
-        if self._run(["cat-file", "-e", f"{remote_head}^{{commit}}"], timeout=120).returncode != 0:
+        known = self._run(["cat-file", "-e", f"{remote_head}^{{commit}}"], timeout=120)
+        # Git reports an object absent from this clone as either 1 or 128
+        # depending on its version.  That is the expected divergence case;
+        # another 128 (for example an ownership/configuration refusal) is a
+        # failed probe with a cause the operator needs to see.
+        if known.returncode == 1 or "not a valid object name" in self._git_output(known).lower():
             return False
-        return self._run(["merge-base", "--is-ancestor", remote_head, head], timeout=120).returncode == 0
+        if known.returncode != 0:
+            self._raise_git_failure(known, "checkpoint remote reachability")
+        ancestor = self._run(["merge-base", "--is-ancestor", remote_head, head], timeout=120)
+        if ancestor.returncode == 0:
+            return True
+        if ancestor.returncode == 1:
+            return False
+        self._raise_git_failure(ancestor, "checkpoint ancestry check")
 
     def _git(self, args: list[str], label: str, *, timeout: float = 120) -> str:
         result = self._run(args, timeout=timeout)
         if result.returncode != 0:
-            output = (result.stderr or result.stdout or "").strip()
-            detail = output.splitlines()
-            raise _GitFailure(
-                f"{label} failed: {detail[-1] if detail else 'git error'}", output
-            )
+            self._raise_git_failure(result, label)
         return result.stdout
 
     def _run(self, args: list[str], *, timeout: float) -> subprocess.CompletedProcess[str]:
         try:
-            return subprocess.run(
-                ["git", "-C", str(self.instance_dir), *args],
-                text=True,
-                capture_output=True,
+            return state_repo.run_git(
+                self.instance_dir,
+                args,
+                label=f"checkpoint {args[0]}",
                 timeout=timeout,
-                check=False,
-                env=_noninteractive_env(),
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise _GitFailure(f"git {args[0]} failed: {exc}") from None
+        except state_repo.StateRepoError as exc:
+            raise _GitFailure(str(exc)) from None
+
+    @staticmethod
+    def _raise_git_failure(result: subprocess.CompletedProcess[str], label: str) -> None:
+        output = CheckpointPusher._git_output(result)
+        detail = output.splitlines()
+        raise _GitFailure(f"{label} failed: {detail[-1] if detail else 'git error'}", output)
+
+    @staticmethod
+    def _git_output(result: subprocess.CompletedProcess[str]) -> str:
+        return (result.stderr or result.stdout or "").strip()
 
 
 def checkpoint_snapshot(
@@ -636,18 +659,6 @@ def _read_git(instance_dir: Path, args: list[str], *, ok_only: bool = False) -> 
     if result.returncode != 0:
         return None if ok_only else ""
     return result.stdout
-
-
-def _noninteractive_env() -> dict[str, str]:
-    """No credential prompt may ever block the tick waiting on a terminal.
-
-    Missing credentials have to surface as a failed push with a reason, not as
-    a git process parked on a password prompt nobody is there to answer.
-    """
-    env = dict(os.environ)
-    env["GIT_TERMINAL_PROMPT"] = "0"
-    env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
-    return env
 
 
 def _rfc3339(epoch: float) -> str:
