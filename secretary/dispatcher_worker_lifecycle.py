@@ -13,6 +13,86 @@ from enum import StrEnum
 from typing import Any
 
 
+class ReportNudgeStage(StrEnum):
+    NONE = "none"
+    # The intent is on disk and nothing has been sent yet, or the tick that sent it died before it
+    # could say so. The two are one stage on purpose: they are indistinguishable from the record.
+    PENDING = "pending"
+    DELIVERED = "delivered"
+
+
+@dataclass
+class WorkerReportNudge:
+    """The one reminder a report round may spend on a live worker that has stopped working.
+
+    A head that is alive, at its prompt and holding no report is the failure the idle watchdog was
+    built for, and its answer was to replace the head. Replacing one that has finished the work and
+    only missed the report throws that work away, so the round gets a single prompt at the
+    confirmed-idle boundary before anything destructive happens. Everything after that prompt is
+    unchanged: the report itself, its result verification and the gate all keep the paths they had.
+
+    Bounded by `generation`, which is the report round. That is what makes the bound a fact of the
+    round rather than of a tick: a second confirmed-idle episode in the same round finds the intent
+    already spent and escalates, and a round that opens later is a different number and gets its own
+    single prompt. It is also why nothing has to remember to clear this — a stale nudge from a round
+    that is over can never be mistaken for the current one's.
+
+    `PENDING` is deliberately as spent as `DELIVERED`. A tick that died between the intent and its
+    confirmation may or may not have typed into a live conversation, and re-entering the delivery to
+    find out would be the second prompt this bound exists to prevent. The unconfirmed intent instead
+    holds the card on the fail-closed path: nothing replaces that worker until its stop is confirmed.
+    """
+
+    stage: ReportNudgeStage = ReportNudgeStage.NONE
+    generation: int = 0
+    sent_at: float = 0.0
+
+    def spent(self, generation: int) -> bool:
+        """Whether the round `generation` has already used its one prompt."""
+        return self.stage != ReportNudgeStage.NONE and self.generation == int(generation)
+
+    @property
+    def unconfirmed(self) -> bool:
+        """An intent whose delivery nobody ever confirmed, from any round."""
+        return self.stage == ReportNudgeStage.PENDING
+
+    def begin(self, generation: int, now: float) -> None:
+        """Reserve this round's prompt, before anything is sent to the head."""
+        if self.spent(generation):
+            raise ValueError(f"report generation {generation} has already been prompted")
+        self.stage = ReportNudgeStage.PENDING
+        self.generation = int(generation)
+        self.sent_at = now
+
+    def confirm(self) -> None:
+        if self.stage not in {ReportNudgeStage.PENDING, ReportNudgeStage.DELIVERED}:
+            raise ValueError(f"cannot confirm a report prompt from {self.stage}")
+        self.stage = ReportNudgeStage.DELIVERED
+
+    # Deliberately no `clear()`, unlike the continuation below. Nothing ever has to reset this:
+    # the generation invalidates a spent prompt on its own, and a mutator that could unspend one
+    # is exactly how a round would end up prompting a live conversation twice.
+
+    def to_json(self) -> dict[str, Any]:
+        if self.stage == ReportNudgeStage.NONE:
+            return {}
+        return {
+            "stage": self.stage.value,
+            "generation": self.generation,
+            "sent_at": self.sent_at,
+        }
+
+    @classmethod
+    def from_json(cls, value: Any) -> "WorkerReportNudge":
+        if not isinstance(value, dict) or not value:
+            return cls()
+        return cls(
+            stage=ReportNudgeStage(str(value.get("stage") or "none")),
+            generation=int(value.get("generation") or 0),
+            sent_at=float(value.get("sent_at") or 0.0),
+        )
+
+
 class WorkerContinuationStage(StrEnum):
     NONE = "none"
     VALIDATION_MOVE_PENDING = "validation_move_pending"

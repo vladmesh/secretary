@@ -1172,6 +1172,24 @@ working is never ready, so this never touches a head that is thinking. Readiness
 then Blocked. A pane held in a dialog counts the same way: nothing in the pipeline answers a dialog, so that head has
 stopped as surely as one at its prompt, and the comment says which of the two it was.
 
+Before any of that happens, a worker head that is still a live conversation is asked for the report once. The
+commonest reason a head is idle with nothing on the card is that the work is finished and only the report call was
+missed, and replacing that head throws the work away, so at the first confirmed-idle boundary of a report round the
+dispatcher types one reminder into the worker's own pane: run the report command in the TASK.md you already have,
+for this generation. It changes nothing else. The task document, the report bodies, the generation and the ownership
+of the checkout are exactly what they were, and a report that follows takes the ordinary path — result verification,
+the mechanical gate, then review — because a commit, a push or a green test run has never been a report and is not
+one here either. The tick is `worker-report-prompted` and degraded, and the reminder is written on the board.
+
+That reminder is bounded per report round and is durable before it is sent. A second confirmed-idle episode in the
+same round finds it spent and takes the respawn-then-Blocked path above, so the ladder is one prompt, one
+replacement, then the operator. A head nothing can be typed into — a spent Codex exec turn, a head adopted without a
+pane identity — is never prompted and takes that path immediately. A send that is refused, or that cannot be
+confirmed to have landed, is not retried and not trusted: the round continues on the same path, through the confirmed
+stop that protects the checkout, and if the host will not confirm that stop the tick ends with nothing opened beside
+the head. A dispatcher that dies between the intent and its confirmation leaves a round that reads as already
+prompted, because typing a second prompt into a live conversation is the one thing the bound exists to prevent.
+
 That leaves the heads nothing can be read about: one adopted from a launch intent whose pane identity was never
 persisted, and one whose pane binding the session manager has lost, where the inventory still lists the pane but the
 readiness probe is refused. Neither is a working head and neither is a stopped one, so neither answer is invented for
