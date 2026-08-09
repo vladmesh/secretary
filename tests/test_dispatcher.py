@@ -3012,6 +3012,35 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
         self.assertEqual(len(self.host.reviews), 2, "escalation must not start a third reviewer")
 
+    def test_second_reviewer_stall_retries_an_unconfirmed_stop_before_blocking(self) -> None:
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self.assertEqual(self.tick()["action"], "waiting-review-verdict")
+        self._rewind_wait("review", seconds=stall_seconds("review") + 60)
+        self.assertEqual(self.tick()["action"], "review-respawned")
+        record = self._record_of()
+        identity = (record.review_handle, record.review_leaf, record.review_pid_file)
+        self._rewind_wait("review", seconds=stall_seconds("review") + 60)
+        self.host.fail_stop_review_reason = "Orca cannot confirm terminal stop"
+
+        refused = self.tick()
+
+        self.assertEqual(refused["action"], "review-stop-unconfirmed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+        record = self._record_of()
+        self.assertEqual((record.review_handle, record.review_leaf, record.review_pid_file), identity)
+        self.assertEqual(self.host.calls.count("stop_review"), 2)
+        self.assertNotIn("stop", self.host.calls)
+
+        self.host.fail_stop_review_reason = ""
+        blocked = self.tick()
+
+        self.assertEqual(blocked["to"], "blocked")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertNotIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
+        self.assertIn("stop_head:worker", self.host.calls)
+
     def test_live_reviewer_keeps_waiting_inside_the_stall_ceiling(self) -> None:
         self.start_dispatcher()
         self._run_worker_to_validate()
@@ -3282,6 +3311,38 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(
             self.host.calls.count("restart_worker"), 1, "escalation must not respawn again"
         )
+
+    def test_second_worker_stall_retries_an_unconfirmed_stop_before_blocking(self) -> None:
+        self.start_dispatcher()
+        self.tick()
+        self.assertEqual(self.tick()["action"], "waiting-worker-report")
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
+        self.assertEqual(self.tick()["action"], "worker-respawned")
+        record = self._record_of()
+        identity = (record.handle, record.worker_leaf, record.worker_pid_file)
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
+        self.host.fail_stop_head_reason = "Orca cannot confirm terminal stop"
+
+        refused = self.tick()
+
+        self.assertEqual(refused["action"], "worker-stop-unconfirmed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        record = self._record_of()
+        self.assertEqual((record.handle, record.worker_leaf, record.worker_pid_file), identity)
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertEqual(self.host.prepared, ["secretary-510-pilot", "secretary-510-pilot"])
+        self.assertEqual(self.host.calls.count("stop_head:worker"), 2)
+        self.assertNotIn("stop_workspace", self.host.calls)
+        self.assertNotIn("stop", self.host.calls)
+
+        self.host.fail_stop_head_reason = ""
+        blocked = self.tick()
+
+        self.assertEqual(blocked["to"], "blocked")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertNotIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertEqual(self.host.calls.count("stop_head:worker"), 3)
 
     def _stall_worker_wait_to_blocked(self) -> dict:
         """Drive one full stall cycle: wait past the ceiling, respawn, stall again, escalate."""

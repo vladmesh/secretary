@@ -3993,7 +3993,26 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         ref = task["ref"]
         step = "review" if kind == "review" else "advance"
-        self.host.stop(record)
+        if kind == "review":
+            # The reviewer may still hold the checkout when its second stall escalates.  End it
+            # through the same confirmed boundary that protects a reviewer respawn; a refused
+            # stop leaves the record untouched for this exact retry.
+            unconfirmed = self._end_review_pane_confirmed(
+                record, records, payload, ref, step=step, attempt_id=attempt_id
+            )
+            if unconfirmed is not None:
+                return unconfirmed
+            # Review starts over a retained worker.  It cannot outlive a terminal Blocked move
+            # either, so settle that role before dropping the only durable record for the checkout.
+            unconfirmed = self._stop_worker_confirmed(
+                record, ref, step=step, attempt_id=attempt_id
+            )
+        else:
+            unconfirmed = self._stop_worker_confirmed(
+                record, ref, step=step, attempt_id=attempt_id
+            )
+        if unconfirmed is not None:
+            return unconfirmed
         self.writer.move(
             role="dispatcher",
             actor=self.owner,
