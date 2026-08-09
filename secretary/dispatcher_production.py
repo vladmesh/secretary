@@ -682,6 +682,9 @@ class _ProbeHost:
         "freeze_worker",
         "retain_worker",
         "resume_worker",
+        # Typing into a live pane is an effect: a probe that walked this path would hand a real
+        # worker a prompt for a round the probe is only pretending to advance.
+        "nudge_worker_report",
         "verify_worker_result",
         "gate_check",
         "complete_green",

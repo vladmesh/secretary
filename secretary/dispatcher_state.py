@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from secretary.dispatcher_types import DispatcherError
-from secretary.dispatcher_worker_lifecycle import WorkerContinuation
+from secretary.dispatcher_worker_lifecycle import WorkerContinuation, WorkerReportNudge
 
 
 # Every way a claim can answer "not this card". A claim-skip is about the card in front of the
@@ -140,6 +140,11 @@ class DispatcherRecord:
     # Durable worker ownership while validation has the checkout. This is deliberately one typed
     # state value rather than four optional fields whose combinations callers would have to infer.
     worker_continuation: WorkerContinuation = field(default_factory=WorkerContinuation)
+    # The one report nudge this round may spend on a live, idle worker (secretary-1171). Durable
+    # for the same reason the continuation is: the intent has to be on disk before the pane is
+    # touched, so a tick that dies inside the delivery is recovered by re-entering that one nudge
+    # rather than by prompting the head twice or starting a second writer beside it.
+    worker_report_nudge: WorkerReportNudge = field(default_factory=WorkerReportNudge)
     review_waiting_since: float = 0.0
     review_respawns: int = 0
     review_started_at: float = 0.0
@@ -237,6 +242,7 @@ class DispatcherRecord:
             "worker_idle_confirmations": self.worker_idle_confirmations,
             "worker_progress_at": self.worker_progress_at,
             "worker_continuation": self.worker_continuation.to_json(),
+            "worker_report_nudge": self.worker_report_nudge.to_json(),
             "worker_respawns": self.worker_respawns,
             "worker_started_at": self.worker_started_at,
             "worker_run": self.worker_run,
@@ -326,6 +332,11 @@ class DispatcherRecord:
             worker_idle_confirmations=int(payload.get("worker_idle_confirmations") or 0),
             worker_continuation=WorkerContinuation.from_json(
                 payload.get("worker_continuation")
+            ),
+            # Absent in every record written before the nudge existed, which is exactly a round
+            # that has not spent one.
+            worker_report_nudge=WorkerReportNudge.from_json(
+                payload.get("worker_report_nudge")
             ),
             review_waiting_since=float(payload.get("review_waiting_since") or 0.0),
             review_respawns=int(payload.get("review_respawns") or 0),

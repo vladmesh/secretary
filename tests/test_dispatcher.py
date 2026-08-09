@@ -12,6 +12,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from secretary import dispatcher as dispatcher_module
 from secretary import role_env
 from secretary.board_transport import ensure as ensure_board_transport
 from secretary._fsutil import file_lock, try_file_lock
@@ -28,6 +29,7 @@ from secretary.dispatcher import (
     _gate_attestation_for_prompt,
     _legacy_worker_branch,
     _render_codex_command,
+    _report_nudge_prompt,
     _wrap_role_shell_command,
     default_data_dir,
 )
@@ -56,7 +58,7 @@ from secretary.dispatcher_launcher import (
     with_pid_heartbeat,
 )
 from secretary.dispatcher_review import start_review as start_reviewer
-from secretary.dispatcher_tui import TUI_IDLE_PROBE_TIMEOUT_MS
+from secretary.dispatcher_tui import TUI_IDLE_PROBE_TIMEOUT_MS, TuiDeliveryError
 from secretary.dispatcher_state import (
     DispatcherRecord,
     attempt_request_id as _attempt_request_id,
@@ -760,6 +762,12 @@ class FakeHost:
         # Most fixture cards use the ordinary exec profile, which has no conversation to resume.
         # Tests that model a retained Codex TUI clear this explicitly.
         self.fail_resume_worker_reason = "retained worker session cannot accept a continuation"
+        # The report nudge reaches a head over the same conversation a continuation does, so the
+        # profiles that cannot take one cannot take the other either: this defaults to the same
+        # refusal and is cleared by the same fixtures.
+        self.fail_nudge_worker_report_reason = "worker session cannot accept a report nudge"
+        # The prompt each report nudge carried, built the way the real host builds it.
+        self.worker_report_nudges: list[str] = []
         self.retained_workers: list[str] = []
         self.resumed_workers: list[str] = []
         # The prompt each wake carried, built the way the real host builds it.
@@ -1113,6 +1121,19 @@ class FakeHost:
             )
         )
         self.resumed_workers.append(record.handle)
+
+    def nudge_worker_report(self, task: dict, record) -> None:
+        self.calls.append("nudge_worker_report")
+        if self.fail_nudge_worker_report_reason:
+            raise HostError(self.fail_nudge_worker_report_reason)
+        if not record.handle and not record.worker_pid_file:
+            raise HostError("worker session is not confirmably running")
+        # Unlike the resume, the real host writes no document here: the round it points at is the
+        # one already in the checkout, so a fake that rewrote TASK.md would hide exactly the
+        # property this nudge has to keep.
+        self.worker_report_nudges.append(
+            _report_nudge_prompt(record.report_generation, task["ref"])
+        )
 
     def _kill_head(self, kind: str, record) -> None:
         """Drop the heartbeat of a stopped head, the way a closed pty tree does.
@@ -7176,16 +7197,21 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
     # the bounded wait for a worker report (secretary-1063) --------------------
 
-    def _head_at_its_prompt(self, kind: str = "worker", *, idle: bool = True) -> None:
+    def _head_at_its_prompt(
+        self, kind: str = "worker", *, idle: bool = True, idle_reason: str = ""
+    ) -> None:
         """The live incident's head: its process is alive and it is not working on anything.
 
         A pid-confirmed head is exempt from every timing ceiling, so this is the only state that
-        distinguishes a finished or wedged head from one that is thinking.
+        distinguishes a finished or wedged head from one that is thinking. `idle_reason` names the
+        pane held in a dialog, which is the same stopped head under a different word.
         """
         status = {
             "known": True, "live": True, "reason": "live",
             "last_activity": time.time(), "pid_confirmed": True, "idle": idle,
         }
+        if idle_reason:
+            status["idle_reason"] = idle_reason
         if kind == "review":
             self.host.review_status_result = status
         else:
@@ -7213,6 +7239,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
         first worker was actually given: that is what a retained conversation still holds.
         """
         self.host.fail_resume_worker_reason = ""
+        # The same conversation that can take a continuation can take a report nudge, so this
+        # fixture's head is addressable for both (secretary-1171).
+        self.host.fail_nudge_worker_report_reason = ""
         self.start_dispatcher()
         self.tick()
         stale_id = self._worker_report_request_id()
@@ -7225,22 +7254,32 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertNotEqual(stale_id, self._worker_report_request_id())
         return stale_id
 
-    def _bounce_the_idle_worker(self) -> dict:
-        """Drive the tick that acts on a head sitting idle with nothing delivered.
-
-        Every caller gets the health check with it: this tick is the pipeline failing to move a
-        card, so it is degraded wherever it happens, not only on the path one test drives.
-        """
-        self._head_at_its_prompt()
+    def _confirm_the_idle_head(self, *, idle_reason: str = "") -> dict:
+        """Drive one confirmed-idle episode: the pending reading, then the tick that acts on it."""
+        self._head_at_its_prompt(idle_reason=idle_reason)
         self.assertEqual(
             self.tick()["action"], "waiting-worker-report",
             "one reading of an idle pane is a head between turns, not a stalled one",
         )
         self._rewind_idle()
-        bounced = self.tick()
-        self.assertEqual(bounced["action"], "worker-idle-unconfirmed")
-        self.assertEqual(bounced["status"], "degraded")
-        bounced = self.tick()
+        pending = self.tick()
+        self.assertEqual(pending["action"], "worker-idle-unconfirmed")
+        self.assertEqual(pending["status"], "degraded")
+        return self.tick()
+
+    def _bounce_the_idle_worker(self, *, idle_reason: str = "") -> dict:
+        """Drive the tick that stops and replaces a head sitting idle with nothing delivered.
+
+        An addressable head is asked for the open round's report first (secretary-1171), and that
+        nudge resets the idle episode, so the bounce is what the second episode reaches. A head no
+        prompt can be delivered to fails closed inside the first one and is bounced there.
+
+        Every caller gets the health check with it: this tick is the pipeline failing to move a
+        card, so it is degraded wherever it happens, not only on the path one test drives.
+        """
+        bounced = self._confirm_the_idle_head(idle_reason=idle_reason)
+        if bounced["action"] == "worker-report-nudged":
+            bounced = self._confirm_the_idle_head(idle_reason=idle_reason)
         self.assertEqual(bounced["status"], "degraded")
         return bounced
 
@@ -7248,15 +7287,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         """A pane waiting on a dialog is not working either, and nothing in the pipeline answers a
         dialog, so it is the same stopped head under a different word."""
         self._open_the_second_round()
-        self.host.worker_status_result = {
-            "known": True, "live": True, "reason": "live", "last_activity": time.time(),
-            "pid_confirmed": True, "idle": True, "idle_reason": "dialog",
-        }
-        self.tick()
-        self._rewind_idle()
 
-        self.tick()
-        bounced = self.tick()
+        bounced = self._bounce_the_idle_worker(idle_reason="dialog")
 
         self.assertEqual(bounced["action"], "worker-respawned")
         self.assertIn("held in a dialog", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
@@ -7336,7 +7368,11 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.tick()
         result = self.tick()
 
-        self.assertEqual(result["action"], "worker-respawned")
+        # The window ends on the acting tick, which for an addressable head asks it for the report
+        # of the open round before anything is replaced (secretary-1171). A head that stays at its
+        # prompt through that is still bounced, on the next episode.
+        self.assertEqual(result["action"], "worker-report-nudged")
+        self.assertEqual(self._confirm_the_idle_head()["action"], "worker-respawned")
         self.assertIn("restart_worker", self.host.calls)
 
     def test_idle_tui_respawns_after_activity_has_stopped_for_the_window(self) -> None:
@@ -7348,7 +7384,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.tick()
         result = self.tick()
 
-        self.assertEqual(result["action"], "worker-respawned")
+        self.assertEqual(result["action"], "worker-report-nudged")
+        self.assertEqual(self._confirm_the_idle_head()["action"], "worker-respawned")
         self.assertIn("restart_worker", self.host.calls)
 
     def test_last_moment_repaint_does_not_cancel_an_idle_respawn(self) -> None:
@@ -7365,7 +7402,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
             self.tick()
             result = self.tick()
 
-        self.assertEqual(result["action"], "worker-respawned")
+        self.assertEqual(result["action"], "worker-report-nudged")
+        self.assertEqual(self._confirm_the_idle_head()["action"], "worker-respawned")
         self.assertIn("restart_worker", self.host.calls)
 
     def test_last_moment_busy_status_cancels_an_idle_respawn(self) -> None:
@@ -7400,7 +7438,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
             self.assertEqual(self.tick()["action"], "waiting-worker-report")
 
         self.assertEqual(self._pilot_record()["worker_idle_since"], aged)
-        self.assertEqual(self.tick()["action"], "worker-respawned")
+        self.assertEqual(self.tick()["action"], "worker-report-nudged")
+        self.assertEqual(self._confirm_the_idle_head()["action"], "worker-respawned")
 
     def test_last_moment_missing_terminal_uses_the_terminal_watchdog(self) -> None:
         self._open_the_second_round()
@@ -7469,6 +7508,187 @@ class DispatcherRuntimeTests(unittest.TestCase):
             self.host.calls.count("restart_worker"), 1, "the escalation must not respawn again"
         )
 
+    # the report nudge at the confirmed-idle boundary (secretary-1171) -------
+
+    def test_an_idle_worker_is_asked_for_the_open_rounds_report_before_any_stop(self) -> None:
+        """The live incident (secretary-1170): the work is committed on the worker branch and the
+        head is standing at its prompt, having never run the report command. Replacing it there
+        throws away the only writer that can report the round, so it is asked for that report in
+        the pane it is already in, and nothing is stopped until it has been."""
+        self._open_the_second_round()
+        document = self._task_document()
+
+        nudged = self._confirm_the_idle_head()
+
+        self.assertEqual(nudged["action"], "worker-report-nudged")
+        # Degraded, like the bounce it replaces: a card whose worker had to be reminded to report
+        # is the pipeline failing to move, and the operator reads that from the tick's health.
+        self.assertEqual(nudged["status"], "degraded")
+        self.assertIn("generation 2", nudged["reason"])
+        self.assertEqual(self.host.calls.count("nudge_worker_report"), 1)
+        self.assertNotIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("stop_workspace", self.host.calls)
+        self.assertNotIn("restart_worker", self.host.calls)
+        # The prompt is scoped to this role's open round and points at the document that carries
+        # its commands, and the round itself has not moved an inch.
+        prompt = self.host.worker_report_nudges[-1]
+        self.assertIn("generation 2", prompt)
+        self.assertIn("TASK.md", prompt)
+        self._assert_one_generation(2)
+        self.assertEqual(self._task_document(), document, "the nudge rewrites no document")
+        record = self._pilot_record()
+        self.assertEqual(record["worker_report_nudge"]["stage"], "delivered")
+        self.assertEqual(record["worker_report_nudge"]["generation"], 2)
+        self.assertEqual(
+            record["worker_idle_since"], 0.0, "a delivered nudge resets the episode, not the round"
+        )
+
+    def test_the_nudge_itself_reports_nothing_for_the_card(self) -> None:
+        """A commit on the worker branch and a passing test are not a report. The nudge asks for
+        one; until the worker runs the command the card is exactly where it was."""
+        self._open_the_second_round()
+        # Round one's report was verified and gated; this round has recorded nothing at all.
+        verifications = self.host.calls.count("verify_worker_result")
+        gates = self.host.calls.count("gate_check")
+
+        self.assertEqual(self._confirm_the_idle_head()["action"], "worker-report-nudged")
+
+        self.assertEqual(self.tick()["action"], "waiting-worker-report")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertEqual(self.host.calls.count("verify_worker_result"), verifications)
+        self.assertEqual(self.host.calls.count("gate_check"), gates)
+
+    def test_a_report_that_answers_the_nudge_takes_the_ordinary_path(self) -> None:
+        """The nudge is a delivery, not a verdict: the report it asks for is verified and gated the
+        way any other report of this round is."""
+        self._open_the_second_round()
+        self.assertEqual(self._confirm_the_idle_head()["action"], "worker-report-nudged")
+        verifications = self.host.calls.count("verify_worker_result")
+
+        self.host.commit = "round2-c0ffee1234"
+        self._report_done("round two")
+
+        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(
+            self.host.calls.count("verify_worker_result"), verifications + 1,
+            "the answered report is verified like any other, on the head's own claim",
+        )
+        self.assertNotIn("restart_worker", self.host.calls)
+
+    def test_a_second_idle_episode_in_the_same_round_is_stopped_and_replaced(self) -> None:
+        """One nudge per round. A head that took the prompt and went quiet again with nothing on
+        the card is the case the confirmed-stop path already owned, and it still owns it."""
+        self._open_the_second_round()
+        self.assertEqual(self._confirm_the_idle_head()["action"], "worker-report-nudged")
+
+        bounced = self._confirm_the_idle_head()
+
+        self.assertEqual(bounced["action"], "worker-respawned")
+        self.assertEqual(
+            self.host.calls.count("nudge_worker_report"), 1, "the round has one nudge to spend"
+        )
+        self.assertLess(
+            self.host.calls.index("stop_head:worker"),
+            self.host.calls.index("restart_worker"),
+            "the stop is confirmed before a replacement is started",
+        )
+        self._assert_one_generation(2)
+
+    def test_a_report_nudge_that_cannot_be_delivered_falls_back_to_the_stop_path(self) -> None:
+        """An unconfirmed delivery decides nothing about the card, so the episode goes back to the
+        path it came from inside the same tick, with the spent nudge recorded."""
+        self._open_the_second_round()
+        self.host.fail_nudge_worker_report_reason = (
+            "worker report nudge was not delivered: the pane could not be probed"
+        )
+
+        bounced = self._confirm_the_idle_head()
+
+        self.assertEqual(bounced["action"], "worker-respawned")
+        self.assertEqual(self.host.calls.count("nudge_worker_report"), 1)
+        self.assertLess(
+            self.host.calls.index("stop_head:worker"),
+            self.host.calls.index("restart_worker"),
+        )
+        self.assertEqual(self._pilot_record()["worker_report_nudge"]["stage"], "failed")
+        bodies = [
+            comment["body"] for comment in self.reader.show("secretary-510-pilot")["comments"]
+        ]
+        self.assertTrue(
+            any("was not delivered" in body and "generation 2" in body for body in bodies),
+            "the failed delivery leaves the operator a trace of its own",
+        )
+
+    def test_a_head_no_prompt_can_reach_keeps_the_existing_path(self) -> None:
+        """The ordinary exec worker has no conversation to type into. It is not nudged at all, and
+        the watchdog that has always replaced it still does."""
+        self.start_dispatcher()
+        self.tick()
+
+        bounced = self._confirm_the_idle_head()
+
+        self.assertEqual(bounced["action"], "worker-respawned")
+        self.assertEqual(self.host.worker_report_nudges, [], "nothing was delivered")
+        self.assertIn("restart_worker", self.host.calls)
+
+    def test_a_nudge_interrupted_before_the_pane_is_replayed_once(self) -> None:
+        """The crash window: the intent is on disk and the tick dies before the head is prompted.
+
+        The record left behind is what the next tick reads, and it must produce exactly one prompt
+        for that one intent — not a second copy of it, and not a second writer in the checkout.
+        """
+        self._open_the_second_round()
+        self._head_at_its_prompt()
+        self.tick()
+        self._rewind_idle()
+        self.assertEqual(self.tick()["action"], "worker-idle-unconfirmed")
+
+        with mock.patch.object(
+            self.host, "nudge_worker_report", side_effect=RuntimeError("the tick died")
+        ):
+            with self.assertRaises(RuntimeError):
+                self.tick()
+
+        intent = self._pilot_record()["worker_report_nudge"]
+        self.assertEqual(intent["stage"], "pending")
+        self.assertEqual(intent["generation"], 2)
+        self.assertNotIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("restart_worker", self.host.calls)
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["action"], "worker-report-nudged")
+        self.assertEqual(len(self.host.worker_report_nudges), 1, "the head is prompted once")
+        self.assertEqual(
+            self._pilot_record()["worker_report_nudge"]["sent_at"], intent["sent_at"],
+            "the replay reuses the intent's send boundary rather than opening a second one",
+        )
+        self.assertEqual(self._pilot_record()["worker_report_nudge"]["stage"], "delivered")
+
+    def test_a_pending_nudge_from_an_earlier_episode_is_not_replayed(self) -> None:
+        """A head that worked again and went quiet again has had its turn with the prompt, whatever
+        the interrupted tick managed to record. The round's nudge is spent, so the second episode
+        takes the confirmed-stop path instead of typing into the pane a second time."""
+        self._open_the_second_round()
+        self._head_at_its_prompt()
+        self.tick()
+        self._rewind_idle()
+        self.assertEqual(self.tick()["action"], "worker-idle-unconfirmed")
+        with mock.patch.object(
+            self.host, "nudge_worker_report", side_effect=RuntimeError("the tick died")
+        ):
+            with self.assertRaises(RuntimeError):
+                self.tick()
+        # The head takes a turn: the episode the intent was opened in is over.
+        self._head_at_its_prompt(idle=False)
+        self.tick()
+        self.assertEqual(self._pilot_record()["worker_idle_since"], 0.0)
+
+        bounced = self._confirm_the_idle_head()
+
+        self.assertEqual(bounced["action"], "worker-respawned")
+        self.assertEqual(self.host.worker_report_nudges, [])
+
     def test_a_replayed_stale_report_ends_in_the_bounded_state(self) -> None:
         """The silent shape: the retained worker repeats the command of the round that is over,
         with that round's own body. The protocol answers the retry it is required to answer, so
@@ -7525,6 +7745,114 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self._rewind_idle("review")
         self.tick()
         self.assertEqual(self.tick()["to"], "blocked")
+
+
+class RealHostReportNudgeTests(unittest.TestCase):
+    """The real host's report nudge (secretary-1171): what it delivers, and what it leaves alone.
+
+    The dispatcher-level tests above own the decision; this owns the transport. The nudge shares
+    the continuation's delivery path and must not share its side effects: the round it points at is
+    the one already in the checkout, so a rewritten `TASK.md` or a cleared body file would silently
+    open a round the card is not in.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        env = mock.patch.dict(
+            os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": str(self.root / "bodies")}
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        self.host = CommandHostRuntime(FakeCatalog(), self.root / "data", mode="real")  # type: ignore[arg-type]
+        self.workspace = self.root / "workspace"
+        self.workspace.mkdir(parents=True)
+        self.document = "# Task secretary-510-pilot\nreport generation 2\n"
+        (self.workspace / "TASK.md").write_text(self.document, encoding="utf-8")
+        self.body = Path(_body_file_path("report", "secretary-510-pilot", 2))
+        self.body.parent.mkdir(parents=True, exist_ok=True)
+        self.body.write_text("the report this round is about to file", encoding="utf-8")
+        self.pid_file = self.root / "worker.pid"
+        self.pid_file.write_text(str(os.getpid()), encoding="utf-8")
+        self.record = DispatcherRecord(
+            worker="secretary-510-pilot-pilot", workspace=str(self.workspace),
+            handle="term:worker", head="codex", review_head="codex-reviewer",
+            attempt_id="attempt-1", comment_baseline=0, review_baseline=0, state="claimed",
+            claimed_at=1.0, report_generation=2, worker_pid_file=str(self.pid_file),
+            worker_run={"adapter": "codex", "codex_mode": "tui"},
+        )
+        self.task = {
+            "ref": "secretary-510-pilot",
+            "project": "secretary",
+            "workspace": {"base_branch": "main"},
+            "routing": {},
+        }
+        self.delivery = mock.Mock()
+        delivery = mock.patch.object(dispatcher_module, "_deliver_tui_prompt", self.delivery)
+        delivery.start()
+        self.addCleanup(delivery.stop)
+
+    def test_the_nudge_goes_to_the_pane_the_worker_is_already_in(self) -> None:
+        self.host.nudge_worker_report(self.task, self.record)
+
+        handle = self.delivery.call_args.args[0]
+        prompt = self.delivery.call_args.kwargs["prompt_text"]
+        self.assertEqual(handle, "term:worker")
+        self.assertIn("generation 2", prompt)
+        self.assertIn("secretary-510-pilot", prompt)
+        self.assertIn("TASK.md", prompt)
+
+    def test_the_nudge_leaves_the_open_rounds_document_and_body_alone(self) -> None:
+        """Nothing here opens a round: the command the head is sent back to is the one it was
+        given, and the body file that command names is the head's own scratch space."""
+        self.host.nudge_worker_report(self.task, self.record)
+
+        self.assertEqual((self.workspace / "TASK.md").read_text(encoding="utf-8"), self.document)
+        self.assertTrue(self.body.is_file(), "the round's report body was cleared under the worker")
+
+    def test_a_turn_already_started_since_the_intent_is_not_prompted_again(self) -> None:
+        """The crash window on the host's side: the interrupted tick's prompt did land, and the
+        head is answering it. Recovery has a confirmation to checkpoint, not a prompt to send."""
+        self.record.worker_report_nudge.begin(2, 1000.0, time.time())
+
+        with mock.patch.object(
+            dispatcher_module, "_terminal_turn_started", return_value=True
+        ) as started:
+            self.host.nudge_worker_report(self.task, self.record)
+
+        self.delivery.assert_not_called()
+        self.assertEqual(
+            started.call_args.kwargs["since"], self.record.worker_report_nudge.sent_at
+        )
+
+    def test_a_head_that_is_not_a_live_conversation_refuses(self) -> None:
+        """Every refusal here is the dispatcher's fail-closed path: a nudge that cannot be
+        delivered must never look like one that was."""
+        cases = {
+            "exec worker": lambda: self.record.worker_run.update({"codex_mode": "exec"}),
+            "no pane": lambda: setattr(self.record, "handle", ""),
+            # Above the default pid_max, so the heartbeat reads as a head that is gone.
+            "dead pid": lambda: self.pid_file.write_text("999999", encoding="utf-8"),
+            "no document": lambda: (self.workspace / "TASK.md").unlink(),
+        }
+        for name, break_it in cases.items():
+            with self.subTest(name):
+                self.setUp()
+                break_it()
+
+                with self.assertRaises(HostError):
+                    self.host.nudge_worker_report(self.task, self.record)
+
+                self.delivery.assert_not_called()
+
+    def test_a_delivery_the_pane_never_confirmed_refuses(self) -> None:
+        self.delivery.side_effect = TuiDeliveryError("the pane could not be probed")
+
+        with self.assertRaises(HostError) as refused:
+            self.host.nudge_worker_report(self.task, self.record)
+
+        self.assertIn("was not delivered", str(refused.exception))
 
 
 class HeadPromptTests(unittest.TestCase):

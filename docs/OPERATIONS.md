@@ -1172,6 +1172,18 @@ working is never ready, so this never touches a head that is thinking. Readiness
 then Blocked. A pane held in a dialog counts the same way: nothing in the pipeline answers a dialog, so that head has
 stopped as surely as one at its prompt, and the comment says which of the two it was.
 
+A worker gets one thing before that, because the head standing at its prompt is usually the one that did the work and
+simply never ran the report command, and replacing it throws that conversation away. On the first confirmed-idle
+episode of a report round the dispatcher delivers one report nudge into the pane the worker is already in: a prompt
+naming the open generation, pointing at the unchanged `TASK.md` in the checkout, and saying that a commit on the
+worker branch and a passing test are not a report. Nothing else moves — no document is rewritten, no body file is
+cleared, no round is opened, and the report the worker may then file is verified and gated exactly like any other.
+The tick is `worker-report-nudged` and degraded, and a comment records it. The intent is persisted before the pane is
+touched, so a dispatcher that dies inside the delivery re-enters that same nudge rather than prompting the head twice
+or starting a second writer beside it. One nudge per round: a head that is not an addressable conversation (an exec
+worker, a lost pane), a delivery that failed or could not be confirmed, and a second idle episode in the same
+generation all fall straight through to the confirmed stop and the respawn-then-Blocked path above, unchanged.
+
 That leaves the heads nothing can be read about: one adopted from a launch intent whose pane identity was never
 persisted, and one whose pane binding the session manager has lost, where the inventory still lists the pane but the
 readiness probe is refused. Neither is a working head and neither is a stopped one, so neither answer is invented for

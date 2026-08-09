@@ -287,3 +287,105 @@ class WorkerContinuation:
             # retaining one.
             session_held=bool(value.get("session_held", stage != WorkerContinuationStage.NONE)),
         )
+
+
+class WorkerReportNudgeStage(StrEnum):
+    NONE = "none"
+    # The intent is on disk and the pane has not been answered for yet. A tick that dies inside the
+    # delivery leaves this behind, and recovery re-enters the same nudge rather than sending a
+    # second prompt or starting a second writer.
+    PENDING = "pending"
+    DELIVERED = "delivered"
+    FAILED = "failed"
+
+
+@dataclass
+class WorkerReportNudge:
+    """The one report nudge a report round may spend on a live, idle worker (secretary-1171).
+
+    A head that has finished the work and gone back to its prompt without running the round's
+    report command is not a dead head, and replacing it loses the round's only writer along with
+    everything that conversation knows. It is asked once, in its own pane, for the report of the
+    generation that is already open; nothing about the round, the document or the ownership of the
+    checkout moves with it.
+
+    Keyed on both the report generation and the idle episode it was opened in, because those are
+    the two questions the watchdog asks afterwards. A different generation is a different round and
+    gets its own nudge. The same generation and the same unfinished episode is the crash replay,
+    which must reuse this intent. The same generation in a *later* episode is the head having gone
+    quiet again with nothing delivered, which is the confirmed-stop path this nudge never replaces.
+    """
+
+    stage: WorkerReportNudgeStage = WorkerReportNudgeStage.NONE
+    generation: int = 0
+    episode_at: float = 0.0
+    sent_at: float = 0.0
+
+    UNUSED = "unused"
+    REPLAY = "replay"
+    SPENT = "spent"
+
+    def state_for(self, generation: int, episode_at: float) -> str:
+        """What this round's nudge is to the idle episode the watchdog is looking at now."""
+        if self.stage == WorkerReportNudgeStage.NONE or self.generation != int(generation):
+            return self.UNUSED
+        if self.stage == WorkerReportNudgeStage.PENDING and self.episode_at == float(episode_at):
+            return self.REPLAY
+        return self.SPENT
+
+    def begin(self, generation: int, episode_at: float, now: float) -> None:
+        """Record the intent before the pane is touched.
+
+        Re-entry into the same episode keeps `sent_at`: it is the boundary a delivered prompt's
+        turn is looked for after, and moving it forward would hide the turn the interrupted send
+        already started and cost the worker a second prompt.
+        """
+        if self.state_for(generation, episode_at) == self.REPLAY:
+            return
+        self.stage = WorkerReportNudgeStage.PENDING
+        self.generation = int(generation)
+        self.episode_at = float(episode_at)
+        self.sent_at = now
+
+    def confirm(self) -> None:
+        if self.stage not in {
+            WorkerReportNudgeStage.PENDING,
+            WorkerReportNudgeStage.DELIVERED,
+        }:
+            raise ValueError(f"cannot confirm a report nudge from {self.stage}")
+        self.stage = WorkerReportNudgeStage.DELIVERED
+
+    def fail(self) -> None:
+        """The delivery failed or could not be confirmed. The round keeps the spent nudge.
+
+        Recorded rather than cleared: the caller falls through to the ordinary stop-then-replace
+        path on this same tick, and a cleared intent would let the replacement's first idle episode
+        spend the round's nudge a second time.
+        """
+        if self.stage not in {
+            WorkerReportNudgeStage.PENDING,
+            WorkerReportNudgeStage.FAILED,
+        }:
+            raise ValueError(f"cannot fail a report nudge from {self.stage}")
+        self.stage = WorkerReportNudgeStage.FAILED
+
+    def to_json(self) -> dict[str, Any]:
+        if self.stage == WorkerReportNudgeStage.NONE:
+            return {}
+        return {
+            "stage": self.stage.value,
+            "generation": self.generation,
+            "episode_at": self.episode_at,
+            "sent_at": self.sent_at,
+        }
+
+    @classmethod
+    def from_json(cls, value: Any) -> "WorkerReportNudge":
+        if not isinstance(value, dict) or not value:
+            return cls()
+        return cls(
+            stage=WorkerReportNudgeStage(str(value.get("stage") or "none")),
+            generation=int(value.get("generation") or 0),
+            episode_at=float(value.get("episode_at") or 0.0),
+            sent_at=float(value.get("sent_at") or 0.0),
+        )

@@ -2116,6 +2116,65 @@ class CommandHostRuntime:
         except (TuiDeliveryError, HostError) as exc:
             raise HostError(f"retained worker continuation was not delivered: {exc}") from None
 
+    def nudge_worker_report(self, task: dict[str, Any], record: DispatcherRecord) -> None:
+        """Ask a live worker head, in its own pane, for the report of the round already open.
+
+        The same transport as a continuation, with the opposite relationship to the round: nothing
+        is rewritten and nothing is cleared. The report generation, the `TASK.md` in the checkout
+        and the body files this round's commands name all stay exactly as the worker was given
+        them, because the round has not moved — only its report is missing (secretary-1171).
+
+        A head that cannot be typed into raises, and so does a delivery whose turn never visibly
+        started: the caller's fail-closed path owns those, and neither is a report.
+        """
+        status = _head_process_status(record.worker_pid_file)
+        if not status.get("known") or not status.get("alive"):
+            raise HostError("worker session is not confirmably running")
+        if status.get("stopped"):
+            # A suspended head answers nothing typed at it. Waking one is a continuation, which
+            # belongs to a round that moved; this nudge never resumes anything.
+            raise HostError("worker session is suspended")
+        if not self._continuation_addressable(record):
+            raise HostError("worker session cannot accept a report nudge")
+        workspace = Path(record.workspace)
+        if not workspace.is_dir():
+            raise HostError("worker workspace is missing")
+        if not (workspace / "TASK.md").is_file():
+            # The prompt sends the head back to that document for the command it must run. Without
+            # it there is nothing to point at, and inventing one here would open a round.
+            raise HostError("worker TASK.md is missing")
+        adapter = str(record.worker_run.get("adapter") or "")
+        nudge = record.worker_report_nudge
+        if nudge.sent_at and _terminal_turn_started(
+            record.handle,
+            run_json=self._run_json,
+            workspace=str(workspace),
+            since=nudge.sent_at,
+            adapter=adapter,
+        ):
+            # The dispatcher may have died after the head took the prompt but before it recorded
+            # the confirmation. Returning lets recovery checkpoint that one delivery instead of
+            # sending the head a second copy of it.
+            return
+        prompt = _report_nudge_prompt(record.report_generation, task["ref"])
+        try:
+            if adapter == "codex":
+                _deliver_tui_prompt(
+                    record.handle, str(workspace), "TASK.md", run_json=self._run_json,
+                    prompt_text=prompt,
+                )
+            else:
+                _deliver_interactive_prompt(
+                    record.handle,
+                    prompt,
+                    run_json=self._run_json,
+                    confirm=_turn_started_confirm(
+                        record.handle, str(workspace), adapter, run_json=self._run_json,
+                    ),
+                )
+        except (TuiDeliveryError, HostError) as exc:
+            raise HostError(f"worker report nudge was not delivered: {exc}") from None
+
     def _set_worker_branch(self, workspace: str, branch: str) -> None:
         if self.mode == "noop":
             return
@@ -3791,6 +3850,17 @@ class DispatcherRuntime:
                         "pilot_ref": task["ref"], "attempt_id": attempt_id,
                         "action": f"{kind}-idle-unconfirmed", "reason": idle_trigger,
                     }
+                if kind == "worker":
+                    # The worker of this round is the only writer that can report it, and the head
+                    # standing at its prompt is the one that did the work. It is asked for the
+                    # report once, in its own pane, before anything is stopped or replaced
+                    # (secretary-1171). Every other outcome falls through to the path below.
+                    nudged = self._nudge_worker_report(
+                        task, record, records, payload, attempt_id,
+                        idle_since=idle_since, trigger=idle_trigger,
+                    )
+                    if nudged is not None:
+                        return nudged
                 # Degraded, not ok. A head that stopped without delivering is the pipeline failing
                 # to make progress on a card, and the operator learns about it from the tick's own
                 # health: an `ok` bounce would write healthy telemetry over the one signal that
@@ -3840,6 +3910,112 @@ class DispatcherRuntime:
         if outcome == "respawn":
             return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=now, trigger=f"no {_wait_expectation(kind)} within {stall}s")
         return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=stall, trigger=f"no {_wait_expectation(kind)}")
+
+    def _nudge_worker_report(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        idle_since: float,
+        trigger: str,
+    ) -> dict[str, Any] | None:
+        """Spend this round's one report nudge on a confirmed-live, idle worker (secretary-1171).
+
+        The wait ends destructively today: a head that is alive, at its prompt and has recorded
+        nothing is stopped and replaced. When the work is in fact done and only the report command
+        was never run — `secretary-1170` — that throws away the conversation that did it and the
+        card is blocked over a branch nobody reads. So the head is asked for the report first, once
+        per round, through the delivery path every other role already uses.
+
+        Nothing about the round moves with the nudge. The generation, the document in the checkout,
+        the report body paths, the wait and the ownership of that checkout are all untouched: no
+        commit and no test is read as a completion here, and the report the head may run afterwards
+        goes through the ordinary result verification and the exact-SHA gate exactly as before.
+
+        Returns the tick's outcome when the head was asked, and None when the caller must take the
+        existing confirmed-stop path: this round already spent its nudge, the head is not
+        addressable, or the delivery failed or could not be confirmed.
+        """
+        ref = task["ref"]
+        generation = record.report_generation
+        nudge = record.worker_report_nudge
+        state = nudge.state_for(generation, idle_since)
+        if state == nudge.SPENT:
+            # The round has already had its one nudge and the head has gone quiet again with
+            # nothing on the card. Asking a second time is how a bounded wait becomes unbounded.
+            return None
+        # The intent is durable before the pane is touched. A tick that dies inside the delivery
+        # leaves this behind, and the tick that finds it re-enters the same nudge — same send
+        # boundary, same round — instead of prompting the head twice or opening a second one.
+        nudge.begin(generation, idle_since, time.time())
+        records[ref] = record
+        self.save_records(payload, records)
+        try:
+            self.host.nudge_worker_report(task, record)
+        except (AttributeError, HostError, OSError, TypeError, ValueError) as exc:
+            # Fail closed. A delivery that failed or could not be confirmed decides nothing about
+            # the card, so the episode goes back to the stop-then-replace path unchanged, and the
+            # spent nudge stays on the record so the replacement head cannot spend it again.
+            nudge.fail()
+            records[ref] = record
+            self.save_records(payload, records)
+            self.writer.comment(
+                role="dispatcher",
+                actor=self.owner,
+                reference=ref,
+                body=(
+                    f"Dispatcher wait watchdog: {trigger}. The report nudge for generation "
+                    f"{generation} was not delivered ({scrub_host_output(str(exc))}), so the head "
+                    "is stopped and replaced on the ordinary path."
+                ),
+                request_id=_attempt_request_id(
+                    record.attempt_id or attempt_id,
+                    "worker-report-nudge-failed",
+                    ref,
+                    f"{_wait_cycle_token(record)}-{generation}",
+                ),
+            )
+            return None
+        nudge.confirm()
+        # Only the idle episode resets. The round, its generation and its report commands are
+        # exactly where they were, and the next episode with nothing recorded is the stop the
+        # watchdog already owns.
+        _reset_idle(record, "worker")
+        records[ref] = record
+        self.save_records(payload, records)
+        self.writer.comment(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            body=(
+                f"Dispatcher wait watchdog: {trigger}, asked the worker head in its own pane for "
+                f"the report of generation {generation} instead of replacing it"
+                + (" (redelivered after an interrupted send)." if state == nudge.REPLAY else ".")
+                + " The report round did not move: the same TASK.md is in the checkout with the "
+                f"report commands for generation {generation}, and nothing is recorded for this "
+                "card until the worker runs one of them. Another idle episode with no report "
+                "stops the head and replaces it."
+            ),
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id,
+                "worker-report-nudge",
+                ref,
+                f"{_wait_cycle_token(record)}-{generation}",
+            ),
+        )
+        return {
+            # Degraded for the same reason the bounce is: a card whose worker had to be reminded to
+            # report is not a healthy tick, and the operator reads that from the tick's own health.
+            "status": "degraded",
+            "step": "advance",
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "action": "worker-report-nudged",
+            "reason": trigger,
+        }
 
     def _trigger_wait_watchdog(
         self, task, record, records, payload, attempt_id, *, kind: str, trigger: str,
@@ -5517,6 +5693,34 @@ def _continuation_prompt(
         "an earlier turn of this conversation ends in a different number and belongs to a round "
         "that is over: that id already names that round's report and its body file is gone, so "
         "running it reports nothing here, whether it fails or answers from the old round's record."
+    )
+
+
+def _report_nudge_prompt(generation: int, reference: str) -> str:
+    """What the idle worker of an open round is told (secretary-1171).
+
+    Deliberately not a continuation prompt: no verdict sent this card back, no document was
+    rewritten and no new round was opened. The only thing missing is this round's report, so the
+    prompt names the round, points at the document that already carries its commands, and says
+    what the dispatcher will not infer on its own — a branch commit and a passing test are not a
+    report, and nothing is recorded for the card until the command is run.
+
+    The generation is spelled out for the same reason the continuation spells it out: the head's
+    own scrollback may hold an earlier round's command, and a number both the agent and a human
+    reading the pane can compare makes a replayed command visibly the wrong one.
+    """
+    card = f" for {reference}" if reference else ""
+    return (
+        f"Report generation {generation}{card} is still open and nothing has been recorded for it. "
+        "Your work is not reported until you run the report command yourself: a commit on the "
+        "worker branch and a passing test are not a report, and the dispatcher records neither. "
+        "TASK.md at the workspace root is unchanged and still carries this round's commands. Read "
+        "it again, commit everything on the worker branch so the worktree is clean, then run its "
+        f"report command verbatim; its --request-id and its body file both end in {generation}. "
+        "A report command from an earlier turn of this conversation ends in a different number and "
+        "belongs to a round that is over, so running it reports nothing here. If the card cannot "
+        "be finished, run the matching blocked command from the same file instead. Do not start "
+        "new work for this: only the report of this round is missing."
     )
 
 
