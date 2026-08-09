@@ -1423,9 +1423,10 @@ class CommandHostRuntime:
         if self.mode == "noop":
             return
         if leaf:
-            current = self._pane_handle_for_leaf(record.workspace, leaf)
-            if not current and not pid_file:
-                raise HostError(f"{kind} head leaf is not in the terminal inventory")
+            # This read is part of the stop proof, unlike liveness and anchor selection. An
+            # unreadable inventory cannot be read as an absent leaf: the record must survive so
+            # the next tick cannot put a replacement beside a head we failed to address.
+            current = self._pane_handle_for_leaf_or_raise(record.workspace, leaf)
             if current:
                 _close_tui_terminal(current, run_json=self._run_json)
         elif handle:
@@ -1844,6 +1845,37 @@ class CommandHostRuntime:
         if not isinstance(handle, str) or not handle:
             raise HostError("orca did not return a split terminal handle")
         leaf = _pane_key_leaf(split.get("paneKey"))
+        if not leaf:
+            # Orca's current split reply names the new pane by handle, tab id and runtime id but
+            # does not include paneKey. At this launch boundary that handle can still identify the
+            # just-created pane in a fresh inventory, which gives the reviewer the same stable
+            # leaf create returns directly. Do not let a new reviewer become leafless: that
+            # fallback is only for historical records that predate pane identity.
+            try:
+                leaf = self._pane_leaf_for_handle_or_raise(workspace, handle)
+            except HostError as exc:
+                try:
+                    self._close_launched_pane(handle, pid_file)
+                except HostError as stop_exc:
+                    raise HeadLaunchAborted(
+                        f"{exc}; head terminal stop failed: {stop_exc}",
+                        handle=handle,
+                        workspace=workspace,
+                        pid_file=pid_file,
+                    ) from None
+                raise
+            if not leaf:
+                try:
+                    self._close_launched_pane(handle, pid_file)
+                except HostError as stop_exc:
+                    raise HeadLaunchAborted(
+                        "orca did not expose a stable leaf for the split pane; "
+                        f"head terminal stop failed: {stop_exc}",
+                        handle=handle,
+                        workspace=workspace,
+                        pid_file=pid_file,
+                    ) from None
+                raise HostError("orca did not expose a stable leaf for the split pane")
         try:
             self._run_json([
                 "orca", "terminal", "rename",
@@ -1890,6 +1922,18 @@ class CommandHostRuntime:
                 return str(terminal.get("handle") or "")
         return ""
 
+    def _pane_handle_for_leaf_or_raise(self, workspace: str, leaf: str) -> str:
+        for terminal in self._worktree_terminals_or_raise(workspace):
+            if terminal.get("leafId") == leaf:
+                return str(terminal.get("handle") or "")
+        return ""
+
+    def _pane_leaf_for_handle_or_raise(self, workspace: str, handle: str) -> str:
+        for terminal in self._worktree_terminals_or_raise(workspace):
+            if terminal.get("handle") == handle:
+                return str(terminal.get("leafId") or "")
+        return ""
+
     def _worktree_terminals(self, workspace: str) -> list[dict[str, Any]]:
         """Terminal inventory for a worktree, or [] when it cannot be read. Callers use it to pick
         a pane, never to decide a head is dead, so an unreadable inventory degrades into a weaker
@@ -1897,11 +1941,19 @@ class CommandHostRuntime:
         if self.mode == "noop" or not workspace:
             return []
         try:
-            data = self._run_json([
-                "orca", "terminal", "list", "--worktree", f"path:{workspace}", "--json"
-            ])
+            return self._worktree_terminals_or_raise(workspace)
         except HostError:
             return []
+
+    def _worktree_terminals_or_raise(self, workspace: str) -> list[dict[str, Any]]:
+        """Read a worktree inventory when its absence would make a lifecycle decision unsafe."""
+        if self.mode == "noop":
+            return []
+        if not workspace:
+            raise HostError("terminal inventory needs a workspace")
+        data = self._run_json([
+            "orca", "terminal", "list", "--worktree", f"path:{workspace}", "--json"
+        ])
         payload = data.get("result") if isinstance(data.get("result"), dict) else data
         terminals = payload.get("terminals") if isinstance(payload, dict) else []
         return [terminal for terminal in terminals if isinstance(terminal, dict)] if isinstance(terminals, list) else []

@@ -10340,10 +10340,12 @@ class RecordingReviewHost(CommandHostRuntime):
         *,
         terminals: list[dict] | None = None,
         fail_ops: set[str] | None = None,
+        split_pane_key: str = "",
     ) -> None:
         super().__init__(ReviewCatalog(), root, mode="real")  # type: ignore[arg-type]
         self.calls: list[list[str]] = []
         self.fail_ops = fail_ops or set()
+        self.split_pane_key = split_pane_key
         self.terminals = [
             {"handle": "term-worker", "leafId": "leaf-worker", "title": "codex", "connected": True}
         ] if terminals is None else terminals
@@ -10364,14 +10366,14 @@ class RecordingReviewHost(CommandHostRuntime):
             self.terminals.append(
                 {"handle": "term-review", "leafId": "leaf-review", "title": None, "connected": True}
             )
-            return {
-                "split": {
-                    "handle": "term-review",
-                    "paneKey": "tab-1:leaf-review",
-                    "tabId": "tab-1",
-                    "paneRuntimeId": -1,
-                }
+            split = {
+                "handle": "term-review",
+                "tabId": "tab-1",
+                "paneRuntimeId": -1,
             }
+            if self.split_pane_key:
+                split["paneKey"] = self.split_pane_key
+            return {"split": split}
         if op == "create":
             return {"terminal": {"handle": "term-created", "paneKey": "tab-1:leaf-created"}}
         if op == "wait":
@@ -10422,7 +10424,8 @@ class ReviewPaneTests(unittest.TestCase):
             claimed_at=0.0,
         )
 
-    def test_reviewer_is_split_off_the_worker_pane_and_labelled(self) -> None:
+    def test_reviewer_is_split_off_the_worker_pane_and_gets_its_leaf_from_inventory(self) -> None:
+        """Real `terminal split --json` omits paneKey, so the fresh inventory supplies its leaf."""
         host = RecordingReviewHost(self.root)
 
         launch = host.start_review(self.task, self._record())
@@ -10441,6 +10444,14 @@ class ReviewPaneTests(unittest.TestCase):
             [call for call in host.calls if "worktree" in call and "create" in call],
             "the reviewer must reuse the worker's worktree, never make its own",
         )
+
+    def test_split_uses_pane_key_directly_when_the_backend_supplies_one(self) -> None:
+        host = RecordingReviewHost(self.root, split_pane_key="tab-1:leaf-from-reply")
+
+        launch = host.start_review(self.task, self._record())
+
+        self.assertEqual(launch.leaf, "leaf-from-reply")
+        self.assertEqual(host.ops().count("list"), 1, "the split leaf needed no inventory fallback")
 
     def test_reviewer_pane_carries_the_reference_and_the_role(self) -> None:
         host = RecordingReviewHost(self.root)

@@ -1947,6 +1947,23 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(respawned["action"], "worker-respawned")
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
 
+    def test_leaf_stop_with_unreadable_inventory_and_no_heartbeat_keeps_the_record(self) -> None:
+        """A list failure is not evidence a leaf-scoped head vanished before its heartbeat exists."""
+        self.tick()
+        Path(pid_file_path("worker", REF)).unlink()
+        self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
+        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")  # type: ignore[arg-type]
+        real_host._run_json = mock.Mock(side_effect=HostError("orca terminal list unavailable"))
+
+        with mock.patch.object(self.host, "stop_head", real_host.stop_head):
+            outcome = self.tick()
+
+        self.assertEqual(outcome["action"], "worker-stop-unconfirmed")
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        record = self.record()
+        assert record is not None
+        self.assertTrue(record.worker_leaf, "the unconfirmed stop must retain the named head")
+
     def test_a_reviewer_respawn_after_an_unconfirmed_stop_starts_nothing(self) -> None:
         self.run_to_validate()
         self.tick()  # reviewer up
@@ -2367,7 +2384,13 @@ class HostLaunchContourTests(unittest.TestCase):
 
     def split_answers(self, rename: Exception) -> dict[str, Any]:
         return {
-            "terminal split": {"split": {"handle": "term:review"}},
+            # Production `terminal split --json` has no paneKey. Its just-created terminal is
+            # still present in the fresh inventory under the returned handle, so the host can
+            # persist its stable leaf before the reviewer reaches state.
+            "terminal split": {
+                "split": {"handle": "term:review", "tabId": "tab-1", "paneRuntimeId": -1}
+            },
+            "terminal list": {"terminals": [{"handle": "term:review", "leafId": "leaf:review"}]},
             "terminal rename": rename,
         }
 
