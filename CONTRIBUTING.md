@@ -49,6 +49,21 @@ python3 -m unittest
 python3 -m secretary role-skills audit --check
 ```
 
+To keep the suite's result after the terminal scrolls, run it through the receipt wrapper instead;
+it streams the same output, exits with the same status, and leaves a structured summary in the
+ignored `state/checks/` path that `check show` can read back without running anything again:
+
+```bash
+python3 -m secretary check broad --module unittest
+python3 -m secretary check show --module unittest
+```
+
+`--module` is the shape to prefer: the wrapper builds the command itself, so the suite runs in a
+process that records which project it imported, and the receipt can be read back in place of a
+second run while that import resolved inside this checkout. `--command '<any shell>'` is available for checks that need a shell, and its receipt is
+a summary only — a shell can change directory or import environment before an interpreter starts,
+so that receipt attests no import and never stands in for running the check again.
+
 CI runs the unit suite on every pull request. A short note about what changed and what you verified
 helps with review; if the suite does not cover it, describe any manual testing that was useful.
 

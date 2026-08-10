@@ -8239,6 +8239,23 @@ class HeadPromptTests(unittest.TestCase):
             self.assertIn("Read the commit messages on this branch", review)
             self.assertIn("RED blocker", review)
 
+    def test_worker_packet_points_at_the_receipt_and_forbids_a_scrolled_pane_rerun(self) -> None:
+        """secretary-1406: the packet used to leave the evidence in the terminal, so the only way
+        back to a summary was to run the whole suite again over unchanged code."""
+        doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
+
+        self.assertIn("python3 -m secretary check broad --module", doc)
+        self.assertIn("python3 -m secretary check show --module", doc)
+        # The shell shape is offered, with the promise it cannot keep spelled out.
+        self.assertIn("never reused in place of a run", doc)
+        self.assertIn("state/checks/broad-<digest>.json", doc)
+        self.assertIn("scrolled its output away is prohibited", doc)
+        # Reuse is bounded by the candidate-trust rule the wrapper enforces.
+        self.assertIn("imported the project from this workspace", doc)
+        # The justified reruns stay open, and the receipt never impersonates the gate.
+        self.assertIn("A changed SHA,", doc)
+        self.assertIn("exact-SHA attestation", doc)
+
     def test_worker_prompt_names_a_concrete_body_file(self) -> None:
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
         commands = self._command_lines(doc)

@@ -1580,6 +1580,69 @@ secretary dispatcher production-tick --instance <dir> --probe
 python3 -m unittest
 ```
 
+### Broad checks and their receipts
+
+A broad run is expensive enough that its result should survive the terminal it printed to. The
+documented form wraps the suite:
+
+```bash
+python3 -m secretary check broad --module unittest
+python3 -m secretary check show --module unittest
+```
+
+`check broad` streams the check's combined output to stderr while it runs, exits with the check's
+own status (a signal-killed check becomes the usual `128+N`), and writes one JSON receipt under
+`state/checks/` in the workspace — an ignored path, never committed. The receipt holds the check
+and its check-set digest, the working directory, the import provenance described below, start, end
+and duration, the exit code, the parsed verdict and counts where the runner prints them, and a
+bounded tail of the output. The verdict is scanned off the stream as it goes past, so a runner that
+prints `OK (skipped=8)` and then megabytes of cleanup output still has its counts recorded, without
+the receipt growing to hold the logs.
+
+Two check shapes are accepted, and they differ in one promise:
+
+- `--module unittest` (add `--module-arg` for arguments) is the standard shape. The wrapper builds
+  the argv, so the suite runs in a process that records its own working directory and the
+  `secretary` package it imported. That is provenance observed from the process that ran the check,
+  which is what makes a receipt reusable.
+- `--command '<shell>'` accepts anything a project needs. A shell can `cd` elsewhere or reach a
+  different interpreter or import path before any check starts, so this receipt records
+  `origin: unobservable`, claims no import, and is never reused in place of a run. It remains a
+  summary to read.
+
+Observed provenance is necessary and not sufficient. A receipt may replace a run only when the
+check process imported the project *from this workspace*: a missing or unreadable record, an empty
+path, an unresolvable one, and a path outside the candidate are all refusals. That matters in an
+ordinary Python setup, where `PYTHONPATH` can put another checkout of the project ahead of this one
+— the receipt records that other path truthfully and is still refused for reuse, because the run it
+describes was a run of different code. For a project whose broad suite does not import `secretary`,
+the receipt remains a summary to read and is not offered for reuse.
+
+A check is identified by its structured check set — shape, module and the exact argument vector, or
+the shell string — not by how it renders. `--module-arg 'one two'` and
+`--module-arg one --module-arg two` read the same and are different checks, with different digests,
+different receipt files, and no ability to answer for one another. The receipt stores that check set
+so a reader recomputes the digest instead of trusting the file it was found in.
+
+`check show` runs nothing. It answers whether the receipt still describes the checkout, comparing
+the recorded HEAD object id and content digest of the tracked diff and untracked files with the
+current ones, and exits non-zero when it does not. Its answer fails closed: a truncated or edited
+receipt, a run that was killed or timed out, a checkout with no resolvable identity, an import from
+outside the candidate, and a shape that attests no import are all "not usable" rather than a
+summary. Reading goes through one boundary, `load_receipt`, which also refuses a result no run
+could have written, even when the artifact's own digest was recomputed over the damage. Every
+recorded result field — `signal`, `status`, `verdict`, the stored reason and the status the command
+returns — is derived from one model of the raw process result, and the boundary rebuilds that model
+and requires the stored fields to match it exactly. So a "complete" receipt that records a signal, an
+exit code and signal that disagree, a complete run whose reason is a single space, or a status
+outside the 0..255 a POSIX process can return are all refused, and reuse cannot hand back a masked
+or invented status. Corruption outranks both status preservation and reuse. `check broad --reuse` skips the run while the receipt is usable — through the same single
+predicate `check show` reports, so the two can never disagree — and a report can quote the evidence
+instead of rebuilding it.
+
+This receipt is a local convenience for whoever ran the suite. It is not the mechanical gate's
+exact-SHA attestation and never travels downstream in its place.
+
 `--probe` is a real dry tick: it takes the same singleton lock, passes the same mutation guards, scans the same card
 states and runs the same decision logic, but the first write turns into an abort and lands in the report as "what the
 next tick would do". A green probe with a broken tick is impossible, because a broken tick fails here too.
