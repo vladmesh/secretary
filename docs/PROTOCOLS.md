@@ -394,7 +394,12 @@ machine-derived delivery, CI or board telemetry. `show` and `status` compute fre
 observer work: a card entering Assessment, Blocked or Done; a budget event; or a PO comment on the
 sprint. Claims, reports, Validate moves, reviewer launches, routing and observer-authored events do not make a
 resume stale. Missing data is `resume_missing`; a semantic transition may trail its resume for up to five
-minutes, then is `resume_stale`. Neither command reads an observer transcript. The dispatcher records a
+minutes, then is `resume_stale`. That comparison belongs to an open sprint. A closed or stopped sprint
+takes no further semantic work — it accepts no resume, comment or current task — so the record on its row
+is the last one anybody wrote, and freshness for it is read from that record alone: no later event ages it
+and no status path reads the audit for it. `reopen` puts the sprint back under the ordinary comparison.
+A sprint summary therefore reads the committed audit at most once per operation, and an installation whose
+sprints have all finished does not read it at all. Neither command reads an observer transcript. The dispatcher records a
 durable delivery batch before it wakes or replaces an observer, coalesces pending semantic events to one
 high-water mark, and owns all waiting for workers, reviewers and CI. An observer acknowledges it by passing
 the matching `--delivery-id` and `--through-event` from `status` to `sprint resume`; those values are audit payload,

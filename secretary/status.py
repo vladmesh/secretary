@@ -149,13 +149,7 @@ def _sprints(
             thresholds=budget_thresholds(instance),
         )
         observers = {row["sprint"]: row for row in observer_snapshot(production)}
-        return {
-            "items": [
-                reader.status(sprint["ref"], observer=observers.get(sprint["ref"]))
-                for sprint in reader.list(create=False)
-            ],
-            "error": None,
-        }
+        return {"items": reader.statuses(observers=observers, create=False), "error": None}
     except TaskError as exc:
         return {"items": [], "error": {"code": exc.code, "message": exc.message}}
 
