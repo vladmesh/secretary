@@ -10268,13 +10268,49 @@ class DispatcherGateTests(unittest.TestCase):
     def _task(self) -> dict:
         return {"ref": "secretary-633", "project": "secretary", "workspace": {"base_branch": "main"}}
 
-    def test_ci_none_skips_gate_without_touching_git(self) -> None:
+    def test_ci_none_runs_no_mechanical_check_but_still_reads_the_candidate(self) -> None:
+        """secretary-1401 round 2 (BLOCKER-ci-none-history-bypass): this test asserted that `none`
+        returned green without touching git at all, over a workspace that need not even exist. That
+        is the bypass — `none` opts out of mechanical validation, not out of the candidate-history
+        boundary, and a `none` project merges its candidate like any other. It now asserts what
+        `none` still skips (no push, no validation command, no receipt) and what it no longer
+        skips."""
         with tempfile.TemporaryDirectory() as tmp:
-            host = GateHost(Path(tmp), {"validation": {"ci": "none", "missing": ["tests"]}})
-            record = self._record(Path(tmp) / "absent")
-            result = host.gate_check(self._task(), record)
-        self.assertEqual(result.status, "green")
-        self.assertIsNone(result.attestation)
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            adapter = {"validation": {"ci": "none", "missing": ["tests"]}}
+
+            clean = GateHost(Path(tmp), adapter).gate_check(self._task(), self._record(ws))
+
+            self._commit_with(
+                ws, "more.txt", "Add more\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n"
+            )
+            rejected = GateHost(Path(tmp), adapter).gate_check(self._task(), self._record(ws))
+
+        self.assertEqual(clean.status, "green")
+        self.assertEqual(clean.summary, "ci none: mechanical gate skipped")
+        self.assertIsNone(clean.attestation)
+        self.assertEqual(rejected.status, "red")
+        self.assertIn("forbidden AI attribution", rejected.summary)
+        self.assertIn("Add more", rejected.log)
+        self.assertIsNone(rejected.attestation)
+
+    def test_a_workspace_the_gate_cannot_read_fails_closed_in_every_mode(self) -> None:
+        """Including `none`: a boundary that cannot be checked is not a boundary that passed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            for ci in ("none", "local", "github"):
+                host = GateHost(Path(tmp), {"validation": {"ci": ci, "command": "true"}})
+                with self.assertRaisesRegex(HostError, "gate workspace is missing"):
+                    host.gate_check(self._task(), self._record(Path(tmp) / "absent"))
+
+    def test_a_base_that_resolves_neither_way_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            git(ws, "branch", "-D", "main")
+            git(ws, "update-ref", "-d", "refs/remotes/origin/main")
+            host = GateHost(Path(tmp), {"validation": {"ci": "none"}})
+
+            with self.assertRaisesRegex(HostError, "could not resolve base"):
+                host.gate_check(self._task(), self._record(ws))
 
     def test_noop_gate_never_mints_a_receipt(self) -> None:
         host = CommandHostRuntime(GateCatalog({"validation": {"ci": "local", "command": "true"}}), Path("/tmp"), mode="noop")  # type: ignore[arg-type]
@@ -10449,6 +10485,80 @@ class DispatcherGateTests(unittest.TestCase):
         self.assertEqual(result.status, "green")
         self.assertNotIn("TASK.md", tracked)
         self.assertNotIn("REVIEW.md", tracked)
+
+    # secretary-1401 round 2, BLOCKER-history-record-separator-bypass. Real git, real bytes: the
+    # first implementation framed all messages into one stream on `\x1e` and split on it, so a
+    # message carrying that byte was parsed into records the trailer had fallen out of.
+    def test_control_bytes_in_a_message_cannot_hide_a_trailer(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            (ws / "sneak.txt").write_text("sneak\n", encoding="utf-8")
+            git(ws, "add", "sneak.txt")
+            message = ws / "message.txt"
+            message.write_bytes(
+                b"Sneak it past the parser\n\n\x1e\x1f\n"
+                b"Co-Authored-By: Claude <noreply@anthropic.com>\n"
+            )
+            git(ws, "commit", "-F", str(message))
+            stored = git(ws, "log", "-1", "--format=%B")
+            host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
+
+            result = host.gate_check(self._task(), self._record(ws))
+
+        self.assertIn("\x1e", stored, "the fixture only proves anything if git kept the byte")
+        self.assertEqual(result.status, "red")
+        self.assertIn("Sneak it past the parser", result.log)
+        self.assertIn("noreply@anthropic.com", result.log)
+
+    def test_an_object_id_listing_that_is_not_object_ids_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
+            original = host.run_capture
+
+            def forged(args, label, *, cwd=None):
+                if label == "gate candidate history":
+                    return subprocess.CompletedProcess(
+                        args, 0, "Co-Authored-By: Claude <noreply@anthropic.com>\n", ""
+                    )
+                return original(args, label, cwd=cwd)
+
+            with mock.patch.object(host, "run_capture", side_effect=forged):
+                with self.assertRaisesRegex(HostError, "candidate history could not be read"):
+                    host.gate_check(self._task(), self._record(ws))
+
+    # secretary-1401 round 2, BLOCKER-human-coauthor-false-positive.
+    def test_a_human_co_author_named_after_a_model_is_not_an_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            self._commit_with(
+                ws, "one.txt",
+                "Pair on the parser\n\nCo-Authored-By: Claude Martin <claude.martin@human.example>\n",
+            )
+            self._commit_with(
+                ws, "two.txt",
+                "Pair again\n\nCo-Authored-By: Gemini Rossi <gemini.rossi@human.example>\n",
+            )
+            host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
+
+            result = host.gate_check(self._task(), self._record(ws))
+
+        self.assertEqual(result.status, "green")
+
+    def test_an_unreadable_message_for_one_commit_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
+            original = host.run_capture
+
+            def message_fails(args, label, *, cwd=None):
+                if label == "gate candidate history message":
+                    return subprocess.CompletedProcess(args, 128, "", "fatal: bad object")
+                return original(args, label, cwd=cwd)
+
+            with mock.patch.object(host, "run_capture", side_effect=message_fails):
+                with self.assertRaisesRegex(HostError, "candidate history could not be read for"):
+                    host.gate_check(self._task(), self._record(ws))
 
     def test_an_unreadable_candidate_history_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

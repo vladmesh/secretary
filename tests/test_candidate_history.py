@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 
 import secretary
-from secretary.candidate_history import Commit, ai_attributions, parse_log, repair_message
+from secretary.candidate_history import Commit, ai_attributions, parse_shas, repair_message
 
 
 def _commit(message: str, sha: str = "a" * 40) -> Commit:
@@ -38,26 +38,62 @@ class CandidateHistoryTests(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0].sha, "1" * 40)
         self.assertEqual(found[0].subject, "Add the preflight")
-        self.assertEqual(found[0].identity, "claude")
+        self.assertEqual(found[0].identity, "vendor domain anthropic.com")
         self.assertIn("noreply@anthropic.com", found[0].trailer)
 
     def test_a_codex_trailer_is_reported_too(self) -> None:
         commits = [_commit("Work\n\nCo-authored-by: Codex <codex@openai.com>\n")]
 
-        self.assertEqual([item.identity for item in ai_attributions(commits)], ["codex"])
+        self.assertEqual(
+            [item.identity for item in ai_attributions(commits)], ["vendor domain openai.com"]
+        )
+
+    def test_an_agent_account_at_an_ordinary_domain_is_still_an_agent(self) -> None:
+        """The vendor domain is one signal, not the only one: a self-hosted runner commits under
+        the agent's own account name at whatever domain the installation uses."""
+        commits = [
+            _commit("Work\n\nCo-Authored-By: Claude <claude@example.invalid>\n", sha="1" * 40),
+            _commit(
+                "More\n\nCo-Authored-By: Copilot <198982749+Copilot@users.noreply.github.com>\n",
+                sha="2" * 40,
+            ),
+        ]
+
+        self.assertEqual(
+            [item.identity for item in ai_attributions(commits)],
+            ["agent account claude", "agent account copilot"],
+        )
 
     def test_casing_and_leading_space_do_not_hide_a_trailer(self) -> None:
-        commits = [_commit("Work\n\n  CO-AUTHORED-BY:  Claude Code <bot@example.invalid>\n")]
+        commits = [_commit("Work\n\n  CO-AUTHORED-BY:  Claude Code <NoReply@Anthropic.com>\n")]
 
-        self.assertEqual([item.identity for item in ai_attributions(commits)], ["claude"])
+        self.assertEqual(
+            [item.identity for item in ai_attributions(commits)], ["vendor domain anthropic.com"]
+        )
 
-    def test_an_ordinary_human_co_author_stays_legal(self) -> None:
+    def test_an_addressless_agent_trailer_is_matched_on_its_exact_name(self) -> None:
+        """Git never writes a trailer without an address, so a head that does is not following git's
+        format either. An exact agent name still counts; a person's name that merely contains one
+        does not."""
+        forbidden = [_commit("Work\n\nCo-Authored-By: Claude Code\n")]
+        human = [_commit("Work\n\nCo-Authored-By: Claude Martin, reviewer\n")]
+
+        self.assertEqual([item.identity for item in ai_attributions(forbidden)], ["name claude code"])
+        self.assertEqual(ai_attributions(human), [])
+
+    # secretary-1401 round 2, BLOCKER-human-coauthor-false-positive: display-name matching rejected
+    # an ordinary human co-author. Identity is decided on the address now, and these are the names
+    # that used to fail.
+    def test_a_human_named_after_a_model_stays_an_ordinary_co_author(self) -> None:
         commits = [
             _commit(
                 "Pair on the parser\n\n"
+                "Co-Authored-By: Claude Martin <claude.martin@human.example>\n"
+                "Co-Authored-By: Gemini Rossi <gemini.rossi@human.example>\n"
                 "Co-Authored-By: Claudia Ramirez <claudia@example.invalid>\n"
                 "Co-Authored-By: A. Codexter <a@codexpertise.example>\n"
                 "Co-Authored-By: Vlad <vlad@example.invalid>\n"
+                "Co-Authored-By: Cursor Blake <cursor.blake@human.example>\n"
             )
         ]
 
@@ -80,20 +116,37 @@ class CandidateHistoryTests(unittest.TestCase):
 
         self.assertEqual(
             [(item.sha[:1], item.identity) for item in found],
-            [("1", "claude"), ("3", "codex"), ("3", "copilot")],
+            [
+                ("1", "vendor domain anthropic.com"),
+                ("3", "vendor domain openai.com"),
+                ("3", "agent account copilot"),
+            ],
         )
 
-    def test_the_log_format_round_trips_multi_line_messages(self) -> None:
-        text = (
-            "1111111111111111111111111111111111111111\x1fFirst\n\nbody\n\x1e"
-            "2222222222222222222222222222222222222222\x1fSecond\n\x1e"
+    # secretary-1401 round 2, BLOCKER-history-record-separator-bypass: the object ids are the only
+    # candidate-controlled listing this check parses, and a line that is not one is not skipped.
+    def test_the_object_id_listing_is_read_strictly(self) -> None:
+        self.assertEqual(parse_shas(f"{'1' * 40}\n{'2' * 40}\n"), ["1" * 40, "2" * 40])
+        self.assertEqual(parse_shas(""), [])
+        self.assertEqual(parse_shas("\n"), [])
+        with self.assertRaises(ValueError):
+            parse_shas(f"{'1' * 40}\nCo-Authored-By: Claude <noreply@anthropic.com>\n")
+        with self.assertRaises(ValueError):
+            parse_shas("1" * 39)
+
+    def test_a_control_byte_in_the_message_does_not_hide_a_trailer(self) -> None:
+        """A message may contain any byte, record and unit separators included. Nothing frames
+        messages against each other here, so a trailer behind one is still a trailer."""
+        commits = [
+            _commit(
+                "Sneak\n\n\x1e\x1f\x00\nCo-Authored-By: Claude <noreply@anthropic.com>\n",
+                sha="1" * 40,
+            )
+        ]
+
+        self.assertEqual(
+            [item.identity for item in ai_attributions(commits)], ["vendor domain anthropic.com"]
         )
-
-        commits = parse_log(text)
-
-        self.assertEqual([commit.sha for commit in commits], ["1" * 40, "2" * 40])
-        self.assertEqual([commit.subject for commit in commits], ["First", "Second"])
-        self.assertIn("body", commits[0].message)
 
     def test_the_repair_message_asks_for_a_local_rewrite_and_no_force_push(self) -> None:
         found = ai_attributions(

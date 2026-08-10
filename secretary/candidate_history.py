@@ -12,10 +12,23 @@ push. This module is the deterministic half of the repair. It reads commit messa
 else — no diff, no working tree, no network — so the same candidate always gets the same answer,
 and it names the commits rather than repairing them: a rewrite is the worker's own local step.
 
-The identity list is deliberately narrow. It catches the trailers the coding agents in this
-pipeline actually write and the well-known ones next to them; it does not try to recognise "an AI"
-in general, because the cost of a false positive is a green candidate bounced back to a worker over
-a human collaborator's name. Ordinary human co-authorship is a legitimate trailer and stays legal.
+A commit message is untrusted input. It is written by the head under review, it may contain any
+byte git accepts including control characters, and a candidate that wants to hide a trailer will
+put whatever it takes in it. Two consequences run through this module:
+
+  * Nothing here frames records inside message text. The caller reads object ids first, from a
+    format that cannot be forged, and then one message per id; there is no delimiter a message can
+    contain to break the parse into a shape that reads as "no trailers" (`parse_shas` refuses
+    anything that is not an object id, rather than skipping it).
+  * Identity is decided on the trailer's address, not on prose. A display name is free text: a
+    human called Claude Martin is an ordinary co-author, and a matcher that reads names rejects
+    them. What identifies an agent is where its commits come from — a model vendor's domain, or the
+    agent's own account name — so that is what is matched, and a trailer with no address at all is
+    compared against the agents' exact full names rather than searched for a word.
+
+The identity lists are deliberately narrow. They catch the agents this pipeline actually runs and
+the well-known ones next to them; they do not try to recognise "an AI" in general, because the cost
+of a false positive is a green candidate bounced back to a worker over a colleague's name.
 """
 
 from __future__ import annotations
@@ -30,29 +43,67 @@ from typing import Iterable
 # deterministic check is for.
 _TRAILER_RE = re.compile(r"(?im)^[ \t]*co-authored-by[ \t]*:[ \t]*(?P<identity>.+?)[ \t]*$")
 
-# The AI identities this preflight rejects, matched as whole words inside the trailer's identity
-# (its display name *and* its address). The boundaries are what keep a human out of the net: a
-# co-author called "Claudia" or writing from `codexpert.example` shares a prefix with an entry here
-# and must stay legal, so an entry only fires when it is not glued to another letter or digit.
-_AI_IDENTITIES = (
-    "claude",
+# `Display Name <local@domain>`, the only shape git itself writes for an identity.
+_IDENTITY_RE = re.compile(r"^(?P<name>.*?)\s*<(?P<address>[^<>]*)>\s*$")
+
+# Domains whose mail is a model vendor's own. An address here is not a colleague's: it is the
+# vendor's agent account, which is what `noreply@anthropic.com` was on the two published commits.
+_VENDOR_DOMAINS = frozenset({
+    "anthropic.com",
+    "openai.com",
+    "cursor.com",
+    "cursor.sh",
+    "cognition.ai",
+    "cognition-labs.com",
+})
+
+# Account names the agents commit under, compared to the whole local part and never to a piece of
+# one. `claude.martin@human.example` is a person; `claude@…` is the agent. GitHub's noreply form
+# (`198982749+Copilot@users.noreply.github.com`) carries the account name after the numeric id, so
+# that prefix is stripped before the comparison — the domain itself belongs to every GitHub user
+# and can never be a vendor domain.
+_AGENT_ACCOUNTS = frozenset({
+    "aider",
     "anthropic",
-    "codex",
-    "openai",
     "chatgpt",
+    "claude",
+    "claude-code",
+    "claudecode",
+    "codex",
     "copilot",
     "cursor",
     "devin",
     "gemini",
-)
-_AI_IDENTITY_RE = re.compile(
-    r"(?i)(?<![a-z0-9])(" + "|".join(_AI_IDENTITIES) + r")(?![a-z0-9])"
-)
+    "github-copilot",
+    "openai",
+})
+
+# Exact identities for the malformed trailer git would never write itself: `Co-Authored-By: Claude`
+# with no address. Compared whole, after collapsing whitespace and casing, so "Claude Martin" —
+# a person — is not one of them.
+_AGENT_NAMES = frozenset({
+    "aider",
+    "anthropic",
+    "chatgpt",
+    "claude",
+    "claude code",
+    "codex",
+    "copilot",
+    "cursor",
+    "devin",
+    "gemini",
+    "github copilot",
+    "openai",
+    "openai codex",
+})
+
+_GITHUB_NOREPLY_ID_RE = re.compile(r"^\d+\+")
+_OBJECT_ID_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")
 
 
 @dataclass(frozen=True)
 class Commit:
-    """One candidate commit, as `git log` hands it over: object id and full message."""
+    """One candidate commit, as git hands it over: object id and full message."""
 
     sha: str
     message: str
@@ -76,6 +127,31 @@ class AiAttribution:
         return f"{short} {self.subject}: Co-Authored-By: {self.trailer} [{self.identity}]"
 
 
+def forbidden_identity(trailer: str) -> str:
+    """What makes this co-author an agent, or "" when it is an ordinary human co-author.
+
+    The answer doubles as the evidence line an operator reads, so it says which rule fired: the
+    vendor domain, the agent account, or the bare agent name of an addressless trailer.
+    """
+    identity = " ".join(trailer.split())
+    match = _IDENTITY_RE.match(identity)
+    if match is None:
+        # No address to judge. Only an exact agent name counts, never a name that contains one.
+        return f"name {identity.lower()}" if identity.lower() in _AGENT_NAMES else ""
+    address = match.group("address").strip().lower()
+    local, separator, domain = address.rpartition("@")
+    if not separator:
+        # `<claude>` is not an address either; treat what is inside the brackets as a bare name.
+        bare = address or " ".join(match.group("name").split()).lower()
+        return f"name {bare}" if bare in _AGENT_NAMES else ""
+    if domain in _VENDOR_DOMAINS:
+        return f"vendor domain {domain}"
+    account = _GITHUB_NOREPLY_ID_RE.sub("", local).partition("+")[0]
+    if account in _AGENT_ACCOUNTS:
+        return f"agent account {account}"
+    return ""
+
+
 def ai_attributions(commits: Iterable[Commit]) -> list[AiAttribution]:
     """Every AI co-author trailer in `commits`, in the order the commits were given.
 
@@ -85,30 +161,39 @@ def ai_attributions(commits: Iterable[Commit]) -> list[AiAttribution]:
     found: list[AiAttribution] = []
     for commit in commits:
         for match in _TRAILER_RE.finditer(commit.message or ""):
-            identity = match.group("identity").strip()
-            hit = _AI_IDENTITY_RE.search(identity)
-            if hit is None:
+            trailer = match.group("identity").strip()
+            identity = forbidden_identity(trailer)
+            if not identity:
                 continue
             found.append(
                 AiAttribution(
                     sha=commit.sha,
                     subject=commit.subject,
-                    trailer=identity,
-                    identity=hit.group(1).lower(),
+                    trailer=trailer,
+                    identity=identity,
                 )
             )
     return found
 
 
-def parse_log(text: str) -> list[Commit]:
-    """Read `git log --format=%H%x1f%B%x1e` output. Tolerant of a trailing record separator."""
-    commits: list[Commit] = []
-    for record in (text or "").split("\x1e"):
-        if not record.strip():
+def parse_shas(text: str) -> list[str]:
+    """Object ids from `git log --format=%H`, or `ValueError` if the output is not exactly that.
+
+    This is the only thing read out of a candidate-controlled command whose output a candidate
+    could try to shape, and it is read strictly for that reason: `%H` is git's own rendering of the
+    commit's object id, nothing a message can contain reaches this stream, and a line that is not
+    an object id means the assumption behind this check does not hold. That fails the gate rather
+    than dropping the line, because a skipped line here is an unchecked commit.
+    """
+    shas: list[str] = []
+    for line in (text or "").splitlines():
+        candidate = line.strip()
+        if not candidate:
             continue
-        sha, _, message = record.strip("\n").partition("\x1f")
-        commits.append(Commit(sha=sha.strip(), message=message))
-    return commits
+        if not _OBJECT_ID_RE.match(candidate):
+            raise ValueError(f"unexpected line in the candidate's object id listing: {candidate!r}")
+        shas.append(candidate)
+    return shas
 
 
 def repair_message(attributions: list[AiAttribution], base: str) -> str:

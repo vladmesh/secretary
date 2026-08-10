@@ -82,16 +82,27 @@ not permission to skip the pre-merge check or independent review.
 
 ## Candidate history
 
-Before a gate publishes anything, the dispatcher reads the candidate's own commit messages over
-`base..HEAD` and rejects forbidden AI attribution: a `Co-Authored-By:` trailer naming a model or a
-model vendor. The check is deterministic and dispatcher-owned, it covers the common AI identities
-whatever runtime wrote the commit, and it leaves ordinary human co-authorship alone. It runs for
-`local` and `github` alike, ahead of the branch publish, so a violation is a red gate with the
-commits named and a local repair spelled out — `git commit --amend` or `git rebase -i` in the
-worker's own checkout, then report done again. Nothing is rewritten and nothing is force-pushed for
-the worker, then or later. Every worker launch packet carries the same instruction, independent of
-model family, and the reviewer reads the commit messages again as defence in depth. A history that
-cannot be read is not a pass: the gate fails closed rather than publishing unchecked commits.
+Before a gate publishes or validates anything, the dispatcher reads the candidate's own commit
+messages over `base..HEAD` and rejects forbidden AI attribution: a `Co-Authored-By:` trailer
+belonging to a coding agent. The check is deterministic and dispatcher-owned, it covers the common
+agents whatever runtime wrote the commit, and it leaves ordinary human co-authorship alone. It runs
+in every validation mode — `none` opts out of mechanical validation, not out of this boundary,
+because a project without a gate merges its candidate just the same — so a violation is a red gate
+with the commits named and a local repair spelled out: `git commit --amend` or `git rebase -i` in
+the worker's own checkout, then report done again. Nothing is rewritten and nothing is force-pushed
+for the worker, then or later. Every worker launch packet carries the same instruction, independent
+of model family, and the reviewer reads the commit messages again as defence in depth.
+
+A commit message is untrusted input written by the head under review. Two rules follow. Messages are
+never framed against each other on a delimiter a message could contain: the object ids are listed
+first from `%H`, which message text cannot influence, a listing that is not object ids is refused,
+and each message is then read on its own. And a co-author's identity is decided on the trailer's
+address — a model vendor's domain, or the agent's own account name — never on the display name,
+because a display name is free text and a colleague may legitimately be called Claude or Gemini; a
+trailer with no address at all is compared against the agents' exact full names. Anything the check
+cannot read — a missing workspace, a base that resolves nowhere, an unreadable message — fails
+closed: the gate cannot say what it would publish, so the card stops rather than the boundary being
+skipped.
 
 A gate that could not reach its backend gave no verdict, and the dispatcher does not read that
 absence as a red one. A timeout, a TLS or DNS failure, a dropped connection or a 5xx served by the
