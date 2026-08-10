@@ -325,24 +325,33 @@ The deferred owner-scoped work is intentionally outside this closeout: provision
 and retain/test the installation recovery phrase. Neither is required to inspect checkpoint health, but both
 are required for its respective provider or secret-recovery path.
 
-### Live LLM canary — pending owner validation
+### Live LLM canary — completed normal path, recovery edge still open
 
-No live LLM/card canary is claimed by this closeout. The controlled post-upgrade canary may run one
-card on already authenticated heads resolved from the installation registry. In this installation, the
-intended worker is `codex-extra-tui` on `openai-subscription` and the independent reviewer is
-`claude-opus-high` on `claude-subscription`; this route does not require an OpenRouter credential or
-secret-store materialisation. An installation key or OpenRouter credential is required only when the
-selected route actually depends on the secret store or OpenRouter.
+Production sprint `sprint:1402` completed a real single-card self-hosted cycle on 2026-08-10. Card
+`secretary-1403` used `claude-opus` as worker and `codex-reviewer` as independent reviewer, produced
+candidate `75fd95168d663e19c7654964482b5d279f288c53`, passed the GitHub exact-SHA gate and GREEN review,
+and merged through PR #184 as `b8fe6d190815c1186a00a35c1f8fe5a4b78e7bff`. The sprint closed
+itself after 26 minutes with one worker claim, one gate, one reviewer launch, zero budget events and
+zero manual prompts. The delivered increment made the unit suite's `TA_PIPELINE_STATE_DIR` hermetic.
+
+This evidence closes the normal live candidate-to-review path; it does not claim that every recovery
+edge ran. The reviewer started on its first attempt, so the post-green reviewer-only retry remains a
+live-host follow-up. Observer wake delivery separately returned `pane-stayed-ready` four times around
+Assessment and completion. Those failures did not repeat worker, gate or review work, and the observer
+still released and closed the sprint, but the final sprint resume omitted the delivery failures. The
+board tracks the transport defect (`issue:13dd4d88df6b33cfb98f`), telemetry omission
+(`issue:83ac17afc53248340f4c`) and unexercised reviewer-retry edge
+(`issue:0091f54306e6ee1aad69`) separately.
 
 A missing `secrets/installation.key` reported by `secretary doctor` remains a fail-closed
 secret-recovery finding. It is not healthy, and it must not be recovered, materialised or otherwise
 changed merely to run a canary whose selected subscription heads are already authenticated.
 
-Record the following evidence for the completed single-card canary: card reference; resolved worker
-and reviewer heads and their resources; candidate SHA; exact-SHA mechanical-gate receipt; observer
-decision; checkpoint publication; and post-run `secretary doctor --instance INSTANCE` findings. Record
-values only when the corresponding event has occurred; this guidance does not predeclare a candidate,
-receipt, decision, publication or doctor result.
+For later real sprints, keep recording card reference; resolved worker and reviewer heads; candidate SHA;
+exact-SHA mechanical-gate receipt; observer decision; checkpoint publication; worker/gate/reviewer launch
+counts; delivery failures; and manual prompts. A successful normal launch is not evidence that a retry
+path ran. Do not freeze production merely to preserve the old canary premise, and do not inject a failure
+that mutates candidate history or weakens the gate.
 
 Fresh mode does not accept an existing installation user or checkout. It refuses with an explicit choice:
 `--recover` for the same installation, or a separate adopt workflow for a live host. Recover does not

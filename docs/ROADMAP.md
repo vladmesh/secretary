@@ -86,21 +86,18 @@ The model does not yet have typed execution gates, a coded completeness check, p
 deviations, an in-house CI runner for private repositories, or cleanup by owner label. Known defects in
 the loop itself are prioritised issues on the board under the `secretary` product, not a list here.
 
-## Current product-work programme and self-hosting cutover
+## Current product-work programme and self-hosting status
 
-The next programme is deliberately bootstrapped by hand. The presence of sprint code is not evidence that
-the sprint system can safely develop itself.
+The Product/Issue/Task foundation is in place and the production loop is developing itself. The original
+manual cutover checklist is historical: production `sprint:1402` completed a real code increment through
+worker, exact-SHA gate, independent review, observer release, dispatcher merge, task archival and sprint
+close without a manual prompt or budget event. A failed later sprint is an incident and a source of new
+Issues; it does not by itself roll the whole programme back to manual execution.
 
-The Product/Issue/Task foundation is in place: Product, valid prioritised issues, sprint issue references,
-project reservations, just-in-time tasks and terminal-task archival. Two steps remain before the cutover.
-
-1. **Manual sprint: observer reliability.** Close the stale-resume and process-versus-work liveness gaps.
-2. **Self-hosted canary.** Run one short code-only sprint through the new observer path. It must create its
-   own task, survive a restart, keep resume current, close, archive the terminal task and leave the issue
-   open for a separate PO decision.
-
-The cutover is an explicit PO decision, recorded as `sprint system accepted for self-hosting`. A failed
-canary returns the programme to manual repair and is repeated; it never advances automatically.
+That successful normal cycle is not blanket recovery evidence. Live observer prompt delivery still showed
+`pane-stayed-ready`, its failures were omitted from the final sprint summary, and the post-green
+reviewer-only retry did not run because the reviewer launched normally. These are prioritised board Issues,
+not reasons to describe self-hosting as pending.
 
 After cutover, the sprint system implements its remaining programme through itself:
 
