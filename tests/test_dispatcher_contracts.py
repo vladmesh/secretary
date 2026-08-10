@@ -39,6 +39,7 @@ from secretary import (
 )
 from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, InstanceCatalog
 from secretary.dispatcher_gate import GateResult
+from secretary import dispatcher_launcher
 from secretary.dispatcher_launcher import HeadLaunchError, wrap_role_shell_command
 from secretary.role_env import observer_binding
 from secretary import role_env as head_role_env
@@ -992,6 +993,52 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
                         pid, role=role, prompt="skill", workspace="/tmp/ws", registry=registry
                     )
                     self.assertNotIn("codex exec", rendered.command)
+
+    def test_every_role_that_launches_a_codex_head_prepares_its_workspace(self) -> None:
+        """The trust preflight follows the adapter, not the role.
+
+        Until secretary-1173 the dispatcher ran it for the observer alone, on the reasoning that
+        worker and reviewer workspaces hang off repositories the runtime already trusts. That is a
+        property of a host that has been running codex heads, not of the product: on a clean host
+        every one of these roles brings up a TUI that will sit on the dialog instead of taking its
+        prompt. Swept over the shipped registry so a new codex role default cannot quietly miss it.
+        """
+        canon = canonical_heads(upgrade.running_product_root())
+        codex_heads = sorted(
+            pid for pid, profile in canon["profiles"].items() if profile.get("adapter") == "codex"
+        )
+        self.assertTrue(codex_heads)
+
+        for role in ("worker", "reviewer", "observer", "curator", "retro", "steward"):
+            for head in codex_heads:
+                with self.subTest(role=role, head=head):
+                    tmp = tempfile.TemporaryDirectory()
+                    self.addCleanup(tmp.cleanup)
+                    home = Path(tmp.name) / "codex-home"
+                    workspace = Path(tmp.name) / "ws"
+                    workspace.mkdir()
+                    catalog = object.__new__(InstanceCatalog)
+                    catalog._heads = canon  # type: ignore[attr-defined]
+
+                    with mock.patch.dict(os.environ, {"TA_CODEX_HOME": str(home)}):
+                        catalog.prepare_head_workspace(head, str(workspace), role=role)
+
+                    trusted = (home / "config.toml").read_text(encoding="utf-8")
+                    self.assertIn(str(workspace.resolve()), trusted)
+                    self.assertIn('trust_level = "trusted"', trusted)
+
+    def test_the_preflight_is_shared_with_the_triggered_agents_launcher(self) -> None:
+        """One implementation reachable from both sides, and the dependency direction that forces
+        where it lives: `triggered_agents` may not import `secretary` back."""
+        from triggered_agents.runtime import codex_preflight, dispatch as ta_dispatch
+
+        self.assertIs(dispatcher_launcher._preflight_codex_workspace,
+                      codex_preflight.ensure_codex_workspace_trusted)
+        self.assertIs(ta_dispatch.ensure_codex_workspace_trusted,
+                      codex_preflight.ensure_codex_workspace_trusted)
+        source = Path(codex_preflight.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("import secretary", source)
+        self.assertNotIn("from secretary", source)
 
     def test_a_declared_old_codex_id_resolves_instead_of_orphaning_an_override(self) -> None:
         """A head id already written onto a card or a spec keeps pointing at a launchable head.

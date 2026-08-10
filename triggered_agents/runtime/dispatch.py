@@ -45,12 +45,15 @@ bare busy check would freeze the agent forever — the watchdog makes "skip when
 Dispatch only sends the skill and returns; the head reaches `advance` (same lock) minutes later,
 so there's no deadlock.
 
-Every fresh spawn (create, watchdog-restart) goes through `_ensure_claude_ready` first
-(`claude_env.ensure_trust`/`ensure_theme`): a head that lands on the folder-trust dialog or the
-onboarding theme picker hangs on stdin nobody sends, and never renames its tab away from the
-shell default — invisible to the `Claude`-in-title match above, so it's neither reused nor
-reaped and just sits there as a silent orphan (found live in the curator workspace: a terminal
-stuck at "choose the text style" that `_agent_terminals` couldn't see).
+Every fresh spawn (create, watchdog-restart) prepares the workspace for its head's own runtime
+first, via `_ensure_head_ready`, before any pane is created: a head that lands on a first-run
+dialog hangs on stdin nobody sends, and never renames its tab away from the shell default —
+invisible to the `Claude`-in-title match above, so it's neither reused nor reaped and just sits
+there as a silent orphan (found live in the curator workspace: a terminal stuck at "choose the
+text style" that `_agent_terminals` couldn't see). For a `claude` head that is folder trust and the
+onboarding theme picker, best-effort; for an interactive `codex` head it is the directory-trust
+entry `codex_preflight` writes, and that one is a hard precondition — it fails the spawn before a
+pane exists rather than leaving one sitting on a dialog forever.
 
 A live terminal never re-resolves its head profile on its own, so every spawn that resolves one
 (create, watchdog-restart, red-fallback) records it via `AgentState.save_head_profile` — the only
@@ -105,6 +108,7 @@ from pathlib import Path
 import tomllib
 
 from . import claude_env, finalizer, orca_rpc, role_env
+from .codex_preflight import CodexPreflightError, ensure_codex_workspace_trusted
 from .state import AgentState
 from .tui_delivery import TuiDeliveryError, deliver_interactive_prompt
 
@@ -152,6 +156,10 @@ class DispatchCommand:
     # once it is up. Every Codex head is an interactive session and none of them takes a prompt on
     # its command line; a `claude`/`hermes` launch seeds its own and this stays False.
     prompt_after_start: bool = False
+    # The registry profile `launch` was rendered from, for an interactive head that needs its
+    # workspace prepared before a pane is created. None for every other launch, including the bare
+    # fallback invocation a failed resolution falls back to.
+    head_profile: dict | None = None
 
 
 class ReuseDeliveryError(TuiDeliveryError):
@@ -391,9 +399,9 @@ def _reuse_head_is_red(agent: str, state: AgentState) -> bool:
 
 
 def _launch_cmd(agent: str, variant: str | None = None,
-                card_ref: str | None = None) -> tuple[str, str, str | None, bool]:
-    """(skill, full launch command, resolved head profile, prompt-after-start) from the agent's
-    automation.toml. The third element is the profile id actually rendered into the launch
+                card_ref: str | None = None) -> tuple[str, str, str | None, bool, dict | None]:
+    """(skill, full launch command, resolved head profile, prompt-after-start, profile data) from
+    the agent's automation.toml. The third element is the profile id actually rendered into the launch
     command (None for a spec with no `head`, or when resolution raised) — the caller records it
     via `AgentState.save_head_profile` so a later idle-reuse tick can check the resource this very
     terminal is running against instead of just the agent's static preferred head
@@ -418,6 +426,13 @@ def _launch_cmd(agent: str, variant: str | None = None,
 
     The fourth element is that distinction: a Codex head is an interactive session whose command
     carries no prompt, so the caller types `skill` into it once the pane is up.
+
+    The fifth is the resolved profile's own data, carried for exactly one reason: an interactive
+    head has to have its workspace prepared before its pane exists, and the preflight that does it
+    reads the CODEX_HOME from the profile the command was rendered from. Resolving it a second time
+    at the call site could answer differently — this run's resource health has already chosen a
+    fallback here — and a preflight run against a different home than the launch names would write
+    trust the head never reads.
     """
     spec = _load_spec(agent)
     skill = spec["variants"][variant]["skill"] if variant else spec["skill"]
@@ -426,18 +441,20 @@ def _launch_cmd(agent: str, variant: str | None = None,
     head = _preferred_head(agent, spec)
     bare_claude = role_env.wrap_shell_command(agent, f"claude --dangerously-skip-permissions {skill!r}")
     if not head:
-        return skill, bare_claude, None, False
+        return skill, bare_claude, None, False, None
     try:
         from ..agents.pipeline import health as pipeline_health
         from ..agents.pipeline import heads as pipeline_heads
         statuses = pipeline_health.refresh()
         resolved = pipeline_health.resolve_head(head, statuses) or head
+        registry = pipeline_heads.load_registry()
         rendered = pipeline_heads.render_command(
-            resolved, role=agent, prompt=skill, workspace=_workspace(agent)
+            resolved, role=agent, prompt=skill, workspace=_workspace(agent), registry=registry
         )
-        return skill, rendered.command, resolved, rendered.prompt_after_start
+        return (skill, rendered.command, resolved, rendered.prompt_after_start,
+                registry.profile(resolved))
     except Exception:
-        return skill, bare_claude, None, False
+        return skill, bare_claude, None, False, None
 
 
 def _steward_report_card(agent: str, variant: str | None) -> str | None:
@@ -481,9 +498,11 @@ def _dispatch_command(agent: str, variant: str | None) -> DispatchCommand:
     create, watchdog restart, idle reuse) carries one and a busy-skip tick never does (no card,
     nobody to close it)."""
     card_ref = _steward_report_card(agent, variant)
-    skill, launch, profile, after_start = (_launch_cmd(agent, variant, card_ref=card_ref)
-                                           if card_ref else _launch_cmd(agent, variant))
-    return DispatchCommand(skill, launch, profile, card_ref, prompt_after_start=after_start)
+    skill, launch, profile, after_start, profile_data = (
+        _launch_cmd(agent, variant, card_ref=card_ref) if card_ref else _launch_cmd(agent, variant)
+    )
+    return DispatchCommand(skill, launch, profile, card_ref, prompt_after_start=after_start,
+                           head_profile=profile_data)
 
 
 def _terminal_handle_live(ws: str, handle: str) -> bool:
@@ -528,6 +547,29 @@ def _fresh_steward_report_in_progress(agent: str, now: float, ws: str,
     except Exception:
         return None
     return None
+
+
+def _ensure_head_ready(ws: str, cmd: DispatchCommand) -> None:
+    """Prepare `ws` for the head about to be spawned into it, on that head's own runtime.
+
+    A service head is a head like a pipeline worker is, and the first-run question its runtime asks
+    is the one thing that can make a fresh pane never come up at all. Which question that is
+    depends on the runtime: a `claude` head is asked about folder trust and the theme picker, an
+    interactive `codex` head about directory trust. So this is the one place that branches on it,
+    right before `_create_terminal`, which is the ordering `codex_preflight` states for every
+    interactive Codex head and the Secretary dispatcher keeps too.
+
+    The two failure modes are deliberately not the same. Claude's preparation stays best-effort:
+    it has always been, a config hiccup there risks the hang it prevents but does not guarantee
+    one, and nothing in this module has ever gated a tick on it. The Codex preflight is a hard
+    precondition — without the trust entry the pane cannot reach readiness, so spawning one anyway
+    would create exactly the wedged head this exists to prevent — and it raises, before any pane
+    is created.
+    """
+    if cmd.prompt_after_start and str((cmd.head_profile or {}).get("adapter") or "") == "codex":
+        ensure_codex_workspace_trusted(cmd.head_profile, ws)
+        return
+    _ensure_claude_ready(ws)
 
 
 def _ensure_claude_ready(ws: str) -> None:
@@ -619,6 +661,12 @@ def _create_terminal(agent: str, ws: str, launch: str, state: AgentState,
 
 def _recover_steward_dispatch_failure(state: AgentState, event: str, cmd: DispatchCommand,
                                       failure: BaseException) -> None:
+    """Close out a steward report card whose head was brought up but never took the run.
+
+    Only for a failure after the pane exists. A workspace that could not be prepared at all is
+    escalated instead, by `_escalate_steward_preflight_failure`: nothing ran, so there is nothing
+    to close.
+    """
     if not cmd.card_ref:
         return
     state.clear_active_report(cmd.card_ref)
@@ -631,6 +679,38 @@ def _recover_steward_dispatch_failure(state: AgentState, event: str, cmd: Dispat
     except Exception as recovery_error:
         state.log_run(event, action="dispatch-recovery", result="failed",
                       reference=cmd.card_ref, error=str(recovery_error))
+
+
+def _escalate_steward_preflight_failure(state: AgentState, event: str, cmd: DispatchCommand,
+                                        failure: BaseException) -> None:
+    """Put a steward report card in front of a human when its workspace could not be prepared.
+
+    The preflight fails before any pane is created, so no head has seen this card and no sweep has
+    happened. Closing it as Done — what a post-pane dispatch failure does — would record a sweep
+    that never ran and consume the card that says one was due, and the condition is not one a
+    later tick heals on its own: an untrusted repository root or a codex config the launcher may
+    not rewrite stays that way until somebody changes it. Blocked is the board's own "give up,
+    wait for a human" state and the steward's own escape hatch, so the card lands there with the
+    preflight's reason attached, visible rather than silently swallowed.
+
+    A card that cannot even be moved leaves its reason in the run log, the same fallback the
+    close-out path takes: the tick is failing either way, and a recovery that raises on its own
+    would replace the real cause with its own.
+    """
+    if not cmd.card_ref:
+        return
+    state.clear_active_report(cmd.card_ref)
+    body = "steward dispatch could not prepare the head workspace, so no head was started " \
+           "and no sweep ran.\n\n" \
+           f"failure: {failure}"
+    try:
+        from ..agents.pipeline import ops as pipeline_ops
+        pipeline_ops.move_card("steward", cmd.card_ref, "Blocked", reason=body)
+        state.log_run(event, action="dispatch-preflight", result="blocked", reference=cmd.card_ref,
+                      error=str(failure))
+    except Exception as escalation_error:
+        state.log_run(event, action="dispatch-preflight", result="failed", reference=cmd.card_ref,
+                      error=f"{failure} (escalation failed: {escalation_error})")
 
 
 def _tui_run_json(args: list[str]) -> dict:
@@ -673,9 +753,20 @@ def _deliver_interactive_skill(handle: str, workspace: str, skill: str) -> None:
 
 def _spawn_fresh_terminal(agent: str, variant: str | None, ws: str, state: AgentState,
                           event: str) -> DispatchCommand:
+    """Bring a fresh head up in `ws`: prepare the workspace, create the pane, deliver the skill.
+
+    The preparation is deliberately outside the recovery below. Once a pane exists the head may
+    have started work, so a failure after that point is a run that has to be closed out; a failure
+    before it started nothing at all, and closing a report card for it would record a sweep that
+    never happened.
+    """
     cmd = _dispatch_command(agent, variant)
     try:
-        _ensure_claude_ready(ws)
+        _ensure_head_ready(ws, cmd)
+    except CodexPreflightError as exc:
+        _escalate_steward_preflight_failure(state, event, cmd, exc)
+        raise
+    try:
         handle = _create_terminal(agent, ws, cmd.launch, state, cmd.profile)
         if cmd.prompt_after_start:
             _deliver_interactive_skill(handle, ws, cmd.skill)

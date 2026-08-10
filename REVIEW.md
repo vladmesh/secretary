@@ -23,16 +23,19 @@ The sprint contract requires an absence of `codex_mode` to mean TUI, rejects `--
 
 Changing Claude launch behavior, worker/reviewer family-selection policy, watchdog timing, red-review continuation, pane identity, Orca itself, the recovery-canon path, live installation deployment, or rewriting any existing branch history.
 
+## Operator-directed review retry (2026-08-10)
+
+This round exists solely to take the already completed candidate `34bf7e7a6c5eafa61ae9d30068bfdd2b9b579a89` through an independent Claude review after the Codex reviewer-pane delivery failed twice. Do not modify files, create commits, or run any tests in this worker round. Confirm the retained workspace is clean and still at that candidate SHA, then immediately submit the ordinary `report:done` command from this TASK.md. State the SHA and that this was an operator-directed no-change/no-test handoff; do not claim a mechanical gate passed. The dispatcher must obtain its ordinary exact-SHA gate receipt before it starts the reviewer. This instruction overrides the development check-cost instructions for this no-change handoff only.
 
 
 ## Mechanical gate attestation
 
-- validated_sha: 34bf7e7a6c5eafa61ae9d30068bfdd2b9b579a89
+- validated_sha: 81122c645db2188ae384a6720aaa4035ddd856e2
 - base_sha: 5762fdbe15a189b30c6e014bbed396c5b011c854
 - gate_mode: github
 - required terminal checks:
-  - test: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/31342988812/job/93319710526)
-- completed_at: 2026-08-09T23:55:11+00:00
+  - test: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/31343505947/job/93321051306)
+- completed_at: 2026-08-10T00:07:44+00:00
 - command_or_check_set_digest: e05e08ff6e9e51da3be176a7b5215dfddd2f768f01036631e8a3c9ab7be723ca
 
 Independently inspect the diff, acceptance criteria and invariants. The attested broad
@@ -57,10 +60,10 @@ real behaviour you verified and how. If no end-to-end check against the real bac
 was possible, write plainly that it was not done and which assumption stays unverified.
 
 Post exactly one review verdict through the secretary task protocol:
-Write the body to /tmp/secretary-verdict-secretary-1173-16.md with your file-writing tool,
+Write the body to /tmp/secretary-verdict-secretary-1173-22.md with your file-writing tool,
 then run the command below verbatim. Do not assemble the body inside the shell command
 (no heredoc, no mktemp, no echo pipeline) and do not add `rm`: the codex runtime refuses
 rm-style commands, and quotes or backticks in the body break the call. Leave the file in
 place afterwards; the dispatcher does not read it.
-PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1173 --role reviewer --kind green --request-id dispatcher-attempt-20260809T234030Z-8ff0828a6809-review-green-secretary-1173-16 --body-file /tmp/secretary-verdict-secretary-1173-16.md
-PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1173 --role reviewer --kind red --request-id dispatcher-attempt-20260809T234030Z-8ff0828a6809-review-red-secretary-1173-16 --body-file /tmp/secretary-verdict-secretary-1173-16.md
+PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1173 --role reviewer --kind green --request-id dispatcher-attempt-20260810T000143Z-5541338d119d-review-green-secretary-1173-22 --body-file /tmp/secretary-verdict-secretary-1173-22.md
+PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1173 --role reviewer --kind red --request-id dispatcher-attempt-20260810T000143Z-5541338d119d-review-red-secretary-1173-22 --body-file /tmp/secretary-verdict-secretary-1173-22.md

@@ -165,12 +165,15 @@ class TriggeredCodexHeadTests(unittest.TestCase):
              mock.patch.object(pipeline_heads, "load_registry", return_value=self.registry), \
              mock.patch.object(pipeline_health, "refresh", return_value={}), \
              mock.patch.object(pipeline_health, "resolve_head", return_value="codex"):
-            skill, launch, profile, after_start = dispatch._launch_cmd("retro")
+            skill, launch, profile, after_start, profile_data = dispatch._launch_cmd("retro")
 
         self.assertEqual((skill, profile), ("/retro", "codex"))
         self.assertTrue(after_start)
         self.assertNotIn("codex exec", launch)
         self.assertNotIn("/retro", launch)
+        # The profile the command was rendered from travels with it, so the preflight that has to
+        # run before the pane exists reads the same CODEX_HOME the launch names.
+        self.assertEqual(profile_data, self.REGISTRY["profiles"]["codex"])
 
     def _orca_calls(self, calls: list[list[str]]):
         """Answer the shared interactive delivery path's Orca calls: idle pane, accepted send."""
@@ -312,3 +315,135 @@ class TriggeredCodexHeadTests(unittest.TestCase):
                 dispatch._preferred_head("retro", {"head": "codex-terra"})
             with self.assertRaises(pipeline_heads.HeadRegistryError):
                 dispatch._launch_cmd("retro")
+
+
+class TriggeredCodexPreflightTests(unittest.TestCase):
+    """A fresh service pane is only created once its workspace can actually hold a Codex head.
+
+    The interactive Codex heads a service tick brings up (curator, retro, steward) are asked about
+    directory trust before they will take a prompt, and nobody is sitting in front of that pane to
+    answer. So the tick answers it first, through the same preflight the Secretary dispatcher uses,
+    and a workspace it cannot prepare fails before a pane exists rather than after (secretary-1173).
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.workspace = str(self.root / "workspace")
+        Path(self.workspace).mkdir()
+        self.codex_home = self.root / "codex-home"
+        self.profile = {"resource": "openai-sub", "adapter": "codex",
+                        "codex_home": str(self.codex_home), "fallback": []}
+        self.command = dispatch.DispatchCommand(
+            "/retro", "codex", "codex", None, prompt_after_start=True, head_profile=self.profile
+        )
+
+    def _trusted(self) -> dict:
+        import tomllib
+        return tomllib.loads((self.codex_home / "config.toml").read_text(encoding="utf-8"))
+
+    def test_a_fresh_codex_service_workspace_is_trusted_before_its_pane_exists(self) -> None:
+        order: list[str] = []
+
+        def create(agent, ws, launch, state, profile):
+            order.append("create")
+            # What the pane is created against has to be a workspace already recorded as trusted;
+            # answering the dialog afterwards would be answering it too late.
+            order.append("trusted" if (self.codex_home / "config.toml").is_file() else "untrusted")
+            return "term-codex"
+
+        with mock.patch.object(dispatch, "_dispatch_command", return_value=self.command), \
+             mock.patch.object(dispatch, "_create_terminal", side_effect=create), \
+             mock.patch.object(dispatch, "_deliver_interactive_skill",
+                               side_effect=lambda *a: order.append("deliver")):
+            dispatch._spawn_fresh_terminal("retro", None, self.workspace, mock.Mock(), "dispatch")
+
+        self.assertEqual(order, ["create", "trusted", "deliver"])
+        trusted = self._trusted()
+        self.assertEqual(
+            trusted["projects"][str(Path(self.workspace).resolve())]["trust_level"], "trusted"
+        )
+
+    def test_a_claude_service_head_keeps_its_own_best_effort_preparation(self) -> None:
+        """Claude's first-run prep is unchanged, and no codex config is written for it."""
+        command = dispatch.DispatchCommand("/retro", "claude '/retro'", "claude-opus", None)
+
+        with mock.patch.object(dispatch, "_dispatch_command", return_value=command), \
+             mock.patch.object(dispatch, "_ensure_claude_ready") as claude_ready, \
+             mock.patch.object(dispatch, "_create_terminal", return_value="term-claude"), \
+             mock.patch.object(dispatch, "_orca"):
+            dispatch._spawn_fresh_terminal("retro", None, self.workspace, mock.Mock(), "dispatch")
+
+        claude_ready.assert_called_once_with(self.workspace)
+        self.assertFalse(self.codex_home.exists())
+
+    def test_a_workspace_that_cannot_be_prepared_creates_no_pane_at_all(self) -> None:
+        """A path somebody kept untrusted is a decision, not something to launch on top of."""
+        self.codex_home.mkdir()
+        (self.codex_home / "config.toml").write_text(
+            f'[projects.{json.dumps(str(Path(self.workspace).resolve()))}]\n'
+            'trust_level = "untrusted"\n',
+            encoding="utf-8",
+        )
+        state = mock.Mock()
+
+        with mock.patch.object(dispatch, "_dispatch_command", return_value=self.command), \
+             mock.patch.object(dispatch, "_create_terminal") as create, \
+             mock.patch.object(dispatch, "_deliver_interactive_skill") as deliver:
+            with self.assertRaises(dispatch.CodexPreflightError):
+                dispatch._spawn_fresh_terminal("retro", None, self.workspace, state, "dispatch")
+
+        create.assert_not_called()
+        deliver.assert_not_called()
+        state.save_active_report.assert_not_called()
+
+    def test_a_failed_preflight_escalates_the_steward_card_instead_of_closing_it(self) -> None:
+        """No head was started, so no sweep happened: the card must not be recorded as one.
+
+        Done is what a dispatch that already had a pane closes out with. A workspace that could
+        never hold a head is a condition a later tick cannot heal on its own, so the card goes to
+        the board's own wait-for-a-human state with the reason attached.
+        """
+        self.codex_home.mkdir()
+        (self.codex_home / "config.toml").write_text(
+            f'[projects.{json.dumps(str(Path(self.workspace).resolve()))}]\n'
+            'trust_level = "untrusted"\n',
+            encoding="utf-8",
+        )
+        command = dispatch.DispatchCommand(
+            "/steward --card secretary-817", "codex", "codex", "secretary-817",
+            prompt_after_start=True, head_profile=self.profile,
+        )
+        moved: list[tuple] = []
+        state = mock.Mock()
+
+        with mock.patch.object(dispatch, "_dispatch_command", return_value=command), \
+             mock.patch.object(dispatch, "_create_terminal") as create, \
+             mock.patch("triggered_agents.agents.pipeline.ops.move_card",
+                        side_effect=lambda *args, **kwargs: moved.append((args, kwargs))):
+            with self.assertRaises(dispatch.CodexPreflightError):
+                dispatch._spawn_fresh_terminal("steward", None, self.workspace, state, "dispatch")
+
+        create.assert_not_called()
+        self.assertEqual(moved[0][0], ("steward", "secretary-817", "Blocked"))
+        self.assertIn("no head was started", moved[0][1]["reason"])
+        self.assertIn("trust_level", moved[0][1]["reason"])
+        self.assertNotIn("Done", [call[0][2] for call in moved])
+        state.clear_active_report.assert_called_once_with("secretary-817")
+
+    def test_the_escalation_is_allowed_by_the_boards_own_transition_matrix(self) -> None:
+        """The column this lands a report card in is one the steward may actually move it to."""
+        from triggered_agents.agents.pipeline import model
+
+        model.check_move("steward", "In progress", "Blocked")
+
+    def test_the_service_launcher_and_the_dispatcher_run_one_preflight(self) -> None:
+        """Not two implementations that agree today: the same function object."""
+        from secretary import dispatcher_launcher
+        from triggered_agents.runtime import codex_preflight
+
+        self.assertIs(dispatch.ensure_codex_workspace_trusted,
+                      codex_preflight.ensure_codex_workspace_trusted)
+        self.assertIs(dispatcher_launcher._preflight_codex_workspace,
+                      codex_preflight.ensure_codex_workspace_trusted)

@@ -537,17 +537,25 @@ class InstanceCatalog:
     def prepare_head_workspace(self, head: str, workspace: str, *, role: str = "") -> None:
         """Pre-answer the first-run questions a head's CLI would otherwise put to an operator.
 
-        The codex branch is observer-only on purpose. Worker and reviewer workspaces are worktrees
-        of repositories the codex runtime already trusts, so they never see the dialog, and the
-        role that does see it is the only one whose bring-up may touch the runtime's own
-        `config.toml`.
+        Every codex head runs as a TUI, so every codex head is asked about directory trust before
+        it will take a prompt — worker, reviewer and observer alike. The role made no difference to
+        that question and this branch no longer asks about it: what used to make workers and
+        reviewers look exempt is that the repositories they are cut from happen to be trusted on a
+        host that has been running heads for a while, which is a property of that host, not of the
+        role. A clean host has no such entry, and a head launched into a workspace whose root codex
+        has never seen sits on the dialog, never answers Orca's readiness probe and never receives
+        its prompt.
+
+        This runs on the bring-up path before the pane is created, which is the ordering
+        `triggered_agents.runtime.codex_preflight` states for every interactive codex head and the
+        service launcher keeps too: trust, then pane, then readiness, then delivery.
         """
         profile = self._head_profile(head)
         adapter = profile.get("adapter") if isinstance(profile, dict) else ""
         try:
             if adapter == "claude":
                 _ensure_claude_workspace_ready(workspace)
-            elif adapter == "codex" and role == OBSERVER_ROLE:
+            elif adapter == "codex":
                 _ensure_codex_workspace_trusted(profile, workspace)
         except HeadLaunchError as exc:
             raise HostError(str(exc)) from None

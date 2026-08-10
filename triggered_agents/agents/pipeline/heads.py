@@ -33,6 +33,7 @@ from typing import Any
 import yaml
 
 from ...runtime import role_env
+from ...runtime.codex_preflight import codex_trust_paths
 
 HEADS_TOML = Path(__file__).with_name("heads.toml")
 # The installation whose registry this process runs off, and where that registry sits inside it.
@@ -212,70 +213,6 @@ def _toml_basic_string(value: str) -> str:
     return json.dumps(value)
 
 
-def _resolve_git_path(value: str, base: Path) -> Path:
-    path = Path(value)
-    if not path.is_absolute():
-        path = base / path
-    return path.resolve(strict=False)
-
-
-def _workspace_git_dir(workspace_path: Path) -> Path | None:
-    dotgit = workspace_path / ".git"
-    try:
-        if dotgit.is_dir():
-            return dotgit.resolve(strict=False)
-        if dotgit.is_file():
-            line = dotgit.read_text(encoding="utf-8").splitlines()[0].strip()
-    except (OSError, IndexError):
-        return None
-    if not dotgit.is_file():
-        return None
-    if not line.startswith("gitdir:"):
-        return None
-    return _resolve_git_path(line.split(":", 1)[1].strip(), workspace_path)
-
-
-def _git_common_dir(git_dir: Path) -> Path:
-    common = git_dir / "commondir"
-    try:
-        if common.is_file():
-            value = common.read_text(encoding="utf-8").splitlines()[0].strip()
-            if value:
-                return _resolve_git_path(value, git_dir)
-    except (OSError, IndexError):
-        pass
-    return git_dir.resolve(strict=False)
-
-
-def _codex_repository_trust_root(workspace_path: Path) -> Path | None:
-    """Codex' TUI trust check keys linked worktrees by the common git dir's repo root."""
-    git_dir = _workspace_git_dir(workspace_path)
-    if git_dir is None:
-        return None
-    common_dir = _git_common_dir(git_dir)
-    if common_dir.name != ".git":
-        return None
-    if git_dir != common_dir and not git_dir.is_relative_to(common_dir / "worktrees"):
-        return None
-    return common_dir.parent.resolve(strict=False)
-
-
-def _codex_tui_trust_paths(workspace: str) -> list[str]:
-    workspace_path = Path(workspace).resolve(strict=False)
-    paths = [workspace_path]
-    repo_root = _codex_repository_trust_root(workspace_path)
-    if repo_root is not None:
-        paths.append(repo_root)
-    seen = set()
-    out = []
-    for path in paths:
-        key = str(path)
-        if key not in seen:
-            seen.add(key)
-            out.append(key)
-    return out
-
-
 def _codex_trust_flag(path: str) -> str:
     key = f"projects.{_toml_basic_string(path)}.trust_level=\"trusted\""
     return " -c " + shlex.quote(key)
@@ -289,10 +226,15 @@ def _render_codex_tui(profile: dict, *, prompt: str | None = None, workspace: st
 
     `--skip-git-repo-check` is an `exec`-only flag in Codex 0.143; the top-level TUI rejects it.
     Pipeline worker/reviewer workspaces are git worktrees already, so the TUI path does not need
-    it. Trust overrides only skip Codex' directory-trust dialog for the provisioned worktree and,
-    for linked worktrees, the same repository root Codex derives from the common git dir. The head
-    already runs with `--dangerously-bypass-approvals-and-sandbox`, so this does not grant extra
-    rights.
+    it.
+
+    The trust overrides state the intent on the command line, for the provisioned worktree and, for
+    a linked worktree, the same repository root Codex derives from the common git dir. They do not
+    on their own answer the dialog: Codex 0.145 still shows it with them in place, which is why the
+    only thing that actually gets a pane past it is the `codex_preflight` write into the CODEX_HOME
+    this command names, before the pane is created. The paths come from that same preflight, so the
+    two can never name different directories. The head already runs with
+    `--dangerously-bypass-approvals-and-sandbox`, so this grants no extra rights.
     """
     home = profile.get("codex_home") or CODEX_HOME
     model = profile.get("model")
@@ -303,7 +245,7 @@ def _render_codex_tui(profile: dict, *, prompt: str | None = None, workspace: st
         effort_flag = " -c " + shlex.quote(f'model_reasoning_effort="{effort}"')
     if not workspace:
         raise HeadRegistryError("codex TUI launch requires workspace for directory trust override")
-    trust_flags = "".join(_codex_trust_flag(path) for path in _codex_tui_trust_paths(workspace))
+    trust_flags = "".join(_codex_trust_flag(path) for path in codex_trust_paths(workspace))
     return (f"CODEX_HOME={home} codex --dangerously-bypass-approvals-and-sandbox"
             f"{model_flag}{effort_flag}{trust_flags}")
 
