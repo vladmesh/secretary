@@ -1807,15 +1807,14 @@ class CommandHostRuntime:
                 try:
                     self._close_launched_pane(pane.handle, pid_file)
                 except HostError as stop_exc:
-                    aborted = HeadLaunchAborted(
+                    raise HeadLaunchAborted(
                         f"{exc}; head terminal stop failed: {stop_exc}",
                         handle=pane.handle,
                         leaf=pane.leaf,
                         workspace=workspace,
                         pid_file=pid_file,
-                    )
-                    aborted.evidence = evidence
-                    raise aborted from None
+                        evidence=evidence,
+                    ) from None
                 if readiness in (READINESS_BUSY, READINESS_BLOCKED):
                     raise HeadPaneNotReady(
                         f"the head pane was {_pane_state_label(readiness)} and never took its "

@@ -274,7 +274,14 @@ and through a replacement head's launch document, and they are readable from out
 
 The reviewer keeps the same evidence on its own record. A reviewer prompt that the shared boundary
 saw fail leaves `review_delivery_failures` and `review_delivery_evidence` on the card, because the
-pane is closed behind that failure and nothing can be asked of it afterwards. It changes no routing:
+pane is closed behind that failure and nothing can be asked of it afterwards. Every reviewer
+bring-up failure goes through one recorder in `start_review`, before any branch takes a transition,
+writes a launch intent, decides a retry or returns an outcome — including the ambiguous abort, where
+the pane is still open and the intent has to be kept: the evidence is written first, and refusing to
+open a second reviewer still outranks the ordinary infrastructure retry. One point means no branch
+can forget and none can count twice. A failure carrying no evidence records none: a split that would
+not open is an infrastructure failure, and it must not be tallied as a prompt that was refused.
+It changes no routing:
 the card still takes the infrastructure-retry transition it took before, with its green gate
 receipt, candidate SHA, report round and held worker untouched, and unlike the infrastructure
 counter beside it the delivery evidence is not cleared by a reviewer that later takes the checkout.

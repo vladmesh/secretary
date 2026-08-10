@@ -357,6 +357,44 @@ def recover_review_launch(
     )
 
 
+def _reviewer_launch_aborted(
+    runtime: Any,
+    task: dict[str, Any],
+    records: dict[str, DispatcherRecord],
+    ref: str,
+    record: DispatcherRecord,
+    attempt_id: str,
+    exc: HeadLaunchAborted,
+    *,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """The ambiguous reviewer bring-up: its pane is open and nothing can say the head is gone.
+
+    Unchanged behaviour, moved out of the `try` so the one delivery-evidence sink runs before it.
+    "No reviewer exists" is exactly what cannot be claimed here, so the intent stays on disk with
+    what the failure knew of that head and the next tick adopts it or stops it. Blocking the card
+    and dropping the record instead would leave a live reviewer with nothing pointing at it, and
+    that still outranks the ordinary infrastructure retry.
+    """
+    mark_launch_aborted(runtime, payload, records, ref, record, exc)
+    record.state = "review_starting"
+    # Count this abort and, once it has repeated past the ceiling, pull an operator in once.
+    # The record and its intent are untouched — a head may still be running, so this never
+    # blocks or drops the card — but a launch that cannot freeze its worker for this many ticks
+    # is no longer a transient the steward's degraded line covers on its own (issue:aa9a8ae4).
+    record.review_launch_aborts += 1
+    _escalate_stuck_review_launch(runtime, task, record, attempt_id)
+    records[ref] = record
+    runtime.save_records(payload, records)
+    return launch_aborted(
+        step="review",
+        ref=ref,
+        attempt_id=record.attempt_id or attempt_id,
+        role=REVIEW_ROLE,
+        reason=scrub_host_output(str(exc)),
+    )
+
+
 def _record_review_delivery_failure(record: DispatcherRecord, exc: Exception) -> None:
     """Keep a reviewer prompt that did not land as durable card telemetry.
 
@@ -489,35 +527,21 @@ def start_review(
         )
     try:
         launch = runtime.host.start_review(task, record)
-    except HeadLaunchAborted as exc:
-        # The bring-up failed with the reviewer's pane already open, so "no reviewer exists" is
-        # exactly what cannot be claimed here. The intent stays on disk with what the failure knew
-        # of that head, and the next tick adopts it or stops it. Blocking the card and dropping the
-        # record instead would leave a live reviewer with nothing pointing at it.
-        mark_launch_aborted(runtime, payload, records, ref, record, exc)
-        record.state = "review_starting"
-        # Count this abort and, once it has repeated past the ceiling, pull an operator in once.
-        # The record and its intent are untouched — a head may still be running, so this never
-        # blocks or drops the card — but a launch that cannot freeze its worker for this many ticks
-        # is no longer a transient the steward's degraded line covers on its own (issue:aa9a8ae4).
-        record.review_launch_aborts += 1
-        _escalate_stuck_review_launch(runtime, task, record, attempt_id)
-        records[ref] = record
-        runtime.save_records(payload, records)
-        return launch_aborted(
-            step="review",
-            ref=ref,
-            attempt_id=record.attempt_id or attempt_id,
-            role=REVIEW_ROLE,
-            reason=scrub_host_output(str(exc)),
-        )
     except Exception as exc:
-        # Whatever this bring-up failed on, if the shared delivery boundary saw the reviewer's
-        # prompt fail it is recorded here first, before any branch decides what to do about the
-        # card. The pane is already closed by then, so this is the only surviving account of which
-        # terminal, which payload and which stage; the branches below still decide routing, and
-        # none of them is changed by it.
+        # One sink for every way a reviewer bring-up can fail, and the reason it is one: whatever
+        # the shared delivery boundary saw of this reviewer's prompt is normalised and persisted
+        # here, exactly once, before any branch takes a transition, writes a launch intent, decides
+        # a retry or returns an outcome. The branches below are unchanged and still decide all of
+        # that; none of them can now be the one that forgets, and none of them can count twice.
+        #
+        # A failure that carries no evidence records none: a split that would not open or an
+        # inventory that would not answer is an infrastructure failure, which has its own counter,
+        # and must never be tallied as a prompt that was refused.
         _record_review_delivery_failure(record, exc)
+        if isinstance(exc, HeadLaunchAborted):
+            return _reviewer_launch_aborted(
+                runtime, task, records, ref, record, attempt_id, exc, payload=payload
+            )
         if launch_left_a_head(record):
             # The host reported an ordinary failure, and the reviewer's own heartbeat says a process
             # of this bring-up is running anyway. The heartbeat wins: the intent stays, and the next

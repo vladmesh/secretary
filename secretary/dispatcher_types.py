@@ -49,12 +49,17 @@ class HeadLaunchAborted(HostError):
         leaf: str = "",
         workspace: str = "",
         pid_file: str = "",
+        evidence: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.handle = handle
         self.leaf = leaf
         self.workspace = workspace
         self.pid_file = pid_file
+        # What the shared delivery boundary saw, when this bring-up failed delivering a prompt.
+        # It travels with the ambiguity rather than being read off a pane nobody may touch: the
+        # caller persists it before it decides anything about the head that may still be running.
+        self.evidence = dict(evidence or {})
 
 
 class HeadPaneNotReady(HostError):
