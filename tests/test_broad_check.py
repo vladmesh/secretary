@@ -42,6 +42,17 @@ def _git(root: Path, *args: str) -> None:
     )
 
 
+def _documents(text: str) -> list[str]:
+    """Split the concatenated JSON documents one capture may hold."""
+    return [part for part in text.replace("}\n{", "}\n\x00{").split("\x00") if part.strip()]
+
+
+def _status(argv: list[str]) -> int:
+    """Run one CLI command for its exit status alone."""
+    with mock.patch("sys.stdout", StringIO()), mock.patch("sys.stderr", StringIO()):
+        return main(argv)
+
+
 def _run_main(argv: list[str]) -> dict:
     """Run one CLI command, capturing the JSON document it prints on stdout."""
     stdout = StringIO()
@@ -840,6 +851,51 @@ class CheckCommandTests(BroadCheckTestCase):
         self.assertEqual(code, 0)
         self.assertFalse(payload["reused"])
         self.assertEqual(marker.read_text(encoding="utf-8").count("ran"), 2)
+
+    def test_a_reused_receipt_returns_the_status_of_the_run_it_replaces(self) -> None:
+        """secretary-1406 review, BLOCKER-REUSED-EXIT-STATUS: reuse used to answer 0-or-1, so a
+        check that failed with 2 came back as 1 the moment its receipt stood in for it — losing
+        exactly the fact the caller ran the check to learn."""
+        self._suite("usagesuite", "raise SystemExit(2)\n")
+        argv = ["check", "broad", "--root", str(self.root), "--reuse", "--module", "usagesuite"]
+
+        stdout = StringIO()
+        with mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", StringIO()):
+            fresh = main(argv)
+            reused = main(argv)
+        payloads = [json.loads(part) for part in _documents(stdout.getvalue())]
+
+        self.assertEqual(fresh, 2)
+        self.assertEqual(reused, 2, "a receipt standing in for the run answers what the run did")
+        self.assertFalse(payloads[0]["reused"])
+        self.assertTrue(payloads[1]["reused"])
+        self.assertEqual(payloads[1]["receipt"]["exit_code"], 2)
+
+    def test_a_reused_signal_result_is_normalized_exactly_as_a_fresh_one(self) -> None:
+        """A killed run is recorded incomplete and never authorized, so this receipt is written by
+        hand: the point is that one normalization governs both paths, whatever the stored result."""
+        killed = ["check", "broad", "--root", str(self.root), "--command", "kill -9 $$"]
+        fresh_status = _status(killed)
+        self.assertEqual(fresh_status, 137)
+
+        suite = self._suite("signalsuite", "print('ran')\n")
+        argv = ["check", "broad", "--root", str(self.root), "--reuse", "--module", "signalsuite"]
+        self.assertEqual(_status(argv), 0)
+        path = receipt_path(self.root, suite)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["exit_code"] = -9
+        payload["signal"] = 9
+        payload["verdict"] = "failed"
+        payload["receipt_digest"] = broad_check._receipt_digest(payload)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        reused = _run_main(argv)
+        reused_status = _status(argv)
+
+        self.assertTrue(reused["reused"], "the receipt must still be authorized")
+        self.assertEqual(reused["receipt"]["exit_code"], -9)
+        # The same normalization the fresh path applied to a real `kill -9`.
+        self.assertEqual(reused_status, fresh_status)
 
     def test_a_shell_receipt_is_never_reused_in_place_of_a_run(self) -> None:
         marker = self.scripts / "shell-runs.txt"

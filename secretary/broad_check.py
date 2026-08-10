@@ -648,6 +648,10 @@ def load_receipt(path: Path) -> dict[str, object] | None:
         return None
     if payload.get("status") not in (_STATUS_COMPLETE, _STATUS_INCOMPLETE):
         return None
+    # A reader hands the recorded exit status back to its own caller, so it has to be a status.
+    exit_code = payload.get("exit_code")
+    if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+        return None
     if payload.get("verdict") not in (_VERDICT_PASSED, _VERDICT_FAILED, _VERDICT_UNKNOWN):
         return None
     check_set = payload.get("check_set")

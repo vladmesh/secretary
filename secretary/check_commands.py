@@ -89,6 +89,18 @@ def _fail(exc: BroadCheckError) -> int:
     return 2
 
 
+def _shell_status(exit_code: int) -> int:
+    """Turn one recorded process result into this command's exit status.
+
+    A usable receipt substitutes for rerunning the exact check, so it has to answer the question
+    the run answered — including `2` for a usage failure or `3` for a tool-specific one.  Flattening
+    every non-passing outcome to `1` loses precisely the fact the caller came for (secretary-1406
+    review).  A signal has no portable exit status of its own, so it becomes the shell's `128+N`,
+    and it does so here whether the result was just observed or read back out of a receipt.
+    """
+    return exit_code if exit_code >= 0 else 128 - exit_code
+
+
 def _spec(args: argparse.Namespace) -> CheckSpec:
     if args.module:
         return CheckSpec.for_module(args.module, args.module_arg)
@@ -103,14 +115,17 @@ def run_check_broad(args: argparse.Namespace) -> int:
     try:
         spec = _spec(args)
         if args.reuse:
+            # The one authorization question, asked the one way `check show` asks it.
             lookup = usable_receipt(root, spec)
-            if lookup.usable and lookup.receipt is not None:
+            authorized = lookup.authorized()
+            if authorized is not None:
                 print(json.dumps(
-                    {"reused": True, "path": str(lookup.path), "receipt": lookup.receipt,
-                     "summary": summarize(lookup.receipt)},
+                    {"reused": True, "path": str(lookup.path), "receipt": authorized,
+                     "summary": summarize(authorized)},
                     sort_keys=True, indent=2,
                 ))
-                return 0 if lookup.receipt.get("verdict") == "passed" else 1
+                # A receipt that stands in for the run hands back the result that run had.
+                return _shell_status(int(authorized["exit_code"]))
         # The check's combined output goes to stderr so it stays visible live while stdout keeps
         # carrying exactly one JSON document, as every other command here does.
         exit_code, receipt = run_broad_check(
@@ -126,9 +141,7 @@ def run_check_broad(args: argparse.Namespace) -> int:
          "summary": summarize(receipt)},
         sort_keys=True, indent=2,
     ))
-    # A signal-killed check has no portable exit status of its own; the shell convention keeps it
-    # distinguishable from any ordinary failure instead of flattening it to 1.
-    return exit_code if exit_code >= 0 else 128 - exit_code
+    return _shell_status(exit_code)
 
 
 def run_check_show(args: argparse.Namespace) -> int:
@@ -140,4 +153,6 @@ def run_check_show(args: argparse.Namespace) -> int:
     if lookup.receipt is not None:
         payload["summary"] = summarize(lookup.receipt)
     print(json.dumps(payload, sort_keys=True, indent=2))
-    return 0 if lookup.usable else 1
+    # `show` answers whether a run may be skipped, not what the check decided: 0 when a receipt is
+    # authorized, 1 when it is not. The check's own status is in the receipt it prints.
+    return 0 if lookup.authorized() is not None else 1
