@@ -73,10 +73,12 @@ Both object IDs are full 40-character SHA-1 or 64-character SHA-256 values; abbr
 evidence. A local gate captures HEAD before and after its command and fails closed if the command moves
 it. Only `local` and `github` may carry receipts; `none` and noop are valid only without one, and an
 unknown mode is never accepted.
-The dispatcher persists the receipt with the active card, renders it into `REVIEW.md`, replaces it with
-the fresh post-review receipt in the Assessment delivery, and writes the fresh final receipt into the
-release audit after the mandatory exact-SHA pre-merge re-check. A receipt is evidence, not permission to
-skip the pre-merge check or independent review.
+The dispatcher persists the receipt with the active card, renders it into the workspace-local,
+git-ignored `REVIEW.md`, replaces it with the fresh post-review receipt in the Assessment delivery,
+and writes the fresh final receipt into the release audit after the mandatory exact-SHA pre-merge
+re-check. `TASK.md` is likewise a generated, git-ignored workspace handoff packet. These files are
+operational projections, not repository documentation or candidate changes. A receipt is evidence,
+not permission to skip the pre-merge check or independent review.
 
 A gate that could not reach its backend gave no verdict, and the dispatcher does not read that
 absence as a red one. A timeout, a TLS or DNS failure, a dropped connection or a 5xx served by the

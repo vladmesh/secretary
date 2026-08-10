@@ -9,6 +9,10 @@ dist/
 secretary-data/
 runtime.env
 
+# Dispatcher-generated handoff packets belong to the current workspace only.
+TASK.md
+REVIEW.md
+
 # Runtime state under role worktrees, for example secretary/pipeline/state.
 /state/
 
