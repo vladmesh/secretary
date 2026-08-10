@@ -168,8 +168,9 @@ observed: it has to have resolved inside the candidate workspace, so a legitimat
 that resolves the project to another checkout is recorded truthfully and still refused. One predicate
 answers that question for every route, and a check is keyed by its structured check set — shape,
 module and exact argument vector — so two invocations that render alike cannot answer for each other. Anything less than an intact, finished receipt
-with observed provenance for exactly this content — a truncated or edited artifact, a killed or
-timed-out run, a checkout with no resolvable identity — is not a summary and does not attest anything. The receipt never leaves the workspace and is never committed: only an
+with observed provenance for exactly this content — a truncated or edited artifact, a result no run
+could have written, a killed or timed-out run, a checkout with no resolvable identity — is not a
+summary and does not attest anything. The receipt never leaves the workspace and is never committed: only an
 executed local/GitHub gate with a valid exact-SHA receipt is authoritative reusable evidence
 downstream. A none/noop gate or missing
 receipt attests no broad suite, so the role runs or requests validation appropriate to the decision.

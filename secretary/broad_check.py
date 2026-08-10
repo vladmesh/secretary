@@ -619,8 +619,62 @@ def _write_receipt(path: Path, payload: Mapping[str, object]) -> None:
         raise BroadCheckError("receipt_unwritable", str(exc)) from None
 
 
+def result_refusal(payload: Mapping[str, object]) -> str:
+    """Why this receipt's recorded result could not have been written by a run of this wrapper.
+
+    The digest proves a payload was not edited *after* something computed it; it says nothing about
+    whether the numbers inside describe a real run.  A tool that crashed mid-write, or rewrote the
+    artifact and recomputed the public digest, can leave a receipt that says a suite completed while
+    also recording that it died on a signal — and "complete" is exactly the claim a reader acts on
+    (secretary-1406 review).  So the writer's own invariants are checked here, at the boundary, and
+    a receipt that cannot have come from a run is not a receipt at all.
+
+    The writer's rules, in full: `signal` is `-exit_code` for a signalled result and `0` otherwise;
+    a signalled result is always incomplete; an incomplete result carries an unknown verdict and a
+    reason; a complete result carries no reason, and its verdict is `passed` exactly when the exit
+    status was zero and `failed` otherwise.
+    """
+    exit_code = payload.get("exit_code")
+    signal = payload.get("signal")
+    status = payload.get("status")
+    verdict = payload.get("verdict")
+    reason = payload.get("incomplete_reason")
+    for name, value in (("exit_code", exit_code), ("signal", signal)):
+        if not isinstance(value, int) or isinstance(value, bool):
+            return f"{name} is not an integer"
+    if not isinstance(reason, str):
+        return "incomplete_reason is not a string"
+    if status not in (_STATUS_COMPLETE, _STATUS_INCOMPLETE):
+        return f"status {status!r} was never written by a run"
+    if verdict not in (_VERDICT_PASSED, _VERDICT_FAILED, _VERDICT_UNKNOWN):
+        return f"verdict {verdict!r} was never written by a run"
+    expected_signal = -exit_code if exit_code < 0 else 0
+    if signal != expected_signal:
+        return f"exit code {exit_code} and signal {signal} disagree"
+    if exit_code < 0 and status != _STATUS_INCOMPLETE:
+        return "a signalled result cannot be complete"
+    if status == _STATUS_INCOMPLETE:
+        if verdict != _VERDICT_UNKNOWN:
+            return "an incomplete run decided nothing, so its verdict cannot be known"
+        if not reason.strip():
+            return "an incomplete run records why it did not finish"
+        return ""
+    if reason.strip():
+        return "a complete run records no incomplete reason"
+    expected = _VERDICT_PASSED if exit_code == 0 else _VERDICT_FAILED
+    if verdict != expected:
+        return f"exit code {exit_code} and verdict {verdict!r} disagree"
+    return ""
+
+
 def load_receipt(path: Path) -> dict[str, object] | None:
-    """Read a receipt, or nothing.  A truncated or edited artifact is not a smaller receipt."""
+    """The one semantic boundary: a receipt reaches a reader through here or not at all.
+
+    `usable_receipt` — and therefore `check show` and `check broad --reuse`, which have no other
+    way in — call this first, so an unreadable, undigestible, structurally short or internally
+    contradictory artifact is never authorized, never has its status preserved, and never reaches
+    `_shell_status`.  Corruption outranks both.
+    """
     try:
         raw = Path(path).read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
@@ -641,18 +695,14 @@ def load_receipt(path: Path) -> dict[str, object] | None:
     required = (
         "command", "command_shape", "check_set", "command_or_check_set_digest", "cwd",
         "project_provenance",
-        "content_identity", "started_at", "ended_at", "duration_seconds", "exit_code", "status",
-        "verdict", "parsed", "tail",
+        "content_identity", "started_at", "ended_at", "duration_seconds", "exit_code", "signal",
+        "status", "incomplete_reason", "verdict", "parsed", "tail",
     )
     if any(key not in payload for key in required):
         return None
-    if payload.get("status") not in (_STATUS_COMPLETE, _STATUS_INCOMPLETE):
-        return None
-    # A reader hands the recorded exit status back to its own caller, so it has to be a status.
-    exit_code = payload.get("exit_code")
-    if not isinstance(exit_code, int) or isinstance(exit_code, bool):
-        return None
-    if payload.get("verdict") not in (_VERDICT_PASSED, _VERDICT_FAILED, _VERDICT_UNKNOWN):
+    # Every field the result invariants are stated over is written by every run, so its absence is
+    # itself a refusal rather than something to work around.
+    if result_refusal(payload):
         return None
     check_set = payload.get("check_set")
     if not isinstance(check_set, Mapping) or check_set.get("schema") != _CHECK_SET_SCHEMA:

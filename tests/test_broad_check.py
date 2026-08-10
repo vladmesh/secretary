@@ -346,6 +346,102 @@ class DocumentedCommandTests(unittest.TestCase):
         self.assertIn("resolved inside the candidate workspace", protocols)
 
 
+class ResultInvariantTests(BroadCheckTestCase):
+    """secretary-1406 review: the writer's result invariants, enforced where readers come in.
+
+    A digest proves nobody edited a payload after something computed it. It says nothing about
+    whether the numbers describe a run that happened, so the combinations no run can produce are
+    refused at the same boundary, before anything is authorized or any status is handed back.
+    """
+
+    def _stored(self, **changes: object) -> Path:
+        """A real receipt from a real run, then damaged and re-digested the way a buggy tool would."""
+        suite = self._suite("invariantsuite", "print('ran')\n")
+        self._run(suite)
+        path = receipt_path(self.root, suite)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload.update(changes)
+        payload["receipt_digest"] = broad_check._receipt_digest(payload)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_the_boundary_refuses_every_result_no_run_could_have_written(self) -> None:
+        cases = {
+            "a complete run that died on a signal": {
+                "exit_code": -9, "signal": 9, "verdict": "failed", "status": "complete",
+            },
+            "an exit code and signal that disagree": {
+                "exit_code": -9, "signal": 2, "status": "incomplete", "verdict": "unknown",
+                "incomplete_reason": "killed by signal 9",
+            },
+            "a signal on an ordinary exit": {"exit_code": 1, "signal": 9, "verdict": "failed"},
+            "an incomplete run with no reason": {
+                "status": "incomplete", "verdict": "unknown", "incomplete_reason": "",
+            },
+            "an incomplete run that claims a verdict": {
+                "status": "incomplete", "verdict": "passed", "incomplete_reason": "timed out",
+            },
+            "a complete run carrying an incomplete reason": {"incomplete_reason": "timed out"},
+            "a green exit reported as failed": {"exit_code": 0, "verdict": "failed"},
+            "a red exit reported as passed": {"exit_code": 3, "verdict": "passed"},
+            "a complete run with an unknown verdict": {"verdict": "unknown"},
+            "an exit code that is not a number": {"exit_code": "0"},
+            "a missing signal": {"signal": None},
+            "a boolean masquerading as an exit code": {"exit_code": True, "verdict": "failed"},
+        }
+        for name, changes in cases.items():
+            with self.subTest(case=name):
+                path = self._stored(**changes)
+                self.assertIsNone(load_receipt(path), name)
+                spec = CheckSpec.for_module("invariantsuite")
+                self.assertFalse(usable_receipt(self.root, spec).usable, name)
+
+    def test_the_results_a_run_does_write_are_still_accepted(self) -> None:
+        cases = {
+            "a green complete run": {},
+            "a red complete run": {"exit_code": 2, "verdict": "failed"},
+            "a killed run": {
+                "exit_code": -15, "signal": 15, "status": "incomplete", "verdict": "unknown",
+                "incomplete_reason": "killed by signal 15",
+            },
+            "a timeout that still exited normally": {
+                "exit_code": 0, "signal": 0, "status": "incomplete", "verdict": "unknown",
+                "incomplete_reason": "timed out after 0.5s",
+            },
+        }
+        for name, changes in cases.items():
+            with self.subTest(case=name):
+                path = self._stored(**changes)
+                self.assertIsNotNone(load_receipt(path), name)
+
+    def test_a_signalled_run_this_wrapper_wrote_satisfies_its_own_invariants(self) -> None:
+        # The rules are the writer's, so the writer's own output has to pass them — a killed run,
+        # a timeout, an ordinary red and an ordinary green.
+        _, killed = self._run("kill -9 $$")
+        _, timed_out = self._run(
+            self._script("sleeper.py", "import time\ntime.sleep(30)\n"), timeout_seconds=0.5
+        )
+        _, red = self._run("exit 4")
+        _, green = self._run("true")
+
+        for receipt in (killed, timed_out, red, green):
+            self.assertEqual(broad_check.result_refusal(receipt), "")
+
+    def test_no_reader_reaches_a_receipt_except_through_the_boundary(self) -> None:
+        """The CLI has no way to a receipt that goes around `load_receipt`."""
+        source = Path(broad_check.__file__).with_name("check_commands.py").read_text(
+            encoding="utf-8"
+        )
+
+        for bypass in ("json.load", "read_text", "read_bytes", "open("):
+            self.assertNotIn(bypass, source, f"check_commands must not read a receipt itself")
+        self.assertNotIn("receipt_dir", source)
+        # And the only producer of a lookup is the function that starts by loading.
+        self.assertIn("receipt = load_receipt(path)", Path(broad_check.__file__).read_text(
+            encoding="utf-8"
+        ))
+
+
 class UnchangedContentReuseTests(BroadCheckTestCase):
     def setUp(self) -> None:
         super().setUp()
@@ -871,16 +967,23 @@ class CheckCommandTests(BroadCheckTestCase):
         self.assertTrue(payloads[1]["reused"])
         self.assertEqual(payloads[1]["receipt"]["exit_code"], 2)
 
-    def test_a_reused_signal_result_is_normalized_exactly_as_a_fresh_one(self) -> None:
-        """A killed run is recorded incomplete and never authorized, so this receipt is written by
-        hand: the point is that one normalization governs both paths, whatever the stored result."""
-        killed = ["check", "broad", "--root", str(self.root), "--command", "kill -9 $$"]
-        fresh_status = _status(killed)
-        self.assertEqual(fresh_status, 137)
+    def test_a_complete_receipt_recording_a_signal_is_refused_and_the_check_runs(self) -> None:
+        """secretary-1406 review, BLOCKER-RECEIPT-RESULT-INCONSISTENCY.
 
-        suite = self._suite("signalsuite", "print('ran')\n")
+        This test used to manufacture exactly this artifact and assert that reuse honoured it. A
+        signalled run is written `incomplete` and is never evidence that a suite finished, so a
+        receipt claiming both is corrupt however neatly its own digest was recomputed — and
+        corruption outranks status preservation and reuse.
+        """
+        marker = self.scripts / "signal-runs.txt"
+        suite = self._suite(
+            "signalsuite",
+            f"open({str(marker)!r}, 'a', encoding='utf-8').write('ran\\n')\n",
+        )
         argv = ["check", "broad", "--root", str(self.root), "--reuse", "--module", "signalsuite"]
         self.assertEqual(_status(argv), 0)
+        self.assertEqual(marker.read_text(encoding="utf-8").count("ran"), 1)
+
         path = receipt_path(self.root, suite)
         payload = json.loads(path.read_text(encoding="utf-8"))
         payload["exit_code"] = -9
@@ -889,13 +992,16 @@ class CheckCommandTests(BroadCheckTestCase):
         payload["receipt_digest"] = broad_check._receipt_digest(payload)
         path.write_text(json.dumps(payload), encoding="utf-8")
 
+        # The boundary refuses it, so no reader downstream ever sees it...
+        self.assertIsNone(load_receipt(path))
+        lookup = usable_receipt(self.root, suite)
+        self.assertFalse(lookup.usable)
+        self.assertIsNone(lookup.receipt)
+        self.assertIsNone(lookup.authorized())
+        # ...and the command runs instead of standing on it, which the suite's own marker proves.
         reused = _run_main(argv)
-        reused_status = _status(argv)
-
-        self.assertTrue(reused["reused"], "the receipt must still be authorized")
-        self.assertEqual(reused["receipt"]["exit_code"], -9)
-        # The same normalization the fresh path applied to a real `kill -9`.
-        self.assertEqual(reused_status, fresh_status)
+        self.assertFalse(reused["reused"])
+        self.assertEqual(marker.read_text(encoding="utf-8").count("ran"), 2)
 
     def test_a_shell_receipt_is_never_reused_in_place_of_a_run(self) -> None:
         marker = self.scripts / "shell-runs.txt"

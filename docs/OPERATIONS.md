@@ -1629,7 +1629,10 @@ the recorded HEAD object id and content digest of the tracked diff and untracked
 current ones, and exits non-zero when it does not. Its answer fails closed: a truncated or edited
 receipt, a run that was killed or timed out, a checkout with no resolvable identity, an import from
 outside the candidate, and a shape that attests no import are all "not usable" rather than a
-summary. `check broad --reuse` skips the run while the receipt is usable — through the same single
+summary. Reading goes through one boundary, `load_receipt`, which also refuses a result no run
+could have written — a "complete" receipt that records a signal, an exit code and signal that
+disagree, an incomplete run with no reason, a green exit called failed — even when the artifact's
+own digest was recomputed over the damage. Corruption outranks both status preservation and reuse. `check broad --reuse` skips the run while the receipt is usable — through the same single
 predicate `check show` reports, so the two can never disagree — and a report can quote the evidence
 instead of rebuilding it.
 
