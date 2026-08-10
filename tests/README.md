@@ -68,6 +68,36 @@ fixture or an explicit local opt-in — look for a call to
 chance to patch it, or that imports `secretary.host_apply`'s functions by value instead
 of by module attribute (which would keep an unpatched reference).
 
+## The pipeline pause flag is read from a state dir this run owns
+
+The same result-must-not-depend-on-the-host rule covers the live pipeline's pause flag.
+`triggered_agents/agents/pipeline/state.py` resolves `STATE` at import time and
+`agents/pipeline/pause.py` binds `PAUSE_FILE` off it, so the file every
+triggered-dispatch test runs against is fixed before any test body executes. At its
+default that file is the live `<workspaces>/secretary/pipeline/state/pipeline/pause.json`
+of the machine running the suite: an operator holding `secretary pause --mode freeze`
+while the suite runs makes `runtime/dispatch._pipeline_paused()` true, and every dispatch
+test takes the "pipeline paused — no dispatch" branch instead of the lifecycle branch it
+asserts about. The same binding also had the suite appending its own `runs.jsonl` records
+into that live directory.
+
+`tests/__init__.py` therefore claims one throwaway `TA_PIPELINE_STATE_DIR` for the whole
+run and removes it at exit, set before any `test_*` module is imported and set
+unconditionally — an ambient `TA_PIPELINE_STATE_DIR` inherited from a worker, reviewer or
+operator shell names exactly the live directory that must not be touched.
+`tests/test_hermetic_pipeline_state.py` is the proof, in both directions: a hard freeze in
+a production-like `<workspaces>/secretary/pipeline/state/pipeline` (built under a
+temporary root, never the live one) leaves a warm-reuse dispatch reusing rather than
+skipping, while a freeze written into the suite's *own* state dir still pauses — so the
+"not paused" half cannot pass by the reader having gone dead.
+
+A focused test that needs a different value overrides the variable locally, the usual way
+(`mock.patch.dict(os.environ, {"TA_PIPELINE_STATE_DIR": str(tmp)})`), or pops it to
+exercise the default-path computation; both still work, since the suite default is just an
+ordinary process environment value the `with` block shadows. Note that a test which pops
+it and then *reads* a pause flag is back to reading the host — pop it only to assert about
+a resolved path, as `test_pipeline_paths.py:LegacyMirrorPathTests` does.
+
 ## Board reads are hermetic by construction, not by a patch
 
 There is no default Kanboard fake to install any more, because there is nothing left to

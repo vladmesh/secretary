@@ -30,6 +30,23 @@ paths reads (``codex_preflight.codex_home``, ``heads.CODEX_HOME``,
 its own for the whole run, before any test module is imported.
 ``tests/test_hermetic_codex.py`` proves it.
 
+The live pipeline's state dir needs the same treatment, and needs it early.
+``triggered_agents.agents.pipeline.state`` resolves ``STATE`` at import time,
+and ``agents.pipeline.pause`` binds ``PAUSE_FILE`` off it, so by the time any
+test body runs the pause path is already fixed. Left at its default that path
+is the live ``<workspaces>/secretary/pipeline/state/pipeline`` of the machine
+running the suite: a ``secretary pause --mode freeze`` held there while the
+suite runs makes ``runtime/dispatch._pipeline_paused()`` true, and every
+triggered-dispatch test silently takes the "pipeline paused -- no dispatch"
+branch instead of the lifecycle branch it was written for. The same binding
+also had the suite appending its own ``runs.jsonl`` records to that live
+directory. ``TA_PIPELINE_STATE_DIR`` is the single seam both readers go
+through (``shared_state.resolve_pipeline_state_dir``, and
+``dispatcher_pause.legacy_mirror_path`` for the mirror), so the suite claims
+one throwaway state dir of its own for the whole run, before any test module
+is imported (secretary-1403). ``tests/test_hermetic_pipeline_state.py``
+proves it.
+
 A test that needs real host resolution or a real sprint board opts in
 locally, the same way the rest of the suite already overrides other
 host-facing seams: wrap the call in its own
@@ -66,6 +83,18 @@ _FIXTURE_ORCA = Path(__file__).resolve().parent / "fixtures" / "legacy-orca"
 _SUITE_CODEX_HOME = Path(tempfile.mkdtemp(prefix="secretary-tests-codex-home."))
 os.environ["TA_CODEX_HOME"] = str(_SUITE_CODEX_HOME)
 atexit.register(shutil.rmtree, _SUITE_CODEX_HOME, ignore_errors=True)
+
+# The throwaway pipeline state dir described above, claimed before any test module
+# -- and therefore before `triggered_agents.agents.pipeline.state` -- is imported,
+# because that module binds `STATE` (and through it `pause.PAUSE_FILE`) to whatever
+# `resolve_pipeline_state_dir()` answers at import time. Set unconditionally, for
+# the same reason as TA_CODEX_HOME above: an ambient TA_PIPELINE_STATE_DIR
+# inherited from a worker/reviewer/operator shell names the live installation's
+# state dir, which is exactly what the suite must neither read nor write.
+# `tests/test_hermetic_pipeline_state.py` proves both halves.
+_SUITE_PIPELINE_STATE_DIR = Path(tempfile.mkdtemp(prefix="secretary-tests-pipeline-state."))
+os.environ["TA_PIPELINE_STATE_DIR"] = str(_SUITE_PIPELINE_STATE_DIR)
+atexit.register(shutil.rmtree, _SUITE_PIPELINE_STATE_DIR, ignore_errors=True)
 
 _find_orca_patcher = mock.patch(
     "secretary.host_apply.find_orca_executable", return_value=_FIXTURE_ORCA
