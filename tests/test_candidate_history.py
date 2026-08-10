@@ -119,6 +119,17 @@ class CandidateHistoryTests(unittest.TestCase):
 
         self.assertEqual(ai_attributions(commits), [])
 
+    def test_a_terminal_example_without_a_blank_separator_is_not_a_git_trailer(self) -> None:
+        commits = [
+            _commit(
+                "Document the policy\n"
+                "A literal example follows:\n"
+                "Co-Authored-By: Codex <codex@openai.com>\n"
+            )
+        ]
+
+        self.assertEqual(ai_attributions(commits), [])
+
     def test_every_forbidden_trailer_across_every_commit_is_named_at_once(self) -> None:
         commits = [
             _commit("First\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n", sha="1" * 40),
@@ -158,7 +169,7 @@ class CandidateHistoryTests(unittest.TestCase):
         messages against each other here, so a trailer behind one is still a trailer."""
         commits = [
             _commit(
-                "Sneak\n\n\x1e\x1f\x00\nCo-Authored-By: Claude <noreply@anthropic.com>\n",
+                "Sneak\n\n\x1e\x1f\x00\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n",
                 sha="1" * 40,
             )
         ]

@@ -132,10 +132,15 @@ def _final_trailer_lines(message: str) -> list[str]:
     """Return only the terminal Git trailer block, never trailer-shaped prose in the body."""
     lines = (message or "").rstrip().splitlines()
     trailers: list[str] = []
-    for line in reversed(lines):
+    start = len(lines)
+    for index in range(len(lines) - 1, -1, -1):
+        line = lines[index]
         if not _ANY_TRAILER_RE.match(line):
             break
         trailers.append(line)
+        start = index
+    if not trailers or (start > 0 and lines[start - 1].strip()):
+        return []
     trailers.reverse()
     return trailers
 

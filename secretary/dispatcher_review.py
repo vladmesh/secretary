@@ -85,13 +85,13 @@ def review_infrastructure_retry(
         return None
     attempts = record.review_infra_failures + 1
     limit = _review_infra_retry_attempts()
-    if attempts > limit:
-        return None
     record.review_infra_failures = attempts
     record.review_infra_error = reason
     record.state = "review_starting"
     records[ref] = record
     runtime.save_records(payload, records)
+    if attempts >= limit:
+        return None
     sha = candidate_sha(record)
     return {
         "status": "degraded",
@@ -115,7 +115,7 @@ def review_infrastructure_blocked_reason(record: DispatcherRecord, reason: str) 
     """What the operator reads when reviewer infrastructure never came back."""
     sha = candidate_sha(record)
     return (
-        f"reviewer infrastructure failed on {record.review_infra_failures + 1} consecutive launch "
+        f"reviewer infrastructure failed on {record.review_infra_failures} consecutive launch "
         f"attempts over a green candidate; the card was never reworked and its gate receipt for "
         f"{sha or '(sha unavailable)'} still stands, so relaunch the reviewer rather than the "
         f"worker: {reason}"

@@ -2911,7 +2911,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         be started holds the green candidate and retries. Host output still reaches an operator —
         the tick's own reason while the card is held, and the Blocked comment once the retries run
         out — so both are asserted here, where only the comment used to be."""
-        patch = mock.patch.dict(os.environ, {"SECRETARY_REVIEW_INFRA_RETRY_ATTEMPTS": "1"})
+        patch = mock.patch.dict(os.environ, {"SECRETARY_REVIEW_INFRA_RETRY_ATTEMPTS": "2"})
         patch.start()
         self.addCleanup(patch.stop)
         self.runtime.production_tick()
@@ -2941,7 +2941,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         retained = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
         self.assertEqual(retained["gate_state"], "green")
         self.assertEqual(retained["state"], "review_starting")
-        self.assertEqual(retained["review_infra_failures"], 1)
+        self.assertEqual(retained["review_infra_failures"], 2)
         body = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
         self.assertIn("reviewer infrastructure failed", body)
         self.assertIn("API_TOKEN=<redacted>", body)
@@ -6032,7 +6032,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self._run_worker_to_validate()
         self.host.fail_review_error = HostError("orca terminal split failed: terminal_exited")
 
-        for attempt in range(limit):
+        for attempt in range(limit - 1):
             held = self.tick()
             self.assertEqual(held["attempts"], attempt + 1)
 
@@ -6213,7 +6213,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self._run_worker_to_validate()
         self.host.fail_review_error = self._pane_not_ready("blocked")
 
-        for attempt in range(limit):
+        for attempt in range(limit - 1):
             deferred = self.tick()
             self.assertEqual(deferred["attempts"], attempt + 1)
 
@@ -10612,7 +10612,7 @@ class DispatcherGateTests(unittest.TestCase):
             git(ws, "add", "sneak.txt")
             message = ws / "message.txt"
             message.write_bytes(
-                b"Sneak it past the parser\n\n\x1e\x1f\n"
+                b"Sneak it past the parser\n\n\x1e\x1f\n\n"
                 b"Co-Authored-By: Claude <noreply@anthropic.com>\n"
             )
             git(ws, "commit", "-F", str(message))

@@ -136,16 +136,18 @@ Blocked reason that quotes the tool, while a wrong "answer" costs an immediate B
 of bad network, which is the failure this contract exists to prevent.
 
 A reviewer that cannot be started is a failure of the review stage, not a verdict on the candidate.
-A split pane that will not open, a runtime whose terminal inventory will not answer: the card holds
-its green gate receipt, its candidate SHA, its report round and request ids and its suspended worker
+A split pane that will not open, an unavailable reviewer resource, or an unwritable launch intent:
+the card holds its green gate receipt, its candidate SHA, its report round and request ids and its suspended worker
 session, and the next tick launches the reviewer again against that same evidence. It does not move
 through Ready, does not launch a worker, does not re-run the mechanical gate or any broad validation,
 does not regenerate the candidate, and charges the sprint no budget event; each attempt is one
 `review-infrastructure-retry` action naming the held candidate. The retries are bounded
 (`SECRETARY_REVIEW_INFRA_RETRY_ATTEMPTS`, ten by default) and count consecutive failures only. Once
-they are spent the card moves to Blocked with a reason that names the infrastructure, the untouched
-receipt and the candidate SHA, so the recovery is another reviewer launch rather than a new worker
-round over the same code.
+the ceiling is reached the card moves to Blocked with a reason that names the infrastructure, the
+untouched receipt and the candidate SHA, so recovery is another reviewer launch rather than a new
+worker round over the same code. An inventory that will not answer is
+different: it cannot prove whether a reviewer is already live, so it preserves launch ambiguity
+and retries the inventory without launching another head or consuming the headless-failure ceiling.
 
 Workers use focused checks while developing and run no more than one local broad suite for a report
 generation/unchanged SHA unless they state why it was rerun. Only an executed local/GitHub gate with a
