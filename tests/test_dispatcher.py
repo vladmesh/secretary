@@ -756,6 +756,9 @@ class FakeHost:
         self.fail_prepare_error: Exception | None = None
         self.fail_result_reason = ""
         self.fail_review_error: Exception | None = None
+        # A production reviewer can receive its prompt before a later freeze fails.  Tests that
+        # exercise that boundary give the fake the same completed metadata-only receipt.
+        self.review_launch_delivery_evidence: dict[str, object] = {}
         # Failure hooks for host calls the real runtime can fail on: a rework workspace removed
         # out of band, a merge push the remote rejects, an orca terminal inventory that errors.
         self.fail_restart_reason = ""
@@ -906,6 +909,9 @@ class FakeHost:
             "leaf": launched.leaf,
             "base_branch": task.get("workspace", {}).get("base_branch") or "main",
             "run": launched.run,
+            # The real host always carries this bounded receipt, even when noop mode has no pane
+            # and therefore no delivery facts to record yet.
+            "delivery_evidence": {},
         }
 
     def observer_workspace(self, reference: str) -> str:
@@ -990,6 +996,7 @@ class FakeHost:
         launched = self._launched(
             f"review:{task['ref']}", record.review_head, task, "reviewer", record.workspace,
             failover=bool(record.preferred_review_head),
+            delivery_evidence=dict(self.review_launch_delivery_evidence),
         )
         try:
             if record.worker_continuation.retained and self.worker_retained_vanished(record):
@@ -1012,12 +1019,14 @@ class FakeHost:
                 leaf=launched.leaf,
                 workspace=record.workspace,
                 pid_file=pid_file_path("review", task["ref"]),
+                evidence=dict(launched.delivery_evidence),
             ) from None
         return ReviewLaunch(
             handle=launched.handle,
             leaf=f"leaf:{task['ref']}",
             commit=self.commit,
             run=launched.run,
+            delivery_evidence=dict(launched.delivery_evidence),
         )
 
     def restart_worker(self, task: dict, record) -> LaunchedHead:
@@ -1042,7 +1051,7 @@ class FakeHost:
 
     def _launched(
         self, handle: str, head: str, task: dict, role: str, workspace: str = "",
-        failover: bool = False,
+        failover: bool = False, delivery_evidence: dict[str, object] | None = None,
     ) -> LaunchedHead:
         return LaunchedHead(
             handle=handle,
@@ -1051,6 +1060,7 @@ class FakeHost:
                 task, role=role, head=head, workspace=workspace, failover=failover
             ).to_json(),
             leaf=f"leaf:{handle}",
+            delivery_evidence=dict(delivery_evidence or {}),
         )
 
     def review_running(self, task: dict, record) -> bool:
@@ -8720,17 +8730,17 @@ class ReportPromptDeliveryTests(unittest.TestCase):
         # The document the head is being pointed at is the one it already had.
         self.assertIn("the round the head is in", self.document.read_text(encoding="utf-8"))
 
-    def test_a_claude_worker_goes_through_the_interactive_path(self) -> None:
+    def test_a_claude_worker_uses_the_same_transport_seam(self) -> None:
         self.record.worker_run = {"adapter": "claude"}
         delivered = mock.Mock(return_value=DELIVERY_CONFIRMED)
 
-        with mock.patch.object(dispatcher_module, "_deliver_interactive_prompt", delivered):
+        with mock.patch.object(dispatcher_module, "_deliver_tui_prompt", delivered):
             self.host.prompt_worker_report(self.task, self.record)
 
-        self.assertEqual(delivered.call_args.args[1], _report_nudge_prompt(3, "secretary-1172"))
-        self.assertIsNotNone(
-            delivered.call_args.kwargs["confirm"],
-            "a worker prompt must keep the criterion every worker delivery has",
+        self.assertEqual(delivered.call_args.args[:3], ("term:worker", str(self.workspace), "TASK.md"))
+        self.assertEqual(delivered.call_args.kwargs["adapter"], "claude")
+        self.assertEqual(
+            delivered.call_args.kwargs["prompt_text"], _report_nudge_prompt(3, "secretary-1172")
         )
 
     def test_an_exec_worker_is_refused_rather_than_typed_at(self) -> None:
@@ -9195,6 +9205,28 @@ class DispatcherLauncherTests(unittest.TestCase):
 
         self.assertTrue(launch.prompt_after_start)
         self.assertNotIn("codex exec", launch.command)
+        self.assertNotIn('"$(cat TASK.md)"', launch.command)
+        self.assertNotIn("read TASK.md first", launch.command)
+
+    def test_a_launch_prompt_never_reaches_a_claude_command_line(self) -> None:
+        """Claude shares the post-start prompt transport but keeps its plain body framing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = str(Path(tmp) / "workspace")
+            catalog = object.__new__(InstanceCatalog)
+            catalog._heads = {  # type: ignore[attr-defined]
+                "profiles": {"claude-opus": {"adapter": "claude", "model": "opus"}}
+            }
+            with mock.patch.dict(os.environ, {"TA_CLAUDE_JSON": str(Path(tmp) / ".claude.json")}):
+                launch = catalog.head_launch(  # type: ignore[attr-defined]
+                    "claude-opus",
+                    "TASK.md",
+                    workspace=workspace,
+                    role="worker",
+                    launch_prompt="read TASK.md first",
+                )
+
+        self.assertTrue(launch.prompt_after_start)
+        self.assertEqual(launch.adapter, "claude")
         self.assertNotIn('"$(cat TASK.md)"', launch.command)
         self.assertNotIn("read TASK.md first", launch.command)
 

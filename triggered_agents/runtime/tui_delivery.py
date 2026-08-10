@@ -26,7 +26,16 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
-RunJson = Callable[[list[str]], dict[str, Any]]
+from .agent_prompt_transport import (
+    AGENT_PROMPT_TRANSPORT_VERSION,
+    AgentPromptTransportError,
+    PreparedAgentPrompt,
+    PromptTransportReceipt,
+    prepare_agent_prompt,
+    send_agent_prompt,
+)
+from .tui_delivery_types import RunJson
+
 
 TUI_IDLE_TIMEOUT_MS = int(os.environ.get("SECRETARY_TUI_IDLE_TIMEOUT_MS", os.environ.get("TA_TUI_IDLE_TIMEOUT_MS", "60000")))
 # Orca decides `tui-idle` from the pane's agent status and, failing that, from a quiescence window
@@ -104,6 +113,20 @@ class DeliveryEvidence:
     stage: str = STAGE_NONE
     payload_bytes: int = 0
     payload_sha256: str = ""
+    # The public terminal-send adapter that carried the prompt.  The body and its submission are
+    # intentionally recorded independently: neither write acceptance is proof the head began a
+    # turn, which remains the later confirmation stages below.
+    transport_version: str = AGENT_PROMPT_TRANSPORT_VERSION
+    adapter: str = ""
+    framing: str = ""
+    transport_policy: str = "reject-c0-esc"
+    body_write_accepted: bool = False
+    body_bytes_written: int = 0
+    body_write_count: int = 0
+    submit_write_accepted: bool = False
+    submit_bytes_written: int = 0
+    submit_count: int = 0
+    turn_confirmed: bool = False
     # `accepted`/`bytesWritten` as Orca answered the send, kept because they are what used to be
     # mistaken for delivery and are now one stage of it.
     send_accepted: bool = False
@@ -134,6 +157,17 @@ class DeliveryEvidence:
             "stage": self.stage,
             "payload_bytes": self.payload_bytes,
             "payload_sha256": self.payload_sha256,
+            "transport_version": self.transport_version,
+            "adapter": self.adapter,
+            "framing": self.framing,
+            "transport_policy": self.transport_policy,
+            "body_write_accepted": self.body_write_accepted,
+            "body_bytes_written": self.body_bytes_written,
+            "body_write_count": self.body_write_count,
+            "submit_write_accepted": self.submit_write_accepted,
+            "submit_bytes_written": self.submit_bytes_written,
+            "submit_count": self.submit_count,
+            "turn_confirmed": self.turn_confirmed,
             "send_accepted": self.send_accepted,
             "bytes_written": self.bytes_written,
             "attempts": self.attempts,
@@ -436,6 +470,7 @@ def deliver_interactive_prompt(
     prompt: str,
     *,
     run_json: RunJson,
+    adapter: str = "",
     confirm: Callable[[float], bool] | None = None,
     ack_out_of_band: bool = False,
     subject: str = "",
@@ -479,6 +514,14 @@ def deliver_interactive_prompt(
         payload_bytes=payload_bytes,
         payload_sha256=payload_hash,
     )
+    try:
+        prepared = prepare_agent_prompt(prompt, adapter=adapter)
+    except AgentPromptTransportError as exc:
+        _record_transport_receipt(evidence, exc.receipt)
+        evidence.reason = exc.reason
+        raise TuiDeliveryError(
+            f"prompt transport rejected the body (reason={exc.reason})", evidence=evidence
+        ) from None
     with _transport_evidence(evidence, "wait-for-readiness"):
         wait_for_tui_idle(handle, run_json=run_json)
     before = probe_pane(handle, run_json=run_json)
@@ -489,10 +532,10 @@ def deliver_interactive_prompt(
     evidence.cursor_from_backend = before.cursor_from_backend
     sent_at = time.time()
     with _transport_evidence(evidence, "send-payload"):
-        _send_payload(handle, prompt, run_json=run_json, evidence=evidence)
+        _send_payload(handle, prepared, run_json=run_json, evidence=evidence)
     return _confirm_interactive_turn(
         handle,
-        prompt,
+        prepared,
         sent_at,
         before,
         run_json=run_json,
@@ -527,35 +570,57 @@ def _transport_evidence(evidence: DeliveryEvidence, step: str):
 
 
 def _send_payload(
-    handle: str, text: str, *, run_json: RunJson, evidence: DeliveryEvidence
+    handle: str,
+    prompt: PreparedAgentPrompt,
+    *,
+    run_json: RunJson,
+    evidence: DeliveryEvidence,
+    submit_only: bool = False,
 ) -> None:
-    """Write one payload into the pane and record what Orca said about writing it."""
-    answer = run_json([
-        "orca", "terminal", "send",
-        "--terminal", handle,
-        "--text", text,
-        "--enter",
-        "--json",
-    ])
-    body = answer.get("send") if isinstance(answer, dict) and isinstance(answer.get("send"), dict) else answer
-    if isinstance(body, dict):
-        if body.get("accepted") is not None:
-            evidence.send_accepted = bool(body.get("accepted"))
-        else:
-            evidence.send_accepted = True
-        try:
-            evidence.bytes_written = max(evidence.bytes_written, int(body.get("bytesWritten") or 0))
-        except (TypeError, ValueError):
-            pass
-    else:
-        evidence.send_accepted = True
-    evidence.attempts += 1
-    _advance(evidence, STAGE_PAYLOAD_WRITTEN)
+    """Run the one provider-aware body/submit transport and merge its metadata-only receipt."""
+    try:
+        receipt = send_agent_prompt(
+            handle, prompt, run_json=run_json, submit_only=submit_only
+        )
+    except AgentPromptTransportError as exc:
+        _record_transport_receipt(evidence, exc.receipt)
+        if exc.receipt.body_write_accepted:
+            _advance(evidence, STAGE_PAYLOAD_WRITTEN)
+        if exc.receipt.submit_count:
+            evidence.attempts += 1
+        evidence.reason = exc.reason
+        raise TuiDeliveryError(
+            f"the prompt transport refused {exc.reason} (stage={evidence.stage})", evidence=evidence
+        ) from None
+    _record_transport_receipt(evidence, receipt)
+    if receipt.submit_count:
+        evidence.attempts += 1
+    if receipt.body_write_accepted:
+        _advance(evidence, STAGE_PAYLOAD_WRITTEN)
+
+
+def _record_transport_receipt(evidence: DeliveryEvidence, receipt: PromptTransportReceipt) -> None:
+    """Accumulate the transport's body/submit facts without preserving prompt text."""
+    evidence.transport_version = receipt.transport_version
+    evidence.adapter = receipt.adapter
+    evidence.framing = receipt.framing
+    evidence.transport_policy = receipt.policy
+    if receipt.body_write_count:
+        evidence.body_write_accepted = receipt.body_write_accepted
+        evidence.body_bytes_written += receipt.body_bytes_written
+        evidence.body_write_count += receipt.body_write_count
+    evidence.submit_write_accepted = receipt.submit_write_accepted
+    evidence.submit_bytes_written += receipt.submit_bytes_written
+    evidence.submit_count += receipt.submit_count
+    # Compatibility telemetry still means the body write, not a successful delivery.
+    if receipt.body_write_count:
+        evidence.send_accepted = receipt.body_write_accepted
+        evidence.bytes_written += receipt.body_bytes_written
 
 
 def _confirm_interactive_turn(
     handle: str,
-    prompt: str,
+    prompt: PreparedAgentPrompt,
     sent_at: float,
     before: PaneProbe,
     *,
@@ -570,6 +635,7 @@ def _confirm_interactive_turn(
         if confirm is not None and confirm(sent_at):
             _advance(evidence, STAGE_TURN_OBSERVED)
             _advance(evidence, STAGE_ACKNOWLEDGED)
+            evidence.turn_confirmed = True
             evidence.reason = ""
             return DeliveryOutcome(DELIVERY_CONFIRMED, evidence)
         probe = probe_pane(handle, run_json=run_json)
@@ -592,6 +658,7 @@ def _confirm_interactive_turn(
             # is what made a delivered wake report as a failure.
             _advance(evidence, STAGE_ENTER_ACCEPTED)
             _advance(evidence, STAGE_TURN_OBSERVED)
+            evidence.turn_confirmed = True
             if ack_out_of_band:
                 evidence.reason = ""
                 return DeliveryOutcome(DELIVERY_ACCEPTED, evidence)
@@ -608,9 +675,10 @@ def _confirm_interactive_turn(
             with _transport_evidence(evidence, "resend-payload"):
                 _send_payload(
                     handle,
-                    "" if evidence.payload_left_in_composer or not probe.screen_read else prompt,
+                    prompt,
                     run_json=run_json,
                     evidence=evidence,
+                    submit_only=evidence.payload_left_in_composer or not probe.screen_read,
                 )
             evidence.resends += 1
             next_resend_at = time.monotonic() + max(TUI_DELIVERY_RESEND_GRACE_S, 0)

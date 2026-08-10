@@ -197,6 +197,11 @@ class DispatcherRecord:
     # delivery evidence rather than delivery state. Payload size and hash only, never prompt text.
     review_delivery_failures: int = 0
     review_delivery_evidence: dict[str, Any] = field(default_factory=dict)
+    # Same bounded evidence for worker launch, rework and one-turn continuation delivery.  It is
+    # retained across recovery so an attempted body/submit pair is never mistaken for an absent
+    # prompt when the next tick chooses whether a head may be replaced.
+    worker_delivery_failures: int = 0
+    worker_delivery_evidence: dict[str, Any] = field(default_factory=dict)
     # Durable launch intent (secretary-820): the bring-up this record is in the middle of, written
     # before the host is asked for a head and cleared once the host has answered. Empty at rest.
     # `dispatcher_launch` owns its shape and its recovery; nothing else reads inside it.
@@ -271,6 +276,8 @@ class DispatcherRecord:
             "review_infra_error": self.review_infra_error,
             "review_delivery_failures": self.review_delivery_failures,
             "review_delivery_evidence": dict(self.review_delivery_evidence),
+            "worker_delivery_failures": self.worker_delivery_failures,
+            "worker_delivery_evidence": dict(self.worker_delivery_evidence),
             "launch_intent": dict(self.launch_intent),
             "worker_waiting_since": self.worker_waiting_since,
             "workspace": self.workspace,
@@ -351,6 +358,12 @@ class DispatcherRecord:
             review_delivery_evidence=(
                 dict(payload["review_delivery_evidence"])
                 if isinstance(payload.get("review_delivery_evidence"), dict)
+                else {}
+            ),
+            worker_delivery_failures=int(payload.get("worker_delivery_failures") or 0),
+            worker_delivery_evidence=(
+                dict(payload["worker_delivery_evidence"])
+                if isinstance(payload.get("worker_delivery_evidence"), dict)
                 else {}
             ),
             worker_waiting_since=float(payload.get("worker_waiting_since") or 0.0),

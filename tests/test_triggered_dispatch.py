@@ -12,6 +12,7 @@ from unittest import mock
 from triggered_agents.runtime import dispatch
 from triggered_agents.runtime import state as runtime_state
 from triggered_agents.runtime import tui_delivery
+from triggered_agents.runtime.agent_prompt_transport import BRACKETED_PASTE_END, BRACKETED_PASTE_START
 
 
 class TriggeredDispatchReuseTests(unittest.TestCase):
@@ -203,7 +204,12 @@ class TriggeredCodexHeadTests(unittest.TestCase):
              mock.patch("triggered_agents.runtime.tui_delivery.time.sleep"):
             dispatch._spawn_fresh_terminal("retro", None, self.workspace, state, "dispatch")
 
-        self.assertEqual(self._sent_text(calls), ["/retro"])
+        sends = [call for call in calls if "send" in call]
+        self.assertEqual(
+            self._sent_text(calls), [f"{BRACKETED_PASTE_START}/retro{BRACKETED_PASTE_END}", ""]
+        )
+        self.assertNotIn("--enter", sends[0])
+        self.assertIn("--enter", sends[1])
         self.assertIn(["terminal", "wait", "--terminal", "term-codex", "--for", "tui-idle",
                        "--timeout-ms", str(tui_delivery.TUI_IDLE_TIMEOUT_MS)], calls)
         legacy_send.assert_not_called()
@@ -223,7 +229,12 @@ class TriggeredCodexHeadTests(unittest.TestCase):
                 "retro", None, "term-codex", self.workspace, mock.Mock(), "dispatch"
             )
 
-        self.assertEqual(self._sent_text(calls), ["/retro"])
+        sends = [call for call in calls if "send" in call]
+        self.assertEqual(
+            self._sent_text(calls), [f"{BRACKETED_PASTE_START}/retro{BRACKETED_PASTE_END}", ""]
+        )
+        self.assertNotIn("--enter", sends[0])
+        self.assertIn("--enter", sends[1])
         legacy_send.assert_not_called()
 
     def test_an_unconfirmed_codex_prompt_fails_on_the_shared_delivery_contract(self) -> None:

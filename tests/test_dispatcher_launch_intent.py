@@ -1765,6 +1765,30 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(record.review_delivery_failures, 0)
         self.assertEqual(record.review_delivery_evidence, {})
 
+    def test_a_later_reviewer_launch_abort_keeps_a_confirmed_prompt_receipt(self) -> None:
+        """Freezing the worker can fail after the reviewer has already accepted its prompt."""
+        self.run_to_validate()
+        evidence = {
+            "subject": "reviewer-launch",
+            "handle": f"review:{REF}",
+            "stage": "acknowledged",
+            "transport_version": "agent-prompt-v2",
+            "body_write_accepted": True,
+            "submit_write_accepted": True,
+            "submit_count": 1,
+            "turn_confirmed": True,
+        }
+        self.host.review_launch_delivery_evidence = evidence
+        self.host.fail_freeze_worker_reason = "worker did not stop"
+
+        outcome = self.tick()
+
+        self.assertEqual(outcome["action"], "review-launch-aborted")
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.review_delivery_evidence, evidence)
+        self.assertEqual(record.review_delivery_failures, 0)
+
     def _abort_review_into_recovery(self) -> None:
         """Leave the card in `review_starting` with its worker retained and its reviewer dead.
 
@@ -2743,8 +2767,11 @@ class HostLaunchContourTests(unittest.TestCase):
             self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
 
         sends = [command for command in calls if command[2] == "send"]
-        self.assertEqual(len(sends), 1)
-        self.assertNotIn("", [command[command.index("--text") + 1] for command in sends])
+        self.assertEqual(len(sends), 2)
+        self.assertNotIn("--enter", sends[0])
+        self.assertNotEqual(sends[0][sends[0].index("--text") + 1], "")
+        self.assertIn("--enter", sends[1])
+        self.assertEqual(sends[1][sends[1].index("--text") + 1], "")
         # The pane, not a session record, is what confirmed it.
         self.assertTrue(any(command[2] == "read" for command in calls))
 

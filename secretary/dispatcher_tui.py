@@ -89,11 +89,12 @@ def deliver_tui_prompt(
     prompt_file: str,
     *,
     run_json: RunJson,
+    adapter: str = "codex",
     session_root: Path | None = None,
     prompt_text: str | None = None,
     subject: str = "",
 ) -> DeliveryOutcome:
-    """Deliver a Codex TUI prompt: the shared path, with this role's own criterion.
+    """Deliver one provider TUI prompt through the shared transport and confirmation path.
 
     Nothing here is a second delivery path. It resolves what to send, which is the caller's
     business, and hands the same criterion worker and reviewer use on any other head: their head's
@@ -110,8 +111,9 @@ def deliver_tui_prompt(
         handle,
         prompt,
         run_json=run_json,
+        adapter=adapter,
         confirm=turn_started_confirm(
-            handle, workspace, "codex", run_json=run_json, session_root=session_root
+            handle, workspace, adapter, run_json=run_json, session_root=session_root
         ),
         subject=subject,
     )

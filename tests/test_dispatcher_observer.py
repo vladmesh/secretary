@@ -59,6 +59,7 @@ from secretary.role_env import (
 )
 from secretary.status import _observers as status_observers
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter, _now
+from triggered_agents.runtime.agent_prompt_transport import BRACKETED_PASTE_END, BRACKETED_PASTE_START
 
 from tests.observer_identity import as_observer, bind_observer
 from tests.test_dispatcher import (
@@ -512,7 +513,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(delivery.stage, DeliveryStage.IDLE)
         self.assertTrue(delivery.acknowledged_delivery_id)
         self.assertTrue(delivery.acknowledged_resume_id)
-        self.assertEqual(len(sends), 1)
+        self.assertEqual(len(sends), 2)
+        self.assertIn("--enter", sends[1])
+        self.assertEqual(sends[1][sends[1].index("--text") + 1], "")
 
     def test_a_wake_the_pane_never_took_is_an_explicit_refusal(self) -> None:
         """Retry exhaustion reaches the tick and the delivery record instead of being silent."""
@@ -560,8 +563,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             self.assertIn("observer wake was not delivered", delivery.reason)
             self.assertEqual(delivery.attempts, 1)
             self.assertEqual(self.observers()["sprint:1"].state, "wake-deferred")
-            # The prompt and both retries were entered before the delivery was given up on.
-            self.assertEqual(len(sends), 3)
+            # The prompt body is one write, followed by its submit and the existing two bare
+            # Enter retries before the delivery is given up on.
+            self.assertEqual(len(sends), 4)
+            self.assertNotIn("--enter", sends[0])
+            self.assertIn("--enter", sends[1])
+            self.assertTrue(all("--enter" in send for send in sends[2:]))
             owed = (delivery.delivery_id, delivery.through_event)
 
             # Retries are bounded: the last one hands the batch to the replacement path instead of
@@ -814,7 +821,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         delivery = self.observers()["sprint:1"].delivery
         self.assertEqual(delivery.wake_failures, 1)
         evidence = delivery.last_evidence
-        self.assertEqual(evidence["reason"], "transport-refused-send-payload")
+        self.assertEqual(evidence["reason"], "transport-refused-body-write")
         self.assertEqual(evidence["handle"], record.handle)
         self.assertTrue(evidence["payload_bytes"])
         self.assertEqual(len(evidence["payload_sha256"]), 16)
@@ -869,7 +876,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             )
             delivery = self.observers()["sprint:1"].delivery
             self.assertEqual(delivery.stage, DeliveryStage.RETRY_DEFERRED)
-            self.assertEqual(len(sends), 1)
+            self.assertEqual(len(sends), 2)
 
             # The head had the prompt after all, and says so with this delivery's own markers.
             entry = {
@@ -887,7 +894,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(delivery.stage, DeliveryStage.IDLE)
         self.assertTrue(delivery.acknowledged_resume_id)
         # No second turn for a batch the observer has already answered.
-        self.assertEqual(len(sends), 1)
+        self.assertEqual(len(sends), 2)
         self.assertEqual(self.host.observers, ["sprint:1"])
 
     def test_a_readiness_probe_that_fails_is_not_read_as_a_busy_head(self) -> None:
@@ -3812,7 +3819,10 @@ class ObserverConfigurationTests(unittest.TestCase):
                 outcome = host.nudge_observer(record)
 
         sent = next(args for args in calls if args[1:3] == ["terminal", "send"])
-        message = sent[sent.index("--text") + 1]
+        wire_body = sent[sent.index("--text") + 1]
+        self.assertTrue(wire_body.startswith(BRACKETED_PASTE_START))
+        self.assertTrue(wire_body.endswith(BRACKETED_PASTE_END))
+        message = wire_body[len(BRACKETED_PASTE_START):-len(BRACKETED_PASTE_END)]
         self.assertIn("--delivery-id delivery-1", message)
         self.assertIn("--through-event evt-card-1", message)
         self.assertIn("only when that receipt exists", message)
@@ -3829,6 +3839,7 @@ class ObserverConfigurationTests(unittest.TestCase):
                 ["terminal", "wait"],
                 ["terminal", "read"],
                 ["terminal", "send"],
+                ["terminal", "send"],
                 ["terminal", "wait"],
                 ["terminal", "read"],
             ],
@@ -3839,6 +3850,10 @@ class ObserverConfigurationTests(unittest.TestCase):
         self.assertEqual(evidence["subject"], "observer-wake")
         self.assertEqual(evidence["stage"], "turn_observed")
         self.assertEqual(evidence["bytes_written"], 1315)
+        self.assertEqual((evidence["body_write_count"], evidence["submit_count"]), (1, 1))
+        self.assertTrue(evidence["body_write_accepted"])
+        self.assertTrue(evidence["submit_write_accepted"])
+        self.assertTrue(evidence["turn_confirmed"])
         self.assertEqual(evidence["payload_bytes"], len(message.encode("utf-8")))
         self.assertNotIn(message[:40], json.dumps(evidence))
 
@@ -3927,8 +3942,10 @@ class ObserverConfigurationTests(unittest.TestCase):
         self.assertIn("observer wake was not delivered", str(raised.exception))
         self.assertIn("pane-stayed-ready", str(raised.exception))
         sends = [call for call in calls if call[1:3] == ["terminal", "send"]]
-        self.assertEqual(len(sends), 3)
-        self.assertEqual([call[call.index("--text") + 1] for call in sends[1:]], ["", ""])
+        self.assertEqual(len(sends), 4)
+        self.assertNotIn("--enter", sends[0])
+        self.assertEqual([call[call.index("--text") + 1] for call in sends[1:]], ["", "", ""])
+        self.assertTrue(all("--enter" in call for call in sends[1:]))
 
     def test_real_host_reads_readiness_from_tui_idle_and_the_output_timestamp(self) -> None:
         with tempfile.TemporaryDirectory() as root:

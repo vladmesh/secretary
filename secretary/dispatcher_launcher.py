@@ -64,6 +64,7 @@ class HeadLaunchError(RuntimeError):
 class HeadLaunch:
     command: str
     prompt_after_start: bool = False
+    adapter: str = ""
 
 
 def ensure_claude_workspace_ready(
@@ -120,6 +121,37 @@ def render_claude_command(
     return f"{shlex.join(args)} {_delivered_prompt(prompt_file, launch_prompt)}"
 
 
+def render_claude_launch(
+    profile: dict[str, Any],
+    prompt_file: str,
+    *,
+    launch_prompt: str | None = None,
+) -> HeadLaunch:
+    """Start Claude's interactive TUI without putting a prompt on its command line.
+
+    Claude does not need Codex's bracketed-paste body framing, but it must share the same
+    serialized body/submit transport once the pane is ready.  Keeping the prompt out of the
+    command line also means workers, reviewers and observers all get the same receipt and lock
+    boundary, regardless of provider.
+
+    ``prompt_file`` and ``launch_prompt`` remain part of the public renderer signature because
+    callers resolve their inputs before choosing an adapter.  They are deliberately unused here:
+    ``CommandHostRuntime`` sends the resolved body after startup.
+    """
+    del prompt_file, launch_prompt
+    args = ["claude", "--dangerously-skip-permissions"]
+    model = profile.get("model")
+    if model:
+        args += ["--model", str(model)]
+    effort = str(profile.get("effort") or "default")
+    if effort not in CLAUDE_EFFORTS:
+        known = ", ".join(sorted(CLAUDE_EFFORTS))
+        raise HeadLaunchError(f"claude profile has unknown effort {effort!r} (known: {known})")
+    if effort != "default":
+        args += ["--effort", effort]
+    return HeadLaunch(shlex.join(args), prompt_after_start=True, adapter="claude")
+
+
 def render_codex_command(
     profile: dict[str, Any],
     prompt_file: str,
@@ -152,7 +184,8 @@ def render_codex_launch(
     every adapter.
     """
     return HeadLaunch(
-        _render_codex_tui_command(profile, workspace=workspace), prompt_after_start=True
+        _render_codex_tui_command(profile, workspace=workspace), prompt_after_start=True,
+        adapter="codex",
     )
 
 

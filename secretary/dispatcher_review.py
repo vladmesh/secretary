@@ -410,8 +410,12 @@ def _record_review_delivery_failure(record: DispatcherRecord, exc: Exception) ->
         evidence = evidence.to_json()
     if not isinstance(evidence, dict) or not evidence:
         return
-    record.review_delivery_failures += 1
     record.review_delivery_evidence = dict(evidence)
+    # The reviewer can receive its prompt before a later launch step, such as freezing the
+    # retained worker, fails.  That successful receipt still has to survive recovery, but it is
+    # not a delivery failure merely because the enclosing reviewer bring-up later aborted.
+    if not bool(evidence.get("turn_confirmed")):
+        record.review_delivery_failures += 1
 
 
 def _escalate_stuck_review_launch(
@@ -613,6 +617,11 @@ def start_review(
     record.review_handle = launch.handle
     record.review_leaf = launch.leaf
     record.review_commit = launch.commit
+    if launch.delivery_evidence:
+        # Successful and refused reviewer launches use the same durable, metadata-only receipt.
+        # A later recovery therefore sees the actual transport version and submit count instead
+        # of assuming the pane received the review because the split succeeded.
+        record.review_delivery_evidence = dict(launch.delivery_evidence)
     # The verdict this pane issues belongs to this head, so the round records it now, from the
     # launcher's own snapshot (secretary-716). The intent is spent only once that has landed: a
     # journal that refuses here leaves the reviewer adoptable, and the adoption writes the routing

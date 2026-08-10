@@ -105,6 +105,7 @@ class ReviewLaunch:
     # The launch configuration of the reviewer head this bring-up started, snapshotted by the
     # launcher itself (secretary-716). The runtime writes it to the routing journal as-is.
     run: dict[str, Any] = field(default_factory=dict)
+    delivery_evidence: dict[str, Any] = field(default_factory=dict)
 
 
 def review_pane_label(reference: str) -> str:

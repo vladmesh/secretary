@@ -24,7 +24,7 @@ from secretary.dispatcher_launcher import (
     claude_launch_model as _claude_launch_model,
     ensure_claude_workspace_ready as _ensure_claude_workspace_ready,
     ensure_codex_workspace_trusted as _ensure_codex_workspace_trusted,
-    render_claude_command as _render_claude_command,
+    render_claude_launch as _render_claude_launch,
     render_codex_command as _render_codex_command,
     render_codex_launch as _render_codex_launch,
     PYTHON_SAFE_PATH_FLAG as _PYTHON_SAFE_PATH_FLAG,
@@ -268,6 +268,9 @@ class LaunchedHead:
     # aliasing, so launch callers carry it instead of trying to recover it from an inventory keyed
     # by the already-unstable handle.
     leaf: str = ""
+    # The completed launch prompt's bounded transport receipt.  This belongs beside the head
+    # identity so caller recovery never has to infer a successful body/submit pair from the pane.
+    delivery_evidence: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -522,7 +525,7 @@ class InstanceCatalog:
         try:
             self.prepare_head_workspace(head, workspace, role=role)
             if adapter == "claude":
-                launch = HeadLaunch(_render_claude_command(profile, prompt_file, launch_prompt=launch_prompt))
+                launch = _render_claude_launch(profile, prompt_file, launch_prompt=launch_prompt)
             else:
                 launch = _render_codex_launch(
                     profile, prompt_file, workspace=workspace, launch_prompt=launch_prompt
@@ -533,7 +536,9 @@ class InstanceCatalog:
             wrapped = _wrap_role_shell_command(role, launch.command, identity=identity)
         except HeadLaunchError as exc:
             raise HostError(str(exc)) from None
-        return HeadLaunch(wrapped, prompt_after_start=launch.prompt_after_start)
+        return HeadLaunch(
+            wrapped, prompt_after_start=launch.prompt_after_start, adapter=launch.adapter
+        )
 
     def prepare_head_workspace(self, head: str, workspace: str, *, role: str = "") -> None:
         """Pre-answer the first-run questions a head's CLI would otherwise put to an operator.
@@ -594,6 +599,28 @@ class CommandHostRuntime:
         self.data_dir = data_dir
         self.mode = mode
 
+    def _prompt_adapter(self, run: Any, head: str) -> str:
+        """Resolve the provider for a retained pane without downgrading old Codex records.
+
+        New records carry the immutable run snapshot.  Older records can lack it, so resolve the
+        current head profile when available; a missing profile still chooses Codex, whose framing
+        is the safe default for the historical TUI-only path rather than silently falling back to
+        the generic unframed send that lost the reproduced prompt.
+        """
+        if isinstance(run, dict):
+            adapter = str(run.get("adapter") or "").lower()
+            if adapter:
+                return adapter
+        try:
+            profile = self.catalog.head_profile(head)
+        except (AttributeError, HostError):
+            profile = {}
+        if isinstance(profile, dict):
+            adapter = str(profile.get("adapter") or "").lower()
+            if adapter:
+                return adapter
+        return "codex"
+
     def prepare_worker(
         self,
         task: dict[str, Any],
@@ -642,6 +669,7 @@ class CommandHostRuntime:
             # The launch configuration of the head that went up. The caller records this instead of
             # re-reading the registry, which a later edit would answer differently.
             "run": launched.run,
+            "delivery_evidence": dict(launched.delivery_evidence),
         }
 
     def restart_worker(self, task: dict[str, Any], record: DispatcherRecord) -> LaunchedHead:
@@ -847,6 +875,7 @@ class CommandHostRuntime:
                     str(workspace),
                     OBSERVER_PROMPT_FILE,
                     run_json=self._run_json,
+                    adapter=launch.adapter or "codex",
                     prompt_text=_observer_launch_prompt(),
                     subject="observer-launch",
                 )
@@ -1016,6 +1045,9 @@ class CommandHostRuntime:
                 current,
                 message,
                 run_json=self._run_json,
+                adapter=self._prompt_adapter(
+                    getattr(record, "run", {}), str(getattr(record, "head", ""))
+                ),
                 ack_out_of_band=True,
                 subject="observer-wake",
             )
@@ -1134,12 +1166,14 @@ class CommandHostRuntime:
                 leaf=launched.leaf,
                 workspace=record.workspace,
                 pid_file=_pid_file_path("review", task["ref"]),
+                evidence=dict(launched.delivery_evidence),
             ) from None
         return ReviewLaunch(
             handle=launched.handle,
             leaf=launched.leaf,
             commit=self.head_commit(record),
             run=launched.run,
+            delivery_evidence=dict(launched.delivery_evidence),
         )
 
     def review_running(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
@@ -1780,12 +1814,15 @@ class CommandHostRuntime:
         # than looking it up again through the unstable alias.
         if isinstance(pane, str):
             pane = PaneIdentity(pane)
+        delivery_evidence: dict[str, Any] = {}
         if launch and launch.prompt_after_start:
             try:
-                _deliver_tui_prompt(
+                outcome = _deliver_tui_prompt(
                     pane.handle, workspace, prompt_file, run_json=self._run_json,
+                    adapter=launch.adapter or "codex",
                     prompt_text=launch_prompt, subject=f"{role or 'head'}-launch",
                 )
+                delivery_evidence = _delivery_evidence_json(outcome, f"{role or 'head'}-launch")
             except (TuiDeliveryError, HostError) as exc:
                 # The pane is about to be closed, so this is the last moment anything can be known
                 # about the prompt it would not take. The evidence travels with every way out of
@@ -1826,7 +1863,16 @@ class CommandHostRuntime:
                 failure = HostError(str(exc))
                 failure.evidence = evidence
                 raise failure from None
-        return self._launched(pane.handle, head, task, role, workspace, failover, leaf=pane.leaf)
+        return self._launched(
+            pane.handle,
+            head,
+            task,
+            role,
+            workspace,
+            failover,
+            leaf=pane.leaf,
+            delivery_evidence=delivery_evidence,
+        )
 
     def _close_launched_pane(self, handle: str, pid_file: str) -> None:
         """Close a pane this bring-up opened and confirm nothing of its head survived.
@@ -1847,7 +1893,7 @@ class CommandHostRuntime:
 
     def _launched(
         self, handle: str, head: str, task: dict[str, Any] | None, role: str, workspace: str = "",
-        failover: bool = False, leaf: str = "",
+        failover: bool = False, leaf: str = "", delivery_evidence: dict[str, Any] | None = None,
     ) -> LaunchedHead:
         """Pair the pane with the launch snapshot of the head running in it.
 
@@ -1857,7 +1903,9 @@ class CommandHostRuntime:
         already succeeded.
         """
         if task is None:
-            return LaunchedHead(handle=handle, head=head, leaf=leaf)
+            return LaunchedHead(
+                handle=handle, head=head, leaf=leaf, delivery_evidence=dict(delivery_evidence or {})
+            )
         try:
             run = self.catalog.head_run(
                 task, role=role, head=head, workspace=workspace, failover=failover
@@ -1866,7 +1914,13 @@ class CommandHostRuntime:
             run = HeadRun(
                 role=role, head=head, adapter="unknown", model_source=MODEL_UNKNOWN
             ).to_json()
-        return LaunchedHead(handle=handle, head=head, run=run, leaf=leaf)
+        return LaunchedHead(
+            handle=handle,
+            head=head,
+            run=run,
+            leaf=leaf,
+            delivery_evidence=dict(delivery_evidence or {}),
+        )
 
     def _create_terminal(self, workspace: str, title: str, command: str) -> PaneIdentity:
         result = self._run_json([
@@ -2156,26 +2210,22 @@ class CommandHostRuntime:
         workspace = Path(record.workspace)
         if not workspace.is_dir():
             raise HostError("worker workspace is missing")
-        adapter = record.worker_run.get("adapter")
+        adapter = self._prompt_adapter(record.worker_run, record.head)
         prompt = _report_nudge_prompt(record.report_generation, task["ref"])
         try:
-            if adapter == "codex":
-                _deliver_tui_prompt(
-                    record.handle, str(workspace), "TASK.md", run_json=self._run_json,
-                    prompt_text=prompt,
-                )
-            else:
-                _deliver_interactive_prompt(
-                    record.handle,
-                    prompt,
-                    run_json=self._run_json,
-                    confirm=_turn_started_confirm(
-                        record.handle, str(workspace), str(adapter or ""),
-                        run_json=self._run_json,
-                    ),
-                )
+            outcome = _deliver_tui_prompt(
+                record.handle,
+                str(workspace),
+                "TASK.md",
+                run_json=self._run_json,
+                adapter=adapter,
+                prompt_text=prompt,
+            )
+            _record_worker_delivery_evidence(record, outcome)
         except (TuiDeliveryError, HostError) as exc:
-            raise HostError(f"worker report prompt was not delivered: {exc}") from None
+            failure = HostError(f"worker report prompt was not delivered: {exc}")
+            failure.evidence = getattr(exc, "evidence", None)
+            raise failure from None
 
     def resume_worker(self, task: dict[str, Any], record: DispatcherRecord) -> None:
         """Resume an addressable retained worker and deliver its updated rework task.
@@ -2192,7 +2242,7 @@ class CommandHostRuntime:
             raise HostError("retained worker session exited")
         if not self._continuation_addressable(record):
             raise HostError("retained worker session cannot accept a continuation")
-        adapter = record.worker_run.get("adapter")
+        adapter = self._prompt_adapter(record.worker_run, record.head)
         workspace = Path(record.workspace)
         if not workspace.is_dir():
             raise HostError("retained worker workspace is missing")
@@ -2206,7 +2256,7 @@ class CommandHostRuntime:
             run_json=self._run_json,
             workspace=str(workspace),
             since=continuation.sent_at,
-            adapter=str(adapter or ""),
+            adapter=adapter,
         ):
             # The dispatcher may have died after the provider started but before it recorded
             # that confirmation. Returning lets recovery checkpoint it before finishing, without
@@ -2227,23 +2277,19 @@ class CommandHostRuntime:
             if status.get("stopped"):
                 self._signal_head(record.worker_pid_file, signal.SIGCONT)
             prompt = _continuation_prompt(continuation.phase, generation, task["ref"], decision)
-            if adapter == "codex":
-                _deliver_tui_prompt(
-                    record.handle, str(workspace), "TASK.md", run_json=self._run_json,
-                    prompt_text=prompt,
-                )
-            else:
-                _deliver_interactive_prompt(
-                    record.handle,
-                    prompt,
-                    run_json=self._run_json,
-                    confirm=_turn_started_confirm(
-                        record.handle, str(workspace), str(adapter or ""),
-                        run_json=self._run_json,
-                    ),
-                )
+            outcome = _deliver_tui_prompt(
+                record.handle,
+                str(workspace),
+                "TASK.md",
+                run_json=self._run_json,
+                adapter=adapter,
+                prompt_text=prompt,
+            )
+            _record_worker_delivery_evidence(record, outcome)
         except (TuiDeliveryError, HostError) as exc:
-            raise HostError(f"retained worker continuation was not delivered: {exc}") from None
+            failure = HostError(f"retained worker continuation was not delivered: {exc}")
+            failure.evidence = getattr(exc, "evidence", None)
+            raise failure from None
 
     def _set_worker_branch(self, workspace: str, branch: str) -> None:
         if self.mode == "noop":
@@ -2645,7 +2691,7 @@ class CommandHostRuntime:
         self._run(["bash", "-lc", command], label, cwd=cwd)
 
     def _run_json(self, args: list[str]) -> dict[str, Any]:
-        completed = self._run(args, " ".join(args))
+        completed = self._run(args, _safe_orca_command_label(args))
         try:
             loaded = json.loads(completed.stdout or "{}")
         except ValueError:
@@ -3161,6 +3207,7 @@ class DispatcherRuntime:
             self.save_records(payload, records)
             return {"status": "blocked", "step": "claim", "pilot_ref": ref, "reason": "host bring-up failed"}
         record.workspace = prepared["workspace"]
+        _record_worker_delivery_evidence(record, prepared.get("delivery_evidence"))
         # The intent carries the pane and the launch snapshot before the record does: from here on
         # every failure is one over a worker that is already running.
         _confirm_launch_intent(
@@ -3334,6 +3381,7 @@ class DispatcherRuntime:
         left a process behind whatever the error said, and blocking the card and dropping its record
         over that process is exactly the head the next requeue would open a second one beside.
         """
+        _record_worker_delivery_evidence(record, exc, failure=True)
         if not isinstance(exc, HeadLaunchAborted):
             if not _launch_left_a_head(record):
                 return None
@@ -3341,6 +3389,7 @@ class DispatcherRuntime:
                 str(exc),
                 workspace=record.workspace,
                 pid_file=_launch_pid_file(WORKER_ROLE, ref),
+                evidence=_delivery_evidence_json(exc, "worker-launch"),
             )
         return self._worker_launch_aborted(
             payload, records, ref, record, exc, step=step, attempt_id=attempt_id
@@ -3427,6 +3476,7 @@ class DispatcherRuntime:
             self, payload, records, ref, record,
             handle=launched.handle, leaf=launched.leaf, run=launched.run,
         )
+        _record_worker_delivery_evidence(record, launched.delivery_evidence)
         try:
             self._settle_worker_pane(ref, record, launched.handle, launched.leaf)
         except HeadLaunchAborted as exc:
@@ -3753,6 +3803,7 @@ class DispatcherRuntime:
         if launched is None:
             assert failed is not None
             return failed
+        _record_worker_delivery_evidence(record, launched.delivery_evidence)
         record.state = "claimed"
         # A rejected done report earns no verdict, so this stays the same round: the relaunch is
         # recorded and dedupes unless the registry moved under it.
@@ -4075,6 +4126,9 @@ class DispatcherRuntime:
         try:
             self.host.prompt_worker_report(task, record)
         except HostError as exc:
+            _record_worker_delivery_evidence(record, exc, failure=True)
+            records[ref] = record
+            self.save_records(payload, records)
             return None, f"{trigger}, and the report prompt was refused: {scrub_host_output(str(exc))}"
         nudge.confirm()
         # The prompted head owns a fresh idle window: it has just been given something to do, and
@@ -4640,6 +4694,9 @@ class DispatcherRuntime:
             try:
                 self.host.resume_worker(task, record)
             except HostError as exc:
+                _record_worker_delivery_evidence(record, exc, failure=True)
+                records[ref] = record
+                self.save_records(payload, records)
                 return self._restart_red_worker(
                     task, record, records, payload, attempt_id,
                     continuation_reason=scrub_host_output(str(exc)), phase=phase,
@@ -5789,6 +5846,28 @@ def _continuation_prompt(
     )
 
 
+def _safe_orca_command_label(args: list[str]) -> str:
+    """Describe a public terminal send without retaining its prompt in an exception.
+
+    ``CommandHostRuntime._run`` includes its label in failures.  The transport deliberately
+    passes the prompt as ``--text`` and the failure record outlives the pane, so that label must
+    be redacted before a subprocess is started rather than scrubbed after an arbitrary provider
+    error has been made durable.
+    """
+    if args[:3] != ["orca", "terminal", "send"]:
+        return " ".join(args)
+    safe: list[str] = []
+    redact_next = False
+    for arg in args:
+        if redact_next:
+            safe.append("<prompt-redacted>")
+            redact_next = False
+        else:
+            safe.append(arg)
+            redact_next = arg == "--text"
+    return " ".join(safe)
+
+
 def _delivery_evidence_json(carrier: Any, subject: str) -> dict[str, Any]:
     """The bounded evidence a delivery verdict or failure carries, ready to persist.
 
@@ -5807,6 +5886,27 @@ def _delivery_evidence_json(carrier: Any, subject: str) -> dict[str, Any]:
     evidence = dict(evidence)
     evidence["subject"] = subject
     return evidence
+
+
+def _record_worker_delivery_evidence(
+    record: DispatcherRecord, carrier: Any, *, failure: bool = False
+) -> None:
+    """Persist a worker prompt receipt before recovery can replace its conversation.
+
+    Worker launch, rework and retained continuation recover on different paths, but the prompt
+    receipt is one fact.  Keeping it on the record makes the later path see body/submit acceptance
+    and turn confirmation instead of flattening a partially delivered prompt to a prose error.
+    """
+    evidence = (
+        dict(carrier)
+        if isinstance(carrier, dict) and carrier
+        else _delivery_evidence_json(carrier, "worker-prompt")
+    )
+    if not evidence:
+        return
+    record.worker_delivery_evidence = evidence
+    if failure:
+        record.worker_delivery_failures += 1
 
 
 def _report_nudge_prompt(generation: int, reference: str) -> str:

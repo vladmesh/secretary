@@ -173,9 +173,25 @@ class ReuseDeliveryError(TuiDeliveryError):
 def _orca_json(args: list[str]) -> dict:
     p = subprocess.run([ORCA, *args, "--json"], capture_output=True, text=True, timeout=ORCA_TIMEOUT_S)
     if p.returncode != 0:
-        raise RuntimeError(f"orca {' '.join(args)} failed: {(p.stderr or p.stdout).strip()}")
+        raise RuntimeError(f"orca {_safe_orca_args_label(args)} failed: {(p.stderr or p.stdout).strip()}")
     data = json.loads(p.stdout)
     return data.get("result", data)
+
+
+def _safe_orca_args_label(args: list[str]) -> str:
+    """Keep a failed terminal send from formatting its prompt into runtime logs."""
+    if args[:2] != ["terminal", "send"]:
+        return " ".join(args)
+    safe: list[str] = []
+    redact_next = False
+    for arg in args:
+        if redact_next:
+            safe.append("<prompt-redacted>")
+            redact_next = False
+        else:
+            safe.append(arg)
+            redact_next = arg == "--text"
+    return " ".join(safe)
 
 
 def _orca(args: list[str]) -> None:
@@ -747,6 +763,7 @@ def _deliver_interactive_skill(handle: str, workspace: str, skill: str) -> None:
         handle,
         skill,
         run_json=_tui_run_json,
+        adapter="codex",
         confirm=lambda sent_at: _codex_turn_after(workspace, sent_at),
     )
 

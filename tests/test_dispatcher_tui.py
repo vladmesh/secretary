@@ -220,7 +220,10 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
 
         send_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "send"])
         delivered = host.calls[send_i][host.calls[send_i].index("--text") + 1]
-        self.assertEqual(delivered, "The full task is in TASK.md. Read it first.")
+        self.assertEqual(
+            delivered,
+            "\x1b[200~The full task is in TASK.md. Read it first.\x1b[201~",
+        )
         self.assertNotIn("full spec body", delivered)
 
     def test_tui_delivery_resends_enter_when_the_pane_did_not_take_the_prompt(self) -> None:
@@ -264,9 +267,15 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 )
 
         sends = [call for call in host.calls if call[:3] == ["orca", "terminal", "send"]]
-        self.assertEqual(len(sends), 2)
-        self.assertIn("Read TASK.md", sends[0][sends[0].index("--text") + 1])
+        self.assertEqual(len(sends), 3)
+        self.assertEqual(
+            sends[0][sends[0].index("--text") + 1],
+            "\x1b[200~Read TASK.md\n\x1b[201~",
+        )
         self.assertEqual(sends[1][sends[1].index("--text") + 1], "")
+        self.assertIn("--enter", sends[1])
+        self.assertEqual(sends[2][sends[2].index("--text") + 1], "")
+        self.assertIn("--enter", sends[2])
 
     def test_tui_delivery_failure_closes_terminal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -497,9 +506,10 @@ class ScriptedPane:
         self.refuse = refuse
         self.calls: list[list[str]] = []
         self.sends: list[str] = []
+        self.submits = 0
 
     def _at(self, table: dict):
-        landed = len(self.sends)
+        landed = self.submits
         while landed >= 0:
             if landed in table:
                 return table[landed]
@@ -515,9 +525,11 @@ class ScriptedPane:
             raise HostError(f"orca terminal {self.refuse} failed: synthetic transport refusal")
         if args[1:3] == ["terminal", "send"]:
             self.sends.append(args[args.index("--text") + 1])
+            if "--enter" in args:
+                self.submits += 1
             return {"send": {"accepted": True, "bytesWritten": self.bytes_written}}
         if args[1:3] == ["terminal", "wait"]:
-            idle = self.idle_after.get(len(self.sends), True)
+            idle = self.idle_after.get(self.submits, True)
             return {"wait": {"condition": "tui-idle", "satisfied": idle}}
         if args[1:3] == ["terminal", "read"]:
             terminal: dict = {"tail": list(self._screen())}
@@ -543,7 +555,8 @@ class TuiDeliveryStageTests(unittest.TestCase):
         with mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3), \
              mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01), \
              mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0), \
-             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2):
+             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2), \
+             mock.patch("triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0):
             return deliver_interactive_prompt(
                 "term-observer", "wake the observer", run_json=pane.run_json, **kwargs
             )
@@ -564,7 +577,7 @@ class TuiDeliveryStageTests(unittest.TestCase):
         self.assertEqual(evidence.readiness_after, READINESS_READY)
         self.assertFalse(evidence.cursor_moved)
         # The payload is entered again rather than written again: it is already sitting there.
-        self.assertEqual(pane.sends, ["wake the observer", "", ""])
+        self.assertEqual(pane.sends, ["wake the observer", "", "", ""])
         self.assertEqual(evidence.attempts, 3)
         self.assertEqual(evidence.resends, 2)
 
@@ -580,7 +593,7 @@ class TuiDeliveryStageTests(unittest.TestCase):
         self.assertEqual(outcome, DELIVERY_ACCEPTED)
         self.assertEqual(outcome.evidence.stage, "turn_observed")
         self.assertEqual(outcome.evidence.resends, 1)
-        self.assertEqual(pane.sends, ["wake the observer", ""])
+        self.assertEqual(pane.sends, ["wake the observer", "", ""])
         self.assertFalse(outcome.evidence.payload_left_in_composer)
 
     def test_output_cursor_progress_is_a_turn_on_a_pane_that_stayed_ready(self) -> None:
@@ -599,7 +612,7 @@ class TuiDeliveryStageTests(unittest.TestCase):
         self.assertEqual(outcome.evidence.stage, "turn_observed")
         self.assertTrue(outcome.evidence.cursor_moved)
         self.assertEqual(outcome.evidence.readiness_after, READINESS_READY)
-        self.assertEqual(pane.sends, ["wake the observer"])
+        self.assertEqual(pane.sends, ["wake the observer", ""])
 
     def test_a_pane_that_showed_nothing_for_the_prompt_is_written_again_and_then_refused(self) -> None:
         """A composer that is empty and a pane that printed nothing: the payload is gone.
@@ -616,7 +629,7 @@ class TuiDeliveryStageTests(unittest.TestCase):
         evidence = raised.exception.evidence
         self.assertEqual(evidence.reason, "enter-accepted-without-turn")
         self.assertFalse(evidence.cursor_moved)
-        self.assertEqual(pane.sends, ["wake the observer"] * 3)
+        self.assertEqual(pane.sends, ["wake the observer", ""] * 3)
 
     def test_evidence_keeps_the_size_and_the_hash_and_never_the_prompt(self) -> None:
         pane = ScriptedPane({0: ["›"], 1: ["› [Pasted Content 1315 chars]"]})
@@ -648,7 +661,7 @@ class TuiDeliveryStageTests(unittest.TestCase):
 
         self.assertEqual(outcome, DELIVERY_CONFIRMED)
         self.assertEqual(outcome.evidence.stage, "acknowledged")
-        self.assertEqual(pane.sends, ["wake the observer", ""])
+        self.assertEqual(pane.sends, ["wake the observer", "", ""])
 
     def test_the_backend_cursor_advancing_is_a_turn_even_when_the_tail_is_unchanged(self) -> None:
         """The retained tail is bounded; Orca's cursor is not.
@@ -672,7 +685,7 @@ class TuiDeliveryStageTests(unittest.TestCase):
         self.assertTrue(evidence.cursor_from_backend)
         self.assertEqual((evidence.cursor_before, evidence.cursor_after), ("orca:558", "orca:612"))
         self.assertEqual(evidence.readiness_after, READINESS_READY)
-        self.assertEqual(pane.sends, ["wake the observer"])
+        self.assertEqual(pane.sends, ["wake the observer", ""])
 
     def test_a_backend_cursor_that_did_not_move_is_not_a_turn(self) -> None:
         """The same pane with the cursor standing still: nothing was printed, so nothing landed."""
@@ -711,13 +724,45 @@ class TuiDeliveryStageTests(unittest.TestCase):
             self.deliver(pane, ack_out_of_band=True)
 
         evidence = raised.exception.evidence
-        self.assertEqual(evidence.reason, "transport-refused-send-payload")
+        self.assertEqual(evidence.reason, "transport-refused-body-write")
         self.assertEqual(evidence.handle, "term-observer")
         self.assertEqual(evidence.payload_bytes, len("wake the observer"))
         self.assertEqual(len(evidence.payload_sha256), 16)
         self.assertEqual(evidence.readiness_before, READINESS_READY)
         self.assertEqual(evidence.stage, "none")
         self.assertNotIn("wake the observer", json.dumps(evidence.to_json()))
+
+    def test_a_refused_submit_keeps_the_accepted_framed_body_as_separate_evidence(self) -> None:
+        """A body acceptance is not delivery when its one submission write is refused."""
+        calls: list[list[str]] = []
+
+        def run_json(args: list[str]) -> dict:
+            calls.append(args)
+            if args[1:3] == ["terminal", "wait"]:
+                return {"wait": {"condition": "tui-idle", "satisfied": True}}
+            if args[1:3] == ["terminal", "read"]:
+                return {"terminal": {"tail": ["›"]}}
+            if args[1:3] == ["terminal", "send"]:
+                return {"send": {"accepted": "--enter" not in args, "bytesWritten": 7}}
+            raise AssertionError(args)
+
+        with mock.patch("triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0):
+            with self.assertRaises(TuiDeliveryError) as raised:
+                deliver_interactive_prompt(
+                    "term-codex", "deliver exactly once", run_json=run_json,
+                    adapter="codex", ack_out_of_band=True,
+                )
+
+        evidence = raised.exception.evidence
+        self.assertEqual(evidence.stage, "payload_written")
+        self.assertTrue(evidence.body_write_accepted)
+        self.assertFalse(evidence.submit_write_accepted)
+        self.assertEqual((evidence.body_write_count, evidence.submit_count), (1, 1))
+        sends = [call for call in calls if call[1:3] == ["terminal", "send"]]
+        self.assertEqual(len(sends), 2)
+        self.assertTrue(sends[0][sends[0].index("--text") + 1].startswith("\x1b[200~"))
+        self.assertIn("--enter", sends[1])
+        self.assertNotIn("deliver exactly once", json.dumps(evidence.to_json()))
 
     def test_a_refused_readiness_wait_is_a_delivery_failure_with_its_evidence(self) -> None:
         pane = ScriptedPane({0: ["ready", "›"]}, refuse="wait")
