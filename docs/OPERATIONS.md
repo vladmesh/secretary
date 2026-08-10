@@ -1580,6 +1580,33 @@ secretary dispatcher production-tick --instance <dir> --probe
 python3 -m unittest
 ```
 
+### Broad checks and their receipts
+
+A broad run is expensive enough that its result should survive the terminal it printed to. The
+documented form wraps the suite:
+
+```bash
+python3 -m secretary check broad --command 'python3 -m unittest'
+python3 -m secretary check show --command 'python3 -m unittest'
+```
+
+`check broad` streams the command's combined output to stderr while it runs, exits with the
+command's own status (a signal-killed command becomes the usual `128+N`), and writes one JSON
+receipt under `state/checks/` in the workspace — an ignored path, never committed. The receipt
+holds the command and its check-set digest, the working directory and which `secretary` package a
+check launched from there imports, start, end and duration, the exit code, the parsed verdict and
+counts where the runner prints them, and a bounded tail of the output.
+
+`check show` runs nothing. It answers whether the receipt still describes the checkout, comparing
+the recorded HEAD object id and content digest of the tracked diff and untracked files with the
+current ones, and exits non-zero when it does not. Its answer fails closed: a truncated or edited
+receipt, a run that was killed or timed out, and a checkout with no resolvable identity are all
+"not usable" rather than a summary. `check broad --reuse` skips the run while the receipt is
+usable, so a report can quote the evidence instead of rebuilding it.
+
+This receipt is a local convenience for whoever ran the suite. It is not the mechanical gate's
+exact-SHA attestation and never travels downstream in its place.
+
 `--probe` is a real dry tick: it takes the same singleton lock, passes the same mutation guards, scans the same card
 states and runs the same decision logic, but the first write turns into an abort and lands in the report as "what the
 next tick would do". A green probe with a broken tick is impossible, because a broken tick fails here too.

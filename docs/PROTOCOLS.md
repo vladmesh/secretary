@@ -150,8 +150,20 @@ different: it cannot prove whether a reviewer is already live, so it preserves l
 and retries the inventory without launching another head or consuming the headless-failure ceiling.
 
 Workers use focused checks while developing and run no more than one local broad suite for a report
-generation/unchanged SHA unless they state why it was rerun. Only an executed local/GitHub gate with a
-valid exact-SHA receipt is authoritative reusable evidence downstream. A none/noop gate or missing
+generation/unchanged SHA unless they state why it was rerun. That broad run goes through
+`secretary check broad`, which streams the combined output, returns the command's own exit status and
+writes a workspace-local receipt under the ignored `state/checks/` path: command and check-set digest,
+cwd and imported project provenance, start/end/duration, exit code, parsed verdict and counts where the
+runner prints them, and a bounded diagnostic tail. The receipt is evidence about content, not about
+time: it records the checkout's HEAD object id and a digest of the tracked diff and untracked files, so
+`secretary check show` answers whether it still describes the code in front of the role. While a usable
+receipt exists, rerunning the broad suite only because the pane scrolled its output away is prohibited;
+a changed SHA, an edited worktree or a concrete red result being fixed opens a justified new run, named
+in the report. Anything less than an intact, finished receipt for exactly this content — a truncated or
+edited artifact, a killed or timed-out run, a checkout with no resolvable identity — is not a summary
+and does not attest anything. The receipt never leaves the workspace and is never committed: only an
+executed local/GitHub gate with a valid exact-SHA receipt is authoritative reusable evidence
+downstream. A none/noop gate or missing
 receipt attests no broad suite, so the role runs or requests validation appropriate to the decision.
 Reviewers independently inspect changed code and invariants, but do not repeat an attested broad command
 on the same SHA without a recorded `rerun_reason`; targeted reproduction remains appropriate for a new

@@ -49,6 +49,15 @@ python3 -m unittest
 python3 -m secretary role-skills audit --check
 ```
 
+To keep the suite's result after the terminal scrolls, run it through the receipt wrapper instead;
+it streams the same output, exits with the same status, and leaves a structured summary in the
+ignored `state/checks/` path that `check show` can read back without running anything again:
+
+```bash
+python3 -m secretary check broad --command 'python3 -m unittest'
+python3 -m secretary check show --command 'python3 -m unittest'
+```
+
 CI runs the unit suite on every pull request. A short note about what changed and what you verified
 helps with review; if the suite does not cover it, describe any manual testing that was useful.
 

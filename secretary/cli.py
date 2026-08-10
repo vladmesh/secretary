@@ -24,6 +24,7 @@ from secretary.data import (
     init_layout,
     raw_kanboard_dump,
 )
+from secretary.check_commands import add_check_subcommands
 from secretary.dispatcher_commands import add_dispatcher_subcommands, add_pause_commands
 from secretary.dispatcher_pause import ProductionPause
 from secretary.host import (
@@ -122,6 +123,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command")
     add_dispatcher_subcommands(subparsers)
     add_pause_commands(subparsers)
+    add_check_subcommands(subparsers)
 
     doctor = subparsers.add_parser("doctor", help="inspect an instance without changing the host")
     doctor.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
