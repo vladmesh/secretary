@@ -394,11 +394,19 @@ head, which is what `provision-start` derives its run id from.
 
 What a failure leaves behind depends on how the command died. A refusal or an I/O error restores every file
 the transition touched, so nothing needs cleaning up. A host crash or a kill mid-transition has no such
-rollback: it can leave the binding already disabled with the old draft, or the new draft published with the
-canonical adapter not yet deleted. Both are safe states, because the transition drops the enable before it
-writes anything else — no interruption can leave a project enabled on an adapter or draft no gate has seen.
-Re-running the command from either state completes the takedown, and from the second state an ordinary
-`project add` is enough, the binding being disabled already.
+rollback, and the transition is ordered for that case: the draft is written first, the binding second, the
+adapter deleted last. The binding is what the next run reads to decide whether a takedown is still owed, so
+writing it last keeps an unfinished re-onboarding legible instead of leaving leftovers that look like a
+finished one.
+
+Two interruption windows exist, and re-running the command clears both:
+
+- Killed after the draft, before the binding: the project still carries the enable it started from, on the
+  adapter it already had. Nothing new is trusted. Re-run `project add --re-onboard` and the takedown
+  completes.
+- Killed after the binding, before the adapter is deleted: the project is disabled with the new draft, and
+  only the stale adapter is left behind. A plain `project add` deletes it, the binding being disabled
+  already; `--re-onboard` is not needed and would do nothing.
 
 ### Verifying the result
 

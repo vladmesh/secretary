@@ -220,6 +220,42 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(code, 1, refused)
         self.assertFalse(self.adapter_path.exists())
 
+    def test_re_onboard_interrupted_on_a_drafted_draft_is_completed_by_a_retry(self):
+        """A crash between the two replaces runs no rollback. The transition publishes the draft
+        before the binding so the interrupted state still reads as an enabled binding, which is
+        what a retry needs to recognise the takedown as unfinished and carry it through."""
+        task = self.start()["task"]
+        result_path = self.write_result(self.drafted_result(task))
+        code, result = apply_provision_result(str(self.instance), "sample-project", str(result_path))
+        self.assertEqual(code, 0, result)
+        binding = load_config(self.binding_path)
+        binding["enabled"] = True
+        self.binding_path.write_text(yaml.safe_dump(binding), encoding="utf-8")
+        real_replace = os.replace
+        calls = 0
+
+        def crash_after_first(source, target):
+            nonlocal calls
+            calls += 1
+            outcome = real_replace(source, target)
+            if calls == 1:
+                raise KeyboardInterrupt("host crash")
+            return outcome
+
+        with mock.patch("secretary._fsutil.os.replace", side_effect=crash_after_first):
+            with self.assertRaises(KeyboardInterrupt):
+                project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
+
+        code, artifact = project_add(
+            str(self.repo), str(self.instance), dry_run=False, re_onboard=True
+        )
+
+        self.assertEqual(code, 0, artifact)
+        self.assertFalse(load_config(self.binding_path)["enabled"])
+        self.assertFalse(self.adapter_path.exists())
+        self.assertEqual(artifact["provision"]["status"], "pending")
+        self.assertNotEqual(self.start()["task"]["run_id"], task["run_id"])
+
     def test_re_onboard_keeps_a_drafted_provision_on_a_disabled_binding(self):
         """Once the binding is disabled the flag is inert, so re-running it after
         provision-apply does not throw away the run the operator just published."""

@@ -163,16 +163,21 @@ def _project_add_locked(
     try:
         binding_text = yaml.safe_dump(binding, sort_keys=False, allow_unicode=True)
         draft_text = yaml.safe_dump(artifact, sort_keys=False, allow_unicode=True)
+        # The draft is published before the binding. A refusal or an I/O error rolls the whole
+        # transition back, but an interruption has no rollback, and the binding is what the next
+        # run reads to decide whether a takedown is still owed: writing it last keeps an
+        # unfinished re-onboarding visible as the enabled binding it started from, so a retry
+        # carries it through instead of mistaking the leftovers for a finished disabled state.
         if remove_stale_adapter:
             publish_pair_and_remove_atomic(
-                binding_path,
-                binding_text,
                 draft_path,
                 draft_text,
+                binding_path,
+                binding_text,
                 adapter_path,
             )
         else:
-            publish_pair_atomic(binding_path, binding_text, draft_path, draft_text)
+            publish_pair_atomic(draft_path, draft_text, binding_path, binding_text)
     except OSError as exc:
         message = f"publication failed: {exc.strerror or 'I/O error'}"
         return 1, _fail_draft(artifact, "draft.invalid", message)
