@@ -175,6 +175,127 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(stored["provision"]["status"], "pending")
         self.assertFalse(self.adapter_path.exists())
 
+    def test_re_onboard_takes_down_an_enabled_binding_with_a_drafted_provision(self):
+        """An enabled binding whose draft carries a drafted provision is still taken down: the
+        adapter that was executing under the enable cannot ride into the new draft unverified."""
+        task = self.start()["task"]
+        result_path = self.write_result(self.drafted_result(task))
+        code, result = apply_provision_result(str(self.instance), "sample-project", str(result_path))
+        self.assertEqual(code, 0, result)
+        binding = load_config(self.binding_path)
+        binding["enabled"] = True
+        self.binding_path.write_text(yaml.safe_dump(binding), encoding="utf-8")
+
+        code, artifact = project_add(
+            str(self.repo), str(self.instance), dry_run=False, re_onboard=True
+        )
+
+        self.assertEqual(code, 0, artifact)
+        self.assertFalse(load_config(self.binding_path)["enabled"])
+        self.assertFalse(self.adapter_path.exists())
+        self.assertEqual(artifact["provision"]["status"], "pending")
+        self.assertEqual(artifact["provision"]["adapter"]["status"], "unresolved")
+        self.assertEqual(artifact["gate"]["status"], "pending")
+        self.assertEqual(load_config(self.draft_path), artifact)
+
+    def test_re_onboard_voids_the_previous_run_evidence_on_an_unchanged_head(self):
+        """Taking an enabled binding down starts a new onboarding cycle. Run ids are derived from
+        the cycle too, so the previous result cannot republish the adapter the takedown deleted and
+        the previous gate result cannot supersede the new one."""
+        task = self.start()["task"]
+        old_result = self.write_result(self.drafted_result(task))
+        code, result = apply_provision_result(str(self.instance), "sample-project", str(old_result))
+        self.assertEqual(code, 0, result)
+        binding = load_config(self.binding_path)
+        binding["enabled"] = True
+        self.binding_path.write_text(yaml.safe_dump(binding), encoding="utf-8")
+        code, _ = project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
+        self.assertEqual(code, 0)
+
+        fresh = self.start()
+
+        self.assertNotEqual(fresh["task"]["run_id"], task["run_id"])
+        self.assertTrue(old_result.exists())
+        code, refused = apply_provision_result(str(self.instance), "sample-project", None)
+        self.assertEqual(code, 1, refused)
+        self.assertFalse(self.adapter_path.exists())
+
+    def test_re_onboard_interrupted_on_a_drafted_draft_is_completed_by_a_retry(self):
+        """A crash between the two replaces runs no rollback. The transition publishes the draft
+        before the binding so the interrupted state still reads as an enabled binding, which is
+        what a retry needs to recognise the takedown as unfinished and carry it through."""
+        task = self.start()["task"]
+        result_path = self.write_result(self.drafted_result(task))
+        code, result = apply_provision_result(str(self.instance), "sample-project", str(result_path))
+        self.assertEqual(code, 0, result)
+        binding = load_config(self.binding_path)
+        binding["enabled"] = True
+        self.binding_path.write_text(yaml.safe_dump(binding), encoding="utf-8")
+        real_replace = os.replace
+        calls = 0
+
+        def crash_after_first(source, target):
+            nonlocal calls
+            calls += 1
+            outcome = real_replace(source, target)
+            if calls == 1:
+                raise KeyboardInterrupt("host crash")
+            return outcome
+
+        with mock.patch("secretary._fsutil.os.replace", side_effect=crash_after_first):
+            with self.assertRaises(KeyboardInterrupt):
+                project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
+
+        code, artifact = project_add(
+            str(self.repo), str(self.instance), dry_run=False, re_onboard=True
+        )
+
+        self.assertEqual(code, 0, artifact)
+        self.assertFalse(load_config(self.binding_path)["enabled"])
+        self.assertFalse(self.adapter_path.exists())
+        self.assertEqual(artifact["provision"]["status"], "pending")
+        self.assertNotEqual(self.start()["task"]["run_id"], task["run_id"])
+
+    def test_re_onboard_keeps_a_drafted_provision_on_a_disabled_binding(self):
+        """Once the binding is disabled the flag is inert, so re-running it after
+        provision-apply does not throw away the run the operator just published."""
+        task = self.start()["task"]
+        result_path = self.write_result(self.drafted_result(task))
+        code, result = apply_provision_result(str(self.instance), "sample-project", str(result_path))
+        self.assertEqual(code, 0, result)
+        draft_bytes = self.draft_path.read_bytes()
+        adapter_bytes = self.adapter_path.read_bytes()
+
+        code, artifact = project_add(
+            str(self.repo), str(self.instance), dry_run=False, re_onboard=True
+        )
+
+        self.assertEqual(code, 0, artifact)
+        self.assertEqual(artifact["provision"]["status"], "drafted")
+        self.assertEqual(draft_bytes, self.draft_path.read_bytes())
+        self.assertEqual(adapter_bytes, self.adapter_path.read_bytes())
+
+    def test_re_onboard_rolls_back_when_the_adapter_delete_fails(self):
+        task = self.start()["task"]
+        result_path = self.write_result(self.drafted_result(task))
+        code, result = apply_provision_result(str(self.instance), "sample-project", str(result_path))
+        self.assertEqual(code, 0, result)
+        binding = load_config(self.binding_path)
+        binding["enabled"] = True
+        self.binding_path.write_text(yaml.safe_dump(binding), encoding="utf-8")
+        before = self.binding_path.read_bytes(), self.draft_path.read_bytes()
+
+        with mock.patch("pathlib.Path.unlink", side_effect=PermissionError("injected")):
+            code, artifact = project_add(
+                str(self.repo), str(self.instance), dry_run=False, re_onboard=True
+            )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(artifact["draft"]["findings"][-1]["code"], "draft.invalid")
+        self.assertTrue(self.adapter_path.exists())
+        self.assertTrue(load_config(self.binding_path)["enabled"])
+        self.assertEqual(before, (self.binding_path.read_bytes(), self.draft_path.read_bytes()))
+
     def test_project_add_rolls_back_when_stale_adapter_delete_fails(self):
         task = self.start()["task"]
         result_path = self.write_result(self.drafted_result(task))

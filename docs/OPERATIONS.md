@@ -356,6 +356,58 @@ What each stage does:
 reason to edit YAML: run `project gate` on the live binding first. It will clear the enable itself if the
 input is stale and return the project to the disabled state the recovery works from.
 
+### Re-onboarding an enabled legacy project
+
+A project connected before drafts existed carries `enabled: true` and a canonical adapter but no draft,
+provision run or gate result. The gate has no passed result to compare against, so it refuses with
+"enabled binding has no matching passed gate result" and leaves the enable in place — `project add` alone
+cannot get past it either. `--re-onboard` is the supported way out, and the only one; editing the binding
+or the adapter by hand is not:
+
+```bash
+python3 -P -m secretary project add PROJECT_PATH --re-onboard --instance "$INSTANCE"
+python3 -P -m secretary project provision-start PROJECT_ID --instance "$INSTANCE"
+python3 -P -m secretary project provision-apply PROJECT_ID --instance "$INSTANCE"
+python3 -P -m secretary project gate PROJECT_ID --instance "$INSTANCE"
+```
+
+The flag only lifts the refusal on an enabled binding; nothing else about the stage changes, and the gate
+stays the only owner of the enable. In one transition `project add --re-onboard` republishes the binding as
+disabled, publishes a fresh draft on the current scanner head with provision and gate back to pending, and
+deletes the canonical adapter so it cannot be executed before a new gate. Identity (`id`, `repo`, `adapter`,
+`default_branch`) must still match and the binding must still satisfy its schema: a mismatch, a schema
+error, or a repository the scanner cannot read fails closed, writing nothing and leaving the enable exactly
+as it was. `plane`, `policy`, `remote` and `orca_binding` are carried over.
+
+A takedown also opens a new onboarding cycle, recorded as `onboarding_cycle` in the draft and mixed into
+the provision run id. Without it a re-onboarding on an unchanged HEAD would land on the previous cycle's
+run: `provision-apply` would republish the very adapter the takedown deleted without any new provisioning,
+and the old passed gate receipt would then make `project gate` refuse the new run as superseded. A new
+cycle gives `provision-start` a fresh run directory instead. The old run directories stay on disk as
+history; nothing reads them again. Drafts published before this existed carry no cycle and keep their run
+ids.
+
+On an already disabled binding the flag does nothing at all: the run is an ordinary `project add`, so
+repeating the command after `provision-apply` republishes the same bytes instead of discarding the run and
+without burning a cycle. To re-onboard on a moved HEAD, just run it: the new draft records the current
+head, which is what `provision-start` derives its run id from.
+
+What a failure leaves behind depends on how the command died. A refusal or an I/O error restores every file
+the transition touched, so nothing needs cleaning up. A host crash or a kill mid-transition has no such
+rollback, and the transition is ordered for that case: the draft is written first, the binding second, the
+adapter deleted last. The binding is what the next run reads to decide whether a takedown is still owed, so
+writing it last keeps an unfinished re-onboarding legible instead of leaving leftovers that look like a
+finished one.
+
+Two interruption windows exist, and re-running the command clears both:
+
+- Killed after the draft, before the binding: the project still carries the enable it started from, on the
+  adapter it already had. Nothing new is trusted. Re-run `project add --re-onboard` and the takedown
+  completes.
+- Killed after the binding, before the adapter is deleted: the project is disabled with the new draft, and
+  only the stale adapter is left behind. A plain `project add` deletes it, the binding being disabled
+  already; `--re-onboard` is not needed and would do nothing.
+
 ### Verifying the result
 
 Read the three artifacts:

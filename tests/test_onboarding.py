@@ -14,7 +14,7 @@ import yaml
 
 from secretary.config import load_config, validate, validate_instance
 from secretary.cli import main
-from secretary.onboarding import project_add
+from secretary.onboarding import ScannerError, project_add
 
 
 def git(repo: Path, *args: str) -> str:
@@ -296,6 +296,237 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(validate(artifact, "onboarding-contract", "failure"), [])
         self.assertFalse(self.binding.exists())
         self.assertFalse(self.draft.exists())
+
+    def legacy_enabled_project(self) -> Path:
+        """A binding as onboarding left it before drafts existed: enabled, with a canonical
+        adapter, and with no draft, provision run or gate result to justify the enable."""
+        project_add(str(self.repo), str(self.instance), dry_run=False)
+        binding = load_config(self.binding)
+        binding["enabled"] = True
+        binding["plane"] = "project"
+        binding["policy"] = {"code_concurrency": 3}
+        binding["remote"] = "git@example.invalid:sample.git"
+        binding["orca_binding"] = "Sample_Project"
+        self.binding.write_text(yaml.safe_dump(binding), encoding="utf-8")
+        self.draft.unlink()
+        adapter = self.instance / "adapters" / "sample-project.yaml"
+        adapter.parent.mkdir(parents=True, exist_ok=True)
+        adapter.write_text("version: 1\nid: sample-project\n", encoding="utf-8")
+        return adapter
+
+    def test_re_onboard_disables_legacy_binding_and_drops_its_adapter(self):
+        adapter = self.legacy_enabled_project()
+
+        code, artifact = project_add(
+            str(self.repo), str(self.instance), dry_run=False, re_onboard=True
+        )
+
+        self.assertEqual(code, 0)
+        binding = load_config(self.binding)
+        self.assertFalse(binding["enabled"])
+        self.assertFalse(adapter.exists())
+        self.assertEqual(binding["plane"], "project")
+        self.assertEqual(binding["policy"], {"code_concurrency": 3})
+        self.assertEqual(binding["remote"], "git@example.invalid:sample.git")
+        self.assertEqual(binding["orca_binding"], "Sample_Project")
+        self.assertEqual(artifact["provision"]["status"], "pending")
+        self.assertEqual(artifact["gate"]["status"], "pending")
+        self.assertEqual(load_config(self.draft), artifact)
+        self.assertEqual(validate(binding, "project-binding", self.binding.name), [])
+        self.assertEqual(validate(artifact, "onboarding-contract", self.draft.name), [])
+
+    def test_re_onboard_is_idempotent_and_leaves_a_disabled_binding_alone(self):
+        self.legacy_enabled_project()
+        project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
+        binding_bytes = self.binding.read_bytes()
+        draft_bytes = self.draft.read_bytes()
+
+        code, _ = project_add(
+            str(self.repo), str(self.instance), dry_run=False, re_onboard=True
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(binding_bytes, self.binding.read_bytes())
+        self.assertEqual(draft_bytes, self.draft.read_bytes())
+
+    def test_re_onboard_fails_closed_on_identity_mismatch(self):
+        self.legacy_enabled_project()
+        binding = load_config(self.binding)
+        binding["repo"] = "/different/repo"
+        self.binding.write_text(yaml.safe_dump(binding), encoding="utf-8")
+        adapter = self.instance / "adapters" / "sample-project.yaml"
+        before = self.binding.read_bytes(), adapter.read_bytes()
+
+        code, artifact = project_add(
+            str(self.repo), str(self.instance), dry_run=False, re_onboard=True
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(artifact["draft"]["findings"][-1]["code"], "draft.invalid")
+        self.assertEqual(validate(artifact, "onboarding-contract", "failure"), [])
+        self.assertEqual(before, (self.binding.read_bytes(), adapter.read_bytes()))
+        self.assertFalse(self.draft.exists())
+
+    def test_re_onboard_fails_closed_on_a_schema_invalid_binding(self):
+        self.legacy_enabled_project()
+        binding = load_config(self.binding)
+        binding["unexpected"] = "value"
+        self.binding.write_text(yaml.safe_dump(binding), encoding="utf-8")
+        adapter = self.instance / "adapters" / "sample-project.yaml"
+        before = self.binding.read_bytes(), adapter.read_bytes()
+
+        code, artifact = project_add(
+            str(self.repo), str(self.instance), dry_run=False, re_onboard=True
+        )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(artifact["draft"]["findings"][-1]["code"], "draft.invalid")
+        self.assertEqual(before, (self.binding.read_bytes(), adapter.read_bytes()))
+
+    def test_re_onboard_on_a_stale_head_publishes_the_current_one(self):
+        self.legacy_enabled_project()
+        (self.repo / "sample.py").write_text("VALUE = 2\n", encoding="utf-8")
+        git(self.repo, "add", "sample.py")
+        git(self.repo, "commit", "-m", "Change")
+        head = git(self.repo, "rev-parse", "HEAD")
+
+        code, artifact = project_add(
+            str(self.repo), str(self.instance), dry_run=False, re_onboard=True
+        )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(artifact["scanner"]["repo"]["head"], head)
+        self.assertEqual(artifact["provision"]["status"], "pending")
+
+    def test_re_onboard_scanner_failure_leaves_the_enable_in_place(self):
+        adapter = self.legacy_enabled_project()
+        before = self.binding.read_bytes(), adapter.read_bytes()
+
+        with mock.patch(
+            "secretary.onboarding.scan_repo", side_effect=ScannerError("injected")
+        ):
+            code, artifact = project_add(
+                str(self.repo), str(self.instance), dry_run=False, re_onboard=True
+            )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(artifact["scanner"]["findings"][0]["code"], "scanner.failed")
+        self.assertEqual(before, (self.binding.read_bytes(), adapter.read_bytes()))
+        self.assertFalse(self.draft.exists())
+
+    def test_re_onboard_rollback_leaves_the_enabled_binding_untouched(self):
+        adapter = self.legacy_enabled_project()
+        before = self.binding.read_bytes(), adapter.read_bytes()
+        real_replace = os.replace
+        calls = 0
+
+        def fail_second(source, target):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError(5, "injected")
+            return real_replace(source, target)
+
+        with mock.patch("secretary._fsutil.os.replace", side_effect=fail_second):
+            code, artifact = project_add(
+                str(self.repo), str(self.instance), dry_run=False, re_onboard=True
+            )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(artifact["draft"]["findings"][-1]["code"], "draft.invalid")
+        self.assertEqual(before, (self.binding.read_bytes(), adapter.read_bytes()))
+        self.assertFalse(self.draft.exists())
+
+    def test_re_onboard_interrupted_mid_transition_is_completed_by_a_retry(self):
+        """A kill between the two replaces runs no rollback. Because the binding is written last,
+        the interrupted state still carries the enable it started from: nothing new is trusted,
+        and the retry recognises the takedown as unfinished and carries it through."""
+        adapter = self.legacy_enabled_project()
+        real_replace = os.replace
+        calls = 0
+
+        def crash_after_first(source, target):
+            nonlocal calls
+            calls += 1
+            result = real_replace(source, target)
+            if calls == 1:
+                raise KeyboardInterrupt("host crash")
+            return result
+
+        with mock.patch("secretary._fsutil.os.replace", side_effect=crash_after_first):
+            with self.assertRaises(KeyboardInterrupt):
+                project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
+
+        self.assertTrue(load_config(self.binding)["enabled"])
+        self.assertTrue(adapter.exists())
+
+        code, artifact = project_add(
+            str(self.repo), str(self.instance), dry_run=False, re_onboard=True
+        )
+
+        self.assertEqual(code, 0)
+        self.assertFalse(load_config(self.binding)["enabled"])
+        self.assertFalse(adapter.exists())
+        self.assertEqual(artifact["provision"]["status"], "pending")
+        self.assertEqual(load_config(self.draft), artifact)
+
+    def test_re_onboard_interrupted_before_the_adapter_is_dropped_recovers(self):
+        """The other crash window: both files published, the adapter not yet deleted. The binding
+        is disabled by then, so an ordinary project add finishes the cleanup."""
+        adapter = self.legacy_enabled_project()
+        real_unlink = Path.unlink
+
+        def crash_on_adapter(self_path, *args, **kwargs):
+            if self_path == adapter:
+                raise KeyboardInterrupt("host crash")
+            return real_unlink(self_path, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", crash_on_adapter):
+            with self.assertRaises(KeyboardInterrupt):
+                project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
+
+        self.assertFalse(load_config(self.binding)["enabled"])
+        self.assertTrue(adapter.exists())
+
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
+
+        self.assertEqual(code, 0)
+        self.assertFalse(adapter.exists())
+        self.assertEqual(artifact["provision"]["status"], "pending")
+
+    def test_cli_re_onboard_publishes_a_disabled_binding(self):
+        adapter = self.legacy_enabled_project()
+        output = io.StringIO()
+
+        with contextlib.redirect_stdout(output):
+            code = main(
+                [
+                    "project",
+                    "add",
+                    str(self.repo),
+                    "--instance",
+                    str(self.instance),
+                    "--re-onboard",
+                ]
+            )
+
+        artifact = json.loads(output.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(validate(artifact, "onboarding-contract", "stdout"), [])
+        self.assertFalse(load_config(self.binding)["enabled"])
+        self.assertFalse(adapter.exists())
+
+    def test_add_without_the_flag_still_refuses_an_enabled_binding(self):
+        adapter = self.legacy_enabled_project()
+        before = self.binding.read_bytes(), adapter.read_bytes()
+
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
+
+        self.assertEqual(code, 1)
+        self.assertEqual(
+            artifact["draft"]["findings"][-1]["message"], "existing binding is enabled"
+        )
+        self.assertEqual(before, (self.binding.read_bytes(), adapter.read_bytes()))
 
     def test_scanner_cannot_add_a_target(self):
         _, artifact = project_add(str(self.repo), str(self.instance), dry_run=True)

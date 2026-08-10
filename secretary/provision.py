@@ -12,7 +12,12 @@ import yaml
 
 from secretary._fsutil import file_lock, publish_pair_atomic, publish_state_atomic
 from secretary.config import ConfigError, load_config, validate
-from secretary.onboarding import IDENTITY_FIELDS, project_lock_path, scan_repo
+from secretary.onboarding import (
+    IDENTITY_FIELDS,
+    onboarding_cycle,
+    project_lock_path,
+    scan_repo,
+)
 
 ENVIRONMENT_SUMMARIES = {
     "dependency-missing": "required dependency is missing",
@@ -199,9 +204,13 @@ def _stale_reason(draft: dict[str, Any]) -> dict[str, Any] | None:
 def _run_id(draft: dict[str, Any]) -> str:
     identity = draft["identity"]
     scanner_head = draft["scanner"]["repo"]["head"]
-    digest = hashlib.sha256(
-        f"{identity['id']}\0{identity['repo']}\0{identity['adapter']}\0{identity['default_branch']}\0{scanner_head}".encode("utf-8")
-    ).hexdigest()[:16]
+    material = f"{identity['id']}\0{identity['repo']}\0{identity['adapter']}\0{identity['default_branch']}\0{scanner_head}"
+    cycle = onboarding_cycle(draft)
+    if cycle > 1:
+        # The first cycle keeps its historical run ids: a draft published before re-onboarding
+        # existed carries no cycle, and its published runs must stay addressable.
+        material = f"{material}\0cycle={cycle}"
+    digest = hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
     return f"provision-{identity['id']}-{digest}"
 
 

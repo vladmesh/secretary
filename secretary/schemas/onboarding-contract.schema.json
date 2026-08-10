@@ -9,6 +9,11 @@
   "properties": {
     "version": {"const": 1},
     "identity": {"$ref": "#/$defs/identity"},
+    "onboarding_cycle": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Re-onboarding generation. It increments only when `project add --re-onboard` takes an enabled binding down, and it enters the provision run id, so provision and gate evidence from an earlier cycle cannot be reused on an unchanged scanner head. Absent is the first cycle."
+    },
     "scanner": {"$ref": "#/$defs/scanner"},
     "draft": {"$ref": "#/$defs/draft"},
     "provision": {"$ref": "#/$defs/provision"},

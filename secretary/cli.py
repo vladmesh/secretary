@@ -308,6 +308,14 @@ def build_parser() -> argparse.ArgumentParser:
     project_add.add_argument("path_or_url")
     project_add.add_argument("--dry-run", action="store_true")
     project_add.add_argument(
+        "--re-onboard",
+        action="store_true",
+        help=(
+            "take an enabled binding back down to a disabled draft: keep plane, policy, remote "
+            "and orca_binding, drop the canonical adapter, and require provision and gate again"
+        ),
+    )
+    project_add.add_argument(
         "--instance",
         default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
         help=f"instance directory (default: SECRETARY_INSTANCE or {DEFAULT_INSTANCE})",
@@ -645,7 +653,9 @@ def _restore_findings(report) -> list[str]:
 
 
 def run_project_add(args: argparse.Namespace) -> int:
-    code, artifact = project_add(args.path_or_url, args.instance, dry_run=args.dry_run)
+    code, artifact = project_add(
+        args.path_or_url, args.instance, dry_run=args.dry_run, re_onboard=args.re_onboard
+    )
     print(render_artifact(artifact), end="")
     return code
 
