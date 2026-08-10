@@ -60,7 +60,7 @@ python3 -m secretary check show --module unittest
 
 `--module` is the shape to prefer: the wrapper builds the command itself, so the suite runs in a
 process that records which project it imported, and the receipt can be read back in place of a
-second run. `--command '<any shell>'` is available for checks that need a shell, and its receipt is
+second run while that import resolved inside this checkout. `--command '<any shell>'` is available for checks that need a shell, and its receipt is
 a summary only — a shell can change directory or import environment before an interpreter starts,
 so that receipt attests no import and never stands in for running the check again.
 

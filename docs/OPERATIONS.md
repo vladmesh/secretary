@@ -1610,12 +1610,28 @@ Two check shapes are accepted, and they differ in one promise:
   `origin: unobservable`, claims no import, and is never reused in place of a run. It remains a
   summary to read.
 
+Observed provenance is necessary and not sufficient. A receipt may replace a run only when the
+check process imported the project *from this workspace*: a missing or unreadable record, an empty
+path, an unresolvable one, and a path outside the candidate are all refusals. That matters in an
+ordinary Python setup, where `PYTHONPATH` can put another checkout of the project ahead of this one
+— the receipt records that other path truthfully and is still refused for reuse, because the run it
+describes was a run of different code. For a project whose broad suite does not import `secretary`,
+the receipt remains a summary to read and is not offered for reuse.
+
+A check is identified by its structured check set — shape, module and the exact argument vector, or
+the shell string — not by how it renders. `--module-arg 'one two'` and
+`--module-arg one --module-arg two` read the same and are different checks, with different digests,
+different receipt files, and no ability to answer for one another. The receipt stores that check set
+so a reader recomputes the digest instead of trusting the file it was found in.
+
 `check show` runs nothing. It answers whether the receipt still describes the checkout, comparing
 the recorded HEAD object id and content digest of the tracked diff and untracked files with the
 current ones, and exits non-zero when it does not. Its answer fails closed: a truncated or edited
-receipt, a run that was killed or timed out, a checkout with no resolvable identity, and a shape
-that attests no import are all "not usable" rather than a summary. `check broad --reuse` skips the
-run while the receipt is usable, so a report can quote the evidence instead of rebuilding it.
+receipt, a run that was killed or timed out, a checkout with no resolvable identity, an import from
+outside the candidate, and a shape that attests no import are all "not usable" rather than a
+summary. `check broad --reuse` skips the run while the receipt is usable — through the same single
+predicate `check show` reports, so the two can never disagree — and a report can quote the evidence
+instead of rebuilding it.
 
 This receipt is a local convenience for whoever ran the suite. It is not the mechanical gate's
 exact-SHA attestation and never travels downstream in its place.

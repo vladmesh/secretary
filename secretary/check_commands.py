@@ -10,6 +10,10 @@ records its own import provenance and the receipt can be reused while the checko
 ``--command`` accepts any shell a project needs and attests nothing about imports, because the
 shell may change directory or import environment before an interpreter starts; its receipt is a
 summary to read, never a substitute for running the check again.
+
+Reuse is authorized in exactly one place — ``usable_receipt``, read through
+``ReceiptLookup.authorized()``. Both commands here ask that one question, so ``check show`` cannot
+report "not usable" while ``--reuse`` quietly skips the run.
 """
 from __future__ import annotations
 

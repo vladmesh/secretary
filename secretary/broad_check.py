@@ -120,6 +120,7 @@ with open(_record, "w", encoding="utf-8") as _handle:
 runpy.run_module(_module, run_name="__main__", alter_sys=True)
 """
 
+_CHECK_SET_SCHEMA = 1
 _SHAPE_MODULE = "module"
 _SHAPE_SHELL = "shell"
 _ORIGIN_CHECK_PROCESS = "check-process"
@@ -164,8 +165,31 @@ class CheckSpec:
         return cls(_SHAPE_SHELL, command=command)
 
     @property
+    def check_set(self) -> dict[str, object]:
+        """The canonical structured identity of this check: what is digested and stored.
+
+        A rendered command line cannot carry an argument vector faithfully — `--module-arg 'one two'`
+        and `--module-arg one --module-arg two` render identically while running different checks,
+        and a receipt keyed on that rendering hands the first one's result to the second
+        (secretary-1406 review).  The argument vector is kept as a list, and every route that keys,
+        looks up or validates a receipt uses this representation rather than the display string.
+        """
+        if self.shape == _SHAPE_MODULE:
+            return {
+                "schema": _CHECK_SET_SCHEMA,
+                "shape": _SHAPE_MODULE,
+                "module": self.module,
+                "args": list(self.module_args),
+            }
+        return {"schema": _CHECK_SET_SCHEMA, "shape": _SHAPE_SHELL, "command": self.command}
+
+    @property
+    def digest(self) -> str:
+        return check_set_digest(self.check_set)
+
+    @property
     def identity(self) -> str:
-        """The check-set identity that is digested, named in a report and used for lookup."""
+        """A human rendering for reports and logs.  Never used to key or match a receipt."""
         if self.shape == _SHAPE_MODULE:
             return " ".join(["python", "-m", self.module, *self.module_args])
         return self.command
@@ -199,14 +223,16 @@ def receipt_dir(root: Path) -> Path:
     return Path(root) / RECEIPT_DIR_NAME
 
 
-def command_digest(command: str) -> str:
-    """The same check-set identity the mechanical gate digests, so the two agree on naming."""
-    return hashlib.sha256(command.encode("utf-8", "surrogateescape")).hexdigest()
+def check_set_digest(check_set: Mapping[str, object]) -> str:
+    """Digest the canonical check-set, the way the mechanical gate digests its own check set."""
+    canonical = json.dumps(
+        check_set, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return hashlib.sha256(canonical.encode("utf-8", "surrogateescape")).hexdigest()
 
 
 def receipt_path(root: Path, check: "CheckSpec | str") -> Path:
-    identity = as_spec(check).identity
-    return receipt_dir(root) / f"broad-{command_digest(identity)[:16]}.json"
+    return receipt_dir(root) / f"broad-{as_spec(check).digest[:16]}.json"
 
 
 def _git(root: Path, args: list[str]) -> subprocess.CompletedProcess[str] | None:
@@ -438,7 +464,7 @@ def run_broad_check(
     the check decided, and the receipt never becomes a second, softer answer to that question.
     """
     spec = as_spec(check)
-    if len(spec.identity) > MAX_COMMAND_CHARS:
+    if len(json.dumps(spec.check_set)) > MAX_COMMAND_CHARS:
         raise BroadCheckError(
             "command_too_long", f"command exceeds {MAX_COMMAND_CHARS} characters"
         )
@@ -560,8 +586,9 @@ def _build_payload(
         "schema_version": SCHEMA_VERSION,
         "command": spec.identity,
         "command_shape": spec.shape,
+        "check_set": spec.check_set,
         "argv": spec.displayed_argv(),
-        "command_or_check_set_digest": command_digest(spec.identity),
+        "command_or_check_set_digest": spec.digest,
         "cwd": str(Path(root).resolve()),
         "project_provenance": provenance,
         "content_identity": identity.as_dict(),
@@ -612,7 +639,8 @@ def load_receipt(path: Path) -> dict[str, object] | None:
     if payload.get("schema_version") != SCHEMA_VERSION:
         return None
     required = (
-        "command", "command_shape", "command_or_check_set_digest", "cwd", "project_provenance",
+        "command", "command_shape", "check_set", "command_or_check_set_digest", "cwd",
+        "project_provenance",
         "content_identity", "started_at", "ended_at", "duration_seconds", "exit_code", "status",
         "verdict", "parsed", "tail",
     )
@@ -622,17 +650,34 @@ def load_receipt(path: Path) -> dict[str, object] | None:
         return None
     if payload.get("verdict") not in (_VERDICT_PASSED, _VERDICT_FAILED, _VERDICT_UNKNOWN):
         return None
+    check_set = payload.get("check_set")
+    if not isinstance(check_set, Mapping) or check_set.get("schema") != _CHECK_SET_SCHEMA:
+        return None
+    # The receipt carries the whole check set, so a reader recomputes the digest rather than
+    # trusting the name it was filed under.
+    if check_set_digest(check_set) != payload.get("command_or_check_set_digest"):
+        return None
     return payload
 
 
 @dataclass(frozen=True)
 class ReceiptLookup:
-    """Whether an existing receipt may stand in for running the broad check again."""
+    """Whether an existing receipt may stand in for running the broad check again.
+
+    Constructed only by :func:`usable_receipt`, and the one place a caller may ask "may I skip the
+    run?" is :meth:`authorized`.  Every route — ``check show``, ``check broad --reuse``, anything
+    later — therefore passes the same predicate; there is no field a caller can read to reach a
+    softer conclusion of its own (secretary-1406 review, twice over).
+    """
 
     usable: bool
     reason: str
     receipt: dict[str, object] | None
     path: Path
+
+    def authorized(self) -> dict[str, object] | None:
+        """The receipt that may replace a run, or nothing at all."""
+        return self.receipt if self.usable else None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -643,11 +688,45 @@ class ReceiptLookup:
         }
 
 
+def candidate_import_refusal(receipt: Mapping[str, object], root: Path) -> str:
+    """The candidate-trust boundary: why this receipt's import may not be trusted, or ``""``.
+
+    Observed provenance is necessary and not sufficient.  A check process reports honestly that it
+    imported some project; only an import resolved *inside this candidate workspace* says the run
+    that produced the receipt was a run of this code.  A missing record, an unreadable one, an
+    empty path, a path that no longer resolves, and a path outside the candidate are all refusals,
+    and they are refusals here, once, for every caller.
+    """
+    provenance = receipt.get("project_provenance")
+    if not isinstance(provenance, Mapping):
+        return "the receipt records no import provenance"
+    if provenance.get("origin") != _ORIGIN_CHECK_PROCESS:
+        # A shell shape may change directory or import environment before the interpreter starts,
+        # so nothing observed what the check imported.
+        return (
+            "import provenance was not observed from the check process, so this receipt attests "
+            "no checkout"
+        )
+    imported = str(provenance.get("imported_secretary") or "")
+    if not imported:
+        return "the check process imported no project, so it validated no checkout"
+    try:
+        resolved = Path(imported).resolve()
+        inside = resolved.is_relative_to(Path(root).resolve())
+    except (OSError, ValueError):
+        return f"the imported project path could not be resolved: {imported}"
+    if not inside:
+        # Recomputed against this workspace rather than read off the receipt's own flag: the
+        # question is where the import lands for the reader, now.
+        return f"the check process imported {imported}, which is outside this candidate workspace"
+    return ""
+
+
 def usable_receipt(root: Path, check: "CheckSpec | str") -> ReceiptLookup:
     """Answer the only question a scrolled-away pane raises: has this run already happened here?
 
-    Usable means the artifact is intact, the run finished, its import provenance came from the
-    process that ran the check, and it describes the content in this checkout right now.  A red
+    Usable means the artifact is intact, the run finished, the check process imported this
+    candidate workspace, and the receipt describes the content in this checkout right now.  A red
     result is usable evidence too — it is a concrete answer, and the caller decides whether fixing
     the cause justifies a new run.
     """
@@ -656,24 +735,19 @@ def usable_receipt(root: Path, check: "CheckSpec | str") -> ReceiptLookup:
     receipt = load_receipt(path)
     if receipt is None:
         return ReceiptLookup(False, "no intact receipt for this check", None, path)
-    if receipt.get("command_or_check_set_digest") != command_digest(spec.identity):
+    if (
+        receipt.get("command_or_check_set_digest") != spec.digest
+        or receipt.get("check_set") != spec.check_set
+    ):
+        # The stored check set is compared, not only the name the file was filed under, so an
+        # argument vector that renders the same as another one cannot answer for it.
         return ReceiptLookup(False, "receipt is for a different check", receipt, path)
     if receipt.get("status") != _STATUS_COMPLETE:
         reason = str(receipt.get("incomplete_reason") or "run did not finish")
         return ReceiptLookup(False, f"run did not finish: {reason}", receipt, path)
-    provenance = receipt.get("project_provenance")
-    origin = provenance.get("origin") if isinstance(provenance, Mapping) else None
-    if origin != _ORIGIN_CHECK_PROCESS:
-        # A shell shape may change directory or import environment before the interpreter starts,
-        # so nothing here observed what the check imported. Rather than claim this checkout, the
-        # receipt stays a summary and never stands in for running the check again.
-        return ReceiptLookup(
-            False,
-            "import provenance was not observed from the check process, so this receipt attests "
-            "no checkout",
-            receipt,
-            path,
-        )
+    refusal = candidate_import_refusal(receipt, root)
+    if refusal:
+        return ReceiptLookup(False, refusal, receipt, path)
     recorded = receipt.get("content_identity")
     if not isinstance(recorded, Mapping):
         return ReceiptLookup(False, "receipt records no content identity", receipt, path)

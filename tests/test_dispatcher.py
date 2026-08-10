@@ -8250,6 +8250,8 @@ class HeadPromptTests(unittest.TestCase):
         self.assertIn("never reused in place of a run", doc)
         self.assertIn("state/checks/broad-<digest>.json", doc)
         self.assertIn("scrolled its output away is prohibited", doc)
+        # Reuse is bounded by the candidate-trust rule the wrapper enforces.
+        self.assertIn("imported the project from this workspace", doc)
         # The justified reruns stay open, and the receipt never impersonates the gate.
         self.assertIn("A changed SHA,", doc)
         self.assertIn("exact-SHA attestation", doc)

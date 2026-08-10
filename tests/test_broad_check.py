@@ -42,6 +42,14 @@ def _git(root: Path, *args: str) -> None:
     )
 
 
+def _run_main(argv: list[str]) -> dict:
+    """Run one CLI command, capturing the JSON document it prints on stdout."""
+    stdout = StringIO()
+    with mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", StringIO()):
+        main(argv)
+    return json.loads(stdout.getvalue())
+
+
 class BroadCheckTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -57,6 +65,10 @@ class BroadCheckTestCase(unittest.TestCase):
         # a Python check writes bytecode as it runs, and that is not a change to the code.
         (self.root / ".gitignore").write_text("/state/\n__pycache__/\n", encoding="utf-8")
         (self.root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+        # A candidate workspace is a checkout of the project under check, and reuse is only ever
+        # authorized for a check process that imported the project from here.
+        (self.root / "secretary").mkdir()
+        (self.root / "secretary" / "__init__.py").write_text("", encoding="utf-8")
         _git(self.root, "add", "-A")
         _git(self.root, "commit", "-q", "-m", "base")
         self.stream = StringIO()
@@ -169,16 +181,9 @@ class RunAndCaptureTests(BroadCheckTestCase):
 
         _, receipt = self._run(suite)
         provenance = receipt["project_provenance"]
-        # This workspace has no `secretary` package of its own, so the check process imported one
-        # from elsewhere, and the receipt says exactly that instead of implying the candidate.
-        self.assertEqual(provenance["origin"], "check-process")
-        self.assertFalse(provenance["inside_workspace"])
-        self.assertEqual(provenance["cwd"], str(self.root.resolve()))
 
-        (self.root / "secretary").mkdir()
-        (self.root / "secretary" / "__init__.py").write_text("", encoding="utf-8")
-        _, receipt = self._run(suite)
-        provenance = receipt["project_provenance"]
+        self.assertEqual(provenance["origin"], "check-process")
+        self.assertEqual(provenance["cwd"], str(self.root.resolve()))
         self.assertTrue(provenance["inside_workspace"])
         self.assertTrue(
             provenance["imported_secretary"].startswith(str(self.root.resolve())),
@@ -190,7 +195,7 @@ class RunAndCaptureTests(BroadCheckTestCase):
 
         self.assertEqual(receipt["cwd"], str(self.root.resolve()))
         self.assertEqual(
-            receipt["command_or_check_set_digest"], broad_check.command_digest("echo timed")
+            receipt["command_or_check_set_digest"], CheckSpec.for_shell("echo timed").digest
         )
         self.assertLessEqual(receipt["started_at"], receipt["ended_at"])
         self.assertGreaterEqual(receipt["duration_seconds"], 0.0)
@@ -325,6 +330,9 @@ class DocumentedCommandTests(unittest.TestCase):
         self.assertIn("origin: unobservable", operations)
         self.assertIn("--module", operations)
         self.assertIn("attests no import", protocols)
+        # Both documents have to state the trust boundary reuse actually enforces.
+        self.assertIn("outside the candidate", operations)
+        self.assertIn("resolved inside the candidate workspace", protocols)
 
 
 class UnchangedContentReuseTests(BroadCheckTestCase):
@@ -391,6 +399,8 @@ class UnchangedContentReuseTests(BroadCheckTestCase):
         bare = Path(self.tmpdir.name) / "not-a-repo"
         bare.mkdir()
         (bare / "baresuite.py").write_text("print('suite ran')\n", encoding="utf-8")
+        (bare / "secretary").mkdir()
+        (bare / "secretary" / "__init__.py").write_text("", encoding="utf-8")
         spec = CheckSpec.for_module("baresuite")
         exit_code, receipt = run_broad_check(spec, root=bare, stream=self.stream)
 
@@ -418,9 +428,6 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
         return outside
 
     def test_a_shell_check_that_changes_directory_cannot_claim_the_candidate_checkout(self) -> None:
-        candidate = self.root / "secretary"
-        candidate.mkdir()
-        (candidate / "__init__.py").write_text("", encoding="utf-8")
         outside = self._outside_project()
         command = (
             f"cd {outside}; {sys.executable} -c "
@@ -453,34 +460,182 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
                 self.assertFalse(lookup.usable)
                 self.assertEqual(lookup.receipt["project_provenance"]["origin"], "unobservable")
 
-    def test_a_module_check_reports_an_import_from_outside_as_outside(self) -> None:
+    def test_an_import_from_outside_the_candidate_is_recorded_and_refused(self) -> None:
+        """The end-to-end case the second review reproduced: a real subprocess, a real safe-path
+        import environment, and an alternate checkout ordered before the candidate."""
         outside = self._outside_project()
-        suite = self._suite("outsidesuite", "print('ran')\n")
-        env = dict(os.environ, PYTHONPATH=str(outside))
+        suite = self._suite(
+            "outsidesuite", "import secretary\nprint(secretary.__file__)\n"
+        )
+        env = dict(
+            os.environ,
+            PYTHONSAFEPATH="1",
+            PYTHONPATH=os.pathsep.join([str(outside), str(self.root)]),
+        )
 
         _, receipt = self._run(suite, env=env)
 
-        # The workspace has no `secretary` of its own, so the check process imported the other
-        # copy; the receipt names it rather than the candidate, and stays usable because the
-        # answer came from the process that ran the check.
+        # The receipt tells the truth about what the check process imported...
         provenance = receipt["project_provenance"]
         self.assertEqual(provenance["origin"], "check-process")
-        self.assertTrue(provenance["imported_secretary"].startswith(str(outside)))
+        self.assertTrue(
+            provenance["imported_secretary"].startswith(str(outside.resolve())),
+            provenance["imported_secretary"],
+        )
         self.assertFalse(provenance["inside_workspace"])
+        self.assertIn(str(outside), receipt["tail"])
+        # ...and precisely because that import was not this candidate, it cannot stand in for a
+        # run of this candidate.
+        lookup = usable_receipt(self.root, suite)
+        self.assertFalse(lookup.usable)
+        self.assertIn("outside this candidate workspace", lookup.reason)
+        self.assertIsNone(lookup.authorized())
+
+        # The ordinary candidate-inside run of the same standard shape stays reusable.
+        _, inside_receipt = self._run(suite)
+        self.assertTrue(inside_receipt["project_provenance"]["inside_workspace"])
         self.assertTrue(usable_receipt(self.root, suite).usable)
 
-    def test_a_module_check_that_dies_before_recording_provenance_claims_none(self) -> None:
-        outside = self._outside_project()
-        suite = self._suite("crashsuite", "raise SystemExit(4)\n")
+    def test_a_module_check_that_imported_no_project_authorizes_nothing(self) -> None:
+        # The suite lives outside the candidate and the safe path keeps the working directory off
+        # `sys.path`, so the check process can run while importing no project at all.
+        (self.scripts / "crashsuite.py").write_text("raise SystemExit(4)\n", encoding="utf-8")
+        suite = CheckSpec.for_module("crashsuite")
+        env = {
+            "PATH": os.environ.get("PATH", ""),
+            "PYTHONSAFEPATH": "1",
+            "PYTHONPATH": str(self.scripts),
+        }
 
-        # `secretary` cannot be imported at all here, so the bootstrap records an empty import
-        # rather than inventing one, and the receipt reports what it saw.
-        _, receipt = self._run(suite, env={"PATH": os.environ.get("PATH", ""), "HOME": str(outside)})
+        _, receipt = self._run(suite, env=env)
 
         self.assertEqual(receipt["exit_code"], 4)
         provenance = receipt["project_provenance"]
         self.assertEqual(provenance["origin"], "check-process")
-        self.assertNotIn(str(self.root.resolve()), provenance["imported_secretary"])
+        self.assertEqual(provenance["imported_secretary"], "")
+        lookup = usable_receipt(self.root, suite)
+        self.assertFalse(lookup.usable)
+        self.assertIn("imported no project", lookup.reason)
+
+    def test_every_route_refuses_the_same_receipts_for_the_same_reasons(self) -> None:
+        """No route may authorize reuse the other would refuse: `check show` and `--reuse` read
+        one predicate, so their verdicts cannot drift apart."""
+        outside = self._outside_project()
+        cases = {
+            "inside": (self._suite("insidesuite", "print('in')\n"), None),
+            "outside": (
+                self._suite("outsidecase", "print('out')\n"),
+                dict(os.environ, PYTHONSAFEPATH="1",
+                     PYTHONPATH=os.pathsep.join([str(outside), str(self.root)])),
+            ),
+            "shell": (CheckSpec.for_shell("echo shell"), None),
+        }
+        for name, (spec, env) in cases.items():
+            with self.subTest(case=name):
+                self._run(spec, **({"env": env} if env else {}))
+                lookup = usable_receipt(self.root, spec)
+                argv = ["check", "broad", "--root", str(self.root), "--reuse"]
+                argv += (
+                    ["--module", spec.module] if spec.shape == "module"
+                    else ["--command", spec.command]
+                )
+                stdout = StringIO()
+                with mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", StringIO()):
+                    main(argv)
+                reused = json.loads(stdout.getvalue())["reused"]
+
+                self.assertEqual(
+                    reused, lookup.usable, f"{name}: --reuse and the predicate disagree"
+                )
+                self.assertEqual(lookup.usable, lookup.authorized() is not None)
+
+
+class CheckSetIdentityTests(BroadCheckTestCase):
+    """secretary-1406 review, BLOCKER-CHECK-SET-IDENTITY-COLLISION.
+
+    Identity used to be the rendered command line, and a rendering cannot carry an argument vector:
+    `--module-arg 'one two'` and `--module-arg one --module-arg two` render identically, so the
+    second invocation was handed the first one's receipt. The digest covers the structured check
+    set instead, and the receipt stores it so a reader validates rather than trusts the filename.
+    """
+
+    def _record(self) -> Path:
+        """A suite that logs its own argv — outside the checkout, so running it is not an edit."""
+        log = self.scripts / "argv.log"
+        (self.root / "argsuite.py").write_text(
+            "import sys\n"
+            f"open({str(log)!r}, 'a', encoding='utf-8').write(repr(sys.argv[1:]) + '\\n')\n",
+            encoding="utf-8",
+        )
+        return log
+
+    def test_one_argument_with_a_space_is_not_the_same_check_as_two_arguments(self) -> None:
+        log = self._record()
+        joined = CheckSpec.for_module("argsuite", ("one two",))
+        split = CheckSpec.for_module("argsuite", ("one", "two"))
+
+        # They still *read* the same, which is exactly why the rendering cannot be the identity.
+        self.assertEqual(joined.identity, split.identity)
+        self.assertNotEqual(joined.digest, split.digest)
+        self.assertNotEqual(receipt_path(self.root, joined), receipt_path(self.root, split))
+
+        self._run(joined)
+        # The second invocation must run: nothing here has evidence about it.
+        self.assertFalse(usable_receipt(self.root, split).usable)
+        self.assertIsNone(usable_receipt(self.root, split).receipt)
+        self._run(split)
+
+        logged = log.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(logged, ["['one two']", "['one', 'two']"])
+
+    def test_the_cli_runs_the_second_invocation_instead_of_reusing_the_first(self) -> None:
+        log = self._record()
+        base = ["check", "broad", "--root", str(self.root), "--reuse", "--module", "argsuite"]
+
+        first = _run_main(base + ["--module-arg", "one two"])
+        second = _run_main(base + ["--module-arg", "one", "--module-arg", "two"])
+        # The same invocation again is the case reuse exists for, and it must still work.
+        third = _run_main(base + ["--module-arg", "one", "--module-arg", "two"])
+
+        self.assertFalse(first["reused"])
+        self.assertFalse(second["reused"], "a different argument vector must run, not reuse")
+        self.assertTrue(third["reused"])
+        self.assertEqual(
+            log.read_text(encoding="utf-8").splitlines(), ["['one two']", "['one', 'two']"]
+        )
+
+    def test_a_receipt_whose_stored_check_set_was_edited_is_refused(self) -> None:
+        self._record()
+        spec = CheckSpec.for_module("argsuite", ("one", "two"))
+        self._run(spec)
+        path = receipt_path(self.root, spec)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["check_set"]["args"] = ["one two"]
+        payload["receipt_digest"] = broad_check._receipt_digest(payload)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        # The receipt's own digest is intact, so only the check set's digest catches this.
+        self.assertIsNone(load_receipt(path))
+        self.assertFalse(usable_receipt(self.root, spec).usable)
+
+    def test_a_receipt_found_under_another_check_s_name_is_refused(self) -> None:
+        self._record()
+        joined = CheckSpec.for_module("argsuite", ("one two",))
+        split = CheckSpec.for_module("argsuite", ("one", "two"))
+        self._run(joined)
+        # Move the first receipt to where a lookup for the second would find it.
+        receipt_path(self.root, joined).rename(receipt_path(self.root, split))
+
+        lookup = usable_receipt(self.root, split)
+        self.assertFalse(lookup.usable)
+        self.assertEqual(lookup.reason, "receipt is for a different check")
+
+    def test_shell_and_module_checks_never_share_an_identity(self) -> None:
+        shell = CheckSpec.for_shell("python -m unittest")
+        module = CheckSpec.for_module("unittest")
+
+        self.assertEqual(shell.identity, module.identity)
+        self.assertNotEqual(shell.digest, module.digest)
 
 
 class StreamingSummaryTests(BroadCheckTestCase):
