@@ -96,10 +96,10 @@ of model family, and the reviewer reads the commit messages again as defence in 
 A commit message is untrusted input written by the head under review. Two rules follow. Messages are
 never framed against each other on a delimiter a message could contain: the object ids are listed
 first from `%H`, which message text cannot influence, a listing that is not object ids is refused,
-and each message is then read on its own. And a co-author's identity is decided on the trailer's
-address — a model vendor's domain, or the agent's own account name — never on the display name,
-because a display name is free text and a colleague may legitimately be called Claude or Gemini; a
-trailer with no address at all is compared against the agents' exact full names. Anything the check
+and each message is then read on its own. An addressed co-author is rejected only when its complete,
+normalized name/address pair is in the narrow registered-agent list: neither a vendor domain nor an
+ambiguous local part is evidence by itself, because either can belong to a human. A trailer with no
+address at all is compared against the agents' exact full names. Anything the check
 cannot read — a missing workspace, a base that resolves nowhere, an unreadable message — fails
 closed: the gate cannot say what it would publish, so the card stops rather than the boundary being
 skipped.

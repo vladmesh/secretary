@@ -1464,6 +1464,54 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(result["action"], "review-resource-not-ready")
         self.assertFalse(self.host.reviews)
 
+    def test_unavailable_reviewer_resource_uses_the_green_infrastructure_ceiling(self) -> None:
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        record = self._record_of()
+        record.gate_state = "green"
+        record.gate_attestation = {"validated_sha": self.host.commit}
+        record.state = "review_starting"
+        self.runtime.head_readiness = lambda _head: HeadReadiness(
+            "openai-sub", "unavailable", "resource provider is unavailable", 1.0
+        )
+        payload = self.runtime.production_state.load()
+        records = {"secretary-510-pilot": record}
+
+        result = start_reviewer(
+            self.runtime, self.reader.show("secretary-510-pilot"), records, record,
+            record.attempt_id, action="review-started", payload=payload,
+        )
+
+        self.assertEqual(result["action"], "review-infrastructure-retry")
+        self.assertEqual(record.review_infra_failures, 1)
+        self.assertFalse(self.host.reviews)
+
+    def test_unwritable_reviewer_launch_intent_uses_the_green_infrastructure_ceiling(self) -> None:
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        record = self._record_of()
+        record.gate_state = "green"
+        record.gate_attestation = {"validated_sha": self.host.commit}
+        record.state = "review_starting"
+        payload = self.runtime.production_state.load()
+        records = {"secretary-510-pilot": record}
+        real_save = self.runtime.save_records
+
+        with mock.patch.object(
+            self.runtime, "save_records", side_effect=[OSError("disk full"), None]
+        ):
+            result = start_reviewer(
+                self.runtime, self.reader.show("secretary-510-pilot"), records, record,
+                record.attempt_id, action="review-started", payload=payload,
+            )
+        real_save(payload, records)
+
+        self.assertEqual(result["action"], "review-infrastructure-retry")
+        self.assertIn("disk full", result["reason"])
+        self.assertEqual(record.review_infra_failures, 1)
+        self.assertEqual(record.launch_intent, {})
+        self.assertFalse(self.host.reviews)
+
     # secretary-1165. A dead resource used to end every one of these the same way — the card sat in
     # Ready until an operator moved it by hand — because the claim read one head and stopped there.
     # It now walks the chain the canon writes down, and the cases below are the four answers that
@@ -5109,13 +5157,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(result["action"], "review-restarted")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot", "secretary-510-pilot"])
 
-    def test_review_inventory_failure_holds_the_card_and_then_blocks_it(self) -> None:
-        """An inventory that will not answer says nothing about the candidate either, so it gets the
-        same hold as a reviewer pane that will not open (secretary-1401). This test asserted the
-        first such failure blocked the card; that is now what the spent hold does."""
-        patch = mock.patch.dict(os.environ, {"SECRETARY_REVIEW_INFRA_RETRY_ATTEMPTS": "1"})
-        patch.start()
-        self.addCleanup(patch.stop)
+    def test_review_inventory_failure_preserves_launch_ambiguity_without_a_ceiling(self) -> None:
+        """An inventory that will not answer cannot prove whether a reviewer is already live."""
         self.start_dispatcher()
         self._run_worker_to_validate()
         self.tick()
@@ -5126,19 +5169,12 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.runtime.production_state.save(payload)
         self.host.review_running_error = HostError("orca terminal list failed")
 
-        held = self.tick()
-        self.assertEqual(held["action"], "review-infrastructure-retry")
+        for _ in range(3):
+            held = self.tick()
+            self.assertEqual(held["action"], "review-inventory-unavailable")
+            self.assertEqual(held["status"], "degraded")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
-
-        result = self.tick()
-
-        self.assertEqual(result["status"], "blocked")
-        self.assertEqual(result["reason"], "review inventory failed")
-        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
-        self.assertIn(
-            "reviewer infrastructure failed",
-            self.reader.show("secretary-510-pilot")["comments"][-1]["body"],
-        )
+        self.assertEqual(self._record_of().review_infra_failures, 0)
 
     def test_routing_head_overrides_reach_the_board_and_the_host(self) -> None:
         """A card can pin its own worker/reviewer head. The resolved pair is written to the board
@@ -5894,7 +5930,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         started = self.tick()
 
         self.assertEqual(held["action"], "review-infrastructure-retry")
-        self.assertEqual(held["candidate_sha"], self.host.commit)
+        self.assertEqual(held["candidate_sha"], receipt["validated_sha"])
         self.assertEqual(held["report_generation"], generation)
         self.assertEqual(started["status"], "ok")
         self.assertEqual(started["action"], "review-restarted")
@@ -5942,14 +5978,32 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.host.gate_results = [GateResult("green", "initial", attestation=receipt)]
         self._run_worker_to_validate()
         before = self._record_of()
+        before.gate_state = "green"
+        before.gate_attestation = receipt
+        before.state = "review_starting"
+        payload = self.runtime.production_state.load()
+        self.runtime.production_state.put_records(payload, {"secretary-510-pilot": before})
+        self.runtime.production_state.save(payload)
         report_generation = before.report_generation
         report_request = self._worker_report_request_id()
         worker_identity = (before.handle, before.worker_leaf, before.worker_pid_file, before.worker_run)
-        self.host.fail_review_error = HostError(
-            "review prompt delivery failed: pane-stayed-ready after 20 seconds"
-        )
-
-        held = self.tick()
+        real_host = RecordingReviewHost(self.data_dir, catalog=PromptAfterStartCatalog())
+        real_host.wait_answer = {"wait": {"condition": "tui-idle", "satisfied": True}}
+        self.runtime.host = real_host
+        isolated_bodies = self.data_dir / "pane-stayed-ready-bodies"
+        isolated_bodies.mkdir()
+        with mock.patch.dict(
+            os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": str(isolated_bodies)}
+        ), mock.patch.object(
+            real_host, "_signal_head", side_effect=AssertionError("unexpected head signal")
+        ), mock.patch(
+            "triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.03
+        ), mock.patch(
+            "triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01
+        ), mock.patch(
+            "triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0
+        ):
+            held = self.tick()
 
         self.assertEqual(held["status"], "degraded", held)
         self.assertEqual(held["action"], "review-infrastructure-retry")
@@ -5965,9 +6019,12 @@ class DispatcherRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(record.review_infra_failures, 1)
         self.assertEqual(record.review_launch_attempts, 0)
-        self.assertEqual(self.host.prepared, ["secretary-510-pilot"])
-        self.assertEqual(self.host.gate_calls, ["secretary-510-pilot"])
-        self.assertEqual(self.host.torn_down, [])
+        closed = [
+            call[call.index("--terminal") + 1]
+            for call in real_host.calls
+            if call[:3] == ["orca", "terminal", "close"]
+        ]
+        self.assertEqual(closed, ["term-review"], "only the failed reviewer pane is torn down")
 
     def test_a_reviewer_that_never_starts_blocks_the_card_naming_the_held_candidate(self) -> None:
         limit = self._bound_review_infra_retries(3)
@@ -5993,6 +6050,10 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(retained.gate_state, "green")
         self.assertEqual(retained.state, "review_starting")
         self.assertEqual(retained.review_infra_failures, limit)
+        self.runtime.production_tick()
+        retained_next_tick = self._record_of()
+        self.assertEqual(retained_next_tick.gate_attestation, retained.gate_attestation)
+        self.assertEqual(retained_next_tick.handle, retained.handle)
         self.assertEqual(
             [_budget_event_type(event) for event in self.audit_events()
              if _budget_event_type(event) is not None],
@@ -6162,7 +6223,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         task = self.reader.show("secretary-510-pilot")
         self.assertEqual(task["state"], "blocked")
         reason = task["comments"][-1]["body"]
-        self.assertIn("reviewer head pane was held in a dialog", reason)
+        self.assertIn("head pane was held in a dialog", reason)
+        self.assertIn("reviewer infrastructure failed", reason)
         self.assertNotIn("review bring-up failed", reason)
         self.assertEqual(self._record_of().review_infra_failures, limit)
         self.assertEqual(self._record_of().review_launch_attempts, 0)
@@ -11519,11 +11581,12 @@ class RecordingReviewHost(CommandHostRuntime):
         self,
         root: Path,
         *,
+        catalog=None,
         terminals: list[dict] | None = None,
         fail_ops: set[str] | None = None,
         split_pane_key: str = "",
     ) -> None:
-        super().__init__(ReviewCatalog(), root, mode="real")  # type: ignore[arg-type]
+        super().__init__(catalog or ReviewCatalog(), root, mode="real")  # type: ignore[arg-type]
         self.calls: list[list[str]] = []
         self.fail_ops = fail_ops or set()
         self.split_pane_key = split_pane_key

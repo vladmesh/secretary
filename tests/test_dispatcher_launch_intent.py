@@ -1320,7 +1320,8 @@ class LaunchIntentTests(unittest.TestCase):
         with self.fail_launch_intent_save():
             outcome = self.tick()
 
-        self.assertEqual(outcome["action"], "review-launch-intent-unwritable")
+        self.assertEqual(outcome["action"], "review-infrastructure-retry")
+        self.assertIn("state is not writable", outcome["reason"])
         self.assertEqual(self.host.reviews, [])
 
         recovered = self.tick()

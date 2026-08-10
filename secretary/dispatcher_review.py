@@ -122,6 +122,40 @@ def review_infrastructure_blocked_reason(record: DispatcherRecord, reason: str) 
     )
 
 
+def review_infrastructure_failure(
+    runtime: Any,
+    task: dict[str, Any],
+    records: dict[str, DispatcherRecord],
+    record: DispatcherRecord,
+    attempt_id: str,
+    *,
+    payload: dict[str, Any],
+    reason: str,
+    outcome_reason: str,
+) -> dict[str, Any]:
+    """One bounded path for a proven-headless reviewer infrastructure failure."""
+    held = review_infrastructure_retry(
+        runtime, task, records, record, attempt_id, payload=payload, reason=reason
+    )
+    if held is not None:
+        return held
+    ref = task["ref"]
+    runtime.writer.move(
+        role="dispatcher",
+        actor=runtime.owner,
+        reference=ref,
+        target="blocked",
+        reason=review_infrastructure_blocked_reason(record, reason),
+        request_id=_attempt_request_id(
+            record.attempt_id or attempt_id, "review-infrastructure-blocked", ref,
+            _wait_cycle_token(record),
+        ),
+    )
+    records[ref] = record
+    runtime.save_records(payload, records)
+    return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": outcome_reason}
+
+
 def command_terminal_status(
     host: Any, task: dict[str, Any], record: DispatcherRecord, *, kind: str
 ) -> dict[str, Any]:
@@ -295,37 +329,14 @@ def recover_review_launch(
     try:
         running = runtime.host.review_running(task, record)
     except Exception as exc:
-        # An inventory that will not answer is the same kind of failure as a pane that will not
-        # open: the review stage's machinery, not the candidate. It gets the same hold.
-        held = review_infrastructure_retry(
-            runtime, task, records, record, attempt_id,
-            payload=payload, reason=scrub_host_output(str(exc)),
-        )
-        if held is not None:
-            return held
-        runtime.writer.move(
-            role="dispatcher",
-            actor=runtime.owner,
-            reference=ref,
-            target="blocked",
-            reason=(
-                review_infrastructure_blocked_reason(record, scrub_host_output(str(exc)))
-                if record.gate_state == "green"
-                else f"review inventory failed: {scrub_host_output(str(exc))}"
-            ),
-            request_id=_attempt_request_id(
-                record.attempt_id or attempt_id,
-                "review-inventory-blocked",
-                ref,
-                _wait_cycle_token(record),
-            ),
-        )
-        if record.gate_state != "green":
-            records.pop(ref, None)
-        else:
-            records[ref] = record
-            runtime.save_records(payload, records)
-        return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": "review inventory failed"}
+        # Inventory silence cannot prove the reviewer is absent. Preserve launch ambiguity and ask
+        # the same liveness question next tick; never launch beside a possibly-live head.
+        return {
+            "status": "degraded", "step": "review", "pilot_ref": ref,
+            "attempt_id": record.attempt_id or attempt_id,
+            "action": "review-inventory-unavailable",
+            "reason": scrub_host_output(str(exc)),
+        }
     if running:
         record.state = "reviewing"
         # A reviewer is on the checkout: whatever stuck launches came before belong to an episode
@@ -405,6 +416,11 @@ def start_review(
     readiness = runtime.head_readiness(record.review_head)
     if not readiness.launch_allowed:
         record.state = "review_starting"
+        if record.gate_state == "green":
+            return review_infrastructure_failure(
+                runtime, task, records, record, attempt_id, payload=payload,
+                reason=readiness.reason, outcome_reason="review resource unavailable",
+            )
         return {
             "status": "skipped",
             "step": "head-preflight",
@@ -431,6 +447,11 @@ def start_review(
     )
     if failure is not None:
         record.state = "review_starting"
+        if record.gate_state == "green":
+            return review_infrastructure_failure(
+                runtime, task, records, record, attempt_id, payload=payload,
+                reason=failure, outcome_reason="review launch intent unavailable",
+            )
         return launch_intent_unwritable(
             step="review",
             ref=ref,
@@ -491,14 +512,10 @@ def start_review(
             # a pane held in a dialog, or a ready pane that never took the prompt and ended in
             # `pane-stayed-ready`. Green candidates use only this infrastructure counter; the old
             # pane deferral counter must not create a second ceiling or overwrite this action.
-            held = review_infrastructure_retry(
-                runtime, task, records, record, attempt_id,
-                payload=payload,
-                reason=scrub_host_output(str(exc)),
+            return review_infrastructure_failure(
+                runtime, task, records, record, attempt_id, payload=payload,
+                reason=scrub_host_output(str(exc)), outcome_reason="host review failed",
             )
-            if held is not None:
-                return held
-            # Past the ceiling the card is blocked once, below, naming what it was holding.
         else:
             deferred = launch_deferred(
                 record,
@@ -521,22 +538,12 @@ def start_review(
             actor=runtime.owner,
             reference=ref,
             target="blocked",
-            reason=(
-                review_infrastructure_blocked_reason(
-                    record, bring_up_blocked_reason("review bring-up failed", exc, record, REVIEW_ROLE)
-                )
-                if record.gate_state == "green" and record.review_infra_failures
-                else bring_up_blocked_reason("review bring-up failed", exc, record, REVIEW_ROLE)
-            ),
+            reason=bring_up_blocked_reason("review bring-up failed", exc, record, REVIEW_ROLE),
             request_id=_attempt_request_id(
                 record.attempt_id or attempt_id, "review-blocked", ref, _wait_cycle_token(record)
             ),
         )
-        if record.gate_state != "green":
-            records.pop(ref, None)
-        else:
-            records[ref] = record
-            runtime.save_records(payload, records)
+        records.pop(ref, None)
         return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": "host review failed"}
     # The reviewer is up: its pane and its launch configuration go into the intent on disk before
     # the record is told anything about it, so a tick that dies from here on is adopted with the

@@ -1020,6 +1020,16 @@ def _reconcile_production(
         if state is None or state in ACTIVE_STATES:
             continue
         record = records[ref]
+        if (
+            state == "blocked"
+            and record.gate_state == "green"
+            and record.state == "review_starting"
+            and record.review_infra_failures > 0
+        ):
+            # The infrastructure ceiling deliberately hands this exact candidate to an operator.
+            # Stopping its retained worker and dropping its receipt one tick later would make the
+            # instruction to relaunch only the reviewer impossible to follow.
+            continue
         intent_action = str(launch_intent(record).get("action") or "")
         stopped = _stop_record_heads(runtime, record, ref, state)
         if stopped is not None:
