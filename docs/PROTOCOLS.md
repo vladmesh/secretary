@@ -80,6 +80,30 @@ re-check. `TASK.md` is likewise a generated, git-ignored workspace handoff packe
 operational projections, not repository documentation or candidate changes. A receipt is evidence,
 not permission to skip the pre-merge check or independent review.
 
+## Candidate history
+
+Before a gate publishes or validates anything, the dispatcher reads the candidate's own commit
+messages over `base..HEAD` and rejects forbidden AI attribution: a `Co-Authored-By:` trailer
+belonging to a coding agent. The check is deterministic and dispatcher-owned, it covers the common
+agents whatever runtime wrote the commit, and it leaves ordinary human co-authorship alone. It runs
+in every validation mode — `none` opts out of mechanical validation, not out of this boundary,
+because a project without a gate merges its candidate just the same — so a violation is a red gate
+with the commits named and a local repair spelled out: `git commit --amend` or `git rebase -i` in
+the worker's own checkout, then report done again. Nothing is rewritten and nothing is force-pushed
+for the worker, then or later. Every worker launch packet carries the same instruction, independent
+of model family, and the reviewer reads the commit messages again as defence in depth.
+
+A commit message is untrusted input written by the head under review. Two rules follow. Messages are
+never framed against each other on a delimiter a message could contain: the object ids are listed
+first from `%H`, which message text cannot influence, a listing that is not object ids is refused,
+and each message is then read on its own. An addressed co-author is rejected only when its complete,
+normalized name/address pair is in the narrow registered-agent list: neither a vendor domain nor an
+ambiguous local part is evidence by itself, because either can belong to a human. A trailer with no
+address at all is compared against the agents' exact full names. Anything the check
+cannot read — a missing workspace, a base that resolves nowhere, an unreadable message — fails
+closed: the gate cannot say what it would publish, so the card stops rather than the boundary being
+skipped.
+
 A gate that could not reach its backend gave no verdict, and the dispatcher does not read that
 absence as a red one. A timeout, a TLS or DNS failure, a dropped connection or a 5xx served by the
 backend itself leaves the card exactly where it is — no board move, no head stopped, no verdict or
@@ -110,6 +134,20 @@ a transport message, an empty stderr, a wording nobody has captured yet — is s
 waits. The default runs that way round on purpose: a wrong "no answer" costs a few retries and a
 Blocked reason that quotes the tool, while a wrong "answer" costs an immediate Blocked on a moment
 of bad network, which is the failure this contract exists to prevent.
+
+A reviewer that cannot be started is a failure of the review stage, not a verdict on the candidate.
+A split pane that will not open, an unavailable reviewer resource, or an unwritable launch intent:
+the card holds its green gate receipt, its candidate SHA, its report round and request ids and its suspended worker
+session, and the next tick launches the reviewer again against that same evidence. It does not move
+through Ready, does not launch a worker, does not re-run the mechanical gate or any broad validation,
+does not regenerate the candidate, and charges the sprint no budget event; each attempt is one
+`review-infrastructure-retry` action naming the held candidate. The retries are bounded
+(`SECRETARY_REVIEW_INFRA_RETRY_ATTEMPTS`, ten by default) and count consecutive failures only. Once
+the ceiling is reached the card moves to Blocked with a reason that names the infrastructure, the
+untouched receipt and the candidate SHA, so recovery is another reviewer launch rather than a new
+worker round over the same code. An inventory that will not answer is
+different: it cannot prove whether a reviewer is already live, so it preserves launch ambiguity
+and retries the inventory without launching another head or consuming the headless-failure ceiling.
 
 Workers use focused checks while developing and run no more than one local broad suite for a report
 generation/unchanged SHA unless they state why it was rerun. Only an executed local/GitHub gate with a

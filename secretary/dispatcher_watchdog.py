@@ -50,6 +50,14 @@ BRING_UP_DEFER_ATTEMPTS_DEFAULT = 5
 # is asked to look.
 REVIEW_LAUNCH_ABORT_STUCK_DEFAULT = 10
 
+# How many consecutive ticks may fail to bring a reviewer up over a green candidate before the card
+# is blocked for an operator (secretary-1401). Each failure is one tick, so this is also how long
+# the reviewer's runtime is given to come back. It is deliberately larger than the deferral bound:
+# a deferred bring-up has a pane to point at and a head that may yet answer, while these are
+# failures of the review stage's own machinery, and the alternative to waiting them out is a green
+# candidate re-run from Ready.
+REVIEW_INFRA_RETRY_ATTEMPTS_DEFAULT = 10
+
 
 def stall_seconds(kind: str) -> int:
     """Ceiling for a wait, read per call. A typo in the env var falls back to the default rather
@@ -104,6 +112,18 @@ def review_launch_abort_stuck_ticks() -> int:
     except ValueError:
         return REVIEW_LAUNCH_ABORT_STUCK_DEFAULT
     return value if value > 0 else REVIEW_LAUNCH_ABORT_STUCK_DEFAULT
+
+
+def review_infra_retry_attempts() -> int:
+    """How many reviewer bring-up failures a green candidate absorbs before the card is blocked."""
+    try:
+        value = int(
+            os.environ.get("SECRETARY_REVIEW_INFRA_RETRY_ATTEMPTS", "")
+            or REVIEW_INFRA_RETRY_ATTEMPTS_DEFAULT
+        )
+    except ValueError:
+        return REVIEW_INFRA_RETRY_ATTEMPTS_DEFAULT
+    return value if value > 0 else REVIEW_INFRA_RETRY_ATTEMPTS_DEFAULT
 
 
 class IdleOutcome(NamedTuple):

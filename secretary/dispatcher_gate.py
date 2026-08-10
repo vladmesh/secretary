@@ -13,6 +13,10 @@ A project declares where its gate runs through its adapter's `validation.ci`:
            the sha counts.
   none   — no mechanical gate; the card goes straight to review (unchanged pre-633 behaviour).
 
+Candidate history is checked in every mode, `none` included, before anything is published or
+validated: a commit message carrying a forbidden AI co-author trailer is a red gate with a local
+repair, never a push followed by a history rewrite (secretary-1401).
+
 Base-freshness recovery runs first for local/github: a branch that fell behind its base is
 fast-forwarded by merging origin/<base> in, so the gate reflects the post-merge tree and a plain
 `push branch:main` at merge time stays a fast-forward. A real textual conflict is a red verdict —
@@ -33,6 +37,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from secretary.candidate_history import Commit, ai_attributions, parse_shas, repair_message
 from secretary.dispatcher_helpers import _legacy_worker_branch, _tail, safe_one_line
 from secretary.dispatcher_gate_receipt import is_exact_sha, mint_gate_receipt
 from secretary.dispatcher_types import GateTransportError, HostError
@@ -204,24 +209,120 @@ def gate_check(host, task: dict, record) -> GateResult:
         return GateResult("green", "noop gate")
     ci = _validation(host, task).get("ci") or "none"
     workspace = record.workspace
-    if ci != "none" and (not workspace or not Path(workspace).is_dir()):
+    # Every mode needs the checkout now, `none` included: the candidate-history preflight below is
+    # not mechanical validation and `none` does not opt out of it, so a workspace that cannot be
+    # read is a gate that cannot answer rather than a boundary quietly skipped (secretary-1401).
+    if not workspace or not Path(workspace).is_dir():
         raise HostError("gate workspace is missing")
     base = host.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
-    if ci == "none":
-        # `none` is an explicit absence of mechanical validation, not an all-green check set.
-        return GateResult("green", "ci none: mechanical gate skipped")
-    if _recover_base(host, workspace, base) == "conflict":
+    if ci != "none" and _recover_base(host, workspace, base) == "conflict":
         return GateResult(
             "red",
             f"branch fell behind base {base!r} and the merge conflicts — resolve it in the "
             f"workspace and report done again",
             fingerprint=_fingerprint("base-conflict", base),
         )
+    # Ahead of every publication and of every validation command, and ahead of the `none` exit: a
+    # project without a mechanical gate still merges its candidate, so it is exactly as unable to
+    # repair a published AI trailer as one with a gate.
+    history = _candidate_history_gate(host, workspace, base)
+    if history is not None:
+        return history
+    if ci == "none":
+        # `none` is an explicit absence of mechanical validation, not an all-green check set.
+        return GateResult("green", "ci none: mechanical gate skipped")
     if ci == "local":
         return _local_gate(host, task, record, workspace)
     if ci == "github":
         return _github_gate(host, task, workspace, base, _required_checks(host, task))
     raise HostError(f"unsupported validation ci mode {ci!r}; expected local, github or none")
+
+
+def _candidate_history_gate(host, workspace: str, base: str) -> GateResult | None:
+    """Reject forbidden AI attribution in `base..HEAD` before anything is published.
+
+    This is the dispatcher's own check, not a worker's: it runs on the gate path every candidate
+    crosses, ahead of the branch push in `_github_gate`, ahead of the local suite, and ahead of the
+    `none` exit, so a violation costs a rework round rather than a rewrite of published history
+    (secretary-1401, from the two AI-trailer commits published in `sprint:1300`).
+
+    Only the commit messages are read. Generated workspace packets (`TASK.md`, `REVIEW.md`) are
+    git-ignored operational projections and never enter this range, whatever they happen to quote.
+
+    The messages are read one commit at a time, keyed on object ids that were listed separately.
+    Framing several untrusted messages into one stream is what a candidate can attack: a message
+    may contain any byte, delimiter bytes included, and a stream split on such a byte can be made
+    to parse into records that no longer carry the trailer. There is no delimiter here to forge —
+    `%H` cannot be influenced by message text, `parse_shas` refuses anything that is not an object
+    id, and each `git log -1 --format=%B` hands back exactly one message as its whole stdout.
+
+    Nothing about a range that will not answer is a pass: an unreadable listing, an unreadable
+    message, or a listing that is not object ids raises `HostError`, and the card is blocked over a
+    gate that could not say what it would publish rather than publishing unchecked history.
+    """
+    try:
+        listing = host.run_capture(
+            ["git", "-C", workspace, "log", "--format=%H", _history_range(host, workspace, base)],
+            "gate candidate history",
+        )
+    except UnicodeError as exc:
+        raise HostError("gate candidate history could not be decoded") from exc
+    if listing.returncode != 0:
+        raise HostError(
+            "gate candidate history could not be read: "
+            f"{_tail((listing.stderr or listing.stdout or '').strip())}"
+        )
+    try:
+        shas = parse_shas(listing.stdout or "")
+    except ValueError as exc:
+        raise HostError(f"gate candidate history could not be read: {exc}") from None
+    commits = []
+    for sha in shas:
+        try:
+            message = host.run_capture(
+                ["git", "-C", workspace, "log", "-1", "--format=%B", sha],
+                "gate candidate history message",
+            )
+        except UnicodeError as exc:
+            raise HostError(
+                f"gate candidate history could not be decoded for {sha[:12]}"
+            ) from exc
+        if message.returncode != 0:
+            raise HostError(
+                f"gate candidate history could not be read for {sha[:12]}: "
+                f"{_tail((message.stderr or message.stdout or '').strip())}"
+            )
+        commits.append(Commit(sha=sha, message=message.stdout or ""))
+    attributions = ai_attributions(commits)
+    if not attributions:
+        return None
+    return GateResult(
+        "red",
+        "candidate history carries forbidden AI attribution; nothing was published",
+        repair_message(attributions, base),
+        fingerprint=_fingerprint("ai-attribution", *(item.sha for item in attributions)),
+    )
+
+
+def _history_range(host, workspace: str, base: str) -> str:
+    """`<base>..HEAD` for this checkout, named by a base ref that actually resolves here.
+
+    `origin/<base>` is the right base wherever the gate has just fetched it. A `none` project never
+    fetches, and its checkout may only have the local branch, so the local ref is the fallback and
+    a base that resolves neither way raises: a preflight that silently widened its range to the
+    whole history, or narrowed it to nothing, would not be reading the candidate.
+    """
+    for ref in (f"origin/{base}", base):
+        resolved = host.run_capture(
+            ["git", "-C", workspace, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+            "gate candidate history base",
+        )
+        if resolved.returncode == 0 and (resolved.stdout or "").strip():
+            return f"{ref}..HEAD"
+    raise HostError(
+        f"gate candidate history could not resolve base {base!r} in the worker workspace; "
+        "the candidate's own commits cannot be identified"
+    )
 
 
 def _validation(host, task: dict) -> dict:

@@ -37,9 +37,123 @@ from secretary.dispatcher_watchdog import (
     head_process_status as _head_process_status,
     initial_output_stall_seconds as _initial_output_stall_seconds,
     pid_file_path as _pid_file_path,
+    review_infra_retry_attempts as _review_infra_retry_attempts,
     review_launch_abort_stuck_ticks as _review_launch_abort_stuck_ticks,
     wait_cycle_token as _wait_cycle_token,
 )
+
+
+def candidate_sha(record: DispatcherRecord) -> str:
+    """The checkout the green gate attested, as the receipt itself recorded it."""
+    attestation = record.gate_attestation if isinstance(record.gate_attestation, dict) else {}
+    return str(attestation.get("validated_sha") or "")
+
+
+def review_infrastructure_retry(
+    runtime: Any,
+    task: dict[str, Any],
+    records: dict[str, DispatcherRecord],
+    record: DispatcherRecord,
+    attempt_id: str,
+    *,
+    payload: dict[str, Any],
+    reason: str,
+) -> dict[str, Any] | None:
+    """Hold a green candidate over a reviewer that could not be started. None past the ceiling.
+
+    A reviewer pane that will not split, or an inventory the runtime will not answer, says nothing
+    about the code: it is a failure of the review stage's machinery, and the candidate behind it is
+    still the one a green exact-SHA gate accepted. Blocking the card on it made the recovery a
+    return to Ready and a fresh worker, which repeated the whole suite and the live benchmark and
+    produced a different SHA from a regenerated packet — the round's evidence thrown away over a
+    split pane (sprint:1300).
+
+    So nothing here decides anything about the candidate. The record stays exactly as the green
+    gate left it — `gate_state`, the receipt, the report generation and its request ids, the
+    reviewed workspace and the held worker session — and the state goes back to `review_starting`,
+    which is the one state whose recovery launches a reviewer and only a reviewer: the tick's gate
+    step is skipped for it, no worker is brought up, the card does not move off Validate, and no
+    board move charges the sprint a budget event.
+
+    Only the count moves, and only it can end this: past the ceiling the caller blocks the card for
+    an operator, naming the candidate this was holding.
+    """
+    ref = task["ref"]
+    if record.gate_state != "green":
+        # No green candidate to preserve. Whatever failed here belongs to the ordinary failure
+        # path, which is where the caller goes when this answers None.
+        return None
+    attempts = record.review_infra_failures + 1
+    limit = _review_infra_retry_attempts()
+    record.review_infra_failures = attempts
+    record.review_infra_error = reason
+    record.state = "review_starting"
+    records[ref] = record
+    runtime.save_records(payload, records)
+    if attempts >= limit:
+        return None
+    sha = candidate_sha(record)
+    return {
+        "status": "degraded",
+        "step": "review",
+        "pilot_ref": ref,
+        "attempt_id": record.attempt_id or attempt_id,
+        "action": "review-infrastructure-retry",
+        "attempts": attempts,
+        "candidate_sha": sha,
+        "report_generation": record.report_generation,
+        "reason": (
+            f"the reviewer could not be started over the green candidate "
+            f"{sha[:12] or '(sha unavailable)'}; this is a review-stage infrastructure failure, "
+            f"not a verdict, so the gate receipt, the worker report and the held worker session "
+            f"stay and retry {attempts} of {limit} launches the reviewer again: {reason}"
+        ),
+    }
+
+
+def review_infrastructure_blocked_reason(record: DispatcherRecord, reason: str) -> str:
+    """What the operator reads when reviewer infrastructure never came back."""
+    sha = candidate_sha(record)
+    return (
+        f"reviewer infrastructure failed on {record.review_infra_failures} consecutive launch "
+        f"attempts over a green candidate; the card was never reworked and its gate receipt for "
+        f"{sha or '(sha unavailable)'} still stands, so relaunch the reviewer rather than the "
+        f"worker: {reason}"
+    )
+
+
+def review_infrastructure_failure(
+    runtime: Any,
+    task: dict[str, Any],
+    records: dict[str, DispatcherRecord],
+    record: DispatcherRecord,
+    attempt_id: str,
+    *,
+    payload: dict[str, Any],
+    reason: str,
+    outcome_reason: str,
+) -> dict[str, Any]:
+    """One bounded path for a proven-headless reviewer infrastructure failure."""
+    held = review_infrastructure_retry(
+        runtime, task, records, record, attempt_id, payload=payload, reason=reason
+    )
+    if held is not None:
+        return held
+    ref = task["ref"]
+    runtime.writer.move(
+        role="dispatcher",
+        actor=runtime.owner,
+        reference=ref,
+        target="blocked",
+        reason=review_infrastructure_blocked_reason(record, reason),
+        request_id=_attempt_request_id(
+            record.attempt_id or attempt_id, "review-infrastructure-blocked", ref,
+            _wait_cycle_token(record),
+        ),
+    )
+    records[ref] = record
+    runtime.save_records(payload, records)
+    return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": outcome_reason}
 
 
 def command_terminal_status(
@@ -215,26 +329,22 @@ def recover_review_launch(
     try:
         running = runtime.host.review_running(task, record)
     except Exception as exc:
-        runtime.writer.move(
-            role="dispatcher",
-            actor=runtime.owner,
-            reference=ref,
-            target="blocked",
-            reason=f"review inventory failed: {scrub_host_output(str(exc))}",
-            request_id=_attempt_request_id(
-                record.attempt_id or attempt_id,
-                "review-inventory-blocked",
-                ref,
-                _wait_cycle_token(record),
-            ),
-        )
-        records.pop(ref, None)
-        return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": "review inventory failed"}
+        # Inventory silence cannot prove the reviewer is absent. Preserve launch ambiguity and ask
+        # the same liveness question next tick; never launch beside a possibly-live head.
+        return {
+            "status": "degraded", "step": "review", "pilot_ref": ref,
+            "attempt_id": record.attempt_id or attempt_id,
+            "action": "review-inventory-unavailable",
+            "reason": scrub_host_output(str(exc)),
+        }
     if running:
         record.state = "reviewing"
         # A reviewer is on the checkout: whatever stuck launches came before belong to an episode
-        # that is over, so the abort ceiling starts fresh for the next one (issue:aa9a8ae4).
+        # that is over, so the abort ceiling starts fresh for the next one (issue:aa9a8ae4), and so
+        # does the infrastructure hold this card may have been retrying under (secretary-1401).
         record.review_launch_aborts = 0
+        record.review_infra_failures = 0
+        record.review_infra_error = ""
         return {
             "status": "ok",
             "step": "review",
@@ -303,9 +413,23 @@ def start_review(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     ref = task["ref"]
-    readiness = runtime.head_readiness(record.review_head)
+    try:
+        readiness = runtime.head_readiness(record.review_head)
+    except HostError as exc:
+        if record.gate_state != "green":
+            raise
+        record.state = "review_starting"
+        return review_infrastructure_failure(
+            runtime, task, records, record, attempt_id, payload=payload,
+            reason=scrub_host_output(str(exc)), outcome_reason="review resource check failed",
+        )
     if not readiness.launch_allowed:
         record.state = "review_starting"
+        if record.gate_state == "green":
+            return review_infrastructure_failure(
+                runtime, task, records, record, attempt_id, payload=payload,
+                reason=readiness.reason, outcome_reason="review resource unavailable",
+            )
         return {
             "status": "skipped",
             "step": "head-preflight",
@@ -332,6 +456,11 @@ def start_review(
     )
     if failure is not None:
         record.state = "review_starting"
+        if record.gate_state == "green":
+            return review_infrastructure_failure(
+                runtime, task, records, record, attempt_id, payload=payload,
+                reason=failure, outcome_reason="review launch intent unavailable",
+            )
         return launch_intent_unwritable(
             step="review",
             ref=ref,
@@ -385,18 +514,30 @@ def start_review(
                 reason=scrub_host_output(str(exc)),
             )
         clear_launch_intent(record)
-        deferred = launch_deferred(
-            record,
-            exc,
-            step="review",
-            ref=ref,
-            attempt_id=record.attempt_id or attempt_id,
-            role=REVIEW_ROLE,
-        )
-        if deferred is not None:
-            # No reviewer came up and none is running. The card keeps its record in
-            # `review_starting`, which is the state the next tick recovers the launch from, so the
-            # verdict this card is waiting for is delayed by a tick rather than lost to Blocked.
+        if record.gate_state == "green":
+            # Nothing came up and nothing is running, so there is no head to settle and no claim to
+            # make about the code. Every such failure goes through the one transition, whatever the
+            # bring-up failed on: a split that would not open, an inventory that would not answer,
+            # a pane held in a dialog, or a ready pane that never took the prompt and ended in
+            # `pane-stayed-ready`. Green candidates use only this infrastructure counter; the old
+            # pane deferral counter must not create a second ceiling or overwrite this action.
+            return review_infrastructure_failure(
+                runtime, task, records, record, attempt_id, payload=payload,
+                reason=scrub_host_output(str(exc)), outcome_reason="host review failed",
+            )
+        else:
+            deferred = launch_deferred(
+                record,
+                exc,
+                step="review",
+                ref=ref,
+                attempt_id=record.attempt_id or attempt_id,
+                role=REVIEW_ROLE,
+            )
+        if record.gate_state != "green" and deferred is not None:
+            # No green candidate to preserve, but a pane that is merely busy still defers: the card
+            # keeps its record in `review_starting`, which is the state the next tick recovers the
+            # launch from, so the round is delayed by a tick rather than lost to Blocked.
             record.state = "review_starting"
             records[ref] = record
             runtime.save_records(payload, records)
@@ -432,8 +573,11 @@ def start_review(
     record.review_started_at = record.review_progress_at = time.time()
     reset_launch_attempts(record, REVIEW_ROLE)
     # The reviewer took the checkout, so any stuck-launch episode before it is over and its abort
-    # ceiling starts fresh for the next one (issue:aa9a8ae4).
+    # ceiling starts fresh for the next one (issue:aa9a8ae4), as does any infrastructure hold the
+    # card was retrying under (secretary-1401).
     record.review_launch_aborts = 0
+    record.review_infra_failures = 0
+    record.review_infra_error = ""
     # A retained worker is suspended, not gone: it keeps its pane and its heartbeat so a red
     # verdict can continue that same conversation, and the reviewer still judges a checkout
     # nothing is editing. Without retention the worker head was shut down for the reviewer, and
