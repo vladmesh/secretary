@@ -1183,8 +1183,10 @@ one here either. The tick is `worker-report-prompted` and degraded, and the remi
 
 That reminder is bounded per report round and is durable before it is sent. A second confirmed-idle episode in the
 same round finds it spent and takes the respawn-then-Blocked path above, so the ladder is one prompt, one
-replacement, then the operator. A head nothing can be typed into — a spent Codex exec turn, a head adopted without a
-pane identity — is never prompted and takes that path immediately. A send that is refused, or that cannot be
+replacement, then the operator. A head nothing can be typed into — for example, one adopted without a pane identity
+or one whose interactive session disappeared — is never prompted and takes that path immediately. Legacy Codex exec
+records are normalized to TUI before launch or rejected by registry validation; they cannot create a one-shot worker
+on this path. A send that is refused, or that cannot be
 confirmed to have landed, is not retried and not trusted: the round continues on the same path, through the confirmed
 stop that protects the checkout, and if the host will not confirm that stop the tick ends with nothing opened beside
 the head. A dispatcher that dies between the intent and its confirmation leaves a round that reads as already

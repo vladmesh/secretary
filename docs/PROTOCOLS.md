@@ -867,8 +867,9 @@ continuation. A checkpointed delivery is finished on the next tick, so the rewor
 round and the reuse is recorded on the card once and only once. A pending delivery whose head is
 awake again by the next tick is not typed into a second time: it fails the confirmation and takes
 the confirmed stop and the single replacement, and the host keeps its own guard against re-sending
-over a turn already underway. Codex TUI and Claude interactive
-workers accept a continuation; a one-shot Codex exec worker has spent its turn and refuses one. The
+over a turn already underway. All supported Codex and Claude workers are interactive and accept a
+continuation. Legacy records that name Codex exec are normalized to TUI before launch or rejected
+by registry validation, so no one-shot exec worker can reach this branch. The
 routing record and card comment name the outcome as a reused continuation or a replacement, with
 the worker profile, model, effort, reason and timestamp. A dead session, an unavailable
 continuation transport, or a lost handle is an explicit fallback: the dispatcher confirms the old
