@@ -13,6 +13,10 @@ A project declares where its gate runs through its adapter's `validation.ci`:
            the sha counts.
   none   — no mechanical gate; the card goes straight to review (unchanged pre-633 behaviour).
 
+Candidate history is checked for local/github before either publishes anything: a commit message
+carrying a forbidden AI co-author trailer is a red gate with a local repair, never a push followed
+by a history rewrite (secretary-1401).
+
 Base-freshness recovery runs first for local/github: a branch that fell behind its base is
 fast-forwarded by merging origin/<base> in, so the gate reflects the post-merge tree and a plain
 `push branch:main` at merge time stays a fast-forward. A real textual conflict is a red verdict —
@@ -33,6 +37,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from secretary.candidate_history import ai_attributions, parse_log, repair_message
 from secretary.dispatcher_helpers import _legacy_worker_branch, _tail, safe_one_line
 from secretary.dispatcher_gate_receipt import is_exact_sha, mint_gate_receipt
 from secretary.dispatcher_types import GateTransportError, HostError
@@ -217,11 +222,51 @@ def gate_check(host, task: dict, record) -> GateResult:
             f"workspace and report done again",
             fingerprint=_fingerprint("base-conflict", base),
         )
+    history = _candidate_history_gate(host, workspace, base)
+    if history is not None:
+        return history
     if ci == "local":
         return _local_gate(host, task, record, workspace)
     if ci == "github":
         return _github_gate(host, task, workspace, base, _required_checks(host, task))
     raise HostError(f"unsupported validation ci mode {ci!r}; expected local, github or none")
+
+
+def _candidate_history_gate(host, workspace: str, base: str) -> GateResult | None:
+    """Reject forbidden AI attribution in `base..HEAD` before anything is published.
+
+    This is the dispatcher's own check, not a worker's: it runs on the gate path every candidate
+    crosses, ahead of the branch push in `_github_gate` and ahead of the local suite, so a
+    violation costs a rework round rather than a rewrite of published history (secretary-1401,
+    from the two AI-trailer commits published in `sprint:1300`).
+
+    Only the commit messages are read. Generated workspace packets (`TASK.md`, `REVIEW.md`) are
+    git-ignored operational projections and never enter this range, whatever they happen to quote.
+
+    A range that cannot be read is a failure, not a pass: `_recover_base` has just fetched the base
+    this reads against, so an unreadable `git log` here means the gate cannot say what it would
+    publish, and `HostError` blocks the card instead of publishing unchecked history.
+    """
+    completed = host.run_capture(
+        [
+            "git", "-C", workspace, "log", "--format=%H%x1f%B%x1e", f"origin/{base}..HEAD",
+        ],
+        "gate candidate history",
+    )
+    if completed.returncode != 0:
+        raise HostError(
+            "gate candidate history could not be read: "
+            f"{_tail((completed.stderr or completed.stdout or '').strip())}"
+        )
+    attributions = ai_attributions(parse_log(completed.stdout or ""))
+    if not attributions:
+        return None
+    return GateResult(
+        "red",
+        "candidate history carries forbidden AI attribution; nothing was published",
+        repair_message(attributions, base),
+        fingerprint=_fingerprint("ai-attribution", *(item.sha for item in attributions)),
+    )
 
 
 def _validation(host, task: dict) -> dict:

@@ -2395,6 +2395,18 @@ class CommandHostRuntime:
             "never hold, is why this paragraph exists (secretary-1161, 2026-08-06). The full suite",
             "takes about 95 seconds in the foreground; that is cheaper than any way of waiting.",
             "",
+            # In sprint:1300 two commits with AI co-author trailers were published before anything
+            # looked at them. The instruction not to write them lived only in one model family's
+            # home file, so it never reached a head of another family; it belongs in the packet
+            # every worker gets, whatever runtime is behind it (secretary-1401).
+            "Do not add AI co-authorship to your commits. No `Co-Authored-By:` trailer naming",
+            "Claude, Codex, an assistant or any model or vendor, and no generated-by attribution",
+            "line: the dispatcher checks every commit message on your branch before it publishes",
+            "anything, and a violation bounces the card back to you as a red gate. Human",
+            "co-authors are fine. If the gate does bounce one, repair the message in this checkout",
+            "with `git commit --amend` or `git rebase -i` and report done again; nothing is",
+            "rewritten or force-pushed for you.",
+            "",
             "Before reporting done, stage AND commit everything on the worker branch: run",
             "`git add -A && git commit`, then confirm `git status --porcelain` prints nothing.",
             "The dispatcher rejects a done report while the workspace has any uncommitted changes,",
@@ -2459,6 +2471,15 @@ class CommandHostRuntime:
             "the defect or it was pre-existing, and whether the repair appears local or would change",
             "architecture, a compatibility promise, a product contract, or a trust boundary. Report",
             "evidence; do not silently widen the supported boundary or decide sprint scope.",
+            "",
+            # Defense in depth behind the gate's own deterministic preflight (secretary-1401): the
+            # gate reads the commit messages before it publishes, and the reviewer reads them again
+            # on the checkout, because a check that only ever ran in one place is a check with no
+            # second opinion.
+            "Read the commit messages on this branch, not only the diff. AI co-authorship is",
+            "forbidden: a `Co-Authored-By:` trailer naming a model or vendor, or a generated-by",
+            "attribution line, is a RED blocker. Ordinary human co-authors are not. Say what you",
+            "found; do not rewrite history yourself.",
             "",
             # Two live-breaking defects once shipped under a full green suite because the fixtures
             # encoded the same wrong assumption about the backend as the code did.

@@ -179,6 +179,17 @@ class DispatcherRecord:
     # stuck ceiling one operator escalation is emitted. Reset the moment a reviewer does take the
     # checkout, so the count covers one stuck episode rather than the card's whole history.
     review_launch_aborts: int = 0
+    # Reviewer infrastructure failures over a green candidate (secretary-1401): consecutive ticks
+    # whose reviewer bring-up failed outright — a split that would not open, an inventory the
+    # runtime would not answer — with no head left behind and nothing said about the candidate. A
+    # reviewer that cannot be started is a failure of the review stage, not a verdict on the code,
+    # so the card keeps this record: the gate receipt, the candidate SHA, the report round and the
+    # held worker session all stay exactly as the green gate left them, and the next tick launches
+    # the reviewer again against that same evidence. Only the ceiling blocks the card, for an
+    # operator, and `review_infra_error` is what the last attempt failed on. Reset the moment a
+    # reviewer does take the checkout, so the count covers one outage rather than the card's life.
+    review_infra_failures: int = 0
+    review_infra_error: str = ""
     # Durable launch intent (secretary-820): the bring-up this record is in the middle of, written
     # before the host is asked for a head and cleared once the host has answered. Empty at rest.
     # `dispatcher_launch` owns its shape and its recovery; nothing else reads inside it.
@@ -249,6 +260,8 @@ class DispatcherRecord:
             "worker_launch_attempts": self.worker_launch_attempts,
             "review_launch_attempts": self.review_launch_attempts,
             "review_launch_aborts": self.review_launch_aborts,
+            "review_infra_failures": self.review_infra_failures,
+            "review_infra_error": self.review_infra_error,
             "launch_intent": dict(self.launch_intent),
             "worker_waiting_since": self.worker_waiting_since,
             "workspace": self.workspace,
@@ -323,6 +336,8 @@ class DispatcherRecord:
             worker_launch_attempts=int(payload.get("worker_launch_attempts") or 0),
             review_launch_attempts=int(payload.get("review_launch_attempts") or 0),
             review_launch_aborts=int(payload.get("review_launch_aborts") or 0),
+            review_infra_failures=int(payload.get("review_infra_failures") or 0),
+            review_infra_error=str(payload.get("review_infra_error") or ""),
             worker_waiting_since=float(payload.get("worker_waiting_since") or 0.0),
             worker_respawns=int(payload.get("worker_respawns") or 0),
             worker_started_at=float(payload.get("worker_started_at") or 0.0),

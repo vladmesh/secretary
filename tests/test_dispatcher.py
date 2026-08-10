@@ -58,6 +58,7 @@ from secretary.dispatcher_launcher import (
     role_launch_env,
     with_pid_heartbeat,
 )
+from secretary.dispatcher_production import _budget_event_type
 from secretary.dispatcher_review import start_review as start_reviewer
 from secretary.dispatcher_tui import (
     DELIVERY_CONFIRMED,
@@ -2857,7 +2858,14 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(result["actions"][0]["action"], "waiting-review-verdict")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
 
-    def test_production_review_unexpected_launch_error_moves_card_blocked(self) -> None:
+    def test_production_review_unexpected_launch_error_redacts_every_line_it_reaches(self) -> None:
+        """secretary-1401 moved the first such failure off the Blocked path: a reviewer that cannot
+        be started holds the green candidate and retries. Host output still reaches an operator —
+        the tick's own reason while the card is held, and the Blocked comment once the retries run
+        out — so both are asserted here, where only the comment used to be."""
+        patch = mock.patch.dict(os.environ, {"SECRETARY_REVIEW_INFRA_RETRY_ATTEMPTS": "1"})
+        patch.start()
+        self.addCleanup(patch.stop)
         self.runtime.production_tick()
         self.writer.report(
             role="worker",
@@ -2872,15 +2880,19 @@ class DispatcherRuntimeTests(unittest.TestCase):
             "review write failed: API_TOKEN=secret-token raw abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN123456789"
         )
 
+        held = self.runtime.production_tick()["actions"][0]
         result = self.runtime.production_tick()
 
+        self.assertEqual(held["action"], "review-infrastructure-retry")
+        self.assertIn("API_TOKEN=<redacted>", held["reason"])
+        self.assertNotIn("secret-token", held["reason"])
         self.assertEqual(result["actions"][0]["status"], "blocked")
         self.assertEqual(result["actions"][0]["reason"], "host review failed")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
         self.assertEqual(self.host.reviews, [])
         self.assertEqual(self.runtime.production_state.load()["records"], {})
         body = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
-        self.assertIn("review bring-up failed", body)
+        self.assertIn("reviewer infrastructure failed", body)
         self.assertIn("API_TOKEN=<redacted>", body)
         self.assertNotIn("secret-token", body)
         self.assertNotIn("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMN123456789", body)
@@ -5094,7 +5106,13 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(result["action"], "review-restarted")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot", "secretary-510-pilot"])
 
-    def test_review_inventory_failure_blocks_the_card(self) -> None:
+    def test_review_inventory_failure_holds_the_card_and_then_blocks_it(self) -> None:
+        """An inventory that will not answer says nothing about the candidate either, so it gets the
+        same hold as a reviewer pane that will not open (secretary-1401). This test asserted the
+        first such failure blocked the card; that is now what the spent hold does."""
+        patch = mock.patch.dict(os.environ, {"SECRETARY_REVIEW_INFRA_RETRY_ATTEMPTS": "1"})
+        patch.start()
+        self.addCleanup(patch.stop)
         self.start_dispatcher()
         self._run_worker_to_validate()
         self.tick()
@@ -5105,11 +5123,19 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.runtime.production_state.save(payload)
         self.host.review_running_error = HostError("orca terminal list failed")
 
+        held = self.tick()
+        self.assertEqual(held["action"], "review-infrastructure-retry")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+
         result = self.tick()
 
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(result["reason"], "review inventory failed")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertIn(
+            "reviewer infrastructure failed",
+            self.reader.show("secretary-510-pilot")["comments"][-1]["body"],
+        )
 
     def test_routing_head_overrides_reach_the_board_and_the_host(self) -> None:
         """A card can pin its own worker/reviewer head. The resolved pair is written to the board
@@ -5799,12 +5825,113 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.host.completed, ["secretary-510-pilot"])
         self.assertEqual(self.host.torn_down, ["secretary-510-pilot-pilot"])
 
-    def test_review_bringup_failure_blocks_without_destroying_the_workspace(self) -> None:
-        """A split that fails must not park the card in `reviewing` with no reviewer behind it, and
-        must leave the worker's checkout alone — it is the only copy of the work."""
+    # secretary-1401: a reviewer that cannot be started over a green candidate is an
+    # infrastructure-stage failure, not a verdict. This test used to assert that the first such
+    # failure blocked the card and dropped its record; in sprint:1300 that recovery returned the
+    # card to Ready and relaunched the worker, which repeated the whole suite and the live
+    # benchmark for a new SHA. The card keeps its evidence and retries the reviewer now, and only
+    # the ceiling below still blocks.
+    def _bound_review_infra_retries(self, limit: int) -> int:
+        """Pin the infrastructure-hold bound for this test, so assertions do not ride on the default."""
+        patch = mock.patch.dict(os.environ, {"SECRETARY_REVIEW_INFRA_RETRY_ATTEMPTS": str(limit)})
+        patch.start()
+        self.addCleanup(patch.stop)
+        return limit
+
+    def test_review_bringup_failure_holds_the_green_candidate_without_touching_the_workspace(self) -> None:
+        """A split that fails must not park the card in `reviewing` with no reviewer behind it, must
+        leave the worker's checkout alone — it is the only copy of the work — and must not spend the
+        round's green gate over a pane that would not open."""
         self.start_dispatcher()
         self._run_worker_to_validate()
         self.host.fail_review_error = HostError("orca terminal split failed: terminal_exited")
+
+        held = self.tick()
+
+        self.assertEqual(held["status"], "degraded")
+        self.assertEqual(held["action"], "review-infrastructure-retry")
+        self.assertEqual(held["attempts"], 1)
+        self.assertIn("infrastructure failure", held["reason"])
+        self.assertIn("terminal_exited", held["reason"])
+        task = self.reader.show("secretary-510-pilot")
+        self.assertEqual(task["state"], "validate", "an unstartable reviewer is not a verdict")
+        record = self._record_of()
+        self.assertEqual(record.state, "review_starting", "the next tick launches only the reviewer")
+        self.assertEqual(record.gate_state, "green", "the green gate survives the failed launch")
+        self.assertEqual(record.review_infra_failures, 1)
+        self.assertEqual(self.host.torn_down, [], "a failed reviewer must not remove the checkout")
+
+    def test_a_failed_review_split_keeps_the_whole_round_for_the_next_reviewer_launch(self) -> None:
+        """secretary-1401, from sprint:1300: a green exact-SHA gate, a reviewer split-pane failure,
+        then a reviewer that does come up. The second launch judges the same candidate on the same
+        evidence — same SHA, same receipt, same report round — and nothing behind it runs twice:
+        one worker launch, one gate call, no board move to charge the sprint's budget."""
+        self.start_dispatcher()
+        self.catalog._adapter = {"validation": {"ci": "local", "command": "python3 -m unittest"}}
+        self.host.commit = "c" * 40
+        receipt = {
+            "validated_sha": self.host.commit,
+            "base_sha": "b" * 40,
+            "gate_mode": "local",
+            "required_checks": [{"name": "unit", "conclusion": "SUCCESS", "url": ""}],
+            "completed_at": "2026-08-10T00:00:00+00:00",
+            "command_or_check_set_digest": "a" * 64,
+        }
+        # Exactly one scripted answer: a second broad validation would find the queue empty and
+        # fall through to the fixture's default green, so `gate_calls` below is what proves the
+        # suite (and the live benchmark behind it) was not run again for the retry.
+        self.host.gate_results = [GateResult("green", "initial", attestation=receipt)]
+        self._run_worker_to_validate()
+        report_request = self._worker_report_request_id()
+        generation = self._record_of().report_generation
+        self.host.fail_review_error = HostError("orca terminal split failed: terminal_exited")
+
+        held = self.tick()
+        self.host.fail_review_error = None
+        started = self.tick()
+
+        self.assertEqual(held["action"], "review-infrastructure-retry")
+        self.assertEqual(held["candidate_sha"], self.host.commit)
+        self.assertEqual(held["report_generation"], generation)
+        self.assertEqual(started["status"], "ok")
+        self.assertEqual(started["action"], "review-restarted")
+        self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
+        record = self._record_of()
+        self.assertEqual(record.state, "reviewing")
+        self.assertEqual(record.review_commit, self.host.commit, "the same candidate is reviewed")
+        self.assertEqual(record.gate_attestation, receipt, "the green receipt is the same one")
+        self.assertEqual(record.gate_state, "green")
+        self.assertEqual(record.report_generation, generation, "no new report round was opened")
+        self.assertEqual(self._worker_report_request_id(), report_request)
+        self.assertEqual(record.review_infra_failures, 0, "a started reviewer ends the hold")
+        self.assertEqual(self.host.gate_calls, ["secretary-510-pilot"], "no second broad validation")
+        self.assertEqual(self.host.prepared, ["secretary-510-pilot"], "one worker launch only")
+        self.assertNotIn("restart_worker", self.host.calls)
+        self.assertEqual(self.host.torn_down, [])
+        moves = [
+            event for event in self.audit_events()
+            if event.get("kind") == "moved" and event.get("ref") == "secretary-510-pilot"
+        ]
+        self.assertEqual(
+            [str((event.get("payload") or {}).get("to")) for event in moves],
+            ["validate"],
+            "the card never went back through Ready and never reached Blocked",
+        )
+        self.assertEqual(
+            [event for event in self.audit_events() if _budget_event_type(event) is not None],
+            [],
+            "an infrastructure retry charges the sprint no budget event",
+        )
+
+    def test_a_reviewer_that_never_starts_blocks_the_card_naming_the_held_candidate(self) -> None:
+        limit = self._bound_review_infra_retries(3)
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.host.fail_review_error = HostError("orca terminal split failed: terminal_exited")
+
+        for attempt in range(limit):
+            held = self.tick()
+            self.assertEqual(held["attempts"], attempt + 1)
 
         blocked = self.tick()
 
@@ -5812,9 +5939,16 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(blocked["reason"], "host review failed")
         task = self.reader.show("secretary-510-pilot")
         self.assertEqual(task["state"], "blocked")
-        self.assertIn("review bring-up failed", task["comments"][-1]["body"])
-        self.assertNotIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
+        reason = task["comments"][-1]["body"]
+        self.assertIn("reviewer infrastructure failed", reason)
+        self.assertIn("relaunch the reviewer rather than the worker", reason)
         self.assertEqual(self.host.torn_down, [], "a failed reviewer must not remove the checkout")
+        self.assertEqual(
+            [_budget_event_type(event) for event in self.audit_events()
+             if _budget_event_type(event) is not None],
+            ["blocked"],
+            "only the operator escalation costs the sprint an event; the retries before it do not",
+        )
 
     # secretary-1163: a head pane that is not ready for its launch prompt defers the bring-up.
     # Twice in 33 minutes on the `sprint:1200` canary a codex update dialog held the pane a worker
@@ -7919,6 +8053,25 @@ class HeadPromptTests(unittest.TestCase):
         self.assertIn("`claude-opus`", substituted)
         self.assertIn("`codex`", substituted)
         self.assertNotIn("Head failover", plain)
+
+    def test_every_worker_packet_forbids_ai_co_authorship_whatever_the_head(self) -> None:
+        """secretary-1401: the instruction used to live in one model family's home file, so a head
+        of another family never saw it. It is in the packet now, and the packet is the same
+        document for every runtime."""
+        for head in ("claude-opus", "codex", "gemini"):
+            record = DispatcherRecord(
+                worker="secretary-510-pilot-pilot", workspace="", handle="", head=head,
+                review_head=f"{head}-reviewer", attempt_id="attempt-1", comment_baseline=0,
+                review_baseline=0, state="review_starting", claimed_at=1.0,
+            )
+            doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
+            review = self.host._review_prompt(self.task, "attempt-1", 1, record=record)
+
+            self.assertIn("Do not add AI co-authorship to your commits", doc)
+            self.assertIn("`Co-Authored-By:` trailer", doc)
+            self.assertIn("Human", doc)
+            self.assertIn("Read the commit messages on this branch", review)
+            self.assertIn("RED blocker", review)
 
     def test_worker_prompt_names_a_concrete_body_file(self) -> None:
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
@@ -10211,6 +10364,106 @@ class DispatcherGateTests(unittest.TestCase):
             result = host.gate_check(self._task(), self._record(ws))
         self.assertEqual(result.status, "red")
         self.assertIn("boom", result.log)
+
+    # secretary-1401: the candidate's own commit messages, checked before anything is published.
+    def _commit_with(self, ws: Path, name: str, message: str) -> None:
+        (ws / name).write_text(name, encoding="utf-8")
+        git(ws, "add", name)
+        git(ws, "commit", "-m", message)
+
+    def test_an_ai_co_author_trailer_is_red_before_the_branch_is_published(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ws = _build_gated_workspace(root, "main", "pipeline/secretary-633")
+            self._commit_with(
+                ws, "more.txt",
+                "Add more\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n",
+            )
+            host = GithubGateHost(
+                root, {"validation": {"ci": "github"}}, pr_open=True,
+                check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS", "name": "unit"}],
+            )
+
+            result = host.gate_check(self._task(), self._record(ws))
+
+            published = git(root / "origin.git", "branch", "--list")
+        self.assertEqual(result.status, "red")
+        self.assertIn("forbidden AI attribution", result.summary)
+        self.assertIn("Add more", result.log)
+        self.assertIn("git rebase -i origin/main", result.log)
+        self.assertIsNone(result.attestation, "a rejected candidate attests nothing")
+        self.assertNotIn(
+            "pipeline/secretary-633", published,
+            "the candidate must be rejected before the gate publishes the branch",
+        )
+
+    def test_a_codex_trailer_is_red_and_names_every_offending_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            self._commit_with(ws, "one.txt", "One\n\nCo-authored-by: Codex <codex@openai.com>\n")
+            self._commit_with(ws, "two.txt", "Two\n\nCo-Authored-By: Claude <claude@anthropic.com>\n")
+            host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
+
+            result = host.gate_check(self._task(), self._record(ws))
+
+        self.assertEqual(result.status, "red")
+        self.assertIn("One", result.log)
+        self.assertIn("Two", result.log)
+        self.assertIn("Do not add AI co-authorship again", result.log)
+
+    def test_clean_history_with_human_co_authors_passes_the_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            self._commit_with(
+                ws, "one.txt",
+                "One\n\nCo-Authored-By: Claudia Ramirez <claudia@example.invalid>\n",
+            )
+            self._commit_with(ws, "two.txt", "Two\n\nplain body\n")
+            host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
+
+            result = host.gate_check(self._task(), self._record(ws))
+
+        self.assertEqual(result.status, "green")
+
+    def test_generated_workspace_packets_are_not_candidate_history(self) -> None:
+        """TASK.md and REVIEW.md are git-ignored operational projections (#181). A packet that
+        happens to quote a forbidden trailer — this card's own TASK.md does — is not a commit, so
+        the preflight never sees it and the packets stay out of the candidate."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            (ws / ".gitignore").write_text("TASK.md\nREVIEW.md\n", encoding="utf-8")
+            git(ws, "add", ".gitignore")
+            git(ws, "commit", "-m", "ignore the handoff packets")
+            (ws / "TASK.md").write_text(
+                "Do not write `Co-Authored-By: Claude <noreply@anthropic.com>`\n", encoding="utf-8"
+            )
+            (ws / "REVIEW.md").write_text(
+                "Co-Authored-By: Codex <codex@openai.com> is a RED blocker\n", encoding="utf-8"
+            )
+            host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
+
+            result = host.gate_check(self._task(), self._record(ws))
+
+            self.assertEqual(git(ws, "status", "--porcelain"), "")
+            tracked = git(ws, "ls-files")
+        self.assertEqual(result.status, "green")
+        self.assertNotIn("TASK.md", tracked)
+        self.assertNotIn("REVIEW.md", tracked)
+
+    def test_an_unreadable_candidate_history_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
+            original = host.run_capture
+
+            def only_the_history_fails(args, label, *, cwd=None):
+                if label == "gate candidate history":
+                    return subprocess.CompletedProcess(args, 128, "", "fatal: bad revision")
+                return original(args, label, cwd=cwd)
+
+            with mock.patch.object(host, "run_capture", side_effect=only_the_history_fails):
+                with self.assertRaisesRegex(HostError, "candidate history could not be read"):
+                    host.gate_check(self._task(), self._record(ws))
 
     def test_base_freshness_recovers_behind_branch_before_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
