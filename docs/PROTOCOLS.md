@@ -421,8 +421,8 @@ write; two observer processes cannot each make a different decision for the same
 ### The open-sprint limit
 
 How many sprints an installation may hold open at once is the instance setting `open_sprint_limit`, an
-integer that is either 1 or 2. Absent means 1, which is what every installation does and what the shipped
-default is. Two is a gated pilot and nothing enables it by itself. A value the setting cannot honour
+integer that is either 1 or 2. Absent means 1, which is the shipped default; an installation may
+explicitly enable 2 for the gated pilot. Nothing enables the pilot by itself. A value the setting cannot honour
 (3, a string, `true`, anything the schema refuses) fails closed to 1 rather than raising, so a malformed
 setting can never widen the limit and can never stop admission either; `validate_instance` reports it as
 an `open_sprint_limit` finding, because failing closed is otherwise silent to the operator who wrote it.
