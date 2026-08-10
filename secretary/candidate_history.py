@@ -45,8 +45,9 @@ _ANY_TRAILER_RE = re.compile(r"^[ \t]*[A-Za-z0-9-]+[ \t]*:[ \t]*.+?[ \t]*$")
 # `Display Name <local@domain>`, the only shape git itself writes for an identity.
 _IDENTITY_RE = re.compile(r"^(?P<name>.*?)\s*<(?P<address>[^<>]*)>\s*$")
 
-# Domains whose mail is a model vendor's own. An address here is not a colleague's: it is the
-# vendor's agent account, which is what `noreply@anthropic.com` was on the two published commits.
+# Exact name/address pairs registered for the agent accounts this pipeline actually encounters.
+# Neither half is matched independently, so a vendor employee or a human with an ambiguous local
+# part stays an ordinary co-author.
 _REGISTERED_AGENT_IDENTITIES = frozenset({
     ("claude", "noreply@anthropic.com"),
     ("claude code", "noreply@anthropic.com"),

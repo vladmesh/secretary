@@ -413,7 +413,16 @@ def start_review(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     ref = task["ref"]
-    readiness = runtime.head_readiness(record.review_head)
+    try:
+        readiness = runtime.head_readiness(record.review_head)
+    except HostError as exc:
+        if record.gate_state != "green":
+            raise
+        record.state = "review_starting"
+        return review_infrastructure_failure(
+            runtime, task, records, record, attempt_id, payload=payload,
+            reason=scrub_host_output(str(exc)), outcome_reason="review resource check failed",
+        )
     if not readiness.launch_allowed:
         record.state = "review_starting"
         if record.gate_state == "green":

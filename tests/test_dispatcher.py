@@ -1486,6 +1486,35 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(record.review_infra_failures, 1)
         self.assertFalse(self.host.reviews)
 
+    def test_reviewer_resource_check_failure_uses_the_exact_green_ceiling(self) -> None:
+        limit = self._bound_review_infra_retries(2)
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        record = self._record_of()
+        record.gate_state = "green"
+        record.gate_attestation = {"validated_sha": self.host.commit}
+        record.state = "review_starting"
+        payload = self.runtime.production_state.load()
+        records = {"secretary-510-pilot": record}
+        self.runtime.head_readiness = lambda _head: (_ for _ in ()).throw(
+            HostError("review profile disappeared")
+        )
+
+        held = start_reviewer(
+            self.runtime, self.reader.show("secretary-510-pilot"), records, record,
+            record.attempt_id, action="review-started", payload=payload,
+        )
+        blocked = start_reviewer(
+            self.runtime, self.reader.show("secretary-510-pilot"), records, record,
+            record.attempt_id, action="review-started", payload=payload,
+        )
+
+        self.assertEqual(held["action"], "review-infrastructure-retry")
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(record.review_infra_failures, limit)
+        self.assertEqual(record.gate_state, "green")
+        self.assertFalse(self.host.reviews)
+
     def test_unwritable_reviewer_launch_intent_uses_the_green_infrastructure_ceiling(self) -> None:
         self.start_dispatcher()
         self._run_worker_to_validate()
