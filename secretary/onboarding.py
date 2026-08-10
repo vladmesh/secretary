@@ -133,8 +133,11 @@ def _project_add_locked(
             _reset_scanner_derived_state(artifact)
     if taking_down:
         # The adapter that was executing under the enable is not evidence for the new draft:
-        # provisioning and the gate start from pending again, on this scanner head.
+        # provisioning and the gate start from pending again, on this scanner head. On an
+        # unchanged head the run ids would otherwise repeat, so the new cycle enters them and
+        # the previous run's result and gate receipt can neither be reapplied nor supersede.
         _reset_scanner_derived_state(artifact)
+        artifact["onboarding_cycle"] = onboarding_cycle(artifact) + 1
 
     binding = dict(identity)
     if existing_binding:
@@ -209,6 +212,12 @@ def _binding_conflict(
             return f"existing binding has conflicting {field}"
     errors = validate(binding, "project-binding", "existing binding")
     return str(errors[0]) if errors else None
+
+
+def onboarding_cycle(draft: dict[str, Any]) -> int:
+    """The draft's re-onboarding generation. An absent value is the first cycle."""
+    value = draft.get("onboarding_cycle")
+    return value if isinstance(value, int) and value >= 1 else 1
 
 
 def _identity_core(identity: dict[str, Any]) -> tuple[Any, ...]:

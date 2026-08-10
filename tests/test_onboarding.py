@@ -437,6 +437,35 @@ class OnboardingTests(unittest.TestCase):
         self.assertEqual(before, (self.binding.read_bytes(), adapter.read_bytes()))
         self.assertFalse(self.draft.exists())
 
+    def test_re_onboard_interrupted_mid_transition_never_leaves_the_enable(self):
+        """A kill between the two replaces runs no rollback. The transition writes the disabled
+        binding first for exactly that reason: every crash window is disabled, never enabled with
+        a draft or adapter nobody gated, and re-running the command recovers."""
+        adapter = self.legacy_enabled_project()
+        real_replace = os.replace
+        calls = 0
+
+        def crash_after_first(source, target):
+            nonlocal calls
+            calls += 1
+            result = real_replace(source, target)
+            if calls == 1:
+                raise KeyboardInterrupt("host crash")
+            return result
+
+        with mock.patch("secretary._fsutil.os.replace", side_effect=crash_after_first):
+            with self.assertRaises(KeyboardInterrupt):
+                project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
+
+        self.assertFalse(load_config(self.binding)["enabled"])
+
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
+
+        self.assertEqual(code, 0)
+        self.assertFalse(load_config(self.binding)["enabled"])
+        self.assertFalse(adapter.exists())
+        self.assertEqual(load_config(self.draft), artifact)
+
     def test_cli_re_onboard_publishes_a_disabled_binding(self):
         adapter = self.legacy_enabled_project()
         output = io.StringIO()

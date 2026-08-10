@@ -1073,8 +1073,13 @@ revisions, a provision run and a write set. A higher-level resumable workflow is
 
 An enabled binding is never rewritten by an ordinary `project add`. Re-onboarding one is an explicit
 operator request, `project add --re-onboard`, which disables the binding and drops its canonical adapter in
-the same atomic transition that publishes the new draft, so the project holds no executable adapter until a
-new gate passes. It does not enable anything and grants the scanner and the provision agent nothing.
+the same transition that publishes the new draft, so the project holds no executable adapter until a new
+gate passes. The transition drops the enable first, so no interruption of it can leave a project enabled on
+ungated state. It does not enable anything and grants the scanner and the provision agent nothing.
+
+A takedown opens a new onboarding cycle. The draft records it as `onboarding_cycle` and the provision run
+id derives from it, so provision results and gate receipts from an earlier cycle cannot be reused on an
+unchanged scanner head. Evidence is bound to the cycle that produced it.
 
 Diagnosing failures, recovering a stale disabled draft, re-onboarding an enabled legacy project and
 verifying a passed result are described in

@@ -198,6 +198,28 @@ class ProvisionTests(unittest.TestCase):
         self.assertEqual(artifact["gate"]["status"], "pending")
         self.assertEqual(load_config(self.draft_path), artifact)
 
+    def test_re_onboard_voids_the_previous_run_evidence_on_an_unchanged_head(self):
+        """Taking an enabled binding down starts a new onboarding cycle. Run ids are derived from
+        the cycle too, so the previous result cannot republish the adapter the takedown deleted and
+        the previous gate result cannot supersede the new one."""
+        task = self.start()["task"]
+        old_result = self.write_result(self.drafted_result(task))
+        code, result = apply_provision_result(str(self.instance), "sample-project", str(old_result))
+        self.assertEqual(code, 0, result)
+        binding = load_config(self.binding_path)
+        binding["enabled"] = True
+        self.binding_path.write_text(yaml.safe_dump(binding), encoding="utf-8")
+        code, _ = project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
+        self.assertEqual(code, 0)
+
+        fresh = self.start()
+
+        self.assertNotEqual(fresh["task"]["run_id"], task["run_id"])
+        self.assertTrue(old_result.exists())
+        code, refused = apply_provision_result(str(self.instance), "sample-project", None)
+        self.assertEqual(code, 1, refused)
+        self.assertFalse(self.adapter_path.exists())
+
     def test_re_onboard_keeps_a_drafted_provision_on_a_disabled_binding(self):
         """Once the binding is disabled the flag is inert, so re-running it after
         provision-apply does not throw away the run the operator just published."""
