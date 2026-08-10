@@ -45,12 +45,15 @@ bare busy check would freeze the agent forever — the watchdog makes "skip when
 Dispatch only sends the skill and returns; the head reaches `advance` (same lock) minutes later,
 so there's no deadlock.
 
-Every fresh spawn (create, watchdog-restart) goes through `_ensure_claude_ready` first
-(`claude_env.ensure_trust`/`ensure_theme`): a head that lands on the folder-trust dialog or the
-onboarding theme picker hangs on stdin nobody sends, and never renames its tab away from the
-shell default — invisible to the `Claude`-in-title match above, so it's neither reused nor
-reaped and just sits there as a silent orphan (found live in the curator workspace: a terminal
-stuck at "choose the text style" that `_agent_terminals` couldn't see).
+Every fresh spawn (create, watchdog-restart) prepares the workspace for its head's own runtime
+first, via `_ensure_head_ready`, before any pane is created: a head that lands on a first-run
+dialog hangs on stdin nobody sends, and never renames its tab away from the shell default —
+invisible to the `Claude`-in-title match above, so it's neither reused nor reaped and just sits
+there as a silent orphan (found live in the curator workspace: a terminal stuck at "choose the
+text style" that `_agent_terminals` couldn't see). For a `claude` head that is folder trust and the
+onboarding theme picker, best-effort; for an interactive `codex` head it is the directory-trust
+entry `codex_preflight` writes, and that one is a hard precondition — it fails the spawn before a
+pane exists rather than leaving one sitting on a dialog forever.
 
 A live terminal never re-resolves its head profile on its own, so every spawn that resolves one
 (create, watchdog-restart, red-fallback) records it via `AgentState.save_head_profile` — the only
@@ -105,7 +108,9 @@ from pathlib import Path
 import tomllib
 
 from . import claude_env, finalizer, orca_rpc, role_env
+from .codex_preflight import CodexPreflightError, ensure_codex_workspace_trusted
 from .state import AgentState
+from .tui_delivery import TuiDeliveryError, deliver_interactive_prompt
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 ORCA = os.environ.get("ORCA_BIN") or shutil.which("orca") or str(Path.home() / ".local/bin/orca")
@@ -147,10 +152,22 @@ class DispatchCommand:
     launch: str
     profile: str | None
     card_ref: str | None = None
+    # Whether `launch` carries no prompt at all, so `skill` still has to be typed into the head
+    # once it is up. Every Codex head is an interactive session and none of them takes a prompt on
+    # its command line; a `claude`/`hermes` launch seeds its own and this stays False.
+    prompt_after_start: bool = False
+    # The registry profile `launch` was rendered from, for an interactive head that needs its
+    # workspace prepared before a pane is created. None for every other launch, including the bare
+    # fallback invocation a failed resolution falls back to.
+    head_profile: dict | None = None
 
 
-class ReuseDeliveryError(RuntimeError):
-    """A warm terminal did not visibly accept its next skill command."""
+class ReuseDeliveryError(TuiDeliveryError):
+    """A warm terminal did not visibly accept its next skill command.
+
+    A kind of the delivery failure the shared interactive path raises, not a second one: a caller
+    catching either sees the same thing, a head that was not proven to have taken its prompt.
+    """
 
 
 def _orca_json(args: list[str]) -> dict:
@@ -253,8 +270,28 @@ def _claude_user_turn_after(workspace: str, since: float) -> bool:
     return False
 
 
-def _confirm_reuse_delivery(handle: str, workspace: str, sent_at: float) -> None:
-    """Wait until Claude durably records the command just sent to the reused REPL."""
+def _codex_turn_after(workspace: str, since: float) -> bool:
+    """Whether the Codex session for this workspace wrote anything after ``since``.
+
+    Codex persists its turns as rollout JSONL under CODEX_HOME, so the file moving after the send
+    boundary is the same kind of durable proof `_claude_user_turn_after` reads for Claude — it is
+    the head having taken the prompt into a turn, not the terminal having accepted keystrokes.
+    """
+    try:
+        from ..agents.pipeline import codex_sessions
+        latest = codex_sessions.latest_activity_for(workspace)
+    except Exception:
+        return False
+    return latest is not None and latest > since
+
+
+def _confirm_delivery(handle: str, workspace: str, sent_at: float) -> None:
+    """Wait until the head durably records the command just sent into its live session.
+
+    For a head whose launch command seeds its own prompt, which is a Claude or Hermes one. An
+    interactive head is delivered to — and confirmed — through the shared interactive path
+    instead, so nothing here decides between two providers' records any more.
+    """
     deadline = time.monotonic() + REUSE_DELIVERY_TIMEOUT_S
     last_reason = "no-user-turn"
     while time.monotonic() < deadline:
@@ -270,7 +307,7 @@ def _confirm_reuse_delivery(handle: str, workspace: str, sent_at: float) -> None
             last_reason = "agent-repl-not-visible"
         time.sleep(max(REUSE_DELIVERY_POLL_S, 0.01))
     raise ReuseDeliveryError(
-        f"warm-reuse delivery was not confirmed after {REUSE_DELIVERY_TIMEOUT_S:.1f}s "
+        f"delivery was not confirmed after {REUSE_DELIVERY_TIMEOUT_S:.1f}s "
         f"(reason={last_reason})"
     )
 
@@ -307,13 +344,26 @@ def _preferred_head(agent: str, spec: dict) -> str | None:
     `[role_defaults]` table the dispatcher routes worker, reviewer and observer through also names
     curator's, retro's and steward's head, so one registry generation decides all six. The spec's
     own `head` stays as the last resort for a registry that routes this role nowhere.
+
+    That last resort is a head id written down in the product, not in the registry it has to be
+    found in, so it goes through the registry's own resolution: an agent pinned to a Codex id from
+    before every Codex head became interactive still reaches the equivalent profile the
+    installation publishes now, instead of falling back to a bare `claude` invocation nobody chose.
+
+    Resolution refusing that id reaches the caller rather than becoming the bare invocation: a
+    Codex-pinned service agent whose registry has no interactive Codex head left for that name is
+    a dispatch that must not happen, not one to quietly run on another family.
     """
     try:
         from ..agents.pipeline import heads as pipeline_heads
-        routed = pipeline_heads.load_registry().role_default(agent)
+        registry = pipeline_heads.load_registry()
     except Exception:
-        routed = None
-    return routed or spec.get("head")
+        return spec.get("head")
+    routed = registry.role_default(agent)
+    if routed:
+        return routed
+    fallback = spec.get("head")
+    return registry.resolve(fallback) if fallback else fallback
 
 
 def _reuse_head_is_red(agent: str, state: AgentState) -> bool:
@@ -349,9 +399,9 @@ def _reuse_head_is_red(agent: str, state: AgentState) -> bool:
 
 
 def _launch_cmd(agent: str, variant: str | None = None,
-                card_ref: str | None = None) -> tuple[str, str, str | None]:
-    """(skill, full claude launch command, resolved head profile) from the agent's
-    automation.toml. The third element is the profile id actually rendered into the launch
+                card_ref: str | None = None) -> tuple[str, str, str | None, bool, dict | None]:
+    """(skill, full launch command, resolved head profile, prompt-after-start, profile data) from
+    the agent's automation.toml. The third element is the profile id actually rendered into the launch
     command (None for a spec with no `head`, or when resolution raised) — the caller records it
     via `AgentState.save_head_profile` so a later idle-reuse tick can check the resource this very
     terminal is running against instead of just the agent's static preferred head
@@ -371,9 +421,18 @@ def _launch_cmd(agent: str, variant: str | None = None,
 
     `card_ref` (triggered-agents-255) appends `--card <ref>` to the skill text BEFORE it is handed
     to the head, the same way a hand-typed `/steward --card ...` would read — so the augmented text
-    is what actually gets sent/embedded (heads.render_command reprs the whole prompt as one shell
-    argument), not just tacked onto the rendered command afterward where it could land outside the
-    quoted prompt.
+    is what actually gets sent (or embedded, for a head whose command seeds its own prompt), not
+    just tacked onto the rendered command afterward where it could land outside the quoted prompt.
+
+    The fourth element is that distinction: a Codex head is an interactive session whose command
+    carries no prompt, so the caller types `skill` into it once the pane is up.
+
+    The fifth is the resolved profile's own data, carried for exactly one reason: an interactive
+    head has to have its workspace prepared before its pane exists, and the preflight that does it
+    reads the CODEX_HOME from the profile the command was rendered from. Resolving it a second time
+    at the call site could answer differently — this run's resource health has already chosen a
+    fallback here — and a preflight run against a different home than the launch names would write
+    trust the head never reads.
     """
     spec = _load_spec(agent)
     skill = spec["variants"][variant]["skill"] if variant else spec["skill"]
@@ -382,15 +441,20 @@ def _launch_cmd(agent: str, variant: str | None = None,
     head = _preferred_head(agent, spec)
     bare_claude = role_env.wrap_shell_command(agent, f"claude --dangerously-skip-permissions {skill!r}")
     if not head:
-        return skill, bare_claude, None
+        return skill, bare_claude, None, False, None
     try:
         from ..agents.pipeline import health as pipeline_health
         from ..agents.pipeline import heads as pipeline_heads
         statuses = pipeline_health.refresh()
         resolved = pipeline_health.resolve_head(head, statuses) or head
-        return skill, pipeline_heads.render_command(resolved, role=agent, prompt=skill), resolved
+        registry = pipeline_heads.load_registry()
+        rendered = pipeline_heads.render_command(
+            resolved, role=agent, prompt=skill, workspace=_workspace(agent), registry=registry
+        )
+        return (skill, rendered.command, resolved, rendered.prompt_after_start,
+                registry.profile(resolved))
     except Exception:
-        return skill, bare_claude, None
+        return skill, bare_claude, None, False, None
 
 
 def _steward_report_card(agent: str, variant: str | None) -> str | None:
@@ -434,9 +498,11 @@ def _dispatch_command(agent: str, variant: str | None) -> DispatchCommand:
     create, watchdog restart, idle reuse) carries one and a busy-skip tick never does (no card,
     nobody to close it)."""
     card_ref = _steward_report_card(agent, variant)
-    skill, launch, profile = (_launch_cmd(agent, variant, card_ref=card_ref)
-                              if card_ref else _launch_cmd(agent, variant))
-    return DispatchCommand(skill, launch, profile, card_ref)
+    skill, launch, profile, after_start, profile_data = (
+        _launch_cmd(agent, variant, card_ref=card_ref) if card_ref else _launch_cmd(agent, variant)
+    )
+    return DispatchCommand(skill, launch, profile, card_ref, prompt_after_start=after_start,
+                           head_profile=profile_data)
 
 
 def _terminal_handle_live(ws: str, handle: str) -> bool:
@@ -481,6 +547,29 @@ def _fresh_steward_report_in_progress(agent: str, now: float, ws: str,
     except Exception:
         return None
     return None
+
+
+def _ensure_head_ready(ws: str, cmd: DispatchCommand) -> None:
+    """Prepare `ws` for the head about to be spawned into it, on that head's own runtime.
+
+    A service head is a head like a pipeline worker is, and the first-run question its runtime asks
+    is the one thing that can make a fresh pane never come up at all. Which question that is
+    depends on the runtime: a `claude` head is asked about folder trust and the theme picker, an
+    interactive `codex` head about directory trust. So this is the one place that branches on it,
+    right before `_create_terminal`, which is the ordering `codex_preflight` states for every
+    interactive Codex head and the Secretary dispatcher keeps too.
+
+    The two failure modes are deliberately not the same. Claude's preparation stays best-effort:
+    it has always been, a config hiccup there risks the hang it prevents but does not guarantee
+    one, and nothing in this module has ever gated a tick on it. The Codex preflight is a hard
+    precondition — without the trust entry the pane cannot reach readiness, so spawning one anyway
+    would create exactly the wedged head this exists to prevent — and it raises, before any pane
+    is created.
+    """
+    if cmd.prompt_after_start and str((cmd.head_profile or {}).get("adapter") or "") == "codex":
+        ensure_codex_workspace_trusted(cmd.head_profile, ws)
+        return
+    _ensure_claude_ready(ws)
 
 
 def _ensure_claude_ready(ws: str) -> None:
@@ -572,6 +661,12 @@ def _create_terminal(agent: str, ws: str, launch: str, state: AgentState,
 
 def _recover_steward_dispatch_failure(state: AgentState, event: str, cmd: DispatchCommand,
                                       failure: BaseException) -> None:
+    """Close out a steward report card whose head was brought up but never took the run.
+
+    Only for a failure after the pane exists. A workspace that could not be prepared at all is
+    escalated instead, by `_escalate_steward_preflight_failure`: nothing ran, so there is nothing
+    to close.
+    """
     if not cmd.card_ref:
         return
     state.clear_active_report(cmd.card_ref)
@@ -586,12 +681,95 @@ def _recover_steward_dispatch_failure(state: AgentState, event: str, cmd: Dispat
                       reference=cmd.card_ref, error=str(recovery_error))
 
 
+def _escalate_steward_preflight_failure(state: AgentState, event: str, cmd: DispatchCommand,
+                                        failure: BaseException) -> None:
+    """Put a steward report card in front of a human when its workspace could not be prepared.
+
+    The preflight fails before any pane is created, so no head has seen this card and no sweep has
+    happened. Closing it as Done — what a post-pane dispatch failure does — would record a sweep
+    that never ran and consume the card that says one was due, and the condition is not one a
+    later tick heals on its own: an untrusted repository root or a codex config the launcher may
+    not rewrite stays that way until somebody changes it. Blocked is the board's own "give up,
+    wait for a human" state and the steward's own escape hatch, so the card lands there with the
+    preflight's reason attached, visible rather than silently swallowed.
+
+    A card that cannot even be moved leaves its reason in the run log, the same fallback the
+    close-out path takes: the tick is failing either way, and a recovery that raises on its own
+    would replace the real cause with its own.
+    """
+    if not cmd.card_ref:
+        return
+    state.clear_active_report(cmd.card_ref)
+    body = "steward dispatch could not prepare the head workspace, so no head was started " \
+           "and no sweep ran.\n\n" \
+           f"failure: {failure}"
+    try:
+        from ..agents.pipeline import ops as pipeline_ops
+        pipeline_ops.move_card("steward", cmd.card_ref, "Blocked", reason=body)
+        state.log_run(event, action="dispatch-preflight", result="blocked", reference=cmd.card_ref,
+                      error=str(failure))
+    except Exception as escalation_error:
+        state.log_run(event, action="dispatch-preflight", result="failed", reference=cmd.card_ref,
+                      error=f"{failure} (escalation failed: {escalation_error})")
+
+
+def _tui_run_json(args: list[str]) -> dict:
+    """Run the shared delivery path's Orca calls the way this module runs every other one.
+
+    That path speaks full `orca … --json` argument vectors, since its other caller hands it a
+    runner that executes them verbatim; `_orca_json` supplies the binary and the flag itself, so
+    they are stripped back off here rather than a second Orca runner being kept for one caller.
+    """
+    argv = list(args)
+    if argv and argv[0] == "orca":
+        argv = argv[1:]
+    if argv and argv[-1] == "--json":
+        argv = argv[:-1]
+    return _orca_json(argv)
+
+
+def _deliver_interactive_skill(handle: str, workspace: str, skill: str) -> None:
+    """Put a service head's skill in front of it, on the product's one interactive delivery path.
+
+    A Codex head starts with an empty composer, fresh or warm: nothing has been asked of it until
+    this lands, so the dispatch is not finished when `terminal create` (or `/clear`) returns. The
+    delivery itself — waiting for the pane to answer Orca's readiness probe, sending, re-entering
+    a prompt a dialog swallowed, and failing when the pane cannot be probed at all — is the same
+    primitive a worker, a reviewer and an observer are given their prompt through. The criterion
+    this side proves it with stays this side's: Codex having durably recorded the turn for this
+    workspace after the send boundary.
+
+    A failure raises, exactly like a warm reuse that was never taken: the terminal stays up and
+    idle, so the next tick recognises it and re-sends the skill through the reuse path rather than
+    piling a second head beside a silent one.
+    """
+    deliver_interactive_prompt(
+        handle,
+        skill,
+        run_json=_tui_run_json,
+        confirm=lambda sent_at: _codex_turn_after(workspace, sent_at),
+    )
+
+
 def _spawn_fresh_terminal(agent: str, variant: str | None, ws: str, state: AgentState,
                           event: str) -> DispatchCommand:
+    """Bring a fresh head up in `ws`: prepare the workspace, create the pane, deliver the skill.
+
+    The preparation is deliberately outside the recovery below. Once a pane exists the head may
+    have started work, so a failure after that point is a run that has to be closed out; a failure
+    before it started nothing at all, and closing a report card for it would record a sweep that
+    never happened.
+    """
     cmd = _dispatch_command(agent, variant)
     try:
-        _ensure_claude_ready(ws)
+        _ensure_head_ready(ws, cmd)
+    except CodexPreflightError as exc:
+        _escalate_steward_preflight_failure(state, event, cmd, exc)
+        raise
+    try:
         handle = _create_terminal(agent, ws, cmd.launch, state, cmd.profile)
+        if cmd.prompt_after_start:
+            _deliver_interactive_skill(handle, ws, cmd.skill)
     except Exception as exc:
         _recover_steward_dispatch_failure(state, event, cmd, exc)
         raise
@@ -603,10 +781,15 @@ def _send_reuse_dispatch(agent: str, variant: str | None, terminal_handle: str, 
                          state: AgentState, event: str) -> DispatchCommand:
     cmd = _dispatch_command(agent, variant)
     try:
-        sent_at = time.time()
-        _orca(["terminal", "send", "--terminal", terminal_handle,
-               "--text", cmd.skill, "--enter"])
-        _confirm_reuse_delivery(terminal_handle, workspace, sent_at)
+        if cmd.prompt_after_start:
+            # An interactive head is prompted the one way the product prompts one, whether this
+            # is the terminal's first skill or its fifth.
+            _deliver_interactive_skill(terminal_handle, workspace, cmd.skill)
+        else:
+            sent_at = time.time()
+            _orca(["terminal", "send", "--terminal", terminal_handle,
+                   "--text", cmd.skill, "--enter"])
+            _confirm_delivery(terminal_handle, workspace, sent_at)
     except Exception as exc:
         _recover_steward_dispatch_failure(state, event, cmd, exc)
         raise
@@ -1027,7 +1210,10 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False) -> i
         time.sleep(1.0)  # let /clear settle before the skill lands
         try:
             cmd = _send_reuse_dispatch(agent, variant, survivor["handle"], ws, state, event)
-        except ReuseDeliveryError as exc:
+        except TuiDeliveryError as exc:
+            # Both shapes of unconfirmed delivery — a seeded head's own record never appearing and
+            # the interactive path never proving the prompt landed — are the same warm-reuse
+            # failure to this tick, and are recorded as it.
             state.log_run(event, action="reuse-delivery-unconfirmed", result="error", error=str(exc))
             print(f"dispatch[{agent}]: warm-reuse delivery was not confirmed ({exc})", file=sys.stderr)
             raise

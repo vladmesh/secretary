@@ -18,6 +18,7 @@ from secretary.tasks import (
     TaskReader,
     TaskWriter,
 )
+from triggered_agents.agents.pipeline.heads import CODEX_LAUNCH_MODES
 
 
 def _add_instance_arg(parser) -> None:
@@ -105,7 +106,10 @@ def add_task_subcommands(subparsers) -> None:
     task_create.add_argument("--base-branch", default="")
     task_create.add_argument("--complexity", choices=("cheap", "standard", "hard", "frontier"), default="standard")
     task_create.add_argument("--family-preference", choices=("auto", "claude", "codex"), default="auto")
-    task_create.add_argument("--codex-mode", "--codex-launch-mode", dest="codex_mode", choices=("exec", "tui"), default="")
+    # No `choices`: `--codex-mode exec` names a launch shape the product removed, and it is
+    # answered with that sentence in `_validate_codex_mode_for_create` rather than with argparse's
+    # "invalid choice" over a flag whose only remaining value is the default anyway.
+    task_create.add_argument("--codex-mode", "--codex-launch-mode", dest="codex_mode", default="")
     task_create.add_argument("--sprint", default="", help="link the card to an open sprint reference")
     task_create.add_argument("--priority", default="", help="rejected: tasks do not carry product priority")
     task_create.add_argument("--budget-event", choices=("recreated_task", "hotfix"), default="", help="charge a sprint recreation or hotfix event")
@@ -372,6 +376,18 @@ def run_task_verify_audit(args: argparse.Namespace) -> int:
 def _validate_codex_mode_for_create(args: argparse.Namespace) -> None:
     if not args.codex_mode:
         return
+    mode = str(args.codex_mode).strip()
+    if mode not in CODEX_LAUNCH_MODES:
+        # Refused before the registry is even read, and long before the board is touched: there is
+        # one Codex launch shape and it is interactive, so `exec` is not a mode this rejects for
+        # being unavailable here — it is a mode that no longer exists anywhere.
+        known = ", ".join(sorted(CODEX_LAUNCH_MODES))
+        raise TaskError(
+            "validation",
+            f"--codex-mode {mode!r} is not a Codex launch mode; Codex heads launch through the "
+            f"interactive TUI only (known: {known})",
+            2,
+        )
     heads = _load_heads(Path(args.instance))
     head = args.head or str(heads.get("role_defaults", {}).get("new_card") or "codex")
     profiles = heads.get("profiles", {})

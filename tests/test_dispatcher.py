@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import shlex
@@ -28,6 +29,7 @@ from secretary.dispatcher import (
     _gate_attestation_for_prompt,
     _legacy_worker_branch,
     _render_codex_command,
+    _render_codex_launch,
     _report_nudge_prompt,
     _wrap_role_shell_command,
     default_data_dir,
@@ -59,9 +61,9 @@ from secretary.dispatcher_launcher import (
 from secretary.dispatcher_review import start_review as start_reviewer
 from secretary.dispatcher_tui import (
     DELIVERY_CONFIRMED,
-    TUI_IDLE_PROBE_TIMEOUT_MS,
     TuiDeliveryError,
 )
+from triggered_agents.runtime.tui_delivery import TUI_IDLE_PROBE_TIMEOUT_MS
 from secretary.dispatcher_state import (
     DispatcherRecord,
     attempt_request_id as _attempt_request_id,
@@ -667,11 +669,9 @@ class FakeCatalog:
         if role == "worker":
             override = routing.get("head_override")
             asked = str(override or self.role_defaults["new_card"])
-            codex_mode = str(routing.get("codex_launch_mode") or "")
         else:
             override = routing.get("review_head_override")
             asked = str(override or self.role_defaults["reviewer"])
-            codex_mode = ""
         launched = str(head) if head else asked
         # Same rule as InstanceCatalog: a head the claim reached by walking a chain says so, and
         # anything else that differs from the asked head is the record's older decision.
@@ -695,7 +695,6 @@ class FakeCatalog:
             head_source=source,
             profile=profile,
             resources=self.resources,
-            codex_mode=codex_mode,
             model=model,
             model_source=model_source,
         )
@@ -5187,7 +5186,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(second.worker.model, "gpt-6-terra", "the round must keep its own snapshot")
         self.assertEqual(first.reviewer.effort, "extra")
         self.assertEqual(first.reviewer.account, "openai-subscription")
-        self.assertEqual(first.worker.codex_mode, "exec")
+        # The effective mode, not the profile's or the card's opinion of one: a Codex head has a
+        # single launch shape and the journal names it.
+        self.assertEqual(first.worker.codex_mode, "tui")
 
     def test_adoption_keeps_the_heads_the_card_was_claimed_with(self) -> None:
         """The head is decided once, at claim. A dispatcher that lost its record and picks the card
@@ -8540,6 +8541,73 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertEqual(head, "pinned-terra")
         self.assertIn("-m gpt-5.6-terra", command)
 
+    # A registry an installation can publish and `validate_registry` accepts, in which one of the
+    # old Codex ids has been reused for a Claude profile. Profile ids are not reserved by adapter,
+    # so this is valid input, and every persisted override naming `codex-terra` was written when
+    # that id meant Codex.
+    COLLIDING_REGISTRY = {
+        "resources": {"openai-sub": {"account": "openai-subscription"}},
+        "profiles": {
+            "codex-terra": {"resource": "openai-sub", "adapter": "claude", "model": "opus"},
+            "codex": {"resource": "openai-sub", "adapter": "codex"},
+        },
+        "role_defaults": {"new_card": "codex", "reviewer": "codex"},
+    }
+    CLAUDE_ONLY_REGISTRY = {
+        "resources": {"openai-sub": {"account": "openai-subscription"}},
+        "profiles": {
+            "codex-terra": {"resource": "openai-sub", "adapter": "claude", "model": "opus"},
+        },
+        "role_defaults": {},
+    }
+
+    def test_an_old_codex_override_never_launches_the_claude_profile_on_that_id(self) -> None:
+        """The reviewer's reproduction: worker, reviewer and claimed routes all stay in family."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            catalog = object.__new__(InstanceCatalog)
+            catalog._heads = self.COLLIDING_REGISTRY  # type: ignore[attr-defined]
+
+            routes = {
+                "worker": catalog.worker_head(  # type: ignore[attr-defined]
+                    {"routing": {"head_override": "codex-terra"}}),
+                "review": catalog.review_head(  # type: ignore[attr-defined]
+                    {"routing": {"review_head_override": "codex-terra"}}),
+                "claimed-worker": catalog.claimed_worker_head(  # type: ignore[attr-defined]
+                    {"routing": {"resolved_worker_head": "codex-terra"}}),
+                "claimed-review": catalog.claimed_review_head(  # type: ignore[attr-defined]
+                    {"routing": {"resolved_review_head": "codex-terra"}}),
+            }
+            command = catalog.head_command(  # type: ignore[attr-defined]
+                routes["worker"], "TASK.md", workspace=str(workspace), role="worker"
+            )
+
+        for route, head in routes.items():
+            with self.subTest(route=route):
+                self.assertEqual(head, "codex")
+        self.assertIn("codex", command)
+        self.assertNotIn("claude", command)
+
+    def test_an_old_codex_override_with_no_codex_head_left_fails_closed(self) -> None:
+        """Nothing in family to serve the name is a refused head, not a Claude launch."""
+        catalog = object.__new__(InstanceCatalog)
+        catalog._heads = self.CLAUDE_ONLY_REGISTRY  # type: ignore[attr-defined]
+
+        for route, task in (
+            ("worker", {"routing": {"head_override": "codex-terra"}}),
+            ("review", {"routing": {"review_head_override": "codex-terra"}}),
+            ("claimed-worker", {"routing": {"resolved_worker_head": "codex-terra"}}),
+        ):
+            with self.subTest(route=route):
+                with self.assertRaisesRegex(HostError, "unavailable"):
+                    if route == "worker":
+                        catalog.worker_head(task)  # type: ignore[attr-defined]
+                    elif route == "review":
+                        catalog.review_head(task)  # type: ignore[attr-defined]
+                    else:
+                        catalog.claimed_worker_head(task)  # type: ignore[attr-defined]
+
     def test_head_run_snapshots_the_launched_profiles_configuration(self) -> None:
         """The launch record must carry the configuration, not just the profile id: two profiles
         can be one model at different effort, so the id alone cannot answer which head ran."""
@@ -8554,9 +8622,21 @@ class DispatcherLauncherTests(unittest.TestCase):
             "role": "worker", "head": "pinned-terra", "head_source": "card",
             "adapter": "codex", "model": "gpt-5.6-terra", "model_source": "profile",
             "effort": "extra",
-            # The card pinned the launch mode, so the record shows the mode the head really ran in.
             "codex_mode": "tui", "resource": "openai-sub", "account": "openai-subscription",
         })
+
+    def test_a_legacy_exec_card_is_journalled_under_the_mode_that_ran(self) -> None:
+        """The journal names the effective mode, so a card the launcher no longer reads for one
+        cannot leave a record claiming a launch shape that did not happen."""
+        catalog = object.__new__(InstanceCatalog)
+        catalog._heads = self.PINNED_REGISTRY  # type: ignore[attr-defined]
+
+        worker = catalog.head_run(  # type: ignore[attr-defined]
+            {"routing": {"head_override": "pinned-terra", "codex_launch_mode": "exec"}},
+            role="worker",
+        )
+
+        self.assertEqual(worker.codex_mode, "tui")
 
     def test_head_run_reads_the_reviewer_role_default_from_the_registry(self) -> None:
         """Which profile reviews is configuration and moves with the quota that is up; what this
@@ -8699,7 +8779,53 @@ class DispatcherLauncherTests(unittest.TestCase):
                 {"routing": {"head_override": "codex-does-not-exist"}}
             )
 
-    def test_codex_command_uses_unattended_profile_contract(self) -> None:
+    def test_a_recorded_old_codex_head_still_reaches_a_launchable_profile(self) -> None:
+        """An override written before the installation republished its Codex heads.
+
+        `codex-terra` is not in this snapshot any more. The card, the reviewer field and the
+        dispatcher record that named it are all still there, and each has to resolve to the
+        equivalent interactive profile rather than stopping the attempt on an unknown head.
+        """
+        catalog = object.__new__(InstanceCatalog)
+        catalog._heads = {  # type: ignore[attr-defined]
+            "profiles": {
+                "codex": {"adapter": "codex", "resource": "openai-sub"},
+                "codex-extra": {"adapter": "codex", "effort": "extra", "resource": "openai-sub"},
+            },
+            "role_defaults": {"new_card": "codex", "reviewer": "codex-extra"},
+        }
+
+        worker = catalog.worker_head({"routing": {"head_override": "codex-terra"}})  # type: ignore[attr-defined]
+        reviewer = catalog.review_head({"routing": {"review_head_override": "codex-reviewer"}})  # type: ignore[attr-defined]
+        claimed = catalog.claimed_worker_head({"routing": {"resolved_worker_head": "codex-mini"}})  # type: ignore[attr-defined]
+
+        self.assertEqual(worker, "codex")
+        self.assertEqual(reviewer, "codex-extra")
+        self.assertEqual(claimed, "codex")
+        # The journal still calls it the card's own head: resolving an id is not a fallback walk.
+        run = catalog.head_run(  # type: ignore[attr-defined]
+            {"routing": {"head_override": "codex-terra"}}, role="worker", head=worker
+        )
+        self.assertEqual((run.head, run.head_source, run.codex_mode), ("codex", "card", "tui"))
+
+    def test_an_unknown_non_codex_head_is_still_rejected(self) -> None:
+        """Resolution is for the declared old Codex ids only; nothing else is substituted."""
+        catalog = object.__new__(InstanceCatalog)
+        catalog._heads = {  # type: ignore[attr-defined]
+            "profiles": {"codex": {"adapter": "codex", "resource": "openai-sub"}},
+            "role_defaults": {"new_card": "codex"},
+        }
+
+        with self.assertRaisesRegex(HostError, "unknown head 'claude-retired'"):
+            catalog.worker_head({"routing": {"head_override": "claude-retired"}})  # type: ignore[attr-defined]
+
+    def test_codex_command_uses_the_interactive_profile_contract(self) -> None:
+        """The one Codex launch shape: an interactive session carrying no prompt at all.
+
+        Replaces the `codex exec` contract this asserted before secretary-1173. The one-shot head
+        is gone from the product, so the profile's model, effort and directory trust are what a
+        Codex command still states, and the prompt is delivered into the pane afterwards.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
             workspace.mkdir()
@@ -8710,50 +8836,39 @@ class DispatcherLauncherTests(unittest.TestCase):
                 workspace=str(workspace),
             )
 
-        self.assertIn("CODEX_HOME=/tmp/codex-home codex exec", command)
-        self.assertIn("--dangerously-bypass-approvals-and-sandbox", command)
-        self.assertIn("--skip-git-repo-check", command)
+        self.assertIn("CODEX_HOME=/tmp/codex-home codex --dangerously-bypass-approvals-and-sandbox", command)
+        self.assertNotIn("codex exec", command)
+        self.assertNotIn("--skip-git-repo-check", command)
         self.assertIn("-m gpt-5.5", command)
         self.assertIn('model_reasoning_effort="xhigh"', command)
         self.assertIn("trust_level=\"trusted\"", command)
-        self.assertIn('"$(cat TASK.md)"', command)
-        self.assertNotIn('codex "$(cat TASK.md)"', command)
+        self.assertNotIn('"$(cat TASK.md)"', command)
 
-    def test_codex_exec_launch_prompt_replaces_cat_substitution(self) -> None:
+    def test_a_launch_prompt_never_reaches_a_codex_command_line(self) -> None:
+        """Neither prompt input is rendered: both are for the delivery that follows the launch."""
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
             workspace.mkdir()
 
-            command = _render_codex_command(
+            launch = _render_codex_launch(
                 {"adapter": "codex", "model": "gpt-5.5", "codex_home": "/tmp/codex-home"},
                 "TASK.md",
                 workspace=str(workspace),
                 launch_prompt="read TASK.md first",
             )
 
-        self.assertIn("codex exec", command)
-        self.assertNotIn('"$(cat TASK.md)"', command)
-        self.assertIn("'read TASK.md first'", command)
+        self.assertTrue(launch.prompt_after_start)
+        self.assertNotIn("codex exec", launch.command)
+        self.assertNotIn('"$(cat TASK.md)"', launch.command)
+        self.assertNotIn("read TASK.md first", launch.command)
 
-    def test_codex_tui_command_omits_exec_and_prompt_substitution(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace = Path(tmp) / "workspace"
-            workspace.mkdir()
+    def test_a_legacy_card_launch_mode_cannot_select_exec(self) -> None:
+        """A card carrying the retired `exec` still launches the interactive head.
 
-            command = _render_codex_command(
-                {"adapter": "codex", "model": "gpt-5.5", "effort": "extra", "codex_home": "/tmp/codex-home"},
-                "TASK.md",
-                workspace=str(workspace),
-                mode="tui",
-            )
-
-        self.assertIn("CODEX_HOME=/tmp/codex-home codex --dangerously-bypass-approvals-and-sandbox", command)
-        self.assertNotIn("codex exec", command)
-        self.assertNotIn("--skip-git-repo-check", command)
-        self.assertNotIn('"$(cat TASK.md)"', command)
-        self.assertIn("trust_level=\"trusted\"", command)
-
-    def test_card_launch_mode_overrides_codex_profile_mode(self) -> None:
+        Replaces `test_card_launch_mode_overrides_codex_profile_mode`, which asserted that the
+        card's mode selected the launch shape. Nothing selects it now: the routing field is not an
+        input to the launcher at all, so a persisted `exec` cannot bring the one-shot head back.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
             workspace.mkdir()
@@ -8764,22 +8879,28 @@ class DispatcherLauncherTests(unittest.TestCase):
                         "adapter": "codex",
                         "model": "gpt-5.5",
                         "codex_mode": "tui",
-                        "codex_home": "/tmp/codex-home",
+                        # A real bring-up, so the trust preflight writes a config: name a home
+                        # inside this test's own tmpdir rather than a fixed /tmp path shared with
+                        # every other user and run of the suite.
+                        "codex_home": str(Path(tmp) / "codex-home"),
                     }
                 }
             }
+            host = CommandHostRuntime(catalog, Path(tmp) / "data", mode="noop")
 
             launch = catalog.head_launch(  # type: ignore[attr-defined]
                 "codex-tui",
                 "TASK.md",
                 workspace=str(workspace),
                 role="worker",
-                codex_mode="exec",
             )
 
-        self.assertFalse(launch.prompt_after_start)
-        self.assertIn("codex exec", launch.command)
-        self.assertIn('"$(cat TASK.md)"', launch.command)
+        self.assertTrue(launch.prompt_after_start)
+        self.assertNotIn("codex exec", launch.command)
+        self.assertNotIn('"$(cat TASK.md)"', launch.command)
+        # `_launch` is the only caller, and it has no launch-mode input left to hand over.
+        self.assertNotIn("codex_mode", inspect.signature(host._launch).parameters)
+        self.assertNotIn("codex_mode", inspect.signature(catalog.head_launch).parameters)
 
     def test_binding_resolves_underscore_swimlane_to_hyphen_id(self) -> None:
         catalog = object.__new__(InstanceCatalog)
@@ -9669,7 +9790,6 @@ class GitBranchHost(CommandHostRuntime):
         *,
         role: str,
         env_name: str,
-        codex_mode: str | None = None,
         launch_prompt: str | None = None,
         split_from: str = "",
         task: dict | None = None,
@@ -10851,7 +10971,6 @@ class ReviewCatalog(FakeCatalog):
         *,
         workspace: str,
         role: str,
-        codex_mode: str | None = None,
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
     ):
@@ -11213,7 +11332,6 @@ class PromptAfterStartCatalog(ReviewCatalog):
         *,
         workspace: str,
         role: str,
-        codex_mode: str | None = None,
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
     ):

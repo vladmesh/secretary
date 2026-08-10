@@ -62,7 +62,11 @@ def resolve_profile_id(head: str | None, *, registry: head_registry.Registry | N
     """Resolve a user-supplied head name to a real heads.toml profile id."""
     reg = registry or head_registry.load_registry()
     name = head or DEFAULT_HEAD
-    candidate = ADAPTER_DEFAULT_PROFILE.get(name, name)
+    # `resolve` keeps a Codex id from before the TUI-only rule pointing at the interactive Codex
+    # profile the installation publishes now, and refuses the name outright when it has none left
+    # rather than opening an operator session on whatever other family now answers to it. Anything
+    # it does not recognise is handed to the lookup unchanged and still fails by name.
+    candidate = reg.resolve(ADAPTER_DEFAULT_PROFILE.get(name, name))
     reg.profile(candidate)  # raises HeadRegistryError listing known ids if unknown
     return candidate
 
@@ -85,7 +89,11 @@ def render_interactive(
         return f"claude --dangerously-skip-permissions{model_flag}{effort_flag}"
     if adapter == "codex":
         # Reuse the pipeline's TUI render: it carries CODEX_HOME, model/effort and the
-        # directory-trust flags for the workspace so no trust dialog blocks the pinned launch.
+        # directory-trust flags for the workspace. Those flags state the intent; codex 0.145 can
+        # still put its dialog up, which is why a dispatcher- or tick-launched head is preflighted
+        # through `codex_preflight` before its pane exists. This command is not one of those: it is
+        # handed to an operator who is sitting in front of the terminal it opens and can answer the
+        # question, so it renders a command and writes nothing to the runtime's own config.
         return head_registry._render_codex_tui(profile, workspace=workspace or os.getcwd())
     if adapter == "hermes":
         parts = ["hermes"]

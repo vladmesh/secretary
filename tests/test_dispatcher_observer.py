@@ -542,10 +542,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         )
 
         with mock.patch.object(real_host, "_run_json", side_effect=run_json), \
-             mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_TIMEOUT_S", 0.3), \
-             mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_POLL_S", 0.01), \
-             mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RESEND_GRACE_S", 0), \
-             mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RETRIES", 2):
+             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3), \
+             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01), \
+             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0), \
+             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2):
             self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
             self.host.nudge_observer = real_host.nudge_observer  # type: ignore[method-assign]
             result = self.runtime.production_tick()
@@ -3667,10 +3667,10 @@ class ObserverConfigurationTests(unittest.TestCase):
                 raise AssertionError(args)
 
             with mock.patch.object(host, "_run_json", side_effect=run_json), \
-                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_TIMEOUT_S", 0.3), \
-                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_POLL_S", 0.01), \
-                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RESEND_GRACE_S", 0), \
-                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RETRIES", 2), \
+                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3), \
+                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01), \
+                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0), \
+                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2), \
                  self.assertRaises(HostError) as raised:
                 host.nudge_observer(record)
 
@@ -4363,12 +4363,16 @@ class ObserverCodexTrustTests(unittest.TestCase):
 
         self.assertEqual((self.codex_home / "config.toml").read_text(encoding="utf-8"), first)
 
-    def test_worker_and_reviewer_launches_never_touch_the_codex_config(self) -> None:
-        """Trust is written for the observer alone.
+    def test_worker_and_reviewer_launches_trust_their_workspace_too(self) -> None:
+        """Trust is written for every codex head, not for the observer alone.
 
-        Worker and reviewer workspaces are worktrees of repositories the codex runtime already
-        trusts, so their bring-up has no reason to rewrite the runtime's own `config.toml` and
-        must not: it is installation state, shared by every codex head on the host.
+        This test asserted the opposite until secretary-1173: worker and reviewer bring-up was
+        expected to leave the codex config untouched, on the reasoning that their workspaces are
+        worktrees of repositories the runtime already trusts. That reasoning describes a host that
+        has been running codex heads for a while, not the product's own contract — on a clean host
+        no such entry exists, and every codex head is now a TUI that will not take a prompt until
+        the dialog is answered. So the role no longer decides: what decides is that the head is an
+        interactive codex one.
         """
         workspace = self.root / "worker-workspace"
         workspace.mkdir()
@@ -4378,9 +4382,16 @@ class ObserverCodexTrustTests(unittest.TestCase):
                 launch = self.host.catalog.head_launch(
                     head, "TASK.md", workspace=str(workspace), role=role
                 )
-                self.assertIn(f"CODEX_HOME={self.codex_home} codex exec", launch.command)
+                self.assertIn(
+                    f"CODEX_HOME={self.codex_home} codex --dangerously-bypass-approvals-and-sandbox",
+                    launch.command,
+                )
+                self.assertNotIn("codex exec", launch.command)
                 self.assertIn(f"--role {role}", launch.command)
-                self.assertFalse(self.codex_home.exists())
+                trusted = tomllib.loads((self.codex_home / "config.toml").read_text(encoding="utf-8"))
+                self.assertEqual(
+                    trusted["projects"][str(workspace.resolve())]["trust_level"], "trusted"
+                )
 
 
 class _ObserverCatalog(FakeCatalog):
@@ -4393,7 +4404,6 @@ class _ObserverCatalog(FakeCatalog):
         *,
         workspace: str,
         role: str,
-        codex_mode: str | None = None,
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
     ):
@@ -4410,7 +4420,6 @@ class _TuiCatalog(FakeCatalog):
         *,
         workspace: str,
         role: str,
-        codex_mode: str | None = None,
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
     ):

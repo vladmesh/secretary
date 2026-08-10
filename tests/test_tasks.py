@@ -277,6 +277,33 @@ class TaskCliTests(unittest.TestCase):
         self.assertEqual(error["code"], "validation")
         self.assertIn("requires a Codex worker head", error["message"])
 
+    def test_create_rejects_codex_mode_exec_before_the_registry_is_even_read(self) -> None:
+        """`--codex-mode exec` names a launch shape the product removed.
+
+        It is refused with that reason, before the instance registry is opened and long before any
+        board call: the CLI must never accept a mode that would then have to be silently launched
+        as something else. The instance path here does not exist, so reaching the registry read at
+        all would fail with a different error.
+        """
+        output, errors = io.StringIO(), io.StringIO()
+        with mock.patch.dict("os.environ", {}, clear=True), \
+             contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            code = main([
+                "task", "create",
+                "--role", "po",
+                "--instance", "/nonexistent-instance",
+                "--project", "secretary",
+                "--type", "code",
+                "--title", "T",
+                "--codex-mode", "exec",
+            ])
+
+        self.assertEqual(code, 2)
+        self.assertEqual(output.getvalue(), "")
+        error = json.loads(errors.getvalue())["error"]
+        self.assertEqual(error["code"], "validation")
+        self.assertIn("interactive TUI only", error["message"])
+
     def test_archive_cli_reads_reason_file_and_closes_card(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1333,6 +1360,29 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(raised.exception.exit_code, 2)
         self.assertFalse(any(call[0] == "createTask" for call in self.client.calls))
 
+    def test_create_rejects_the_retired_exec_launch_mode_without_write(self) -> None:
+        """The service layer refuses it too, not only the command that usually calls it."""
+        with self.assertRaisesRegex(TaskError, "codex launch mode must be tui") as raised:
+            self.writer.create(
+                role="observer",
+                actor="observer",
+                project="secretary",
+                task_type="code",
+                title="Launch mode",
+                codex_launch_mode="exec",
+            )
+
+        self.assertEqual(raised.exception.exit_code, 2)
+        self.assertFalse(any(call[0] == "createTask" for call in self.client.calls))
+
+    def test_a_card_already_carrying_exec_reads_as_carrying_no_mode(self) -> None:
+        """Legacy routing data, not authority: the field no longer names anything launchable."""
+        self.client.metadata[12]["codex_launch_mode"] = "exec"
+
+        task = self.writer.reader.show("secretary-468")
+
+        self.assertIsNone(task["routing"]["codex_launch_mode"])
+
     def test_worker_create_ready_is_forbidden_without_backend_write(self) -> None:
         with self.assertRaisesRegex(TaskError, "only proposals in Issues") as raised:
             self.writer.create(
@@ -2304,6 +2354,40 @@ class RoutingJournalTests(unittest.TestCase):
         )
 
         self.assertEqual((unpinned.model, unpinned.model_source), ("", "cli_default"))
+
+    def test_a_codex_record_names_the_one_launch_mode_whatever_it_was_asked_for(self) -> None:
+        """The journal records the mode the head actually ran in, and there is one.
+
+        A profile that still pins the retired `exec`, and a card that still carries it, are both
+        legacy routing data. Neither may put a mode in the journal that no bring-up on this
+        product could have produced.
+        """
+        run = head_run_from_profile(
+            role="worker",
+            head="codex",
+            head_source="card",
+            profile={
+                "adapter": "codex", "model": "gpt-5.6-terra", "effort": "high",
+                "resource": "openai-sub", "codex_mode": "exec",
+            },
+            resources={"openai-sub": {"account": "openai-subscription"}},
+        )
+
+        self.assertEqual(run.codex_mode, "tui")
+        self.assertNotIn(
+            "codex_mode", inspect.signature(head_run_from_profile).parameters,
+            "no caller may hand the journal a launch mode of its own",
+        )
+
+    def test_an_old_journal_record_is_read_back_as_it_was_written(self) -> None:
+        """History is read, not rewritten: an attempt that really ran one-shot still says so."""
+        legacy = HeadRun.from_json({
+            "role": "worker", "head": "codex", "head_source": "card", "adapter": "codex",
+            "model": "gpt-5.6-terra", "model_source": "profile", "effort": "default",
+            "codex_mode": "exec", "resource": "openai-sub", "account": "openai-subscription",
+        })
+
+        self.assertEqual(legacy.codex_mode, "exec")
 
     def test_claude_effort_is_part_of_the_routing_record(self) -> None:
         run = head_run_from_profile(

@@ -289,7 +289,7 @@ class CheckpointWriterTests(unittest.TestCase):
         worker = {
             "role": "worker", "head": "codex", "head_source": "role_default", "adapter": "codex",
             "model": "gpt-5.6-terra", "model_source": "profile", "effort": "default",
-            "codex_mode": "exec", "resource": "openai-sub", "account": "openai-subscription",
+            "codex_mode": "tui", "resource": "openai-sub", "account": "openai-subscription",
         }
         reviewer = {
             "role": "reviewer", "head": "claude-default", "head_source": "card", "adapter": "claude",

@@ -102,11 +102,20 @@ Launch and cleanup still depend on Orca's specific API; a target session protoco
 milestone. Head-specific rendering and delivery are confined to adapters, but that contract is not
 yet a stable plugin API.
 
-Before launching a head the dispatcher answers its CLI's first-run questions on its behalf.
-Otherwise an interactive head sits in a dialog instead of working: it never goes idle, the prompt is
-never delivered, and bring-up ends up deferred. The dispatcher appends only the missing entries,
-leaves foreign ones alone, and stops bring-up with a visible reason when a path is held at a
-different trust level rather than silently overwriting it.
+Before launching a head its CLI's first-run questions are answered on its behalf. Otherwise an
+interactive head sits in a dialog instead of working: it never goes idle, the prompt is never
+delivered, and bring-up ends up deferred. Only the missing entries are appended, foreign ones are
+left alone, and a path held at a different trust level stops bring-up with a visible reason rather
+than being silently overwritten.
+
+This is one preflight, not one per launcher. Every interactive Codex head follows the same order —
+ensure the workspace is trusted, create the pane, wait for readiness, deliver the prompt, confirm
+the turn — whether the dispatcher launches it for a worker, reviewer or observer, or a background
+tick launches it for a service agent. A launch command's own directory-trust flags state the intent
+but do not answer the question on their own, so the preflight runs before the pane exists; a
+workspace that cannot be prepared fails there, with nothing started and nothing recorded as having
+run. An operator-launched `secretary shell` session is excluded on purpose: a human is sitting in
+front of that terminal and can answer the dialog themselves.
 
 ## The sprint observer head
 

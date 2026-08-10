@@ -15,6 +15,21 @@ transport configuration, so a worker/reviewer/operator shell that inherits a
 live installation's environment cannot turn the unit suite into a client of
 that board (secretary-1026). ``tests/test_hermetic_kanboard.py`` proves it.
 
+Codex runtime state needs one more default, for the same reason and in the
+same shape. Since secretary-1173 every Codex head is an interactive TUI, so
+every Codex bring-up answers the directory-trust dialog *before* the pane
+exists, by appending a ``[projects."<workspace>"]`` table to ``config.toml``
+inside the ``CODEX_HOME`` that head will run with. On a developer box that
+home defaults to ``~/.config/orca/codex-runtime-home/home`` -- installation
+state shared by every Codex head on the host -- so any test that reaches a
+worker/reviewer/service bring-up without saying otherwise would record a
+permanent ``trusted`` grant for its own throwaway workspace there, and
+nothing prunes it. ``TA_CODEX_HOME`` is the single seam every one of those
+paths reads (``codex_preflight.codex_home``, ``heads.CODEX_HOME``,
+``dispatcher_tui._sessions_root``), so the suite claims one throwaway home of
+its own for the whole run, before any test module is imported.
+``tests/test_hermetic_codex.py`` proves it.
+
 A test that needs real host resolution or a real sprint board opts in
 locally, the same way the rest of the suite already overrides other
 host-facing seams: wrap the call in its own
@@ -33,11 +48,24 @@ through ``resolve_systemd_layout``/``resolve_packaged``.
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
+import tempfile
 from pathlib import Path
 from unittest import mock
 
 _FIXTURE_ORCA = Path(__file__).resolve().parent / "fixtures" / "legacy-orca"
+
+# The throwaway CODEX_HOME described above. Created here rather than per test so
+# that a bring-up reached from anywhere in the suite -- including one whose
+# fixture registry names no `codex_home` and which never thought about trust at
+# all -- writes into a directory this run owns and removes. Set unconditionally:
+# an ambient TA_CODEX_HOME inherited from a worker/reviewer shell names that
+# installation's real home, which is exactly what must not be written.
+_SUITE_CODEX_HOME = Path(tempfile.mkdtemp(prefix="secretary-tests-codex-home."))
+os.environ["TA_CODEX_HOME"] = str(_SUITE_CODEX_HOME)
+atexit.register(shutil.rmtree, _SUITE_CODEX_HOME, ignore_errors=True)
 
 _find_orca_patcher = mock.patch(
     "secretary.host_apply.find_orca_executable", return_value=_FIXTURE_ORCA

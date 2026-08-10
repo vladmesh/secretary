@@ -21,6 +21,7 @@ def restore_card(
         raise TaskError("validation", "restore target is invalid", 2)
     if position is not None and position < 1:
         raise TaskError("validation", "restore position must be positive", 2)
+    metadata = _without_retired_launch_mode(metadata)
 
     def mutation(task: dict[str, Any]) -> None:
         writer.client.call("saveTaskMetadata", task_id=_task_number(task), values=metadata)
@@ -39,6 +40,28 @@ def restore_card(
         "restored", "steward", "restore", reference, request_id, payload, mutation,
         identity=payload,
     )
+
+
+def _without_retired_launch_mode(metadata: dict[str, str]) -> dict[str, str]:
+    """The restore payload with no retired Codex launch mode left in it.
+
+    This is the write boundary, so it is where the retirement has to be enforced: everything below
+    hands `metadata` to `saveTaskMetadata` verbatim, and a checkpoint taken before the TUI-only
+    rule still carries `codex_launch_mode=exec` in its raw export. Normalized readers already hide
+    such a value, but hiding is not removing — restoring it would put a launch shape the product
+    no longer has back onto a live board, where the next export would carry it forward again.
+
+    The key is cleared rather than dropped: `saveTaskMetadata` is a partial update, so dropping it
+    would leave a retired value already on the card exactly where it was. Every mode the product
+    still has passes through untouched.
+    """
+    from secretary.tasks import _CODEX_LAUNCH_MODES
+
+    sanitized = dict(metadata)
+    if "codex_launch_mode" in sanitized:
+        if str(sanitized["codex_launch_mode"] or "") not in _CODEX_LAUNCH_MODES:
+            sanitized["codex_launch_mode"] = ""
+    return sanitized
 
 
 def restore_comment(

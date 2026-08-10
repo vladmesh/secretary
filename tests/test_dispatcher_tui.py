@@ -156,7 +156,6 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 "TASK.md",
                 role="worker",
                 env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
-                codex_mode="tui",
             )
 
         self.assertEqual(handle.handle, "term-tui")
@@ -167,7 +166,38 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
         self.assertLess(wait_i, send_i)
         self.assertEqual(host.calls[wait_i][host.calls[wait_i].index("--terminal") + 1], "term-tui")
         self.assertIn("Read TASK.md", host.calls[send_i][host.calls[send_i].index("--text") + 1])
-        self.assertEqual(host.catalog.modes, ["tui"])
+        # Nothing selected the interactive shape: the launcher was asked for a Codex head and
+        # there is no other kind to ask for.
+        self.assertEqual(host.catalog.heads, ["codex"])
+
+    def test_a_card_still_carrying_exec_is_launched_and_prompted_the_same_way(self) -> None:
+        """The route a restored or long-lived card takes: legacy `codex_launch_mode` on the card.
+
+        It reaches the bring-up exactly as it is stored and changes nothing. The pane is waited
+        for and the prompt is delivered into it, which is the one Codex bring-up there is.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            (workspace / "TASK.md").write_text("Read TASK.md\n", encoding="utf-8")
+            host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["\x1b[1mWorking\x1b[0m"]}}])
+
+            host._launch(
+                str(workspace),
+                "title",
+                "codex",
+                "TASK.md",
+                role="worker",
+                env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
+                task={"ref": "secretary-1173", "routing": {"codex_launch_mode": "exec"}},
+            )
+
+        create_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "create"])
+        wait_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "wait"])
+        send_i = next(i for i, call in enumerate(host.calls) if call[:3] == ["orca", "terminal", "send"])
+        self.assertLess(create_i, wait_i)
+        self.assertLess(wait_i, send_i)
+        launched = host.calls[create_i][host.calls[create_i].index("--command") + 1]
+        self.assertNotIn("codex exec", launched)
 
     def test_tui_launch_delivers_short_pointer_not_task_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -182,7 +212,6 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 "TASK.md",
                 role="worker",
                 env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
-                codex_mode="tui",
                 launch_prompt="The full task is in TASK.md. Read it first.",
             )
 
@@ -213,8 +242,8 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 ],
             )
 
-            with mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RESEND_GRACE_S", 0), \
-                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_POLL_S", 0.01):
+            with mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0), \
+                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01):
                 host._launch(
                     str(workspace),
                     "title",
@@ -222,7 +251,6 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                     "TASK.md",
                     role="worker",
                     env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
-                    codex_mode="tui",
                 )
 
         sends = [call for call in host.calls if call[:3] == ["orca", "terminal", "send"]]
@@ -236,10 +264,10 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             (workspace / "TASK.md").write_text("Read TASK.md\n", encoding="utf-8")
             host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["\u203a Read TASK.md"]}}])
 
-            with mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_TIMEOUT_S", 0.03), \
-                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_POLL_S", 0.01), \
-                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RESEND_GRACE_S", 0), \
-                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_RETRIES", 1), \
+            with mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.03), \
+                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01), \
+                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0), \
+                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 1), \
                  self.assertRaises(HostError):
                 host._launch(
                     str(workspace),
@@ -248,7 +276,6 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                     "TASK.md",
                     role="worker",
                     env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
-                    codex_mode="tui",
                 )
 
         self.assertIn(["orca", "terminal", "close", "--terminal", "term-tui", "--json"], host.calls)
@@ -267,7 +294,6 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                     "TASK.md",
                     role="worker",
                     env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
-                    codex_mode="tui",
                 )
 
         self.assertIn(["orca", "terminal", "close", "--terminal", "term-tui", "--json"], host.calls)
@@ -293,7 +319,7 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["idle"]}}])
 
             with mock.patch.dict(os.environ, {"SECRETARY_CODEX_SESSIONS": str(Path(tmp) / "sessions")}), \
-                 mock.patch("secretary.dispatcher_tui.TUI_DELIVERY_POLL_S", 0.01):
+                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01):
                 handle = host._launch(
                     str(workspace),
                     "title",
@@ -301,27 +327,29 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                     "TASK.md",
                     role="worker",
                     env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
-                    codex_mode="tui",
                 )
 
         self.assertEqual(handle.handle, "term-tui")
         self.assertNotIn(["orca", "terminal", "close", "--terminal", "term-tui", "--json"], host.calls)
 
-    def test_tui_activity_uses_rollout_mtime_only_for_tui_profiles(self) -> None:
-        """Alternate-screen TUI output gets a progress signal without masking exec stalls."""
+    def test_tui_activity_uses_rollout_mtime_for_every_codex_head(self) -> None:
+        """Alternate-screen TUI output gets a progress signal; another adapter gets none.
+
+        The card's retired `codex_launch_mode` no longer gates it either: a legacy `exec` on the
+        card cannot take the supplement away from the interactive head that actually ran.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             catalog = ActivityCatalog()
             host = CommandHostRuntime(catalog, root / "data", mode="noop")  # type: ignore[arg-type]
-            task = {"routing": {}}
-            tui_record = DispatcherRecord(
+            codex_record = DispatcherRecord(
                 worker="worker", workspace=str(root), handle="term", head="codex-tui",
                 review_head="codex-tui", attempt_id="attempt", comment_baseline=0,
                 review_baseline=0, state="claimed", claimed_at=0.0,
             )
-            exec_record = DispatcherRecord(
-                worker="worker", workspace=str(root), handle="term", head="codex-exec",
-                review_head="codex-exec", attempt_id="attempt", comment_baseline=0,
+            claude_record = DispatcherRecord(
+                worker="worker", workspace=str(root), handle="term", head="claude-opus",
+                review_head="claude-opus", attempt_id="attempt", comment_baseline=0,
                 review_baseline=0, state="claimed", claimed_at=0.0,
             )
 
@@ -329,10 +357,16 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 "triggered_agents.agents.pipeline.codex_sessions.latest_activity_for",
                 return_value=123.0,
             ) as latest_activity:
-                self.assertEqual(host.codex_tui_activity(task, tui_record, "worker"), 123.0)
-                self.assertIsNone(host.codex_tui_activity(task, exec_record, "worker"))
+                self.assertEqual(host.codex_tui_activity({"routing": {}}, codex_record, "worker"), 123.0)
+                self.assertEqual(
+                    host.codex_tui_activity(
+                        {"routing": {"codex_launch_mode": "exec"}}, codex_record, "worker"
+                    ),
+                    123.0,
+                )
+                self.assertIsNone(host.codex_tui_activity({"routing": {}}, claude_record, "worker"))
 
-        latest_activity.assert_called_once_with(str(root))
+        self.assertEqual(latest_activity.call_args_list, [mock.call(str(root))] * 2)
 
     def test_tui_activity_ignores_a_head_removed_from_the_snapshot(self) -> None:
         """A stale record cannot turn an optional supplemental signal into an inventory failure."""
@@ -351,7 +385,7 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
 
 class TuiCatalog:
     def __init__(self) -> None:
-        self.modes: list[str | None] = []
+        self.heads: list[str] = []
 
     def prepare_head_workspace(self, head: str, workspace: str, *, role: str = "") -> None:
         return None
@@ -363,11 +397,10 @@ class TuiCatalog:
         *,
         workspace: str,
         role: str,
-        codex_mode: str | None = None,
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
     ) -> HeadLaunch:
-        self.modes.append(codex_mode)
+        self.heads.append(head)
         return HeadLaunch(
             "CODEX_HOME=/tmp/codex-home codex --dangerously-bypass-approvals-and-sandbox",
             prompt_after_start=True,
@@ -379,7 +412,7 @@ class ActivityCatalog:
         self._heads = {
             "profiles": {
                 "codex-tui": {"adapter": "codex", "codex_mode": "tui"},
-                "codex-exec": {"adapter": "codex", "codex_mode": "exec"},
+                "claude-opus": {"adapter": "claude", "model": "opus"},
             },
         }
 
