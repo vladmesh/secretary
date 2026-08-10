@@ -449,6 +449,28 @@ def _sprint_board(client: KanboardClient, *, create: bool) -> int | None:
     return board_id
 
 
+class _AuditOnce:
+    """One committed-audit traversal shared by the sprint summaries of a single operation.
+
+    A mass status read summarises every sprint, and each summary used to re-read the whole
+    append-only journal, making the read linear in sprints times events.  The traversal is
+    lazy, so an operation whose sprints all answer freshness from their own record reads the
+    audit not at all.  Its lifetime is exactly the call that created it: nothing here outlives
+    the operation, so this is a shared read rather than a cache of installation state.
+    """
+
+    def __init__(self, data_dir: Path | None) -> None:
+        self._data_dir = data_dir
+        self._events: list[dict[str, Any]] | None = None
+
+    def events(self) -> list[dict[str, Any]]:
+        if self._data_dir is None:
+            return []
+        if self._events is None:
+            self._events = TaskAudit(self._data_dir).events()
+        return self._events
+
+
 class SprintReader:
     def __init__(self, client: KanboardClient, *, data_dir: str | Path | None = None, thresholds: dict[str, int] | None = None) -> None:
         self.client = client
@@ -507,6 +529,7 @@ class SprintReader:
 
     def show(
         self, reference: str, *, include_cards: bool = True, include_resume_freshness: bool = True,
+        audit: "_AuditOnce | None" = None,
     ) -> dict[str, Any]:
         board_id = ensure_sprint_board(self.client)
         raw = self.client.call("getTaskByReference", project_id=board_id, reference=reference)
@@ -528,7 +551,7 @@ class SprintReader:
         if include_cards:
             sprint["cards"] = TaskReader(self.client).list(sprint=reference)
         if include_resume_freshness:
-            sprint["resume_freshness"] = self._resume_freshness(sprint, sprint.get("resume"))
+            sprint["resume_freshness"] = self._resume_freshness(sprint, sprint.get("resume"), audit=audit)
         return sprint
 
     def _normalize(
@@ -577,8 +600,26 @@ class SprintReader:
             result["resume_freshness"] = self._resume_freshness(result, resume)
         return result
 
-    def status(self, reference: str, *, observer: dict[str, Any] | None = None) -> dict[str, Any]:
-        sprint = self.show(reference)
+    def statuses(
+        self, *, observers: dict[str, dict[str, Any]] | None = None, create: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Every sprint's status, consuming the committed audit at most once for the call.
+
+        Summarising the sprints one by one repeated the whole audit traversal per sprint; the
+        summaries of one operation share a single read instead.  `list` itself reads no audit.
+        """
+        observers = observers or {}
+        audit = _AuditOnce(self.data_dir)
+        return [
+            self.status(sprint["ref"], observer=observers.get(sprint["ref"]), audit=audit)
+            for sprint in self.list(create=create)
+        ]
+
+    def status(
+        self, reference: str, *, observer: dict[str, Any] | None = None,
+        audit: "_AuditOnce | None" = None,
+    ) -> dict[str, Any]:
+        sprint = self.show(reference, audit=audit)
         cards = sprint.get("cards") or []
         states: dict[str, list[str]] = {}
         for card in cards:
@@ -593,7 +634,9 @@ class SprintReader:
             "observer": observer or {"state": "unknown"},
         }
 
-    def _resume_freshness(self, sprint: dict[str, Any], resume: dict[str, Any] | None) -> dict[str, Any]:
+    def _resume_freshness(
+        self, sprint: dict[str, Any], resume: dict[str, Any] | None, *, audit: "_AuditOnce | None" = None,
+    ) -> dict[str, Any]:
         if not resume:
             return {
                 "fresh": False, "error": "resume_missing", "recorded_at": None,
@@ -607,7 +650,7 @@ class SprintReader:
                 for card in sprint.get("cards") or []
                 if isinstance(card, dict) and str(card.get("ref") or "")
             }
-            for event in TaskAudit(self.data_dir).events():
+            for event in (audit if audit is not None else _AuditOnce(self.data_dir)).events():
                 if is_significant_observer_event(event, linked_refs=refs, sprint_ref=sprint["ref"]):
                     last_event = max(last_event, str(event.get("occurred_at") or ""))
         recorded_at = str(resume.get("recorded_at") or "")

@@ -2147,6 +2147,143 @@ class SprintTests(SprintFixture):
         self.assertEqual(freshness["last_event_at"], baseline["last_event_at"])
 
 
+class SprintAuditTraversalTests(SprintFixture):
+    """A mass sprint summary costs one audit traversal, not one per sprint."""
+
+    @contextlib.contextmanager
+    def _traversals(self):
+        """Count the committed-audit traversals a block performs."""
+        counter: dict[str, int] = {"count": 0}
+        original = TaskAudit.events
+
+        def counting(audit: TaskAudit, *args: Any, **kwargs: Any) -> list[dict]:
+            counter["count"] += 1
+            return original(audit, *args, **kwargs)
+
+        with mock.patch.object(TaskAudit, "events", counting):
+            yield counter
+
+    def _resumed(self, goal: str) -> str:
+        """An open sprint holding a recorded resume, ready to be judged for freshness."""
+        ref = self._create(goal=goal)["sprint"]["ref"]
+        self.writer.resume(
+            role="po", actor="operator", reference=ref, request_id=f"resume-{goal}",
+            entry={
+                "selected_step": "implement", "selected_why": "needed", "rejected_alternatives": "wait",
+                "current_task": "next card", "dod_state": "tests pending", "next_safe_step": "run tests",
+                "recorded_at": "2000-01-01T00:00:00Z",
+            },
+        )
+        return ref
+
+    def _terminal(self, reference: str, *, status: str) -> str:
+        """A closed or stopped sprint carrying a resume, seeded straight onto the board.
+
+        A terminal sprint holds no reservation, so a live board accumulates them beside the
+        open one; the writer cannot open a second sprint over the fixture's project.
+        """
+        board = ensure_sprint_board(self.client)  # type: ignore[arg-type]
+        task_id = max(int(task["id"]) for task in self.client.tasks) + 1
+        self.client.tasks.append({
+            "id": task_id, "project_id": board, "reference": reference, "title": reference,
+            "description": "", "column_id": self.client.columns[board][0]["id"], "position": task_id,
+            "swimlane_id": 0, "is_active": 1,
+            "date_creation": "1720000000", "date_modification": "1720000000",
+        })
+        self.client.metadata[task_id] = {
+            "sprint_goal": "seeded", "sprint_definition_of_done": "done",
+            "sprint_repositories": json.dumps(["secretary"]), "sprint_status": status,
+            "sprint_current_task": "",
+            "sprint_resume": json.dumps({
+                "selected_step": "implement", "selected_why": "needed", "rejected_alternatives": "wait",
+                "current_task": "next card", "dod_state": "tests pending", "next_safe_step": "run tests",
+                "recorded_at": "2000-01-01T00:00:00Z",
+            }),
+        }
+        self.client.comments[task_id] = []
+        return reference
+
+    def _reader(self) -> SprintReader:
+        return SprintReader(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+
+    def test_mass_sprint_status_reads_the_audit_once_for_one_and_for_many_sprints(self) -> None:
+        open_ref = self._resumed("audit traversal")
+        task = TaskWriter(self.client, data_dir=self.tmp.name).create(  # type: ignore[arg-type]
+            role="observer", actor="observer", project="secretary", task_type="code", title="linked",
+            target="ready", sprint=open_ref, request_id="traversal-card",
+        )["task"]
+        TaskAudit(self.tmp.name).append("traversal-later", {
+            "event_id": "evt_traversal_later", "request_id": "traversal-later", "ref": task["ref"],
+            "kind": "moved", "outcome": "success", "actor": {"role": "dispatcher"},
+            "payload": {"to": "assessment"}, "occurred_at": "2099-01-01T00:00:00Z",
+        })
+
+        with self._traversals() as single:
+            one = self._reader().statuses()
+
+        for index in range(4):
+            self._terminal(f"sprint:seeded-{index}", status="closed" if index % 2 else "stopped")
+
+        with self._traversals() as many:
+            all_sprints = self._reader().statuses()
+
+        self.assertEqual(len(one), 1)
+        self.assertEqual(len(all_sprints), 5)
+        self.assertEqual(single["count"], 1)
+        # The cost is the traversal, not the sprint count: five summaries read the journal once.
+        self.assertEqual(many["count"], 1)
+        for summary in (one[0], next(item for item in all_sprints if item["ref"] == open_ref)):
+            # The open sprint still sees the significant later linked-card event.
+            self.assertFalse(summary["resume_freshness"]["fresh"])
+            self.assertEqual(summary["resume_freshness"]["error"], "resume_stale")
+            self.assertEqual(summary["resume_freshness"]["last_event_at"], "2099-01-01T00:00:00Z")
+
+    def test_sprint_list_reads_no_audit_and_a_single_status_reads_it_once(self) -> None:
+        ref = self._resumed("single status")
+
+        with self._traversals() as listing:
+            listed = self._reader().list()
+        with self._traversals() as single:
+            summary = self._reader().status(ref)
+
+        self.assertEqual([sprint["ref"] for sprint in listed], [ref])
+        self.assertEqual(listing["count"], 0)
+        self.assertEqual(single["count"], 1)
+        self.assertTrue(summary["resume_freshness"]["fresh"])
+
+    def test_closed_and_stopped_summaries_keep_the_documented_freshness_shape(self) -> None:
+        closed = self._terminal("sprint:closed-summary", status="closed")
+        stopped = self._terminal("sprint:stopped-summary", status="stopped")
+
+        with self._traversals() as traversals:
+            summaries = {item["ref"]: item for item in self._reader().statuses()}
+
+        self.assertEqual(traversals["count"], 1)
+        self.assertEqual(summaries[closed]["status"], "closed")
+        self.assertEqual(summaries[stopped]["status"], "stopped")
+        self.assertEqual(summaries[stopped]["stop_reason"], "budget_hard_limit")
+        self.assertIsNone(summaries[closed]["stop_reason"])
+        for ref in (closed, stopped):
+            freshness = summaries[ref]["resume_freshness"]
+            self.assertEqual(
+                sorted(freshness),
+                ["error", "fresh", "lag_seconds", "last_event_at", "recorded_at", "threshold_seconds"],
+            )
+            self.assertEqual(freshness["recorded_at"], "2000-01-01T00:00:00Z")
+            self.assertTrue(freshness["fresh"])
+            self.assertIsNone(freshness["error"])
+
+    def test_a_missing_resume_still_answers_without_reading_the_audit(self) -> None:
+        ref = self._create(goal="no resume")["sprint"]["ref"]
+
+        with self._traversals() as traversals:
+            summary = self._reader().status(ref)
+
+        self.assertEqual(traversals["count"], 0)
+        self.assertEqual(summary["resume_freshness"]["error"], "resume_missing")
+        self.assertFalse(summary["resume_freshness"]["fresh"])
+
+
 class SprintSingleWriterGuardTests(unittest.TestCase):
     def setUp(self) -> None:
         self.client = SprintKanboard()

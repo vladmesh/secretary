@@ -241,6 +241,71 @@ class StatusCliTests(unittest.TestCase):
         self.assertEqual(sprint["budget"]["thresholds"], {"signal": 20, "hard": 40})
         self.assertEqual(sprint["resume_freshness"]["error"], "resume_stale")
 
+    def test_status_json_reads_the_task_audit_once_however_many_sprints_exist(self):
+        """`secretary status --json` costs one audit traversal, not one per sprint."""
+        def snapshot(sprint_count: int) -> tuple[dict, int]:
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                data_dir = root / "data"
+                (data_dir / "dispatcher").mkdir(parents=True)
+                (data_dir / "dispatcher" / "production-state.json").write_text(
+                    json.dumps({"records": {}}), encoding="utf-8"
+                )
+                instance = root / "instance.yaml"
+                instance.write_text(
+                    "version: 1\nname: test\n"
+                    f"data_dir: {data_dir}\n"
+                    "offsite:\n  instance_remote: git@example.invalid:x/y.git\n"
+                    "host:\n  unit_prefix: secretary-\n",
+                    encoding="utf-8",
+                )
+                board = FakeKanboard()
+                for index in range(sprint_count):
+                    board.add_sprint(
+                        f"sprint:{index}",
+                        status="open" if index == 0 else "closed",
+                        sprint_resume=json.dumps({
+                            "selected_step": "fix", "selected_why": "blocked",
+                            "rejected_alternatives": "wait", "current_task": "secretary-510-pilot",
+                            "dod_state": "pending", "next_safe_step": "test",
+                            "recorded_at": "2020-01-01T00:00:00Z",
+                        }),
+                    )
+                board.metadata[12]["sprint_ref"] = "sprint:0"
+                TaskAudit(data_dir).append("later-card-event", {
+                    "event_id": "evt_later_card_event", "request_id": "later-card-event",
+                    "ref": "secretary-510-pilot", "kind": "moved", "outcome": "success",
+                    "payload": {"to": "assessment"}, "occurred_at": "2026-07-27T00:00:00Z",
+                })
+                report = validate_instance(instance)
+                traversals = 0
+                original = TaskAudit.events
+
+                def counting(audit, *args, **kwargs):
+                    nonlocal traversals
+                    traversals += 1
+                    return original(audit, *args, **kwargs)
+
+                with mock.patch("secretary.status.checkpoint_snapshot", return_value={
+                    "last_commit": None, "lag_minutes": None, "remote_diverged": False,
+                    "blocked_reason": None,
+                }), mock.patch.object(TaskAudit, "events", counting):
+                    collected = collect_status(report, offline=True, sprint_client=board)
+                return collected, traversals
+
+        one, one_traversals = snapshot(1)
+        many, many_traversals = snapshot(4)
+
+        self.assertEqual(len(one["installation"]["sprints"]["items"]), 1)
+        self.assertEqual(len(many["installation"]["sprints"]["items"]), 4)
+        self.assertEqual(one_traversals, 1)
+        self.assertEqual(many_traversals, 1)
+        for items in (one["installation"]["sprints"]["items"], many["installation"]["sprints"]["items"]):
+            # The open sprint still reflects the significant later linked-card event.
+            open_sprint = next(item for item in items if item["status"] == "open")
+            self.assertEqual(open_sprint["resume_freshness"]["error"], "resume_stale")
+            self.assertEqual(open_sprint["resume_freshness"]["last_event_at"], "2026-07-27T00:00:00Z")
+
     def test_invalid_status_json_uses_the_documented_schema(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp) / "instance.yaml"
