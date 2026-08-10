@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .pane_host import PaneHost, pane_host as resolve_pane_host
 from .tui_delivery_types import RunJson
 
 
@@ -128,21 +129,23 @@ def send_agent_prompt(
     handle: str,
     prompt: PreparedAgentPrompt,
     *,
-    run_json: RunJson,
+    run_json: RunJson | None = None,
+    host: PaneHost | None = None,
     submit_only: bool = False,
 ) -> PromptTransportReceipt:
     """Write one body and one separate submission while owning this terminal's ingress.
 
     A process-wide lock plus a per-process advisory file lock covers both the body and Enter.  The
-    public CLI invocation is deliberately one body call and one submit call: no caller gets to
-    combine them and no other Secretary delivery can put bytes between them.
+    session manager is asked for two writes and never one: no caller gets to combine them and no
+    other Secretary delivery can put bytes between them.
     """
+    pane = resolve_pane_host(run_json, host=host)
     receipt = PromptTransportReceipt(adapter=prompt.adapter, framing=prompt.framing)
     with terminal_prompt_lock(handle):
         if not submit_only:
             receipt.body_write_count = 1
             try:
-                answer = _terminal_send(handle, prompt.body, run_json=run_json, enter=False)
+                answer = pane.send(handle, prompt.body, enter=False)
             except Exception as exc:
                 raise AgentPromptTransportError("transport-refused-body-write", receipt) from exc
             _record_write(receipt, "body", answer)
@@ -154,21 +157,13 @@ def send_agent_prompt(
             time.sleep(max(AGENT_PROMPT_SUBMIT_DELAY_S, 0.0))
         receipt.submit_count = 1
         try:
-            answer = _terminal_send(handle, "", run_json=run_json, enter=True)
+            answer = pane.send(handle, "", enter=True)
         except Exception as exc:
             raise AgentPromptTransportError("transport-refused-submit-write", receipt) from exc
         _record_write(receipt, "submit", answer)
         if not receipt.submit_write_accepted:
             raise AgentPromptTransportError("submit-write-refused", receipt)
     return receipt
-
-
-def _terminal_send(handle: str, text: str, *, run_json: RunJson, enter: bool) -> Any:
-    args = ["orca", "terminal", "send", "--terminal", handle, "--text", text]
-    if enter:
-        args.append("--enter")
-    args.append("--json")
-    return run_json(args)
 
 
 def _record_write(receipt: PromptTransportReceipt, kind: str, answer: Any) -> None:

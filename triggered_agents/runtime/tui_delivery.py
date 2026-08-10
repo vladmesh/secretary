@@ -35,6 +35,7 @@ from .agent_prompt_transport import (
     prepare_agent_prompt,
     send_agent_prompt,
 )
+from .pane_host import PaneHost, pane_host as resolve_pane_host
 from .tui_delivery_types import RunJson
 
 
@@ -276,14 +277,14 @@ def payload_fingerprint(prompt: str) -> tuple[int, str]:
     return len(raw), _digest(prompt or "")
 
 
-def read_pane(handle: str, *, run_json: RunJson) -> PaneRead:
-    """One `terminal read`: the tail, ANSI stripped, and Orca's own output cursor with it.
+def read_pane(handle: str, *, run_json: RunJson | None = None, host: PaneHost | None = None) -> PaneRead:
+    """One pane read: the tail, ANSI stripped, and the session manager's output cursor with it.
 
     A pane that cannot be read is not a failure here: it costs the delivery its composer and
     cursor evidence and leaves it on readiness alone, which is strictly what it had before.
     """
     try:
-        data = run_json(["orca", "terminal", "read", "--terminal", handle, "--json"])
+        data = resolve_pane_host(run_json, host=host).read(handle)
     except Exception:
         return PaneRead()
     terminal = data.get("terminal") if isinstance(data, dict) and isinstance(data.get("terminal"), dict) else data
@@ -377,24 +378,26 @@ def _advance(evidence: DeliveryEvidence, stage: str) -> None:
         evidence.stage = stage
 
 
-def wait_for_tui_idle(handle: str, *, run_json: RunJson, timeout_ms: int | None = None) -> None:
-    """Wait until Orca reports the pane ready for input. A refusal reaches the caller.
+def wait_for_tui_idle(
+    handle: str, *, run_json: RunJson | None = None, host: PaneHost | None = None,
+    timeout_ms: int | None = None,
+) -> None:
+    """Wait until the session manager reports the pane ready for input; a refusal reaches the caller.
 
     This is also what a freshly created head is given to come up in: a TUI paints, reads its
-    config and answers Orca's readiness probe well after the pty exists, and the wait for that is
+    config and answers the readiness probe well after the pty exists, and the wait for that is
     the same wait as for a pane that is merely busy.
     """
-    run_json([
-        "orca", "terminal", "wait",
-        "--terminal", handle,
-        "--for", "tui-idle",
-        "--timeout-ms", str(TUI_IDLE_TIMEOUT_MS if timeout_ms is None else timeout_ms),
-        "--json",
-    ])
+    resolve_pane_host(run_json, host=host).wait_idle(
+        handle, timeout_ms=TUI_IDLE_TIMEOUT_MS if timeout_ms is None else timeout_ms
+    )
 
 
-def terminal_readiness(handle: str, *, run_json: RunJson, timeout_ms: int | None = None) -> str:
-    """Ask Orca whether the pane is ready for input, and answer in three states, not two.
+def terminal_readiness(
+    handle: str, *, run_json: RunJson | None = None, host: PaneHost | None = None,
+    timeout_ms: int | None = None,
+) -> str:
+    """Ask whether the pane is ready for input, and answer in three states, not two.
 
     This is the one readiness question the product asks about an interactive head, whatever
     provider runs in it: the runtime derives it from the pane's own agent status and falls back to
@@ -408,13 +411,9 @@ def terminal_readiness(handle: str, *, run_json: RunJson, timeout_ms: int | None
     looking at a working observer, it is looking at nothing.
     """
     try:
-        data = run_json([
-            "orca", "terminal", "wait",
-            "--terminal", handle,
-            "--for", "tui-idle",
-            "--timeout-ms", str(TUI_IDLE_PROBE_TIMEOUT_MS if timeout_ms is None else timeout_ms),
-            "--json",
-        ])
+        data = resolve_pane_host(run_json, host=host).wait_idle(
+            handle, timeout_ms=TUI_IDLE_PROBE_TIMEOUT_MS if timeout_ms is None else timeout_ms
+        )
     except Exception as exc:
         return _refused_wait_readiness(exc)
     wait = data.get("wait") if isinstance(data, dict) and isinstance(data.get("wait"), dict) else data

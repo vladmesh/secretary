@@ -14,6 +14,7 @@ from triggered_agents.runtime.agent_prompt_transport import (
     send_agent_prompt,
 )
 from triggered_agents.runtime.dispatch import _safe_orca_args_label
+from triggered_agents.runtime.tui_delivery import read_pane, wait_for_tui_idle
 
 
 class AgentPromptTransportTests(unittest.TestCase):
@@ -143,6 +144,45 @@ class AgentPromptTransportTests(unittest.TestCase):
         self.assertFalse(first.is_alive())
         self.assertFalse(second.is_alive())
         self.assertEqual(calls, [("first", False), ("first", True), ("second", False), ("second", True)])
+
+    def test_a_session_manager_that_is_not_orca_can_carry_the_same_delivery(self) -> None:
+        """The seam is only real if a host with no argument vectors at all still delivers."""
+        writes: list[tuple[str, str, bool]] = []
+        probes: list[tuple[str, int]] = []
+
+        class FakePaneHost:
+            def send(self, handle: str, text: str, *, enter: bool):
+                writes.append((handle, text, enter))
+                return {"send": {"accepted": True, "bytesWritten": len(text.encode())}}
+
+            def read(self, handle: str, *, limit: int | None = None):
+                return {"terminal": {"tail": ["ready"], "nextCursor": "7"}}
+
+            def wait_idle(self, handle: str, *, timeout_ms: int):
+                probes.append((handle, timeout_ms))
+                return {"wait": {"satisfied": True}}
+
+        host = FakePaneHost()
+        prepared = prepare_agent_prompt("hello", adapter="codex")
+        with mock.patch("triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0):
+            receipt = send_agent_prompt("term-1", prepared, host=host)
+
+        self.assertEqual(
+            writes,
+            [
+                ("term-1", f"{BRACKETED_PASTE_START}hello{BRACKETED_PASTE_END}", False),
+                ("term-1", "", True),
+            ],
+        )
+        self.assertEqual((receipt.body_write_count, receipt.submit_count), (1, 1))
+        self.assertEqual(read_pane("term-1", host=host).cursor, "7")
+        wait_for_tui_idle("term-1", host=host, timeout_ms=1234)
+        self.assertEqual(probes, [("term-1", 1234)])
+
+    def test_a_delivery_with_neither_a_host_nor_a_runner_is_refused(self) -> None:
+        prepared = prepare_agent_prompt("hello", adapter="codex")
+        with self.assertRaises(ValueError):
+            send_agent_prompt("term-1", prepared)
 
     def test_public_runner_labels_never_include_the_prompt_body(self) -> None:
         prompt = "do not retain this 🔐\nsecond line"
