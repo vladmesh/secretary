@@ -28,14 +28,26 @@ Changing Claude launch behavior, worker/reviewer family-selection policy, watchd
 This round exists solely to take the already completed candidate `34bf7e7a6c5eafa61ae9d30068bfdd2b9b579a89` through an independent Claude review after the Codex reviewer-pane delivery failed twice. Do not modify files, create commits, or run any tests in this worker round. Confirm the retained workspace is clean and still at that candidate SHA, then immediately submit the ordinary `report:done` command from this TASK.md. State the SHA and that this was an operator-directed no-change/no-test handoff; do not claim a mechanical gate passed. The dispatcher must obtain its ordinary exact-SHA gate receipt before it starts the reviewer. This instruction overrides the development check-cost instructions for this no-change handoff only.
 
 
+## Re-review packet
+
+previous_reviewed_sha: 81122c645db2188ae384a6720aaa4035ddd856e2
+current_sha: d451d90b0ef0ae001cc0dd1b525ed918131f3ddd
+Changed paths / delta from the prior review:
+REVIEW.md docs/ARCHITECTURE.md secretary/dispatcher.py secretary/dispatcher_launcher.py secretary/session.py tests/test_dispatcher_contracts.py tests/test_dispatcher_observer.py tests/test_triggered_dispatch.py triggered_agents/agents/pipeline/heads.py triggered_agents/runtime/codex_preflight.py triggered_agents/runtime/dispatch.py
+REVIEW.md | 15 +- docs/ARCHITECTURE.md | 19 ++- secretary/dispatcher.py | 18 +- secretary/dispatcher_launcher.py | 213 +++--------------------- secretary/session.py | 6 +- tests/test_dispatcher_contracts.py | 47 ++++++ tests/test_dispatcher_observer.py | 21 ++- tests/test_triggered_dispatch.py | 137 ++++++++++++++- triggered_agents/agents/pipeline/heads.py | 80 ++------- triggered_agents/runtime/codex_preflight.py | 247 ++++++++++++++++++++++++++++ triggered_agents/runtime/dispatch.py | 125 ++++++++++++-- 11 files changed, 631 insertions(+), 297 deletions(-)
+Previous blockers (close or explicitly retain these stable IDs):
+# Review verdict: secretary-1173 (round 22) — RED Reviewed SHA: 81122c645db2188ae384a6720aaa4035ddd856e2 (HEAD of pipeline/secretary-1173, base 5762fdbe15a189b30c6e014bbed396c5b011c854). Worktree is clean apart from `REVIEW.md`, which carries this round's own review packet (dispatcher-owned, not a candidate change). I ran no tests. The attested `test` check on this exact SHA was not rerun and I record no `rerun_reason`; everything below is static inspection of the diff plus read-only inspection of this host's live registry and Codex home. ## What the branch does well Most of the contract is met, and met cleanly: - All four Codex profiles in the portable registry (`codex`, `codex-high`, `codex-reviewer`, `codex-observer`) now state `codex_mode = "tui"`; `validate_registry` defaults a missing mode to TUI and refuses `exec` outright. - The exec renderer is genuinely gone: `_render_codex_exec_command` in `secretary/dispatcher_launcher.py` and `_render_codex` in `triggered_agents/agents/pipeline/heads.py` are deleted, `ADAPTERS["codex"]` is the TUI renderer, and `render_codex_launch` has no mode branch or mode argument left. `render_command` now returns a `HeadCommand` carrying `prompt_after_start`, and both consumers (`secretary/dispatcher.py`, `triggered_agents/runtime/dispatch.py`) handle it. - `task create --codex-mode exec` is refused in `_validate_codex_mode_for_create`, which `run_task_create` calls before `TaskWriter`/`KanboardClient` is even constructed, so no board call can precede it. `TaskWriter.create` refuses the same value independently. - The legacy-routing story is coherent at every layer: `restore._restore_fields` maps a checkpointed `exec` to no mode, `task_restore._without_retired_launch_mode` clears it at the `saveTaskMetadata` write boundary (closing the round-16 blocker recorded in TASK.md), `_create_metadata_values` drops it on replay, and `routing_journal.head_run_from_profile` writes `CODEX_TUI_MODE` for every Codex adapter rather than copying t
+Review this delta, the closure of prior blockers and collateral impact; do not restart
+from the original base unless a concrete suspicion requires the historical diff.
+
 ## Mechanical gate attestation
 
-- validated_sha: 81122c645db2188ae384a6720aaa4035ddd856e2
+- validated_sha: d451d90b0ef0ae001cc0dd1b525ed918131f3ddd
 - base_sha: 5762fdbe15a189b30c6e014bbed396c5b011c854
 - gate_mode: github
 - required terminal checks:
-  - test: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/31343505947/job/93321051306)
-- completed_at: 2026-08-10T00:07:44+00:00
+  - test: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/31345438273/job/93326381499)
+- completed_at: 2026-08-10T00:50:54+00:00
 - command_or_check_set_digest: e05e08ff6e9e51da3be176a7b5215dfddd2f768f01036631e8a3c9ab7be723ca
 
 Independently inspect the diff, acceptance criteria and invariants. The attested broad
@@ -60,10 +72,10 @@ real behaviour you verified and how. If no end-to-end check against the real bac
 was possible, write plainly that it was not done and which assumption stays unverified.
 
 Post exactly one review verdict through the secretary task protocol:
-Write the body to /tmp/secretary-verdict-secretary-1173-22.md with your file-writing tool,
+Write the body to /tmp/secretary-verdict-secretary-1173-30.md with your file-writing tool,
 then run the command below verbatim. Do not assemble the body inside the shell command
 (no heredoc, no mktemp, no echo pipeline) and do not add `rm`: the codex runtime refuses
 rm-style commands, and quotes or backticks in the body break the call. Leave the file in
 place afterwards; the dispatcher does not read it.
-PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1173 --role reviewer --kind green --request-id dispatcher-attempt-20260810T000143Z-5541338d119d-review-green-secretary-1173-22 --body-file /tmp/secretary-verdict-secretary-1173-22.md
-PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1173 --role reviewer --kind red --request-id dispatcher-attempt-20260810T000143Z-5541338d119d-review-red-secretary-1173-22 --body-file /tmp/secretary-verdict-secretary-1173-22.md
+PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1173 --role reviewer --kind green --request-id dispatcher-attempt-20260810T000143Z-5541338d119d-review-green-secretary-1173-30 --body-file /tmp/secretary-verdict-secretary-1173-30.md
+PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1173 --role reviewer --kind red --request-id dispatcher-attempt-20260810T000143Z-5541338d119d-review-red-secretary-1173-30 --body-file /tmp/secretary-verdict-secretary-1173-30.md

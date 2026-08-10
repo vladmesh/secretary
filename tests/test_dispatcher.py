@@ -8879,7 +8879,10 @@ class DispatcherLauncherTests(unittest.TestCase):
                         "adapter": "codex",
                         "model": "gpt-5.5",
                         "codex_mode": "tui",
-                        "codex_home": "/tmp/codex-home",
+                        # A real bring-up, so the trust preflight writes a config: name a home
+                        # inside this test's own tmpdir rather than a fixed /tmp path shared with
+                        # every other user and run of the suite.
+                        "codex_home": str(Path(tmp) / "codex-home"),
                     }
                 }
             }
