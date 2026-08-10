@@ -2890,7 +2890,10 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(result["actions"][0]["reason"], "host review failed")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
         self.assertEqual(self.host.reviews, [])
-        self.assertEqual(self.runtime.production_state.load()["records"], {})
+        retained = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(retained["gate_state"], "green")
+        self.assertEqual(retained["state"], "review_starting")
+        self.assertEqual(retained["review_infra_failures"], 1)
         body = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
         self.assertIn("reviewer infrastructure failed", body)
         self.assertIn("API_TOKEN=<redacted>", body)
@@ -5848,7 +5851,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         held = self.tick()
 
-        self.assertEqual(held["status"], "degraded")
+        self.assertEqual(held["status"], "degraded", held)
         self.assertEqual(held["action"], "review-infrastructure-retry")
         self.assertEqual(held["attempts"], 1)
         self.assertIn("infrastructure failure", held["reason"])
@@ -5923,6 +5926,49 @@ class DispatcherRuntimeTests(unittest.TestCase):
             "an infrastructure retry charges the sprint no budget event",
         )
 
+    def test_pane_stayed_ready_retries_only_the_reviewer_with_the_exact_green_evidence(self) -> None:
+        """The live failure is a generic HostError from prompt delivery, not HeadPaneNotReady."""
+        self.start_dispatcher()
+        self.catalog._adapter = {"validation": {"ci": "local", "command": "python3 -m unittest"}}
+        self.host.commit = "d" * 40
+        receipt = {
+            "validated_sha": self.host.commit,
+            "base_sha": "b" * 40,
+            "gate_mode": "local",
+            "required_checks": [{"name": "unit", "conclusion": "SUCCESS", "url": ""}],
+            "completed_at": "2026-08-10T00:00:00+00:00",
+            "command_or_check_set_digest": "a" * 64,
+        }
+        self.host.gate_results = [GateResult("green", "initial", attestation=receipt)]
+        self._run_worker_to_validate()
+        before = self._record_of()
+        report_generation = before.report_generation
+        report_request = self._worker_report_request_id()
+        worker_identity = (before.handle, before.worker_leaf, before.worker_pid_file, before.worker_run)
+        self.host.fail_review_error = HostError(
+            "review prompt delivery failed: pane-stayed-ready after 20 seconds"
+        )
+
+        held = self.tick()
+
+        self.assertEqual(held["status"], "degraded", held)
+        self.assertEqual(held["action"], "review-infrastructure-retry")
+        self.assertEqual(held["candidate_sha"], self.host.commit)
+        self.assertIn("pane-stayed-ready", held["reason"])
+        record = self._record_of()
+        self.assertEqual(record.gate_attestation, receipt)
+        self.assertEqual(record.report_generation, report_generation)
+        self.assertEqual(self._worker_report_request_id(), report_request)
+        self.assertEqual(
+            (record.handle, record.worker_leaf, record.worker_pid_file, record.worker_run),
+            worker_identity,
+        )
+        self.assertEqual(record.review_infra_failures, 1)
+        self.assertEqual(record.review_launch_attempts, 0)
+        self.assertEqual(self.host.prepared, ["secretary-510-pilot"])
+        self.assertEqual(self.host.gate_calls, ["secretary-510-pilot"])
+        self.assertEqual(self.host.torn_down, [])
+
     def test_a_reviewer_that_never_starts_blocks_the_card_naming_the_held_candidate(self) -> None:
         limit = self._bound_review_infra_retries(3)
         self.start_dispatcher()
@@ -5943,6 +5989,10 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertIn("reviewer infrastructure failed", reason)
         self.assertIn("relaunch the reviewer rather than the worker", reason)
         self.assertEqual(self.host.torn_down, [], "a failed reviewer must not remove the checkout")
+        retained = self._record_of()
+        self.assertEqual(retained.gate_state, "green")
+        self.assertEqual(retained.state, "review_starting")
+        self.assertEqual(retained.review_infra_failures, limit)
         self.assertEqual(
             [_budget_event_type(event) for event in self.audit_events()
              if _budget_event_type(event) is not None],
@@ -6069,15 +6119,15 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         deferred = self.tick()
 
-        self.assertEqual(deferred["status"], "skipped")
-        self.assertEqual(deferred["action"], "review-launch-deferred")
-        self.assertEqual(deferred["readiness"], "busy")
-        self.assertIn("reviewer head pane is busy", deferred["reason"])
+        self.assertEqual(deferred["status"], "degraded")
+        self.assertEqual(deferred["action"], "review-infrastructure-retry")
+        self.assertIn("held in a dialog", deferred["reason"])
         task = self.reader.show("secretary-510-pilot")
         self.assertEqual(task["state"], "validate", "a deferred reviewer is not a failed round")
         record = self._record_of()
         self.assertEqual(record.state, "review_starting", "the next tick recovers this launch")
-        self.assertEqual(record.review_launch_attempts, 1)
+        self.assertEqual(record.review_launch_attempts, 0)
+        self.assertEqual(record.review_infra_failures, 1)
         self.assertEqual(self.host.torn_down, [], "a deferred reviewer must not touch the checkout")
 
     def test_a_deferred_review_launch_is_retried_on_the_next_tick(self) -> None:
@@ -6085,7 +6135,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self._run_worker_to_validate()
         self.host.fail_review_error = self._pane_not_ready("blocked")
         deferred = self.tick()
-        self.assertEqual(deferred["readiness"], "blocked")
+        self.assertEqual(deferred["action"], "review-infrastructure-retry")
         self.host.fail_review_error = None
 
         started = self.tick()
@@ -6097,7 +6147,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(record.review_launch_attempts, 0)
 
     def test_a_reviewer_pane_that_never_frees_up_blocks_the_card_over_that_pane(self) -> None:
-        limit = self._bound_bring_up_attempts(3)
+        limit = self._bound_review_infra_retries(3)
         self.start_dispatcher()
         self._run_worker_to_validate()
         self.host.fail_review_error = self._pane_not_ready("blocked")
@@ -6114,6 +6164,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         reason = task["comments"][-1]["body"]
         self.assertIn("reviewer head pane was held in a dialog", reason)
         self.assertNotIn("review bring-up failed", reason)
+        self.assertEqual(self._record_of().review_infra_failures, limit)
+        self.assertEqual(self._record_of().review_launch_attempts, 0)
 
     def test_a_rework_bringup_defers_on_a_pane_that_is_not_ready(self) -> None:
         """A rework is a bring-up like any other: a red gate that lands while the head's pane is
@@ -10437,7 +10489,9 @@ class DispatcherGateTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
             self._commit_with(ws, "one.txt", "One\n\nCo-authored-by: Codex <codex@openai.com>\n")
-            self._commit_with(ws, "two.txt", "Two\n\nCo-Authored-By: Claude <claude@anthropic.com>\n")
+            self._commit_with(
+                ws, "two.txt", "Two\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n"
+            )
             host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
 
             result = host.gate_check(self._task(), self._record(ws))
@@ -10558,6 +10612,21 @@ class DispatcherGateTests(unittest.TestCase):
 
             with mock.patch.object(host, "run_capture", side_effect=message_fails):
                 with self.assertRaisesRegex(HostError, "candidate history could not be read for"):
+                    host.gate_check(self._task(), self._record(ws))
+
+    def test_a_non_utf8_commit_message_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
+            original = host.run_capture
+
+            def decoding_fails(args, label, *, cwd=None):
+                if label == "gate candidate history message":
+                    raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+                return original(args, label, cwd=cwd)
+
+            with mock.patch.object(host, "run_capture", side_effect=decoding_fails):
+                with self.assertRaisesRegex(HostError, "could not be decoded"):
                     host.gate_check(self._task(), self._record(ws))
 
     def test_an_unreadable_candidate_history_fails_closed(self) -> None:

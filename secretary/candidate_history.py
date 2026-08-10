@@ -20,11 +20,9 @@ put whatever it takes in it. Two consequences run through this module:
     format that cannot be forged, and then one message per id; there is no delimiter a message can
     contain to break the parse into a shape that reads as "no trailers" (`parse_shas` refuses
     anything that is not an object id, rather than skipping it).
-  * Identity is decided on the trailer's address, not on prose. A display name is free text: a
-    human called Claude Martin is an ordinary co-author, and a matcher that reads names rejects
-    them. What identifies an agent is where its commits come from — a model vendor's domain, or the
-    agent's own account name — so that is what is matched, and a trailer with no address at all is
-    compared against the agents' exact full names rather than searched for a word.
+  * Addressed identities are compared to an exact registry of name/address pairs. Neither a model
+    vendor's domain nor an ambiguous local part is evidence on its own: both can belong to a human.
+    A trailer with no address is compared against exact agent names rather than searched for a word.
 
 The identity lists are deliberately narrow. They catch the agents this pipeline actually runs and
 the well-known ones next to them; they do not try to recognise "an AI" in general, because the cost
@@ -41,41 +39,21 @@ from typing import Iterable
 # per line and case-insensitively: `Co-authored-by`, `CO-AUTHORED-BY` and a leading-space variant
 # are the same trailer, and a candidate that hides one behind different casing is exactly what a
 # deterministic check is for.
-_TRAILER_RE = re.compile(r"(?im)^[ \t]*co-authored-by[ \t]*:[ \t]*(?P<identity>.+?)[ \t]*$")
+_TRAILER_RE = re.compile(r"(?i)^[ \t]*co-authored-by[ \t]*:[ \t]*(?P<identity>.+?)[ \t]*$")
+_ANY_TRAILER_RE = re.compile(r"^[ \t]*[A-Za-z0-9-]+[ \t]*:[ \t]*.+?[ \t]*$")
 
 # `Display Name <local@domain>`, the only shape git itself writes for an identity.
 _IDENTITY_RE = re.compile(r"^(?P<name>.*?)\s*<(?P<address>[^<>]*)>\s*$")
 
 # Domains whose mail is a model vendor's own. An address here is not a colleague's: it is the
 # vendor's agent account, which is what `noreply@anthropic.com` was on the two published commits.
-_VENDOR_DOMAINS = frozenset({
-    "anthropic.com",
-    "openai.com",
-    "cursor.com",
-    "cursor.sh",
-    "cognition.ai",
-    "cognition-labs.com",
-})
-
-# Account names the agents commit under, compared to the whole local part and never to a piece of
-# one. `claude.martin@human.example` is a person; `claude@…` is the agent. GitHub's noreply form
-# (`198982749+Copilot@users.noreply.github.com`) carries the account name after the numeric id, so
-# that prefix is stripped before the comparison — the domain itself belongs to every GitHub user
-# and can never be a vendor domain.
-_AGENT_ACCOUNTS = frozenset({
-    "aider",
-    "anthropic",
-    "chatgpt",
-    "claude",
-    "claude-code",
-    "claudecode",
-    "codex",
-    "copilot",
-    "cursor",
-    "devin",
-    "gemini",
-    "github-copilot",
-    "openai",
+_REGISTERED_AGENT_IDENTITIES = frozenset({
+    ("claude", "noreply@anthropic.com"),
+    ("claude code", "noreply@anthropic.com"),
+    ("codex", "codex@openai.com"),
+    ("openai codex", "codex@openai.com"),
+    ("github copilot", "copilot@users.noreply.github.com"),
+    ("copilot", "copilot@users.noreply.github.com"),
 })
 
 # Exact identities for the malformed trailer git would never write itself: `Co-Authored-By: Claude`
@@ -130,26 +108,36 @@ class AiAttribution:
 def forbidden_identity(trailer: str) -> str:
     """What makes this co-author an agent, or "" when it is an ordinary human co-author.
 
-    The answer doubles as the evidence line an operator reads, so it says which rule fired: the
-    vendor domain, the agent account, or the bare agent name of an addressless trailer.
+    The answer doubles as the evidence line an operator reads, so it names the exact registered
+    identity, or the bare agent name of an addressless trailer.
     """
     identity = " ".join(trailer.split())
     match = _IDENTITY_RE.match(identity)
     if match is None:
         # No address to judge. Only an exact agent name counts, never a name that contains one.
         return f"name {identity.lower()}" if identity.lower() in _AGENT_NAMES else ""
+    name = " ".join(match.group("name").split()).lower()
     address = match.group("address").strip().lower()
-    local, separator, domain = address.rpartition("@")
-    if not separator:
+    if "@" not in address:
         # `<claude>` is not an address either; treat what is inside the brackets as a bare name.
         bare = address or " ".join(match.group("name").split()).lower()
         return f"name {bare}" if bare in _AGENT_NAMES else ""
-    if domain in _VENDOR_DOMAINS:
-        return f"vendor domain {domain}"
-    account = _GITHUB_NOREPLY_ID_RE.sub("", local).partition("+")[0]
-    if account in _AGENT_ACCOUNTS:
-        return f"agent account {account}"
+    canonical_address = _GITHUB_NOREPLY_ID_RE.sub("", address)
+    if (name, canonical_address) in _REGISTERED_AGENT_IDENTITIES:
+        return f"registered agent {name} <{canonical_address}>"
     return ""
+
+
+def _final_trailer_lines(message: str) -> list[str]:
+    """Return only the terminal Git trailer block, never trailer-shaped prose in the body."""
+    lines = (message or "").rstrip().splitlines()
+    trailers: list[str] = []
+    for line in reversed(lines):
+        if not _ANY_TRAILER_RE.match(line):
+            break
+        trailers.append(line)
+    trailers.reverse()
+    return trailers
 
 
 def ai_attributions(commits: Iterable[Commit]) -> list[AiAttribution]:
@@ -160,7 +148,10 @@ def ai_attributions(commits: Iterable[Commit]) -> list[AiAttribution]:
     """
     found: list[AiAttribution] = []
     for commit in commits:
-        for match in _TRAILER_RE.finditer(commit.message or ""):
+        for line in _final_trailer_lines(commit.message):
+            match = _TRAILER_RE.match(line)
+            if match is None:
+                continue
             trailer = match.group("identity").strip()
             identity = forbidden_identity(trailer)
             if not identity:

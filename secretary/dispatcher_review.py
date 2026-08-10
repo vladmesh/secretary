@@ -30,7 +30,6 @@ from secretary.dispatcher_tui import (
 )
 from secretary.dispatcher_types import (
     HeadLaunchAborted,
-    HeadPaneNotReady,
     HostError,
     review_pane_label,
 )
@@ -321,7 +320,11 @@ def recover_review_launch(
                 _wait_cycle_token(record),
             ),
         )
-        records.pop(ref, None)
+        if record.gate_state != "green":
+            records.pop(ref, None)
+        else:
+            records[ref] = record
+            runtime.save_records(payload, records)
         return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": "review inventory failed"}
     if running:
         record.state = "reviewing"
@@ -481,39 +484,38 @@ def start_review(
                 reason=scrub_host_output(str(exc)),
             )
         clear_launch_intent(record)
-        deferred = launch_deferred(
-            record,
-            exc,
-            step="review",
-            ref=ref,
-            attempt_id=record.attempt_id or attempt_id,
-            role=REVIEW_ROLE,
-        )
-        if deferred is not None:
-            # No reviewer came up and none is running. The card keeps its record in
-            # `review_starting`, which is the state the next tick recovers the launch from, so the
-            # verdict this card is waiting for is delayed by a tick rather than lost to Blocked.
+        if record.gate_state == "green":
+            # Nothing came up and nothing is running, so there is no head to settle and no claim to
+            # make about the code. Every such failure goes through the one transition, whatever the
+            # bring-up failed on: a split that would not open, an inventory that would not answer,
+            # a pane held in a dialog, or a ready pane that never took the prompt and ended in
+            # `pane-stayed-ready`. Green candidates use only this infrastructure counter; the old
+            # pane deferral counter must not create a second ceiling or overwrite this action.
+            held = review_infrastructure_retry(
+                runtime, task, records, record, attempt_id,
+                payload=payload,
+                reason=scrub_host_output(str(exc)),
+            )
+            if held is not None:
+                return held
+            # Past the ceiling the card is blocked once, below, naming what it was holding.
+        else:
+            deferred = launch_deferred(
+                record,
+                exc,
+                step="review",
+                ref=ref,
+                attempt_id=record.attempt_id or attempt_id,
+                role=REVIEW_ROLE,
+            )
+        if record.gate_state != "green" and deferred is not None:
+            # No green candidate to preserve, but a pane that is merely busy still defers: the card
+            # keeps its record in `review_starting`, which is the state the next tick recovers the
+            # launch from, so the round is delayed by a tick rather than lost to Blocked.
             record.state = "review_starting"
             records[ref] = record
             runtime.save_records(payload, records)
             return deferred
-        held = (
-            None
-            if isinstance(exc, HeadPaneNotReady)
-            # A pane that would not take its prompt already has a hold of its own, with the same
-            # shape and the same guarantees: the record stays, only the reviewer is retried, and
-            # the count is bounded (secretary-1163). Holding it twice would only double how long an
-            # operator waits to hear about a head that is stuck in a dialog.
-            else review_infrastructure_retry(
-                runtime, task, records, record, attempt_id,
-                payload=payload, reason=scrub_host_output(str(exc)),
-            )
-        )
-        if held is not None:
-            # Nothing came up and nothing is running, so there is no head to settle and no claim
-            # to make about the code. The green candidate keeps its evidence and the next tick
-            # launches a reviewer over it again (secretary-1401).
-            return held
         runtime.writer.move(
             role="dispatcher",
             actor=runtime.owner,
@@ -530,7 +532,11 @@ def start_review(
                 record.attempt_id or attempt_id, "review-blocked", ref, _wait_cycle_token(record)
             ),
         )
-        records.pop(ref, None)
+        if record.gate_state != "green":
+            records.pop(ref, None)
+        else:
+            records[ref] = record
+            runtime.save_records(payload, records)
         return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": "host review failed"}
     # The reviewer is up: its pane and its launch configuration go into the intent on disk before
     # the record is told anything about it, so a tick that dies from here on is adopted with the

@@ -38,19 +38,18 @@ class CandidateHistoryTests(unittest.TestCase):
         self.assertEqual(len(found), 1)
         self.assertEqual(found[0].sha, "1" * 40)
         self.assertEqual(found[0].subject, "Add the preflight")
-        self.assertEqual(found[0].identity, "vendor domain anthropic.com")
+        self.assertIn("registered agent claude", found[0].identity)
         self.assertIn("noreply@anthropic.com", found[0].trailer)
 
     def test_a_codex_trailer_is_reported_too(self) -> None:
         commits = [_commit("Work\n\nCo-authored-by: Codex <codex@openai.com>\n")]
 
         self.assertEqual(
-            [item.identity for item in ai_attributions(commits)], ["vendor domain openai.com"]
+            [item.identity for item in ai_attributions(commits)],
+            ["registered agent codex <codex@openai.com>"],
         )
 
-    def test_an_agent_account_at_an_ordinary_domain_is_still_an_agent(self) -> None:
-        """The vendor domain is one signal, not the only one: a self-hosted runner commits under
-        the agent's own account name at whatever domain the installation uses."""
+    def test_only_registered_agent_name_and_address_pairs_are_rejected(self) -> None:
         commits = [
             _commit("Work\n\nCo-Authored-By: Claude <claude@example.invalid>\n", sha="1" * 40),
             _commit(
@@ -61,14 +60,15 @@ class CandidateHistoryTests(unittest.TestCase):
 
         self.assertEqual(
             [item.identity for item in ai_attributions(commits)],
-            ["agent account claude", "agent account copilot"],
+            ["registered agent copilot <copilot@users.noreply.github.com>"],
         )
 
     def test_casing_and_leading_space_do_not_hide_a_trailer(self) -> None:
         commits = [_commit("Work\n\n  CO-AUTHORED-BY:  Claude Code <NoReply@Anthropic.com>\n")]
 
         self.assertEqual(
-            [item.identity for item in ai_attributions(commits)], ["vendor domain anthropic.com"]
+            [item.identity for item in ai_attributions(commits)],
+            ["registered agent claude code <noreply@anthropic.com>"],
         )
 
     def test_an_addressless_agent_trailer_is_matched_on_its_exact_name(self) -> None:
@@ -99,6 +99,26 @@ class CandidateHistoryTests(unittest.TestCase):
 
         self.assertEqual(ai_attributions(commits), [])
 
+    def test_vendor_employees_and_ambiguous_local_parts_stay_human(self) -> None:
+        commits = [
+            _commit("Work\n\nCo-Authored-By: Taylor <taylor@openai.com>\n"),
+            _commit("Work\n\nCo-Authored-By: Claude Henderson <claude@personal.example>\n"),
+        ]
+
+        self.assertEqual(ai_attributions(commits), [])
+
+    def test_trailer_shaped_prose_outside_the_final_block_is_ignored(self) -> None:
+        commits = [
+            _commit(
+                "Document the policy\n\n"
+                "Example: Co-Authored-By trailers are forbidden.\n"
+                "Co-Authored-By: Codex <codex@openai.com>\n"
+                "This line is ordinary prose after the example.\n"
+            )
+        ]
+
+        self.assertEqual(ai_attributions(commits), [])
+
     def test_every_forbidden_trailer_across_every_commit_is_named_at_once(self) -> None:
         commits = [
             _commit("First\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n", sha="1" * 40),
@@ -117,9 +137,8 @@ class CandidateHistoryTests(unittest.TestCase):
         self.assertEqual(
             [(item.sha[:1], item.identity) for item in found],
             [
-                ("1", "vendor domain anthropic.com"),
-                ("3", "vendor domain openai.com"),
-                ("3", "agent account copilot"),
+                ("1", "registered agent claude <noreply@anthropic.com>"),
+                ("3", "registered agent codex <codex@openai.com>"),
             ],
         )
 
@@ -145,7 +164,8 @@ class CandidateHistoryTests(unittest.TestCase):
         ]
 
         self.assertEqual(
-            [item.identity for item in ai_attributions(commits)], ["vendor domain anthropic.com"]
+            [item.identity for item in ai_attributions(commits)],
+            ["registered agent claude <noreply@anthropic.com>"],
         )
 
     def test_the_repair_message_asks_for_a_local_rewrite_and_no_force_push(self) -> None:

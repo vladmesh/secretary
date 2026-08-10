@@ -260,10 +260,13 @@ def _candidate_history_gate(host, workspace: str, base: str) -> GateResult | Non
     message, or a listing that is not object ids raises `HostError`, and the card is blocked over a
     gate that could not say what it would publish rather than publishing unchecked history.
     """
-    listing = host.run_capture(
-        ["git", "-C", workspace, "log", "--format=%H", _history_range(host, workspace, base)],
-        "gate candidate history",
-    )
+    try:
+        listing = host.run_capture(
+            ["git", "-C", workspace, "log", "--format=%H", _history_range(host, workspace, base)],
+            "gate candidate history",
+        )
+    except UnicodeError as exc:
+        raise HostError("gate candidate history could not be decoded") from exc
     if listing.returncode != 0:
         raise HostError(
             "gate candidate history could not be read: "
@@ -275,10 +278,15 @@ def _candidate_history_gate(host, workspace: str, base: str) -> GateResult | Non
         raise HostError(f"gate candidate history could not be read: {exc}") from None
     commits = []
     for sha in shas:
-        message = host.run_capture(
-            ["git", "-C", workspace, "log", "-1", "--format=%B", sha],
-            "gate candidate history message",
-        )
+        try:
+            message = host.run_capture(
+                ["git", "-C", workspace, "log", "-1", "--format=%B", sha],
+                "gate candidate history message",
+            )
+        except UnicodeError as exc:
+            raise HostError(
+                f"gate candidate history could not be decoded for {sha[:12]}"
+            ) from exc
         if message.returncode != 0:
             raise HostError(
                 f"gate candidate history could not be read for {sha[:12]}: "
