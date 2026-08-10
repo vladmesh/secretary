@@ -51,12 +51,12 @@ freshness must still reflect significant linked-card events.
 
 ## Mechanical gate attestation
 
-- validated_sha: f1c437053775d5779fd5bd1278e24519fba169b0
+- validated_sha: 2dcc75aaea48b077e871128cf2d02e61acb26704
 - base_sha: 34da6d3d70c787130078e3f96c86ae4ac58a486f
 - gate_mode: github
 - required terminal checks:
-  - test: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/31376336107/job/93416306603)
-- completed_at: 2026-08-10T09:52:51+00:00
+  - test: SUCCESS (https://github.com/vladmesh/secretary/actions/runs/31378275566/job/93422394857)
+- completed_at: 2026-08-10T10:17:47+00:00
 - command_or_check_set_digest: e05e08ff6e9e51da3be176a7b5215dfddd2f768f01036631e8a3c9ab7be723ca
 
 Independently inspect the diff, acceptance criteria and invariants. The attested broad
@@ -81,10 +81,10 @@ real behaviour you verified and how. If no end-to-end check against the real bac
 was possible, write plainly that it was not done and which assumption stays unverified.
 
 Post exactly one review verdict through the secretary task protocol:
-Write the body to /tmp/secretary-verdict-secretary-1175-2.md with your file-writing tool,
+Write the body to /tmp/secretary-verdict-secretary-1175-8.md with your file-writing tool,
 then run the command below verbatim. Do not assemble the body inside the shell command
 (no heredoc, no mktemp, no echo pipeline) and do not add `rm`: the codex runtime refuses
 rm-style commands, and quotes or backticks in the body break the call. Leave the file in
 place afterwards; the dispatcher does not read it.
-PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1175 --role reviewer --kind green --request-id dispatcher-attempt-20260810T090939Z-2d279b77f589-review-green-secretary-1175-2 --body-file /tmp/secretary-verdict-secretary-1175-2.md
-PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1175 --role reviewer --kind red --request-id dispatcher-attempt-20260810T090939Z-2d279b77f589-review-red-secretary-1175-2 --body-file /tmp/secretary-verdict-secretary-1175-2.md
+PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1175 --role reviewer --kind green --request-id dispatcher-attempt-20260810T095430Z-0d19ce948eeb-review-green-secretary-1175-8 --body-file /tmp/secretary-verdict-secretary-1175-8.md
+PYTHONPATH="${TA_SECRETARY_REPO:-$HOME/secretary}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m secretary task verdict --ref secretary-1175 --role reviewer --kind red --request-id dispatcher-attempt-20260810T095430Z-0d19ce948eeb-review-red-secretary-1175-8 --body-file /tmp/secretary-verdict-secretary-1175-8.md

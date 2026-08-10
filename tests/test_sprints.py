@@ -2176,11 +2176,20 @@ class SprintAuditTraversalTests(SprintFixture):
         )
         return ref
 
-    def _terminal(self, reference: str, *, status: str) -> str:
+    def _entry(self, recorded_at: str = "2000-01-01T00:00:00Z") -> dict[str, str]:
+        return {
+            "selected_step": "implement", "selected_why": "needed", "rejected_alternatives": "wait",
+            "current_task": "next card", "dod_state": "tests pending", "next_safe_step": "run tests",
+            "recorded_at": recorded_at,
+        }
+
+    def _terminal(self, reference: str, *, status: str, recorded_at: str = "2000-01-01T00:00:00Z") -> str:
         """A closed or stopped sprint carrying a resume, seeded straight onto the board.
 
         A terminal sprint holds no reservation, so a live board accumulates them beside the
-        open one; the writer cannot open a second sprint over the fixture's project.
+        open one; the writer cannot open a second sprint over the fixture's project.  The real
+        `close`, hard-budget stop and restore transitions are traced separately, over rows this
+        fixture's writer produces itself.
         """
         board = ensure_sprint_board(self.client)  # type: ignore[arg-type]
         task_id = max(int(task["id"]) for task in self.client.tasks) + 1
@@ -2194,14 +2203,19 @@ class SprintAuditTraversalTests(SprintFixture):
             "sprint_goal": "seeded", "sprint_definition_of_done": "done",
             "sprint_repositories": json.dumps(["secretary"]), "sprint_status": status,
             "sprint_current_task": "",
-            "sprint_resume": json.dumps({
-                "selected_step": "implement", "selected_why": "needed", "rejected_alternatives": "wait",
-                "current_task": "next card", "dod_state": "tests pending", "next_safe_step": "run tests",
-                "recorded_at": "2000-01-01T00:00:00Z",
-            }),
+            "sprint_resume": json.dumps(self._entry(recorded_at)),
         }
         self.client.comments[task_id] = []
         return reference
+
+    def _sprint_event(self, reference: str, request_id: str, occurred_at: str) -> None:
+        """A significant sprint-scoped event: it would age the resume of an open sprint."""
+        TaskAudit(self.tmp.name).append(request_id, {
+            "event_id": f"evt_{request_id.replace('-', '_')}", "request_id": request_id,
+            "ref": reference, "kind": "budget_recorded", "outcome": "success",
+            "actor": {"role": "dispatcher"}, "payload": {"event_type": "red_ci"},
+            "occurred_at": occurred_at,
+        })
 
     def _reader(self) -> SprintReader:
         return SprintReader(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
@@ -2254,11 +2268,15 @@ class SprintAuditTraversalTests(SprintFixture):
     def test_closed_and_stopped_summaries_keep_the_documented_freshness_shape(self) -> None:
         closed = self._terminal("sprint:closed-summary", status="closed")
         stopped = self._terminal("sprint:stopped-summary", status="stopped")
+        # Events that would age an open sprint's resume.  A terminal sprint is judged by its own
+        # frozen record, so they are never read: the whole summary costs no traversal at all.
+        self._sprint_event(closed, "closed-later", "2099-01-01T00:00:00Z")
+        self._sprint_event(stopped, "stopped-later", "2099-01-01T00:00:00Z")
 
         with self._traversals() as traversals:
             summaries = {item["ref"]: item for item in self._reader().statuses()}
 
-        self.assertEqual(traversals["count"], 1)
+        self.assertEqual(traversals["count"], 0)
         self.assertEqual(summaries[closed]["status"], "closed")
         self.assertEqual(summaries[stopped]["status"], "stopped")
         self.assertEqual(summaries[stopped]["stop_reason"], "budget_hard_limit")
@@ -2270,8 +2288,144 @@ class SprintAuditTraversalTests(SprintFixture):
                 ["error", "fresh", "lag_seconds", "last_event_at", "recorded_at", "threshold_seconds"],
             )
             self.assertEqual(freshness["recorded_at"], "2000-01-01T00:00:00Z")
+            self.assertIsNone(freshness["last_event_at"])
+            self.assertEqual(freshness["lag_seconds"], 0)
             self.assertTrue(freshness["fresh"])
             self.assertIsNone(freshness["error"])
+
+    def test_an_all_terminal_installation_summarises_without_touching_the_audit(self) -> None:
+        """The acceptance case: only closed and stopped rows, every one with a valid resume."""
+        refs = [
+            self._terminal(f"sprint:terminal-{index}", status="closed" if index % 2 else "stopped")
+            for index in range(6)
+        ]
+        for index, ref in enumerate(refs):
+            self._sprint_event(ref, f"terminal-later-{index}", "2099-01-01T00:00:00Z")
+
+        with self._traversals() as mass:
+            summaries = {item["ref"]: item for item in self._reader().statuses()}
+        with self._traversals() as single:
+            direct = self._reader().status(refs[0])
+
+        self.assertEqual(sorted(summaries), sorted(refs))
+        self.assertEqual(mass["count"], 0)
+        self.assertEqual(single["count"], 0)
+        for freshness in [item["resume_freshness"] for item in summaries.values()] + [direct["resume_freshness"]]:
+            self.assertTrue(freshness["fresh"])
+            self.assertIsNone(freshness["error"])
+            self.assertIsNone(freshness["last_event_at"])
+
+    def test_every_terminal_transition_freezes_freshness_on_the_sprint_record(self) -> None:
+        """Close, hard-budget stop and restore all reach the same read-time rule."""
+        closing = self._resumed("close transition")
+        card = TaskWriter(self.client, data_dir=self.tmp.name).create(  # type: ignore[arg-type]
+            role="observer", actor="observer", project="secretary", task_type="code", title="linked",
+            target="ready", sprint=closing, request_id="close-card",
+        )["task"]
+        TaskAudit(self.tmp.name).append("close-later", {
+            "event_id": "evt_close_later", "request_id": "close-later", "ref": card["ref"],
+            "kind": "moved", "outcome": "success", "actor": {"role": "dispatcher"},
+            "payload": {"to": "assessment"}, "occurred_at": "2099-01-01T00:00:00Z",
+        })
+
+        with self._traversals() as while_open:
+            open_summary = self._reader().status(closing)
+        self.writer.close(role="po", actor="operator", reference=closing, request_id="close-it")
+        with self._traversals() as after_close:
+            closed_summary = self._reader().status(closing)
+
+        # Open: one traversal and the later card event is seen.  Closed: the same record, no read.
+        self.assertEqual(while_open["count"], 1)
+        self.assertEqual(open_summary["resume_freshness"]["error"], "resume_stale")
+        self.assertEqual(open_summary["resume_freshness"]["last_event_at"], "2099-01-01T00:00:00Z")
+        self.assertEqual(after_close["count"], 0)
+        self.assertEqual(closed_summary["status"], "closed")
+        self.assertTrue(closed_summary["resume_freshness"]["fresh"])
+        self.assertEqual(closed_summary["resume_freshness"]["recorded_at"], "2000-01-01T00:00:00Z")
+        # The record cannot move after the transition, which is what makes it the durable source.
+        with self.assertRaisesRegex(TaskError, "sprint is closed"):
+            self.writer.resume(
+                role="po", actor="operator", reference=closing, request_id="resume-after-close",
+                entry=self._entry("2030-01-01T00:00:00Z"),
+            )
+
+        stopping = self._resumed("stop transition")
+        budget_writer = SprintWriter(  # type: ignore[arg-type]
+            self.client, data_dir=self.tmp.name, instance=self.instance,
+            thresholds={"signal": 1, "hard": 1},
+        )
+        budget_writer.record_budget(
+            role="dispatcher", actor="dispatcher", reference=stopping, event_type="blocked",
+            request_id="hard-stop", source_event_id="evt-card-blocked",
+        )
+
+        with self._traversals() as after_stop:
+            stopped_summary = self._reader().status(stopping)
+
+        self.assertEqual(stopped_summary["status"], "stopped")
+        self.assertEqual(stopped_summary["stop_reason"], "budget_hard_limit")
+        # The stop itself writes a significant sprint event, and it still ages nothing.
+        self.assertEqual(after_stop["count"], 0)
+        self.assertTrue(stopped_summary["resume_freshness"]["fresh"])
+        self.assertEqual(stopped_summary["resume_freshness"]["recorded_at"], "2000-01-01T00:00:00Z")
+
+        restored = self.writer.restore_create(
+            reference="sprint:restored", goal="restored", status="closed", request_id="restore-create",
+        )["sprint"]["ref"]
+        self.writer.restore(
+            reference=restored, values={"sprint_resume": json.dumps(self._entry("2001-01-01T00:00:00Z"))},
+            request_id="restore-resume",
+        )
+        self._sprint_event(restored, "restored-later", "2099-01-01T00:00:00Z")
+
+        with self._traversals() as after_restore:
+            restored_summary = self._reader().status(restored)
+
+        self.assertEqual(restored_summary["status"], "closed")
+        self.assertEqual(after_restore["count"], 0)
+        self.assertTrue(restored_summary["resume_freshness"]["fresh"])
+        self.assertEqual(restored_summary["resume_freshness"]["recorded_at"], "2001-01-01T00:00:00Z")
+
+    def test_a_reopened_sprint_is_judged_against_the_audit_again(self) -> None:
+        """The rule reads the sprint's state, so it is not sticky once the sprint reopens."""
+        ref = self._resumed("reopen transition")
+        self.writer.close(role="po", actor="operator", reference=ref, request_id="close-before-reopen")
+        self._sprint_event(ref, "reopen-later", "2099-01-01T00:00:00Z")
+
+        with self._traversals() as closed:
+            closed_summary = self._reader().status(ref)
+        self.writer.reopen(
+            role="po", actor="operator", reference=ref, request_id="reopen-it",
+            observer=head_choice("codex-observer"),
+        )
+        with self._traversals() as reopened:
+            reopened_summary = self._reader().status(ref)
+
+        self.assertEqual(closed["count"], 0)
+        self.assertTrue(closed_summary["resume_freshness"]["fresh"])
+        self.assertEqual(reopened["count"], 1)
+        self.assertEqual(reopened_summary["resume_freshness"]["error"], "resume_stale")
+        self.assertEqual(reopened_summary["resume_freshness"]["last_event_at"], "2099-01-01T00:00:00Z")
+
+    def test_an_unusable_terminal_resume_still_fails_closed_without_the_audit(self) -> None:
+        """A legacy record the writer would refuse today keeps its documented answer."""
+        naive = self._terminal("sprint:legacy-terminal", status="closed", recorded_at="2026-07-29T12:00:00")
+        empty = self._terminal("sprint:missing-terminal", status="stopped")
+        empty_id = next(int(task["id"]) for task in self.client.tasks if task.get("reference") == empty)
+        self.client.metadata[empty_id].pop("sprint_resume")
+
+        with self._traversals() as traversals:
+            summaries = {item["ref"]: item for item in self._reader().statuses()}
+
+        self.assertEqual(traversals["count"], 0)
+        self.assertFalse(summaries[naive]["resume_freshness"]["fresh"])
+        self.assertEqual(summaries[naive]["resume_freshness"]["error"], "resume_stale")
+        # No event to trail, so the lag is the zero the helper already answers for that case; the
+        # unusable timestamp still fails closed on its own.
+        self.assertEqual(summaries[naive]["resume_freshness"]["lag_seconds"], 0)
+        self.assertEqual(summaries[naive]["resume_freshness"]["recorded_at"], "2026-07-29T12:00:00")
+        self.assertEqual(summaries[empty]["resume_freshness"]["error"], "resume_missing")
+        self.assertIsNone(summaries[empty]["resume_freshness"]["recorded_at"])
 
     def test_a_missing_resume_still_answers_without_reading_the_audit(self) -> None:
         ref = self._create(goal="no resume")["sprint"]["ref"]

@@ -89,6 +89,11 @@ SPRINT_CREATED = "created"
 SPRINT_REOPENED = "reopened"
 SPRINT_CLOSED = "closed"
 SPRINT_STATUSES = {"open", "closed", "stopped"}
+# A sprint in one of these states takes no further semantic work: `_write` refuses a resume,
+# a comment and a current task on it, so the resume record its row carries is the last one
+# anybody wrote and cannot go stale afterwards.  Freshness for such a sprint is read from
+# that record alone, which is why no status path consults the audit for it.
+SPRINT_TERMINAL_STATUSES = {"closed", "stopped"}
 # An admitted create that the backend refused holds nothing: it compensates its own row
 # and re-checks the installation before it publishes.  These are the refusals of that
 # re-check, and they are answers to the caller rather than a pending repair.
@@ -637,6 +642,15 @@ class SprintReader:
     def _resume_freshness(
         self, sprint: dict[str, Any], resume: dict[str, Any] | None, *, audit: "_AuditOnce | None" = None,
     ) -> dict[str, Any]:
+        """The freshness of a sprint's resume, read here and nowhere else.
+
+        An open sprint is judged against the significant linked-card events of the committed
+        audit, and the summaries of one operation share a single traversal of it.  A closed or
+        stopped sprint is judged against its own record and nothing else: the record is frozen
+        at the terminal transition, so no later event can age it, and no status path reads the
+        audit for such a sprint.  The object returned keeps its documented shape in every case,
+        and a missing or unusable resume is still answered from the record alone.
+        """
         if not resume:
             return {
                 "fresh": False, "error": "resume_missing", "recorded_at": None,
@@ -644,7 +658,8 @@ class SprintReader:
                 "threshold_seconds": RESUME_FRESHNESS_GRACE_SECONDS,
             }
         last_event = ""
-        if self.data_dir is not None:
+        terminal = str(sprint.get("status") or "") in SPRINT_TERMINAL_STATUSES
+        if self.data_dir is not None and not terminal:
             refs = {
                 str(card.get("ref") or "")
                 for card in sprint.get("cards") or []

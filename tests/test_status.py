@@ -192,7 +192,8 @@ class StatusCliTests(unittest.TestCase):
         self.assertIn("Secretary status:", output.getvalue())
         self.assertTrue(snapshot["dispatcher"]["active_attempts"][0]["watchdogs"]["worker"]["panel"]["live"])
 
-    def test_status_json_includes_stopped_sprint_and_stale_resume(self):
+    def test_status_json_includes_stopped_sprint_and_its_frozen_resume(self):
+        """A stopped sprint reports the freshness of its own record, not of later events."""
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             data_dir = root / "data"
@@ -239,11 +240,16 @@ class StatusCliTests(unittest.TestCase):
         self.assertEqual(sprint["stop_reason"], "budget_hard_limit")
         self.assertEqual(sprint["budget"]["by_type"]["blocked"], 2)
         self.assertEqual(sprint["budget"]["thresholds"], {"signal": 20, "hard": 40})
-        self.assertEqual(sprint["resume_freshness"]["error"], "resume_stale")
+        # The linked card moved after the sprint stopped.  The sprint takes no further work, so
+        # its resume cannot go stale: freshness comes from the record the stop froze.
+        self.assertTrue(sprint["resume_freshness"]["fresh"])
+        self.assertIsNone(sprint["resume_freshness"]["error"])
+        self.assertEqual(sprint["resume_freshness"]["recorded_at"], "2020-01-01T00:00:00Z")
+        self.assertIsNone(sprint["resume_freshness"]["last_event_at"])
 
     def test_status_json_reads_the_task_audit_once_however_many_sprints_exist(self):
         """`secretary status --json` costs one audit traversal, not one per sprint."""
-        def snapshot(sprint_count: int) -> tuple[dict, int]:
+        def snapshot(sprint_count: int, *, open_first: bool = True) -> tuple[dict, int]:
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
                 data_dir = root / "data"
@@ -263,7 +269,7 @@ class StatusCliTests(unittest.TestCase):
                 for index in range(sprint_count):
                     board.add_sprint(
                         f"sprint:{index}",
-                        status="open" if index == 0 else "closed",
+                        status="open" if index == 0 and open_first else "closed",
                         sprint_resume=json.dumps({
                             "selected_step": "fix", "selected_why": "blocked",
                             "rejected_alternatives": "wait", "current_task": "secretary-510-pilot",
@@ -295,11 +301,18 @@ class StatusCliTests(unittest.TestCase):
 
         one, one_traversals = snapshot(1)
         many, many_traversals = snapshot(4)
+        terminal, terminal_traversals = snapshot(4, open_first=False)
 
         self.assertEqual(len(one["installation"]["sprints"]["items"]), 1)
         self.assertEqual(len(many["installation"]["sprints"]["items"]), 4)
         self.assertEqual(one_traversals, 1)
         self.assertEqual(many_traversals, 1)
+        # An installation whose sprints have all finished reads the journal not at all.
+        self.assertEqual(len(terminal["installation"]["sprints"]["items"]), 4)
+        self.assertEqual(terminal_traversals, 0)
+        for item in terminal["installation"]["sprints"]["items"]:
+            self.assertTrue(item["resume_freshness"]["fresh"])
+            self.assertIsNone(item["resume_freshness"]["last_event_at"])
         for items in (one["installation"]["sprints"]["items"], many["installation"]["sprints"]["items"]):
             # The open sprint still reflects the significant later linked-card event.
             open_sprint = next(item for item in items if item["status"] == "open")
