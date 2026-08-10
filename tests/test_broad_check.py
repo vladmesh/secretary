@@ -496,9 +496,14 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
         self.assertTrue(inside_receipt["project_provenance"]["inside_workspace"])
         self.assertTrue(usable_receipt(self.root, suite).usable)
 
-    def test_a_module_check_that_imported_no_project_authorizes_nothing(self) -> None:
+    def test_a_check_process_outside_the_candidate_authorizes_nothing_even_when_it_fails(
+        self,
+    ) -> None:
         # The suite lives outside the candidate and the safe path keeps the working directory off
-        # `sys.path`, so the check process can run while importing no project at all.
+        # `sys.path`, so whatever this check process imported, it was not this checkout. Whether
+        # the project is importable at all from there depends on the machine — an installed copy
+        # in site-packages is exactly the case CI runs — so the assertion is about the candidate
+        # boundary, which is the invariant, and not about that machine's site configuration.
         (self.scripts / "crashsuite.py").write_text("raise SystemExit(4)\n", encoding="utf-8")
         suite = CheckSpec.for_module("crashsuite")
         env = {
@@ -512,10 +517,41 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
         self.assertEqual(receipt["exit_code"], 4)
         provenance = receipt["project_provenance"]
         self.assertEqual(provenance["origin"], "check-process")
-        self.assertEqual(provenance["imported_secretary"], "")
+        self.assertNotIn(str(self.root.resolve()), provenance["imported_secretary"])
+        self.assertFalse(provenance["inside_workspace"])
         lookup = usable_receipt(self.root, suite)
         self.assertFalse(lookup.usable)
-        self.assertIn("imported no project", lookup.reason)
+        self.assertIsNone(lookup.authorized())
+
+    def test_every_untrusted_import_is_refused_by_the_one_predicate(self) -> None:
+        """The refusal table itself, without an interpreter's site configuration in the way."""
+        cases = {
+            "no provenance at all": {},
+            "an unobserved shape": {"project_provenance": dict(broad_check._UNOBSERVED_PROVENANCE)},
+            "a check process that imported nothing": {
+                "project_provenance": {"origin": "check-process", "imported_secretary": ""}
+            },
+            "an import from outside the candidate": {
+                "project_provenance": {
+                    "origin": "check-process",
+                    "imported_secretary": str(self.scripts / "secretary" / "__init__.py"),
+                }
+            },
+            "an unresolvable import path": {
+                "project_provenance": {"origin": "check-process", "imported_secretary": "\x00"}
+            },
+        }
+        for name, receipt in cases.items():
+            with self.subTest(case=name):
+                self.assertTrue(broad_check.candidate_import_refusal(receipt, self.root))
+
+        trusted = {
+            "project_provenance": {
+                "origin": "check-process",
+                "imported_secretary": str(self.root / "secretary" / "__init__.py"),
+            }
+        }
+        self.assertEqual(broad_check.candidate_import_refusal(trusted, self.root), "")
 
     def test_every_route_refuses_the_same_receipts_for_the_same_reasons(self) -> None:
         """No route may authorize reuse the other would refuse: `check show` and `--reuse` read
