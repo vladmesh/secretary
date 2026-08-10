@@ -20,9 +20,12 @@ from pathlib import Path
 from unittest import mock
 
 from secretary import broad_check
+from signal import NSIG
+
 from secretary.broad_check import (
     BroadCheckError,
     CheckSpec,
+    RunResult,
     content_identity,
     load_receipt,
     parse_unittest_summary,
@@ -365,6 +368,116 @@ class ResultInvariantTests(BroadCheckTestCase):
         path.write_text(json.dumps(payload), encoding="utf-8")
         return path
 
+    def _damaged(self, marker: Path, **changes: object) -> tuple[CheckSpec, Path, list[str]]:
+        """A real receipt for a red suite, damaged and re-digested the way a buggy writer would."""
+        suite = self._suite(
+            "reddish",
+            f"open({str(marker)!r}, 'a', encoding='utf-8').write('ran\\n')\nraise SystemExit(2)\n",
+        )
+        argv = ["check", "broad", "--root", str(self.root), "--reuse", "--module", "reddish"]
+        self.assertEqual(_status(argv), 2)
+        path = receipt_path(self.root, suite)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload.update(changes)
+        payload["receipt_digest"] = broad_check._receipt_digest(payload)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return suite, path, argv
+
+    def test_a_complete_receipt_with_a_whitespace_reason_is_refused_and_the_check_runs(self) -> None:
+        """secretary-1406 review, BLOCKER-RECEIPT-WHITESPACE-REASON: a blank-after-strip reason
+        used to read as no reason at all, so a complete receipt could carry one and still be
+        reused. No run writes anything but `""` there."""
+        marker = self.scripts / "whitespace-runs.txt"
+        suite, path, argv = self._damaged(marker, incomplete_reason=" ")
+
+        self.assertIsNone(load_receipt(path))
+        lookup = usable_receipt(self.root, suite)
+        self.assertFalse(lookup.usable)
+        self.assertIsNone(lookup.authorized())
+        self.assertIsNone(lookup.authorized_result())
+
+        reused = _run_main(argv)
+        self.assertFalse(reused["reused"])
+        self.assertEqual(marker.read_text(encoding="utf-8").count("ran"), 2)
+
+    def test_a_receipt_recording_exit_256_is_refused_and_cannot_mask_a_failure(self) -> None:
+        """secretary-1406 review, BLOCKER-RECEIPT-EXIT-RANGE: 256 is not a status this POSIX
+        wrapper can observe, and reusing it returned shell 0 because the value is masked."""
+        marker = self.scripts / "range-runs.txt"
+        suite, path, argv = self._damaged(marker, exit_code=256, verdict="failed")
+
+        self.assertIsNone(load_receipt(path))
+        self.assertFalse(usable_receipt(self.root, suite).usable)
+
+        # At the shell, through a real process: the check runs again and its own 2 comes back,
+        # rather than the stored 256 being masked to a successful 0.
+        completed = subprocess.run(
+            [sys.executable, "-m", "secretary", *argv],
+            cwd=Path(__file__).resolve().parents[1],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertFalse(json.loads(completed.stdout)["reused"])
+        self.assertEqual(marker.read_text(encoding="utf-8").count("ran"), 2)
+
+    def test_a_valid_red_receipt_still_preserves_its_status_at_the_shell(self) -> None:
+        """The other half of the same behaviour: an intact exit-2 receipt is reused, and reuse
+        still answers 2 through a real process."""
+        marker = self.scripts / "valid-runs.txt"
+        suite, _, argv = self._damaged(marker)  # no damage: the receipt stays valid
+
+        self.assertTrue(usable_receipt(self.root, suite).usable)
+        completed = subprocess.run(
+            [sys.executable, "-m", "secretary", *argv],
+            cwd=Path(__file__).resolve().parents[1],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertTrue(json.loads(completed.stdout)["reused"])
+        self.assertEqual(marker.read_text(encoding="utf-8").count("ran"), 1, "the check was skipped")
+
+    def test_the_representable_edges_are_exactly_what_a_posix_process_can_return(self) -> None:
+        representable = {
+            "the widest normal status": (255, ""),
+            "a green status": (0, ""),
+            "the lowest signal": (-1, ""),
+            "the highest signal this platform defines": (-(NSIG - 1), ""),
+            "a normal exit the runner still calls unfinished": (0, "timed out after 0.5s"),
+        }
+        for name, (code, reason) in representable.items():
+            with self.subTest(case=name):
+                self.assertIsNotNone(RunResult.observe(code, reason), name)
+
+        unrepresentable = {
+            "a status one past the widest": (256, ""),
+            "a wildly out-of-range status": (4096, ""),
+            "a signal this platform does not define": (-NSIG, ""),
+            "a code that is not a number": ("2", ""),
+            "a boolean": (True, ""),
+            "a reason that is not a string": (0, None),
+        }
+        for name, (code, reason) in unrepresentable.items():
+            with self.subTest(case=name):
+                self.assertIsNone(RunResult.observe(code, reason), name)
+
+    def test_a_signalled_result_keeps_a_canonical_reason_and_an_unknown_verdict(self) -> None:
+        bare = RunResult.observe(-15, "")
+        given = RunResult.observe(-15, "timed out after 0.5s")
+
+        self.assertEqual(bare.incomplete_reason, "killed by signal 15")
+        self.assertEqual(given.incomplete_reason, "timed out after 0.5s")
+        for result in (bare, given):
+            self.assertEqual(result.signal, 15)
+            self.assertEqual(result.status, "incomplete")
+            self.assertEqual(result.verdict, "unknown")
+            self.assertEqual(result.shell_status, 143)
+
     def test_the_boundary_refuses_every_result_no_run_could_have_written(self) -> None:
         cases = {
             "a complete run that died on a signal": {
@@ -388,6 +501,15 @@ class ResultInvariantTests(BroadCheckTestCase):
             "an exit code that is not a number": {"exit_code": "0"},
             "a missing signal": {"signal": None},
             "a boolean masquerading as an exit code": {"exit_code": True, "verdict": "failed"},
+            "a normal status outside the POSIX range": {"exit_code": 256, "verdict": "failed"},
+            "a signal this platform does not define": {
+                "exit_code": -NSIG, "signal": NSIG, "status": "incomplete", "verdict": "unknown",
+                "incomplete_reason": f"killed by signal {NSIG}",
+            },
+            "a complete run whose reason is only whitespace": {"incomplete_reason": " "},
+            "an incomplete reason that is not canonical": {
+                "status": "incomplete", "verdict": "unknown", "incomplete_reason": "timed out  ",
+            },
         }
         for name, changes in cases.items():
             with self.subTest(case=name):
@@ -434,8 +556,13 @@ class ResultInvariantTests(BroadCheckTestCase):
         )
 
         for bypass in ("json.load", "read_text", "read_bytes", "open("):
-            self.assertNotIn(bypass, source, f"check_commands must not read a receipt itself")
+            self.assertNotIn(bypass, source, "check_commands must not read a receipt itself")
         self.assertNotIn("receipt_dir", source)
+        # Nor may it take a result out of a receipt by hand: the status it returns comes from the
+        # canonical model the boundary reconstructed.
+        for raw in ('["exit_code"]', '"exit_code"', '["verdict"]', '["signal"]'):
+            self.assertNotIn(raw, source, "check_commands must not read raw result fields")
+        self.assertIn("shell_status", source)
         # And the only producer of a lookup is the function that starts by loading.
         self.assertIn("receipt = load_receipt(path)", Path(broad_check.__file__).read_text(
             encoding="utf-8"

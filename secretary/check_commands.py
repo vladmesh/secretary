@@ -26,6 +26,7 @@ from secretary.broad_check import (
     BroadCheckError,
     CheckSpec,
     receipt_path,
+    recorded_result,
     run_broad_check,
     summarize,
     usable_receipt,
@@ -89,18 +90,6 @@ def _fail(exc: BroadCheckError) -> int:
     return 2
 
 
-def _shell_status(exit_code: int) -> int:
-    """Turn one recorded process result into this command's exit status.
-
-    A usable receipt substitutes for rerunning the exact check, so it has to answer the question
-    the run answered — including `2` for a usage failure or `3` for a tool-specific one.  Flattening
-    every non-passing outcome to `1` loses precisely the fact the caller came for (secretary-1406
-    review).  A signal has no portable exit status of its own, so it becomes the shell's `128+N`,
-    and it does so here whether the result was just observed or read back out of a receipt.
-    """
-    return exit_code if exit_code >= 0 else 128 - exit_code
-
-
 def _spec(args: argparse.Namespace) -> CheckSpec:
     if args.module:
         return CheckSpec.for_module(args.module, args.module_arg)
@@ -124,8 +113,10 @@ def run_check_broad(args: argparse.Namespace) -> int:
                      "summary": summarize(authorized)},
                     sort_keys=True, indent=2,
                 ))
-                # A receipt that stands in for the run hands back the result that run had.
-                return _shell_status(int(authorized["exit_code"]))
+                # A receipt that stands in for the run hands back the result that run had, taken
+                # from the canonical model the load boundary reconstructed — never from a raw
+                # field this command read for itself.
+                return lookup.authorized_result().shell_status
         # The check's combined output goes to stderr so it stays visible live while stdout keeps
         # carrying exactly one JSON document, as every other command here does.
         exit_code, receipt = run_broad_check(
@@ -141,7 +132,10 @@ def run_check_broad(args: argparse.Namespace) -> int:
          "summary": summarize(receipt)},
         sort_keys=True, indent=2,
     ))
-    return _shell_status(exit_code)
+    result = recorded_result(receipt)
+    if result is None:  # unreachable: the writer records the model it just derived
+        raise BroadCheckError("unrepresentable_result", "the check result could not be recorded")
+    return result.shell_status
 
 
 def run_check_show(args: argparse.Namespace) -> int:

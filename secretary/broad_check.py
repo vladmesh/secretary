@@ -40,6 +40,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from signal import NSIG
 from pathlib import Path
 from typing import IO, Any, Iterable, Mapping
 
@@ -55,6 +56,8 @@ MAX_COMMAND_CHARS = 4096
 #: Bounds on the streaming parser's own state: a line longer than this cannot be a runner summary,
 #: and a verdict's detail is a handful of counts.
 _MAX_LINE_BYTES = 4096
+#: The widest normal exit status a POSIX process can hand back.
+_MAX_EXIT_STATUS = 255
 _MAX_DETAIL_CHARS = 512
 _READ_CHUNK = 65536
 _GIT_TIMEOUT = 60
@@ -577,11 +580,14 @@ def _build_payload(
     incomplete_reason: str,
 ) -> dict[str, object]:
     tail_text = tail.text()
-    status = _STATUS_INCOMPLETE if incomplete_reason else _STATUS_COMPLETE
-    if status == _STATUS_INCOMPLETE:
-        verdict = _VERDICT_UNKNOWN
-    else:
-        verdict = _VERDICT_PASSED if exit_code == 0 else _VERDICT_FAILED
+    # The writer does not compose these fields by hand: it records the one model, so what a reader
+    # reconstructs at the boundary is by construction what was written.
+    result = RunResult.observe(exit_code, incomplete_reason)
+    if result is None:
+        raise BroadCheckError(
+            "unrepresentable_result",
+            f"the check returned {exit_code!r}, which is not a result this wrapper can record",
+        )
     payload: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
         "command": spec.identity,
@@ -595,11 +601,7 @@ def _build_payload(
         "started_at": started_at,
         "ended_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
         "duration_seconds": round(max(duration, 0.0), 3),
-        "exit_code": exit_code,
-        "signal": -exit_code if exit_code < 0 else 0,
-        "status": status,
-        "incomplete_reason": incomplete_reason,
-        "verdict": verdict,
+        **result.as_fields(),
         "parsed": parsed,
         "output_bytes": tail.total_bytes,
         "output_lines": tail.total_lines,
@@ -619,51 +621,113 @@ def _write_receipt(path: Path, payload: Mapping[str, object]) -> None:
         raise BroadCheckError("receipt_unwritable", str(exc)) from None
 
 
-def result_refusal(payload: Mapping[str, object]) -> str:
-    """Why this receipt's recorded result could not have been written by a run of this wrapper.
+@dataclass(frozen=True)
+class RunResult:
+    """The one canonical model of what a check process did.
 
-    The digest proves a payload was not edited *after* something computed it; it says nothing about
-    whether the numbers inside describe a real run.  A tool that crashed mid-write, or rewrote the
-    artifact and recomputed the public digest, can leave a receipt that says a suite completed while
-    also recording that it died on a signal — and "complete" is exactly the claim a reader acts on
-    (secretary-1406 review).  So the writer's own invariants are checked here, at the boundary, and
-    a receipt that cannot have come from a run is not a receipt at all.
+    Every recorded result field is a function of two facts: the raw ``Popen.returncode`` and the
+    reason the runner has for calling the run unfinished.  Deriving `signal`, `status`, `verdict`,
+    the stored reason and the shell status from that one model — rather than checking them against
+    each other one predicate at a time — is what keeps a reader from having to guess which of two
+    disagreeing fields to believe, and is why a stored `" "` reason or an exit code of `256` are
+    refused without anybody having thought of them individually (secretary-1406 review).
 
-    The writer's rules, in full: `signal` is `-exit_code` for a signalled result and `0` otherwise;
-    a signalled result is always incomplete; an incomplete result carries an unknown verdict and a
-    reason; a complete result carries no reason, and its verdict is `passed` exactly when the exit
-    status was zero and `failed` otherwise.
+    The domain is what this POSIX wrapper can actually observe: a normal status of 0..255, or a
+    negative code naming a signal this platform defines.  Anything else was never written by a run.
     """
-    exit_code = payload.get("exit_code")
-    signal = payload.get("signal")
-    status = payload.get("status")
-    verdict = payload.get("verdict")
-    reason = payload.get("incomplete_reason")
-    for name, value in (("exit_code", exit_code), ("signal", signal)):
-        if not isinstance(value, int) or isinstance(value, bool):
-            return f"{name} is not an integer"
-    if not isinstance(reason, str):
-        return "incomplete_reason is not a string"
-    if status not in (_STATUS_COMPLETE, _STATUS_INCOMPLETE):
-        return f"status {status!r} was never written by a run"
-    if verdict not in (_VERDICT_PASSED, _VERDICT_FAILED, _VERDICT_UNKNOWN):
-        return f"verdict {verdict!r} was never written by a run"
-    expected_signal = -exit_code if exit_code < 0 else 0
-    if signal != expected_signal:
-        return f"exit code {exit_code} and signal {signal} disagree"
-    if exit_code < 0 and status != _STATUS_INCOMPLETE:
-        return "a signalled result cannot be complete"
-    if status == _STATUS_INCOMPLETE:
-        if verdict != _VERDICT_UNKNOWN:
-            return "an incomplete run decided nothing, so its verdict cannot be known"
-        if not reason.strip():
-            return "an incomplete run records why it did not finish"
-        return ""
-    if reason.strip():
-        return "a complete run records no incomplete reason"
-    expected = _VERDICT_PASSED if exit_code == 0 else _VERDICT_FAILED
-    if verdict != expected:
-        return f"exit code {exit_code} and verdict {verdict!r} disagree"
+
+    exit_code: int
+    incomplete_reason: str
+
+    @classmethod
+    def observe(cls, exit_code: object, incomplete_reason: object) -> "RunResult | None":
+        """Build the model from a raw process result, or refuse a result nothing could produce."""
+        if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+            return None
+        if not isinstance(incomplete_reason, str):
+            return None
+        if exit_code < 0:
+            if not (1 <= -exit_code < NSIG):
+                return None
+            # A signalled run is unfinished by construction; if the runner has nothing more
+            # specific to say, the canonical reason is the signal itself.
+            reason = incomplete_reason.strip() or f"killed by signal {-exit_code}"
+        else:
+            if exit_code > _MAX_EXIT_STATUS:
+                return None
+            reason = incomplete_reason.strip()
+        return cls(exit_code, reason)
+
+    @property
+    def signal(self) -> int:
+        return -self.exit_code if self.exit_code < 0 else 0
+
+    @property
+    def status(self) -> str:
+        return _STATUS_INCOMPLETE if self.incomplete_reason else _STATUS_COMPLETE
+
+    @property
+    def verdict(self) -> str:
+        if self.status == _STATUS_INCOMPLETE:
+            return _VERDICT_UNKNOWN
+        return _VERDICT_PASSED if self.exit_code == 0 else _VERDICT_FAILED
+
+    @property
+    def shell_status(self) -> int:
+        """The status this result gives a caller: `128+N` for a signal, otherwise its own.
+
+        One rule, used whether the result was just observed or read back from a receipt, so a
+        reused receipt answers exactly what the run it replaces answered.
+        """
+        return self.exit_code if self.exit_code >= 0 else 128 - self.exit_code
+
+    def as_fields(self) -> dict[str, object]:
+        return {
+            "exit_code": self.exit_code,
+            "signal": self.signal,
+            "status": self.status,
+            "incomplete_reason": self.incomplete_reason,
+            "verdict": self.verdict,
+        }
+
+    @classmethod
+    def restore(cls, payload: Mapping[str, object]) -> "RunResult | None":
+        """Reconstruct the model from stored fields, and insist the store agrees with it exactly."""
+        result = cls.observe(payload.get("exit_code"), payload.get("incomplete_reason"))
+        if result is None:
+            return None
+        fields = result.as_fields()
+        if any(payload.get(key) != value for key, value in fields.items()):
+            return None
+        return result
+
+
+def recorded_result(receipt: Mapping[str, object]) -> RunResult | None:
+    """The model behind an already-loaded receipt; readers take their answers from here."""
+    return RunResult.restore(receipt)
+
+
+def result_refusal(payload: Mapping[str, object]) -> str:
+    """Why this receipt's recorded result could not have been written by a run, or ``""``.
+
+    The digest proves a payload was not edited after something computed it; it says nothing about
+    whether the numbers inside describe a run that happened.  This states the difference, and it
+    states it by rebuilding the canonical model and comparing every stored field with it, so the
+    answer cannot drift from what the writer actually writes.
+    """
+    result = RunResult.observe(payload.get("exit_code"), payload.get("incomplete_reason"))
+    if result is None:
+        return (
+            f"exit code {payload.get('exit_code')!r} with reason "
+            f"{payload.get('incomplete_reason')!r} is not a result this wrapper can record"
+        )
+    disagreements = [
+        f"{key}={payload.get(key)!r} (a run would record {value!r})"
+        for key, value in result.as_fields().items()
+        if payload.get(key) != value
+    ]
+    if disagreements:
+        return "the stored result disagrees with itself: " + ", ".join(disagreements)
     return ""
 
 
@@ -702,7 +766,7 @@ def load_receipt(path: Path) -> dict[str, object] | None:
         return None
     # Every field the result invariants are stated over is written by every run, so its absence is
     # itself a refusal rather than something to work around.
-    if result_refusal(payload):
+    if RunResult.restore(payload) is None:
         return None
     check_set = payload.get("check_set")
     if not isinstance(check_set, Mapping) or check_set.get("schema") != _CHECK_SET_SCHEMA:
@@ -732,6 +796,15 @@ class ReceiptLookup:
     def authorized(self) -> dict[str, object] | None:
         """The receipt that may replace a run, or nothing at all."""
         return self.receipt if self.usable else None
+
+    def authorized_result(self) -> RunResult | None:
+        """The canonical result an authorized receipt recorded, for a caller that owes a status.
+
+        A caller never reads `exit_code` out of a receipt for itself: it asks here, and the answer
+        comes from the model the load boundary already reconstructed and matched.
+        """
+        receipt = self.authorized()
+        return None if receipt is None else recorded_result(receipt)
 
     def as_dict(self) -> dict[str, object]:
         return {

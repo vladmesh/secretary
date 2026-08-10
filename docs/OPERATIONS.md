@@ -1630,9 +1630,13 @@ current ones, and exits non-zero when it does not. Its answer fails closed: a tr
 receipt, a run that was killed or timed out, a checkout with no resolvable identity, an import from
 outside the candidate, and a shape that attests no import are all "not usable" rather than a
 summary. Reading goes through one boundary, `load_receipt`, which also refuses a result no run
-could have written — a "complete" receipt that records a signal, an exit code and signal that
-disagree, an incomplete run with no reason, a green exit called failed — even when the artifact's
-own digest was recomputed over the damage. Corruption outranks both status preservation and reuse. `check broad --reuse` skips the run while the receipt is usable — through the same single
+could have written, even when the artifact's own digest was recomputed over the damage. Every
+recorded result field — `signal`, `status`, `verdict`, the stored reason and the status the command
+returns — is derived from one model of the raw process result, and the boundary rebuilds that model
+and requires the stored fields to match it exactly. So a "complete" receipt that records a signal, an
+exit code and signal that disagree, a complete run whose reason is a single space, or a status
+outside the 0..255 a POSIX process can return are all refused, and reuse cannot hand back a masked
+or invented status. Corruption outranks both status preservation and reuse. `check broad --reuse` skips the run while the receipt is usable — through the same single
 predicate `check show` reports, so the two can never disagree — and a report can quote the evidence
 instead of rebuilding it.
 
