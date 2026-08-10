@@ -63,8 +63,22 @@ class AgentPromptTransportTests(unittest.TestCase):
         self.assertEqual(receipt.framing, "bracketed-paste-v1")
         self.assertNotIn(prompt, str(receipt.to_json()))
 
+    def test_a_board_card_written_through_a_web_form_still_delivers(self) -> None:
+        """CRLF is what an HTML textarea submits, so it cannot be a permanent delivery refusal."""
+        calls, receipt = self.send("codex", "# Review\r\n\r\nline one\r\nline two")
+        self.assertEqual(
+            calls[0][calls[0].index("--text") + 1],
+            f"{BRACKETED_PASTE_START}# Review\n\nline one\nline two{BRACKETED_PASTE_END}",
+        )
+        self.assertTrue(receipt.body_write_accepted)
+
+    def test_a_lone_carriage_return_becomes_a_newline_rather_than_a_submission(self) -> None:
+        prepared = prepare_agent_prompt("first\rsecond", adapter="codex")
+        self.assertEqual(prepared.text, "first\nsecond")
+        self.assertNotIn("\r", prepared.body)
+
     def test_controls_cannot_break_the_frame_or_write_a_second_command(self) -> None:
-        for hostile in ("bad\x1b[201~submit", "bad\x1b[200~", "bad\x00", "bad\rnext"):
+        for hostile in ("bad\x1b[201~submit", "bad\x1b[200~", "bad\x00", "bad\x07bell"):
             with self.subTest(hostile=repr(hostile)):
                 calls: list[list[str]] = []
                 with self.assertRaisesRegex(AgentPromptTransportError, "prompt-body-rejected-control"):

@@ -28,6 +28,7 @@ from typing import Any
 
 from .agent_prompt_transport import (
     AGENT_PROMPT_TRANSPORT_VERSION,
+    TRANSPORT_POLICY,
     AgentPromptTransportError,
     PreparedAgentPrompt,
     PromptTransportReceipt,
@@ -119,7 +120,7 @@ class DeliveryEvidence:
     transport_version: str = AGENT_PROMPT_TRANSPORT_VERSION
     adapter: str = ""
     framing: str = ""
-    transport_policy: str = "reject-c0-esc"
+    transport_policy: str = TRANSPORT_POLICY
     body_write_accepted: bool = False
     body_bytes_written: int = 0
     body_write_count: int = 0
@@ -522,6 +523,10 @@ def deliver_interactive_prompt(
         raise TuiDeliveryError(
             f"prompt transport rejected the body (reason={exc.reason})", evidence=evidence
         ) from None
+    # The fingerprint is evidence about the bytes the pane was given, so it follows the transport's
+    # own normalisation rather than the caller's text. A rejected prompt keeps the caller's, which
+    # is the only thing that ever existed on that path.
+    evidence.payload_bytes, evidence.payload_sha256 = payload_fingerprint(prepared.text)
     with _transport_evidence(evidence, "wait-for-readiness"):
         wait_for_tui_idle(handle, run_json=run_json)
     before = probe_pane(handle, run_json=run_json)
