@@ -17,34 +17,56 @@ from typing import Any
 
 from secretary.dispatcher_launcher import CODEX_HOME_DEFAULT
 from triggered_agents.runtime.tui_delivery import (
+    COMPOSER_EMPTY,
+    COMPOSER_UNKNOWN,
     DELIVERY_ACCEPTED,
     DELIVERY_CONFIRMED,
     READINESS_BLOCKED,
     READINESS_BUSY,
     READINESS_READY,
     READINESS_UNKNOWN,
+    STAGE_ACKNOWLEDGED,
+    STAGE_ENTER_ACCEPTED,
+    STAGE_PAYLOAD_WRITTEN,
+    STAGE_TURN_OBSERVED,
+    DeliveryEvidence,
+    DeliveryOutcome,
     RunJson,
     TuiDeliveryError,
+    composer_fingerprint,
     deliver_interactive_prompt,
+    output_cursor,
+    read_pane_text,
+    strip_ansi,
     terminal_readiness,
     wait_for_tui_idle,
 )
 
 __all__ = [
+    "COMPOSER_EMPTY",
+    "COMPOSER_UNKNOWN",
     "DELIVERY_ACCEPTED",
     "DELIVERY_CONFIRMED",
     "READINESS_BLOCKED",
     "READINESS_BUSY",
     "READINESS_READY",
     "READINESS_UNKNOWN",
+    "STAGE_ACKNOWLEDGED",
+    "STAGE_ENTER_ACCEPTED",
+    "STAGE_PAYLOAD_WRITTEN",
+    "STAGE_TURN_OBSERVED",
+    "DeliveryEvidence",
+    "DeliveryOutcome",
     "RunJson",
     "TuiDeliveryError",
     "close_terminal",
     "close_terminal_strict",
+    "composer_fingerprint",
     "deliver_interactive_prompt",
     "deliver_tui_prompt",
     "latest_claude_user_turn_for",
     "latest_user_turn_for",
+    "output_cursor",
     "read_terminal_text",
     "strip_ansi",
     "terminal_readiness",
@@ -53,7 +75,6 @@ __all__ = [
     "wait_for_tui_idle",
 ]
 
-_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _CODEX_WORKING_RE = re.compile(r"\b(?:working|thinking)\b", re.IGNORECASE)
 # Claude's composer has no Codex `›` marker. Its active turn is a dedicated status line, so a
 # transcript word such as "working" or "thinking" is not enough to say a new turn started.
@@ -70,7 +91,8 @@ def deliver_tui_prompt(
     run_json: RunJson,
     session_root: Path | None = None,
     prompt_text: str | None = None,
-) -> None:
+    subject: str = "",
+) -> DeliveryOutcome:
     """Deliver a Codex TUI prompt: the shared path, with this role's own criterion.
 
     Nothing here is a second delivery path. It resolves what to send, which is the caller's
@@ -84,13 +106,14 @@ def deliver_tui_prompt(
             prompt = (Path(workspace) / prompt_file).read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             raise TuiDeliveryError(f"TUI prompt file is unreadable: {exc}") from None
-    deliver_interactive_prompt(
+    return deliver_interactive_prompt(
         handle,
         prompt,
         run_json=run_json,
         confirm=turn_started_confirm(
             handle, workspace, "codex", run_json=run_json, session_root=session_root
         ),
+        subject=subject,
     )
 
 
@@ -164,22 +187,8 @@ def close_terminal_strict(handle: str, *, run_json: RunJson) -> None:
 
 
 def read_terminal_text(handle: str, *, run_json: RunJson) -> str:
-    data = run_json(["orca", "terminal", "read", "--terminal", handle, "--json"])
-    terminal = data.get("terminal") if isinstance(data.get("terminal"), dict) else data
-    if not isinstance(terminal, dict):
-        return ""
-    tail = terminal.get("tail")
-    if isinstance(tail, list):
-        return strip_ansi("\n".join(str(line) for line in tail))
-    for key in ("text", "content", "screen"):
-        value = terminal.get(key)
-        if isinstance(value, str):
-            return strip_ansi(value)
-    return ""
-
-
-def strip_ansi(text: str) -> str:
-    return _ANSI_RE.sub("", text or "")
+    """The pane's text, read the one way the delivery boundary reads it."""
+    return read_pane_text(handle, run_json=run_json)
 
 
 def latest_user_turn_for(

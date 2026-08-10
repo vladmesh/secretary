@@ -35,7 +35,7 @@ from secretary.dispatcher_launch import launch_intent_liveness
 from secretary._fsutil import file_lock
 from secretary.dispatcher_state import DispatcherRecord
 from tests.dispatcher_fixtures import ensure_attempt
-from secretary.dispatcher_types import HeadLaunchAborted, HostError
+from secretary.dispatcher_types import HeadLaunchAborted, HeadPaneNotReady, HostError
 from secretary.dispatcher_watchdog import initial_output_stall_seconds, pid_file_path
 from secretary.dispatcher_worker_lifecycle import WorkerContinuation, WorkerContinuationStage
 from secretary.routing_journal import attempts as routing_attempts
@@ -1677,6 +1677,93 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual((record.handle, record.worker_pid_file), ("", ""))
         self.assertEqual(record.review_leaf, f"leaf:review:{REF}")
         self.assertFalse(self.head_alive("worker"), "the freeze is what recovery had to finish")
+
+    def test_an_aborted_reviewer_launch_keeps_its_delivery_evidence_and_its_intent(self) -> None:
+        """The ambiguous reviewer bring-up: its prompt was refused and its pane will not close.
+
+        Both things are true at once and the card owes both answers. The pane may still hold a
+        running reviewer, so the launch intent is kept and no second reviewer is opened — that
+        still outranks the ordinary infrastructure retry. And the prompt that never landed is the
+        card's only account of a pane nothing may touch again, so the evidence is persisted before
+        the intent is written, not after some branch remembers to.
+        """
+        self.run_to_validate()
+        evidence = {
+            "subject": "reviewer-launch", "handle": f"review:{REF}", "stage": "payload_written",
+            "payload_bytes": 812, "payload_sha256": "0f1e2d3c4b5a6978",
+            "reason": "payload-left-in-composer",
+        }
+        self.host.fail_review_error = HeadLaunchAborted(
+            "the head pane never took its launch prompt; head terminal stop failed: orca refused",
+            handle=f"review:{REF}",
+            leaf=f"leaf:review:{REF}",
+            workspace=str(self.data_dir / "workspaces" / f"{REF}-pilot"),
+            pid_file=pid_file_path("review", REF),
+            evidence=evidence,
+        )
+
+        outcome = self.tick()
+
+        # The safety behaviour of this branch is unchanged.
+        self.assertEqual(outcome["action"], "review-launch-aborted")
+        self.assertEqual(self.reader.show(REF)["state"], "validate", "the card is not blocked")
+        intent = self.stored_intent()
+        self.assertEqual((intent["role"], intent["aborted"]), ("review", True))
+        self.assertEqual(intent["handle"], f"review:{REF}")
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.review_launch_aborts, 1)
+        # And the delivery evidence survived the branch that used to drop it.
+        self.assertEqual(record.review_delivery_failures, 1)
+        self.assertEqual(record.review_delivery_evidence, evidence)
+        self.assertEqual(self.host.reviews, [], "no second reviewer was opened")
+        # Exactly once: this tick passed the evidence sink, the abort branch and the outward
+        # result, and the count is one for one refused prompt.
+        self.assertEqual(record.review_delivery_failures, 1)
+
+    def test_a_pane_that_would_not_take_the_prompt_counts_once_on_the_ordinary_path(self) -> None:
+        """The other half of the sink's exception family, and the no-double-count case.
+
+        Here the pane did close, so nothing of the reviewer is left and the card takes its ordinary
+        failure path rather than keeping an intent. The same one recorder ran, once.
+        """
+        self.run_to_validate()
+        evidence = {
+            "subject": "reviewer-launch", "handle": f"review:{REF}", "stage": "payload_written",
+            "payload_bytes": 812, "payload_sha256": "0f1e2d3c4b5a6978",
+            "reason": "pane-stayed-ready",
+        }
+        self.host.fail_review_error = HeadPaneNotReady(
+            "the head pane was held in a dialog and never took its launch prompt",
+            readiness="blocked",
+            pane=f"review:{REF}",
+            evidence=evidence,
+        )
+
+        outcome = self.tick()
+
+        self.assertNotEqual(outcome.get("action"), "review-launch-aborted")
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.review_delivery_failures, 1)
+        self.assertEqual(record.review_delivery_evidence, evidence)
+
+    def test_an_unevidenced_reviewer_bring_up_failure_is_not_a_delivery_failure(self) -> None:
+        """A split that would not open is an infrastructure failure and has its own counter.
+
+        The single evidence sink runs for every reviewer-launch exception, so this is where it has
+        to stay quiet: counting a bring-up that never reached a prompt as a refused delivery would
+        make the card's delivery telemetry say the opposite of what happened.
+        """
+        self.run_to_validate()
+        self.host.fail_review_error = HostError("orca split failed: no pane could be opened")
+
+        self.tick()
+
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.review_delivery_failures, 0)
+        self.assertEqual(record.review_delivery_evidence, {})
 
     def _abort_review_into_recovery(self) -> None:
         """Leave the card in `review_starting` with its worker retained and its reviewer dead.

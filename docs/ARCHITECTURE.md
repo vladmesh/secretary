@@ -226,10 +226,26 @@ pending event and checks again on later ticks, delivering the nudge as soon as t
 
 The wake itself goes through the one delivery path every interactive head has, whatever provider it
 runs and whichever role owns it: a Codex launch, a worker or reviewer continuation and an observer
-wake are the same primitive. Wait for the pane, send, re-enter the prompt while Orca says the pane
-took nothing, which is what carries it past a dialog that swallowed the first Enter, and refuse
-upwards when the retries run out. A worker or reviewer continuation is delivered once its own
-head's turn has visibly started, which is that role's long-standing criterion. Observer delivery
+wake are the same primitive. Delivery there is four observed stages, not one: the payload written
+into the pane, the Enter taken, a turn observed, and the caller's own acknowledgement. `terminal
+send` answering `accepted: true` with a byte count is only the first, and Orca calls a pane holding
+an unsent composer `tui-idle` because it really is idle — which is how a prompt that was pasted and
+never entered reported as delivered (`issue:13dd4d88df6b33cfb98f`). So the pane is fingerprinted on
+both sides of the send: what the composer holds, and where its output has got to. That position is
+Orca's own `nextCursor`, kept opaque and only compared: the retained tail is a bounded window, so a
+quick turn can append output the tail no longer shows and a repainting TUI can print without the
+returned lines differing at all. Only a runtime that answers a read without a cursor falls back to
+a digest of the tail, and the evidence says which of the two it was. A composer that is holding what
+the send put there is re-entered; one that is empty with nothing printed is written again; a pane
+that went to work, or whose cursor advanced, has taken a turn — including one that began and ended
+between two readiness probes, which readiness alone reports as a pane that stayed ready. Retries
+stay bounded and a delivery that runs out of them refuses upwards with the stage it reached. So
+does the transport itself: a `terminal wait` or `terminal send` the host refuses is a delivery that
+did not happen, and it leaves the boundary as an evidence-carrying delivery failure rather than as
+a bare host error a caller could only persist as prose. A worker or reviewer continuation is delivered once
+its own head's turn has visibly started, which is that role's long-standing criterion, and an
+observer wake stops one stage earlier for the same reasons rather than under a weaker rule.
+Observer delivery
 acceptance is deliberately separate from its causal acknowledgement: the terminal path proves that
 the prompt was taken, then returns without polling the audit log; the next normal reconciliation
 reads one audit snapshot and closes the batch only if it contains a resume naming that delivery.
@@ -239,6 +255,36 @@ bounded number of times (`SECRETARY_OBSERVER_WAKE_MAX_ATTEMPTS`, 3 by default) o
 backoff; once they are spent, the batch goes to the ordinary replacement path, which stops that head
 before it opens the next one and carries the same delivery marker into the new launch, so the resume
 that finally arrives still acknowledges the batch that was owed.
+
+What was delivered, and what was not, is sprint evidence rather than delivery state. The batch's own
+retry counter is reset by an acknowledgement, by a replacement head and by the next batch, and has
+to be. Beside it the observer record keeps cumulative counts that nothing resets while the sprint is
+open: wake attempts and failures, launch-delivery attempts and failures, the last failure's reason
+and subject, and the last attempt's bounded evidence — terminal identity, payload size and hash,
+the stage reached, the composer and output fingerprints, and why it stopped. Never the prompt text.
+The counts are wake-scoped and launch-scoped on purpose: a reviewer that failed to come up on a card
+is a different subject with its own counters on that card's record, and "the reviewer launched
+normally" was the answer that hid three refused observer wakes from a sprint's closing resume
+(`issue:83ac17afc53248340f4c`). Every prompt a bring-up puts in front of a head counts as a launch
+delivery, including the first launch of a sprint, which carries no batch at all — a launch with
+nothing owed writes no retry state, because there is nothing to redeliver, but it is still counted
+and its evidence still kept. They reach the head that has to report them through the wake message
+and through a replacement head's launch document, and they are readable from outside in
+`sprint status` (`observer.delivery`) and in `secretary status` (`delivery_failures`).
+
+The reviewer keeps the same evidence on its own record. A reviewer prompt that the shared boundary
+saw fail leaves `review_delivery_failures` and `review_delivery_evidence` on the card, because the
+pane is closed behind that failure and nothing can be asked of it afterwards. Every reviewer
+bring-up failure goes through one recorder in `start_review`, before any branch takes a transition,
+writes a launch intent, decides a retry or returns an outcome — including the ambiguous abort, where
+the pane is still open and the intent has to be kept: the evidence is written first, and refusing to
+open a second reviewer still outranks the ordinary infrastructure retry. One point means no branch
+can forget and none can count twice. A failure carrying no evidence records none: a split that would
+not open is an infrastructure failure, and it must not be tallied as a prompt that was refused.
+It changes no routing:
+the card still takes the infrastructure-retry transition it took before, with its green gate
+receipt, candidate SHA, report round and held worker untouched, and unlike the infrastructure
+counter beside it the delivery evidence is not cleared by a reviewer that later takes the checkout.
 
 All lifecycle events go to the same durable audit log keyed by the sprint reference and are deduplicated
 by request id. The record's generation is part of that id, so a sprint reappearing on the board starts a

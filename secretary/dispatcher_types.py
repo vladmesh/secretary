@@ -49,12 +49,17 @@ class HeadLaunchAborted(HostError):
         leaf: str = "",
         workspace: str = "",
         pid_file: str = "",
+        evidence: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.handle = handle
         self.leaf = leaf
         self.workspace = workspace
         self.pid_file = pid_file
+        # What the shared delivery boundary saw, when this bring-up failed delivering a prompt.
+        # It travels with the ambiguity rather than being read off a pane nobody may touch: the
+        # caller persists it before it decides anything about the head that may still be running.
+        self.evidence = dict(evidence or {})
 
 
 class HeadPaneNotReady(HostError):
@@ -72,10 +77,21 @@ class HeadPaneNotReady(HostError):
     answer is a dialog nobody answered.
     """
 
-    def __init__(self, message: str, *, readiness: str, pane: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        readiness: str,
+        pane: str = "",
+        evidence: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.readiness = readiness
         self.pane = pane
+        # What the shared delivery boundary saw of the prompt this pane would not take. The pane
+        # is closed behind this failure, so nothing can be asked of it afterwards: whatever is not
+        # carried here is gone, and the caller's durable telemetry is the only place left to put it.
+        self.evidence = dict(evidence or {})
 
 
 @dataclass(frozen=True)

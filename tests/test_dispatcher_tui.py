@@ -11,10 +11,13 @@ from secretary.dispatcher import CommandHostRuntime, HostError
 from secretary.dispatcher_launcher import HeadLaunch
 from secretary.dispatcher_state import DispatcherRecord
 from secretary.dispatcher_tui import (
+    DELIVERY_ACCEPTED,
+    DELIVERY_CONFIRMED,
     READINESS_BLOCKED,
     READINESS_BUSY,
     READINESS_READY,
     READINESS_UNKNOWN,
+    TuiDeliveryError,
     deliver_interactive_prompt,
     latest_claude_user_turn_for,
     terminal_readiness,
@@ -223,9 +226,13 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
     def test_tui_delivery_resends_enter_when_the_pane_did_not_take_the_prompt(self) -> None:
         """A Codex launch is delivered by the shared path, and re-entered the same way.
 
-        Replaces the composer-text check this used to make: the prompt is entered again because
-        Orca says the pane took nothing, here the update dialog that swallows the first Enter, and
-        it is confirmed by this role's own criterion, its turn having started.
+        Orca says the pane took nothing \u2014 here the update dialog that swallows the first Enter \u2014
+        and the composer is holding the payload the send wrote, so the Enter alone is re-entered
+        and the delivery is confirmed by this role's own criterion, its turn having started.
+
+        The first screen is the pane before the send: the delivery fingerprints the composer there
+        so that the one it reads afterwards can be compared against it rather than against
+        emptiness, which a TUI's own hint text is not.
         """
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -233,10 +240,13 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             host = RecordingTuiHost(
                 workspace,
                 [
-                    {"terminal": {"tail": ["\u203a Read TASK.md"]}},
+                    {"terminal": {"tail": ["\u203a"]}},
+                    {"terminal": {"tail": ["\u203a [Pasted Content 13 chars]"]}},
+                    {"terminal": {"tail": ["\u203a [Pasted Content 13 chars]"]}},
                     {"terminal": {"tail": ["thinking"]}},
                 ],
                 waits=[
+                    {"wait": {"satisfied": True}},
                     {"wait": {"satisfied": True}},
                     {"wait": {"satisfied": False, "blockedReason": "codex-update-prompt"}},
                 ],
@@ -459,3 +469,264 @@ class RecordingTuiHost(CommandHostRuntime):
         if args[:3] == ["orca", "terminal", "read"]:
             return self._next(self.reads, {"terminal": {"tail": []}})
         return {}
+
+
+class ScriptedPane:
+    """One pane, answered from a script keyed on what the delivery has already done.
+
+    `screens` are keyed by how many sends have landed, so a test says what the pane looks like
+    before the payload is written, after it, and after each re-entry, which is exactly the sequence
+    this boundary has to tell apart.
+    """
+
+    def __init__(
+        self,
+        screens: dict[int, list[str]],
+        *,
+        idle_after: dict[int, bool] | None = None,
+        bytes_written: int = 1315,
+        cursors: dict[int, str] | None = None,
+        refuse: str = "",
+    ) -> None:
+        self.screens = screens
+        self.idle_after = idle_after or {}
+        self.bytes_written = bytes_written
+        # What Orca answers as `nextCursor`, keyed the same way. None at all is a runtime that
+        # returns no cursor, which is how every fixture that predates this looked.
+        self.cursors = cursors or {}
+        self.refuse = refuse
+        self.calls: list[list[str]] = []
+        self.sends: list[str] = []
+
+    def _at(self, table: dict):
+        landed = len(self.sends)
+        while landed >= 0:
+            if landed in table:
+                return table[landed]
+            landed -= 1
+        return None
+
+    def _screen(self) -> list[str]:
+        return self._at(self.screens) or []
+
+    def run_json(self, args: list[str]) -> dict:
+        self.calls.append(args)
+        if self.refuse and args[1:3] == ["terminal", self.refuse]:
+            raise HostError(f"orca terminal {self.refuse} failed: synthetic transport refusal")
+        if args[1:3] == ["terminal", "send"]:
+            self.sends.append(args[args.index("--text") + 1])
+            return {"send": {"accepted": True, "bytesWritten": self.bytes_written}}
+        if args[1:3] == ["terminal", "wait"]:
+            idle = self.idle_after.get(len(self.sends), True)
+            return {"wait": {"condition": "tui-idle", "satisfied": idle}}
+        if args[1:3] == ["terminal", "read"]:
+            terminal: dict = {"tail": list(self._screen())}
+            cursor = self._at(self.cursors)
+            if cursor is not None:
+                terminal["nextCursor"] = cursor
+                terminal["latestCursor"] = cursor
+            return {"terminal": terminal}
+        raise AssertionError(args)
+
+
+class TuiDeliveryStageTests(unittest.TestCase):
+    """Delivery is staged, and a written payload is only the first stage of it.
+
+    Every case here is one of the two production failures this boundary was rebuilt for: a Codex
+    pane that answered `accepted: true` with a byte count, left the payload under a paste
+    placeholder in its composer and reported `tui-idle` satisfied throughout (board 871), and an
+    observer wake that reached its head and was recorded as `pane-stayed-ready` anyway because the
+    turn began and ended between two probes (sprint:1402).
+    """
+
+    def deliver(self, pane: ScriptedPane, **kwargs):
+        with mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3), \
+             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01), \
+             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0), \
+             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2):
+            return deliver_interactive_prompt(
+                "term-observer", "wake the observer", run_json=pane.run_json, **kwargs
+            )
+
+    def test_a_payload_left_in_the_composer_is_not_a_delivered_prompt(self) -> None:
+        pane = ScriptedPane({0: ["›"], 1: ["› [Pasted Content 1315 chars]"]})
+
+        with self.assertRaises(TuiDeliveryError) as raised:
+            self.deliver(pane, ack_out_of_band=True)
+
+        evidence = raised.exception.evidence
+        self.assertEqual(evidence.reason, "payload-left-in-composer")
+        self.assertEqual(evidence.stage, "payload_written")
+        self.assertTrue(evidence.send_accepted)
+        self.assertEqual(evidence.bytes_written, 1315)
+        self.assertTrue(evidence.payload_left_in_composer)
+        self.assertTrue(evidence.composer_after.startswith("paste:"))
+        self.assertEqual(evidence.readiness_after, READINESS_READY)
+        self.assertFalse(evidence.cursor_moved)
+        # The payload is entered again rather than written again: it is already sitting there.
+        self.assertEqual(pane.sends, ["wake the observer", "", ""])
+        self.assertEqual(evidence.attempts, 3)
+        self.assertEqual(evidence.resends, 2)
+
+    def test_an_enter_that_starts_a_turn_completes_the_delivery(self) -> None:
+        """The re-entry carries the prompt past whatever swallowed the first Enter."""
+        pane = ScriptedPane(
+            {0: ["›"], 1: ["› [Pasted Content 1315 chars]"], 2: ["thinking"]},
+            idle_after={2: False},
+        )
+
+        outcome = self.deliver(pane, ack_out_of_band=True)
+
+        self.assertEqual(outcome, DELIVERY_ACCEPTED)
+        self.assertEqual(outcome.evidence.stage, "turn_observed")
+        self.assertEqual(outcome.evidence.resends, 1)
+        self.assertEqual(pane.sends, ["wake the observer", ""])
+        self.assertFalse(outcome.evidence.payload_left_in_composer)
+
+    def test_output_cursor_progress_is_a_turn_on_a_pane_that_stayed_ready(self) -> None:
+        """The sprint:1402 false failure: the head answered between two readiness probes.
+
+        Orca calls the pane ready before the send and ready again afterwards, because the turn it
+        ran fitted between them. Readiness alone therefore says the prompt was swallowed. The
+        composer is empty and the pane has printed output it had not printed before, which is a
+        turn, and the delivery is accepted instead of being reported as a refusal.
+        """
+        pane = ScriptedPane({0: ["ready", "›"], 1: ["ready", "read the card, recorded resume", "›"]})
+
+        outcome = self.deliver(pane, ack_out_of_band=True)
+
+        self.assertEqual(outcome, DELIVERY_ACCEPTED)
+        self.assertEqual(outcome.evidence.stage, "turn_observed")
+        self.assertTrue(outcome.evidence.cursor_moved)
+        self.assertEqual(outcome.evidence.readiness_after, READINESS_READY)
+        self.assertEqual(pane.sends, ["wake the observer"])
+
+    def test_a_pane_that_showed_nothing_for_the_prompt_is_written_again_and_then_refused(self) -> None:
+        """A composer that is empty and a pane that printed nothing: the payload is gone.
+
+        Re-entering an Enter would achieve nothing here — there is nothing in the composer to
+        enter — so the payload is written again instead, and when that produces no turn either the
+        delivery is refused with the stage it actually reached rather than as a delivered prompt.
+        """
+        pane = ScriptedPane({0: ["ready", "›"]})
+
+        with self.assertRaises(TuiDeliveryError) as raised:
+            self.deliver(pane, ack_out_of_band=True)
+
+        evidence = raised.exception.evidence
+        self.assertEqual(evidence.reason, "enter-accepted-without-turn")
+        self.assertFalse(evidence.cursor_moved)
+        self.assertEqual(pane.sends, ["wake the observer"] * 3)
+
+    def test_evidence_keeps_the_size_and_the_hash_and_never_the_prompt(self) -> None:
+        pane = ScriptedPane({0: ["›"], 1: ["› [Pasted Content 1315 chars]"]})
+
+        with self.assertRaises(TuiDeliveryError) as raised:
+            self.deliver(pane, ack_out_of_band=True, subject="observer-wake")
+
+        evidence = raised.exception.evidence.to_json()
+        self.assertEqual(evidence["subject"], "observer-wake")
+        self.assertEqual(evidence["payload_bytes"], len("wake the observer"))
+        self.assertEqual(len(evidence["payload_sha256"]), 16)
+        self.assertNotIn("wake the observer", json.dumps(evidence))
+
+    def test_the_reviewer_criterion_and_the_observer_rule_are_the_same_boundary(self) -> None:
+        """A confirmed delivery is the out-of-band one plus the caller's own acknowledgement.
+
+        The reviewer and worker path passes `confirm`; the observer path passes none and stops one
+        stage earlier. Both see the same composer, the same output cursor and the same bounded
+        re-entry, which is what "the same confirmation rule" has to mean if a reviewer prompt and
+        an observer wake are to fail for the same reasons.
+        """
+        pane = ScriptedPane(
+            {0: ["›"], 1: ["› [Pasted Content 1315 chars]"], 2: ["thinking"]},
+            idle_after={2: False},
+        )
+        turns: list[float] = []
+
+        outcome = self.deliver(pane, confirm=lambda sent_at: bool(turns) or turns.append(sent_at))
+
+        self.assertEqual(outcome, DELIVERY_CONFIRMED)
+        self.assertEqual(outcome.evidence.stage, "acknowledged")
+        self.assertEqual(pane.sends, ["wake the observer", ""])
+
+    def test_the_backend_cursor_advancing_is_a_turn_even_when_the_tail_is_unchanged(self) -> None:
+        """The retained tail is bounded; Orca's cursor is not.
+
+        A quick turn can append output that the tail window no longer shows, and a repainting TUI
+        can print without the returned lines differing at all. Orca still advances `nextCursor`,
+        and that is the pane's real position, so it is what the delivery compares. A digest of the
+        tail would have said nothing moved and the wake would have been re-entered and refused.
+        """
+        pane = ScriptedPane(
+            {0: ["ready", "›"]},
+            cursors={0: "558", 1: "612"},
+        )
+
+        outcome = self.deliver(pane, ack_out_of_band=True)
+
+        self.assertEqual(outcome, DELIVERY_ACCEPTED)
+        evidence = outcome.evidence
+        self.assertEqual(evidence.stage, "turn_observed")
+        self.assertTrue(evidence.cursor_moved)
+        self.assertTrue(evidence.cursor_from_backend)
+        self.assertEqual((evidence.cursor_before, evidence.cursor_after), ("orca:558", "orca:612"))
+        self.assertEqual(evidence.readiness_after, READINESS_READY)
+        self.assertEqual(pane.sends, ["wake the observer"])
+
+    def test_a_backend_cursor_that_did_not_move_is_not_a_turn(self) -> None:
+        """The same pane with the cursor standing still: nothing was printed, so nothing landed."""
+        pane = ScriptedPane({0: ["ready", "›"]}, cursors={0: "558"})
+
+        with self.assertRaises(TuiDeliveryError) as raised:
+            self.deliver(pane, ack_out_of_band=True)
+
+        evidence = raised.exception.evidence
+        self.assertFalse(evidence.cursor_moved)
+        self.assertTrue(evidence.cursor_from_backend)
+        self.assertEqual(evidence.cursor_after, "orca:558")
+
+    def test_a_runtime_without_cursors_still_falls_back_to_the_tail(self) -> None:
+        """No cursor in the answer is the only case the tail digest stands in for one, and it says
+        so in the evidence rather than passing itself off as the backend's position."""
+        pane = ScriptedPane({0: ["ready", "›"], 1: ["ready", "answered", "›"]})
+
+        outcome = self.deliver(pane, ack_out_of_band=True)
+
+        self.assertEqual(outcome, DELIVERY_ACCEPTED)
+        self.assertTrue(outcome.evidence.cursor_moved)
+        self.assertFalse(outcome.evidence.cursor_from_backend)
+        self.assertTrue(outcome.evidence.cursor_after.startswith("tail:"))
+
+    def test_a_refused_send_is_a_delivery_failure_with_its_evidence(self) -> None:
+        """The transport itself failing is a prompt that did not land, not a bare host error.
+
+        Before this, a refused `terminal send` escaped the boundary as the host's own exception,
+        the observer path caught it as a plain failure, and the record kept a count and a sentence
+        with no terminal, payload or stage — and whatever evidence an earlier failure had left.
+        """
+        pane = ScriptedPane({0: ["ready", "›"]}, refuse="send")
+
+        with self.assertRaises(TuiDeliveryError) as raised:
+            self.deliver(pane, ack_out_of_band=True)
+
+        evidence = raised.exception.evidence
+        self.assertEqual(evidence.reason, "transport-refused-send-payload")
+        self.assertEqual(evidence.handle, "term-observer")
+        self.assertEqual(evidence.payload_bytes, len("wake the observer"))
+        self.assertEqual(len(evidence.payload_sha256), 16)
+        self.assertEqual(evidence.readiness_before, READINESS_READY)
+        self.assertEqual(evidence.stage, "none")
+        self.assertNotIn("wake the observer", json.dumps(evidence.to_json()))
+
+    def test_a_refused_readiness_wait_is_a_delivery_failure_with_its_evidence(self) -> None:
+        pane = ScriptedPane({0: ["ready", "›"]}, refuse="wait")
+
+        with self.assertRaises(TuiDeliveryError) as raised:
+            self.deliver(pane, ack_out_of_band=True)
+
+        evidence = raised.exception.evidence
+        self.assertEqual(evidence.reason, "transport-refused-wait-for-readiness")
+        self.assertEqual(evidence.handle, "term-observer")
+        self.assertEqual(evidence.payload_bytes, len("wake the observer"))
+        self.assertEqual(pane.sends, [], "nothing was written into a pane that could not be waited for")

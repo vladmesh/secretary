@@ -74,6 +74,7 @@ from secretary.dispatcher_observer import (
     OBSERVER_PROMPT_FILE,
     OBSERVER_ROLE,
     ObserverLaunchAborted,
+    delivery_evidence_summary as _observer_delivery_evidence_summary,
     observer_launch_prompt as _observer_launch_prompt,
     observer_pid_file as _observer_pid_file,
 )
@@ -817,6 +818,10 @@ class CommandHostRuntime:
                 "workspace": str(workspace),
                 "handle": f"noop:{head}:{workspace.name}:{OBSERVER_PROMPT_FILE}",
                 "leaf": "",
+                # No pane exists in this mode, so no prompt was put in front of anything: the
+                # lifecycle must count no launch delivery for it.
+                "prompt_delivered": False,
+                "delivery_evidence": {},
                 "pid_file": pid_file,
                 "run": run,
             }
@@ -833,16 +838,25 @@ class CommandHostRuntime:
         pane = self._create_terminal(
             str(workspace), f"{reference} observer", _with_pid_heartbeat(launch.command, pid_file)
         )
+        delivered = False
+        delivery_evidence: dict[str, Any] = {}
         if launch.prompt_after_start:
             try:
-                _deliver_tui_prompt(
+                outcome = _deliver_tui_prompt(
                     pane.handle,
                     str(workspace),
                     OBSERVER_PROMPT_FILE,
                     run_json=self._run_json,
                     prompt_text=_observer_launch_prompt(),
+                    subject="observer-launch",
                 )
+                delivered = True
+                delivery_evidence = _delivery_evidence_json(outcome, "observer-launch")
             except (TuiDeliveryError, HostError) as exc:
+                # Every prompt this bring-up put in front of a head is accounted for, whether or
+                # not the launch was carrying an unacknowledged batch: the first launch of a
+                # sprint delivers a prompt too, and a sprint that lost it must be able to say so.
+                evidence = _delivery_evidence_json(exc, "observer-launch")
                 try:
                     self._stop_observer_terminals(str(workspace))
                 except Exception as stop_exc:
@@ -857,12 +871,18 @@ class CommandHostRuntime:
                         workspace=str(workspace),
                         pid_file=pid_file,
                         run=run,
+                        evidence=evidence,
                     ) from None
-                raise ObserverLaunchAborted(str(exc)) from None
+                raise ObserverLaunchAborted(str(exc), evidence=evidence) from None
         return {
             "workspace": str(workspace),
             "handle": pane.handle,
             "leaf": pane.leaf,
+            # Whether this bring-up put a prompt in front of the head, and what the delivery
+            # boundary saw doing it. The lifecycle counts a launch delivery from this rather than
+            # from whether the launch happened to carry a pending batch.
+            "prompt_delivered": delivered,
+            "delivery_evidence": delivery_evidence,
             "pid_file": pid_file,
             "run": run,
         }
@@ -985,15 +1005,27 @@ class CommandHostRuntime:
                 " Acknowledge this delivery in that resume with --delivery-id "
                 f"{delivery_id} --through-event {through_event}."
             )
+        # The wakes this sprint has already lost travel with the wake that reaches the head, so the
+        # resume or closeout written from this turn reports what actually happened rather than the
+        # nothing a head can see of a prompt that never arrived.
+        evidence_line = _observer_delivery_evidence_summary(delivery) if delivery is not None else ""
+        if evidence_line:
+            message += f" Sprint delivery evidence to carry into your closing resume: {evidence_line}."
         try:
             return _deliver_interactive_prompt(
                 current,
                 message,
                 run_json=self._run_json,
                 ack_out_of_band=True,
+                subject="observer-wake",
             )
         except TuiDeliveryError as exc:
-            raise HostError(f"observer wake was not delivered: {exc}") from None
+            failure = HostError(f"observer wake was not delivered: {exc}")
+            # The lifecycle stores this beside the sprint. It is the delivery boundary's own
+            # evidence — terminal identity, payload size and hash, the stage the delivery reached,
+            # the composer and output fingerprints around it — and carries no prompt text.
+            failure.evidence = getattr(exc, "evidence", None)
+            raise failure from None
 
     def _stop_observer_terminals(self, workspace: str) -> None:
         """Stop every pane of an observer workspace.
@@ -1751,9 +1783,14 @@ class CommandHostRuntime:
         if launch and launch.prompt_after_start:
             try:
                 _deliver_tui_prompt(
-                    pane.handle, workspace, prompt_file, run_json=self._run_json, prompt_text=launch_prompt
+                    pane.handle, workspace, prompt_file, run_json=self._run_json,
+                    prompt_text=launch_prompt, subject=f"{role or 'head'}-launch",
                 )
             except (TuiDeliveryError, HostError) as exc:
+                # The pane is about to be closed, so this is the last moment anything can be known
+                # about the prompt it would not take. The evidence travels with every way out of
+                # here, because the caller's own record is where it has to end up.
+                evidence = _delivery_evidence_json(exc, f"{role or 'head'}-launch")
                 # What the pane was doing when it refused the prompt, asked before it is closed
                 # because afterwards there is nothing left to ask (secretary-1163). A pane that is
                 # working, or held in a dialog its head cannot leave on its own, is a launch worth
@@ -1776,6 +1813,7 @@ class CommandHostRuntime:
                         leaf=pane.leaf,
                         workspace=workspace,
                         pid_file=pid_file,
+                        evidence=evidence,
                     ) from None
                 if readiness in (READINESS_BUSY, READINESS_BLOCKED):
                     raise HeadPaneNotReady(
@@ -1783,8 +1821,11 @@ class CommandHostRuntime:
                         f"launch prompt: {exc}",
                         readiness=readiness,
                         pane=pane.handle,
+                        evidence=evidence,
                     ) from None
-                raise HostError(str(exc)) from None
+                failure = HostError(str(exc))
+                failure.evidence = evidence
+                raise failure from None
         return self._launched(pane.handle, head, task, role, workspace, failover, leaf=pane.leaf)
 
     def _close_launched_pane(self, handle: str, pid_file: str) -> None:
@@ -5718,6 +5759,26 @@ def _continuation_prompt(
         "that is over: that id already names that round's report and its body file is gone, so "
         "running it reports nothing here, whether it fails or answers from the old round's record."
     )
+
+
+def _delivery_evidence_json(carrier: Any, subject: str) -> dict[str, Any]:
+    """The bounded evidence a delivery verdict or failure carries, ready to persist.
+
+    A failure that reaches here without one is still a delivery that did not happen, so a minimal
+    record is synthesised for it rather than nothing being kept: the subject and the reason are
+    what tell a later reader which prompt this was and why it stopped. Prompt text is never in it —
+    the boundary records size and hash only.
+    """
+    evidence = getattr(carrier, "evidence", None)
+    if hasattr(evidence, "to_json"):
+        evidence = evidence.to_json()
+    if not isinstance(evidence, dict) or not evidence:
+        if isinstance(carrier, BaseException):
+            return {"subject": subject, "reason": scrub_host_output(str(carrier))[:400]}
+        return {}
+    evidence = dict(evidence)
+    evidence["subject"] = subject
+    return evidence
 
 
 def _report_nudge_prompt(generation: int, reference: str) -> str:
