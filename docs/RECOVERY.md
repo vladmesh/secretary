@@ -327,9 +327,22 @@ are required for its respective provider or secret-recovery path.
 
 ### Live LLM canary — pending owner validation
 
-No live LLM/card canary is claimed by this closeout. After the OpenRouter credential is supplied, record one
-single-card canary here with its card reference, receipt SHA, checkpoint result and post-run
-`secretary doctor --instance INSTANCE` result.
+No live LLM/card canary is claimed by this closeout. The controlled post-upgrade canary may run one
+card on already authenticated heads resolved from the installation registry. In this installation, the
+intended worker is `codex-extra-tui` on `openai-subscription` and the independent reviewer is
+`claude-opus-high` on `claude-subscription`; this route does not require an OpenRouter credential or
+secret-store materialisation. An installation key or OpenRouter credential is required only when the
+selected route actually depends on the secret store or OpenRouter.
+
+A missing `secrets/installation.key` reported by `secretary doctor` remains a fail-closed
+secret-recovery finding. It is not healthy, and it must not be recovered, materialised or otherwise
+changed merely to run a canary whose selected subscription heads are already authenticated.
+
+Record the following evidence for the completed single-card canary: card reference; resolved worker
+and reviewer heads and their resources; candidate SHA; exact-SHA mechanical-gate receipt; observer
+decision; checkpoint publication; and post-run `secretary doctor --instance INSTANCE` findings. Record
+values only when the corresponding event has occurred; this guidance does not predeclare a candidate,
+receipt, decision, publication or doctor result.
 
 Fresh mode does not accept an existing installation user or checkout. It refuses with an explicit choice:
 `--recover` for the same installation, or a separate adopt workflow for a live host. Recover does not
