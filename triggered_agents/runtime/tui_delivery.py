@@ -22,6 +22,7 @@ import os
 import re
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -120,6 +121,10 @@ class DeliveryEvidence:
     cursor_before: str = ""
     cursor_after: str = ""
     cursor_moved: bool = False
+    # Whether those cursors are Orca's own or the tail digest that stands in when a runtime
+    # answers a read without one: a reader of this evidence must not mistake the second for the
+    # first when it asks why a turn was or was not seen.
+    cursor_from_backend: bool = False
     reason: str = ""
 
     def to_json(self) -> dict[str, Any]:
@@ -143,6 +148,7 @@ class DeliveryEvidence:
             "cursor_before": self.cursor_before,
             "cursor_after": self.cursor_after,
             "cursor_moved": self.cursor_moved,
+            "cursor_from_backend": self.cursor_from_backend,
             "reason": self.reason,
         }
 
@@ -192,12 +198,32 @@ class TuiDeliveryError(RuntimeError):
 
 
 @dataclass
+class PaneRead:
+    """One `terminal read`: the retained tail, and the backend's own position in the output.
+
+    The cursor is Orca's `nextCursor` — the opaque token it gives a reader to ask for "only what
+    came after this". It is the authority on whether the pane printed anything, and the tail is
+    not: the retained window is bounded, so a quick turn can append output and leave the tail it
+    returns identical, and repaint-heavy TUI output does the same. `cursor_known` is false only
+    when the runtime answered without one, and then, and only then, a digest of the tail stands in.
+    """
+
+    text: str = ""
+    cursor: str = ""
+    cursor_known: bool = False
+    read: bool = False
+
+
+@dataclass
 class PaneProbe:
     """One bounded look at a pane: is it ready, what is it holding, and has it printed since."""
 
     readiness: str = READINESS_UNKNOWN
     composer: str = COMPOSER_UNKNOWN
     cursor: str = ""
+    # True when the cursor above is Orca's own, false when it is the tail digest standing in for
+    # one. Two probes are only comparable when they answered the same way.
+    cursor_from_backend: bool = False
     screen_read: bool = False
 
     @property
@@ -215,27 +241,44 @@ def payload_fingerprint(prompt: str) -> tuple[int, str]:
     return len(raw), _digest(prompt or "")
 
 
-def read_pane_text(handle: str, *, run_json: RunJson) -> str:
-    """The pane as Orca renders it, ANSI stripped. Empty when it cannot be read.
+def read_pane(handle: str, *, run_json: RunJson) -> PaneRead:
+    """One `terminal read`: the tail, ANSI stripped, and Orca's own output cursor with it.
 
-    A screen that cannot be read is not a failure here: it costs the delivery its composer and
+    A pane that cannot be read is not a failure here: it costs the delivery its composer and
     cursor evidence and leaves it on readiness alone, which is strictly what it had before.
     """
     try:
         data = run_json(["orca", "terminal", "read", "--terminal", handle, "--json"])
     except Exception:
-        return ""
+        return PaneRead()
     terminal = data.get("terminal") if isinstance(data, dict) and isinstance(data.get("terminal"), dict) else data
     if not isinstance(terminal, dict):
-        return ""
+        return PaneRead()
+    text = ""
     tail = terminal.get("tail")
     if isinstance(tail, list):
-        return strip_ansi("\n".join(str(line) for line in tail))
-    for key in ("text", "content", "screen"):
+        text = strip_ansi("\n".join(str(line) for line in tail))
+    else:
+        for key in ("text", "content", "screen"):
+            value = terminal.get(key)
+            if isinstance(value, str):
+                text = strip_ansi(value)
+                break
+    # `nextCursor` is what a reader passes back to get only later output, so it is the position
+    # this pane has reached. `latestCursor` is the same position for a read that returned
+    # everything, and is taken only when the first is absent.
+    cursor = ""
+    for key in ("nextCursor", "latestCursor"):
         value = terminal.get(key)
-        if isinstance(value, str):
-            return strip_ansi(value)
-    return ""
+        if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value):
+            cursor = str(value)[:64]
+            break
+    return PaneRead(text=text, cursor=cursor, cursor_known=bool(cursor), read=bool(terminal))
+
+
+def read_pane_text(handle: str, *, run_json: RunJson) -> str:
+    """The pane's text alone, for callers that read a screen rather than a position."""
+    return read_pane(handle, run_json=run_json).text
 
 
 def strip_ansi(text: str) -> str:
@@ -262,30 +305,35 @@ def composer_fingerprint(screen: str) -> str:
     return f"{kind}:{len(held)}:{_digest(held)}"
 
 
-def output_cursor(screen: str) -> str:
-    """A digest of everything above the composer: the pane's output as a single position.
+def output_cursor(read: PaneRead) -> tuple[str, bool]:
+    """Where the pane's output has got to, and whether that came from the backend.
 
-    Movement of this value between two probes is a pane that printed something, which is the
-    evidence that an Enter started a turn on a head that finished it before the next probe. It is
-    not a byte offset because no runtime offers one for a TUI repainting an alternate screen.
+    Orca's own cursor is used whenever it answers with one, opaque and unparsed: it advances when
+    the pane printed, which a retained tail does not have to. Comparing a digest of that tail
+    instead would miss a turn whose output fell outside the window or repainted over itself, and
+    it is only what stands in when the runtime returns no cursor at all.
     """
-    if not screen:
-        return ""
-    marker = max(screen.rfind(char) for char in COMPOSER_MARKERS)
-    output = screen[:marker] if marker >= 0 else screen
+    if read.cursor_known:
+        return f"orca:{read.cursor}", True
+    if not read.text:
+        return "", False
+    marker = max(read.text.rfind(char) for char in COMPOSER_MARKERS)
+    output = read.text[:marker] if marker >= 0 else read.text
     output = output[-TUI_FINGERPRINT_LIMIT:]
-    return f"{len(output)}:{_digest(output)}"
+    return f"tail:{len(output)}:{_digest(output)}", False
 
 
 def probe_pane(handle: str, *, run_json: RunJson) -> PaneProbe:
     """Readiness, composer and output cursor in one look, for the evidence of one attempt."""
     readiness = terminal_readiness(handle, run_json=run_json)
-    screen = read_pane_text(handle, run_json=run_json)
+    read = read_pane(handle, run_json=run_json)
+    cursor, from_backend = output_cursor(read)
     return PaneProbe(
         readiness=readiness,
-        composer=composer_fingerprint(screen),
-        cursor=output_cursor(screen),
-        screen_read=bool(screen),
+        composer=composer_fingerprint(read.text),
+        cursor=cursor,
+        cursor_from_backend=from_backend,
+        screen_read=bool(read.text),
     )
 
 
@@ -414,7 +462,11 @@ def deliver_interactive_prompt(
     no callback at all; it gets `DELIVERY_ACCEPTED` once stage 3 is evidenced, which is the same
     rule with only the last step left out, not a weaker one.
 
-    The verdict comes back with the evidence of the attempt attached, and so does the failure.
+    The verdict comes back with the evidence of the attempt attached, and so does the failure —
+    including a failure of the transport itself. Once this call has an evidence record, every way
+    out of it carries that record: a `terminal wait` or `terminal send` the host refuses is a
+    delivery that did not happen, and it is reported with the terminal, the payload fingerprint and
+    the stage reached rather than as a bare host error a caller would have to persist as prose.
     """
     if ack_out_of_band and confirm is not None:
         raise ValueError("out-of-band delivery cannot use a synchronous confirmation callback")
@@ -427,14 +479,17 @@ def deliver_interactive_prompt(
         payload_bytes=payload_bytes,
         payload_sha256=payload_hash,
     )
-    wait_for_tui_idle(handle, run_json=run_json)
+    with _transport_evidence(evidence, "wait-for-readiness"):
+        wait_for_tui_idle(handle, run_json=run_json)
     before = probe_pane(handle, run_json=run_json)
     evidence.readiness_before = before.readiness
     evidence.composer_before = before.composer
     evidence.modal_before = before.modal
     evidence.cursor_before = before.cursor
+    evidence.cursor_from_backend = before.cursor_from_backend
     sent_at = time.time()
-    _send_payload(handle, prompt, run_json=run_json, evidence=evidence)
+    with _transport_evidence(evidence, "send-payload"):
+        _send_payload(handle, prompt, run_json=run_json, evidence=evidence)
     return _confirm_interactive_turn(
         handle,
         prompt,
@@ -445,6 +500,30 @@ def deliver_interactive_prompt(
         ack_out_of_band=ack_out_of_band,
         evidence=evidence,
     )
+
+
+@contextmanager
+def _transport_evidence(evidence: DeliveryEvidence, step: str):
+    """Turn a refused Orca call inside the delivery into an evidence-carrying delivery failure.
+
+    A `terminal wait` or `terminal send` the host will not perform is exactly as much a delivery
+    that did not happen as a pane that swallowed the prompt, and the caller persists both the same
+    way. Without this the host's own exception escapes with nothing attached and the record keeps a
+    count and a sentence — and, worse, whatever evidence an earlier failure happened to leave.
+
+    `ValueError` is not caught: the two argument refusals this path raises are programming errors
+    in the caller, not deliveries.
+    """
+    try:
+        yield
+    except (TuiDeliveryError, ValueError):
+        raise
+    except Exception as exc:
+        evidence.reason = f"transport-refused-{step}"
+        raise TuiDeliveryError(
+            f"the {step} step of prompt delivery was refused (stage={evidence.stage}): {exc}",
+            evidence=evidence,
+        ) from None
 
 
 def _send_payload(
@@ -526,12 +605,13 @@ def _confirm_interactive_turn(
             # is what carries a prompt past a dialog that swallowed it; a composer that is empty
             # with nothing having happened is a pane the payload never reached, so it is written
             # again. A pane whose screen cannot be read gets the bare Enter it always got.
-            _send_payload(
-                handle,
-                "" if evidence.payload_left_in_composer or not probe.screen_read else prompt,
-                run_json=run_json,
-                evidence=evidence,
-            )
+            with _transport_evidence(evidence, "resend-payload"):
+                _send_payload(
+                    handle,
+                    "" if evidence.payload_left_in_composer or not probe.screen_read else prompt,
+                    run_json=run_json,
+                    evidence=evidence,
+                )
             evidence.resends += 1
             next_resend_at = time.monotonic() + max(TUI_DELIVERY_RESEND_GRACE_S, 0)
         time.sleep(max(TUI_DELIVERY_POLL_S, 0.01))
@@ -560,7 +640,15 @@ def _record_probe(evidence: DeliveryEvidence, before: PaneProbe, probe: PaneProb
     )
     if not evidence.payload_left_in_composer and evidence.stage == STAGE_PAYLOAD_WRITTEN and probe.screen_read:
         _advance(evidence, STAGE_ENTER_ACCEPTED)
-    if probe.cursor and before.cursor and probe.cursor != before.cursor:
+    evidence.cursor_from_backend = probe.cursor_from_backend
+    if (
+        probe.cursor
+        and before.cursor
+        and probe.cursor_from_backend == before.cursor_from_backend
+        and probe.cursor != before.cursor
+    ):
+        # Two positions of the same kind, and they differ: the pane printed. A backend cursor and
+        # a tail digest are not comparable, so a probe that lost the cursor says nothing here.
         evidence.cursor_moved = True
 
 

@@ -717,8 +717,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             self.runtime.production_tick()
 
         # The wake carries what the sprint had lost before it: this delivery is not history yet.
+        # The first launch's own prompt is one of those attempts — every prompt this sprint put in
+        # front of its head is counted, not only the ones carrying a card-event batch.
         message = sends[0][sends[0].index("--text") + 1]
-        self.assertIn("observer delivery so far: 1 attempt(s), 1 failed (1 wake, 0 launch)", message)
+        self.assertIn("observer delivery so far: 2 attempt(s), 1 failed (1 wake, 0 launch)", message)
         self.assertIn("closing resume", message)
 
         document = render_observer_prompt(
@@ -727,8 +729,99 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             delivery=self.observers()["sprint:1"].delivery,
         )
         self.assertIn("## Delivery evidence", document)
-        self.assertIn("2 attempt(s), 1 failed (1 wake, 0 launch)", document)
+        self.assertIn("3 attempt(s), 1 failed (1 wake, 0 launch)", document)
         self.assertIn("do not retry delivery yourself", document)
+
+    def test_a_first_launch_that_lost_its_prompt_is_counted_and_kept(self) -> None:
+        """The normal first launch carries no card-event batch, and still delivers a prompt.
+
+        `delivery_event_id` is set only when a launch is replacing an unacknowledged batch, so an
+        initial bring-up whose prompt stayed in the composer used to leave every delivery counter
+        at zero. A later successful launch and the closing resume then reported that no observer
+        delivery had ever failed, which is exactly what this card exists to stop.
+        """
+        self.open_sprint()
+        evidence = {
+            "subject": "observer-launch", "handle": "observer:sprint:1",
+            "stage": "payload_written", "payload_bytes": 512,
+            "payload_sha256": "abcdef0123456789", "reason": "payload-left-in-composer",
+        }
+        with mock.patch.object(
+            self.host, "prepare_observer",
+            side_effect=ObserverLaunchAborted("observer bring-up failed", evidence=evidence),
+        ):
+            failed = self.runtime.production_tick()
+
+        self.assertEqual(
+            [row["action"] for row in self.actions(failed)], ["observer-launch-deferred"]
+        )
+        delivery = self.observers()["sprint:1"].delivery
+        self.assertEqual((delivery.launch_delivery_attempts, delivery.launch_delivery_failures), (1, 1))
+        self.assertEqual((delivery.wake_attempts, delivery.wake_failures), (0, 0))
+        self.assertEqual(delivery.last_failure_method, "observer-launch")
+        self.assertEqual(delivery.last_evidence["reason"], "payload-left-in-composer")
+        # A launch with no batch owed writes no retry state: there is nothing to redeliver.
+        self.assertEqual(delivery.stage, DeliveryStage.IDLE)
+
+        # The next launch comes up, and the sprint still says a prompt was lost before it.
+        self.expire_launch_retry()
+        launched = self.runtime.production_tick()
+        self.assertEqual([row["action"] for row in self.actions(launched)], ["observer-launched"])
+        delivery = self.observers()["sprint:1"].delivery
+        self.assertEqual((delivery.launch_delivery_attempts, delivery.launch_delivery_failures), (2, 1))
+        self.assertEqual(
+            status_observers(self.runtime.production_state.load())[0]["delivery_failures"], 1
+        )
+
+    def test_a_wake_whose_transport_was_refused_keeps_its_evidence(self) -> None:
+        """A `terminal send` the host refuses is a prompt that did not land, evidenced like one.
+
+        The failure used to escape the delivery boundary as the host's own exception, so the record
+        kept a count and a sentence: no terminal, no payload fingerprint, no stage — and whatever
+        evidence an earlier failure happened to leave behind.
+        """
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="transport-refusal-event",
+        )
+        self.host.observer_status_result = {"last_activity": time.time(), "idle": True}
+        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
+        record = self.observers()["sprint:1"]
+
+        def run_json(args: list[str]) -> dict:
+            if args[1:3] == ["terminal", "list"]:
+                return {"terminals": [{
+                    "handle": record.handle, "leafId": record.leaf,
+                    "connected": True, "lastOutputAt": int((time.time() - 2) * 1000),
+                }]}
+            if args[1:3] == ["terminal", "send"]:
+                raise HostError("orca terminal send failed: synthetic transport refusal")
+            if args[1:3] == ["terminal", "read"]:
+                return {"terminal": {"tail": ["›"], "nextCursor": "42"}}
+            if args[1:3] == ["terminal", "wait"]:
+                return {"wait": {"condition": "tui-idle", "satisfied": True}}
+            raise AssertionError(args)
+
+        with mock.patch.object(real_host, "_run_json", side_effect=run_json):
+            self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
+            self.host.nudge_observer = real_host.nudge_observer  # type: ignore[method-assign]
+            deferred = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(deferred)], ["observer-wake-deferred"])
+        delivery = self.observers()["sprint:1"].delivery
+        self.assertEqual(delivery.wake_failures, 1)
+        evidence = delivery.last_evidence
+        self.assertEqual(evidence["reason"], "transport-refused-send-payload")
+        self.assertEqual(evidence["handle"], record.handle)
+        self.assertTrue(evidence["payload_bytes"])
+        self.assertEqual(len(evidence["payload_sha256"]), 16)
+        # The pane was fingerprinted before the send that never happened, so the record can say
+        # what the head looked like when the prompt was lost.
+        self.assertEqual(evidence["readiness_before"], "ready")
+        self.assertEqual(evidence["cursor_before"], "orca:42")
 
     def test_a_resume_for_a_refused_delivery_stops_the_retry(self) -> None:
         """A wake refused after its prompt landed is not sent twice.

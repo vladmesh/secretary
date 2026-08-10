@@ -1807,7 +1807,14 @@ def _launch_observer(
         if delivery_event_id:
             _defer_delivery(
                 record, ref, f"observer replacement launch failed: {exc}",
-                method="launch", evidence=_evidence_of(exc),
+                method="launch", evidence=dict(exc.evidence),
+            )
+        elif exc.evidence:
+            # No batch was owed, so there is no retry state to write — but a prompt was delivered
+            # to that head and did not land, and that is the sprint's evidence either way.
+            _count_delivery_failure(
+                record.delivery, "launch", f"observer launch prompt failed: {exc}",
+                dict(exc.evidence),
             )
         if exc.handle:
             record.handle = exc.handle
@@ -1865,8 +1872,15 @@ def _launch_observer(
     record.launch_next_at = 0.0
     record.stopped_reason = ""
     record.paused_at = 0.0
-    if delivery_event_id:
+    if launched.get("prompt_delivered"):
+        # Every launch prompt is one launch delivery, batch or no batch. The first launch of a
+        # sprint carries no pending event and still puts a prompt in front of a head; a sprint
+        # that lost that prompt has to be able to say so at closeout.
         _count_delivery_attempt(record.delivery, "launch")
+        evidence = launched.get("delivery_evidence")
+        if isinstance(evidence, dict) and evidence:
+            record.delivery.last_evidence = dict(evidence)
+    if delivery_event_id:
         record.delivery.stage = DeliveryStage.AWAITING_ACK
         record.delivery.sent_at = now
         record.delivery.held_since = now

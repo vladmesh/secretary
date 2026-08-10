@@ -485,23 +485,34 @@ class ScriptedPane:
         *,
         idle_after: dict[int, bool] | None = None,
         bytes_written: int = 1315,
+        cursors: dict[int, str] | None = None,
+        refuse: str = "",
     ) -> None:
         self.screens = screens
         self.idle_after = idle_after or {}
         self.bytes_written = bytes_written
+        # What Orca answers as `nextCursor`, keyed the same way. None at all is a runtime that
+        # returns no cursor, which is how every fixture that predates this looked.
+        self.cursors = cursors or {}
+        self.refuse = refuse
         self.calls: list[list[str]] = []
         self.sends: list[str] = []
 
-    def _screen(self) -> list[str]:
+    def _at(self, table: dict):
         landed = len(self.sends)
         while landed >= 0:
-            if landed in self.screens:
-                return self.screens[landed]
+            if landed in table:
+                return table[landed]
             landed -= 1
-        return []
+        return None
+
+    def _screen(self) -> list[str]:
+        return self._at(self.screens) or []
 
     def run_json(self, args: list[str]) -> dict:
         self.calls.append(args)
+        if self.refuse and args[1:3] == ["terminal", self.refuse]:
+            raise HostError(f"orca terminal {self.refuse} failed: synthetic transport refusal")
         if args[1:3] == ["terminal", "send"]:
             self.sends.append(args[args.index("--text") + 1])
             return {"send": {"accepted": True, "bytesWritten": self.bytes_written}}
@@ -509,7 +520,12 @@ class ScriptedPane:
             idle = self.idle_after.get(len(self.sends), True)
             return {"wait": {"condition": "tui-idle", "satisfied": idle}}
         if args[1:3] == ["terminal", "read"]:
-            return {"terminal": {"tail": list(self._screen())}}
+            terminal: dict = {"tail": list(self._screen())}
+            cursor = self._at(self.cursors)
+            if cursor is not None:
+                terminal["nextCursor"] = cursor
+                terminal["latestCursor"] = cursor
+            return {"terminal": terminal}
         raise AssertionError(args)
 
 
@@ -633,3 +649,84 @@ class TuiDeliveryStageTests(unittest.TestCase):
         self.assertEqual(outcome, DELIVERY_CONFIRMED)
         self.assertEqual(outcome.evidence.stage, "acknowledged")
         self.assertEqual(pane.sends, ["wake the observer", ""])
+
+    def test_the_backend_cursor_advancing_is_a_turn_even_when_the_tail_is_unchanged(self) -> None:
+        """The retained tail is bounded; Orca's cursor is not.
+
+        A quick turn can append output that the tail window no longer shows, and a repainting TUI
+        can print without the returned lines differing at all. Orca still advances `nextCursor`,
+        and that is the pane's real position, so it is what the delivery compares. A digest of the
+        tail would have said nothing moved and the wake would have been re-entered and refused.
+        """
+        pane = ScriptedPane(
+            {0: ["ready", "›"]},
+            cursors={0: "558", 1: "612"},
+        )
+
+        outcome = self.deliver(pane, ack_out_of_band=True)
+
+        self.assertEqual(outcome, DELIVERY_ACCEPTED)
+        evidence = outcome.evidence
+        self.assertEqual(evidence.stage, "turn_observed")
+        self.assertTrue(evidence.cursor_moved)
+        self.assertTrue(evidence.cursor_from_backend)
+        self.assertEqual((evidence.cursor_before, evidence.cursor_after), ("orca:558", "orca:612"))
+        self.assertEqual(evidence.readiness_after, READINESS_READY)
+        self.assertEqual(pane.sends, ["wake the observer"])
+
+    def test_a_backend_cursor_that_did_not_move_is_not_a_turn(self) -> None:
+        """The same pane with the cursor standing still: nothing was printed, so nothing landed."""
+        pane = ScriptedPane({0: ["ready", "›"]}, cursors={0: "558"})
+
+        with self.assertRaises(TuiDeliveryError) as raised:
+            self.deliver(pane, ack_out_of_band=True)
+
+        evidence = raised.exception.evidence
+        self.assertFalse(evidence.cursor_moved)
+        self.assertTrue(evidence.cursor_from_backend)
+        self.assertEqual(evidence.cursor_after, "orca:558")
+
+    def test_a_runtime_without_cursors_still_falls_back_to_the_tail(self) -> None:
+        """No cursor in the answer is the only case the tail digest stands in for one, and it says
+        so in the evidence rather than passing itself off as the backend's position."""
+        pane = ScriptedPane({0: ["ready", "›"], 1: ["ready", "answered", "›"]})
+
+        outcome = self.deliver(pane, ack_out_of_band=True)
+
+        self.assertEqual(outcome, DELIVERY_ACCEPTED)
+        self.assertTrue(outcome.evidence.cursor_moved)
+        self.assertFalse(outcome.evidence.cursor_from_backend)
+        self.assertTrue(outcome.evidence.cursor_after.startswith("tail:"))
+
+    def test_a_refused_send_is_a_delivery_failure_with_its_evidence(self) -> None:
+        """The transport itself failing is a prompt that did not land, not a bare host error.
+
+        Before this, a refused `terminal send` escaped the boundary as the host's own exception,
+        the observer path caught it as a plain failure, and the record kept a count and a sentence
+        with no terminal, payload or stage — and whatever evidence an earlier failure had left.
+        """
+        pane = ScriptedPane({0: ["ready", "›"]}, refuse="send")
+
+        with self.assertRaises(TuiDeliveryError) as raised:
+            self.deliver(pane, ack_out_of_band=True)
+
+        evidence = raised.exception.evidence
+        self.assertEqual(evidence.reason, "transport-refused-send-payload")
+        self.assertEqual(evidence.handle, "term-observer")
+        self.assertEqual(evidence.payload_bytes, len("wake the observer"))
+        self.assertEqual(len(evidence.payload_sha256), 16)
+        self.assertEqual(evidence.readiness_before, READINESS_READY)
+        self.assertEqual(evidence.stage, "none")
+        self.assertNotIn("wake the observer", json.dumps(evidence.to_json()))
+
+    def test_a_refused_readiness_wait_is_a_delivery_failure_with_its_evidence(self) -> None:
+        pane = ScriptedPane({0: ["ready", "›"]}, refuse="wait")
+
+        with self.assertRaises(TuiDeliveryError) as raised:
+            self.deliver(pane, ack_out_of_band=True)
+
+        evidence = raised.exception.evidence
+        self.assertEqual(evidence.reason, "transport-refused-wait-for-readiness")
+        self.assertEqual(evidence.handle, "term-observer")
+        self.assertEqual(evidence.payload_bytes, len("wake the observer"))
+        self.assertEqual(pane.sends, [], "nothing was written into a pane that could not be waited for")

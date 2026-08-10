@@ -357,6 +357,25 @@ def recover_review_launch(
     )
 
 
+def _record_review_delivery_failure(record: DispatcherRecord, exc: Exception) -> None:
+    """Keep a reviewer prompt that did not land as durable card telemetry.
+
+    Only a failure the delivery boundary evidenced counts: a split that would not open or an
+    inventory that would not answer is a bring-up failure, not a prompt that was refused, and the
+    infrastructure counter beside this one already carries those. What is kept is what the boundary
+    saw — terminal, payload size and hash, stage, attempts, composer and cursor fingerprints — and
+    it is never reset by a later reviewer, so a card cannot report that every prompt landed once
+    one finally does.
+    """
+    evidence = getattr(exc, "evidence", None)
+    if hasattr(evidence, "to_json"):
+        evidence = evidence.to_json()
+    if not isinstance(evidence, dict) or not evidence:
+        return
+    record.review_delivery_failures += 1
+    record.review_delivery_evidence = dict(evidence)
+
+
 def _escalate_stuck_review_launch(
     runtime: Any,
     task: dict[str, Any],
@@ -493,6 +512,12 @@ def start_review(
             reason=scrub_host_output(str(exc)),
         )
     except Exception as exc:
+        # Whatever this bring-up failed on, if the shared delivery boundary saw the reviewer's
+        # prompt fail it is recorded here first, before any branch decides what to do about the
+        # card. The pane is already closed by then, so this is the only surviving account of which
+        # terminal, which payload and which stage; the branches below still decide routing, and
+        # none of them is changed by it.
+        _record_review_delivery_failure(record, exc)
         if launch_left_a_head(record):
             # The host reported an ordinary failure, and the reviewer's own heartbeat says a process
             # of this bring-up is running anyway. The heartbeat wins: the intent stays, and the next

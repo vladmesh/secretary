@@ -72,10 +72,21 @@ class HeadPaneNotReady(HostError):
     answer is a dialog nobody answered.
     """
 
-    def __init__(self, message: str, *, readiness: str, pane: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        readiness: str,
+        pane: str = "",
+        evidence: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(message)
         self.readiness = readiness
         self.pane = pane
+        # What the shared delivery boundary saw of the prompt this pane would not take. The pane
+        # is closed behind this failure, so nothing can be asked of it afterwards: whatever is not
+        # carried here is gone, and the caller's durable telemetry is the only place left to put it.
+        self.evidence = dict(evidence or {})
 
 
 @dataclass(frozen=True)

@@ -91,7 +91,8 @@ def deliver_tui_prompt(
     run_json: RunJson,
     session_root: Path | None = None,
     prompt_text: str | None = None,
-) -> None:
+    subject: str = "",
+) -> DeliveryOutcome:
     """Deliver a Codex TUI prompt: the shared path, with this role's own criterion.
 
     Nothing here is a second delivery path. It resolves what to send, which is the caller's
@@ -105,13 +106,14 @@ def deliver_tui_prompt(
             prompt = (Path(workspace) / prompt_file).read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             raise TuiDeliveryError(f"TUI prompt file is unreadable: {exc}") from None
-    deliver_interactive_prompt(
+    return deliver_interactive_prompt(
         handle,
         prompt,
         run_json=run_json,
         confirm=turn_started_confirm(
             handle, workspace, "codex", run_json=run_json, session_root=session_root
         ),
+        subject=subject,
     )
 
 

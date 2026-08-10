@@ -940,6 +940,15 @@ class FakeHost:
             "handle": handle,
             "leaf": f"leaf:{handle}",
             "pid_file": str(pid_file),
+            # Like the real host: a bring-up that puts a prompt in front of the head says so, and
+            # hands back what the delivery boundary saw doing it.
+            "prompt_delivered": True,
+            "delivery_evidence": {
+                "subject": "observer-launch",
+                "handle": handle,
+                "stage": "acknowledged",
+                "payload_bytes": len(prompt.encode("utf-8")),
+            },
             "run": self.catalog.observer_run(head, workspace=str(workspace)).to_json(),
         }
 
@@ -6048,6 +6057,20 @@ class DispatcherRuntimeTests(unittest.TestCase):
         )
         self.assertEqual(record.review_infra_failures, 1)
         self.assertEqual(record.review_launch_attempts, 0)
+        # The reviewer's prompt went through the shared delivery boundary, so what that boundary
+        # saw is durable card telemetry rather than a scrubbed sentence. The pane is closed by now
+        # and nothing else can be asked about it. Routing is untouched: the same infrastructure
+        # retry, the same counter, the same held green evidence as before this was recorded.
+        self.assertEqual(record.review_delivery_failures, 1)
+        evidence = record.review_delivery_evidence
+        self.assertEqual(evidence["subject"], "reviewer-launch")
+        self.assertEqual(evidence["stage"], "payload_written")
+        self.assertEqual(evidence["reason"], "pane-stayed-ready")
+        self.assertTrue(evidence["payload_bytes"])
+        self.assertEqual(len(evidence["payload_sha256"]), 16)
+        self.assertEqual(
+            self._record_of().review_delivery_evidence, evidence, "it survives the state write"
+        )
         closed = [
             call[call.index("--terminal") + 1]
             for call in real_host.calls

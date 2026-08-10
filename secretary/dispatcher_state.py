@@ -190,6 +190,13 @@ class DispatcherRecord:
     # reviewer does take the checkout, so the count covers one outage rather than the card's life.
     review_infra_failures: int = 0
     review_infra_error: str = ""
+    # Reviewer prompt deliveries this card lost, and the bounded evidence of the last one, from
+    # the same delivery boundary the observer's wakes go through. Unlike the counter above these
+    # are not reset by a reviewer that later takes the checkout: a card whose first reviewer never
+    # received its prompt must still read that way afterwards, which is the whole point of keeping
+    # delivery evidence rather than delivery state. Payload size and hash only, never prompt text.
+    review_delivery_failures: int = 0
+    review_delivery_evidence: dict[str, Any] = field(default_factory=dict)
     # Durable launch intent (secretary-820): the bring-up this record is in the middle of, written
     # before the host is asked for a head and cleared once the host has answered. Empty at rest.
     # `dispatcher_launch` owns its shape and its recovery; nothing else reads inside it.
@@ -262,6 +269,8 @@ class DispatcherRecord:
             "review_launch_aborts": self.review_launch_aborts,
             "review_infra_failures": self.review_infra_failures,
             "review_infra_error": self.review_infra_error,
+            "review_delivery_failures": self.review_delivery_failures,
+            "review_delivery_evidence": dict(self.review_delivery_evidence),
             "launch_intent": dict(self.launch_intent),
             "worker_waiting_since": self.worker_waiting_since,
             "workspace": self.workspace,
@@ -338,6 +347,12 @@ class DispatcherRecord:
             review_launch_aborts=int(payload.get("review_launch_aborts") or 0),
             review_infra_failures=int(payload.get("review_infra_failures") or 0),
             review_infra_error=str(payload.get("review_infra_error") or ""),
+            review_delivery_failures=int(payload.get("review_delivery_failures") or 0),
+            review_delivery_evidence=(
+                dict(payload["review_delivery_evidence"])
+                if isinstance(payload.get("review_delivery_evidence"), dict)
+                else {}
+            ),
             worker_waiting_since=float(payload.get("worker_waiting_since") or 0.0),
             worker_respawns=int(payload.get("worker_respawns") or 0),
             worker_started_at=float(payload.get("worker_started_at") or 0.0),
