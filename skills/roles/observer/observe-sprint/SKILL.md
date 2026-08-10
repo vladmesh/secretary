@@ -70,7 +70,8 @@ classifying Blocked or a release failure, changing plan at a budget/human signal
 Do **not** write one for a claim, worker report, Validate move, reviewer launch, routine routing, or
 your own previous decision. A straight-green card normally needs only its Assessment decision and the
 post-Done next-cut/close update. Keep each field to the delta a replacement head needs; do not repeat
-machine-derived CI, delivery or board telemetry.
+machine-derived CI, delivery or board telemetry. The one exception is the closing resume, which reports
+the sprint's delivery counts — see step 11.
 
 ```bash
 python3 -P -m secretary sprint resume --ref <sprint-ref> --role observer --body-file <file.json>
@@ -376,6 +377,15 @@ When the Definition of Done is confirmed by a check against the default branch a
 3. Check that the affected checkouts are clean and that every pull request reached a merge.
 4. Write a final resume entry: the goal reached, the evidence for each Definition of Done item, the cards,
    the hotfixes, the important conclusions.
+
+   This one entry does report delivery telemetry, and it is the only one that does. Read
+   `observer.delivery` in `sprint status` — `wake_attempts`, `wake_failures`,
+   `launch_delivery_failures`, `last_failure_reason` — or the delivery-evidence line the dispatcher
+   put in your wake message or launch document, and state the actual counts. They are cumulative
+   over the sprint and survive acknowledgement and your own predecessors, so they include wakes that
+   never reached a head at all: you cannot have seen those, which is why they are handed to you.
+   A sprint whose reviewer came up normally can still have lost observer wakes; report them as
+   observer delivery, not as reviewer bring-up, and do not retry delivery yourself.
 5. Close the sprint:
    ```bash
    python3 -P -m secretary sprint close --ref <sprint-ref> --role po --actor observer

@@ -146,6 +146,7 @@ class ObserverLaunchAborted(HostError):
         workspace: str = "",
         pid_file: str = "",
         run: dict[str, Any] | None = None,
+        evidence: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.handle = handle
@@ -153,6 +154,9 @@ class ObserverLaunchAborted(HostError):
         self.workspace = workspace
         self.pid_file = pid_file
         self.run = dict(run or {})
+        # What the delivery boundary saw of the prompt this bring-up failed to hand over, so the
+        # sprint keeps the evidence of a launch delivery exactly as it keeps a wake's.
+        self.evidence = dict(evidence or {})
 
 
 class DeliveryStage(str, Enum):
@@ -197,6 +201,28 @@ class ObserverDelivery:
     attempts: int = 0
     next_at: float = 0.0
     reason: str = ""
+    # Everything below is sprint evidence rather than delivery state, and that is the difference
+    # that matters: `attempts` is the current batch's bounded retry counter and is reset by an
+    # acknowledgement, by a replacement head and by the next batch, while these are cumulative
+    # over the whole sprint and are never cleared. Without them a sprint whose wakes were refused
+    # three times and then acknowledged reads, at closeout, exactly like one where every wake
+    # landed first time — which is what sprint:1402 reported.
+    #
+    # They are scoped to the observer's own wakes on purpose. A reviewer that failed to come up on
+    # a card is a different subject with its own counters on the card's record, and the two were
+    # being read as one: "the reviewer launched fine" is not an answer about whether the observer
+    # was ever reached.
+    wake_attempts: int = 0
+    wake_failures: int = 0
+    launch_delivery_attempts: int = 0
+    launch_delivery_failures: int = 0
+    last_failure_reason: str = ""
+    last_failure_at: float = 0.0
+    last_failure_method: str = ""
+    # The bounded, content-free evidence of the last wake that was attempted: terminal identity,
+    # payload size and hash, the stage it reached, the composer and output fingerprints around it
+    # and why it stopped. Never the prompt.
+    last_evidence: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -216,6 +242,14 @@ class ObserverDelivery:
             "attempts": self.attempts,
             "next_at": self.next_at,
             "reason": self.reason,
+            "wake_attempts": self.wake_attempts,
+            "wake_failures": self.wake_failures,
+            "launch_delivery_attempts": self.launch_delivery_attempts,
+            "launch_delivery_failures": self.launch_delivery_failures,
+            "last_failure_reason": self.last_failure_reason,
+            "last_failure_at": self.last_failure_at,
+            "last_failure_method": self.last_failure_method,
+            "last_evidence": dict(self.last_evidence),
         }
 
     @classmethod
@@ -243,6 +277,18 @@ class ObserverDelivery:
             attempts=_int(payload.get("attempts")),
             next_at=_float(payload.get("next_at")),
             reason=str(payload.get("reason") or ""),
+            wake_attempts=_int(payload.get("wake_attempts")),
+            wake_failures=_int(payload.get("wake_failures")),
+            launch_delivery_attempts=_int(payload.get("launch_delivery_attempts")),
+            launch_delivery_failures=_int(payload.get("launch_delivery_failures")),
+            last_failure_reason=str(payload.get("last_failure_reason") or ""),
+            last_failure_at=_float(payload.get("last_failure_at")),
+            last_failure_method=str(payload.get("last_failure_method") or ""),
+            last_evidence=(
+                dict(payload["last_evidence"])
+                if isinstance(payload.get("last_evidence"), dict)
+                else {}
+            ),
         )
 
 
@@ -983,10 +1029,103 @@ def _set_delivery_waiting(delivery: ObserverDelivery, event: dict[str, Any], *, 
     delivery.reason = reason
 
 
-def _defer_delivery(record: ObserverRecord, ref: str, reason: str) -> dict[str, Any]:
+def _evidence_of(carrier: Any) -> dict[str, Any]:
+    """The bounded delivery evidence a host answer or failure carries, or nothing.
+
+    The host layer speaks the shared delivery boundary's evidence and this lifecycle stores it, so
+    a host seam that predates it — an in-process double, a noop run — simply contributes none
+    rather than being required to invent one.
+    """
+    evidence = getattr(carrier, "evidence", None)
+    if hasattr(evidence, "to_json"):
+        evidence = evidence.to_json()
+    return dict(evidence) if isinstance(evidence, dict) else {}
+
+
+def _delivery_subject(method: str) -> str:
+    """Which delivery this is, in the words the sprint's evidence keeps it under.
+
+    A wake is a prompt sent into the observer head that is already up; a launch delivery is the
+    prompt a replacement head is brought up with. Neither is a reviewer bring-up, which belongs to
+    a card and counts on that card's record: a sprint that reads "the reviewer came up" has said
+    nothing about whether its observer was ever reached.
+    """
+    return "observer-launch" if method == "launch" else "observer-wake"
+
+
+def _count_delivery_attempt(delivery: ObserverDelivery, method: str) -> None:
+    """Count one attempt to put a batch in front of the observer, however it ends."""
+    if method == "launch":
+        delivery.launch_delivery_attempts += 1
+    else:
+        delivery.wake_attempts += 1
+
+
+def _count_delivery_failure(
+    delivery: ObserverDelivery,
+    method: str,
+    reason: str,
+    evidence: dict[str, Any] | None = None,
+) -> None:
+    """Record one delivery that did not reach the head, as sprint evidence rather than as state.
+
+    An attempt is counted with it: a delivery that failed before the pane was touched at all —
+    an intent that could not be persisted, a replacement that never came up — was still a turn
+    the observer was owed and did not get.
+    """
+    _count_delivery_attempt(delivery, method)
+    if method == "launch":
+        delivery.launch_delivery_failures += 1
+    else:
+        delivery.wake_failures += 1
+    delivery.last_failure_reason = reason
+    delivery.last_failure_at = time.time()
+    delivery.last_failure_method = _delivery_subject(method)
+    if evidence:
+        delivery.last_evidence = dict(evidence)
+
+
+def delivery_evidence_summary(delivery: Any) -> str:
+    """One line of delivery evidence for the head that has to report it, or an empty string.
+
+    This is what the final resume and the closeout are written from. It is deliberately counts and
+    a reason, never a retry instruction: redelivery is the dispatcher's, and a head reading this
+    is reporting history, not acting on it.
+
+    It reads its numbers defensively because a host seam may hand it any record shape, and a wake
+    is not worth refusing over the line of provenance printed inside it.
+    """
+    wake_failures = _int(getattr(delivery, "wake_failures", 0))
+    launch_failures = _int(getattr(delivery, "launch_delivery_failures", 0))
+    attempts = _int(getattr(delivery, "wake_attempts", 0)) + _int(
+        getattr(delivery, "launch_delivery_attempts", 0)
+    )
+    failures = wake_failures + launch_failures
+    if not attempts and not failures:
+        return ""
+    line = (
+        f"observer delivery so far: {attempts} attempt(s), {failures} failed "
+        f"({wake_failures} wake, {launch_failures} launch)"
+    )
+    reason = str(getattr(delivery, "last_failure_reason", "") or "")
+    if reason:
+        method = str(getattr(delivery, "last_failure_method", "") or "observer-wake")
+        line += f"; last failure ({method}): {reason}"
+    return line
+
+
+def _defer_delivery(
+    record: ObserverRecord,
+    ref: str,
+    reason: str,
+    *,
+    method: str = "",
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Persist bounded external-delivery retry state without creating a busy loop."""
 
     delivery = record.delivery
+    _count_delivery_failure(delivery, method or delivery.method or "nudge", reason, evidence)
     delivery.stage = DeliveryStage.RETRY_DEFERRED
     delivery.attempts += 1
     delay = min(
@@ -1006,6 +1145,8 @@ def _defer_delivery(record: ObserverRecord, ref: str, reason: str) -> dict[str, 
         "delivery_id": delivery.delivery_id,
         "event_id": delivery.through_event,
         "reason": delivery.reason,
+        "wake_failures": delivery.wake_failures,
+        "launch_delivery_failures": delivery.launch_delivery_failures,
     }
 
 
@@ -1017,6 +1158,7 @@ def _fail_delivery(
     record: ObserverRecord,
     event: dict[str, Any],
     reason: str,
+    evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Refuse one wake, retry it a bounded number of times, then replace the head.
 
@@ -1027,7 +1169,7 @@ def _fail_delivery(
     `delivery_id` and `through_event` into the new launch, so a resume still acknowledges exactly
     the batch that was owed.
     """
-    outcome = _defer_delivery(record, ref, reason)
+    outcome = _defer_delivery(record, ref, reason, method="nudge", evidence=evidence)
     if record.delivery.attempts < observer_wake_max_attempts():
         return outcome
     attempts = record.delivery.attempts
@@ -1233,11 +1375,15 @@ def _wake_for_event(
         # Delivery acceptance is a terminal concern. The causal acknowledgement is deliberately
         # out of band: the next normal reconciliation reads the observer's durable resume once,
         # instead of polling the complete audit stream while the prompt-delivery loop runs.
-        runtime.host.nudge_observer(record)
+        accepted = runtime.host.nudge_observer(record)
     except (AttributeError, HostError, OSError, TypeError, ValueError) as exc:
         return _fail_delivery(
-            runtime, payload, observers, ref, record, event, f"observer wake failed: {exc}"
+            runtime, payload, observers, ref, record, event,
+            f"observer wake failed: {exc}",
+            evidence=_evidence_of(exc),
         )
+    _count_delivery_attempt(delivery, "nudge")
+    delivery.last_evidence = _evidence_of(accepted) or delivery.last_evidence
     delivery.stage = DeliveryStage.AWAITING_ACK
     delivery.sent_at = now
     delivery.held_since = now
@@ -1659,7 +1805,10 @@ def _launch_observer(
         discard_event(runtime, request_id)
         _clear_launch_intent(record, head_possible=bool(exc.handle))
         if delivery_event_id:
-            _defer_delivery(record, ref, f"observer replacement launch failed: {exc}")
+            _defer_delivery(
+                record, ref, f"observer replacement launch failed: {exc}",
+                method="launch", evidence=_evidence_of(exc),
+            )
         if exc.handle:
             record.handle = exc.handle
             record.leaf = exc.leaf
@@ -1682,6 +1831,8 @@ def _launch_observer(
                 record,
                 ref,
                 f"observer replacement launch failed: {getattr(exc, 'message', str(exc))}",
+                method="launch",
+                evidence=_evidence_of(exc),
             )
         return _defer(
             runtime, payload, observers, ref, record, head=head,
@@ -1715,6 +1866,7 @@ def _launch_observer(
     record.stopped_reason = ""
     record.paused_at = 0.0
     if delivery_event_id:
+        _count_delivery_attempt(record.delivery, "launch")
         record.delivery.stage = DeliveryStage.AWAITING_ACK
         record.delivery.sent_at = now
         record.delivery.held_since = now
@@ -2305,6 +2457,19 @@ def render_observer_prompt(
             "",
             f"delivery_id: {marker[0]}",
             f"through_event: {marker[1]}",
+            "",
+        ])
+    evidence = delivery_evidence_summary(delivery) if delivery is not None else ""
+    if evidence:
+        # A replacement head has no memory of the wakes its predecessor never received, and the
+        # closing resume is written by whichever head is up at the end. The counts come with the
+        # document so that head can report them instead of reporting zero.
+        sections.extend([
+            "## Delivery evidence",
+            "",
+            evidence,
+            "",
+            "Report these counts in your closing resume; do not retry delivery yourself.",
             "",
         ])
     return "\n".join(sections)

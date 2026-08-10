@@ -21,7 +21,7 @@ from secretary.dispatcher import (
 )
 from secretary.dispatcher_observer_fence import EVENT_CLEARED, EVENT_FENCED
 from secretary.dispatcher_launcher import HeadLaunch
-from secretary.dispatcher_tui import TuiDeliveryError
+from secretary.dispatcher_tui import DeliveryEvidence, TuiDeliveryError
 from secretary.dispatcher_observer import (
     EVENT_DEFERRED,
     EVENT_LAUNCHED,
@@ -36,6 +36,7 @@ from secretary.dispatcher_observer import (
     observer_alive,
     _observer_event_state,
     observer_pid_file,
+    observer_snapshot,
     put_observers,
     observer_request_id,
     render_observer_prompt,
@@ -592,6 +593,142 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             [event["kind"] for event in self.audit.events("sprint:1")],
             [EVENT_FENCED, EVENT_LAUNCHED, EVENT_CLEARED, EVENT_RELAUNCHED],
         )
+
+    def test_wake_failures_survive_acknowledgement_as_sprint_evidence(self) -> None:
+        """sprint:1402: wakes were refused, the batch was later acknowledged, and the sprint's
+        own telemetry then said no delivery had ever failed.
+
+        The batch's retry counter is reset by the acknowledgement and must be — the next batch
+        gets its own bounded retries. The sprint's evidence is not: attempts, failures and the
+        last failure reason are cumulative over the sprint and outlive both the acknowledgement
+        and the head, because the closing resume is written from them.
+        """
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="evidence-first-event",
+        )
+        # The head is standing at its prompt: a wake is delivered rather than waited for.
+        self.host.observer_status_result = {"last_activity": time.time(), "idle": True}
+        refusal = HostError("observer wake was not delivered: pane-stayed-ready")
+        refusal.evidence = {
+            "subject": "observer-wake", "stage": "payload_written", "payload_bytes": 1315,
+            "payload_sha256": "0123456789abcdef", "reason": "payload-left-in-composer",
+        }
+
+        with mock.patch.object(self.host, "nudge_observer", side_effect=refusal):
+            deferred = self.runtime.production_tick()
+
+        action = self.actions(deferred)[0]
+        self.assertEqual(action["action"], "observer-wake-deferred")
+        self.assertEqual(action["wake_failures"], 1)
+        delivery = self.observers()["sprint:1"].delivery
+        self.assertEqual(delivery.stage, DeliveryStage.RETRY_DEFERRED)
+        self.assertEqual((delivery.wake_attempts, delivery.wake_failures), (1, 1))
+        self.assertEqual(delivery.last_failure_method, "observer-wake")
+        self.assertEqual(delivery.last_evidence["reason"], "payload-left-in-composer")
+        # The evidence is the size and the hash of the payload, never the payload.
+        self.assertEqual(delivery.last_evidence["payload_bytes"], 1315)
+
+        # The retry lands, and the observer answers for the batch it was finally given.
+        self.expire_wake_retry()
+        woke = self.runtime.production_tick()
+        self.assertEqual([row["action"] for row in self.actions(woke)], ["observer-nudged"])
+        entry = {
+            "selected_step": "read board", "selected_why": "card changed",
+            "rejected_alternatives": "wait", "current_task": "secretary-510-pilot",
+            "dod_state": "open", "next_safe_step": "resume",
+        }
+        self.acknowledge_delivery(entry, request_id="evidence-ack")
+        acknowledged = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(acknowledged)], ["observer-idle"])
+        delivery = self.observers()["sprint:1"].delivery
+        self.assertEqual(delivery.stage, DeliveryStage.IDLE)
+        self.assertTrue(delivery.acknowledged_resume_id)
+        # The batch is closed and its retry counter with it.
+        self.assertEqual(delivery.attempts, 0)
+        # The sprint's evidence is not closed by an acknowledgement.
+        self.assertEqual((delivery.wake_attempts, delivery.wake_failures), (2, 1))
+        self.assertIn(str(refusal), delivery.last_failure_reason)
+        self.assertEqual(delivery.last_evidence["stage"], "payload_written")
+        # Both readers of this state say so: the operator's own status row, and the sprint
+        # status the observer itself reads when it writes the closing resume.
+        operator = status_observers(self.runtime.production_state.load())[0]
+        self.assertEqual(operator["delivery_failures"], 1)
+        self.assertIn("observer-wake:", operator["delivery_last_failure"])
+        row = observer_snapshot(self.runtime.production_state.load())[0]
+        self.assertEqual(
+            self.runtime.sprints.status("sprint:1", observer=row)["observer"]["delivery"][
+                "wake_failures"
+            ],
+            1,
+        )
+
+    def test_the_closing_turn_is_given_the_delivery_counts_it_has_to_report(self) -> None:
+        """A head cannot see a wake that never reached it, so the counts are handed to it.
+
+        Both routes carry them, because either head may be the one that writes the closeout: the
+        wake message a live head is given, and the launch document a replacement head reads. A
+        reviewer bring-up is a different subject and is not counted here — "the reviewer came up"
+        was exactly the answer that hid these failures.
+        """
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="closeout-evidence-event",
+        )
+        # The head is standing at its prompt: a wake is delivered rather than waited for.
+        self.host.observer_status_result = {"last_activity": time.time(), "idle": True}
+        with mock.patch.object(
+            self.host, "nudge_observer", side_effect=HostError("observer wake was not delivered")
+        ):
+            self.runtime.production_tick()
+
+        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
+        record = self.observers()["sprint:1"]
+        sends: list[list[str]] = []
+        busy = [False]
+
+        def run_json(args: list[str]) -> dict:
+            if args[1:3] == ["terminal", "list"]:
+                return {"terminals": [{
+                    "handle": record.handle, "leafId": record.leaf,
+                    "connected": True, "lastOutputAt": int((time.time() - 2) * 1000),
+                }]}
+            if args[1:3] == ["terminal", "send"]:
+                sends.append(args)
+                busy[0] = True
+                return {"send": {"accepted": True, "bytesWritten": 900}}
+            if args[1:3] == ["terminal", "read"]:
+                return {"terminal": {"tail": ["›"]}}
+            if args[1:3] == ["terminal", "wait"]:
+                return {"wait": {"condition": "tui-idle", "satisfied": not busy[0]}}
+            raise AssertionError(args)
+
+        self.expire_wake_retry()
+        with mock.patch.object(real_host, "_run_json", side_effect=run_json):
+            self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
+            self.host.nudge_observer = real_host.nudge_observer  # type: ignore[method-assign]
+            self.runtime.production_tick()
+
+        # The wake carries what the sprint had lost before it: this delivery is not history yet.
+        message = sends[0][sends[0].index("--text") + 1]
+        self.assertIn("observer delivery so far: 1 attempt(s), 1 failed (1 wake, 0 launch)", message)
+        self.assertIn("closing resume", message)
+
+        document = render_observer_prompt(
+            self.runtime.sprints.show("sprint:1", include_cards=False,
+                                      include_resume_freshness=False),
+            delivery=self.observers()["sprint:1"].delivery,
+        )
+        self.assertIn("## Delivery evidence", document)
+        self.assertIn("2 attempt(s), 1 failed (1 wake, 0 launch)", document)
+        self.assertIn("do not retry delivery yourself", document)
 
     def test_a_resume_for_a_refused_delivery_stops_the_retry(self) -> None:
         """A wake refused after its prompt landed is not sent twice.
@@ -3569,7 +3706,9 @@ class ObserverConfigurationTests(unittest.TestCase):
                 if args[1:3] == ["terminal", "list"]:
                     return {"terminals": [{"handle": "observer:sprint:1", "connected": True}]}
                 if args[1:3] == ["terminal", "send"]:
-                    return {}
+                    return {"send": {"accepted": True, "bytesWritten": 1315}}
+                if args[1:3] == ["terminal", "read"]:
+                    return {"terminal": {"tail": ["›"]}}
                 if args[1:3] == ["terminal", "wait"]:
                     # Ready before the send, working after it: the pane took the prompt.
                     sends = [call for call in calls if call[1:3] == ["terminal", "send"]]
@@ -3587,10 +3726,28 @@ class ObserverConfigurationTests(unittest.TestCase):
         self.assertIn("none/noop/missing evidence proves no broad suite", message)
         # The pane started a turn, and that alone does not close an observer delivery.
         self.assertEqual(outcome, "accepted")
+        # Readiness is asked and the pane is fingerprinted on both sides of the send: the byte
+        # count Orca answers with is one stage of delivery, not the whole of it.
         self.assertEqual(
             [call[1:3] for call in calls],
-            [["terminal", "list"], ["terminal", "wait"], ["terminal", "send"], ["terminal", "wait"]],
+            [
+                ["terminal", "list"],
+                ["terminal", "wait"],
+                ["terminal", "wait"],
+                ["terminal", "read"],
+                ["terminal", "send"],
+                ["terminal", "wait"],
+                ["terminal", "read"],
+            ],
         )
+        # The verdict carries the attempt's evidence, and the evidence carries no prompt text.
+        evidence = outcome.evidence.to_json()
+        self.assertEqual(evidence["handle"], "observer:sprint:1")
+        self.assertEqual(evidence["subject"], "observer-wake")
+        self.assertEqual(evidence["stage"], "turn_observed")
+        self.assertEqual(evidence["bytes_written"], 1315)
+        self.assertEqual(evidence["payload_bytes"], len(message.encode("utf-8")))
+        self.assertNotIn(message[:40], json.dumps(evidence))
 
     def test_real_host_nudge_resolves_an_observer_alias_by_its_saved_leaf(self) -> None:
         """The create-time handle need not occur in inventory after the observer is running."""
@@ -4270,6 +4427,27 @@ class RealHostTuiObserverLaunchTests(unittest.TestCase):
 
         self.assertEqual(self.stops, [f"path:{self.host.observer_workspace('sprint:1')}"])
         self.assertEqual(caught.exception.handle, "")
+
+    def test_a_failed_launch_delivery_hands_back_its_evidence_under_its_own_subject(self) -> None:
+        """The bring-up prompt is delivered by the same boundary as a wake, and evidenced like one.
+
+        The subject is what keeps the two apart in the sprint's telemetry: a launch delivery that
+        failed is not a wake that failed, and neither is a reviewer that would not come up.
+        """
+        evidence = DeliveryEvidence(
+            handle="term-obs", stage="payload_written", payload_bytes=420,
+            payload_sha256="feedfacefeedface", reason="payload-left-in-composer",
+        )
+        with mock.patch.object(
+            dispatcher_module,
+            "_deliver_tui_prompt",
+            mock.Mock(side_effect=TuiDeliveryError("TUI prompt was not delivered", evidence=evidence)),
+        ), self.assertRaises(ObserverLaunchAborted) as caught:
+            self._prepare()
+
+        self.assertEqual(caught.exception.evidence["subject"], "observer-launch")
+        self.assertEqual(caught.exception.evidence["reason"], "payload-left-in-composer")
+        self.assertEqual(caught.exception.evidence["payload_bytes"], 420)
 
     def test_a_terminal_that_will_not_stop_hands_its_handle_back(self) -> None:
         self.stop_refused = True

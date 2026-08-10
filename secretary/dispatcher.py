@@ -74,6 +74,7 @@ from secretary.dispatcher_observer import (
     OBSERVER_PROMPT_FILE,
     OBSERVER_ROLE,
     ObserverLaunchAborted,
+    delivery_evidence_summary as _observer_delivery_evidence_summary,
     observer_launch_prompt as _observer_launch_prompt,
     observer_pid_file as _observer_pid_file,
 )
@@ -843,6 +844,10 @@ class CommandHostRuntime:
                     prompt_text=_observer_launch_prompt(),
                 )
             except (TuiDeliveryError, HostError) as exc:
+                evidence = getattr(exc, "evidence", None)
+                evidence = evidence.to_json() if hasattr(evidence, "to_json") else {}
+                if evidence:
+                    evidence["subject"] = "observer-launch"
                 try:
                     self._stop_observer_terminals(str(workspace))
                 except Exception as stop_exc:
@@ -857,8 +862,9 @@ class CommandHostRuntime:
                         workspace=str(workspace),
                         pid_file=pid_file,
                         run=run,
+                        evidence=evidence,
                     ) from None
-                raise ObserverLaunchAborted(str(exc)) from None
+                raise ObserverLaunchAborted(str(exc), evidence=evidence) from None
         return {
             "workspace": str(workspace),
             "handle": pane.handle,
@@ -985,15 +991,27 @@ class CommandHostRuntime:
                 " Acknowledge this delivery in that resume with --delivery-id "
                 f"{delivery_id} --through-event {through_event}."
             )
+        # The wakes this sprint has already lost travel with the wake that reaches the head, so the
+        # resume or closeout written from this turn reports what actually happened rather than the
+        # nothing a head can see of a prompt that never arrived.
+        evidence_line = _observer_delivery_evidence_summary(delivery) if delivery is not None else ""
+        if evidence_line:
+            message += f" Sprint delivery evidence to carry into your closing resume: {evidence_line}."
         try:
             return _deliver_interactive_prompt(
                 current,
                 message,
                 run_json=self._run_json,
                 ack_out_of_band=True,
+                subject="observer-wake",
             )
         except TuiDeliveryError as exc:
-            raise HostError(f"observer wake was not delivered: {exc}") from None
+            failure = HostError(f"observer wake was not delivered: {exc}")
+            # The lifecycle stores this beside the sprint. It is the delivery boundary's own
+            # evidence — terminal identity, payload size and hash, the stage the delivery reached,
+            # the composer and output fingerprints around it — and carries no prompt text.
+            failure.evidence = getattr(exc, "evidence", None)
+            raise failure from None
 
     def _stop_observer_terminals(self, workspace: str) -> None:
         """Stop every pane of an observer workspace.

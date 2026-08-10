@@ -283,9 +283,31 @@ def _observers(production: dict[str, Any]) -> list[dict[str, Any]]:
             "paused": row["paused"],
             "idle_since": _epoch(row["idle_since"]),
             "idle_reason": row["idle_reason"] or None,
+            # Wakes this sprint's observer was owed and did not get, cumulative over the sprint
+            # and separate from a reviewer that failed to come up on a card: a sprint whose head
+            # was never reached must not read here as one whose deliveries all landed.
+            "delivery_failures": _delivery_failures(row.get("delivery")),
+            "delivery_last_failure": _delivery_last_failure(row.get("delivery")),
         }
         for row in observer_snapshot(production)
     ]
+
+
+def _delivery_failures(delivery: Any) -> int:
+    if not isinstance(delivery, dict):
+        return 0
+    return int(delivery.get("wake_failures") or 0) + int(
+        delivery.get("launch_delivery_failures") or 0
+    )
+
+
+def _delivery_last_failure(delivery: Any) -> str | None:
+    if not isinstance(delivery, dict):
+        return None
+    reason = str(delivery.get("last_failure_reason") or "")
+    if not reason:
+        return None
+    return f"{delivery.get('last_failure_method') or 'observer-wake'}: {reason}"
 
 
 def _divergences(production: dict[str, Any]) -> dict[str, Any]:

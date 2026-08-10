@@ -226,10 +226,20 @@ pending event and checks again on later ticks, delivering the nudge as soon as t
 
 The wake itself goes through the one delivery path every interactive head has, whatever provider it
 runs and whichever role owns it: a Codex launch, a worker or reviewer continuation and an observer
-wake are the same primitive. Wait for the pane, send, re-enter the prompt while Orca says the pane
-took nothing, which is what carries it past a dialog that swallowed the first Enter, and refuse
-upwards when the retries run out. A worker or reviewer continuation is delivered once its own
-head's turn has visibly started, which is that role's long-standing criterion. Observer delivery
+wake are the same primitive. Delivery there is four observed stages, not one: the payload written
+into the pane, the Enter taken, a turn observed, and the caller's own acknowledgement. `terminal
+send` answering `accepted: true` with a byte count is only the first, and Orca calls a pane holding
+an unsent composer `tui-idle` because it really is idle — which is how a prompt that was pasted and
+never entered reported as delivered (`issue:13dd4d88df6b33cfb98f`). So the pane is fingerprinted on
+both sides of the send: what the composer holds, and a digest of the output above it. A composer
+that is holding what the send put there is re-entered; one that is empty with nothing printed is
+written again; a pane that went to work, or that printed output it had not printed before, has
+taken a turn — including one that began and ended between two readiness probes, which readiness
+alone reports as a pane that stayed ready. Retries stay bounded and a delivery that runs out of
+them refuses upwards with the stage it reached. A worker or reviewer continuation is delivered once
+its own head's turn has visibly started, which is that role's long-standing criterion, and an
+observer wake stops one stage earlier for the same reasons rather than under a weaker rule.
+Observer delivery
 acceptance is deliberately separate from its causal acknowledgement: the terminal path proves that
 the prompt was taken, then returns without polling the audit log; the next normal reconciliation
 reads one audit snapshot and closes the batch only if it contains a resume naming that delivery.
@@ -239,6 +249,19 @@ bounded number of times (`SECRETARY_OBSERVER_WAKE_MAX_ATTEMPTS`, 3 by default) o
 backoff; once they are spent, the batch goes to the ordinary replacement path, which stops that head
 before it opens the next one and carries the same delivery marker into the new launch, so the resume
 that finally arrives still acknowledges the batch that was owed.
+
+What was delivered, and what was not, is sprint evidence rather than delivery state. The batch's own
+retry counter is reset by an acknowledgement, by a replacement head and by the next batch, and has
+to be. Beside it the observer record keeps cumulative counts that nothing resets while the sprint is
+open: wake attempts and failures, launch-delivery attempts and failures, the last failure's reason
+and subject, and the last attempt's bounded evidence — terminal identity, payload size and hash,
+the stage reached, the composer and output fingerprints, and why it stopped. Never the prompt text.
+The counts are wake-scoped and launch-scoped on purpose: a reviewer that failed to come up on a card
+is a different subject with its own counters on that card's record, and "the reviewer launched
+normally" was the answer that hid three refused observer wakes from a sprint's closing resume
+(`issue:83ac17afc53248340f4c`). They reach the head that has to report them through the wake message
+and through a replacement head's launch document, and they are readable from outside in
+`sprint status` (`observer.delivery`) and in `secretary status` (`delivery_failures`).
 
 All lifecycle events go to the same durable audit log keyed by the sprint reference and are deduplicated
 by request id. The record's generation is part of that id, so a sprint reappearing on the board starts a
