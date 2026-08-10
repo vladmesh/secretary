@@ -1066,12 +1066,18 @@ python3 -P -m secretary project gate ...
 ```
 
 A project's identity is set once by the top-level binding: `id`, `repo`, `adapter`, `default_branch`. The
-binding's mutable `plane` and `policy` fields are not part of identity and are carried over into the
-rewritten binding by a repeat `project add`. The scanner and provisioning prepare changes but do not
-enable a binding. Enabling is allowed only through a passing gate tied to verified revisions, a provision
-run and a write set. A higher-level resumable workflow is a roadmap milestone.
+binding's mutable `plane`, `policy` and `remote` fields are not part of identity and are carried over into
+the rewritten binding by a repeat `project add`, as is `orca_binding`. The scanner and provisioning prepare
+changes but do not enable a binding. Enabling is allowed only through a passing gate tied to verified
+revisions, a provision run and a write set. A higher-level resumable workflow is a roadmap milestone.
 
-Diagnosing failures, recovering a stale disabled draft and verifying a passed result are described in
+An enabled binding is never rewritten by an ordinary `project add`. Re-onboarding one is an explicit
+operator request, `project add --re-onboard`, which disables the binding and drops its canonical adapter in
+the same atomic transition that publishes the new draft, so the project holds no executable adapter until a
+new gate passes. It does not enable anything and grants the scanner and the provision agent nothing.
+
+Diagnosing failures, recovering a stale disabled draft, re-onboarding an enabled legacy project and
+verifying a passed result are described in
 [Operations](OPERATIONS.md#connecting-a-project-gate-and-stale-input-recovery).
 
 ## Memory

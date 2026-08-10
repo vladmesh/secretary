@@ -20,7 +20,7 @@ from triggered_agents.runtime.paths import default_instance_path
 DEFAULT_INSTANCE = str(default_instance_path())
 # Binding-owned fields. They live in the binding, never in the contract's ``identity``, and a
 # rewrite of the binding carries the values the operator set instead of resetting them.
-MUTABLE_BINDING_FIELDS = ("plane", "policy")
+MUTABLE_BINDING_FIELDS = ("plane", "policy", "remote")
 IDENTITY_FIELDS = ("id", "repo", "adapter", "default_branch")
 REQUIRED_DECISIONS = [
     "setup.commands",
@@ -39,8 +39,14 @@ def project_add(
     instance_value: str,
     *,
     dry_run: bool,
+    re_onboard: bool = False,
 ) -> tuple[int, dict[str, Any]]:
-    """Scan ``repo_value`` and optionally publish a disabled binding and draft."""
+    """Scan ``repo_value`` and optionally publish a disabled binding and draft.
+
+    ``re_onboard`` is the operator's explicit request to take an enabled binding back down to
+    the disabled draft state. It is the only supported way to re-onboard a legacy project that
+    carries ``enabled: true`` and a canonical adapter but no draft, provision run or gate result.
+    """
     repo = Path(repo_value).expanduser().resolve(strict=False)
     project_id = _project_id(repo.name)
     instance = Path(instance_value).expanduser()
@@ -49,11 +55,13 @@ def project_add(
     draft_path = instance_dir / "adapter-drafts" / f"{project_id}.yaml"
     if dry_run:
         return _project_add_locked(
-            repo, project_id, instance_dir, binding_path, draft_path, dry_run=True
+            repo, project_id, instance_dir, binding_path, draft_path,
+            dry_run=True, re_onboard=re_onboard,
         )
     with file_lock(project_lock_path(instance_dir, project_id)):
         return _project_add_locked(
-            repo, project_id, instance_dir, binding_path, draft_path, dry_run=False
+            repo, project_id, instance_dir, binding_path, draft_path,
+            dry_run=False, re_onboard=re_onboard,
         )
 
 
@@ -65,6 +73,7 @@ def _project_add_locked(
     draft_path: Path,
     *,
     dry_run: bool,
+    re_onboard: bool = False,
 ) -> tuple[int, dict[str, Any]]:
     existing_binding, error = _load_optional_mapping(binding_path)
     if error:
@@ -79,8 +88,14 @@ def _project_add_locked(
         default_branch = str(existing_binding.get("default_branch", default_branch))
 
     identity = _identity(repo, project_id, default_branch)
+    # Taking an enabled binding down is what ``--re-onboard`` asks for, and only that. On an
+    # already disabled binding the flag changes nothing, so repeating the request republishes
+    # the same bytes instead of wiping a provision run the operator has since applied.
+    taking_down = bool(re_onboard) and bool(existing_binding) and existing_binding.get("enabled") is True
     if existing_binding:
-        conflict = _binding_conflict(existing_binding, identity, allow_enabled=dry_run)
+        conflict = _binding_conflict(
+            existing_binding, identity, allow_enabled=dry_run or re_onboard
+        )
         if conflict:
             artifact = _base_artifact(
                 repo, project_id, default_branch, _safe_scan(repo, default_branch)
@@ -116,6 +131,10 @@ def _project_add_locked(
         artifact["scanner"] = scanner
         if old_head and scanner.get("repo", {}).get("head") != old_head:
             _reset_scanner_derived_state(artifact)
+    if taking_down:
+        # The adapter that was executing under the enable is not evidence for the new draft:
+        # provisioning and the gate start from pending again, on this scanner head.
+        _reset_scanner_derived_state(artifact)
 
     binding = dict(identity)
     if existing_binding:
@@ -135,9 +154,8 @@ def _project_add_locked(
         return 0, artifact
 
     adapter_path = instance_dir / "adapters" / f"{identity['adapter']}.yaml"
-    remove_stale_adapter = (
-        adapter_path.exists()
-        and artifact.get("provision", {}).get("status") != "drafted"
+    remove_stale_adapter = adapter_path.exists() and (
+        taking_down or artifact.get("provision", {}).get("status") != "drafted"
     )
     try:
         binding_text = yaml.safe_dump(binding, sort_keys=False, allow_unicode=True)

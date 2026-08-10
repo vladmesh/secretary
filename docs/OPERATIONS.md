@@ -356,6 +356,35 @@ What each stage does:
 reason to edit YAML: run `project gate` on the live binding first. It will clear the enable itself if the
 input is stale and return the project to the disabled state the recovery works from.
 
+### Re-onboarding an enabled legacy project
+
+A project connected before drafts existed carries `enabled: true` and a canonical adapter but no draft,
+provision run or gate result. The gate has no passed result to compare against, so it refuses with
+"enabled binding has no matching passed gate result" and leaves the enable in place — `project add` alone
+cannot get past it either. `--re-onboard` is the supported way out, and the only one; editing the binding
+or the adapter by hand is not:
+
+```bash
+python3 -P -m secretary project add PROJECT_PATH --re-onboard --instance "$INSTANCE"
+python3 -P -m secretary project provision-start PROJECT_ID --instance "$INSTANCE"
+python3 -P -m secretary project provision-apply PROJECT_ID --instance "$INSTANCE"
+python3 -P -m secretary project gate PROJECT_ID --instance "$INSTANCE"
+```
+
+The flag only lifts the refusal on an enabled binding; nothing else about the stage changes, and the gate
+stays the only owner of the enable. In one atomic transition `project add --re-onboard` republishes the
+binding as disabled, publishes a fresh draft on the current scanner head with provision and gate back to
+pending, and deletes the canonical adapter so it cannot be executed before a new gate. Identity
+(`id`, `repo`, `adapter`, `default_branch`) must still match and the binding must still satisfy its schema:
+a mismatch, a schema error, or a repository the scanner cannot read fails closed, writing nothing and
+leaving the enable exactly as it was. `plane`, `policy`, `remote` and `orca_binding` are carried over.
+
+On an already disabled binding the flag does nothing at all: the run is an ordinary `project add`, so
+repeating the command after `provision-apply` republishes the same bytes instead of discarding the run.
+Recovery after a partial write needs no cleanup — a failed transition restores every file it touched, so
+re-running the same command is safe. To re-onboard on a moved HEAD, just run it: the new draft records the
+current head, which is what `provision-start` will then derive its run id from.
+
 ### Verifying the result
 
 Read the three artifacts:
