@@ -1586,23 +1586,36 @@ A broad run is expensive enough that its result should survive the terminal it p
 documented form wraps the suite:
 
 ```bash
-python3 -m secretary check broad --command 'python3 -m unittest'
-python3 -m secretary check show --command 'python3 -m unittest'
+python3 -m secretary check broad --module unittest
+python3 -m secretary check show --module unittest
 ```
 
-`check broad` streams the command's combined output to stderr while it runs, exits with the
-command's own status (a signal-killed command becomes the usual `128+N`), and writes one JSON
-receipt under `state/checks/` in the workspace — an ignored path, never committed. The receipt
-holds the command and its check-set digest, the working directory and which `secretary` package a
-check launched from there imports, start, end and duration, the exit code, the parsed verdict and
-counts where the runner prints them, and a bounded tail of the output.
+`check broad` streams the check's combined output to stderr while it runs, exits with the check's
+own status (a signal-killed check becomes the usual `128+N`), and writes one JSON receipt under
+`state/checks/` in the workspace — an ignored path, never committed. The receipt holds the check
+and its check-set digest, the working directory, the import provenance described below, start, end
+and duration, the exit code, the parsed verdict and counts where the runner prints them, and a
+bounded tail of the output. The verdict is scanned off the stream as it goes past, so a runner that
+prints `OK (skipped=8)` and then megabytes of cleanup output still has its counts recorded, without
+the receipt growing to hold the logs.
+
+Two check shapes are accepted, and they differ in one promise:
+
+- `--module unittest` (add `--module-arg` for arguments) is the standard shape. The wrapper builds
+  the argv, so the suite runs in a process that records its own working directory and the
+  `secretary` package it imported. That is provenance observed from the process that ran the check,
+  which is what makes a receipt reusable.
+- `--command '<shell>'` accepts anything a project needs. A shell can `cd` elsewhere or reach a
+  different interpreter or import path before any check starts, so this receipt records
+  `origin: unobservable`, claims no import, and is never reused in place of a run. It remains a
+  summary to read.
 
 `check show` runs nothing. It answers whether the receipt still describes the checkout, comparing
 the recorded HEAD object id and content digest of the tracked diff and untracked files with the
 current ones, and exits non-zero when it does not. Its answer fails closed: a truncated or edited
-receipt, a run that was killed or timed out, and a checkout with no resolvable identity are all
-"not usable" rather than a summary. `check broad --reuse` skips the run while the receipt is
-usable, so a report can quote the evidence instead of rebuilding it.
+receipt, a run that was killed or timed out, a checkout with no resolvable identity, and a shape
+that attests no import are all "not usable" rather than a summary. `check broad --reuse` skips the
+run while the receipt is usable, so a report can quote the evidence instead of rebuilding it.
 
 This receipt is a local convenience for whoever ran the suite. It is not the mechanical gate's
 exact-SHA attestation and never travels downstream in its place.

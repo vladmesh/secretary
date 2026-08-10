@@ -8244,8 +8244,10 @@ class HeadPromptTests(unittest.TestCase):
         back to a summary was to run the whole suite again over unchanged code."""
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
 
-        self.assertIn("python3 -m secretary check broad --command", doc)
-        self.assertIn("python3 -m secretary check show --command", doc)
+        self.assertIn("python3 -m secretary check broad --module", doc)
+        self.assertIn("python3 -m secretary check show --module", doc)
+        # The shell shape is offered, with the promise it cannot keep spelled out.
+        self.assertIn("never reused in place of a run", doc)
         self.assertIn("state/checks/broad-<digest>.json", doc)
         self.assertIn("scrolled its output away is prohibited", doc)
         # The justified reruns stay open, and the receipt never impersonates the gate.

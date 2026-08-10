@@ -22,6 +22,7 @@ from unittest import mock
 from secretary import broad_check
 from secretary.broad_check import (
     BroadCheckError,
+    CheckSpec,
     content_identity,
     load_receipt,
     parse_unittest_summary,
@@ -52,7 +53,9 @@ class BroadCheckTestCase(unittest.TestCase):
         _git(self.root, "init", "-q")
         _git(self.root, "config", "user.email", "worker@example.invalid")
         _git(self.root, "config", "user.name", "worker")
-        (self.root / ".gitignore").write_text("/state/\n", encoding="utf-8")
+        # `__pycache__/` is ignored here for the same reason every real checkout ignores it:
+        # a Python check writes bytecode as it runs, and that is not a change to the code.
+        (self.root / ".gitignore").write_text("/state/\n__pycache__/\n", encoding="utf-8")
         (self.root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
         _git(self.root, "add", "-A")
         _git(self.root, "commit", "-q", "-m", "base")
@@ -63,8 +66,13 @@ class BroadCheckTestCase(unittest.TestCase):
         path.write_text(body, encoding="utf-8")
         return f"{sys.executable} {path}"
 
-    def _run(self, command: str, **kwargs):
+    def _run(self, command, **kwargs):
         return run_broad_check(command, root=self.root, stream=self.stream, **kwargs)
+
+    def _suite(self, name: str, body: str, args: tuple[str, ...] = ()) -> CheckSpec:
+        """A module-shaped check: the standard shape, and the only one that attests an import."""
+        (self.root / f"{name}.py").write_text(body, encoding="utf-8")
+        return CheckSpec.for_module(name, args)
 
 
 class RunAndCaptureTests(BroadCheckTestCase):
@@ -108,7 +116,11 @@ class RunAndCaptureTests(BroadCheckTestCase):
         self.assertLessEqual(len(receipt["tail"].encode("utf-8")), broad_check.TAIL_BYTES)
 
     def test_nonzero_exit_is_preserved_and_remains_usable_evidence(self) -> None:
-        exit_code, receipt = self._run("echo boom 1>&2; exit 3")
+        suite = self._suite(
+            "redsuite",
+            "import sys\nsys.stderr.write('boom\\n')\nsys.exit(3)\n",
+        )
+        exit_code, receipt = self._run(suite)
 
         self.assertEqual(exit_code, 3)
         self.assertEqual(receipt["exit_code"], 3)
@@ -117,9 +129,17 @@ class RunAndCaptureTests(BroadCheckTestCase):
         self.assertIn("boom", receipt["tail"])
         # A red answer is a concrete answer: the point of the receipt is that nobody reruns the
         # suite to rediscover it.
-        lookup = usable_receipt(self.root, "echo boom 1>&2; exit 3")
+        lookup = usable_receipt(self.root, suite)
         self.assertTrue(lookup.usable)
         self.assertEqual(lookup.receipt["verdict"], "failed")
+
+    def test_a_shell_shape_keeps_its_exit_status_while_attesting_no_import(self) -> None:
+        exit_code, receipt = self._run("echo boom 1>&2; exit 3")
+
+        self.assertEqual(exit_code, 3)
+        self.assertEqual(receipt["command_shape"], "shell")
+        self.assertIn("boom", receipt["tail"])
+        self.assertEqual(receipt["project_provenance"]["origin"], "unobservable")
 
     def test_a_killed_command_is_incomplete_and_never_usable(self) -> None:
         exit_code, receipt = self._run("echo starting; kill -9 $$")
@@ -144,17 +164,20 @@ class RunAndCaptureTests(BroadCheckTestCase):
         self.assertIn("timed out", receipt["incomplete_reason"])
         self.assertFalse(usable_receipt(self.root, command).usable)
 
-    def test_provenance_records_the_project_a_check_from_this_cwd_would_import(self) -> None:
-        _, receipt = self._run("true")
-        provenance = receipt["project_provenance"]
+    def test_a_module_check_reports_the_import_its_own_process_made(self) -> None:
+        suite = self._suite("quietsuite", "print('done')\n")
 
-        # This workspace has no `secretary` package of its own, so the import resolves outside it
-        # and the receipt says so plainly rather than implying the candidate was validated.
+        _, receipt = self._run(suite)
+        provenance = receipt["project_provenance"]
+        # This workspace has no `secretary` package of its own, so the check process imported one
+        # from elsewhere, and the receipt says exactly that instead of implying the candidate.
+        self.assertEqual(provenance["origin"], "check-process")
         self.assertFalse(provenance["inside_workspace"])
+        self.assertEqual(provenance["cwd"], str(self.root.resolve()))
 
         (self.root / "secretary").mkdir()
         (self.root / "secretary" / "__init__.py").write_text("", encoding="utf-8")
-        _, receipt = self._run("true")
+        _, receipt = self._run(suite)
         provenance = receipt["project_provenance"]
         self.assertTrue(provenance["inside_workspace"])
         self.assertTrue(
@@ -291,61 +314,249 @@ class DocumentedCommandTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("python3 -m secretary check show --command", text)
+        self.assertIn("python3 -m secretary check show --module", text)
         self.assertIn("state/checks/", text)
+
+    def test_the_documented_shapes_say_which_one_attests_an_import(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        operations = (repo_root / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
+        protocols = (repo_root / "docs" / "PROTOCOLS.md").read_text(encoding="utf-8")
+
+        self.assertIn("origin: unobservable", operations)
+        self.assertIn("--module", operations)
+        self.assertIn("attests no import", protocols)
 
 
 class UnchangedContentReuseTests(BroadCheckTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        # Reuse is only ever offered for the standard module shape, so these tests use it.
+        self.suite = self._suite("reusesuite", "print('suite ran')\n")
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-q", "-m", "suite")
+
     def test_an_unchanged_checkout_reuses_the_receipt_and_any_edit_invalidates_it(self) -> None:
-        self._run("echo suite")
-        lookup = usable_receipt(self.root, "echo suite")
+        self._run(self.suite)
+        lookup = usable_receipt(self.root, self.suite)
         self.assertTrue(lookup.usable)
         self.assertEqual(lookup.reason, "receipt describes this exact content")
 
         # Writing the receipt is itself a change to the directory; it must not invalidate the
         # receipt it just wrote, or reuse would never be possible at all.
-        self.assertTrue(usable_receipt(self.root, "echo suite").usable)
+        self.assertTrue(usable_receipt(self.root, self.suite).usable)
 
         (self.root / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
-        stale = usable_receipt(self.root, "echo suite")
+        stale = usable_receipt(self.root, self.suite)
         self.assertFalse(stale.usable)
         self.assertIn("content changed", stale.reason)
 
         (self.root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
-        self.assertTrue(usable_receipt(self.root, "echo suite").usable)
+        self.assertTrue(usable_receipt(self.root, self.suite).usable)
 
     def test_committing_the_same_content_still_changes_the_identity(self) -> None:
         (self.root / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
-        self._run("echo suite")
-        self.assertTrue(usable_receipt(self.root, "echo suite").usable)
+        self._run(self.suite)
+        self.assertTrue(usable_receipt(self.root, self.suite).usable)
 
         _git(self.root, "commit", "-q", "-a", "-m", "second")
         # A new candidate SHA is precisely the case that opens a justified new run.
-        self.assertFalse(usable_receipt(self.root, "echo suite").usable)
+        self.assertFalse(usable_receipt(self.root, self.suite).usable)
 
     def test_a_new_untracked_file_changes_the_identity(self) -> None:
-        self._run("echo suite")
+        self._run(self.suite)
         (self.root / "extra.py").write_text("HELPER = True\n", encoding="utf-8")
 
-        self.assertFalse(usable_receipt(self.root, "echo suite").usable)
+        self.assertFalse(usable_receipt(self.root, self.suite).usable)
+
+    def test_a_check_that_writes_into_the_checkout_invalidates_its_own_receipt(self) -> None:
+        writer = self._suite(
+            "writersuite", "open('artefact.txt', 'w', encoding='utf-8').write('made\\n')\n"
+        )
+        self._run(writer)
+
+        # Not a defect: the content the receipt described is not the content now on disk, and
+        # saying so is the whole contract.
+        lookup = usable_receipt(self.root, writer)
+        self.assertFalse(lookup.usable)
+        self.assertIn("content changed", lookup.reason)
 
     def test_a_receipt_for_another_command_is_never_offered_for_this_one(self) -> None:
-        self._run("echo suite")
+        self._run(self.suite)
 
-        other = usable_receipt(self.root, "echo other-suite")
+        other = usable_receipt(self.root, CheckSpec.for_module("othersuite"))
         self.assertFalse(other.usable)
         self.assertIsNone(other.receipt)
 
     def test_a_checkout_without_a_resolvable_identity_never_reuses_anything(self) -> None:
         bare = Path(self.tmpdir.name) / "not-a-repo"
         bare.mkdir()
-        exit_code, receipt = run_broad_check("echo suite", root=bare, stream=self.stream)
+        (bare / "baresuite.py").write_text("print('suite ran')\n", encoding="utf-8")
+        spec = CheckSpec.for_module("baresuite")
+        exit_code, receipt = run_broad_check(spec, root=bare, stream=self.stream)
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(receipt["content_identity"], {"head_sha": "", "worktree_digest": ""})
-        lookup = usable_receipt(bare, "echo suite")
+        lookup = usable_receipt(bare, spec)
         self.assertFalse(lookup.usable)
         self.assertIn("no resolvable content identity", lookup.reason)
+
+
+class ProvenanceHonestyTests(BroadCheckTestCase):
+    """secretary-1406 review, BLOCKER-ACTUAL-IMPORT-PROVENANCE.
+
+    Provenance used to come from a preflight probe the wrapper ran in the workspace before it
+    started the check. That probe answers a different question than the one asked: the check may
+    `cd` elsewhere, or reach a different interpreter or import path, and the receipt would still
+    report the candidate worktree as the imported project — on a complete, passing, reusable
+    receipt. Nothing may claim an import it did not observe.
+    """
+
+    def _outside_project(self) -> Path:
+        outside = Path(self.tmpdir.name) / "elsewhere"
+        (outside / "secretary").mkdir(parents=True)
+        (outside / "secretary" / "__init__.py").write_text("", encoding="utf-8")
+        return outside
+
+    def test_a_shell_check_that_changes_directory_cannot_claim_the_candidate_checkout(self) -> None:
+        candidate = self.root / "secretary"
+        candidate.mkdir()
+        (candidate / "__init__.py").write_text("", encoding="utf-8")
+        outside = self._outside_project()
+        command = (
+            f"cd {outside}; {sys.executable} -c "
+            "\"import secretary, sys; sys.stdout.write(secretary.__file__)\""
+        )
+
+        exit_code, receipt = self._run(command)
+
+        self.assertEqual(exit_code, 0)
+        # The check really did import the other checkout, and it really did pass.
+        self.assertIn(str(outside), receipt["tail"])
+        self.assertEqual(receipt["status"], "complete")
+        self.assertEqual(receipt["verdict"], "passed")
+        # The receipt claims no import at all, and above all not this workspace's.
+        provenance = receipt["project_provenance"]
+        self.assertEqual(provenance["origin"], "unobservable")
+        self.assertEqual(provenance["imported_secretary"], "")
+        self.assertFalse(provenance["inside_workspace"])
+        self.assertNotIn(str(self.root.resolve()), json.dumps(provenance))
+        # And it can never stand in for running the check again.
+        lookup = usable_receipt(self.root, command)
+        self.assertFalse(lookup.usable)
+        self.assertIn("provenance was not observed", lookup.reason)
+
+    def test_no_shell_check_is_ever_reusable_however_ordinary_it_looks(self) -> None:
+        for command in ("true", f"cd / && {sys.executable} -c 'pass'", "echo ok"):
+            with self.subTest(command=command):
+                self._run(command)
+                lookup = usable_receipt(self.root, command)
+                self.assertFalse(lookup.usable)
+                self.assertEqual(lookup.receipt["project_provenance"]["origin"], "unobservable")
+
+    def test_a_module_check_reports_an_import_from_outside_as_outside(self) -> None:
+        outside = self._outside_project()
+        suite = self._suite("outsidesuite", "print('ran')\n")
+        env = dict(os.environ, PYTHONPATH=str(outside))
+
+        _, receipt = self._run(suite, env=env)
+
+        # The workspace has no `secretary` of its own, so the check process imported the other
+        # copy; the receipt names it rather than the candidate, and stays usable because the
+        # answer came from the process that ran the check.
+        provenance = receipt["project_provenance"]
+        self.assertEqual(provenance["origin"], "check-process")
+        self.assertTrue(provenance["imported_secretary"].startswith(str(outside)))
+        self.assertFalse(provenance["inside_workspace"])
+        self.assertTrue(usable_receipt(self.root, suite).usable)
+
+    def test_a_module_check_that_dies_before_recording_provenance_claims_none(self) -> None:
+        outside = self._outside_project()
+        suite = self._suite("crashsuite", "raise SystemExit(4)\n")
+
+        # `secretary` cannot be imported at all here, so the bootstrap records an empty import
+        # rather than inventing one, and the receipt reports what it saw.
+        _, receipt = self._run(suite, env={"PATH": os.environ.get("PATH", ""), "HOME": str(outside)})
+
+        self.assertEqual(receipt["exit_code"], 4)
+        provenance = receipt["project_provenance"]
+        self.assertEqual(provenance["origin"], "check-process")
+        self.assertNotIn(str(self.root.resolve()), provenance["imported_secretary"])
+
+
+class StreamingSummaryTests(BroadCheckTestCase):
+    """secretary-1406 review, BLOCKER-PARSED-SUMMARY-LOST-BEYOND-TAIL.
+
+    The parsed verdict used to be read back out of the bounded tail, so a runner that printed its
+    summary and then more than the tail's worth of cleanup output produced a passing receipt with
+    no parsed fields at all. The verdict is scanned off the stream instead, in constant memory.
+    """
+
+    def test_a_summary_followed_by_more_than_the_tail_still_parses(self) -> None:
+        command = self._script(
+            "noisy.py",
+            "import sys\n"
+            "sys.stdout.write('Ran 5 tests in 0.100s\\n\\nOK (skipped=2)\\n')\n"
+            "sys.stdout.write('cleanup\\n' * 4000)\n",
+        )
+
+        _, receipt = self._run(command)
+
+        self.assertGreater(receipt["output_bytes"], broad_check.TAIL_BYTES)
+        self.assertNotIn("OK (skipped=2)", receipt["tail"])
+        self.assertEqual(
+            receipt["parsed"],
+            {"tests": 5, "runner_duration_seconds": 0.1, "summary": "OK", "skipped": 2},
+        )
+        # Parsing kept the verdict without keeping the logs.
+        self.assertLessEqual(len(receipt["tail"].encode("utf-8")), broad_check.TAIL_BYTES)
+
+    def test_a_red_summary_buried_under_cleanup_output_is_not_lost_either(self) -> None:
+        command = self._script(
+            "noisyred.py",
+            "import sys\n"
+            "sys.stdout.write('Ran 9 tests in 2.000s\\n\\nFAILED (failures=1, skipped=3)\\n')\n"
+            "sys.stdout.write('x' * 40000 + '\\n')\n"
+            "sys.exit(1)\n",
+        )
+
+        exit_code, receipt = self._run(command)
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(receipt["parsed"]["summary"], "FAILED")
+        self.assertEqual(receipt["parsed"]["failures"], 1)
+        self.assertEqual(receipt["parsed"]["skipped"], 3)
+        self.assertEqual(receipt["parsed"]["tests"], 9)
+
+    def test_a_summary_split_across_reads_is_still_seen(self) -> None:
+        scanner = broad_check._SummaryScanner()
+        for chunk in (b"Ran 7 te", b"sts in 1.5s\n\nOK (ski", b"pped=1)\n"):
+            scanner.feed(chunk)
+
+        self.assertEqual(
+            scanner.finish(),
+            {"tests": 7, "runner_duration_seconds": 1.5, "summary": "OK", "skipped": 1},
+        )
+
+    def test_the_scanner_keeps_constant_state_across_an_enormous_line(self) -> None:
+        scanner = broad_check._SummaryScanner()
+        for _ in range(64):
+            scanner.feed(b"y" * 65536)
+        scanner.feed(b"\nRan 2 tests in 0.5s\nOK\n")
+
+        self.assertEqual(len(scanner._carry), 0)
+        self.assertEqual(
+            scanner.finish(), {"tests": 2, "runner_duration_seconds": 0.5, "summary": "OK"}
+        )
+
+    def test_the_last_summary_wins_when_a_runner_prints_several(self) -> None:
+        parsed = parse_unittest_summary(
+            "Ran 1 test in 0.1s\nOK\nRan 4 tests in 0.4s\nFAILED (errors=2)\n"
+        )
+
+        self.assertEqual(
+            parsed,
+            {"tests": 4, "runner_duration_seconds": 0.4, "summary": "FAILED", "errors": 2},
+        )
 
 
 class CheckCommandTests(BroadCheckTestCase):
@@ -374,14 +585,19 @@ class CheckCommandTests(BroadCheckTestCase):
         self.assertEqual(payload["receipt"]["status"], "incomplete")
 
     def test_show_reports_usability_without_running_the_check_again(self) -> None:
-        # The marker lives outside the checkout: a command that edited the workspace would
+        # The marker lives outside the checkout: a check that edited the workspace would
         # legitimately change its content identity, which is a different test than this one.
         marker = self.scripts / "ran.txt"
-        command = f"echo ran >> {marker}"
-        self._main(["check", "broad", "--root", str(self.root), "--command", command])
+        self._suite(
+            "marksuite",
+            f"open({str(marker)!r}, 'a', encoding='utf-8').write('ran\\n')\n",
+        )
+        self._main(["check", "broad", "--root", str(self.root), "--module", "marksuite"])
         self.assertEqual(marker.read_text(encoding="utf-8").count("ran"), 1)
 
-        code, payload = self._main(["check", "show", "--root", str(self.root), "--command", command])
+        code, payload = self._main(
+            ["check", "show", "--root", str(self.root), "--module", "marksuite"]
+        )
 
         self.assertEqual(code, 0)
         self.assertTrue(payload["usable"])
@@ -389,9 +605,8 @@ class CheckCommandTests(BroadCheckTestCase):
         self.assertIn("- command:", payload["summary"])
         self.assertEqual(marker.read_text(encoding="utf-8").count("ran"), 1)
 
-    def test_show_refuses_a_receipt_that_no_longer_describes_the_checkout(self) -> None:
+    def test_show_refuses_a_shell_receipt_because_it_attests_no_import(self) -> None:
         self._main(["check", "broad", "--root", str(self.root), "--command", "echo suite"])
-        (self.root / "app.py").write_text("VALUE = 9\n", encoding="utf-8")
 
         code, payload = self._main(
             ["check", "show", "--root", str(self.root), "--command", "echo suite"]
@@ -399,26 +614,64 @@ class CheckCommandTests(BroadCheckTestCase):
 
         self.assertEqual(code, 1)
         self.assertFalse(payload["usable"])
+        self.assertIn("provenance was not observed", payload["reason"])
+        # The summary is still there to read; it just cannot replace a run.
+        self.assertIn("attests no import", payload["summary"])
+
+    def test_show_refuses_a_receipt_that_no_longer_describes_the_checkout(self) -> None:
+        self._suite("showsuite", "print('ran')\n")
+        self._main(["check", "broad", "--root", str(self.root), "--module", "showsuite"])
+        (self.root / "app.py").write_text("VALUE = 9\n", encoding="utf-8")
+
+        code, payload = self._main(
+            ["check", "show", "--root", str(self.root), "--module", "showsuite"]
+        )
+
+        self.assertEqual(code, 1)
+        self.assertFalse(payload["usable"])
 
     def test_reuse_skips_the_run_only_while_the_content_is_unchanged(self) -> None:
         marker = self.scripts / "runs.txt"
-        command = f"echo ran >> {marker}"
-        self._main(["check", "broad", "--root", str(self.root), "--command", command, "--reuse"])
-
-        code, payload = self._main(
-            ["check", "broad", "--root", str(self.root), "--command", command, "--reuse"]
+        self._suite(
+            "reruns",
+            f"open({str(marker)!r}, 'a', encoding='utf-8').write('ran\\n')\n",
         )
+        argv = ["check", "broad", "--root", str(self.root), "--module", "reruns", "--reuse"]
+        self._main(argv)
+
+        code, payload = self._main(argv)
         self.assertEqual(code, 0)
         self.assertTrue(payload["reused"])
         self.assertEqual(marker.read_text(encoding="utf-8").count("ran"), 1)
 
         (self.root / "app.py").write_text("VALUE = 3\n", encoding="utf-8")
-        code, payload = self._main(
-            ["check", "broad", "--root", str(self.root), "--command", command, "--reuse"]
-        )
+        code, payload = self._main(argv)
         self.assertEqual(code, 0)
         self.assertFalse(payload["reused"])
         self.assertEqual(marker.read_text(encoding="utf-8").count("ran"), 2)
+
+    def test_a_shell_receipt_is_never_reused_in_place_of_a_run(self) -> None:
+        marker = self.scripts / "shell-runs.txt"
+        command = f"echo ran >> {marker}"
+        argv = ["check", "broad", "--root", str(self.root), "--command", command, "--reuse"]
+        self._main(argv)
+        code, payload = self._main(argv)
+
+        self.assertEqual(code, 0)
+        self.assertFalse(payload["reused"])
+        self.assertEqual(marker.read_text(encoding="utf-8").count("ran"), 2)
+
+    def test_a_check_needs_exactly_one_shape(self) -> None:
+        stdout, stderr = StringIO(), StringIO()
+        with mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
+            neither = main(["check", "broad", "--root", str(self.root)])
+            both = main([
+                "check", "broad", "--root", str(self.root), "--module", "unittest",
+                "--command", "true",
+            ])
+
+        self.assertEqual(neither, 2)
+        self.assertEqual(both, 2)
 
     def test_an_empty_command_is_a_usage_error_and_writes_nothing(self) -> None:
         stdout, stderr = StringIO(), StringIO()
