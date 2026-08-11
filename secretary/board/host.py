@@ -15,6 +15,7 @@ class Create:
     actor: Actor
     reason: str
     related_refs: RelatedRefs = field(default_factory=RelatedRefs)
+    request_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +24,7 @@ class Replace:
     actor: Actor
     reason: str
     related_refs: RelatedRefs = field(default_factory=RelatedRefs)
+    request_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +35,7 @@ class TransitionRequest:
     actor: Actor
     reason: str
     related_refs: RelatedRefs = field(default_factory=RelatedRefs)
+    request_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

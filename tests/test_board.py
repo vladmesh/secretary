@@ -4,16 +4,21 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import tempfile
+import threading
 import unittest
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from unittest import mock
 
 from secretary.board import (
-    Actor, BoardProtocolError, Card, CardState, Create, EntityKind, EventKind,
-    FakeBoardHost, InvalidTransition, KanboardBoardHost, RelatedRefs, Replace,
-    TRANSITIONS, TransitionRequest,
+    Actor, BoardEventCanon, BoardEventPending, BoardProtocolError, Card, CardState,
+    Create, EntityKind, Event, EventKind, FakeBoardHost, InvalidTransition,
+    KanboardBoardHost, MutationEventTransaction, RelatedRefs, Replace, TRANSITIONS,
+    TransitionRequest,
 )
 from secretary.board.card_transitions import CARD_TRANSITIONS, CardTransitionForbidden, card_transition
+from secretary.tasks import TaskAudit, TaskError
 
 
 class BoardHostContractTests(unittest.TestCase):
@@ -97,6 +102,433 @@ class BoardHostContractTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_event_is_typed_deterministic_and_deduplicates_related_refs(self) -> None:
+        event = Event(
+            "event-1", EventKind.CARD_STARTED, EntityKind.CARD, "secretary-1419",
+            self.actor, "worker started", datetime(2026, 8, 11, 18, 0, 0, tzinfo=UTC),
+            RelatedRefs(("sprint:943", "head-run:1417", "sprint:943")),
+        )
+
+        record = event.to_record("start-1")
+
+        self.assertEqual(record["schema_version"], 2)
+        self.assertEqual(record["subject"], {"kind": "card", "ref": "secretary-1419"})
+        self.assertEqual(record["related_refs"], ["sprint:943", "head-run:1417"])
+        self.assertEqual(Event.from_record(record), event)
+        with self.assertRaisesRegex(ValueError, "EventKind"):
+            Event("event-2", "card.started", EntityKind.CARD, "secretary-1419", self.actor, "reason", event.occurred_at)
+
+    def test_event_round_trip_preserves_fractional_occurrence_and_canonicalizes_timezone(self) -> None:
+        event = Event(
+            "event-precise", EventKind.CARD_STARTED, EntityKind.CARD, "secretary-1419",
+            self.actor, "worker started", datetime(2026, 8, 11, 20, 0, 0, 123456, tzinfo=timezone.utc),
+        )
+
+        record = event.to_record("start-precise")
+
+        self.assertEqual(record["occurred_at"], "2026-08-11T20:00:00.123456Z")
+        self.assertEqual(Event.from_record(record), event)
+        record["related_refs"] = ["sprint:943", "sprint:943"]
+        with self.assertRaisesRegex(ValueError, "deduplicated"):
+            Event.from_record(record)
+
+    def test_durable_fake_mutations_append_one_complete_protocol_event(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host = FakeBoardHost(data_dir=tmpdir)
+            result = host.create(Create(
+                Card("secretary-1419", "Typed canon", CardState.READY), self.actor,
+                "accepted", RelatedRefs(("sprint:943",)), "create-1",
+            ))
+            replacement = host.replace(Replace(
+                Card("secretary-1419", "Typed canon v2", CardState.READY), self.actor,
+                "correct title", request_id="replace-1",
+            ))
+
+            events = BoardEventCanon(tmpdir).events(ref="secretary-1419")
+            self.assertEqual(events, (result.event, replacement.event))
+            self.assertEqual(events[0].kind, EventKind.ENTITY_CREATED)
+            self.assertEqual(events[1].kind, EventKind.ENTITY_UPDATED)
+            self.assertTrue(all(event.reason and event.occurred_at.tzinfo for event in events))
+
+    def test_every_registry_transition_persists_its_declared_event(self) -> None:
+        # The concrete lifecycle values differ by entity type, but this test's
+        # contract is intentionally registry-driven: every declared edge gets a
+        # completed fake mutation and exactly its declared kind in the canon.
+        from secretary.board import Issue, IssueState, Product, ProductState, Sprint, SprintState
+
+        factories = {
+            EntityKind.PRODUCT: lambda state, index: Product(f"product:{index}", "Product", state),
+            EntityKind.ISSUE: lambda state, index: Issue(f"issue:{index}", "Issue", "product:1", state),
+            EntityKind.SPRINT: lambda state, index: Sprint(f"sprint:{index}", "Sprint", state),
+            EntityKind.CARD: lambda state, index: Card(f"card:{index}", "Card", state),
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for index, (entity_kind, edges) in enumerate(TRANSITIONS.items(), start=1):
+                for edge_index, transition in enumerate(edges.values(), start=1):
+                    entity = factories[entity_kind](transition.source, f"{index}-{edge_index}")
+                    host = FakeBoardHost([entity], data_dir=tmpdir)
+                    result = host.transition(TransitionRequest(
+                        entity_kind, entity.ref, transition.target, self.actor, "registry edge",
+                        request_id=f"transition-{index}-{edge_index}",
+                    ))
+                    self.assertEqual(result.event.kind, transition.event_kind)
+            recorded = BoardEventCanon(tmpdir).events()
+            self.assertEqual(len(recorded), sum(len(edges) for edges in TRANSITIONS.values()))
+
+    def test_no_fake_mutation_completes_when_its_event_cannot_be_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host = FakeBoardHost([Card("card:1", "Card", CardState.READY)], data_dir=tmpdir)
+            mutations = (
+                lambda: host.create(Create(
+                    Card("card:2", "Card", CardState.READY), self.actor, "accepted", request_id="create-fail",
+                )),
+                lambda: host.replace(Replace(
+                    Card("card:1", "Card v2", CardState.READY), self.actor, "retitle", request_id="replace-fail",
+                )),
+                lambda: host.transition(TransitionRequest(
+                    EntityKind.CARD, "card:1", CardState.IN_PROGRESS, self.actor, "start",
+                    request_id="transition-fail",
+                )),
+            )
+
+            with mock.patch.object(host.canon.audit, "append", side_effect=OSError("disk full")):
+                for mutation in mutations:
+                    with self.assertRaises(BoardEventPending):
+                        mutation()
+
+            self.assertEqual(BoardEventCanon(tmpdir).events(), ())
+            self.assertEqual(host.canon.audit.status(), {"ok": False, "pending": len(mutations)})
+
+    def test_recreated_durable_hosts_never_reuse_an_event_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            first = FakeBoardHost(data_dir=tmpdir).create(Create(
+                Card("card:1", "First", CardState.READY), self.actor, "accepted", request_id="create-1",
+            ))
+            second = FakeBoardHost(data_dir=tmpdir).create(Create(
+                Card("card:2", "Second", CardState.READY), self.actor, "accepted", request_id="create-2",
+            ))
+            # The same request against a rebuilt host is still one occurrence, so it keeps
+            # the identifier the journal already published for it.
+            replayed = FakeBoardHost([Card("card:1", "First", CardState.READY)], data_dir=tmpdir).create(Create(
+                Card("card:1", "First", CardState.READY), self.actor, "accepted", request_id="create-1",
+            ))
+
+            recorded = BoardEventCanon(tmpdir).events()
+            self.assertNotEqual(first.event.event_id, second.event.event_id)
+            self.assertEqual(replayed.event, first.event)
+            self.assertEqual(
+                [event.event_id for event in recorded], [first.event.event_id, second.event.event_id],
+            )
+
+
+class BoardMutationTransactionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.canon = BoardEventCanon(self.tmpdir.name)
+        self.event = Event(
+            "event-transaction", EventKind.CARD_STARTED, EntityKind.CARD, "secretary-1419",
+            Actor("worker", "worker-1419"), "start work",
+            datetime(2026, 8, 11, 18, 0, 0, tzinfo=UTC),
+        )
+
+    def tearDown(self) -> None:
+        self.tmpdir.cleanup()
+
+    @staticmethod
+    def _generic(request_id: str, event_id: str = "evt_generic") -> dict:
+        return {
+            "event_id": event_id, "schema_version": 1, "occurred_at": "2026-08-11T18:00:00Z",
+            "actor": {"role": "worker", "id": "worker-1419"}, "kind": "moved",
+            "outcome": "success", "task_id": "task_kanboard_1", "ref": "secretary-1419",
+            "request_id": request_id,
+            "backend": {"kind": "kanboard", "task_id": 1, "revision": "updated_at:1"},
+            "payload": {"to": "in_progress"},
+        }
+
+    def test_backend_failure_before_commit_removes_the_staged_event(self) -> None:
+        transaction = MutationEventTransaction(self.canon, request_id="failure-1", event=self.event)
+
+        with self.assertRaisesRegex(RuntimeError, "backend failed"):
+            transaction.execute(lambda: (_ for _ in ()).throw(RuntimeError("backend failed")), replay=lambda: "never")
+
+        self.assertIsNone(self.canon.event("failure-1"))
+        self.assertEqual(self.canon.audit.status(), {"ok": True, "pending": 0})
+
+    def test_event_write_failure_is_pending_and_replay_does_not_repeat_backend(self) -> None:
+        transaction = MutationEventTransaction(self.canon, request_id="pending-1", event=self.event)
+        with mock.patch.object(self.canon.audit, "append", side_effect=OSError("disk full")):
+            with self.assertRaises(BoardEventPending):
+                transaction.execute(lambda: "backend result", replay=lambda: "replayed")
+        self.assertEqual(self.canon.audit.status(), {"ok": False, "pending": 1})
+
+        recovered = transaction.execute(
+            lambda: (_ for _ in ()).throw(AssertionError("effect repeated")), replay=lambda: "confirmed",
+        )
+        self.assertEqual(recovered, "confirmed")
+        self.assertEqual(self.canon.events(), (self.event,))
+
+    def test_released_generic_records_share_the_journal_and_stay_readable(self) -> None:
+        generic = {
+            "event_id": "evt_released", "schema_version": 1, "occurred_at": "2026-08-10T10:00:00Z",
+            "actor": {"role": "worker", "id": "worker-1"}, "kind": "moved", "outcome": "success",
+            "task_id": "task_kanboard_7", "ref": "secretary-1419", "request_id": "released-1",
+            "backend": {"kind": "kanboard", "task_id": 7, "revision": "updated_at:1"},
+            "payload": {"to": "in_progress"},
+        }
+        self.canon.audit.stage("released-1", generic)
+        self.canon.audit.append("released-1", generic)
+
+        self.canon.commit("typed-1", self.event)
+
+        # The released record is untouched and still visible to its own consumers,
+        # while the typed canon reports only protocol events.
+        self.assertEqual(self.canon.audit.events("secretary-1419"), [generic, self.event.to_record("typed-1")])
+        self.assertEqual(self.canon.events(ref="secretary-1419"), (self.event,))
+        with self.assertRaisesRegex(ValueError, "generic audit record"):
+            self.canon.event("released-1")
+
+    def test_generic_reconcile_leaves_a_pending_typed_event_for_protocol_recovery(self) -> None:
+        transaction = MutationEventTransaction(self.canon, request_id="reconcile-1", event=self.event)
+        with mock.patch.object(self.canon.audit, "append", side_effect=OSError("disk full")):
+            with self.assertRaises(BoardEventPending):
+                transaction.execute(lambda: "backend result", replay=lambda: "never")
+
+        self.assertEqual(self.canon.audit.reconcile(), (0, 1))
+        self.assertEqual(self.canon.event("reconcile-1"), self.event)
+        self.assertEqual(self.canon.events(), ())
+
+        self.assertEqual(transaction.execute(lambda: "never", replay=lambda: "recovered"), "recovered")
+        self.assertEqual(self.canon.events(), (self.event,))
+        self.assertEqual(self.canon.audit.status(), {"ok": True, "pending": 0})
+
+    def test_generic_writers_cannot_touch_a_typed_pending_owner(self) -> None:
+        request_id = "shared-generic-typed"
+        typed = self.event.to_record(request_id)
+        generic = self._generic(request_id)
+        self.canon.stage(request_id, self.event)
+        audit = TaskAudit(self.tmpdir.name)
+
+        for operation in (
+            lambda: audit.stage(request_id, generic),
+            lambda: audit.append(request_id, generic),
+            lambda: audit.discard(request_id),
+        ):
+            with self.assertRaisesRegex(TaskError, "another operation or payload"):
+                operation()
+            self.assertEqual(audit.pending_event(request_id), typed)
+            self.assertEqual(audit.events(), [])
+
+        self.assertEqual(audit.reconcile(), (0, 1))
+        self.assertEqual(audit.pending_event(request_id), typed)
+        self.assertEqual(audit.events(), [])
+
+    def test_typed_effect_is_refused_before_starting_against_a_generic_pending_owner(self) -> None:
+        request_id = "generic-before-typed"
+        generic = self._generic(request_id)
+        self.canon.audit.stage(request_id, generic)
+        transaction = MutationEventTransaction(self.canon, request_id=request_id, event=self.event)
+
+        with self.assertRaisesRegex(ValueError, "generic audit record"):
+            transaction.execute(
+                lambda: (_ for _ in ()).throw(AssertionError("foreign effect ran")),
+                replay=lambda: (_ for _ in ()).throw(AssertionError("foreign effect replayed")),
+            )
+
+        self.assertEqual(self.canon.audit.pending_event(request_id), generic)
+        self.assertEqual(self.canon.audit.events(), [])
+
+    def test_rejected_generic_contender_keeps_typed_event_recoverable(self) -> None:
+        request_id = "recover-after-generic"
+        transaction = MutationEventTransaction(self.canon, request_id=request_id, event=self.event)
+        self.canon.stage(request_id, self.event)
+        generic = self._generic(request_id)
+
+        with self.assertRaisesRegex(TaskError, "another operation or payload"):
+            TaskAudit(self.tmpdir.name).append(request_id, generic)
+        self.assertEqual(self.canon.event(request_id), self.event)
+
+        self.assertEqual(transaction.execute(lambda: "never", replay=lambda: "confirmed"), "confirmed")
+        self.assertEqual(self.canon.committed(request_id), self.event)
+        self.assertEqual(self.canon.audit.pending_event(request_id), None)
+
+    def test_generic_same_owner_can_restage_then_commit(self) -> None:
+        request_id = "generic-restage"
+        audit = self.canon.audit
+        first = self._generic(request_id, "evt_generic_first")
+        restaged = self._generic(request_id, "evt_generic_restaged")
+        restaged["payload"] = {"to": "validate"}
+
+        audit.stage(request_id, first)
+        audit.stage(request_id, restaged)
+        self.assertEqual(audit.pending_event(request_id), restaged)
+        self.assertEqual(audit.append(request_id, restaged), "evt_generic_restaged")
+        self.assertEqual(audit.committed_event(request_id), restaged)
+        self.assertIsNone(audit.pending_event(request_id))
+
+    def test_concurrent_generic_and_typed_contenders_leave_one_unchanged_owner(self) -> None:
+        request_id = "concurrent-generic-typed"
+        generic = self._generic(request_id)
+        start = threading.Barrier(2)
+        outcomes: list[str] = []
+        guard = threading.Lock()
+
+        def stage_typed() -> None:
+            start.wait()
+            try:
+                BoardEventCanon(self.tmpdir.name).stage(request_id, self.event)
+            except ValueError:
+                outcome = "typed-refused"
+            else:
+                outcome = "typed-staged"
+            with guard:
+                outcomes.append(outcome)
+
+        def stage_generic() -> None:
+            start.wait()
+            try:
+                TaskAudit(self.tmpdir.name).stage(request_id, generic)
+            except TaskError:
+                outcome = "generic-refused"
+            else:
+                outcome = "generic-staged"
+            with guard:
+                outcomes.append(outcome)
+
+        typed_thread = threading.Thread(target=stage_typed)
+        generic_thread = threading.Thread(target=stage_generic)
+        typed_thread.start()
+        generic_thread.start()
+        typed_thread.join()
+        generic_thread.join()
+
+        self.assertIn(sorted(outcomes), (["generic-refused", "typed-staged"], ["generic-staged", "typed-refused"]))
+        pending = TaskAudit(self.tmpdir.name).pending_event(request_id)
+        self.assertIn(pending, (generic, self.event.to_record(request_id)))
+        self.assertEqual(TaskAudit(self.tmpdir.name).events(), [])
+
+    def test_concurrent_same_request_staging_leaves_exactly_one_owner(self) -> None:
+        """Compare-and-stage is one critical section, not a read followed by a write.
+
+        Each thread owns its own canon and TaskAudit, so they contend on the released audit
+        lock exactly as separate processes retrying the same request id would.
+        """
+        contenders = [
+            Event(
+                f"event-race-{index}", EventKind.CARD_STARTED, EntityKind.CARD, "secretary-1419",
+                Actor("worker", f"worker-{index}"), "start work",
+                datetime(2026, 8, 11, 18, 0, 0, tzinfo=UTC),
+            )
+            for index in range(4)
+        ]
+        start = threading.Barrier(len(contenders))
+        guard = threading.Lock()
+        staged: list[Event] = []
+        refused: list[str] = []
+
+        def stage(event: Event) -> None:
+            canon = BoardEventCanon(self.tmpdir.name)
+            start.wait()
+            try:
+                owned = canon.stage("race-1", event)
+            except ValueError as exc:
+                with guard:
+                    refused.append(str(exc))
+                return
+            with guard:
+                staged.append(owned)
+
+        threads = [threading.Thread(target=stage, args=(event,)) for event in contenders]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        self.assertEqual(len(staged), 1)
+        self.assertEqual(len(refused), len(contenders) - 1)
+        self.assertTrue(all("another operation or payload" in message for message in refused))
+        self.assertEqual(self.canon.event("race-1"), staged[0])
+        self.assertEqual(self.canon.audit.status(), {"ok": False, "pending": 1})
+
+    def test_a_second_owner_of_the_request_id_is_refused_before_any_backend_effect(self) -> None:
+        BoardEventCanon(self.tmpdir.name).stage("shared-1", self.event)
+        conflicting = Event(
+            "event-conflicting", EventKind.CARD_BLOCKED, EntityKind.CARD, "secretary-1419",
+            Actor("steward", "steward-1419"), "blocked", self.event.occurred_at,
+        )
+        transaction = MutationEventTransaction(self.canon, request_id="shared-1", event=conflicting)
+
+        with self.assertRaisesRegex(ValueError, "another operation or payload"):
+            transaction.execute(
+                lambda: (_ for _ in ()).throw(AssertionError("effect ran against a foreign event")),
+                replay=lambda: (_ for _ in ()).throw(AssertionError("replayed a foreign event")),
+            )
+
+        self.assertEqual(self.canon.event("shared-1"), self.event)
+        self.assertEqual(self.canon.audit.status(), {"ok": False, "pending": 1})
+
+    def test_staging_refuses_an_event_id_already_owned_by_another_request(self) -> None:
+        duplicate = Event(
+            self.event.event_id, EventKind.CARD_BLOCKED, EntityKind.CARD, "secretary-1419",
+            Actor("steward", "steward-1419"), "blocked", self.event.occurred_at,
+        )
+
+        self.canon.stage("owner-1", self.event)
+        with self.assertRaisesRegex(ValueError, "already belongs to another request"):
+            self.canon.stage("duplicate-1", duplicate)
+
+        self.canon.commit("owner-1", self.event)
+        with self.assertRaisesRegex(ValueError, "already belongs to another request"):
+            BoardEventCanon(self.tmpdir.name).stage("duplicate-2", duplicate)
+        self.assertEqual(self.canon.events(), (self.event,))
+
+    def test_every_typed_staging_route_reaches_the_atomic_claim(self) -> None:
+        from secretary.tasks import TaskAudit
+
+        class ClaimReached(Exception):
+            """Raised in place of the one staging primitive, to prove it was reached."""
+
+        actor = Actor("worker", "worker-1419")
+        host = FakeBoardHost([Card("card:1", "Card", CardState.READY)], data_dir=self.tmpdir.name)
+        routes = (
+            lambda: self.canon.stage("route-stage", self.event),
+            lambda: self.canon.commit("route-commit", self.event),
+            lambda: MutationEventTransaction(
+                self.canon, request_id="route-transaction", event=self.event,
+            ).execute(lambda: "effect", replay=lambda: "replay"),
+            lambda: host.create(Create(
+                Card("card:2", "Card", CardState.READY), actor, "accepted", request_id="route-create",
+            )),
+            lambda: host.replace(Replace(
+                Card("card:1", "Card v2", CardState.READY), actor, "retitle", request_id="route-replace",
+            )),
+            lambda: host.transition(TransitionRequest(
+                EntityKind.CARD, "card:1", CardState.IN_PROGRESS, actor, "start",
+                request_id="route-transition",
+            )),
+        )
+
+        with mock.patch.object(TaskAudit, "claim", side_effect=ClaimReached):
+            for route in routes:
+                with self.assertRaises(ClaimReached):
+                    route()
+
+        self.assertEqual(self.canon.events(), ())
+        self.assertEqual(self.canon.audit.status(), {"ok": True, "pending": 0})
+        self.assertEqual(host.read(EntityKind.CARD, "card:1"), Card("card:1", "Card", CardState.READY))
+
+    def test_committed_request_id_replay_does_not_repeat_backend_effect(self) -> None:
+        transaction = MutationEventTransaction(self.canon, request_id="replay-1", event=self.event)
+        self.assertEqual(transaction.execute(lambda: "first", replay=lambda: "read"), "first")
+        with mock.patch.object(self.canon.audit, "claim", wraps=self.canon.audit.claim) as claim:
+            self.assertEqual(
+                transaction.execute(
+                    lambda: (_ for _ in ()).throw(AssertionError("effect repeated")), replay=lambda: "replayed",
+                ),
+                "replayed",
+            )
+        claim.assert_called_once()
+        self.assertEqual(self.canon.events(), (self.event,))
 
 
 class KanboardBoardHostTests(unittest.TestCase):

@@ -21,6 +21,7 @@ from secretary.secret_words import RECOVERY_WORDS
 from secretary.data import DataExport
 from secretary.routing_journal import attempts
 from secretary.tasks import TaskAudit
+from secretary.board import Actor, BoardEventCanon, Card, CardState, Create, FakeBoardHost
 
 
 def git(repo: Path, *args: str) -> str:
@@ -184,6 +185,36 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertEqual(result.status, "committed")
         self.assertNotIn("state/board/events.ndjson", self.head_files())
         self.assertIn("state/board/cards.ndjson", self.head_files())
+
+    def test_live_typed_event_is_staged_as_a_board_checkpoint_artifact(self):
+        host = FakeBoardHost(data_dir=self.data_dir)
+        host.create(Create(
+            Card("secretary-1419", "Typed event canon", CardState.READY),
+            Actor("po", "operator"), "accepted into the sprint", request_id="checkpoint-event-1",
+        ))
+
+        result = self.write()
+
+        self.assertEqual(result.status, "committed")
+        committed = git(self.instance_dir, "show", "HEAD:state/board/events.ndjson")
+        event = BoardEventCanon(self.data_dir).events()[0]
+        self.assertEqual(json.loads(committed)["event_id"], event.event_id)
+        self.assertEqual(json.loads(committed)["subject"], {"kind": "card", "ref": "secretary-1419"})
+
+    def test_invalid_typed_event_blocks_checkpoint_but_generic_history_stays_allowed(self):
+        (self.data_dir / "board" / "events.ndjson").write_text(
+            json.dumps({
+                "schema_version": 2, "record_type": "board.protocol_event", "request_id": "bad",
+                "event_id": "bad", "kind": "card.started", "subject": {"kind": "card", "ref": "x"},
+                "actor": {"role": "worker", "id": "w"}, "reason": "missing occurrence", "related_refs": [],
+            }) + "\n" + json.dumps({"event_id": "released-generic", "request_id": "old", "kind": "moved"}) + "\n",
+            encoding="utf-8",
+        )
+
+        result = self.write()
+
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("invalid board protocol event", result.reason)
 
     def test_empty_live_runs_cannot_replace_non_empty_canonical_history(self):
         self.seed_runs([{"source": "runs.jsonl", "line": 1, "record": {"event": "claim"}}])

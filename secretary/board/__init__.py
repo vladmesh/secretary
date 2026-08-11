@@ -7,9 +7,10 @@ command paths retain their current writers until their dedicated migration cards
 from secretary.board.fake import FakeBoardHost
 from secretary.board.host import BoardHost, Create, MutationResult, Replace, TransitionRequest
 from secretary.board.models import (
-    Actor, BoardEntity, Card, CardState, EntityKind, Event, Issue, IssueState,
+    Actor, BoardEntity, Card, CardState, EntityKind, Event, EventKind, Issue, IssueState,
     Product, ProductState, RelatedRefs, Sprint, SprintState,
 )
+from secretary.board.events import BoardEventCanon, BoardEventPending, MutationEventTransaction
 from secretary.board.card_transitions import CARD_TRANSITIONS, CardTransitionForbidden, card_transition
 from secretary.board.transitions import BoardProtocolError, EventKind, InvalidTransition, TRANSITIONS, transition
 
@@ -22,8 +23,8 @@ def __getattr__(name: str):
     raise AttributeError(name)
 
 __all__ = [
-    "Actor", "BoardEntity", "BoardHost", "BoardProtocolError", "CARD_TRANSITIONS", "Card", "CardState",
+    "Actor", "BoardEntity", "BoardEventCanon", "BoardEventPending", "BoardHost", "BoardProtocolError", "CARD_TRANSITIONS", "Card", "CardState",
     "CardTransitionForbidden", "Create", "EntityKind", "Event", "EventKind", "FakeBoardHost", "InvalidTransition",
-    "Issue", "IssueState", "KanboardBoardHost", "MutationResult", "Product", "ProductState", "RelatedRefs",
+    "Issue", "IssueState", "KanboardBoardHost", "MutationEventTransaction", "MutationResult", "Product", "ProductState", "RelatedRefs",
     "Replace", "Sprint", "SprintState", "TRANSITIONS", "TransitionRequest", "card_transition", "transition",
 ]

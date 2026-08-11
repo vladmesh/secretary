@@ -44,6 +44,7 @@ from secretary.data import (
 from secretary import state_repo
 from secretary.state_repo import BOARD_RUNS_PATHSPEC
 from secretary.tasks import TaskAudit, TaskError
+from secretary.board.models import Event
 from secretary.product_issues import (
     ProductIssueTransaction,
     ProductIssueValidationError,
@@ -750,6 +751,22 @@ def _validate_board(
             f"board sprint count mismatch: export.json={declared_sprints} "
             f"sprints.ndjson={actual_sprints}"
         )
+    events_path = staging / "events.ndjson"
+    if events_path.exists():
+        _validate_board_events(events_path)
+
+
+def _validate_board_events(path: Path) -> None:
+    """Validate new typed records while retaining released generic audit rows."""
+    for number, record in enumerate(_read_ndjson(path, "board events.ndjson"), start=1):
+        if record.get("record_type") != Event.RECORD_TYPE:
+            continue
+        try:
+            Event.from_record(record)
+        except ValueError as exc:
+            raise CheckpointBlocked(
+                f"invalid board protocol event at board events.ndjson line {number}: {exc}"
+            ) from None
 
 
 def _validate_runs(staging: Path) -> None:

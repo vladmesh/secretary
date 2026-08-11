@@ -543,6 +543,12 @@ class TaskReader:
 class TaskAudit:
     """Durable, append-only audit log with retry-safe pending records."""
 
+    # Generic journal records intentionally have no discriminator.  This explicit value is
+    # the only distinction the released audit substrate needs to make: a protocol pending
+    # record may describe an effect that has already reached the backend, while a generic
+    # record retains its released same-writer restaging behaviour.
+    _PROTOCOL_EVENT_RECORD_TYPE = "board.protocol_event"
+
     def __init__(self, data_dir: str | os.PathLike[str]) -> None:
         self.board_dir = os.path.join(os.fspath(data_dir), "board")
         self.events_path = os.path.join(self.board_dir, "events.ndjson")
@@ -553,6 +559,9 @@ class TaskAudit:
         # каждой записи, а append/stage зовут его на каждое событие: прогон получался
         # квадратичным по числу событий.
         self._committed_offsets: dict[str, int] = {}
+        # event_id -> request_id, заполняется тем же проходом: владельца идентификатора
+        # надо уметь спросить под замком, не разбирая журнал заново.
+        self._committed_event_ids: dict[str, str] = {}
         self._committed_read = 0
         self._committed_ident: tuple[int, int] | None = None
         self._committed_anchor = b""
@@ -574,49 +583,163 @@ class TaskAudit:
                 4,
             )
 
-    def stage(self, request_id: str, event: dict[str, Any]) -> None:
-        os.makedirs(self.pending_dir, exist_ok=True)
-        self._require_v2_pending_layout()
+    @contextlib.contextmanager
+    def _locked_audit(self, *, create_pending: bool = False) -> Iterator[None]:
+        """Hold the one lock that owns journal and pending-record identity."""
+        os.makedirs(self.board_dir, exist_ok=True)
+        if create_pending:
+            os.makedirs(self.pending_dir, exist_ok=True)
         with open(self.lock_path, "a+", encoding="utf-8") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
-                committed = self.committed_event(request_id)
-                if committed is not None:
-                    self._require_same_event(committed, event)
-                    return
-                if self._product_issue_pending(request_id):
-                    raise TaskError("validation", "request id belongs to another operation or payload", 2)
-                self._atomic_json(self._pending_path(request_id), event)
+                self._require_v2_pending_layout()
+                yield
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    @classmethod
+    def _is_protocol_event(cls, event: dict[str, Any]) -> bool:
+        return event.get("record_type") == cls._PROTOCOL_EVENT_RECORD_TYPE
+
+    def _pending_owner(
+        self,
+        request_id: str,
+        event: dict[str, Any] | None,
+        *,
+        operation: str,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, bool]:
+        """Resolve a request-id owner while ``.audit.lock`` is held.
+
+        The return value is ``(committed, pending, replace_generic_pending)``.  The first two
+        values are the durable evidence in priority order.  A generic ``stage`` is the sole
+        released operation allowed to replace a pending record, and only when both records are
+        generic.  Every other pending mismatch fails before a write, append, unlink or discard.
+        """
+        committed = self.committed_event(request_id)
+        if committed is not None:
+            if event is not None:
+                self._require_same_event(committed, event)
+            return committed, None, False
+
+        pending = self.pending_event(request_id)
+        if pending is None:
+            return None, None, False
+        # TaskAudit's released reconciler can repair generic rows, but it cannot attest a
+        # protocol backend effect.  That recovery belongs to MutationEventTransaction, which
+        # supplies the exact typed event through BoardEventCanon.commit().
+        if operation == "reconcile" and self._is_protocol_event(pending):
+            self._require_same_event(pending, {})
+        if event is not None and pending == event:
+            return None, pending, False
+        if (
+            operation == "stage"
+            and event is not None
+            and not self._is_protocol_event(pending)
+            and not self._is_protocol_event(event)
+        ):
+            return None, pending, True
+        if operation == "discard" and event is None and not self._is_protocol_event(pending):
+            return None, pending, False
+        self._require_same_event(pending, event or {})
+        raise AssertionError("unreachable")
+
+    def stage(self, request_id: str, event: dict[str, Any]) -> None:
+        with self._locked_audit(create_pending=True):
+            committed, _pending, replace = self._pending_owner(
+                request_id, event, operation="stage",
+            )
+            if committed is not None:
+                return
+            if self._product_issue_pending(request_id):
+                raise TaskError("validation", "request id belongs to another operation or payload", 2)
+            # A matching pending record is already the exact durable owner.  Do not replace it:
+            # besides avoiding needless I/O, this preserves the evidence across a retry.
+            if _pending is not None and not replace:
+                return
+            self._atomic_json(self._pending_path(request_id), event)
+
+    def claim(
+        self,
+        request_id: str,
+        event: dict[str, Any],
+        *,
+        verify: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any] | None:
+        """Resolve request-id ownership and stage the record in one critical section."""
+        with self._locked_audit(create_pending=True):
+            committed, pending, _replace = self._pending_owner(
+                request_id, event, operation="claim",
+            )
+            if committed is not None:
+                return committed
+            if pending is not None:
+                return pending
+            if self._product_issue_pending(request_id):
+                raise TaskError("validation", "request id belongs to another operation or payload", 2)
+            if verify is not None:
+                verify(event)
+            self._atomic_json(self._pending_path(request_id), event)
+            return None
+
+    def event_id_owner(self, event_id: str) -> str | None:
+        """Which request id already published `event_id`, committed or pending."""
+        self._refresh_committed_index()
+        owner = self._committed_event_ids.get(event_id)
+        if owner is not None:
+            return owner
+        for record in self.pending_events():
+            if record.get("event_id") == event_id:
+                candidate = record.get("request_id")
+                if isinstance(candidate, str):
+                    return candidate
+        return None
 
     def append(self, request_id: str, event: dict[str, Any]) -> str:
-        os.makedirs(self.board_dir, exist_ok=True)
-        self._require_v2_pending_layout()
-        with open(self.lock_path, "a+", encoding="utf-8") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                committed = self.committed_event(request_id)
-                if committed is None:
-                    with open(self.events_path, "a", encoding="utf-8") as events:
-                        events.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
-                        events.flush()
-                        os.fsync(events.fileno())
-                else:
-                    self._require_same_event(committed, event)
-                pending = self._pending_path(request_id)
-                if os.path.exists(pending):
-                    os.unlink(pending)
-                return str(event["event_id"])
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        with self._locked_audit():
+            return self._append_owned(request_id, event)
 
-    def discard(self, request_id: str) -> None:
-        try:
-            self._require_v2_pending_layout()
+    def _append_owned(
+        self,
+        request_id: str,
+        event: dict[str, Any],
+        *,
+        operation: str = "append",
+    ) -> str:
+        """Append one exact owner and clear only that owner's pending evidence.
+
+        The caller holds ``.audit.lock``.  Reconciliation shares this primitive so it cannot
+        race a stage or recover a file another owner has replaced.
+        """
+        committed, pending, _replace = self._pending_owner(request_id, event, operation=operation)
+        if operation == "reconcile" and committed is None and pending is None:
+            raise TaskError("validation", "pending audit record disappeared", 2)
+        if committed is None:
+            with open(self.events_path, "a", encoding="utf-8") as events:
+                events.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
+                events.flush()
+                os.fsync(events.fileno())
+        else:
+            # A committed replay is already durable.  Look at pending only now, and only remove
+            # an exact duplicate; a foreign pending file remains recovery evidence.
+            pending = self.pending_event(request_id)
+            if pending is not None and pending != event:
+                return str(event["event_id"])
+        if pending is not None:
             os.unlink(self._pending_path(request_id))
-        except FileNotFoundError:
-            pass
+        return str(event["event_id"])
+
+    def discard(self, request_id: str, event: dict[str, Any] | None = None) -> None:
+        """Discard a generic pending retry, or the supplied exact protocol event."""
+        with self._locked_audit():
+            committed, pending, _replace = self._pending_owner(
+                request_id, event, operation="discard",
+            )
+            if committed is not None or pending is None:
+                return
+            try:
+                os.unlink(self._pending_path(request_id))
+            except FileNotFoundError:
+                pass
 
     def reconcile(self) -> tuple[int, int]:
         if not os.path.isdir(self.pending_dir):
@@ -632,9 +755,10 @@ class TaskAudit:
                 with open(path, encoding="utf-8") as source:
                     event = json.load(source)
                 request_id = str(event["request_id"])
-                self.append(request_id, event)
+                with self._locked_audit():
+                    self._append_owned(request_id, event, operation="reconcile")
                 repaired += 1
-            except (OSError, ValueError, KeyError, TypeError):
+            except (OSError, TaskError, ValueError, KeyError, TypeError):
                 unresolved += 1
         return repaired, unresolved
 
@@ -718,6 +842,7 @@ class TaskAudit:
             stat = os.stat(self.events_path)
         except FileNotFoundError:
             self._committed_offsets = {}
+            self._committed_event_ids = {}
             self._committed_read = 0
             self._committed_ident = None
             self._committed_anchor = b""
@@ -726,6 +851,7 @@ class TaskAudit:
         if ident != self._committed_ident or stat.st_size < self._committed_read or not self._anchor_intact():
             # журнал пересоздан, усечён или переписан — индекс больше не про этот файл
             self._committed_offsets = {}
+            self._committed_event_ids = {}
             self._committed_read = 0
             self._committed_ident = ident
             self._committed_anchor = b""
@@ -753,6 +879,9 @@ class TaskAudit:
             # первым побеждает самое раннее совпадение — так вёл себя скан сверху вниз
             if isinstance(request_id, str) and request_id not in self._committed_offsets:
                 self._committed_offsets[request_id] = offset
+            event_id = candidate.get("event_id")
+            if isinstance(event_id, str) and isinstance(request_id, str) and event_id not in self._committed_event_ids:
+                self._committed_event_ids[event_id] = request_id
         self._committed_read += consumed
 
     def committed_event(self, request_id: str) -> dict[str, Any] | None:
