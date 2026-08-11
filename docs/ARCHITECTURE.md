@@ -273,9 +273,11 @@ and through a replacement head's launch document, and they are readable from out
 `sprint status` (`observer.delivery`) and in `secretary status` (`delivery_failures`).
 
 What the input channel carries is bounded: a task is a document on disk and the pane receives one
-short line naming its absolute path. A worker has always been pointed at its `TASK.md` that way; the
-reviewer is the first role for which the rule is enforced rather than merely followed, and the first
-whose document is kept out of the checkout. Its review — description, gate attestation, verdict
+short line naming its absolute path. Both roles are nudged that way and both bring-ups are told the
+document they nudged at: the worker at the `TASK.md` in its checkout, the reviewer at a review kept
+out of the checkout. The reviewer was the first for which the rule was enforced rather than merely
+followed; the worker followed it in the prompt it sent and not in the record it kept, which is how a
+bring-up came to answer an unconfirmed pointer by closing the pane behind it. Its review — description, gate attestation, verdict
 commands, some 12 KiB of it — is written under the run artifacts, private, because a workspace's
 identity is the tracked diff and untracked files a receipt hashes to say which code it is evidence
 for. The nudge is derived from that path alone, so nothing a card description carries (an ESC, a
@@ -286,12 +288,26 @@ lines have never failed. A retry re-renders the same document and sends the same
 head always opens the round's current task. The delivery record says which mode it was and which
 document it named, and never what the document says.
 
-The pane's fate is not decided by that delivery's classification. A nudge the boundary could not
-confirm is ambiguous by construction — the head may well have taken it — so the bring-up hands the
-pane back as an abort with its evidence rather than closing it, the launch intent stays on disk, and
-the next tick either adopts that reviewer or stops it through its own retained identity with the
-cleanup recorded as the initiator. Closing a pane on a classification is what killed reviewers that
-had their task in hand.
+The pane's fate is not decided by that delivery's classification, whichever role's head is in it. A
+nudge the boundary could not confirm is ambiguous by construction — the head may well have taken it
+— so the bring-up hands the pane back as an abort with its evidence rather than closing it, the
+launch intent stays on disk, and the next tick either adopts that head or stops it through its own
+retained identity with the cleanup recorded as the initiator. Closing a pane on a classification is
+what killed reviewers that had their task in hand, and then six consecutive Claude workers on
+`codegen-orchestrator-1166` that had taken their prompt and started work.
+
+What the classification is made of is the head's own provider record, not its screen. Claude and
+Codex both persist a user turn locally, and a turn recorded after the send boundary is the proof;
+the pane's status line is a secondary hint that may confirm and may never condemn. That asymmetry is
+not a preference. Both readings are claims about another product's format, and both had gone stale
+at once by 2026-08-11: `~/.claude/projects` names a project directory after the workspace path with
+every non-alphanumeric character replaced, so a `codegen_orchestrator` workspace was being looked
+for under a directory Claude Code has never written, while the status-line pattern still expected a
+spinner glyph and a `(4s · ↑ 13.2k tokens)` suffix that the current version does not paint. Neither
+could fire, so every delivery was unproven — and the bring-up that trusted that verdict killed the
+heads. The rules are held against the real catalogue and the real pane text in
+`tests/test_dispatcher_tui.py`, because a unit test that builds its fixture with the same rule it is
+asserting cannot detect the drift that matters.
 
 The reviewer keeps the same evidence on its own record. A reviewer prompt that the shared boundary
 saw fail leaves `review_delivery_failures` and `review_delivery_evidence` on the card, because the

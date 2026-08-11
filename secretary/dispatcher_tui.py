@@ -16,6 +16,10 @@ from pathlib import Path
 from typing import Any
 
 from secretary.dispatcher_launcher import CODEX_HOME_DEFAULT
+from triggered_agents.runtime.claude_sessions import (
+    claude_project_dir_name,
+    claude_session_paths,
+)
 from triggered_agents.runtime.tui_delivery import (
     COMPOSER_EMPTY,
     COMPOSER_UNKNOWN,
@@ -59,6 +63,7 @@ __all__ = [
     "DeliveryOutcome",
     "RunJson",
     "TuiDeliveryError",
+    "claude_project_dir_name",
     "close_terminal",
     "close_terminal_strict",
     "composer_fingerprint",
@@ -78,9 +83,17 @@ __all__ = [
 _CODEX_WORKING_RE = re.compile(r"\b(?:working|thinking)\b", re.IGNORECASE)
 # Claude's composer has no Codex `›` marker. Its active turn is a dedicated status line, so a
 # transcript word such as "working" or "thinking" is not enough to say a new turn started.
-_CLAUDE_TURN_RE = re.compile(
-    r"(?im)^\s*[✻✽✢✶·]\s+\S+?(?:…|\.\.\.)\s+\([^\n)]*\)\s*$"
-)
+#
+# What is stable about that line across versions is its shape: some decoration, then a capitalised
+# gerund closed by an ellipsis — `Forming...`, `Thinking…`, `Tempering…`, `Bloviating…`. What is not
+# stable is anything else about it. The previous pattern pinned the spinner to `[✻✽✢✶·]` and
+# required a parenthesised `(4s · ↑ 13.2k tokens)` suffix; Claude 2.1.227 cycles `●` through that
+# spinner too, and the line Orca's pane read returns is an overlay of the alternate screen —
+# `· Tempering…e /btw to ask a 9u ck side question…` — in which the suffix is painted over. So the
+# pattern stopped matching anything at all, and the last screen-side hint died on a version bump.
+# It is only a hint: what proves a Claude turn is the user record the provider persists, and the
+# roles that use this never let a screen that says nothing decide the fate of a pane.
+_CLAUDE_TURN_RE = re.compile(r"(?m)^[^\w\n]*[A-Z][A-Za-z]*(?:…|\.\.\.)")
 
 
 def deliver_tui_prompt(
@@ -168,6 +181,12 @@ def terminal_turn_started(
     Claude and Codex both persist their user turns locally. When recovery knows the delivery
     boundary, that durable record is the proof; the screen remains a secondary hint for old
     records that predate the boundary or for terminal-only recovery.
+
+    Secondary in both directions. A screen that shows a turn underway is worth believing, and a
+    screen that shows nothing is worth nothing: a repainting TUI read through a pane snapshot can
+    be between frames, in an alternate-screen overlay, or drawing a status line this pattern has
+    never seen. No caller may take the `False` this returns as proof that a head did not get its
+    prompt, and none does — an unproven delivery hands its pane back instead of closing it.
     """
     if workspace and since:
         if adapter == "claude":
@@ -249,12 +268,7 @@ def latest_claude_user_turn_for(workspace: str, since: float) -> float | None:
 
 
 def _claude_session_paths_for(workspace: str):
-    root = _claude_projects_root()
-    project = str(Path(workspace).resolve(strict=False)).replace("/", "-")
-    try:
-        yield from (root / project).glob("*.jsonl")
-    except OSError:
-        return
+    return claude_session_paths(workspace, root=_claude_projects_root())
 
 
 def _claude_projects_root() -> Path:

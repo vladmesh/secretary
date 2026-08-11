@@ -29,7 +29,7 @@ from secretary.dispatcher import (
     LaunchedHead,
 )
 from secretary.dispatcher_launcher import HeadLaunch
-from secretary.dispatcher_tui import TuiDeliveryError
+from secretary.dispatcher_tui import TuiDeliveryError, claude_project_dir_name
 from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_launch import launch_intent_liveness
 from secretary._fsutil import file_lock
@@ -2793,7 +2793,7 @@ class HostLaunchContourTests(unittest.TestCase):
             ),
         )
         projects = self.data_dir / "claude-projects"
-        session = projects / str(self.data_dir.resolve()).replace("/", "-") / "session.jsonl"
+        session = projects / claude_project_dir_name(str(self.data_dir)) / "session.jsonl"
         session.parent.mkdir(parents=True)
         session.write_text(
             json.dumps({"type": "user", "timestamp": "2099-01-02T03:04:05Z"}) + "\n",

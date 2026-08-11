@@ -13,6 +13,7 @@ from triggered_agents.runtime import dispatch
 from triggered_agents.runtime import state as runtime_state
 from triggered_agents.runtime import tui_delivery
 from triggered_agents.runtime.agent_prompt_transport import BRACKETED_PASTE_END, BRACKETED_PASTE_START
+from triggered_agents.runtime.claude_sessions import claude_project_dir_name
 
 
 class TriggeredDispatchReuseTests(unittest.TestCase):
@@ -91,7 +92,10 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
 
     def test_claude_user_turn_after_reads_the_workspace_session_log(self) -> None:
         projects = Path(self.tmp.name) / "claude-projects"
-        slug = self.workspace.replace("/", "-")
+        # Claude Code's own naming, not a second reading of it in the test: a temporary directory
+        # name carries underscores as readily as a product workspace does, and spelling the rule
+        # here is how the catalogue and the reader drifted apart in the first place.
+        slug = claude_project_dir_name(self.workspace)
         session = projects / slug / "session.jsonl"
         session.parent.mkdir(parents=True)
         since = time.time()
