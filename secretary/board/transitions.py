@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import TypeAlias
 
 from secretary.board.models import (
     BoardEntity, Card, CardState, EntityKind, Issue, IssueState, Product,
-    ProductState, Sprint, SprintState,
+    EventKind, ProductState, Sprint, SprintState,
 )
 
 
@@ -18,24 +17,6 @@ class BoardProtocolError(Exception):
 
 class InvalidTransition(BoardProtocolError):
     """The lifecycle registry has no edge for the requested move."""
-
-
-class EventKind(StrEnum):
-    PRODUCT_ARCHIVED = "product.archived"
-    ISSUE_CLOSED = "issue.closed"
-    SPRINT_CLOSED = "sprint.closed"
-    SPRINT_STOPPED = "sprint.stopped"
-    SPRINT_REOPENED = "sprint.reopened"
-    CARD_READY = "card.readied"
-    CARD_STARTED = "card.started"
-    CARD_SUBMITTED = "card.submitted"
-    CARD_ASSESSED = "card.assessed"
-    CARD_REWORKED = "card.reworked"
-    CARD_RELEASED = "card.released"
-    CARD_BLOCKED = "card.blocked"
-    CARD_UNBLOCKED = "card.unblocked"
-    CARD_RETURNED = "card.returned"
-    CARD_MOVED = "card.moved"
 
 
 LifecycleState: TypeAlias = ProductState | IssueState | SprintState | CardState
