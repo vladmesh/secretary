@@ -50,7 +50,7 @@ class PromptDocumentError(RuntimeError):
     """A document or a nudge that would not hold the guarantees above; the message says which."""
 
 
-def nudge_for(path: str | Path) -> str:
+def nudge_for(path: str | Path, note: str = "") -> str:
     """The one line a pane receives for a head that has a document waiting.
 
     Absolute, because the head's own working directory is not something the sender knows: a
@@ -59,6 +59,15 @@ def nudge_for(path: str | Path) -> str:
     something delivery can prove, and a path is the one part of the nudge that must survive it
     byte for byte. Control bytes are refused outright: they are what framing is made of, and a
     single newline in a path would turn one nudge into two lines and a stray Enter.
+
+    `note` is for the caller whose pointer has to discriminate as well as point — the retained
+    worker's continuation names which round it opens and what outranks what inside the document,
+    because that conversation's own scrollback holds the previous round's instructions. It travels
+    through here rather than beside it so that there is still exactly one place where the four
+    guarantees are made, and so the ceiling is checked over the line as it will actually be
+    delivered, path and note together. A line that does not fit is refused whole: a note this
+    function truncated would be a discriminator silently cut to length, which is worse than a
+    caller who is told its nudge is too long.
     """
     location = str(path)
     if not os.path.isabs(location):
@@ -74,6 +83,10 @@ def nudge_for(path: str | Path) -> str:
             f"a nudge carries an ASCII document path, and {location!r} is not one"
         ) from None
     nudge = _NUDGE_TEMPLATE.format(path=location)
+    if note:
+        if any(ord(char) < 0x20 or ord(char) == 0x7F for char in note):
+            raise PromptDocumentError("a nudge note carrying control bytes cannot be delivered")
+        nudge = f"{nudge} {note}"
     size = len(nudge.encode("utf-8"))
     if size > NUDGE_MAX_BYTES:
         raise PromptDocumentError(

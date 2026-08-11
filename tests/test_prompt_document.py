@@ -73,6 +73,32 @@ class NudgeTests(unittest.TestCase):
             with self.subTest(path=path), self.assertRaises(PromptDocumentError):
                 nudge_for(path)
 
+    def test_a_note_travels_in_the_same_line_as_the_path(self) -> None:
+        """secretary-1413: a caller whose pointer has to discriminate — which round, what outranks
+        what — hands its tail here instead of assembling a line past the only check there is."""
+        nudge = nudge_for("/var/lib/secretary/prompts/rework-2.md", "Generation 2: its own round.")
+
+        self.assertIn("/var/lib/secretary/prompts/rework-2.md", nudge)
+        self.assertTrue(nudge.endswith("Generation 2: its own round."))
+        self.assertEqual(nudge.splitlines(), [nudge], "a nudge is one line")
+
+    def test_the_ceiling_is_measured_over_the_path_and_the_note_together(self) -> None:
+        """The line the pane receives is what the ceiling is about, so a note that pushes it over
+        is refused whole rather than trimmed: a discriminator cut to length is not one."""
+        path = "/var/lib/secretary/prompts/rework-2.md"
+        room = NUDGE_MAX_BYTES - len(nudge_for(path).encode("utf-8")) - 1
+
+        self.assertEqual(len(nudge_for(path, "n" * room).encode("utf-8")), NUDGE_MAX_BYTES)
+        with self.assertRaisesRegex(PromptDocumentError, "ceiling"):
+            nudge_for(path, "n" * (room + 1))
+
+    def test_a_note_carrying_control_bytes_is_refused(self) -> None:
+        """A newline in the tail is one nudge delivered as two lines and a stray Enter, which is
+        the framing failure the whole seam exists to keep out of a composer."""
+        for note in ("two\nlines", "esc\x1b[200~"):
+            with self.subTest(note=note), self.assertRaises(PromptDocumentError):
+                nudge_for("/var/lib/secretary/prompts/rework-2.md", note)
+
 
 class PromptDocumentTests(unittest.TestCase):
     """Where the document is allowed to live, and what state it is left in."""

@@ -2447,19 +2447,21 @@ class CommandHostRuntime:
             workspace / "TASK.md",
             self._worker_task_doc(task, base, record.attempt_id, generation, decision),
         )
-        if status.get("stopped"):
-            self._signal_head(record.worker_pid_file, signal.SIGCONT)
         # The continuation travels as a pointer at the document just written, not as the round
         # typed into the composer: that is the delivery shape the product has never lost a prompt
-        # on, and the one this path was still missing (secretary-1413).
+        # on, and the one this path was still missing (secretary-1413). The pointer is built before
+        # the wake-up, because a nudge that will not fit is a continuation this path cannot make,
+        # and finding that out after SIGCONT leaves a woken head with nothing to read.
+        try:
+            pointer = head_ops.NudgePointer.at_document(
+                str(workspace / "TASK.md"), _continuation_note(generation, decision)
+            )
+        except PromptDocumentError as exc:
+            raise HostError(f"the continuation pointer could not be built: {exc}") from None
+        if status.get("stopped"):
+            self._signal_head(record.worker_pid_file, signal.SIGCONT)
         self._nudge_worker(
-            record,
-            head_ops.NudgePointer(
-                text=_continuation_nudge(generation, decision),
-                document=str(workspace / "TASK.md"),
-            ),
-            "retained worker continuation",
-            subject="worker-continuation",
+            record, pointer, "retained worker continuation", subject="worker-continuation",
         )
 
     def _nudge_worker(
@@ -6088,14 +6090,15 @@ def _gate_attestation_for_prompt(
     return _accepted_gate_receipt(source, current_sha)
 
 
-def _continuation_nudge(generation: int = 0, decision: str = "") -> str:
-    """The bounded line a resumed conversation is sent with its rework document.
+def _continuation_note(generation: int = 0, decision: str = "") -> str:
+    """The discriminating tail of the continuation pointer: what a pointer cannot delegate.
 
     What sent the card back and what the round owes are in the document, because a round typed
     into a composer is the payload that gets swallowed there: `enter-accepted-without-turn` with
     the text still in the pane, twice in one day on this path alone, each one costing a retained
-    worker's context and a fresh head. So this is a pointer like every other prompt in the product
-    (`prompt_document`), and only what a pointer cannot delegate stays in the line.
+    worker's context and a fresh head. So the continuation is a pointer like every other prompt in
+    the product (`prompt_document`), and this is only the part of the line the document itself
+    cannot carry.
 
     Two things cannot. The generation, because the retained conversation still has the previous
     round's report command in its own scrollback: "read the updated TASK.md" is exactly the
@@ -6107,17 +6110,15 @@ def _continuation_nudge(generation: int = 0, decision: str = "") -> str:
     rejected (secretary-1064). Naming the ranking here is not a second copy of the decision: the
     decision's text stays in the document, under the heading this sentence points at.
 
-    The line stays inside `NUDGE_MAX_BYTES` with both discriminators present, which is why the
-    wording is this terse — a discriminator is not what gets cut to fit.
+    This is a tail and not a line: it is handed to `NudgePointer.at_document`, which builds it into
+    the same nudge as the document's absolute path and checks the ceiling over both together. That
+    is why the wording is this terse — the path takes most of the budget, and a discriminator is
+    not what gets cut to fit. Whether it fits is that constructor's answer, not a guess here.
     """
-    nudge = (
-        f"Report generation {generation}: re-read TASK.md at the workspace root and follow it, "
-        f"then report with the command there, whose id ends in {generation}, not an earlier "
-        "turn's."
-    )
+    note = f"Generation {generation}: use its report command, not an earlier turn's."
     if decision.strip():
-        nudge += " The observer decision in it outranks the reviewer findings kept below it."
-    return nudge
+        note += " Its observer decision outranks the findings below it."
+    return note
 
 
 def _safe_orca_command_label(args: list[str]) -> str:

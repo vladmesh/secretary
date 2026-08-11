@@ -2718,15 +2718,18 @@ class HostLaunchContourTests(unittest.TestCase):
 
         self.assertIn("worker-report-done-secretary-510-pilot-3", task_at_delivery[0])
         # The document the worker is sent back to and the prompt that wakes it name one round.
-        self.assertIn("Report generation 3", prompt_at_delivery[0])
-        self.assertIn("ends in 3", prompt_at_delivery[0])
+        self.assertIn("Generation 3", prompt_at_delivery[0])
+        self.assertIn("not an earlier turn's", prompt_at_delivery[0])
         self.assertTrue(any(command[2] == "send" for command in calls))
-        # secretary-1413: the round travels as the document it was just written to, and the pane
-        # gets the bounded line naming it. The evidence is what says which of the two happened.
+        # secretary-1413: what the pane actually receives is the pointer — the document's own
+        # absolute path — and not the round, whose text stays in the file. This asserts the
+        # payload that was sent, not the telemetry describing it.
+        self.assertIn(str(self.data_dir / "TASK.md"), prompt_at_delivery[0])
+        self.assertLessEqual(len(prompt_at_delivery[0].encode("utf-8")), NUDGE_MAX_BYTES)
+        self.assertNotIn("Reviewer findings", prompt_at_delivery[0])
         evidence = record.worker_delivery_evidence
         self.assertEqual(evidence["delivery_mode"], NUDGE_FILE_MODE)
         self.assertEqual(evidence["document_path"], str(self.data_dir / "TASK.md"))
-        self.assertLessEqual(evidence["payload_bytes"], NUDGE_MAX_BYTES)
         self.assertLess(
             evidence["payload_bytes"],
             len(task_at_delivery[0].encode("utf-8")),
