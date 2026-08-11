@@ -1,24 +1,58 @@
-"""The three pane operations interactive delivery needs, and Orca's answer to them.
+"""The pane operations interactive delivery and a head's lifecycle need, and Orca's answers to them.
 
 Delivery asks a session manager for very little: write bytes into a pane, read the pane back, and
 wait until it will accept input.  Everything above this module is about what those answers mean —
 readiness classification, composer residue, framing, the body/submit pair — and none of it is
 specific to Orca.
 
-Orca is nonetheless the only session manager this product has, so ``OrcaPaneHost`` is the default
-everywhere.  What this seam buys is that its argument vectors exist in one file: a second
-implementation is a class with these three methods, not a search for ``"orca"`` through the
-delivery path.  It deliberately stops at delivery.  Worktree registration, pane creation and pane
-teardown are a larger and differently-shaped dependency (`docs/ARCHITECTURE.md`), and pretending
-this covers them would misreport how portable the product is.
+A head's own life needs more than delivery, and it needs it through the same seam: `spawn` opens a
+pane, `stop` closes one, and both have to find a pane again after the session manager aliased the
+handle it first gave out.  Those verbs used to exist only as ``orca terminal`` argument vectors
+inside the dispatcher, which is what made the three head operations impossible to run without Orca.
+So ``SessionHost`` extends ``PaneHost`` with them rather than a second protocol being invented
+beside it: one live pane is one thing, and a head that is delivered to and later closed would
+otherwise have to hold two objects and hope they name the same pty.
+
+Orca is nonetheless the only session manager this product has, so ``OrcaPaneHost`` and
+``OrcaSessionHost`` are the defaults everywhere.  What this seam buys is that its argument vectors
+exist in one file: a second implementation is a class with these methods, not a search for
+``"orca"`` through the delivery and bring-up paths.  What it still does not cover is worktree
+registration and removal — a larger and differently-shaped dependency (`docs/ARCHITECTURE.md`) that
+belongs to a workspace rather than to a pane.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, Sequence
 
 from .tui_delivery_types import RunJson
+
+
+class PaneHostError(RuntimeError):
+    """A session manager that answered a pane operation with something unusable."""
+
+
+@dataclass(frozen=True)
+class Pane:
+    """One pane as the session manager named it: the handle to address, and its stable leaf.
+
+    Orca can alias the handle it returned at create time while the leaf stays put, so the leaf is
+    what a later tick re-finds the same pty by.  A host that has no such notion returns the handle
+    alone and every lookup then goes by handle, which is what a backend with stable handles means.
+    """
+
+    handle: str
+    leaf: str = ""
+    # Whether the session manager still has a live connection to this pane. Only an inventory
+    # answers it; a pane just created is connected by construction. Callers use it to pick a pane,
+    # never to decide a head is dead — a disconnected pane is one nothing can be typed into, which
+    # is not the same fact as a process that exited.
+    connected: bool = True
+    # When this pane last printed, in epoch seconds, or 0.0 when the session manager did not say.
+    # Advisory work liveness for a caller that watches a head for progress; the pid heartbeat is
+    # what answers whether a process is there.
+    last_output_at: float = 0.0
 
 
 class PaneHost(Protocol):
@@ -32,6 +66,32 @@ class PaneHost(Protocol):
 
     def wait_idle(self, handle: str, *, timeout_ms: int) -> Any:
         """Block until the pane reports it will accept input, or refuse."""
+
+
+class SessionHost(PaneHost, Protocol):
+    """The pane's whole life: everything `PaneHost` answers, plus opening and closing one.
+
+    A head operation reaches the session manager through this and nothing else, so an
+    implementation of these methods is the whole of what a backend-independent head run needs.
+    """
+
+    def open_pane(self, workspace: str, title: str, command: str) -> Pane:
+        """Open a pane in ``workspace`` running ``command``, labelled ``title``."""
+
+    def split_pane(self, handle: str, command: str) -> Pane:
+        """Open a pane running ``command`` beside an existing one."""
+
+    def rename_pane(self, handle: str, title: str) -> None:
+        """Relabel a pane, or refuse."""
+
+    def close_pane(self, handle: str) -> None:
+        """Close one pane, or refuse."""
+
+    def panes(self, workspace: str) -> Sequence[Pane]:
+        """Every pane the session manager currently has in ``workspace``."""
+
+    def stop_workspace(self, workspace: str) -> None:
+        """Stop every pane of ``workspace``, for a caller that can no longer name one."""
 
 
 @dataclass(frozen=True)
@@ -68,6 +128,95 @@ class OrcaPaneHost:
         ])
 
 
+def _epoch_seconds(value: Any) -> float:
+    """Orca times a pane's last output in milliseconds; a missing or unparsable one is no clock."""
+    try:
+        return float(value) / 1000.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _pane_key_leaf(value: Any) -> str:
+    """Read Orca's stable leaf id from its create-time ``tabId:leafId`` pane key."""
+    if not isinstance(value, str):
+        return ""
+    _tab, separator, leaf = value.partition(":")
+    return leaf if separator and leaf else ""
+
+
+@dataclass(frozen=True)
+class OrcaSessionHost(OrcaPaneHost):
+    """Orca's answer to the whole pane lifecycle, as its ``orca terminal`` CLI spells it.
+
+    These argument vectors were the dispatcher's private ones (`_create_terminal`, `_split_pane`,
+    the terminal inventory and the by-worktree stop). They are here so that the operations above
+    them hold no opinion about which session manager is installed, and so the dispatcher's own
+    lifecycle paths and the head operations issue one set of commands rather than two.
+    """
+
+    def open_pane(self, workspace: str, title: str, command: str) -> Pane:
+        result = self.run_json([
+            "orca", "terminal", "create",
+            "--worktree", f"path:{workspace}",
+            "--title", title,
+            "--command", command,
+            "--json",
+        ])
+        terminal = result.get("terminal") if isinstance(result.get("terminal"), dict) else result
+        handle = (
+            terminal.get("handle") or terminal.get("id") if isinstance(terminal, dict) else None
+        )
+        if not isinstance(handle, str) or not handle:
+            raise PaneHostError("orca did not return a terminal handle")
+        return Pane(handle=handle, leaf=_pane_key_leaf(terminal.get("paneKey")))
+
+    def split_pane(self, handle: str, command: str) -> Pane:
+        result = self.run_json([
+            "orca", "terminal", "split",
+            "--terminal", handle,
+            "--direction", "vertical",
+            "--command", command,
+            "--json",
+        ])
+        split = result.get("split") if isinstance(result.get("split"), dict) else result
+        opened = split.get("handle") if isinstance(split, dict) else None
+        if not isinstance(opened, str) or not opened:
+            raise PaneHostError("orca did not return a split terminal handle")
+        return Pane(handle=opened, leaf=_pane_key_leaf(split.get("paneKey")))
+
+    def rename_pane(self, handle: str, title: str) -> None:
+        self.run_json([
+            "orca", "terminal", "rename", "--terminal", handle, "--title", title, "--json",
+        ])
+
+    def close_pane(self, handle: str) -> None:
+        self.run_json(["orca", "terminal", "close", "--terminal", handle, "--json"])
+
+    def panes(self, workspace: str) -> list[Pane]:
+        if not workspace:
+            raise PaneHostError("terminal inventory needs a workspace")
+        data = self.run_json(
+            ["orca", "terminal", "list", "--worktree", f"path:{workspace}", "--json"]
+        )
+        payload = data.get("result") if isinstance(data.get("result"), dict) else data
+        terminals = payload.get("terminals") if isinstance(payload, dict) else []
+        if not isinstance(terminals, list):
+            return []
+        return [
+            Pane(
+                handle=str(entry.get("handle") or ""),
+                leaf=str(entry.get("leafId") or ""),
+                connected=entry.get("connected") is not False,
+                last_output_at=_epoch_seconds(entry.get("lastOutputAt")),
+            )
+            for entry in terminals
+            if isinstance(entry, dict)
+        ]
+
+    def stop_workspace(self, workspace: str) -> None:
+        self.run_json(["orca", "terminal", "stop", "--worktree", f"path:{workspace}", "--json"])
+
+
 def pane_host(run_json: RunJson | None = None, *, host: PaneHost | None = None) -> PaneHost:
     """Resolve the host a delivery call should use.
 
@@ -80,3 +229,14 @@ def pane_host(run_json: RunJson | None = None, *, host: PaneHost | None = None) 
     if run_json is None:
         raise ValueError("interactive delivery needs either a pane host or a command runner")
     return OrcaPaneHost(run_json)
+
+
+def session_host(
+    run_json: RunJson | None = None, *, host: SessionHost | None = None
+) -> SessionHost:
+    """The same resolution for a caller that opens and closes panes as well as writing into them."""
+    if host is not None:
+        return host
+    if run_json is None:
+        raise ValueError("a head's lifecycle needs either a session host or a command runner")
+    return OrcaSessionHost(run_json)

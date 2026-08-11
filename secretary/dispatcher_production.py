@@ -36,7 +36,7 @@ from secretary.dispatcher_state import (
     record_divergence,
     request_token,
 )
-from secretary.dispatcher_types import HostError
+from secretary.dispatcher_types import STOPPED_BY_RECONCILIATION, HostError
 from secretary.tasks import ACTIVE_STATES, TaskError
 from secretary.sprints import SprintWriter, budget_thresholds
 
@@ -1111,7 +1111,7 @@ def _stop_record_heads(
         if record.owns_head(REVIEW_ROLE):
             runtime.host.stop_head(record, REVIEW_ROLE)
         if record.owns_head(WORKER_ROLE):
-            runtime.host.stop_head(record, WORKER_ROLE)
+            runtime.host.stop_head(record, WORKER_ROLE, STOPPED_BY_RECONCILIATION)
         if not record.owns_head() and record.workspace and not record.workspace_settled:
             runtime.host.stop_workspace(record)
     except HostError as exc:

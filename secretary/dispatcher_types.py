@@ -115,3 +115,15 @@ def review_pane_label(reference: str) -> str:
     its own OSC sequence seconds after launch, and a title-only check would then read the reviewer
     as gone (or as the worker)."""
     return f"{reference} reviewer"
+
+
+# Who a head's stop was initiated by, as the head run records it (secretary-1412). These live here
+# rather than beside the runtime because every module that performs a stop has to name one, and the
+# runtime imports those modules. A stop with no initiator is impossible at the operation's
+# signature; naming them here is what keeps the names from drifting per call site.
+STOPPED_BY_DISPATCHER = "dispatcher"
+STOPPED_BY_REVIEW_FREEZE = "review-freeze"
+STOPPED_BY_REPLACEMENT = "replacement"
+STOPPED_BY_OPERATOR = "operator"
+STOPPED_BY_RECONCILIATION = "reconciliation"
+STOPPED_BY_LAUNCH_RECOVERY = "launch-recovery"

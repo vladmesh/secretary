@@ -322,9 +322,20 @@ retained identity with the initiator recorded. Screen-state heuristics (idle/rea
 reconciliation) were rejected as a direction, not merely deferred: the screen is a secondary hint,
 never the deciding signal. The wider head contract this seam grows toward — spec/run split, an
 event stream out, an escalation ladder instead of a liveness poll — is recorded in the instance
-knowledge decision `2026-08-10-golova-protocol-brainstorm.md`. Pane creation, worktree
-registration and computer use remain session-manager-specific, and the second `PaneHost`
-implementation that would settle the backend question by measurement has not been started.
+knowledge decision `2026-08-10-golova-protocol-brainstorm.md`.
+
+The head's own lifecycle now sits on that seam too (secretary-1412). `SessionHost` extends
+`PaneHost` with the pane verbs a head's life needs — open, split, rename, close, inventory,
+stop-by-workspace — and `triggered_agents/runtime/head` states the three operations over it:
+`spawn(spec, workspace, task_ref)`, `nudge(run, pointer)`, `stop(run, initiator)`. A `HeadRun`
+carries an identity the session manager cannot move by aliasing a pane handle, the lifecycle
+`spawned → working → finishing → exited`, and the initiator of its stop, durably. `tests/
+test_head_operations.py` runs all three against a fake host with no session manager installed,
+which is the first backend-independent contract suite this milestone asks for, and the production
+dispatcher's worker path — bring-up, delivery, stop — goes through those operations rather than
+beside them. Worktree registration and computer use remain session-manager-specific, the reviewer
+path still closes its own pane, and the second `SessionHost` implementation that would settle the
+backend question by measurement has not been started.
 
 ### Open questions
 

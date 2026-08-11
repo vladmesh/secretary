@@ -46,7 +46,12 @@ from secretary.dispatcher_pause import (
 )
 from secretary.dispatcher_review import end_review_pane, start_review
 from secretary.dispatcher_state import DispatcherRecord, now_rfc3339
-from secretary.dispatcher_types import DispatcherError, HeadLaunchAborted, HostError
+from secretary.dispatcher_types import (
+    STOPPED_BY_OPERATOR,
+    DispatcherError,
+    HeadLaunchAborted,
+    HostError,
+)
 from secretary.tasks import TaskError
 
 WORKER_MARKERS = {"report:done", "report:blocked"}
@@ -354,7 +359,7 @@ def _freeze_heads(
             stopped_reviewer.append(ref)
         if record.handle or record.worker_leaf or record.worker_pid_file:
             try:
-                runtime.host.stop_head(record, WORKER_ROLE)
+                runtime.host.stop_head(record, WORKER_ROLE, STOPPED_BY_OPERATOR)
             except HostError:
                 continue
             forget_role_head(record, WORKER_ROLE)

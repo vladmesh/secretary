@@ -322,9 +322,11 @@ def read_pane(handle: str, *, run_json: RunJson | None = None, host: PaneHost | 
     return PaneRead(text=text, cursor=cursor, cursor_known=bool(cursor), read=bool(terminal))
 
 
-def read_pane_text(handle: str, *, run_json: RunJson) -> str:
+def read_pane_text(
+    handle: str, *, run_json: RunJson | None = None, host: PaneHost | None = None
+) -> str:
     """The pane's text alone, for callers that read a screen rather than a position."""
-    return read_pane(handle, run_json=run_json).text
+    return read_pane(handle, run_json=run_json, host=host).text
 
 
 def strip_ansi(text: str) -> str:
@@ -369,10 +371,12 @@ def output_cursor(read: PaneRead) -> tuple[str, bool]:
     return f"tail:{len(output)}:{_digest(output)}", False
 
 
-def probe_pane(handle: str, *, run_json: RunJson) -> PaneProbe:
+def probe_pane(
+    handle: str, *, run_json: RunJson | None = None, host: PaneHost | None = None
+) -> PaneProbe:
     """Readiness, composer and output cursor in one look, for the evidence of one attempt."""
-    readiness = terminal_readiness(handle, run_json=run_json)
-    read = read_pane(handle, run_json=run_json)
+    readiness = terminal_readiness(handle, run_json=run_json, host=host)
+    read = read_pane(handle, run_json=run_json, host=host)
     cursor, from_backend = output_cursor(read)
     return PaneProbe(
         readiness=readiness,
@@ -479,7 +483,8 @@ def deliver_interactive_prompt(
     handle: str,
     prompt: str,
     *,
-    run_json: RunJson,
+    run_json: RunJson | None = None,
+    host: PaneHost | None = None,
     adapter: str = "",
     confirm: Callable[[float], bool] | None = None,
     ack_out_of_band: bool = False,
@@ -546,8 +551,8 @@ def deliver_interactive_prompt(
     # is the only thing that ever existed on that path.
     evidence.payload_bytes, evidence.payload_sha256 = payload_fingerprint(prepared.text)
     with _transport_evidence(evidence, "wait-for-readiness"):
-        wait_for_tui_idle(handle, run_json=run_json)
-    before = probe_pane(handle, run_json=run_json)
+        wait_for_tui_idle(handle, run_json=run_json, host=host)
+    before = probe_pane(handle, run_json=run_json, host=host)
     evidence.readiness_before = before.readiness
     evidence.composer_before = before.composer
     evidence.modal_before = before.modal
@@ -555,13 +560,14 @@ def deliver_interactive_prompt(
     evidence.cursor_from_backend = before.cursor_from_backend
     sent_at = time.time()
     with _transport_evidence(evidence, "send-payload"):
-        _send_payload(handle, prepared, run_json=run_json, evidence=evidence)
+        _send_payload(handle, prepared, run_json=run_json, host=host, evidence=evidence)
     return _confirm_interactive_turn(
         handle,
         prepared,
         sent_at,
         before,
         run_json=run_json,
+        host=host,
         confirm=confirm,
         ack_out_of_band=ack_out_of_band,
         evidence=evidence,
@@ -596,14 +602,15 @@ def _send_payload(
     handle: str,
     prompt: PreparedAgentPrompt,
     *,
-    run_json: RunJson,
+    run_json: RunJson | None = None,
+    host: PaneHost | None = None,
     evidence: DeliveryEvidence,
     submit_only: bool = False,
 ) -> None:
     """Run the one provider-aware body/submit transport and merge its metadata-only receipt."""
     try:
         receipt = send_agent_prompt(
-            handle, prompt, run_json=run_json, submit_only=submit_only
+            handle, prompt, run_json=run_json, host=host, submit_only=submit_only
         )
     except AgentPromptTransportError as exc:
         _record_transport_receipt(evidence, exc.receipt)
@@ -647,7 +654,8 @@ def _confirm_interactive_turn(
     sent_at: float,
     before: PaneProbe,
     *,
-    run_json: RunJson,
+    run_json: RunJson | None = None,
+    host: PaneHost | None = None,
     confirm: Callable[[float], bool] | None,
     ack_out_of_band: bool = False,
     evidence: DeliveryEvidence,
@@ -661,7 +669,7 @@ def _confirm_interactive_turn(
             evidence.turn_confirmed = True
             evidence.reason = ""
             return DeliveryOutcome(DELIVERY_CONFIRMED, evidence)
-        probe = probe_pane(handle, run_json=run_json)
+        probe = probe_pane(handle, run_json=run_json, host=host)
         _record_probe(evidence, before, probe)
         if probe.readiness == READINESS_UNKNOWN:
             # Not a swallowed prompt and not a working head: the pane cannot be asked at all.
@@ -700,6 +708,7 @@ def _confirm_interactive_turn(
                     handle,
                     prompt,
                     run_json=run_json,
+                    host=host,
                     evidence=evidence,
                     submit_only=evidence.payload_left_in_composer or not probe.screen_read,
                 )

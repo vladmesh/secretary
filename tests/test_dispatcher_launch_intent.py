@@ -2366,6 +2366,11 @@ class HostLaunchContourTests(unittest.TestCase):
 
         def call(command: list[str]) -> dict:
             self.json_calls.append(command)
+            pending = getattr(self, "write_pid_on_split", None)
+            if pending and command[:3] == ["orca", "terminal", "split"]:
+                path, contents = pending
+                if contents is not None:
+                    path.write_text(contents, encoding="utf-8")
             for key, answer in answers.items():
                 if all(word in command for word in key.split()):
                     if isinstance(answer, Exception):
@@ -2453,9 +2458,12 @@ class HostLaunchContourTests(unittest.TestCase):
             def head_launch(self, *args: Any, **kwargs: Any) -> HeadLaunch:
                 return launch
 
+        created = {"terminal create": {"terminal": {"handle": "term:1"}}}
         with mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir)}):
             with mock.patch.object(self.host, "catalog", Catalog()):
-                with mock.patch.object(self.host, "_create_terminal", lambda *a, **k: "term:1"):
+                # The pane is opened through the session host now (secretary-1412), so the create
+                # is answered where every other Orca call in these tests is answered.
+                with self.run_json(created):
                     with mock.patch.object(self.host, "_launched", lambda *a, **k: "launched"):
                         with mock.patch.object(
                             secretary_dispatcher, "_deliver_tui_prompt",
@@ -2506,6 +2514,42 @@ class HostLaunchContourTests(unittest.TestCase):
             "terminal rename": rename,
         }
 
+    def split_worker(self):
+        """A bring-up that opens its pane beside another, through the same one `_launch` uses.
+
+        The split, its label and the cleanup after a label that will not stick moved into the head
+        package with `spawn` (secretary-1412). What is asserted here is unchanged and is what this
+        layer still owns: which dispatcher failure each of those outcomes becomes.
+        """
+        launch = HeadLaunch("run-review")
+
+        class Catalog:
+            def head_launch(self, *args: Any, **kwargs: Any) -> HeadLaunch:
+                return launch
+
+        with mock.patch.object(self.host, "catalog", Catalog()):
+            return self.host._launch(
+                str(self.data_dir), "title", "codex-reviewer", "REVIEW.md",
+                role="reviewer", env_name="SECRETARY_UNSET_COMMAND", split_from="term:worker",
+                task={"ref": REF, "project": "secretary"},
+            )
+
+    @contextlib.contextmanager
+    def split_pid_file(self, contents: str | None):
+        """The reviewer heartbeat this bring-up leaves behind, or none at all.
+
+        Written when the split answers, not before it: the bring-up clears a predecessor's pid on
+        the way in, so a heartbeat that existed beforehand is not the one this launch would read.
+        """
+        with mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir)}):
+            path = Path(pid_file_path("review", REF))
+            self.write_pid_on_split = (path, contents)
+            try:
+                yield
+            finally:
+                self.write_pid_on_split = None
+                path.unlink(missing_ok=True)
+
     def test_a_split_whose_pane_will_not_close_is_ambiguous(self) -> None:
         """The reviewer's pane exists from the split on, so a failed rename is not "no head".
 
@@ -2516,13 +2560,11 @@ class HostLaunchContourTests(unittest.TestCase):
         answers = self.split_answers(HostError("orca rename failed"))
         refuse = mock.Mock(side_effect=HostError("tab_not_found"))
 
-        with self.run_json(answers):
-            with mock.patch.object(secretary_dispatcher, "_close_tui_terminal_strict", refuse):
-                with self.assertRaises(HeadLaunchAborted) as caught:
-                    self.host._split_pane(
-                        "term:worker", "title", "run-review",
-                        workspace=str(self.data_dir), pid_file=self.pid_file(None),
-                    )
+        with self.split_pid_file(None):
+            with self.run_json(answers):
+                with mock.patch.object(secretary_dispatcher, "_close_tui_terminal_strict", refuse):
+                    with self.assertRaises(HeadLaunchAborted) as caught:
+                        self.split_worker()
 
         self.assertEqual(caught.exception.handle, "term:review")
         self.assertEqual(caught.exception.workspace, str(self.data_dir))
@@ -2532,13 +2574,11 @@ class HostLaunchContourTests(unittest.TestCase):
         answers = self.split_answers(HostError("orca rename failed"))
         refuse = mock.Mock(side_effect=HostError("tab_not_found"))
 
-        with self.run_json(answers):
-            with mock.patch.object(secretary_dispatcher, "_close_tui_terminal_strict", refuse):
-                with self.assertRaises(HostError) as caught:
-                    self.host._split_pane(
-                        "term:worker", "title", "run-review",
-                        workspace=str(self.data_dir), pid_file=self.pid_file(str(DEAD_PID)),
-                    )
+        with self.split_pid_file(str(DEAD_PID)):
+            with self.run_json(answers):
+                with mock.patch.object(secretary_dispatcher, "_close_tui_terminal_strict", refuse):
+                    with self.assertRaises(HostError) as caught:
+                        self.split_worker()
 
         self.assertNotIsInstance(caught.exception, HeadLaunchAborted)
 
