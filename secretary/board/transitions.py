@@ -35,6 +35,7 @@ class EventKind(StrEnum):
     CARD_BLOCKED = "card.blocked"
     CARD_UNBLOCKED = "card.unblocked"
     CARD_RETURNED = "card.returned"
+    CARD_MOVED = "card.moved"
 
 
 LifecycleState: TypeAlias = ProductState | IssueState | SprintState | CardState
@@ -75,18 +76,47 @@ TRANSITIONS: dict[EntityKind, dict[TransitionKey, Transition]] = {
     },
     EntityKind.CARD: {
         (CardState.ISSUES, CardState.READY): Transition(CardState.ISSUES, CardState.READY, EventKind.CARD_READY),
+        (CardState.ISSUES, CardState.IN_PROGRESS): Transition(CardState.ISSUES, CardState.IN_PROGRESS, EventKind.CARD_MOVED),
+        (CardState.ISSUES, CardState.VALIDATE): Transition(CardState.ISSUES, CardState.VALIDATE, EventKind.CARD_MOVED),
+        (CardState.ISSUES, CardState.ASSESSMENT): Transition(CardState.ISSUES, CardState.ASSESSMENT, EventKind.CARD_MOVED),
+        (CardState.ISSUES, CardState.BLOCKED): Transition(CardState.ISSUES, CardState.BLOCKED, EventKind.CARD_BLOCKED),
+        (CardState.ISSUES, CardState.DONE): Transition(CardState.ISSUES, CardState.DONE, EventKind.CARD_MOVED),
+        (CardState.READY, CardState.ISSUES): Transition(CardState.READY, CardState.ISSUES, EventKind.CARD_MOVED),
         (CardState.READY, CardState.IN_PROGRESS): Transition(CardState.READY, CardState.IN_PROGRESS, EventKind.CARD_STARTED),
-        (CardState.IN_PROGRESS, CardState.VALIDATE): Transition(CardState.IN_PROGRESS, CardState.VALIDATE, EventKind.CARD_SUBMITTED),
-        (CardState.VALIDATE, CardState.ASSESSMENT): Transition(CardState.VALIDATE, CardState.ASSESSMENT, EventKind.CARD_ASSESSED),
-        (CardState.ASSESSMENT, CardState.IN_PROGRESS): Transition(CardState.ASSESSMENT, CardState.IN_PROGRESS, EventKind.CARD_REWORKED),
-        (CardState.ASSESSMENT, CardState.DONE): Transition(CardState.ASSESSMENT, CardState.DONE, EventKind.CARD_RELEASED),
+        (CardState.READY, CardState.VALIDATE): Transition(CardState.READY, CardState.VALIDATE, EventKind.CARD_MOVED),
+        (CardState.READY, CardState.ASSESSMENT): Transition(CardState.READY, CardState.ASSESSMENT, EventKind.CARD_MOVED),
         (CardState.READY, CardState.BLOCKED): Transition(CardState.READY, CardState.BLOCKED, EventKind.CARD_BLOCKED),
-        (CardState.IN_PROGRESS, CardState.BLOCKED): Transition(CardState.IN_PROGRESS, CardState.BLOCKED, EventKind.CARD_BLOCKED),
-        (CardState.VALIDATE, CardState.BLOCKED): Transition(CardState.VALIDATE, CardState.BLOCKED, EventKind.CARD_BLOCKED),
-        (CardState.ASSESSMENT, CardState.BLOCKED): Transition(CardState.ASSESSMENT, CardState.BLOCKED, EventKind.CARD_BLOCKED),
-        (CardState.BLOCKED, CardState.READY): Transition(CardState.BLOCKED, CardState.READY, EventKind.CARD_UNBLOCKED),
+        (CardState.READY, CardState.DONE): Transition(CardState.READY, CardState.DONE, EventKind.CARD_MOVED),
+        (CardState.IN_PROGRESS, CardState.ISSUES): Transition(CardState.IN_PROGRESS, CardState.ISSUES, EventKind.CARD_MOVED),
         (CardState.IN_PROGRESS, CardState.READY): Transition(CardState.IN_PROGRESS, CardState.READY, EventKind.CARD_RETURNED),
+        (CardState.IN_PROGRESS, CardState.VALIDATE): Transition(CardState.IN_PROGRESS, CardState.VALIDATE, EventKind.CARD_SUBMITTED),
+        (CardState.IN_PROGRESS, CardState.ASSESSMENT): Transition(CardState.IN_PROGRESS, CardState.ASSESSMENT, EventKind.CARD_MOVED),
+        (CardState.IN_PROGRESS, CardState.BLOCKED): Transition(CardState.IN_PROGRESS, CardState.BLOCKED, EventKind.CARD_BLOCKED),
+        (CardState.IN_PROGRESS, CardState.DONE): Transition(CardState.IN_PROGRESS, CardState.DONE, EventKind.CARD_MOVED),
+        (CardState.VALIDATE, CardState.ISSUES): Transition(CardState.VALIDATE, CardState.ISSUES, EventKind.CARD_MOVED),
+        (CardState.VALIDATE, CardState.READY): Transition(CardState.VALIDATE, CardState.READY, EventKind.CARD_MOVED),
         (CardState.VALIDATE, CardState.IN_PROGRESS): Transition(CardState.VALIDATE, CardState.IN_PROGRESS, EventKind.CARD_RETURNED),
+        (CardState.VALIDATE, CardState.ASSESSMENT): Transition(CardState.VALIDATE, CardState.ASSESSMENT, EventKind.CARD_ASSESSED),
+        (CardState.VALIDATE, CardState.BLOCKED): Transition(CardState.VALIDATE, CardState.BLOCKED, EventKind.CARD_BLOCKED),
+        (CardState.VALIDATE, CardState.DONE): Transition(CardState.VALIDATE, CardState.DONE, EventKind.CARD_MOVED),
+        (CardState.ASSESSMENT, CardState.ISSUES): Transition(CardState.ASSESSMENT, CardState.ISSUES, EventKind.CARD_MOVED),
+        (CardState.ASSESSMENT, CardState.READY): Transition(CardState.ASSESSMENT, CardState.READY, EventKind.CARD_MOVED),
+        (CardState.ASSESSMENT, CardState.IN_PROGRESS): Transition(CardState.ASSESSMENT, CardState.IN_PROGRESS, EventKind.CARD_REWORKED),
+        (CardState.ASSESSMENT, CardState.VALIDATE): Transition(CardState.ASSESSMENT, CardState.VALIDATE, EventKind.CARD_MOVED),
+        (CardState.ASSESSMENT, CardState.DONE): Transition(CardState.ASSESSMENT, CardState.DONE, EventKind.CARD_RELEASED),
+        (CardState.ASSESSMENT, CardState.BLOCKED): Transition(CardState.ASSESSMENT, CardState.BLOCKED, EventKind.CARD_BLOCKED),
+        (CardState.BLOCKED, CardState.ISSUES): Transition(CardState.BLOCKED, CardState.ISSUES, EventKind.CARD_MOVED),
+        (CardState.BLOCKED, CardState.READY): Transition(CardState.BLOCKED, CardState.READY, EventKind.CARD_UNBLOCKED),
+        (CardState.BLOCKED, CardState.IN_PROGRESS): Transition(CardState.BLOCKED, CardState.IN_PROGRESS, EventKind.CARD_MOVED),
+        (CardState.BLOCKED, CardState.VALIDATE): Transition(CardState.BLOCKED, CardState.VALIDATE, EventKind.CARD_MOVED),
+        (CardState.BLOCKED, CardState.ASSESSMENT): Transition(CardState.BLOCKED, CardState.ASSESSMENT, EventKind.CARD_MOVED),
+        (CardState.BLOCKED, CardState.DONE): Transition(CardState.BLOCKED, CardState.DONE, EventKind.CARD_MOVED),
+        (CardState.DONE, CardState.ISSUES): Transition(CardState.DONE, CardState.ISSUES, EventKind.CARD_MOVED),
+        (CardState.DONE, CardState.READY): Transition(CardState.DONE, CardState.READY, EventKind.CARD_MOVED),
+        (CardState.DONE, CardState.IN_PROGRESS): Transition(CardState.DONE, CardState.IN_PROGRESS, EventKind.CARD_MOVED),
+        (CardState.DONE, CardState.VALIDATE): Transition(CardState.DONE, CardState.VALIDATE, EventKind.CARD_MOVED),
+        (CardState.DONE, CardState.ASSESSMENT): Transition(CardState.DONE, CardState.ASSESSMENT, EventKind.CARD_MOVED),
+        (CardState.DONE, CardState.BLOCKED): Transition(CardState.DONE, CardState.BLOCKED, EventKind.CARD_BLOCKED),
     },
 }
 

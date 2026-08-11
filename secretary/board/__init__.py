@@ -6,16 +6,24 @@ command paths retain their current writers until their dedicated migration cards
 
 from secretary.board.fake import FakeBoardHost
 from secretary.board.host import BoardHost, Create, MutationResult, Replace, TransitionRequest
-from secretary.board.kanboard import KanboardBoardHost
 from secretary.board.models import (
     Actor, BoardEntity, Card, CardState, EntityKind, Event, Issue, IssueState,
     Product, ProductState, RelatedRefs, Sprint, SprintState,
 )
+from secretary.board.card_transitions import CARD_TRANSITIONS, CardTransitionForbidden, card_transition
 from secretary.board.transitions import BoardProtocolError, EventKind, InvalidTransition, TRANSITIONS, transition
 
+
+def __getattr__(name: str):
+    """Keep legacy adapters out of imports of board's protocol leaves."""
+    if name == "KanboardBoardHost":
+        from secretary.board.kanboard import KanboardBoardHost
+        return KanboardBoardHost
+    raise AttributeError(name)
+
 __all__ = [
-    "Actor", "BoardEntity", "BoardHost", "BoardProtocolError", "Card", "CardState",
-    "Create", "EntityKind", "Event", "EventKind", "FakeBoardHost", "InvalidTransition",
+    "Actor", "BoardEntity", "BoardHost", "BoardProtocolError", "CARD_TRANSITIONS", "Card", "CardState",
+    "CardTransitionForbidden", "Create", "EntityKind", "Event", "EventKind", "FakeBoardHost", "InvalidTransition",
     "Issue", "IssueState", "KanboardBoardHost", "MutationResult", "Product", "ProductState", "RelatedRefs",
-    "Replace", "Sprint", "SprintState", "TRANSITIONS", "TransitionRequest", "transition",
+    "Replace", "Sprint", "SprintState", "TRANSITIONS", "TransitionRequest", "card_transition", "transition",
 ]
