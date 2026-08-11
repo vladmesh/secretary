@@ -487,6 +487,7 @@ def _resume_heads(
         confirm_launch_intent(
             runtime, payload, records, ref, record,
             handle=launched.handle, leaf=launched.leaf, run=launched.run,
+            head_run=dict(launched.head_run),
         )
         record.handle = launched.handle
         record.worker_leaf = launched.leaf

@@ -614,18 +614,18 @@ def start_review(
     # The reviewer is up: its pane and its launch configuration go into the intent on disk before
     # the record is told anything about it, so a tick that dies from here on is adopted with the
     # routing history of the head that actually ran.
+    # The reviewer's own run goes in with them (secretary-1414). It is what every later stop of this
+    # head continues — the pane pointers beside it are re-addressed by reconciliation, while the
+    # identity, the lifecycle and, once a stop begins, its initiator live there — and it is written
+    # by that one call rather than here, so no durable save separates the head from its run.
     confirm_launch_intent(
         runtime, payload, records, ref, record,
         handle=launch.handle, leaf=launch.leaf, run=launch.run,
+        head_run=dict(launch.head_run),
     )
     record.review_handle = launch.handle
     record.review_leaf = launch.leaf
     record.review_commit = launch.commit
-    # The reviewer's own run, from the operation that brought it up (secretary-1414). It is what
-    # every later stop of this head continues: the pane pointers beside it are re-addressed by
-    # reconciliation, while the identity, the lifecycle and — once a stop begins — its initiator
-    # live here.
-    record.review_head_run = dict(launch.head_run)
     if launch.delivery_evidence:
         # Successful and refused reviewer launches use the same durable, metadata-only receipt.
         # A later recovery therefore sees the actual transport version and submit count instead

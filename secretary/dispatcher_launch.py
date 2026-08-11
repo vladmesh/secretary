@@ -156,6 +156,7 @@ def confirm_launch_intent(
     handle: str = "",
     leaf: str = "",
     run: dict[str, Any] | None = None,
+    head_run: dict[str, Any] | None = None,
 ) -> None:
     """Put what the finished host call knows about the head into its intent, on disk.
 
@@ -164,6 +165,15 @@ def confirm_launch_intent(
     a process that is already up and can refuse. Writing them into the intent here is what lets a
     recovery adopt that head with the configuration it actually launched on, instead of inventing
     one from a registry that may have been edited since.
+
+    `head_run` is the head's own run — its identity and its lifecycle, as the three head operations
+    keep it — and it is why this is the single place a launched head is written down (secretary-1414).
+    Every caller used to assign it to the record on the line after this call, which put a durable
+    save between the two: a tick that died in that window left a head whose run nothing recorded,
+    and the next tick reconstructed a fresh identity for the same process, so a stop already begun
+    stopped being a continuation of itself and its initiator was lost. Written here, into the intent
+    and onto the record in one save, there is no window to die in, and the adoption below brings
+    that same run back.
 
     A refused write is not a problem: the pre-launch intent is already on disk and names the same
     head, so recovery still finds it and only its routing snapshot falls back to the registry.
@@ -177,10 +187,26 @@ def confirm_launch_intent(
         intent["leaf"] = leaf
     if run:
         intent["run"] = dict(run)
+    if head_run is not None:
+        # `None` is a caller with nothing to say about the run; an empty dict is a bring-up that
+        # answered without one — noop mode, or a host seam that reports none — and that answer
+        # replaces whatever run the previous head of this role left on the record.
+        if head_run:
+            intent["head_run"] = dict(head_run)
+        _remember_head_run(record, str(intent.get("role") or ""), head_run)
     intent["launched"] = True
     record.launch_intent = intent
     records[ref] = record
     _persist_quietly(runtime, payload, records)
+
+
+def _remember_head_run(
+    record: DispatcherRecord, role: str, head_run: dict[str, Any] | None
+) -> None:
+    """Put one role's head run on the record. The caller's save is what makes it durable."""
+    if head_run is None or not role:
+        return
+    setattr(record, role_field(role, "head_run"), dict(head_run))
 
 
 def launch_left_a_head(record: DispatcherRecord) -> bool:
@@ -255,6 +281,12 @@ def mark_launch_aborted(
         intent["handle"] = exc.handle
     if exc.leaf:
         intent["leaf"] = exc.leaf
+    if exc.head_run:
+        # A bring-up that spawned its head and then failed over it knows that head's run, and the
+        # pane it left is live. Carrying it here is what lets the adoption continue that run rather
+        # than reconstruct one for a head this dispatcher did in fact start (secretary-1414).
+        intent["head_run"] = dict(exc.head_run)
+        _remember_head_run(record, str(intent.get("role") or ""), exc.head_run)
     intent["aborted"] = True
     record.launch_intent = intent
     records[ref] = record
@@ -554,12 +586,22 @@ def _adopt_launch_intent(
     role: str,
     step: str,
 ) -> dict[str, Any]:
-    """Take the head of a launch whose tick did not survive as this card's head for that role."""
+    """Take the head of a launch whose tick did not survive as this card's head for that role.
+
+    The run comes back first, and the pane pointers below are re-addressed on top of it: the head
+    being adopted is the head that launch started, so its identity, its lifecycle and any initiator
+    a stop already wrote are the launch's, while the handle, the leaf and the heartbeat are only
+    where that same head is currently reachable. Nothing after this reconstructs a run over it —
+    `worker_lifecycle_run`/`review_lifecycle_run` reconstruct only for a record that carries none,
+    and after this one does (secretary-1414).
+    """
     ref = task["ref"]
     launched_at = float(intent.get("at") or 0.0) or time.time()
     record.workspace = record.workspace or str(intent.get("workspace") or "")
     handle = str(intent.get("handle") or "")
     leaf = str(intent.get("leaf") or "")
+    stored_run = intent.get("head_run")
+    _remember_head_run(record, role, stored_run if isinstance(stored_run, dict) else None)
     if role == REVIEW_ROLE:
         # A reviewer bring-up shuts the worker head down before it hands the pane back, and an
         # adopted one has to do the same: a worker still editing the checkout would leave the

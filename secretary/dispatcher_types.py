@@ -50,12 +50,17 @@ class HeadLaunchAborted(HostError):
         workspace: str = "",
         pid_file: str = "",
         evidence: dict[str, Any] | None = None,
+        head_run: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.handle = handle
         self.leaf = leaf
         self.workspace = workspace
         self.pid_file = pid_file
+        # The run of the head this bring-up did start, where it got that far (secretary-1414). An
+        # abort is the case where the pane may be live, so the identity of what is in it travels
+        # with the failure: the intent keeps it, and the adoption continues that run.
+        self.head_run = dict(head_run or {})
         # What the shared delivery boundary saw, when this bring-up failed delivering a prompt.
         # It travels with the ambiguity rather than being read off a pane nobody may touch: the
         # caller persists it before it decides anything about the head that may still be running.

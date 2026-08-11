@@ -1263,6 +1263,7 @@ class CommandHostRuntime:
                 workspace=record.workspace,
                 pid_file=_pid_file_path("review", task["ref"]),
                 evidence=dict(launched.delivery_evidence),
+                head_run=dict(launched.head_run),
             ) from None
         return ReviewLaunch(
             handle=launched.handle,
@@ -1675,9 +1676,11 @@ class CommandHostRuntime:
         and stopping that pane *as* that run would skip a live reviewer on the strength of an older
         confirmation. `finishing` is neither running nor finished with, and is kept.
 
-        A reviewer adopted from a launch intent, or one recorded before this field existed, has no
-        stored run, so one is reconstructed — same head, same pane, same heartbeat, fresh identity.
-        A reviewer that is running has to be stoppable whichever dispatcher started it.
+        A reviewer recorded before this field existed has no stored run, so one is reconstructed —
+        same head, same pane, same heartbeat, fresh identity. A reviewer that is running has to be
+        stoppable whichever dispatcher started it. An adopted reviewer is not such a case: its
+        launch intent carries the run its bring-up started, and the adoption puts it back on the
+        record before anything reads it here.
         """
         stored = record.review_head_run if isinstance(record.review_head_run, dict) else {}
         run: head_ops.HeadRun | None = None
@@ -1783,7 +1786,9 @@ class CommandHostRuntime:
 
         A record from before this field existed has no run to read, so one is reconstructed — same
         head, same pane, same heartbeat, a fresh identity — because a worker that is running has to
-        be stoppable whichever dispatcher started it.
+        be stoppable whichever dispatcher started it. That is the whole of the reconstruction: a
+        worker adopted from a launch intent arrives here with the run its bring-up started, which
+        the adoption restored from that intent.
         """
         stored = record.worker_head_run if isinstance(record.worker_head_run, dict) else {}
         run: head_ops.HeadRun | None = None
@@ -2200,6 +2205,7 @@ class CommandHostRuntime:
                 workspace=workspace or exc.run.workspace,
                 pid_file=pid_file or exc.run.pid_file,
                 evidence=evidence,
+                head_run=exc.run.to_json(),
             )
         if isinstance(exc, head_ops.HeadPaneBusy):
             return HeadPaneNotReady(
@@ -3549,10 +3555,10 @@ class DispatcherRuntime:
             self.save_records(payload, records)
             return {"status": "blocked", "step": "claim", "pilot_ref": ref, "reason": "host bring-up failed"}
         record.workspace = prepared["workspace"]
-        record.worker_head_run = dict(prepared.get("head_run") or {})
         _record_worker_delivery_evidence(record, prepared.get("delivery_evidence"))
-        # The intent carries the pane and the launch snapshot before the record does: from here on
-        # every failure is one over a worker that is already running.
+        # The intent carries the pane, the launch snapshot and this head's own run before the record
+        # is told anything else about it: from here on every failure is one over a worker that is
+        # already running, and one that survives a tick dying carries the run it launched with.
         _confirm_launch_intent(
             self,
             payload,
@@ -3562,6 +3568,7 @@ class DispatcherRuntime:
             handle=str(prepared.get("handle") or ""),
             leaf=str(prepared.get("leaf") or ""),
             run=prepared.get("run"),
+            head_run=dict(prepared.get("head_run") or {}),
         )
         try:
             self._settle_worker_pane(
@@ -3818,13 +3825,14 @@ class DispatcherRuntime:
                 request_id=blocked_request_id,
                 error=exc,
             )
-        # The head is up. Its pane and its launch configuration go into the intent before anything
-        # else is attempted with them, so an adoption gets the run that actually launched.
+        # The head is up. Its pane, its launch configuration and its own run go into the intent
+        # before anything else is attempted with them, so an adoption gets the run that actually
+        # launched rather than a fresh identity for the same process.
         _confirm_launch_intent(
             self, payload, records, ref, record,
             handle=launched.handle, leaf=launched.leaf, run=launched.run,
+            head_run=dict(launched.head_run),
         )
-        record.worker_head_run = dict(launched.head_run)
         _record_worker_delivery_evidence(record, launched.delivery_evidence)
         try:
             self._settle_worker_pane(ref, record, launched.handle, launched.leaf)

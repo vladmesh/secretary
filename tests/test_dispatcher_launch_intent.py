@@ -186,6 +186,45 @@ class LaunchIntentTests(unittest.TestCase):
             with mock.patch.object(self.host, host_method, call):
                 yield
 
+    @contextlib.contextmanager
+    def dies_after_the_intent_is_confirmed(self, host_method: str):
+        """The tick lives exactly as far as the write that confirms its launch intent, and no further.
+
+        The narrower twin of `state_dies_after`, and the window the head run has to survive: the
+        confirming write is itself durable, so the record on disk already knows a head was launched.
+        What used to happen after it — the caller assigning that head's run to the record — is what
+        a process killed here never reached, and the next tick then adopted the head with a
+        reconstructed identity. Every save after the confirming one refuses, which is what that
+        death looks like from the record's side.
+
+        Yields the launched head's run, as the host reported it, so a test can ask whether the head
+        the next tick adopts is that same run.
+        """
+        real_save = self.runtime.production_state.save
+        real_call = getattr(self.host, host_method)
+        launched: dict[str, Any] = {"yet": False, "saves": 0}
+        head_run: dict[str, Any] = {}
+
+        def save(payload: dict) -> None:
+            if launched["yet"]:
+                launched["saves"] += 1
+                if launched["saves"] > 1:
+                    raise OSError("dispatcher state is not writable")
+            real_save(payload)
+
+        def call(*args, **kwargs):
+            result = real_call(*args, **kwargs)
+            reported = (
+                result.get("head_run") if isinstance(result, dict) else getattr(result, "head_run", {})
+            )
+            head_run.update(dict(reported or {}))
+            launched["yet"] = True
+            return result
+
+        with mock.patch.object(self.runtime.production_state, "save", save):
+            with mock.patch.object(self.host, host_method, call):
+                yield head_run
+
     def refuse_audit(self, match: str):
         """A journal that refuses exactly the writes whose request id carries `match`.
 
@@ -327,6 +366,71 @@ class LaunchIntentTests(unittest.TestCase):
         self.report_done()
         self.assertEqual(self.tick()["to"], "validate")
         self.assertEqual(self.host.prepared, [REF])
+
+    def test_an_adopted_worker_keeps_the_run_its_bring_up_started(self) -> None:
+        """The head run belongs to the launch, not to the tick that survived it (secretary-1414).
+
+        The tick dies in the one window that exists: after the write that confirms the launch
+        intent — a durable save, so the record already knows a worker is up — and before anything
+        else the record is told about that head. The next tick adopts it, and the run it stops that
+        worker by has to be the run `spawn` returned. A reconstructed identity here would mean a
+        stop already begun stops being a continuation of itself and its initiator is lost.
+        """
+        with self.dies_after_the_intent_is_confirmed("prepare_worker") as launched_run:
+            with self.assertRaises(OSError):
+                self.tick()
+
+        self.assertTrue(launched_run["run_id"], "the fake host reports a run for every launch")
+        self.assertEqual(self.stored_intent()["head_run"]["run_id"], launched_run["run_id"])
+
+        adopted = self.tick()
+
+        self.assertEqual(adopted["action"], "worker-launch-adopted")
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.worker_head_run["run_id"], launched_run["run_id"])
+        self.assertEqual(self.stored_intent(), {}, "an adopted intent is spent")
+
+    def test_an_adopted_reviewer_keeps_the_run_its_bring_up_started(self) -> None:
+        """The reviewer's half of the same window, and the one the finding was raised on."""
+        self.run_to_validate()
+        with self.dies_after_the_intent_is_confirmed("start_review") as launched_run:
+            with self.assertRaises(OSError):
+                self.tick()
+
+        self.assertTrue(launched_run["run_id"], "the fake host reports a run for every launch")
+        self.assertEqual(self.stored_intent()["head_run"]["run_id"], launched_run["run_id"])
+
+        adopted = self.tick()
+
+        self.assertEqual(adopted["action"], "review-launch-adopted")
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.review_head_run["run_id"], launched_run["run_id"])
+
+    def test_an_aborted_reviewer_bring_up_keeps_the_run_of_the_head_it_left(self) -> None:
+        """An abort is the case where the pane is live, so what is in it has to stay nameable.
+
+        The reviewer spawned and its worker would not freeze: the bring-up fails with the pane
+        open. The run of the head in that pane travels with the failure into the intent, and the
+        adoption that finishes the freeze continues it rather than opening a second identity for a
+        reviewer this dispatcher did start.
+        """
+        self.run_to_validate()
+        self.host.fail_freeze_worker_reason = "orca refused to close the worker pane"
+
+        self.assertEqual(self.tick()["action"], "review-launch-aborted")
+        aborted_run = dict(self.stored_intent()["head_run"])
+        self.assertTrue(aborted_run["run_id"])
+
+        self.host.fail_freeze_worker_reason = ""
+        adopted = self.tick()
+
+        self.assertEqual(adopted["action"], "review-launch-adopted")
+        self.assertEqual(self.host.reviews, [REF], "the live reviewer must not be doubled")
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.review_head_run["run_id"], aborted_run["run_id"])
 
     def test_a_worker_intent_whose_head_died_is_relaunched_exactly_once(self) -> None:
         self.host.head_pid = DEAD_PID

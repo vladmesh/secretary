@@ -771,6 +771,8 @@ class FakeHost:
         self.calls: list[str] = []
         self.prepared: list[str] = []
         self.prepare_requires_existing: list[bool] = []
+        # Every launch this fake performs gets its own head run identity, numbered in order.
+        self.head_runs = 0
         self.reviews: list[str] = []
         self.stopped: list[str] = []
         self.torn_down: list[str] = []
@@ -939,9 +941,8 @@ class FakeHost:
             # The real host always carries this bounded receipt, even when noop mode has no pane
             # and therefore no delivery facts to record yet.
             "delivery_evidence": {},
-            # The head's own run, as `spawn` returns it (secretary-1412). This fake never opens a
-            # pane, so it has no lifecycle to report and says so rather than inventing one.
-            "head_run": {},
+            # The head's own run, as `spawn` returns it (secretary-1412).
+            "head_run": dict(launched.head_run),
         }
 
     def observer_workspace(self, reference: str) -> str:
@@ -1050,12 +1051,17 @@ class FakeHost:
                 workspace=record.workspace,
                 pid_file=pid_file_path("review", task["ref"]),
                 evidence=dict(launched.delivery_evidence),
+                # The pane is up, so the run of the head in it travels with the failure: the
+                # adoption that follows continues that run rather than opening a new identity
+                # for a reviewer this launch did start (secretary-1414).
+                head_run=dict(launched.head_run),
             ) from None
         return ReviewLaunch(
             handle=launched.handle,
             leaf=f"leaf:{task['ref']}",
             commit=self.commit,
             run=launched.run,
+            head_run=dict(launched.head_run),
             delivery_evidence=dict(launched.delivery_evidence),
         )
 
@@ -1083,15 +1089,35 @@ class FakeHost:
         self, handle: str, head: str, task: dict, role: str, workspace: str = "",
         failover: bool = False, delivery_evidence: dict[str, object] | None = None,
     ) -> LaunchedHead:
+        leaf = f"leaf:{handle}"
         return LaunchedHead(
             handle=handle,
             head=head,
             run=self.catalog.head_run(
                 task, role=role, head=head, workspace=workspace, failover=failover
             ).to_json(),
-            leaf=f"leaf:{handle}",
+            leaf=leaf,
             delivery_evidence=dict(delivery_evidence or {}),
+            # The head's own run, as `spawn` hands it back on the real host (secretary-1412). The
+            # fake opens no pane, but it does report an identity: what a bring-up owes the record
+            # is that this head can be named afterwards, and a fake that answered `{}` could not
+            # show a recovery continuing the same run.
+            head_run=self._head_run(handle, head, task, role, workspace, leaf),
         )
+
+    def _head_run(
+        self, handle: str, head: str, task: dict, role: str, workspace: str, leaf: str
+    ) -> dict:
+        self.head_runs += 1
+        return head_ops.HeadRun(
+            run_id=f"run-{role}-{self.head_runs}",
+            spec=head_ops.HeadSpec(profile_id=head, adapter="codex"),
+            workspace=workspace or str(self.root / f"{task['ref']}-pilot"),
+            task_ref=head_ops.TaskRef.card(task["ref"]),
+            handle=handle,
+            leaf=leaf,
+            pid_file=pid_file_path("review" if role == "reviewer" else "worker", task["ref"]),
+        ).to_json()
 
     def review_running(self, task: dict, record) -> bool:
         self.calls.append("review_running")
