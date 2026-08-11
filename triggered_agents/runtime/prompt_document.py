@@ -29,6 +29,7 @@ its `nudge(reason)`; worker launch, rework and observer wake take the same seam 
 from __future__ import annotations
 
 import os
+import stat
 import tempfile
 from pathlib import Path
 
@@ -91,9 +92,12 @@ def write_prompt_document(
     error caught here rather than a receipt digest that moved for no reason.
 
     The write is atomic and the file is private (0600), as is the directory it lives in. A retry
-    that asks for a document it already wrote leaves the file alone: the reviewer's own retry
-    re-renders the same prompt most of the time, and rewriting it would move an mtime that a reader
-    can otherwise take as "when this head was last given a task".
+    that asks for a document it already wrote keeps the file's content and mtime: the reviewer's
+    own retry re-renders the same prompt most of the time, and rewriting it would move a timestamp
+    a reader can otherwise take as "when this head was last given a task". Its mode is still made
+    to hold, because "the document already says the right thing" is not the same promise as "the
+    document is private", and a file that came back from a restore or from an older writer can
+    satisfy the first while failing the second.
     """
     document = Path(path)
     if not document.is_absolute():
@@ -108,9 +112,28 @@ def write_prompt_document(
     except OSError as exc:
         raise PromptDocumentError(f"prompt document directory {directory} is unusable: {exc}") from None
     if _already_holds(document, text):
+        _make_private(document)
         return document
     _replace_atomically(document, text)
     return document
+
+
+def _make_private(document: Path) -> None:
+    """Hold the 0600 promise for a document this call did not write.
+
+    The replacement path below creates its file 0600 and swaps it in, so the mode is settled there.
+    A document that is already correct is never rewritten, and its mode is then whatever left it —
+    an archive restored with a permissive umask, a copy an operator made, a predecessor of this
+    module. Fixing the mode rather than rewriting the file keeps the content and the mtime as they
+    were, which is the whole reason the unchanged case exists.
+    """
+    try:
+        if stat.S_IMODE(document.stat().st_mode) != _DOCUMENT_MODE:
+            os.chmod(document, _DOCUMENT_MODE)
+    except OSError as exc:
+        raise PromptDocumentError(
+            f"prompt document {document} could not be made private: {exc}"
+        ) from None
 
 
 def _encoded(text: str) -> bytes:

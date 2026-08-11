@@ -2350,6 +2350,13 @@ class CommandHostRuntime:
         left. A document that cannot be written or a path no nudge can carry stops the bring-up
         before a pane is opened: an unprompted reviewer would sit at its prompt forever, and the
         caller's infrastructure retry is the right answer to a launch that has not started.
+
+        Nothing here writes to, or removes anything from, the candidate checkout. A `REVIEW.md`
+        left in a workspace by a dispatcher that predates this seam stays exactly where it is: the
+        nudge names an absolute path, so nothing is ambiguous without deleting it, and this product
+        does not get to mutate the tree a reviewer is about to judge — that file can be a tracked
+        part of a candidate, and identity is what the whole document-outside-the-worktree rule is
+        protecting.
         """
         document = self._prompt_document_path(REVIEW_ROLE, task["ref"], record.review_baseline)
         prompt = self._review_prompt(
@@ -2360,13 +2367,6 @@ class CommandHostRuntime:
             nudge = _nudge_for(document)
         except PromptDocumentError as exc:
             raise HostError(f"the reviewer task document could not be prepared: {exc}") from None
-        # A checkout carried over from before this seam still holds the review it was handed then.
-        # Nothing reads it now, and a document a round out of date beside a live one is exactly the
-        # sort of thing a reviewer opens by habit.
-        try:
-            (Path(record.workspace) / "REVIEW.md").unlink(missing_ok=True)
-        except OSError:
-            pass
         return document, nudge
 
     def _prompt_document_path(self, role: str, reference: str, round_number: int) -> Path:

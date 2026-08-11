@@ -129,6 +129,22 @@ class PromptDocumentTests(unittest.TestCase):
 
         self.assertEqual(int(document.stat().st_mtime), 1_000_000)
 
+    def test_a_retry_makes_a_document_it_did_not_write_private_again(self) -> None:
+        """A document that already says the right thing is not thereby a private one.
+
+        A document can arrive at the right content by a route this module did not take — a restore
+        under a permissive umask, an operator's copy, an older writer — and the retry that reuses
+        it would otherwise hand a head a world-readable task.
+        """
+        document = write_prompt_document(self.root / "prompts" / "reviewer-0.md", "body")
+        os.chmod(document, 0o644)
+        os.utime(document, (1_000_000, 1_000_000))
+
+        write_prompt_document(document, "body")
+
+        self.assertEqual(stat.S_IMODE(document.stat().st_mode), 0o600)
+        self.assertEqual(int(document.stat().st_mtime), 1_000_000, "the content did not change")
+
     def test_a_retry_with_changed_text_replaces_the_document_in_place(self) -> None:
         document = write_prompt_document(self.root / "prompts" / "reviewer-0.md", "first")
 

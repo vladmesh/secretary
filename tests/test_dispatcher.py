@@ -12038,6 +12038,13 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
     def _document_of(self, host: NudgingReviewHost) -> Path:
         return host._prompt_document_path("review", self.task["ref"], 0)
 
+    def _checkout_contents(self) -> dict[str, bytes]:
+        return {
+            str(path.relative_to(self.workspace)): path.read_bytes()
+            for path in sorted(self.workspace.rglob("*"))
+            if path.is_file()
+        }
+
     def test_the_pane_receives_a_bounded_pointer_and_never_the_review(self) -> None:
         host = NudgingReviewHost(self.root)
 
@@ -12081,14 +12088,23 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
             "the review packet is the document, and it does not live in the worktree",
         )
 
-    def test_a_stale_packet_from_before_the_seam_is_dropped_from_the_checkout(self) -> None:
-        (self.workspace / "REVIEW.md").write_text("last round's review\n", encoding="utf-8")
+    def test_the_bring_up_does_not_touch_the_candidate_checkout(self) -> None:
+        """Preparing a prompt is not a licence to edit the tree the reviewer is about to judge.
+
+        A `REVIEW.md` in the workspace can be a tracked part of a candidate as easily as a packet
+        left by a dispatcher that predates this seam, and the nudge names an absolute path, so
+        nothing needs deleting to be unambiguous. Removing it would be the same identity change the
+        document-outside-the-worktree rule exists to prevent, made by the code enforcing that rule.
+        """
+        (self.workspace / "REVIEW.md").write_text("a candidate's own file\n", encoding="utf-8")
+        (self.workspace / "src.py").write_text("print('candidate')\n", encoding="utf-8")
+        before = self._checkout_contents()
         host = NudgingReviewHost(self.root)
 
         with self._bounded_delivery():
             host.start_review(self.task, self._record())
 
-        self.assertFalse((self.workspace / "REVIEW.md").exists())
+        self.assertEqual(self._checkout_contents(), before)
 
     def test_a_retry_rewrites_the_same_document_and_sends_a_fresh_nudge(self) -> None:
         """The pointer always names the round's current task, so a retry cannot review a stale one."""
