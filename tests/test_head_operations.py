@@ -423,6 +423,36 @@ class HeadOperationTests(unittest.TestCase):
         with self.assertRaises(HeadStopFailed):
             stop(run, StopInitiator(actor="release"), host=self.host)
 
+    def test_stopping_a_split_head_leaves_the_pane_it_was_split_off_alone(self) -> None:
+        """The reviewer's case (secretary-1414), as the contract sees it with no Orca behind it.
+
+        A reviewer lives in a pane split off the worker's own, inside the worker's worktree, and a
+        red verdict hands that worktree straight back. So its stop has to close one leaf and only
+        one: a stop that reached for the workspace, or for a handle the session manager had since
+        aliased, would take the checkout's other panes down with it.
+        """
+        worker = self.bring_up(pointer=NudgePointer.at_document(self.task.document)).run
+        reviewer = self.bring_up(split_from=worker.handle).run
+        # The session manager renames the reviewer's pane while its pty stays where it is — the
+        # one case a stop by handle gets wrong.
+        fresh = self.host.reincarnate(reviewer.handle)
+
+        outcome = stop(
+            reviewer,
+            StopInitiator(actor="review-verdict", reason="red verdict returned the checkout"),
+            host=self.host,
+        )
+
+        self.assertEqual(outcome.run.lifecycle, EXITED)
+        self.assertEqual(outcome.run.stopped_by.actor, "review-verdict")
+        self.assertEqual(self.host.closed, [fresh], "only the reviewer's own pane was closed")
+        self.assertNotIn(("stop_workspace", WORKSPACE), self.host.calls)
+        self.assertIn(
+            worker.handle,
+            [pane.handle for pane in self.host.panes(WORKSPACE)],
+            "the worker's pane survived the reviewer's stop",
+        )
+
     def test_a_run_survives_being_written_down_and_read_back(self) -> None:
         run = stop(self.bring_up().run, StopInitiator(actor="watchdog", reason="idle"),
                    host=self.host).run

@@ -170,6 +170,11 @@ class DispatcherRecord:
     # the process that ends it, and a restarted dispatcher must still be able to say who was
     # ending this one.
     worker_head_run: dict[str, Any] = field(default_factory=dict)
+    # The reviewer's own run, kept for exactly the same reasons (secretary-1414). The reviewer is
+    # the head this dispatcher stops most often and from the most places — a red verdict, a stalled
+    # reviewer's respawn, a pipeline freeze, launch recovery, reconciliation — and until it had a
+    # run of its own, none of those left a record of who was ending it.
+    review_head_run: dict[str, Any] = field(default_factory=dict)
     worker_run: dict[str, Any] = field(default_factory=dict)
     review_run: dict[str, Any] = field(default_factory=dict)
     # Deferred bring-ups (secretary-1163): how many launches of this role's head have been parked
@@ -276,6 +281,7 @@ class DispatcherRecord:
             "worker_respawns": self.worker_respawns,
             "worker_started_at": self.worker_started_at,
             "worker_head_run": dict(self.worker_head_run),
+            "review_head_run": dict(self.review_head_run),
             "worker_run": self.worker_run,
             "review_run": self.review_run,
             "worker_launch_attempts": self.worker_launch_attempts,
@@ -329,6 +335,7 @@ class DispatcherRecord:
             attempt_id=str(payload.get("attempt_id") or ""),
             attempt_round=int(payload.get("attempt_round") or 0),
             worker_head_run=_run_snapshot(payload.get("worker_head_run")),
+            review_head_run=_run_snapshot(payload.get("review_head_run")),
             worker_run=_run_snapshot(payload.get("worker_run")),
             review_run=_run_snapshot(payload.get("review_run")),
             launch_intent=_run_snapshot(payload.get("launch_intent")),

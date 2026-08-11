@@ -369,7 +369,7 @@ def _freeze_heads(
                 stopped_worker.append(ref)
         if record.review_handle or record.review_leaf or record.review_pid_file:
             try:
-                end_review_pane(runtime.host, record)
+                end_review_pane(runtime.host, record, STOPPED_BY_OPERATOR)
             except HostError:
                 continue
             record.paused_reviewer_at = now

@@ -44,6 +44,10 @@ class Pane:
 
     handle: str
     leaf: str = ""
+    # The label the session manager currently shows for this pane. Weak identity on purpose: an
+    # interactive head overwrites it with its own OSC sequence seconds after launch, so it is only
+    # ever a fallback for a pane whose handle and leaf were never persisted.
+    title: str = ""
     # Whether the session manager still has a live connection to this pane. Only an inventory
     # answers it; a pane just created is connected by construction. Callers use it to pick a pane,
     # never to decide a head is dead — a disconnected pane is one nothing can be typed into, which
@@ -198,14 +202,21 @@ class OrcaSessionHost(OrcaPaneHost):
         data = self.run_json(
             ["orca", "terminal", "list", "--worktree", f"path:{workspace}", "--json"]
         )
+        if isinstance(data, dict) and data.get("ok") is False:
+            raise PaneHostError("orca terminal list failed")
         payload = data.get("result") if isinstance(data.get("result"), dict) else data
-        terminals = payload.get("terminals") if isinstance(payload, dict) else []
+        terminals = payload.get("terminals") if isinstance(payload, dict) else None
+        # An inventory that cannot be read is not an empty worktree, and the difference decides
+        # whether a head is stopped or replaced. An answer this cannot parse says nothing about
+        # which panes exist, so it refuses rather than reporting none — the caller that only needs
+        # to pick a pane degrades that refusal into [] itself.
         if not isinstance(terminals, list):
-            return []
+            raise PaneHostError("orca terminal list returned an unsupported shape")
         return [
             Pane(
                 handle=str(entry.get("handle") or ""),
                 leaf=str(entry.get("leafId") or ""),
+                title=str(entry.get("title") or ""),
                 connected=entry.get("connected") is not False,
                 last_output_at=_epoch_seconds(entry.get("lastOutputAt")),
             )

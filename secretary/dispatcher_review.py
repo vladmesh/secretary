@@ -31,6 +31,7 @@ from secretary.dispatcher_tui import (
 from secretary.dispatcher_types import (
     HeadLaunchAborted,
     HostError,
+    STOPPED_BY_DISPATCHER,
     review_pane_label,
 )
 from secretary.dispatcher_watchdog import (
@@ -163,51 +164,45 @@ def command_terminal_status(
 
     A failed inventory raises instead of looking like a missing pane.  The wait watchdog can then
     report a degraded runtime without restarting a head on a transport failure.
+
+    The inventory is the session host's (secretary-1414), not an argument vector assembled here:
+    one set of pane commands serves the head operations and this liveness read alike, so a backend
+    that is not Orca changes one file rather than every place a pane is looked up. What the host
+    cannot read it refuses, and that refusal still arrives here as a `HostError` rather than as an
+    empty inventory — an unreadable inventory has never been allowed to look like a missing pane.
     """
     if host.mode == "noop":
         return {"known": True, "live": True, "reason": "noop"}
     if not record.workspace:
         raise HostError(f"{kind} workspace is unavailable")
-    data = host._run_json([
-        "orca", "terminal", "list", "--worktree", f"path:{record.workspace}", "--json",
-    ])
-    if data.get("ok") is False:
-        raise HostError("orca terminal list failed")
-    payload = data.get("result") if isinstance(data.get("result"), dict) else data
-    terminals = payload.get("terminals") if isinstance(payload, dict) else []
-    if not isinstance(terminals, list):
-        raise HostError("orca terminal list returned an unsupported shape")
+    terminals = host._worktree_terminals_or_raise(record.workspace)
     if kind == "review":
         label = review_pane_label(task["ref"])
-        pane_known = bool(record.review_handle or record.review_leaf)
         if record.review_leaf:
-            matches = lambda terminal: terminal.get("leafId") == record.review_leaf
+            matches = lambda pane: pane.leaf == record.review_leaf
         elif record.review_handle:
-            matches = lambda terminal: terminal.get("handle") == record.review_handle
+            matches = lambda pane: pane.handle == record.review_handle
         else:
-            matches = lambda terminal: terminal.get("title") == label
+            matches = lambda pane: pane.title == label
     else:
         if record.worker_leaf:
-            matches = lambda terminal: terminal.get("leafId") == record.worker_leaf
+            matches = lambda pane: pane.leaf == record.worker_leaf
         else:
-            matches = lambda terminal: bool(
-                record.handle and terminal.get("handle") == record.handle
-            )
+            matches = lambda pane: bool(record.handle and pane.handle == record.handle)
     for terminal in terminals:
-        if not isinstance(terminal, dict) or not matches(terminal):
+        if not matches(terminal):
             continue
-        if terminal.get("connected") is False:
+        if not terminal.connected:
             return {"known": True, "live": False, "reason": "disconnected"}
         pid_status = _head_process_status(_pid_file_path(kind, task["ref"]))
         if pid_status.get("known") and not pid_status.get("alive"):
             # The pane is connected and Orca kept its wrapping shell open, but the head process
             # itself is gone (secretary-751): a provider crash or a killed runtime, not silence.
             return {"known": True, "live": False, "reason": "process-exited"}
-        last = terminal.get("lastOutputAt")
-        try:
-            activity = float(last) / 1000.0 if last else None
-        except (TypeError, ValueError):
-            activity = None
+        # The host already read Orca's milliseconds into epoch seconds, and 0.0 is its answer for a
+        # session manager that named no clock at all — which is not the same as "printed at the
+        # epoch" and must stay `None` here, where the watchdog reads it as "no activity known".
+        activity = terminal.last_output_at or None
         supplemental = getattr(host, "codex_tui_activity", lambda _task, _record, _kind: None)(
             task, record, kind
         )
@@ -226,7 +221,7 @@ def command_terminal_status(
             # applies and silence has to be told apart from a finished turn (secretary-1063). The
             # key is absent when the question could not be answered, which is not the same as a
             # busy head: the caller falls back to its timing ceilings for that.
-            work = _pane_work_state(host, str(terminal.get("handle") or ""))
+            work = _pane_work_state(host, terminal.handle)
             if work:
                 status["idle"] = work != "working"
                 status["idle_reason"] = work
@@ -300,16 +295,24 @@ def command_review_running(host: Any, task: dict[str, Any], record: DispatcherRe
     return bool(command_terminal_status(host, task, record, kind="review").get("live"))
 
 
-def end_review_pane(host: Any, record: DispatcherRecord) -> None:
+def end_review_pane(
+    host: Any, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER
+) -> None:
     """Close the reviewer's pane and forget it. Used wherever the reviewer's lifecycle ends on its
     own — a red verdict, a respawn after a silent reviewer — so the next bring-up cannot mistake a
     stale handle for a live pane, and so the worker's workspace survives untouched.
+
+    `initiator` is who is ending it, and every caller names one: this is the single place a
+    reviewer stop passes through, so a caller that left it to the default would be a reviewer whose
+    record says only that it went. The pane pointers are dropped afterwards; the run itself stays on
+    the record, because the initiator it carries is what makes the stop readable after the head is
+    gone.
 
     A stop the host will not confirm raises, and the record keeps pointing at that reviewer. Every
     caller of this opens something in the same checkout right after — a rework worker, a
     replacement reviewer — and a forgotten head that is still running would then be the second
     process on it."""
-    host.stop_review(record)
+    host.stop_review(record, initiator)
     record.review_handle = ""
     record.review_leaf = ""
     record.review_pid_file = ""
@@ -618,6 +621,11 @@ def start_review(
     record.review_handle = launch.handle
     record.review_leaf = launch.leaf
     record.review_commit = launch.commit
+    # The reviewer's own run, from the operation that brought it up (secretary-1414). It is what
+    # every later stop of this head continues: the pane pointers beside it are re-addressed by
+    # reconciliation, while the identity, the lifecycle and — once a stop begins — its initiator
+    # live here.
+    record.review_head_run = dict(launch.head_run)
     if launch.delivery_evidence:
         # Successful and refused reviewer launches use the same durable, metadata-only receipt.
         # A later recovery therefore sees the actual transport version and submit count instead

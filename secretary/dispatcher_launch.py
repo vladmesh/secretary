@@ -508,7 +508,7 @@ def stop_launch_intent(
             # intent through this module, and a top-level import either way would be a cycle.
             from secretary.dispatcher_review import end_review_pane
 
-            end_review_pane(runtime.host, record)
+            end_review_pane(runtime.host, record, STOPPED_BY_LAUNCH_RECOVERY)
         elif named:
             runtime.host.stop_head(record, WORKER_ROLE, STOPPED_BY_LAUNCH_RECOVERY)
             forget_role_head(record, WORKER_ROLE)
