@@ -15,15 +15,21 @@ What is pinned here:
     back — which is what "the dispatcher restarted" looks like from inside a run;
   * a pane handle the session manager reincarnates does not create a second run: the identity is
     the run's own, the new handle is bound onto it, and the stop closes the pane that exists now;
+  * a stop that is refused stays the same stop: the run keeps its identity and its first initiator
+    through the retry, and the durable commit of `finishing` happens before any host call;
   * a head can be pointed at a card, a sprint entity or a role's standing instruction, because the
     observer and the mechanical roles have no card and one must not be invented for them;
-  * the package reaches Orca only through the host — asserted by reading its own source.
+  * the package reaches Orca only through the host — asserted by reading its own source. That is a
+    source check and it proves only what a source check can; what binds the *production* path to
+    the host seam is `WorkerPathReachesOnlyTheSessionHostTests` in `test_dispatcher_launch_intent`,
+    which drives the dispatcher's own worker spawn/nudge/stop with a runner that fails if reached.
 """
 
 from __future__ import annotations
 
 import ast
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 
 from triggered_agents.runtime.head import (
@@ -64,10 +70,17 @@ class FakeSessionHost:
         self.closed: list[str] = []
         self.refuse_close = False
         self.next_handle = 1
+        # A test that cares *when* the session manager was reached, not only whether it was.
+        self.on_call: Callable[[str], None] | None = None
+
+    def _note(self, name: str) -> None:
+        if self.on_call is not None:
+            self.on_call(name)
 
     # lifecycle ------------------------------------------------------------
     def open_pane(self, workspace: str, title: str, command: str) -> Pane:
         self.calls.append(("open_pane", workspace, title))
+        self._note("open_pane")
         pane = Pane(handle=f"term:{self.next_handle}", leaf=f"leaf:{self.next_handle}")
         self.next_handle += 1
         self.panes_by_workspace.setdefault(workspace, []).append(pane)
@@ -76,6 +89,7 @@ class FakeSessionHost:
 
     def split_pane(self, handle: str, command: str) -> Pane:
         self.calls.append(("split_pane", handle))
+        self._note("split_pane")
         workspace = self._workspace_of(handle)
         pane = Pane(handle=f"term:{self.next_handle}", leaf=f"leaf:{self.next_handle}")
         self.next_handle += 1
@@ -85,9 +99,11 @@ class FakeSessionHost:
 
     def rename_pane(self, handle: str, title: str) -> None:
         self.calls.append(("rename_pane", handle, title))
+        self._note("rename_pane")
 
     def close_pane(self, handle: str) -> None:
         self.calls.append(("close_pane", handle))
+        self._note("close_pane")
         if self.refuse_close:
             raise RuntimeError("tab_not_found")
         self.closed.append(handle)
@@ -96,22 +112,27 @@ class FakeSessionHost:
 
     def panes(self, workspace: str) -> list[Pane]:
         self.calls.append(("panes", workspace))
+        self._note("panes")
         return list(self.panes_by_workspace.get(workspace, []))
 
     def stop_workspace(self, workspace: str) -> None:
         self.calls.append(("stop_workspace", workspace))
+        self._note("stop_workspace")
         self.panes_by_workspace[workspace] = []
 
     # delivery -------------------------------------------------------------
     def send(self, handle: str, text: str, *, enter: bool):
         self.calls.append(("send", handle))
+        self._note("send")
         self.sent.append((handle, text, enter))
         return {"accepted": True, "bytesWritten": len(text.encode())}
 
     def read(self, handle: str, *, limit: int | None = None):
+        self._note("read")
         return {"terminal": {"tail": ["› "], "nextCursor": f"c{len(self.sent)}"}}
 
     def wait_idle(self, handle: str, *, timeout_ms: int):
+        self._note("wait_idle")
         return {"satisfied": True}
 
     def reincarnate(self, handle: str) -> str:
@@ -141,12 +162,32 @@ def confirmed(_sent_at: float) -> bool:
     return True
 
 
+CONFIRMING = head_operations.HostTransport(confirm=confirmed)
+
+
+class RefusingTransport(head_operations.HostTransport):
+    """A product transport whose delivery never reaches its confirmation.
+
+    Subclassed from the default rather than written from scratch, so what it refuses is the one
+    thing under test and everything else — the close, and the fact that both go through the host
+    it is handed — stays exactly what production does.
+    """
+
+    def __init__(self, reason: str = "the head never took the prompt") -> None:
+        super().__init__(confirm=confirmed)
+        object.__setattr__(self, "reason", reason)
+
+    def deliver(self, run, pointer, *, host, subject):
+        raise RuntimeError(self.reason)
+
+
 class HeadOperationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.host = FakeSessionHost()
         self.task = TaskRef.card("secretary-1412", document=f"{WORKSPACE}/TASK.md")
 
     def bring_up(self, spec: HeadSpec = CODEX, **kwargs):
+        kwargs.setdefault("transport", CONFIRMING)
         return spawn(
             spec,
             WORKSPACE,
@@ -154,7 +195,6 @@ class HeadOperationTests(unittest.TestCase):
             host=self.host,
             command="run-worker",
             title="secretary-1412 worker",
-            confirm=confirmed,
             **kwargs,
         )
 
@@ -201,32 +241,30 @@ class HeadOperationTests(unittest.TestCase):
         self.assertIn(("rename_pane", outcome.run.handle, "secretary-1412 worker"), self.host.calls)
 
     def test_a_bring_up_whose_pane_closes_cleanly_left_nothing_running(self) -> None:
-        def refuse(*_args, **_kwargs):
-            raise RuntimeError("the head never took the prompt")
-
         with self.assertRaises(HeadSpawnFailed):
-            self.bring_up(pointer=NudgePointer.line("report now"), deliver=refuse)
+            self.bring_up(
+                pointer=NudgePointer.line("report now"), transport=RefusingTransport()
+            )
         self.assertEqual(self.host.closed, ["term:1"])
 
     def test_a_bring_up_whose_pane_will_not_close_is_ambiguous_and_keeps_its_run(self) -> None:
         """The distinction the product has killed live heads by collapsing."""
-        def refuse(*_args, **_kwargs):
-            raise RuntimeError("the head never took the prompt")
-
         self.host.refuse_close = True
         with self.assertRaises(HeadSpawnAborted) as caught:
-            self.bring_up(pointer=NudgePointer.line("report now"), deliver=refuse)
+            self.bring_up(
+                pointer=NudgePointer.line("report now"), transport=RefusingTransport()
+            )
 
         self.assertEqual(caught.exception.run.handle, "term:1")
         self.assertEqual(caught.exception.run.workspace, WORKSPACE)
 
     def test_an_unconfirmed_nudge_never_closes_the_pane(self) -> None:
         """A document nudge that was not confirmed says nothing about the head in the pane."""
-        def refuse(*_args, **_kwargs):
-            raise RuntimeError("delivery was not confirmed")
-
         with self.assertRaises(HeadSpawnAborted):
-            self.bring_up(pointer=NudgePointer.at_document(self.task.document), deliver=refuse)
+            self.bring_up(
+                pointer=NudgePointer.at_document(self.task.document),
+                transport=RefusingTransport("delivery was not confirmed"),
+            )
 
         self.assertEqual(self.host.closed, [])
 
@@ -234,7 +272,7 @@ class HeadOperationTests(unittest.TestCase):
     def test_nudge_delivers_into_a_live_head_and_marks_it_working(self) -> None:
         run = self.bring_up().run
 
-        outcome = nudge(run, NudgePointer.line("report now"), host=self.host, confirm=confirmed)
+        outcome = nudge(run, NudgePointer.line("report now"), host=self.host, transport=CONFIRMING)
 
         self.assertEqual(outcome.run.lifecycle, WORKING)
         self.assertEqual(self.host.sent[0][0], run.handle)
@@ -244,7 +282,7 @@ class HeadOperationTests(unittest.TestCase):
         run = self.bring_up().run.finishing(StopInitiator(actor="watchdog"))
 
         with self.assertRaises(head_operations.HeadNudgeFailed):
-            nudge(run, NudgePointer.line("report now"), host=self.host, confirm=confirmed)
+            nudge(run, NudgePointer.line("report now"), host=self.host, transport=CONFIRMING)
 
     # stop -----------------------------------------------------------------
     def test_stop_closes_the_pane_and_records_who_ended_the_head(self) -> None:
@@ -275,22 +313,58 @@ class HeadOperationTests(unittest.TestCase):
         self.assertEqual(caught.exception.run.lifecycle, FINISHING)
         self.assertEqual(caught.exception.run.stopped_by.actor, "operator")
 
-    def test_the_initiator_is_on_the_run_before_the_pane_is_touched(self) -> None:
-        """A dispatcher that dies mid-stop still leaves a record naming who was ending this head."""
-        seen: list[HeadRun] = []
+    def test_the_initiator_is_committed_before_the_pane_is_touched(self) -> None:
+        """A dispatcher that dies mid-stop still leaves a record naming who was ending this head.
+
+        The order is the contract, so this reads the durable write and the host calls on one
+        timeline: the run must be written down, in `finishing` and with its initiator, before the
+        session manager has been asked for anything at all.
+        """
+        timeline: list[str] = []
+        written: list[HeadRun] = []
         run = self.bring_up().run
+        self.host.calls.clear()
+        self.host.on_call = lambda name: timeline.append(f"host:{name}")
 
-        def close(handle: str, pid_file: str) -> None:
-            seen.append(HeadRun.from_json(recorded))
-            raise RuntimeError("orca refused")
+        def commit(finishing: HeadRun) -> None:
+            # Read back the way a restarted dispatcher would, not kept as the object in hand.
+            written.append(HeadRun.from_json(finishing.to_json()))
+            timeline.append("commit")
 
-        recorded = run.finishing(StopInitiator(actor="idle-watchdog", reason="no turn")).to_json()
+        self.host.refuse_close = True
         with self.assertRaises(HeadStopFailed):
             stop(run, StopInitiator(actor="idle-watchdog", reason="no turn"),
-                 host=self.host, close=close)
+                 host=self.host, commit=commit)
 
-        self.assertEqual(seen[0].stopped_by.actor, "idle-watchdog")
-        self.assertEqual(seen[0].lifecycle, FINISHING)
+        self.assertEqual(written[0].stopped_by.actor, "idle-watchdog")
+        self.assertEqual(written[0].lifecycle, FINISHING)
+        self.assertEqual(written[0].run_id, run.run_id)
+        self.assertEqual(timeline[0], "commit", timeline)
+
+    def test_a_retried_stop_keeps_the_run_and_the_actor_that_began_it(self) -> None:
+        """The refused stop is retried by another path with another actor. The record is the first.
+
+        This is the whole of the identity invariant: reconciliation may readdress a run at the pane
+        it is in now, but it may not hand a run that is still `finishing` a new identity or a new
+        initiator. A record that answered "who stopped this worker" with whoever retried last would
+        be answering a different question than the one it exists for.
+        """
+        run = self.bring_up().run
+        self.host.refuse_close = True
+        with self.assertRaises(HeadStopFailed) as first:
+            stop(run, StopInitiator(actor="review-freeze", reason="review took the tree"),
+                 host=self.host)
+
+        stored = HeadRun.from_json(first.exception.run.to_json())
+        self.assertFalse(stored.settled, "a refused stop is not finished with")
+        self.host.refuse_close = False
+
+        outcome = stop(stored, StopInitiator(actor="reconciliation"), host=self.host)
+
+        self.assertEqual(outcome.run.run_id, run.run_id)
+        self.assertEqual(outcome.run.stopped_by.actor, "review-freeze")
+        self.assertEqual(outcome.run.stopped_by.reason, "review took the tree")
+        self.assertEqual(outcome.run.lifecycle, EXITED)
 
     def test_a_head_with_neither_pane_nor_heartbeat_cannot_be_promised_gone(self) -> None:
         run = self.bring_up().run
@@ -306,7 +380,7 @@ class HeadOperationTests(unittest.TestCase):
         spawned = self.bring_up().run
         self.assertEqual(spawned.lifecycle, SPAWNED)
 
-        working = nudge(spawned, NudgePointer.line("go"), host=self.host, confirm=confirmed).run
+        working = nudge(spawned, NudgePointer.line("go"), host=self.host, transport=CONFIRMING).run
         self.assertEqual(working.lifecycle, WORKING)
 
         finishing = working.finishing(StopInitiator(actor="release"))
@@ -322,7 +396,7 @@ class HeadOperationTests(unittest.TestCase):
         self.assertNotEqual(fresh, run.handle)
 
         pointer = NudgePointer.line("still there?")
-        nudged = nudge(run, pointer, host=self.host, confirm=confirmed).run
+        nudged = nudge(run, pointer, host=self.host, transport=CONFIRMING).run
 
         self.assertEqual(nudged.run_id, run.run_id)
         self.assertTrue(nudged.same_run(run))
@@ -370,7 +444,7 @@ class TaskPointerTests(unittest.TestCase):
     def spawn_at(self, task_ref: TaskRef) -> HeadRun:
         return spawn(
             CODEX, WORKSPACE, task_ref, host=self.host, command="run", title="head",
-            confirm=confirmed,
+            transport=CONFIRMING,
         ).run
 
     def test_all_three_kinds_of_task_document_can_carry_a_head(self) -> None:

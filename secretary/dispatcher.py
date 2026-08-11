@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -152,6 +153,7 @@ from secretary.dispatcher_tui import (
     READINESS_BUSY,
     READINESS_READY,
     READINESS_UNKNOWN,
+    DeliveryOutcome,
     TuiDeliveryError,
     close_terminal as _close_tui_terminal,
     close_terminal_strict as _close_tui_terminal_strict,
@@ -209,7 +211,12 @@ from triggered_agents.agents.pipeline.heads import (
 from triggered_agents.agents.pipeline.task_protocol import pythonpath_prefix
 from triggered_agents.runtime import head as head_ops
 from triggered_agents.runtime.head import HeadSpec, HeadSpecError
-from triggered_agents.runtime.pane_host import Pane, PaneHostError, OrcaSessionHost
+from triggered_agents.runtime.pane_host import (
+    OrcaSessionHost,
+    Pane,
+    PaneHostError,
+    SessionHost,
+)
 from triggered_agents.runtime.prompt_document import (
     PromptDocumentError,
     nudge_for as _nudge_for,
@@ -603,11 +610,76 @@ class InstanceCatalog:
         return loaded if isinstance(loaded, dict) else {}
 
 
+@dataclass(frozen=True)
+class DispatcherHeadTransport:
+    """How this dispatcher delivers to a head and closes its pane, against whatever host it is on.
+
+    The one implementation of `head_ops.HeadTransport` the production paths use. It carries no
+    command runner and holds no argument vector: every session-manager call it makes goes to the
+    `SessionHost` the operation passes in, which is what lets the same object that runs in
+    production run in the contract suite against a fake. What it does own is the product's two
+    pieces of knowledge the operations must not invent — the confirmation criterion for a delivered
+    prompt, and what a refused close means over a pid heartbeat.
+    """
+
+    runtime: "CommandHostRuntime"
+    workspace: str = ""
+    prompt_file: str = ""
+    adapter: str = ""
+
+    def deliver(
+        self,
+        run: head_ops.HeadRun,
+        pointer: head_ops.NudgePointer,
+        *,
+        host: SessionHost,
+        subject: str,
+    ) -> DeliveryOutcome:
+        # The framing is the *rendered command's* fact, not the profile's: what is running in that
+        # pane is what the launcher just started, and a registry edited since would frame a prompt
+        # for a head this launch never ran. The run offers its own view of the adapter and this
+        # deliberately keeps the launcher's when there is one.
+        return _deliver_tui_prompt(
+            run.handle,
+            self.workspace,
+            self.prompt_file,
+            host=host,
+            adapter=self.adapter or run.spec.adapter,
+            prompt_text=pointer.text or None,
+            subject=subject,
+            document_path=pointer.document,
+        )
+
+    def close(self, run: head_ops.HeadRun, *, host: SessionHost) -> None:
+        self.runtime._close_head_pane(run.handle, run.pid_file, host=host)
+
+
 class CommandHostRuntime:
     def __init__(self, catalog: InstanceCatalog, data_dir: Path, *, mode: str = "real") -> None:
         self.catalog = catalog
         self.data_dir = data_dir
         self.mode = mode
+        # Where a head run is flushed the moment an operation commits it, ahead of the tick's own
+        # save (secretary-1412). Installed by the owner of the durable state for the span in which
+        # it has that state loaded — `CommandHostRuntime` has a record in hand but not the file it
+        # belongs to. Unset, a run reaches disk with the tick's records, which is all a caller
+        # outside a tick can promise.
+        self.commit_state: Callable[[], None] | None = None
+
+    @contextlib.contextmanager
+    def committing(self, flush: Callable[[], None]):
+        """Lend this runtime a way to flush the durable state, for as long as the caller holds it.
+
+        Restores whatever was there before rather than clearing, so a nested span — a pause
+        performed inside a tick — hands the state back to the span that owns it instead of leaving
+        the runtime unable to commit.
+        """
+        previous = self.commit_state
+        self.commit_state = flush
+        try:
+            yield
+        finally:
+            self.commit_state = previous
 
     def _prompt_adapter(self, run: Any, head: str) -> str:
         """The provider whose framing a prompt for this pane is delivered in.
@@ -1567,12 +1639,19 @@ class CommandHostRuntime:
 
         The initiator is the point. Every stop the dispatcher performs has an agent — the reviewer
         taking the checkout, the idle watchdog, a red verdict opening a rework, an operator pausing
-        the pipeline — and until now none of that reached the record: a worker that was gone looked
-        the same however it had gone. `stop` takes the initiator positionally, so it is on the run
-        before the pane is touched, and it is written to the record here so it survives this
-        dispatcher.
+        the pipeline, reconciliation settling an orphaned record, launch recovery ending a head it
+        could not adopt — and until now none of that reached the record: a worker that was gone
+        looked the same however it had gone. Every one of those paths arrives here, and here is
+        where the record learns who was ending this head.
 
-        The pane close and the heartbeat confirmation are unchanged and still injected: a close is
+        `commit` is the ordering that makes it survive: the run enters `finishing` with its
+        initiator and is written down before the operation touches the pane, so a stop that is
+        refused, or one whose dispatcher dies between the close and the heartbeat, leaves a durable
+        run the next tick continues rather than a record that has forgotten there was a stop at
+        all. `finishing` being idempotent by initiator is the other half — the retry that arrives
+        as `reconciliation` does not rename the freeze that began this.
+
+        The close and the heartbeat confirmation are the transport's and this runtime's: a close is
         best-effort because Orca answers `tab_not_found` for a pane it never gave a UI tab, and the
         heartbeat is what actually decides whether the head is gone.
         """
@@ -1582,25 +1661,50 @@ class CommandHostRuntime:
                 run,
                 head_ops.StopInitiator(actor=initiator),
                 host=self.session,
-                close=lambda handle, _pid: _close_tui_terminal(handle, run_json=self._run_json),
+                transport=self._head_transport(record.workspace),
+                commit=lambda finishing: self._commit_worker_run(record, finishing),
                 confirm_gone=self._confirm_head_process_gone,
             )
         except head_ops.HeadStopFailed as exc:
             # The stop did not happen, and the run says who was ending it. Recording that here is
             # what makes the next tick's retry a continuation of this stop rather than a new one.
-            record.worker_head_run = exc.run.to_json()
+            self._commit_worker_run(record, exc.run)
             raise HostError(str(exc)) from None
-        record.worker_head_run = outcome.run.to_json()
+        self._commit_worker_run(record, outcome.run)
+
+    def _commit_worker_run(self, record: DispatcherRecord, run: head_ops.HeadRun) -> None:
+        """Write this worker's run onto the record, and flush it if the caller gave us the state.
+
+        The record is the durable home of the run, but this runtime does not own the file it lives
+        in: a tick loads the production state, hands records around and saves them at the end. So
+        the owner installs `commit_state` for the span it has that state loaded, and a lifecycle
+        transition committed here reaches disk immediately rather than at the end of a tick that
+        may not get there. Without one — a caller outside a tick — the record still carries the run
+        and is saved by whoever loaded it, which is exactly the guarantee that path already has.
+        """
+        record.worker_head_run = run.to_json()
+        if self.commit_state is not None:
+            self.commit_state()
 
     def worker_lifecycle_run(self, record: DispatcherRecord) -> head_ops.HeadRun:
         """This card's worker as the head operations see it.
 
-        The durable run is preferred and the record is canon for the pane it is in: a tick that
-        re-found the pane, or an adoption that took a launch intent back, wrote those onto the
-        record, and the run's identity survives all of it. A record from before this field existed
-        has no run to read, so one is reconstructed — same head, same pane, same heartbeat, a fresh
-        identity — because a worker that is running has to be stoppable whichever dispatcher
-        started it.
+        The durable run decides which head a stop is continuing; reconciliation may only readdress
+        it. A tick that re-found the pane, or an adoption that took a launch intent back, wrote the
+        current handle, leaf and heartbeat onto the record, and those are bound onto the stored run
+        below — the identity, the lifecycle and the initiator are not touched by any of it. A run in
+        `finishing` is therefore continued, initiator and all, however many ticks the stop takes.
+
+        A run that is `settled` is the one case where the stored value is dropped: its head was
+        confirmed gone, so whatever the record still names a pane or a heartbeat for is not that
+        run, and stopping it *as* that run would quietly skip a live head on the strength of a
+        previous confirmation. Note that this is `settled`, not `not running`: `finishing` is
+        neither running nor finished with, and reading the two as one is what used to hand the
+        retry a new identity and no initiator.
+
+        A record from before this field existed has no run to read, so one is reconstructed — same
+        head, same pane, same heartbeat, a fresh identity — because a worker that is running has to
+        be stoppable whichever dispatcher started it.
         """
         stored = record.worker_head_run if isinstance(record.worker_head_run, dict) else {}
         run: head_ops.HeadRun | None = None
@@ -1609,11 +1713,11 @@ class CommandHostRuntime:
                 run = head_ops.HeadRun.from_json(stored)
             except (head_ops.HeadRunError, head_ops.TaskRefError):
                 run = None
-            if run is not None and not run.running and record.owns_head(WORKER_ROLE):
-                # The record still names a pane or a heartbeat while the run says that head is
-                # gone: whatever is there is not the run that ended, so it is not stopped as that
-                # run either. A fresh identity below is what keeps a stop from quietly skipping a
-                # head because a previous one was confirmed.
+            if run is not None and run.settled and record.owns_head(WORKER_ROLE):
+                # The record still names a pane or a heartbeat while the run says that head was
+                # confirmed gone: whatever is there is not the run that ended, so it is not stopped
+                # as that run either. A fresh identity below is what keeps a stop from quietly
+                # skipping a head because a previous one was confirmed.
                 run = None
         if run is None:
             run = head_ops.HeadRun(
@@ -1936,8 +2040,7 @@ class CommandHostRuntime:
                 pointer=pointer,
                 pid_file=pid_file,
                 split_from=split_from,
-                deliver=self._launch_delivery(workspace, prompt_file, adapter),
-                close=self._close_launched_pane,
+                transport=self._head_transport(workspace, prompt_file, adapter),
                 subject=subject,
             )
         except head_ops.HeadOperationError as exc:
@@ -1983,26 +2086,21 @@ class CommandHostRuntime:
             return head_ops.TaskRef.card(str(task["ref"]), document=pointer)
         return head_ops.TaskRef.standing(role or "head", document=pointer)
 
-    def _launch_delivery(self, workspace: str, prompt_file: str, adapter: str) -> head_ops.Deliver:
-        """The dispatcher's own delivery, handed to `spawn` so the operation performs it.
+    def _head_transport(
+        self, workspace: str, prompt_file: str = "", adapter: str = ""
+    ) -> "DispatcherHeadTransport":
+        """This product's delivery and close semantics, for the operation to perform through
+        the host it is running on.
 
-        The head package can deliver through the host by itself; what it cannot do is the product's
-        confirmation criterion — the provider transcript this role's head writes when its turn
-        starts. That criterion is what `deliver_tui_prompt` owns, so it is injected rather than
-        reimplemented, and `spawn` decides only what an unconfirmed delivery *means*.
+        The head package can deliver and close through a session host by itself; what it cannot do
+        is what this product knows on top of that — the provider transcript this role's head writes
+        when its turn starts, and the fact that Orca answers `tab_not_found` for every pane it never
+        gave a UI tab, so a refused close decides nothing while a heartbeat can still be read. Both
+        of those are policy, and both arrive here as a transport rather than as a callback holding
+        this runtime's command runner: whatever the operation reaches, it reaches through the
+        `SessionHost` it was given.
         """
-        def deliver(handle: str, text: str, *, document_path: str, subject: str, **_spec):
-            # The framing is the *rendered command's* fact, not the profile's: what is running in
-            # that pane is what the launcher just started, and a registry edited since would frame
-            # a prompt for a head this launch never ran. The operation offers its own view of the
-            # adapter and this deliberately keeps the launcher's.
-            return _deliver_tui_prompt(
-                handle, workspace, prompt_file, run_json=self._run_json,
-                adapter=adapter, prompt_text=text or None, subject=subject,
-                document_path=document_path,
-            )
-
-        return deliver
+        return DispatcherHeadTransport(self, workspace, prompt_file, adapter)
 
     def _launch_failure(
         self, exc: head_ops.HeadOperationError, workspace: str, pid_file: str, subject: str
@@ -2036,17 +2134,21 @@ class CommandHostRuntime:
         failure.evidence = evidence
         return failure
 
-    def _close_launched_pane(self, handle: str, pid_file: str) -> None:
-        """Close a pane this bring-up opened and confirm nothing of its head survived.
+    def _close_head_pane(self, handle: str, pid_file: str, *, host: SessionHost) -> None:
+        """Close a head's pane through the session host and confirm nothing of it survived.
 
         The close is asked strictly, but its refusal is not the answer on its own: Orca reports
         `tab_not_found` for a pane it never gave a UI tab, which is every pane a dispatcher-launched
         head gets on a headless serve. The heartbeat decides. Only when there is no heartbeat to
         read is a refused close taken at face value, because then nothing else can say whether the
         head is still there.
+
+        The heartbeat half is not session-manager business at all — it is a pid this product wrote
+        and this product signals — which is why it stays here while the pane itself is closed
+        through the host the operation handed in.
         """
         try:
-            _close_tui_terminal_strict(handle, run_json=self._run_json)
+            host.close_pane(handle)
         except Exception as exc:  # noqa: BLE001 — any refusal, whatever the transport called it
             status = _head_process_status(pid_file) if pid_file else {"known": False}
             if not status.get("known"):
@@ -2368,7 +2470,7 @@ class CommandHostRuntime:
                 run,
                 head_ops.NudgePointer.line(prompt),
                 host=self.session,
-                deliver=self._launch_delivery(
+                transport=self._head_transport(
                     record.workspace, "TASK.md",
                     self._prompt_adapter(record.worker_run, record.head),
                 ),

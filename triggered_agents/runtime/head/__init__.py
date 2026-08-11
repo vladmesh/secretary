@@ -14,7 +14,8 @@ that open and close one. This package owns which head that is, and what happens 
 from __future__ import annotations
 
 from .operations import (
-    Deliver,
+    Commit,
+    Confirm,
     HeadNudgeFailed,
     HeadOperationError,
     HeadOutcome,
@@ -22,6 +23,8 @@ from .operations import (
     HeadSpawnAborted,
     HeadSpawnFailed,
     HeadStopFailed,
+    HeadTransport,
+    HostTransport,
     NudgePointer,
     nudge,
     spawn,
@@ -49,8 +52,9 @@ from .task_ref import (
 )
 
 __all__ = [
+    "Commit",
+    "Confirm",
     "DEFAULT_EFFORT",
-    "Deliver",
     "EXITED",
     "FINISHING",
     "HeadNudgeFailed",
@@ -64,6 +68,8 @@ __all__ = [
     "HeadSpec",
     "HeadSpecError",
     "HeadStopFailed",
+    "HeadTransport",
+    "HostTransport",
     "LIFECYCLE",
     "NudgePointer",
     "SPAWNED",

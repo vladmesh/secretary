@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import inspect
 import json
 import os
@@ -1148,6 +1149,21 @@ class FakeHost:
         if self.fail_stop_workspace_reason:
             raise HostError(self.fail_stop_workspace_reason)
         self.stop(record)
+
+    @contextlib.contextmanager
+    def committing(self, flush):
+        """The real host's durable-commit seam (secretary-1412), lent for the caller's span.
+
+        The fake performs no host I/O, so it never commits mid-operation; it still has to accept
+        the loan, because the tick and the freeze hand it out unconditionally and a host that
+        could not take it would be a host the production paths cannot use.
+        """
+        previous = getattr(self, "commit_state", None)
+        self.commit_state = flush
+        try:
+            yield
+        finally:
+            self.commit_state = previous
 
     def stop_head(self, record, kind: str, initiator: str = "dispatcher") -> None:
         # The initiator the real host records on the run (secretary-1412). Kept in the call log so

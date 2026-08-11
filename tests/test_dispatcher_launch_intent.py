@@ -42,6 +42,7 @@ from secretary.routing_journal import attempts as routing_attempts
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 
 from tests.observer_identity import bind_observer
+from tests.test_head_operations import FakeSessionHost as HeadOperationFakeHost
 from tests.test_dispatcher import (
     FakeCatalog,
     FakeHost,
@@ -2427,27 +2428,45 @@ class HostLaunchContourTests(unittest.TestCase):
 
     # a failure raised after the terminal exists -----------------------------
 
+    class ClosingHost:
+        """A session host whose close either answers or refuses, standing in for Orca's.
+
+        The close goes through the session host now (secretary-1412), so a refusal is modelled
+        where the refusal actually comes from rather than by patching a module-level helper.
+        """
+
+        def __init__(self, refusal: Exception | None = None) -> None:
+            self.refusal = refusal
+            self.closed: list[str] = []
+
+        def close_pane(self, handle: str) -> None:
+            self.closed.append(handle)
+            if self.refusal is not None:
+                raise self.refusal
+
     def test_a_pane_that_closes_leaves_nothing_of_the_bring_up(self) -> None:
         """Confirmed gone, so the caller may treat it as a launch that did not happen."""
-        with mock.patch.object(secretary_dispatcher, "_close_tui_terminal_strict", lambda *a, **k: None):
-            self.host._close_launched_pane("term:1", self.pid_file(str(DEAD_PID)))
+        host = self.ClosingHost()
+
+        self.host._close_head_pane("term:1", self.pid_file(str(DEAD_PID)), host=host)
+
+        self.assertEqual(host.closed, ["term:1"])
 
     def test_a_pane_that_will_not_close_and_a_head_nothing_can_read_is_ambiguous(self) -> None:
         """No heartbeat and a refused close: the head cannot be reported as gone."""
-        refuse = mock.Mock(side_effect=HostError("tab_not_found"))
-
-        with mock.patch.object(secretary_dispatcher, "_close_tui_terminal_strict", refuse):
-            with self.assertRaisesRegex(HostError, "head terminal close failed"):
-                self.host._close_launched_pane("term:1", self.pid_file(None))
+        with self.assertRaisesRegex(HostError, "head terminal close failed"):
+            self.host._close_head_pane(
+                "term:1", self.pid_file(None), host=self.ClosingHost(HostError("tab_not_found"))
+            )
 
     def test_a_refused_close_over_a_head_that_is_provably_gone_is_not_ambiguous(self) -> None:
         """Orca answers `tab_not_found` for every pane it never gave a UI tab, which is every pane
         a dispatcher-launched head gets on a headless serve. The heartbeat, not the refusal, is
         what says whether the head is still there."""
-        refuse = mock.Mock(side_effect=HostError("tab_not_found"))
-
-        with mock.patch.object(secretary_dispatcher, "_close_tui_terminal_strict", refuse):
-            self.host._close_launched_pane("term:1", self.pid_file(str(DEAD_PID)))
+        self.host._close_head_pane(
+            "term:1", self.pid_file(str(DEAD_PID)),
+            host=self.ClosingHost(HostError("tab_not_found")),
+        )
 
     @contextlib.contextmanager
     def delivery_fails(self, close: Exception | None):
@@ -2458,7 +2477,11 @@ class HostLaunchContourTests(unittest.TestCase):
             def head_launch(self, *args: Any, **kwargs: Any) -> HeadLaunch:
                 return launch
 
-        created = {"terminal create": {"terminal": {"handle": "term:1"}}}
+        created: dict[str, Any] = {"terminal create": {"terminal": {"handle": "term:1"}}}
+        # The cleanup close is the session host's `orca terminal close` now (secretary-1412), so a
+        # close that refuses is a backend answer here rather than a patched helper.
+        if close is not None:
+            created["terminal close"] = close
         with mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir)}):
             with mock.patch.object(self.host, "catalog", Catalog()):
                 # The pane is opened through the session host now (secretary-1412), so the create
@@ -2469,11 +2492,7 @@ class HostLaunchContourTests(unittest.TestCase):
                             secretary_dispatcher, "_deliver_tui_prompt",
                             mock.Mock(side_effect=TuiDeliveryError("the head never took the prompt")),
                         ):
-                            with mock.patch.object(
-                                secretary_dispatcher, "_close_tui_terminal_strict",
-                                mock.Mock(side_effect=close) if close else mock.Mock(),
-                            ):
-                                yield
+                            yield
 
     def launch_worker(self):
         return self.host._launch(
@@ -2558,13 +2577,12 @@ class HostLaunchContourTests(unittest.TestCase):
         its launch intent instead of blocking the card and dropping the record over a live head.
         """
         answers = self.split_answers(HostError("orca rename failed"))
-        refuse = mock.Mock(side_effect=HostError("tab_not_found"))
+        answers["terminal close"] = HostError("tab_not_found")
 
         with self.split_pid_file(None):
             with self.run_json(answers):
-                with mock.patch.object(secretary_dispatcher, "_close_tui_terminal_strict", refuse):
-                    with self.assertRaises(HeadLaunchAborted) as caught:
-                        self.split_worker()
+                with self.assertRaises(HeadLaunchAborted) as caught:
+                    self.split_worker()
 
         self.assertEqual(caught.exception.handle, "term:review")
         self.assertEqual(caught.exception.workspace, str(self.data_dir))
@@ -2572,13 +2590,12 @@ class HostLaunchContourTests(unittest.TestCase):
     def test_a_split_whose_pane_is_confirmed_gone_stays_an_ordinary_failure(self) -> None:
         """The other half: the head is provably not there, so the caller may block the card."""
         answers = self.split_answers(HostError("orca rename failed"))
-        refuse = mock.Mock(side_effect=HostError("tab_not_found"))
+        answers["terminal close"] = HostError("tab_not_found")
 
         with self.split_pid_file(str(DEAD_PID)):
             with self.run_json(answers):
-                with mock.patch.object(secretary_dispatcher, "_close_tui_terminal_strict", refuse):
-                    with self.assertRaises(HostError) as caught:
-                        self.split_worker()
+                with self.assertRaises(HostError) as caught:
+                    self.split_worker()
 
         self.assertNotIsInstance(caught.exception, HeadLaunchAborted)
 
@@ -2917,6 +2934,186 @@ class HostLaunchContourTests(unittest.TestCase):
 
         with self.assertRaisesRegex(HostError, "neither a pane handle nor a pid heartbeat"):
             self.host.stop_head(record, "worker")
+
+
+class WorkerPathReachesOnlyTheSessionHostTests(unittest.TestCase):
+    """The production worker path, run on a fake session host with no command runner at all.
+
+    This is what criterion 5 of secretary-1412 actually claims: not that the head package contains
+    no literal `orca` (a source check answers that, and it stays green in exactly the case that
+    matters), but that the *production* bring-up, nudge and stop of a worker reach a session manager
+    only through `SessionHost`. So the runner is replaced by something that fails the test if it is
+    called at all, and the three operations are driven the way the dispatcher drives them. A
+    delivery callback or a close lambda holding this runtime's runner — which is how the previous
+    round bypassed the seam — makes these tests fail rather than pass quietly.
+
+    The heartbeat is deliberately not part of that claim: a pid file this product wrote and signals
+    is not session-manager business, and it never was.
+    """
+
+    class NoRunner:
+        """A command runner that exists only to prove it is never reached."""
+
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        def __call__(self, args: list[str]) -> dict:
+            self.calls.append(list(args))
+            raise AssertionError(f"the worker path reached a command runner: {args}")
+
+    class WorkingPane(HeadOperationFakeHost):
+        """The contract suite's fake, answering the way a pane whose turn has started answers."""
+
+        def read(self, handle: str, *, limit: int | None = None):
+            return {"terminal": {"tail": ["working", "› "], "nextCursor": f"c{len(self.sent)}"}}
+
+    class Catalog(FakeCatalog):
+        def prepare_head_workspace(self, head: str, workspace: str, *, role: str = "") -> None:
+            return None
+
+        def head_launch(self, head, prompt_file, *, workspace, role, launch_prompt=None,
+                        identity=None):
+            return HeadLaunch("run-worker", prompt_after_start=True, adapter="codex")
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.data_dir = Path(self.tmpdir.name)
+        self.session = self.WorkingPane()
+        self.runner = self.NoRunner()
+        self.host = CommandHostRuntime(self.Catalog(), self.data_dir, mode="real")  # type: ignore[arg-type]
+        # Both halves of the runtime's own access to Orca: the JSON runner every `orca terminal`
+        # call goes through, and the process runner underneath it.
+        self.addCleanup(mock.patch.object(self.host, "_run_json", self.runner).stop)
+        mock.patch.object(self.host, "_run_json", self.runner).start()
+        self.addCleanup(mock.patch.object(self.host, "_run", self.runner).stop)
+        mock.patch.object(self.host, "_run", self.runner).start()
+        patched = mock.patch.object(
+            CommandHostRuntime, "session", property(lambda _self: self.session)
+        )
+        patched.start()
+        self.addCleanup(patched.stop)
+        (self.data_dir / "TASK.md").write_text("the task", encoding="utf-8")
+
+    def record(self, run: dict[str, Any] | None = None) -> DispatcherRecord:
+        record = DispatcherRecord(
+            worker="w1", workspace=str(self.data_dir), handle="term:1", head="codex",
+            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=0,
+            state="claimed", claimed_at=0.0,
+        )
+        record.worker_leaf = "leaf:1"
+        record.worker_head_run = dict(run or {})
+        return record
+
+    def spawn_worker(self):
+        return self.host._launch(
+            str(self.data_dir), f"{REF} worker", "codex", "TASK.md",
+            role="worker", env_name="SECRETARY_UNSET_COMMAND",
+            launch_prompt="read TASK.md",
+            prompt_document=str(self.data_dir / "TASK.md"),
+            task={"ref": REF, "project": "secretary"},
+        )
+
+    def test_a_worker_bring_up_opens_and_delivers_through_the_session_host(self) -> None:
+        launched = self.spawn_worker()
+
+        self.assertEqual(launched.handle, "term:1")
+        self.assertEqual(self.session.calls[0][0], "open_pane")
+        self.assertIn("send", [call[0] for call in self.session.calls])
+        self.assertEqual(self.runner.calls, [])
+
+    def test_a_worker_nudge_delivers_through_the_session_host(self) -> None:
+        record = self.record(self.spawn_worker().head_run)
+        self.session.calls.clear()
+
+        self.host._nudge_worker(record, "report now", "worker report", subject="worker-report")
+
+        self.assertIn("send", [call[0] for call in self.session.calls])
+        self.assertEqual(self.runner.calls, [])
+
+    def test_a_worker_stop_closes_through_the_session_host(self) -> None:
+        record = self.record(self.spawn_worker().head_run)
+        self.session.calls.clear()
+
+        self.host.stop_head(record, "worker", "operator")
+
+        self.assertEqual(self.session.closed, ["term:1"])
+        self.assertEqual(self.runner.calls, [])
+        self.assertEqual(record.worker_head_run["stopped_by"]["actor"], "operator")
+
+    def test_a_stop_the_pane_refuses_still_reaches_no_runner(self) -> None:
+        """The failure path is the one that used to reach for a runner-backed close."""
+        record = self.record(self.spawn_worker().head_run)
+        self.session.refuse_close = True
+
+        with self.assertRaises(HostError):
+            self.host.stop_head(record, "worker", "review-freeze")
+
+        self.assertEqual(self.runner.calls, [])
+        self.assertEqual(record.worker_head_run["lifecycle"], "finishing")
+        self.assertEqual(record.worker_head_run["stopped_by"]["actor"], "review-freeze")
+
+    def test_the_finishing_run_is_committed_before_the_pane_is_touched(self) -> None:
+        """The durable half of the stop invariant, on the production path.
+
+        The record has to say which head is being stopped and by whom before the session manager is
+        asked for anything, because a dispatcher killed in between comes back to exactly that
+        record and nothing else.
+        """
+        record = self.record(self.spawn_worker().head_run)
+        committed: list[dict[str, Any]] = []
+        timeline: list[str] = []
+        self.session.calls.clear()
+        self.session.on_call = lambda name: timeline.append(f"host:{name}")
+
+        def flush() -> None:
+            committed.append(json.loads(json.dumps(record.worker_head_run)))
+            timeline.append("commit")
+
+        with self.host.committing(flush):
+            self.host.stop_head(record, "worker", "operator")
+
+        self.assertEqual(timeline[0], "commit", timeline)
+        self.assertEqual(committed[0]["lifecycle"], "finishing")
+        self.assertEqual(committed[0]["stopped_by"]["actor"], "operator")
+        self.assertEqual(self.runner.calls, [])
+
+    def test_a_retried_stop_continues_the_run_the_first_one_began(self) -> None:
+        """The retry is a continuation, not a second stop of a head nothing can name.
+
+        The freeze is refused and its `finishing` run stays on the record; the next tick's stop
+        arrives as `reconciliation`, over a record that still names the pane. It must end the same
+        run — same identity — and the record must still say the freeze was what ended this worker.
+        """
+        record = self.record(self.spawn_worker().head_run)
+        self.session.refuse_close = True
+        with self.assertRaises(HostError):
+            self.host.stop_head(record, "worker", "review-freeze")
+        first = dict(record.worker_head_run)
+        self.session.refuse_close = False
+
+        self.host.stop_head(record, "worker", "reconciliation")
+
+        self.assertEqual(record.worker_head_run["run_id"], first["run_id"])
+        self.assertEqual(record.worker_head_run["stopped_by"]["actor"], "review-freeze")
+        self.assertEqual(record.worker_head_run["lifecycle"], "exited")
+
+    def test_a_confirmed_stop_is_not_continued_over_a_record_that_still_names_a_head(self) -> None:
+        """The other half of the same rule, which the fix must not collapse.
+
+        An `exited` run is finished with. A record that still names a pane afterwards is naming
+        something that is not that run, so the next stop gets a fresh identity rather than
+        reporting a live head as already stopped.
+        """
+        record = self.record(self.spawn_worker().head_run)
+        self.host.stop_head(record, "worker", "operator")
+        exited = dict(record.worker_head_run)
+        record.handle = "term:2"
+
+        run = self.host.worker_lifecycle_run(record)
+
+        self.assertNotEqual(run.run_id, exited["run_id"])
+        self.assertEqual(run.lifecycle, "spawned")
 
 
 class ProductionLaunchIntentTests(unittest.TestCase):

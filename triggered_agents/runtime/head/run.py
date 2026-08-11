@@ -17,7 +17,11 @@ three operations hand each other. Four things about it are decisions rather than
   * **who stopped it is recorded, and it is recorded before the stop happens.** `finishing` cannot
     be entered without an initiator, so there is no way to end a head and leave the record saying
     only that it ended. That is what makes "did the watchdog kill this worker, or did the card
-    finish?" a question the record answers rather than one an operator reconstructs from timing;
+    finish?" a question the record answers rather than one an operator reconstructs from timing.
+    The first initiator is also the one that stays: a stop that was refused is retried by later
+    ticks, often through another path with another actor, and a transition that overwrote the
+    initiator would leave the record naming whoever retried last rather than whoever began. So
+    `finishing` is idempotent — entering it again returns the same run, initiator included;
   * **it is JSON, so it survives the dispatcher.** A run is durable state: the process that spawned
     a head is not necessarily the process that stops it, and the initiator has to still be there
     after a restart, which is the whole point of writing it down.
@@ -114,6 +118,18 @@ class HeadRun:
         """Whether this run still expects a process behind it."""
         return self.lifecycle in (SPAWNED, WORKING)
 
+    @property
+    def settled(self) -> bool:
+        """Whether this head's end was confirmed, so nothing is owed to it any more.
+
+        Deliberately not `not running`: `finishing` is neither. It is a head whose stop was begun
+        and not confirmed, which is exactly the state a later tick must continue rather than
+        replace — a caller that reads "not running" as "finished with" throws away the identity
+        and the initiator of a stop that is still owed, and the retry then becomes a new stop of a
+        head nothing can name.
+        """
+        return self.lifecycle == EXITED
+
     def same_run(self, other: "HeadRun") -> bool:
         """Whether two values name the same head, whatever pane handle each of them is holding."""
         return self.run_id == other.run_id
@@ -138,10 +154,16 @@ class HeadRun:
         Recorded before the stop is attempted, on purpose: a stop that is refused or that outlives
         the dispatcher must leave the initiator behind, or the head that is still there afterwards
         is one nothing can say who was ending.
+
+        Idempotent by initiator, and that is the whole of the rule: the first actor to enter this
+        state is the one the record keeps. A refused stop is retried — by the next tick, by
+        reconciliation, by an operator — and each of those arrives with an initiator of its own.
+        Overwriting would make the record name the last retry rather than the decision that ended
+        the head, which is the one question this field exists to answer.
         """
         if not isinstance(initiator, StopInitiator):
             raise HeadRunError("a stop initiator is a StopInitiator")
-        if self.lifecycle == EXITED:
+        if self.lifecycle in (FINISHING, EXITED):
             return self
         return replace(self, lifecycle=FINISHING, stopped_by=initiator)
 
