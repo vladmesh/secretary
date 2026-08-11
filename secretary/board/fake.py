@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import replace
 from itertools import count
 
 from secretary.board.host import Create, MutationResult, Replace, TransitionRequest
 from secretary.board.models import BoardEntity, EntityKind, Event
-from secretary.board.transitions import BoardProtocolError, transition
+from secretary.board.transitions import BoardProtocolError, InvalidTransition, transition
 
 
 class FakeBoardHost:
@@ -37,8 +36,14 @@ class FakeBoardHost:
 
     def replace(self, operation: Replace) -> MutationResult:
         key = (operation.entity.kind, operation.entity.ref)
-        if key not in self._entities:
+        try:
+            current = self._entities[key]
+        except KeyError:
             raise BoardProtocolError(f"{operation.entity.kind.value} {operation.entity.ref!r} was not found")
+        if current.state != operation.entity.state:
+            raise InvalidTransition(
+                f"replace cannot change {operation.entity.kind.value} lifecycle state; use transition"
+            )
         self._entities[key] = operation.entity
         return self._result(operation.entity, "entity.updated", operation.actor, operation.reason, operation.related_refs)
 

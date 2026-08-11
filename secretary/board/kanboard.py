@@ -56,7 +56,11 @@ class KanboardBoardHost:
 
     def list(self, kind: EntityKind) -> Sequence[BoardEntity]:
         if kind is EntityKind.CARD:
-            return tuple(_card(record) for record in TaskReader(self.client).list())
+            return tuple(
+                _card(record)
+                for record in TaskReader(self.client).list()
+                if record.get("record_type") == "task"
+            )
         if kind is EntityKind.SPRINT:
             return tuple(_sprint(record) for record in SprintReader(self.client, data_dir=self.data_dir).list(create=False))
         store = self._product_issues()
@@ -121,13 +125,15 @@ def _sprint(record: dict[str, Any]) -> Sprint:
         raise BoardProtocolError(f"invalid Sprint lifecycle state {status!r}") from exc
     return Sprint(
         ref=str(record["ref"]), goal=str(record.get("goal") or ""), state=state,
-        product_ref=str(record["product"]) if record.get("product") else None,
+        product_ref=f"product:{record['product']}" if record.get("product") else None,
         issue_refs=tuple(str(ref) for ref in record.get("issues") or ()),
         card_refs=tuple(str(card.get("ref")) for card in record.get("cards") or () if isinstance(card, dict)),
     )
 
 
 def _card(record: dict[str, Any]) -> Card:
+    if record.get("record_type") != "task":
+        raise BoardProtocolError(f"{record.get('ref')!r} is not an execution Card")
     state = str(record.get("state") or "")
     try:
         lifecycle = CardState(state)
