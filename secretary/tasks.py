@@ -1578,6 +1578,26 @@ class TaskWriter:
         if cap < 1:
             raise TaskError("validation", "claim cap must be positive", 2)
         request_id = request_id or str(uuid.uuid4())
+        legacy = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
+        if legacy is not None and legacy.get("record_type") != TaskAudit._PROTOCOL_EVENT_RECORD_TYPE:
+            # Claims written before Card transitions migrated remain generic audit
+            # operations.  They retain their released replay/reconciliation path;
+            # in particular, do not reinterpret a legacy pending record as a new
+            # typed transition or let it move a record that has since become a
+            # Product or Issue.
+            _check_execution_record(self.reader.show(reference))
+            payload = {
+                "worker": worker,
+                "resolved_head": resolved_head or None,
+                "resolved_review_head": resolved_review_head or None,
+                "slug": slug or None,
+                "base_branch": base_branch or None,
+                "cap": cap,
+            }
+            return self._write(
+                "claimed", role, actor, reference, request_id, payload, lambda task: None,
+                identity=payload,
+            )
         existing = self._typed_event(request_id)
         # A typed pending/committed request is replayed by the adapter without
         # rerunning the claim admission checks or the metadata write.

@@ -228,8 +228,9 @@ class LaunchIntentTests(unittest.TestCase):
     def refuse_audit(self, match: str):
         """A journal that refuses exactly the writes whose request id carries `match`.
 
-        The refusal lands on `stage`, which is where the journal is written before the backend
-        mutation it describes: nothing of that write happens at all.
+        The refusal lands on either released staging entry point. Typed events use
+        ``claim`` so their request ownership and pre-effect staging are one lock
+        hold; generic records continue to use ``stage``.
         """
         real = self.writer.audit.stage
 
@@ -238,7 +239,14 @@ class LaunchIntentTests(unittest.TestCase):
                 raise OSError("audit journal is not writable")
             real(request_id, event)
 
-        return mock.patch.object(self.writer.audit, "stage", stage)
+        real_claim = self.writer.audit.claim
+
+        def claim(request_id: str, event: dict, **kwargs: object) -> dict | None:
+            if match in request_id:
+                raise OSError("audit journal is not writable")
+            return real_claim(request_id, event, **kwargs)
+
+        return mock.patch.multiple(self.writer.audit, stage=stage, claim=claim)
 
     @contextlib.contextmanager
     def audit_dies_after(self, host_method: str):
