@@ -222,6 +222,10 @@ class Event:
             raise ValueError("event occurred_at must be timezone-aware")
         if not isinstance(self.related_refs, RelatedRefs):
             raise ValueError("event related refs must be RelatedRefs")
+        # The journal spelling is UTC.  Keep the value canonical too, so an
+        # event read back from its own record compares equal to the value that
+        # was written, even when its caller supplied another aware timezone.
+        object.__setattr__(self, "occurred_at", self.occurred_at.astimezone(UTC))
 
     def to_record(self, request_id: str) -> dict[str, Any]:
         """Serialize a canonical, deterministic TaskAudit journal record."""
@@ -263,6 +267,8 @@ class Event:
             raise ValueError("board event actor must be an object")
         if not isinstance(related, list) or not all(isinstance(ref, str) for ref in related):
             raise ValueError("board event related_refs must be a string list")
+        if len(set(related)) != len(related):
+            raise ValueError("board event related_refs must be deduplicated")
         try:
             event = cls(
                 event_id=_string_field(record, "event_id"),
@@ -303,7 +309,7 @@ def _optional_string_field(document: dict[str, Any], name: str) -> str | None:
 
 
 def _format_time(value: datetime) -> str:
-    return value.astimezone(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _parse_time(value: str) -> datetime:
@@ -313,4 +319,4 @@ def _parse_time(value: str) -> datetime:
         raise ValueError("board event occurred_at must be RFC3339") from exc
     if parsed.tzinfo is None:
         raise ValueError("board event occurred_at must be timezone-aware")
-    return parsed.astimezone(UTC).replace(microsecond=0)
+    return parsed.astimezone(UTC)

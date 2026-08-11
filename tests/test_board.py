@@ -6,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -116,6 +116,20 @@ class BoardHostContractTests(unittest.TestCase):
         self.assertEqual(Event.from_record(record), event)
         with self.assertRaisesRegex(ValueError, "EventKind"):
             Event("event-2", "card.started", EntityKind.CARD, "secretary-1419", self.actor, "reason", event.occurred_at)
+
+    def test_event_round_trip_preserves_fractional_occurrence_and_canonicalizes_timezone(self) -> None:
+        event = Event(
+            "event-precise", EventKind.CARD_STARTED, EntityKind.CARD, "secretary-1419",
+            self.actor, "worker started", datetime(2026, 8, 11, 20, 0, 0, 123456, tzinfo=timezone.utc),
+        )
+
+        record = event.to_record("start-precise")
+
+        self.assertEqual(record["occurred_at"], "2026-08-11T20:00:00.123456Z")
+        self.assertEqual(Event.from_record(record), event)
+        record["related_refs"] = ["sprint:943", "sprint:943"]
+        with self.assertRaisesRegex(ValueError, "deduplicated"):
+            Event.from_record(record)
 
     def test_durable_fake_mutations_append_one_complete_protocol_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
