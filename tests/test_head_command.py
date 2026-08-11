@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -344,6 +345,74 @@ def _module_paths() -> list[Path]:
     return paths
 
 
+# The subcommands the Orca terminal CLI has. A vector is recognised by this shape rather than by
+# the spelling of the binary in front of it, because the binary is exactly the part a module is
+# free to hold in a variable: `dispatch.py` keeps it in `ORCA` (itself `ORCA_BIN` or
+# `shutil.which("orca")`) and hands its runner only the `["terminal", ...]` suffix. A check that
+# recognised the literal `["orca", "terminal", ...]` alone would call that module clean.
+_TERMINAL_SUBCOMMANDS = frozenset(
+    {"create", "close", "list", "read", "send", "stop", "wait"}
+)
+
+# The one module outside the seam that still drives terminals itself, named rather than matched by
+# a pattern, with the reason it is still here. `triggered_agents/runtime/dispatch.py` is the
+# scheduler of mechanical roles: idle/wait semantics, the `/clear` warm-reuse path and duplicate
+# cleanup all sit on top of its own terminal calls, and moving them is the next card of
+# sprint:927 rather than a rider on this one. Until that card lands, the sprint's DoD item about
+# the grep invariant is NOT closed, and this dict is what says so out loud instead of a silent
+# skip. `test_the_only_exception_is_the_one_named_scheduler_module` fails if anything else is
+# added here.
+_SEAM_EXCEPTIONS = {
+    Path("triggered_agents/runtime/dispatch.py"): "sprint:927",
+}
+
+
+def _terminal_vectors(tree: ast.AST) -> list[tuple[int, str]]:
+    """Every argument vector this module builds for the Orca terminal CLI, as (line, subcommand).
+
+    Both spellings count as one thing: `["orca", "terminal", "send", ...]` (binary written out)
+    and `["terminal", "send", ...]` handed to a runner that prepends the binary from a variable.
+    So the subcommand word is looked for at index 0 or 1, which is where it lands in either form,
+    and the element before it is not required to be a constant at all.
+    """
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.List, ast.Tuple)):
+            continue
+        words = [
+            element.value
+            if isinstance(element, ast.Constant) and isinstance(element.value, str)
+            else None
+            for element in node.elts
+        ]
+        for index in (0, 1):
+            if index + 1 < len(words) and words[index] == "terminal" \
+                    and words[index + 1] in _TERMINAL_SUBCOMMANDS:
+                found.append((node.lineno, words[index + 1]))
+                break
+    return found
+
+
+def _pane_screen_reads(tree: ast.AST) -> list[int]:
+    """Every place this module asks a pane for its rendered screen, by name.
+
+    A rule of its own rather than a consequence of the one above: a module can read a screen
+    through a vector built some other way, and `dispatch.py:210` is the live proof that assuming
+    `terminal read` is spelled only inside `pane_host` was wrong. So the words are looked for both
+    as a vector and as a non-docstring string constant.
+    """
+    prose = _docstring_nodes(tree)
+    lines = [lineno for lineno, sub in _terminal_vectors(tree) if sub == "read"]
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Constant) or not isinstance(node.value, str):
+            continue
+        if id(node) in prose:
+            continue
+        if re.search(r"\bterminal read\b", node.value):
+            lines.append(node.lineno)
+    return sorted(set(lines))
+
+
 def _docstring_nodes(tree: ast.AST) -> set[int]:
     """The string constants that are documentation rather than data.
 
@@ -377,31 +446,96 @@ _HEAD_COMMAND_LITERALS = (
 class SeamGrepTests(unittest.TestCase):
     """No second way to reach the session manager, and no second place a head command is built.
 
-    The check is over calls, not mentions: an `orca terminal` argument vector is a list literal
-    whose first two elements say so, and a head command is a string literal carrying a binary and
-    its own flag. Both are read out of the AST with docstrings excluded, so the modules that own
-    these things stay free to explain them in prose — which several of them have to.
+    The check is over calls, not mentions: an `orca terminal` argument vector is recognised by the
+    subcommand word wherever the binary in front of it came from — written out, or taken from a
+    variable and prepended by a runner — and a head command is a string literal carrying a binary
+    and its own flag. Both are read out of the AST with docstrings excluded, so the modules that
+    own these things stay free to explain them in prose — which several of them have to.
 
-    Reading a pane's screen is one of those argument vectors and needs no separate rule: `orca
-    terminal read` is spelled in `pane_host` and nowhere else, so `tui_delivery.read_pane_text` and
-    the dispatcher TUI above it necessarily go through the host. That is what makes the first test
-    below the whole claim rather than a subset of it.
+    Reading a pane's screen gets a rule of its own rather than riding on the vector rule, and one
+    module — the mechanical-role scheduler — is a named exception with its reason written down.
+    The invariant these tests hold is therefore "no terminal driving outside the seam except in
+    `runtime/dispatch.py`", not "none anywhere": the second is what the sprint owes, and the card
+    that pays it is the next one.
     """
 
     def test_no_module_outside_the_seam_calls_orca_terminal(self) -> None:
         offenders = []
         for path in _module_paths():
+            if path.relative_to(REPO_ROOT) in _SEAM_EXCEPTIONS:
+                continue
             tree = ast.parse(path.read_text(encoding="utf-8"))
-            for node in ast.walk(tree):
-                if not isinstance(node, (ast.List, ast.Tuple)):
-                    continue
-                head = [
-                    element.value for element in node.elts[:2]
-                    if isinstance(element, ast.Constant) and isinstance(element.value, str)
-                ]
-                if head == ["orca", "terminal"]:
-                    offenders.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno}")
+            for lineno, sub in _terminal_vectors(tree):
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno} (terminal {sub})")
         self.assertEqual(offenders, [], f"orca terminal argument vectors outside pane_host: {offenders}")
+
+    def test_the_check_sees_a_vector_whose_binary_came_from_a_variable(self) -> None:
+        """The check is not vacuous, in both of the forms a live call is written in.
+
+        The second fixture is `dispatch.py`'s own shape — the one that walked past the previous
+        spelling of this test — and the third is the counter-example the rule must NOT flag: an
+        argument vector that runs a different CLI entirely.
+        """
+        literal = "run(['orca', 'terminal', 'send', '--terminal', t])"
+        from_variable = (
+            "ORCA = shutil.which('orca')\n"
+            "def go(args):\n"
+            "    subprocess.run([ORCA, *args])\n"
+            "def send(t):\n"
+            "    go(['terminal', 'send', '--terminal', t])\n"
+        )
+        other_cli = "run(['claude', '-p', 'ping', '--model', 'haiku'])"
+
+        self.assertEqual(
+            [sub for _, sub in _terminal_vectors(ast.parse(literal))], ["send"]
+        )
+        self.assertEqual(
+            [sub for _, sub in _terminal_vectors(ast.parse(from_variable))], ["send"]
+        )
+        self.assertEqual(_terminal_vectors(ast.parse(other_cli)), [])
+
+    def test_no_module_outside_the_seam_reads_a_pane_screen(self) -> None:
+        offenders = []
+        for path in _module_paths():
+            if path.relative_to(REPO_ROOT) in _SEAM_EXCEPTIONS:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for lineno in _pane_screen_reads(tree):
+                offenders.append(f"{path.relative_to(REPO_ROOT)}:{lineno}")
+        self.assertEqual(offenders, [], f"pane screen reads outside pane_host: {offenders}")
+
+    def test_the_pane_read_rule_catches_a_read_however_the_vector_was_built(self) -> None:
+        """Named, so a screen read is caught even when the vector around it is assembled
+        elsewhere — and prose about `terminal read` still passes, which the modules that own the
+        call depend on."""
+        self.assertEqual(
+            _pane_screen_reads(ast.parse("go(['terminal', 'read', '--terminal', t])")), [1]
+        )
+        self.assertEqual(
+            _pane_screen_reads(ast.parse("cmd = 'orca terminal read --terminal ' + t")), [1]
+        )
+        self.assertEqual(_pane_screen_reads(ast.parse('"""We used to run terminal read."""')), [])
+        # The subcommand is a whole word: a message about a terminal readiness probe is prose
+        # about a different call, and flagging it would push the dispatcher into rewording errors.
+        self.assertEqual(
+            _pane_screen_reads(ast.parse("raise HostError('terminal readiness unreadable')")), []
+        )
+
+    def test_the_only_exception_is_the_one_named_scheduler_module(self) -> None:
+        """A single concrete module, not a pattern, and its reason lives in the code it excuses.
+
+        If a second entry ever shows up here this fails, so the way to make a new violation green
+        is to fix it or to argue for it out loud — never to widen a glob.
+        """
+        self.assertEqual(
+            set(_SEAM_EXCEPTIONS), {Path("triggered_agents/runtime/dispatch.py")}
+        )
+        excused = REPO_ROOT / "triggered_agents" / "runtime" / "dispatch.py"
+        self.assertTrue(excused.is_file())
+        source = excused.read_text(encoding="utf-8")
+        self.assertIn("sprint:927", source)
+        # The exception is only worth having while the thing it excuses is really there.
+        self.assertTrue(_terminal_vectors(ast.parse(source)))
 
     def test_no_module_outside_the_seam_builds_a_head_command(self) -> None:
         offenders = []

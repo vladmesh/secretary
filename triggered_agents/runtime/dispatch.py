@@ -91,6 +91,15 @@ More invariants, all from PR #95 review rounds (triggered-agents-445):
     (create). `_stop_and_confirm_workspace_empty` (not the narrower `_stop_and_confirm`) verifies
     via the same unfiltered `_raw_terminal_count`, since the filtered view would "confirm" success
     on a stray it could never recognize either way, stopped or not (round 2 review B3).
+
+This module is the one named exception to the `PaneHost`/`SessionHost` seam (secretary-1415,
+`tests/test_head_command.py:_SEAM_EXCEPTIONS`). Every other caller in `secretary/` and
+`triggered_agents/` reaches Orca through the host; here `_orca`/`_orca_json` still build
+`["terminal", ...]` vectors themselves and `_terminal_screen` still reads a pane directly, because
+the idle/wait semantics, the `/clear` warm-reuse path and the duplicate cleanup above them are
+this scheduler's own and do not survive a mechanical rewrite. Moving them behind the seam is the
+next card of sprint:927; until it lands, the sprint's DoD item about the grep invariant is not
+closed, and adding a new terminal call anywhere else is still caught by that test.
 """
 from __future__ import annotations
 
