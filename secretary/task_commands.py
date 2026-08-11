@@ -18,7 +18,7 @@ from secretary.tasks import (
     TaskReader,
     TaskWriter,
 )
-from triggered_agents.agents.pipeline.heads import CODEX_LAUNCH_MODES
+from triggered_agents.runtime.head import CODEX_LAUNCH_MODES
 
 
 def _add_instance_arg(parser) -> None:

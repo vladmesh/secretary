@@ -20,7 +20,7 @@ from secretary.dispatcher import (
     InstanceCatalog,
 )
 from secretary.dispatcher_observer_fence import EVENT_CLEARED, EVENT_FENCED
-from secretary.dispatcher_launcher import HeadLaunch
+from triggered_agents.runtime.head import HeadCommand
 from secretary.dispatcher_tui import DeliveryEvidence, TuiDeliveryError
 from secretary.dispatcher_observer import (
     EVENT_DEFERRED,
@@ -4698,7 +4698,7 @@ class _ObserverCatalog(FakeCatalog):
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
     ):
-        return HeadLaunch(f"run-{role}")
+        return HeadCommand(f"run-{role}")
 
 
 class _TuiCatalog(FakeCatalog):
@@ -4714,7 +4714,7 @@ class _TuiCatalog(FakeCatalog):
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
     ):
-        return HeadLaunch(f"run-{role}", prompt_after_start=True)
+        return HeadCommand(f"run-{role}", prompt_after_start=True)
 
 
 if __name__ == "__main__":

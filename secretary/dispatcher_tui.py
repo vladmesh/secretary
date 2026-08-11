@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from secretary.dispatcher_launcher import CODEX_HOME_DEFAULT
+from triggered_agents.runtime.codex_preflight import CODEX_HOME_DEFAULT
 from triggered_agents.runtime.claude_sessions import (
     claude_project_dir_name,
     claude_session_paths,

@@ -40,7 +40,13 @@ from secretary import (
 from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, InstanceCatalog
 from secretary.dispatcher_gate import GateResult
 from secretary import dispatcher_launcher
-from secretary.dispatcher_launcher import HeadLaunchError, wrap_role_shell_command
+from secretary.dispatcher_launcher import HeadLaunchError
+from triggered_agents.runtime.head import (
+    RUNTIME_ROLE_ENV,
+    HeadCommandError,
+    render_head_command,
+    wrap_role_command,
+)
 from secretary.role_env import observer_binding
 from secretary import role_env as head_role_env
 from secretary.dispatcher_state import DispatcherRecord
@@ -559,8 +565,9 @@ class RoleRoutingGenerationTests(unittest.TestCase):
         heads.validate_registry(resources, profiles)
         registry = heads.Registry(resources, profiles)
 
-        rendered = heads.render_command(
-            "opus-medium", role="reviewer", prompt="review", registry=registry
+        rendered = render_head_command(
+            registry.profile("opus-medium"), role="reviewer", prompt="review",
+            binding=RUNTIME_ROLE_ENV,
         )
 
         self.assertIn("--model opus --effort medium", rendered.command)
@@ -764,7 +771,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             },
             clear=True,
         ):
-            command = wrap_role_shell_command("worker", "true")
+            command = wrap_role_command("worker", "true")
 
         self.assertIn(f"TA_SECRETARY_REPO={self.root / 'product'}", command)
         self.assertIn(f"PYTHONPATH={self.root / 'product'}", command)
@@ -797,7 +804,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         with mock.patch.dict(
             os.environ, {**unit_env, "PATH": os.environ.get("PATH", "/usr/bin:/bin")}, clear=True
         ):
-            command = wrap_role_shell_command("worker", "printenv TA_SECRETARY_REPO")
+            command = wrap_role_command("worker", "printenv TA_SECRETARY_REPO")
 
         result = subprocess.run(
             ["/bin/sh", "-c", command],
@@ -823,7 +830,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         bound = self.unit_env("secretary-dispatcher-production.service")
         bound["TA_SECRETARY_REPO"] = str(Path(__file__).resolve().parents[1])
         with mock.patch.dict(os.environ, bound, clear=True):
-            command = wrap_role_shell_command("worker", "printenv SECRETARY_INSTANCE")
+            command = wrap_role_command("worker", "printenv SECRETARY_INSTANCE")
 
         # The role wrapper starts in a worktree.  A package there must not shadow the selected
         # control plane merely because Python's default path would put the cwd first.
@@ -872,7 +879,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         bound = self.unit_env("secretary-dispatcher-production.service")
         bound["TA_SECRETARY_REPO"] = str(Path(__file__).resolve().parents[1])
         with mock.patch.dict(os.environ, bound, clear=True):
-            command = wrap_role_shell_command(
+            command = wrap_role_command(
                 "observer",
                 "printenv SECRETARY_OBSERVER_SPRINT; printenv SECRETARY_OBSERVER_GENERATION",
                 identity=identity,
@@ -893,8 +900,8 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
 
     def test_a_worker_head_is_never_given_an_observer_binding(self) -> None:
         """The binding is one role's, and a launcher asking for it elsewhere is a defect."""
-        with self.assertRaisesRegex(HeadLaunchError, "SECRETARY_OBSERVER_SPRINT"):
-            wrap_role_shell_command(
+        with self.assertRaisesRegex(HeadCommandError, "SECRETARY_OBSERVER_SPRINT"):
+            wrap_role_command(
                 "worker", "true", identity=observer_binding("sprint:1126", "abc123def456"),
             )
 
@@ -960,8 +967,9 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
         heads.validate_registry(self.RESOURCES, profiles)
         registry = heads.Registry(self.RESOURCES, profiles)
 
-        rendered = heads.render_command(
-            "bare", role="worker", prompt="do the card", workspace="/tmp/ws", registry=registry
+        rendered = render_head_command(
+            registry.profile("bare"), role="worker", prompt="do the card", workspace="/tmp/ws",
+            binding=RUNTIME_ROLE_ENV,
         )
 
         self.assertTrue(rendered.prompt_after_start)
@@ -989,8 +997,9 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
         for pid in registry.known():
             for role in ("worker", "reviewer", "observer", "curator", "retro", "steward"):
                 with self.subTest(profile=pid, role=role):
-                    rendered = heads.render_command(
-                        pid, role=role, prompt="skill", workspace="/tmp/ws", registry=registry
+                    rendered = render_head_command(
+                        registry.profile(registry.resolve(pid)), role=role, prompt="skill",
+                        workspace="/tmp/ws", binding=RUNTIME_ROLE_ENV,
                     )
                     self.assertNotIn("codex exec", rendered.command)
 

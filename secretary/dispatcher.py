@@ -20,18 +20,11 @@ from secretary.checkpoint import CheckpointPusher, CheckpointWriter
 from secretary.config import validate_instance
 from secretary import state_repo
 from secretary.dispatcher_launcher import (
-    HeadLaunch,
     HeadLaunchError,
     claude_launch_model as _claude_launch_model,
     ensure_claude_workspace_ready as _ensure_claude_workspace_ready,
     ensure_codex_workspace_trusted as _ensure_codex_workspace_trusted,
-    render_claude_launch as _render_claude_launch,
-    render_codex_command as _render_codex_command,
-    render_codex_launch as _render_codex_launch,
-    PYTHON_SAFE_PATH_FLAG as _PYTHON_SAFE_PATH_FLAG,
     role_launch_env as _role_launch_env,
-    with_pid_heartbeat as _with_pid_heartbeat,
-    wrap_role_shell_command as _wrap_role_shell_command,
 )
 from secretary.dispatcher_helpers import (
     RED_REVIEW_CEILING,
@@ -207,18 +200,27 @@ from secretary.tasks import (
     standing_decision,
 )
 from triggered_agents.agents.pipeline.heads import (
-    CODEX_TUI_MODE,
     HeadRegistryError,
     resolve_head_id as _resolve_head_id,
 )
-from triggered_agents.agents.pipeline.task_protocol import pythonpath_prefix
+from triggered_agents.runtime.launch_prefix import pythonpath_prefix
 from triggered_agents.runtime import head as head_ops
-from triggered_agents.runtime.head import HeadSpec, HeadSpecError
+from triggered_agents.runtime.head import (
+    CODEX_TUI_MODE,
+    PYTHON_SAFE_PATH_FLAG as _PYTHON_SAFE_PATH_FLAG,
+    HeadCommand,
+    HeadCommandError,
+    HeadSpec,
+    HeadSpecError,
+    render_head_command as _render_head_command,
+    with_pid_heartbeat as _with_pid_heartbeat,
+)
 from triggered_agents.runtime.pane_host import (
     OrcaSessionHost,
     Pane,
     PaneHostError,
     SessionHost,
+    safe_command_label as _safe_command_label,
 )
 from triggered_agents.runtime.prompt_document import (
     PromptDocumentError,
@@ -539,26 +541,28 @@ class InstanceCatalog:
         role: str,
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
-    ) -> HeadLaunch:
+    ) -> HeadCommand:
+        """The command this workspace's pane will run, with its workspace made fit to run it in.
+
+        Every head this dispatcher brings up is interactive, whatever its adapter: the command
+        carries no prompt and the caller delivers one into the live pane. So `prompt_file` and
+        `launch_prompt` are the caller's own resolved prompt inputs, named here because the caller
+        resolves them the same way for every adapter, and deliberately not passed to the renderer —
+        asking it for the prompt-carrying shape is what would put a worker's task on a command line
+        Orca stores.
+        """
         profile = self._head_profile(head)
-        adapter = profile.get("adapter") if isinstance(profile, dict) else ""
         try:
             self.prepare_head_workspace(head, workspace, role=role)
-            if adapter == "claude":
-                launch = _render_claude_launch(profile, prompt_file, launch_prompt=launch_prompt)
-            else:
-                launch = _render_codex_launch(
-                    profile, prompt_file, workspace=workspace, launch_prompt=launch_prompt
-                )
-        except HeadLaunchError as exc:
+            return _render_head_command(
+                profile if isinstance(profile, dict) else {},
+                prompt=None,
+                workspace=workspace,
+                role=role,
+                identity=identity,
+            )
+        except (HeadLaunchError, HeadCommandError) as exc:
             raise HostError(str(exc)) from None
-        try:
-            wrapped = _wrap_role_shell_command(role, launch.command, identity=identity)
-        except HeadLaunchError as exc:
-            raise HostError(str(exc)) from None
-        return HeadLaunch(
-            wrapped, prompt_after_start=launch.prompt_after_start, adapter=launch.adapter
-        )
 
     def prepare_head_workspace(self, head: str, workspace: str, *, role: str = "") -> None:
         """Pre-answer the first-run questions a head's CLI would otherwise put to an operator.
@@ -1157,12 +1161,15 @@ class CommandHostRuntime:
     def _stop_observer_terminals(self, workspace: str) -> None:
         """Stop every pane of an observer workspace.
 
-        One call for the whole workspace rather than a close per handle: `terminal close` answers
+        One verb for the whole workspace rather than a close per handle: `close_pane` answers
         `tab_not_found` for a pane the runtime never gave a UI tab, and that is every pane a
         dispatcher-launched head gets on a headless serve, so a per-handle close reports a stop
-        that worked as a stop that failed. This is the same call the worker teardown makes.
+        that worked as a stop that failed. This is the same verb the worker teardown reaches for,
+        and it is the session host's rather than this runtime's: a stop of a whole worktree is a
+        pane-lifecycle command like any other, and the only difference from `stop_head` is what it
+        addresses — a workspace nothing can name a head in, not a head.
         """
-        self._run_json(["orca", "terminal", "stop", "--worktree", f"path:{workspace}", "--json"])
+        self.session.stop_workspace(workspace)
 
     def _close_observer_pane(self, handle: str) -> None:
         try:
@@ -1576,8 +1583,8 @@ class CommandHostRuntime:
         """Stop every head of this workspace and let a refusal reach the caller.
 
         The confirmed twin of `stop`. A path that opens a replacement head afterwards cannot use
-        the suppressing one: `orca terminal stop` refusing is not evidence the head is gone, and
-        the replacement would then be the second process on the same checkout.
+        the suppressing one: a refused workspace stop is not evidence the head is gone, and the
+        replacement would then be the second process on the same checkout.
 
         `selector_not_found` is the one exception: as in `_observer_workspace_registered`, it means
         Orca has no worktree left at this path at all, which a stop cannot be refused on since
@@ -1588,9 +1595,7 @@ class CommandHostRuntime:
         if self.mode == "noop" or not record.workspace:
             return
         try:
-            self._run_json(
-                ["orca", "terminal", "stop", "--worktree", f"path:{record.workspace}", "--json"]
-            )
+            self.session.stop_workspace(record.workspace)
         except HostError as exc:
             if "selector_not_found" not in str(exc):
                 raise
@@ -2082,7 +2087,7 @@ class CommandHostRuntime:
             # head has had a chance to overwrite it (secretary-751).
             Path(pid_file).unlink(missing_ok=True)
         command = os.environ.get(env_name)
-        launch = HeadLaunch(command) if command else None
+        launch = HeadCommand(command) if command else None
         if command:
             # A raw command override bypasses the catalog launcher entirely, so it never gets the
             # pid heartbeat wrapper below. That is deliberate: this path exists for tests and
@@ -3038,7 +3043,7 @@ class CommandHostRuntime:
         self._run(["bash", "-lc", command], label, cwd=cwd)
 
     def _run_json(self, args: list[str]) -> dict[str, Any]:
-        completed = self._run(args, _safe_orca_command_label(args))
+        completed = self._run(args, _safe_command_label(args))
         try:
             loaded = json.loads(completed.stdout or "{}")
         except ValueError:
@@ -6200,28 +6205,6 @@ def _continuation_note(generation: int = 0, decision: str = "") -> str:
     if decision.strip():
         note += " Its observer decision outranks the findings below it."
     return note
-
-
-def _safe_orca_command_label(args: list[str]) -> str:
-    """Describe a public terminal send without retaining its prompt in an exception.
-
-    ``CommandHostRuntime._run`` includes its label in failures.  The transport deliberately
-    passes the prompt as ``--text`` and the failure record outlives the pane, so that label must
-    be redacted before a subprocess is started rather than scrubbed after an arbitrary provider
-    error has been made durable.
-    """
-    if args[:3] != ["orca", "terminal", "send"]:
-        return " ".join(args)
-    safe: list[str] = []
-    redact_next = False
-    for arg in args:
-        if redact_next:
-            safe.append("<prompt-redacted>")
-            redact_next = False
-        else:
-            safe.append(arg)
-            redact_next = arg == "--text"
-    return " ".join(safe)
 
 
 def _delivery_evidence_json(carrier: Any, subject: str) -> dict[str, Any]:

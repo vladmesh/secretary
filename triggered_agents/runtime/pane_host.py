@@ -228,6 +228,35 @@ class OrcaSessionHost(OrcaPaneHost):
         self.run_json(["orca", "terminal", "stop", "--worktree", f"path:{workspace}", "--json"])
 
 
+def safe_command_label(args: Sequence[str]) -> str:
+    """Describe one of the argument vectors above without retaining a prompt in an exception.
+
+    A runner includes its label in failures, and a failure record outlives the pane, so the label
+    has to be redacted before a subprocess is started rather than scrubbed after an arbitrary
+    provider error has been made durable. `send` deliberately passes the prompt as `--text`, which
+    is the only argument here that can hold one.
+
+    This lives beside the vectors rather than with the runner that is handed them: which word of an
+    `orca terminal` call carries a prompt is a fact about the CLI this module spells, and a redactor
+    kept anywhere else is a redactor that goes stale the next time a vector changes. It reads a
+    vector rather than building one, so a runner for another session manager passes its own through
+    and gets it back unchanged.
+    """
+    args = list(args)
+    if args[:3] != ["orca", "terminal", "send"]:
+        return " ".join(args)
+    safe: list[str] = []
+    redact_next = False
+    for arg in args:
+        if redact_next:
+            safe.append("<prompt-redacted>")
+            redact_next = False
+        else:
+            safe.append(arg)
+            redact_next = arg == "--text"
+    return " ".join(safe)
+
+
 def pane_host(run_json: RunJson | None = None, *, host: PaneHost | None = None) -> PaneHost:
     """Resolve the host a delivery call should use.
 

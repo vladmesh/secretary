@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.dispatcher import CommandHostRuntime, HostError
-from secretary.dispatcher_launcher import HeadLaunch
+from triggered_agents.runtime.head import HeadCommand
 from secretary.dispatcher_state import DispatcherRecord
 from secretary.dispatcher_tui import (
     DELIVERY_ACCEPTED,
@@ -597,9 +597,9 @@ class TuiCatalog:
         role: str,
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
-    ) -> HeadLaunch:
+    ) -> HeadCommand:
         self.heads.append(head)
-        return HeadLaunch(
+        return HeadCommand(
             "CODEX_HOME=/tmp/codex-home codex --dangerously-bypass-approvals-and-sandbox",
             prompt_after_start=True,
         )

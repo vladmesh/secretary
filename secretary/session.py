@@ -20,6 +20,7 @@ from secretary.board_transport import (
     resolve_for_environ,
 )
 from triggered_agents.agents.pipeline import heads as head_registry
+from triggered_agents.runtime.head import HeadCommandError, render_head_command
 
 
 # The operator names a head the way a human thinks about it ("claude", "codex", "hermes"). Map a
@@ -77,33 +78,24 @@ def render_interactive(
     workspace: str | None = None,
     registry: head_registry.Registry | None = None,
 ) -> str:
-    """The interactive (no seeded prompt) launch command for a profile's adapter."""
+    """The interactive (no seeded prompt) launch command for a profile's adapter.
+
+    The same renderer every launched head goes through, asked for the same shape a dispatcher- or
+    tick-launched head gets: `prompt=None` is the command that carries no prompt, and an operator
+    types into the session once it is up. Two things differ, and both are this caller: the command
+    is not wrapped for a role, because it execs in a terminal the operator already owns with the
+    environment they already have; and a Codex head is not preflighted through `codex_preflight`
+    beforehand, because the trust dialog the flags do not always answer is being put to somebody
+    who is sitting in front of it. So this writes nothing to the runtime's own config.
+    """
     reg = registry or head_registry.load_registry()
     profile = reg.profile(profile_id)
-    adapter = profile.get("adapter")
-    if adapter == "claude":
-        model = profile.get("model")
-        model_flag = f" --model {model}" if model else ""
-        effort = str(profile.get("effort") or "default")
-        effort_flag = f" --effort {effort}" if effort != "default" else ""
-        return f"claude --dangerously-skip-permissions{model_flag}{effort_flag}"
-    if adapter == "codex":
-        # Reuse the pipeline's TUI render: it carries CODEX_HOME, model/effort and the
-        # directory-trust flags for the workspace. Those flags state the intent; codex 0.145 can
-        # still put its dialog up, which is why a dispatcher- or tick-launched head is preflighted
-        # through `codex_preflight` before its pane exists. This command is not one of those: it is
-        # handed to an operator who is sitting in front of the terminal it opens and can answer the
-        # question, so it renders a command and writes nothing to the runtime's own config.
-        return head_registry._render_codex_tui(profile, workspace=workspace or os.getcwd())
-    if adapter == "hermes":
-        parts = ["hermes"]
-        if profile.get("model"):
-            parts += ["-m", profile["model"]]
-        if profile.get("provider"):
-            parts += ["--provider", profile["provider"]]
-        parts += ["--yolo", "--cli"]
-        return " ".join(parts)
-    raise SessionError(f"adapter {adapter!r} has no interactive launch shape")
+    try:
+        return render_head_command(
+            profile, prompt=None, workspace=workspace or os.getcwd()
+        ).command
+    except HeadCommandError as exc:
+        raise SessionError(str(exc)) from None
 
 
 def run_shell(args: argparse.Namespace) -> int:

@@ -1,52 +1,34 @@
-"""Head command rendering for dispatcher-launched workers and reviewers."""
+"""What a dispatcher-launched head needs around its command: workspace preflight, and the model
+and environment its bring-up is journalled with.
+
+The command itself is not built here any more. `triggered_agents.runtime.head.command` renders
+every head of this product from a registry profile — the dispatcher's, a tick's, an operator
+shell's — so the questions left in this module are the ones that are about *this* launcher rather
+than about the head: has the CLI's first-run dialog been answered for the workspace this pane will
+open in, which model will a `claude` bring-up actually run under, and what environment will the
+role wrapper hand it.
+"""
 
 from __future__ import annotations
 
 import json
 import os
-import shlex
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
 from secretary.role_env import (
-    OBSERVER_GENERATION_ENV,
-    OBSERVER_SPRINT_ENV,
-    ROLE_ALLOWLIST,
-    RUNTIME_ENV_FILE_ENVS,
-    UNIT_BOUND_ENV,
     RoleEnvError,
     runtime_env,
 )
-from triggered_agents.agents.pipeline.heads import (
-    CLAUDE_EFFORTS,
-    CODEX_EFFORTS,
-)
-from triggered_agents.agents.pipeline.task_protocol import pythonpath_prefix
 from triggered_agents.runtime.codex_preflight import (
-    CODEX_HOME_DEFAULT,
     CodexPreflightError,
-    codex_home as _codex_home,
-    codex_trust_paths as _codex_trust_paths,
     reject_symlinked_config as _reject_symlinked_config,
 )
 from triggered_agents.runtime.codex_preflight import (
     ensure_codex_workspace_trusted as _preflight_codex_workspace,
 )
 
-# What a launched head has to be told about the installation it belongs to. The env file name
-# first: everything else about the head's runtime comes out of that file.
-#
-# The observer identity is bound the same way but not taken from here: it names one head rather
-# than the installation, so it comes from the record being launched and is passed per call. The
-# dispatcher's own environment must never answer for it.
-LAUNCH_BOUND_ENV = tuple(
-    name for name in (*RUNTIME_ENV_FILE_ENVS, *UNIT_BOUND_ENV)
-    if name not in {OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV}
-)
-
-PYTHON_SAFE_PATH_FLAG = "-P"
 CLAUDE_JSON_DEFAULT = str(Path.home() / ".claude.json")
 CLAUDE_THEME_DEFAULT = "dark"
 # Where the `claude` CLI itself takes a model from when the head profile pins none.
@@ -57,14 +39,12 @@ CLAUDE_MODEL_ENV = "ANTHROPIC_MODEL"
 
 
 class HeadLaunchError(RuntimeError):
-    pass
+    """A head that cannot be brought up in this workspace: its CLI's first-run state is unwritable.
 
-
-@dataclass(frozen=True)
-class HeadLaunch:
-    command: str
-    prompt_after_start: bool = False
-    adapter: str = ""
+    The command's own refusals (an unknown effort, an adapter nothing renders) are
+    `HeadCommandError` from the renderer. A dispatcher catches both, because either one is the same
+    thing to its caller: this head is not going to start.
+    """
 
 
 def ensure_claude_workspace_ready(
@@ -102,93 +82,6 @@ def ensure_codex_workspace_trusted(
         raise HeadLaunchError(str(exc)) from None
 
 
-def render_claude_command(
-    profile: dict[str, Any],
-    prompt_file: str,
-    *,
-    launch_prompt: str | None = None,
-) -> str:
-    args = ["claude", "--dangerously-skip-permissions"]
-    model = profile.get("model")
-    if model:
-        args += ["--model", str(model)]
-    effort = str(profile.get("effort") or "default")
-    if effort not in CLAUDE_EFFORTS:
-        known = ", ".join(sorted(CLAUDE_EFFORTS))
-        raise HeadLaunchError(f"claude profile has unknown effort {effort!r} (known: {known})")
-    if effort != "default":
-        args += ["--effort", effort]
-    return f"{shlex.join(args)} {_delivered_prompt(prompt_file, launch_prompt)}"
-
-
-def render_claude_launch(
-    profile: dict[str, Any],
-    prompt_file: str,
-    *,
-    launch_prompt: str | None = None,
-) -> HeadLaunch:
-    """Start Claude's interactive TUI without putting a prompt on its command line.
-
-    Claude does not need Codex's bracketed-paste body framing, but it must share the same
-    serialized body/submit transport once the pane is ready.  Keeping the prompt out of the
-    command line also means workers, reviewers and observers all get the same receipt and lock
-    boundary, regardless of provider.
-
-    ``prompt_file`` and ``launch_prompt`` remain part of the public renderer signature because
-    callers resolve their inputs before choosing an adapter.  They are deliberately unused here:
-    ``CommandHostRuntime`` sends the resolved body after startup.
-    """
-    del prompt_file, launch_prompt
-    args = ["claude", "--dangerously-skip-permissions"]
-    model = profile.get("model")
-    if model:
-        args += ["--model", str(model)]
-    effort = str(profile.get("effort") or "default")
-    if effort not in CLAUDE_EFFORTS:
-        known = ", ".join(sorted(CLAUDE_EFFORTS))
-        raise HeadLaunchError(f"claude profile has unknown effort {effort!r} (known: {known})")
-    if effort != "default":
-        args += ["--effort", effort]
-    return HeadLaunch(shlex.join(args), prompt_after_start=True, adapter="claude")
-
-
-def render_codex_command(
-    profile: dict[str, Any],
-    prompt_file: str,
-    *,
-    workspace: str,
-    launch_prompt: str | None = None,
-) -> str:
-    return render_codex_launch(
-        profile, prompt_file, workspace=workspace, launch_prompt=launch_prompt
-    ).command
-
-
-def render_codex_launch(
-    profile: dict[str, Any],
-    prompt_file: str,
-    *,
-    workspace: str,
-    launch_prompt: str | None = None,
-) -> HeadLaunch:
-    """The command that brings one Codex head up. There is one shape and it is interactive.
-
-    Nothing selects it: no profile field, no card, no caller argument. The one-shot `codex exec`
-    head is gone (secretary-1173), so a launch mode carried by routing data or by a registry that
-    predates that has nothing left to select and is not consulted here at all.
-
-    The TUI carries no prompt on its command line, which is what `prompt_after_start` says: the
-    caller delivers `launch_prompt` (or the prompt_file contents) through `orca terminal send`
-    once the pane is ready. `prompt_file` and `launch_prompt` are still named on the signature
-    because they are the caller's own prompt inputs, and the caller resolves them the same way for
-    every adapter.
-    """
-    return HeadLaunch(
-        _render_codex_tui_command(profile, workspace=workspace), prompt_after_start=True,
-        adapter="codex",
-    )
-
-
 def claude_launch_model(
     profile: dict[str, Any],
     *,
@@ -206,7 +99,7 @@ def claude_launch_model(
     of guessing which model that is.
 
     `env` is the environment the head itself will run with, which is not the dispatcher's own:
-    heads are executed through `wrap_role_shell_command`, and `role_env.runtime_env` drops every
+    heads are executed through the role env wrapper, and `role_env.runtime_env` drops every
     `runtime.env` variable that is not role-allowlisted. Reading `os.environ` here would journal an
     `ANTHROPIC_MODEL` or a `CLAUDE_CONFIG_DIR` that the CLI never receives. Callers that are not
     launching a head can leave it unset and get the current process environment.
@@ -250,37 +143,6 @@ def _settings_model(path: Path) -> str:
     if not isinstance(loaded, dict):
         return ""
     return str(loaded.get("model") or "").strip()
-
-
-def _render_codex_tui_command(profile: dict[str, Any], *, workspace: str) -> str:
-    # The `projects` overrides below state the intent on the command line; what the TUI actually
-    # checks before it asks about trust is `config.toml`, written by `ensure_codex_workspace_trusted`.
-    args = _codex_base_args(profile)
-    for path in _codex_trust_paths(workspace):
-        args += ["-c", f"projects.{json.dumps(path)}.trust_level=\"trusted\""]
-    return f"CODEX_HOME={shlex.quote(_codex_home(profile))} {shlex.join(args)}"
-
-
-def _codex_base_args(profile: dict[str, Any]) -> list[str]:
-    args = [
-        "codex",
-        "--dangerously-bypass-approvals-and-sandbox",
-    ]
-    model = profile.get("model")
-    if model:
-        args += ["-m", str(model)]
-    effort = _codex_effort(profile)
-    if effort:
-        args += ["-c", f'model_reasoning_effort="{effort}"']
-    return args
-
-
-def _codex_effort(profile: dict[str, Any]) -> str | None:
-    effort_name = str(profile.get("effort") or "default")
-    if effort_name not in CODEX_EFFORTS:
-        known = ", ".join(sorted(CODEX_EFFORTS))
-        raise HeadLaunchError(f"codex profile has unknown effort {effort_name!r} (known: {known})")
-    return CODEX_EFFORTS[effort_name]
 
 
 def _load_claude_config(config: Path) -> dict[str, Any]:
@@ -354,7 +216,7 @@ def _reject_symlinked_claude_config(config: Path) -> None:
 
 
 def role_launch_env(role: str) -> dict[str, str]:
-    """The environment `wrap_role_shell_command` will actually hand a head of `role`.
+    """The environment the role env wrapper will actually hand a head of `role`.
 
     Same call the wrapper makes, so a snapshot taken here sees what the head sees rather than what
     the dispatcher happens to carry. A role the allowlist does not know is not launchable through
@@ -364,82 +226,3 @@ def role_launch_env(role: str) -> dict[str, str]:
         return runtime_env(role)
     except RoleEnvError:
         return dict(os.environ)
-
-
-def launch_binding() -> list[str]:
-    """The installation binding a launched head has to carry in its own command line.
-
-    A head does not start as a child of the dispatcher: Orca creates the terminal, so nothing the
-    dispatcher's unit exported is guaranteed to be in the environment `role_env exec` then runs
-    in. Without these, a dispatcher rendered for a non-default instance launches heads that read
-    the home default's `runtime.env` and route off that installation's heads. Rendering
-    the names into the command is what binds them; the `UNIT_BOUND_ENV` rule inside `runtime_env`
-    then keeps the file from taking the instance back.
-
-    Only names the launcher was actually given are rendered. Writing out the fallback path when
-    nothing selected an installation would state a choice nobody made, and would override whatever
-    the environment the head starts in has to say about it.
-    """
-    return [
-        f"{name}={shlex.quote(value)}"
-        for name in LAUNCH_BOUND_ENV
-        if (value := os.environ.get(name))
-    ]
-
-
-def wrap_role_shell_command(role: str, command: str, *, identity: dict[str, str] | None = None) -> str:
-    """Render one head's command with the installation binding and, for a head that has one, its
-    identity.
-
-    `identity` is rendered beside the installation binding rather than left to `runtime.env`, so
-    the same `UNIT_BOUND_ENV` rule that keeps the file from moving the installation keeps it from
-    renaming the caller. Only names the role's allowlist knows are rendered; anything else would
-    be dropped by `runtime_env` on the way in and is refused here instead of silently ignored.
-    """
-    unknown = sorted(set(identity or {}) - set(ROLE_ALLOWLIST.get(role, ())))
-    if unknown:
-        raise HeadLaunchError(f"role {role!r} carries no binding named {', '.join(unknown)}")
-    rendered = [f"{name}={shlex.quote(value)}" for name, value in sorted((identity or {}).items())]
-    binding = " ".join([*launch_binding(), *rendered])
-    return (
-        f"{binding} {pythonpath_prefix(os.environ)} python3 {PYTHON_SAFE_PATH_FLAG} -m secretary.role_env exec "
-        f"--role {shlex.quote(role)} -- /bin/sh -lc {shlex.quote(command)}"
-    )
-
-
-def with_pid_heartbeat(command: str, pid_file: str) -> str:
-    """Prefix a head's launch command so its own pid lands in `pid_file` right before it execs.
-
-    `$$` inside a shell always names that shell's own pid, and the trailing `exec` replaces the
-    shell's process image with the head instead of forking it as a child, so the pid written here
-    stays the head's own pid for its whole life. That holds regardless of whether the local `sh`
-    would otherwise have folded a single trailing command into an exec on its own: the two
-    statements before `;` force a real shell to run first, which is what makes `$$` mean anything.
-    Orca still keeps the pane's own wrapping shell around once the head exits, but that shell is no
-    longer this pid, so the watchdog can tell the two apart.
-
-    Catalog-launched commands (`head_launch`) start with a leading `NAME=value` environment
-    assignment, e.g. `PYTHONPATH=... python3 -P -m secretary.role_env exec ...`. POSIX `exec` treats
-    the word right after it as the program to run, not an assignment, so `exec PYTHONPATH=... python3`
-    fails to find a program named `PYTHONPATH=...`. Routing the whole command through `env` instead
-    keeps `exec` a single-word invocation while `env` itself parses and applies any leading
-    assignments before it execs the real program in place, so the pid captured above still ends up
-    belonging to the head once `env` hands off to it.
-    """
-    # The terminal already puts its foreground head in a process group. Keeping that terminal
-    # session matters for interactive heads: they need /dev/tty, resize signals and normal pane
-    # teardown. CommandHostRuntime signals that existing group when it is safe to do so.
-    return f'echo "$$" > {shlex.quote(pid_file)}; exec env {command}'
-
-
-def _delivered_prompt(prompt_file: str, launch_prompt: str | None) -> str:
-    """The prompt argument handed to a head on its command line. A launch_prompt is a short
-    literal pointer (task body lives in prompt_file, which the head opens itself); without it
-    the whole prompt_file is piped in as the prompt, the reviewer's REVIEW.md path."""
-    if launch_prompt is not None:
-        return shlex.quote(launch_prompt)
-    return _prompt_substitution(prompt_file)
-
-
-def _prompt_substitution(prompt_file: str) -> str:
-    return f"\"$(cat {shlex.quote(prompt_file)})\""

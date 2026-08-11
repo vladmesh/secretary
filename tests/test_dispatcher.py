@@ -36,10 +36,7 @@ from secretary.dispatcher import (
     _continuation_note,
     _gate_attestation_for_prompt,
     _legacy_worker_branch,
-    _render_codex_command,
-    _render_codex_launch,
     _report_nudge_prompt,
-    _wrap_role_shell_command,
     default_data_dir,
 )
 from secretary.dispatcher_gate import (
@@ -64,7 +61,11 @@ from secretary.dispatcher_launcher import (
     ensure_claude_workspace_ready,
     ensure_codex_workspace_trusted,
     role_launch_env,
+)
+from triggered_agents.runtime.head import (
+    render_head_command,
     with_pid_heartbeat,
+    wrap_role_command,
 )
 from secretary.dispatcher_production import _budget_event_type
 from secretary.dispatcher_review import start_review as start_reviewer
@@ -9242,7 +9243,7 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertEqual((project.model, project.model_source), ("sonnet", "project_settings"))
 
     def test_claude_snapshot_reads_the_env_the_role_wrapper_delivers(self) -> None:
-        """The head does not run in the dispatcher's environment. `wrap_role_shell_command` hands
+        """The head does not run in the dispatcher's environment. `wrap_role_command` hands
         it to `secretary.role_env exec`, which drops every `runtime.env` variable that is not
         role-allowlisted, and `ANTHROPIC_MODEL` is not. A snapshot read from `os.environ` would
         journal a model the launched CLI never receives, so the record is taken from the env the
@@ -9296,7 +9297,7 @@ class DispatcherLauncherTests(unittest.TestCase):
                 # The wrapper binds names out of the launcher's own environment, so it has to be
                 # rendered inside it: rendered outside, a live host's SECRETARY_RUNTIME_ENV_FILE
                 # would reach the launched process and the fixture's runtime.env never would.
-                wrapped = _wrap_role_shell_command("reviewer", probe)
+                wrapped = wrap_role_command("reviewer", probe)
 
             delivered = subprocess.run(
                 ["/bin/sh", "-c", wrapped],
@@ -9391,11 +9392,11 @@ class DispatcherLauncherTests(unittest.TestCase):
             workspace = Path(tmp) / "workspace"
             workspace.mkdir()
 
-            command = _render_codex_command(
+            command = render_head_command(
                 {"adapter": "codex", "model": "gpt-5.5", "effort": "extra", "codex_home": "/tmp/codex-home"},
-                "TASK.md",
+                prompt=None,
                 workspace=str(workspace),
-            )
+            ).command
 
         self.assertIn("CODEX_HOME=/tmp/codex-home codex --dangerously-bypass-approvals-and-sandbox", command)
         self.assertNotIn("codex exec", command)
@@ -9411,11 +9412,12 @@ class DispatcherLauncherTests(unittest.TestCase):
             workspace = Path(tmp) / "workspace"
             workspace.mkdir()
 
-            launch = _render_codex_launch(
+            launch = render_head_command(
                 {"adapter": "codex", "model": "gpt-5.5", "codex_home": "/tmp/codex-home"},
-                "TASK.md",
+                # The prompt inputs a caller resolves for every adapter alike; a Codex head takes
+                # neither on its command line.
+                prompt="read TASK.md first",
                 workspace=str(workspace),
-                launch_prompt="read TASK.md first",
             )
 
         self.assertTrue(launch.prompt_after_start)
@@ -10274,7 +10276,7 @@ class DispatcherLauncherTests(unittest.TestCase):
                 self.assertEqual(git(instance, "show", "HEAD:result.txt"), "green result")
 
     def test_worker_command_is_wrapped_in_role_env(self) -> None:
-        wrapped = _wrap_role_shell_command("worker", "CODEX_HOME=/tmp/codex-home codex exec --dangerously-bypass-approvals-and-sandbox")
+        wrapped = wrap_role_command("worker", "CODEX_HOME=/tmp/codex-home codex exec --dangerously-bypass-approvals-and-sandbox")
 
         self.assertIn("python3 -P -m secretary.role_env exec --role worker", wrapped)
         self.assertIn("/bin/sh -lc", wrapped)
@@ -11787,9 +11789,9 @@ class ReviewCatalog(FakeCatalog):
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
     ):
-        from secretary.dispatcher_launcher import HeadLaunch
+        from triggered_agents.runtime.head import HeadCommand
 
-        return HeadLaunch(f"run-{role}", prompt_after_start=False)
+        return HeadCommand(f"run-{role}", prompt_after_start=False)
 
 
 class PidHeartbeatTests(unittest.TestCase):
@@ -12832,9 +12834,9 @@ class PromptAfterStartCatalog(ReviewCatalog):
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
     ):
-        from secretary.dispatcher_launcher import HeadLaunch
+        from triggered_agents.runtime.head import HeadCommand
 
-        return HeadLaunch(f"run-{role}", prompt_after_start=True)
+        return HeadCommand(f"run-{role}", prompt_after_start=True)
 
 
 class ScriptedWaitHost(CommandHostRuntime):
