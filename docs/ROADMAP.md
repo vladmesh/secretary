@@ -311,10 +311,26 @@ and agent lifecycle.
 - Every contract has a backend-independent contract suite.
 - A failure of the session-manager UI does not destroy task state or recovery semantics.
 
+### Progress (2026-08-11)
+
+The delivery seam of the session protocol exists and is in production. `PaneHost` states the three
+operations delivery needs (send, read, wait_idle) with the current session manager as its one
+implementation; prompt payloads travel as durable documents with only a bounded nudge through the
+pane (`prompt_document.py`), turns are confirmed against the provider's own transcript rather than
+the screen, and an unproven delivery never closes a pane — teardown happens only against exact
+retained identity with the initiator recorded. Screen-state heuristics (idle/readiness
+reconciliation) were rejected as a direction, not merely deferred: the screen is a secondary hint,
+never the deciding signal. The wider head contract this seam grows toward — spec/run split, an
+event stream out, an escalation ladder instead of a liveness poll — is recorded in the instance
+knowledge decision `2026-08-10-golova-protocol-brainstorm.md`. Pane creation, worktree
+registration and computer use remain session-manager-specific, and the second `PaneHost`
+implementation that would settle the backend question by measurement has not been started.
+
 ### Open questions
 
 - Keep the current session manager, move to an existing alternative, maintain a fork, or build a minimal
-  in-house session backend.
+  in-house session backend. The honest way to decide remains a second `PaneHost` implementation
+  running the same pipeline, so bug classes are attributed by measurement rather than argument.
 - Whether there is a real need for a second board backend and a public extension API.
 
 ## Milestone 6. First supported release
