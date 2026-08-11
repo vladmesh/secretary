@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import subprocess
 import tempfile
 import time
 import unittest
@@ -14,6 +16,77 @@ from triggered_agents.runtime import state as runtime_state
 from triggered_agents.runtime import tui_delivery
 from triggered_agents.runtime.agent_prompt_transport import BRACKETED_PASTE_END, BRACKETED_PASTE_START
 from triggered_agents.runtime.claude_sessions import claude_project_dir_name
+from triggered_agents.runtime.pane_host import Pane, PaneHostError
+
+
+class FakeSessionHost:
+    """A session manager for a test: it records what it was asked and answers what it was given.
+
+    The scheduler reaches Orca through `SessionHost` and nothing else (secretary-1416), so a test
+    of what a tick does to its terminals is a test against one of these — no subprocess, no `orca`
+    on the box, and every pane verb observable as the call it is rather than as an argument vector
+    somebody has to re-parse.
+    """
+
+    def __init__(self, *, panes: tuple[Pane, ...] = (), screens: tuple[str, ...] = (),
+                 idle: bool = True, wait_error: BaseException | None = None,
+                 list_error: BaseException | None = None) -> None:
+        self._panes = list(panes)
+        self._screens = list(screens)
+        self._idle = idle
+        self._wait_error = wait_error
+        self._list_error = list_error
+        self.sends: list[str] = []
+        self.enters: list[bool] = []
+        self.waits: list[tuple[str, int]] = []
+        self.reads: list[tuple[str, int | None]] = []
+        self.opened: list[tuple[str, str, str]] = []
+        self.closed: list[str] = []
+        self.stopped: list[str] = []
+
+    # PaneHost
+    def send(self, handle: str, text: str, *, enter: bool) -> dict:
+        self.sends.append(text)
+        self.enters.append(enter)
+        return {"send": {"accepted": True, "bytesWritten": len(text.encode()) + (1 if enter else 0)}}
+
+    def read(self, handle: str, *, limit: int | None = None) -> dict:
+        self.reads.append((handle, limit))
+        screen = self._screens.pop(0) if len(self._screens) > 1 else (
+            self._screens[0] if self._screens else "")
+        return {"terminal": {"tail": screen.splitlines()}}
+
+    def wait_idle(self, handle: str, *, timeout_ms: int) -> dict:
+        self.waits.append((handle, timeout_ms))
+        if self._wait_error is not None:
+            raise self._wait_error
+        return {"wait": {"satisfied": self._idle}}
+
+    # SessionHost
+    def open_pane(self, workspace: str, title: str, command: str) -> Pane:
+        self.opened.append((workspace, title, command))
+        pane = Pane(handle=f"term-{len(self.opened)}", leaf=f"leaf-{len(self.opened)}", title=title)
+        self._panes.append(pane)
+        return pane
+
+    def split_pane(self, handle: str, command: str) -> Pane:
+        raise AssertionError("the scheduler never splits a pane")
+
+    def rename_pane(self, handle: str, title: str) -> None:
+        raise AssertionError("the scheduler never renames a pane")
+
+    def close_pane(self, handle: str) -> None:
+        self.closed.append(handle)
+        self._panes = [pane for pane in self._panes if pane.handle != handle]
+
+    def panes(self, workspace: str) -> list[Pane]:
+        if self._list_error is not None:
+            raise self._list_error
+        return list(self._panes)
+
+    def stop_workspace(self, workspace: str) -> None:
+        self.stopped.append(workspace)
+        self._panes = []
 
 
 class TriggeredDispatchReuseTests(unittest.TestCase):
@@ -30,12 +103,18 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
         self.state_root_patch.start()
         self.addCleanup(self.state_root_patch.stop)
         self.command = dispatch.DispatchCommand("/retro", "claude '/retro'", None)
-        self.term = {"handle": "term-live", "lastOutputAt": 1}
+        self.term = Pane(handle="term-live", leaf="leaf-live", title="triggered-agent:retro",
+                         last_output_at=1.0)
 
     def _common_run_patches(self):
+        """Everything a warm-reuse tick decides that is not about terminals.
+
+        The pane inventory is deliberately NOT among them any more: it comes from the fake session
+        host, so what these tests exercise is the real recognition, survivor and reuse path over an
+        inventory a session manager answered (secretary-1416).
+        """
         return [
             mock.patch.object(dispatch, "_workspace", return_value=self.workspace),
-            mock.patch.object(dispatch, "_agent_terminals", return_value=[self.term]),
             mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)),
             mock.patch.object(dispatch, "_is_idle", return_value=True),
             mock.patch.object(dispatch, "_is_ephemeral", return_value=False),
@@ -44,51 +123,167 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
             mock.patch("triggered_agents.runtime.dispatch.time.sleep"),
         ]
 
+    def _running(self, patches):
+        stack = contextlib.ExitStack()
+        for patch in patches:
+            stack.enter_context(patch)
+        return stack
+
     def _actions(self, agent: str = "retro") -> list[str]:
         runs = self.state_root / agent / "runs.jsonl"
         return [json.loads(line)["action"] for line in runs.read_text(encoding="utf-8").splitlines()]
 
     def test_live_agent_repl_is_reused_after_delivery_is_confirmed(self) -> None:
-        screens = iter([
-            {"terminal": {"tail": ["Claude Code", "❯"]}},
-            {"terminal": {"tail": ["Claude Code", "✻ Forming... (4s · ↑ 13.2k tokens)"]}},
-        ])
-        sent: list[list[str]] = []
+        host = FakeSessionHost(
+            panes=(self.term,),
+            screens=(
+                "Claude Code\n❯",
+                "Claude Code\n✻ Forming... (4s · ↑ 13.2k tokens)",
+            ),
+        )
         patches = self._common_run_patches() + [
-            mock.patch.object(dispatch, "_orca_json", side_effect=lambda args: next(screens)),
-            mock.patch.object(dispatch, "_orca", side_effect=sent.append),
             mock.patch.object(dispatch, "_claude_user_turn_after", side_effect=[False, True]),
         ]
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9], patches[10]:
-            self.assertEqual(dispatch.run("retro"), 0)
+        with self._running(patches):
+            self.assertEqual(dispatch.run("retro", host=host), 0)
 
-        self.assertEqual([call[call.index("--text") + 1] for call in sent], ["/clear", "/retro"])
+        self.assertEqual(host.sends, ["/clear", "/retro"])
+        self.assertEqual(host.enters, [True, True])
         self.assertEqual(self._actions(), ["reused"])
 
+    def test_the_reused_terminal_is_the_one_the_survivor_rule_picked(self) -> None:
+        """Warm reuse addresses the pane that printed last, and closes the duplicates beside it.
+
+        The `/clear`, the skill and the saved handle all name that one pane; every other terminal
+        the inventory recognised as this agent's is closed, which is the legacy-duplicate cleanup
+        this branch has always done (secretary-1416 keeps it a `close_pane` per extra pane, not a
+        workspace stop).
+        """
+        survivor = Pane(handle="term-new", title="triggered-agent:retro", last_output_at=200.0)
+        stale = Pane(handle="term-old", title="triggered-agent:retro", last_output_at=100.0)
+        host = FakeSessionHost(panes=(stale, survivor), screens=("Claude Code\n❯",))
+        patches = [
+            mock.patch.object(dispatch, "_workspace", return_value=self.workspace),
+            mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)),
+            mock.patch.object(dispatch, "_is_ephemeral", return_value=False),
+            mock.patch.object(dispatch, "_reuse_head_is_red", return_value=False),
+            mock.patch.object(dispatch, "_dispatch_command", return_value=self.command),
+            mock.patch("triggered_agents.runtime.dispatch.time.sleep"),
+            mock.patch.object(dispatch, "_claude_user_turn_after", return_value=True),
+        ]
+        with self._running(patches):
+            self.assertEqual(dispatch.run("retro", host=host), 0)
+
+        self.assertEqual(host.closed, ["term-old"])
+        self.assertEqual(host.stopped, [])
+        self.assertEqual([handle for handle, _ in host.waits], ["term-new"])
+        self.assertEqual(self._actions(), ["reused"])
+        self.assertEqual(
+            runtime_state.AgentState("retro").load_terminal_handle(), "term-new"
+        )
+
+    def test_the_idle_probe_keeps_its_condition_its_budget_and_its_two_readings(self) -> None:
+        """`tui-idle` within `IDLE_PROBE_MS`; a refused or timed-out probe is busy, never idle."""
+        answered = FakeSessionHost()
+        self.assertTrue(dispatch._is_idle("term-live", host=answered))
+        self.assertEqual(answered.waits, [("term-live", dispatch.IDLE_PROBE_MS)])
+
+        self.assertFalse(dispatch._is_idle("term-live", host=FakeSessionHost(idle=False)))
+        refused = FakeSessionHost(wait_error=RuntimeError("orca terminal wait failed"))
+        self.assertFalse(dispatch._is_idle("term-live", host=refused))
+        timed_out = FakeSessionHost(
+            wait_error=subprocess.TimeoutExpired(cmd=["orca"], timeout=dispatch.ORCA_TIMEOUT_S)
+        )
+        self.assertFalse(dispatch._is_idle("term-live", host=timed_out))
+
+    def test_a_busy_terminal_is_left_alone_on_the_clock_the_inventory_carries(self) -> None:
+        """The watchdog reads the pane's own last-output time, in seconds, off the inventory."""
+        now = time.time()
+        working = Pane(handle="term-live", title="triggered-agent:retro", last_output_at=now - 5)
+        host = FakeSessionHost(panes=(working,), idle=False)
+        patches = [
+            mock.patch.object(dispatch, "_workspace", return_value=self.workspace),
+            mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)),
+            mock.patch.object(dispatch, "_is_ephemeral", return_value=False),
+            mock.patch.object(dispatch, "_dispatch_command", return_value=self.command),
+        ]
+        with self._running(patches):
+            self.assertEqual(dispatch.run("retro", host=host), 0)
+
+        self.assertEqual(self._actions(), ["busy-skip"])
+        self.assertEqual(host.sends, [])
+        self.assertEqual(host.stopped, [])
+
+    def test_a_stop_is_a_worktree_stop_confirmed_by_a_fresh_inventory(self) -> None:
+        """Not a close of the head's own pane: the whole workspace goes quiet, and the proof that
+        it did is the list that follows, never the stop's own answer."""
+        host = FakeSessionHost(panes=(self.term,))
+        state = runtime_state.AgentState("retro")
+        with mock.patch("triggered_agents.runtime.dispatch.time.sleep"):
+            self.assertTrue(dispatch._stop_and_confirm(self.workspace, state, host=host))
+
+        self.assertEqual(host.stopped, [self.workspace])
+        self.assertEqual(host.closed, [])
+
+    def test_a_stop_the_host_refuses_is_still_judged_by_the_inventory(self) -> None:
+        """`terminal stop`'s refusal was dropped before the seam and is dropped behind it: what
+        decides is whether the workspace is empty afterwards."""
+        class RefusingStop(FakeSessionHost):
+            def stop_workspace(self, workspace: str) -> None:
+                super().stop_workspace(workspace)
+                raise PaneHostError("orca terminal stop failed")
+
+        host = RefusingStop(panes=(self.term,))
+        state = runtime_state.AgentState("retro")
+        with mock.patch("triggered_agents.runtime.dispatch.time.sleep"):
+            self.assertTrue(dispatch._stop_and_confirm(self.workspace, state, host=host))
+        self.assertEqual(host.stopped, [self.workspace])
+
+    def test_a_terminal_created_moments_ago_is_not_read_as_never_spawned(self) -> None:
+        """The visibility grace survives the move: an empty inventory right after a create is a
+        pane Orca has not registered yet, not a workspace to put a second head in."""
+        host = FakeSessionHost()
+        state = runtime_state.AgentState("retro")
+        state.save_terminal_handle("term-live", created_at=time.time())
+        fresh = mock.Mock(return_value=self.command)
+        patches = [
+            mock.patch.object(dispatch, "_workspace", return_value=self.workspace),
+            mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)),
+            mock.patch.object(dispatch, "_is_ephemeral", return_value=False),
+            mock.patch.object(dispatch, "_spawn_fresh_terminal", fresh),
+        ]
+        with self._running(patches):
+            self.assertEqual(dispatch.run("retro", host=host), 0)
+
+        fresh.assert_not_called()
+        self.assertEqual(host.opened, [])
+        self.assertEqual(self._actions(), ["recent-create-guard"])
+
     def test_shell_panel_restarts_without_sending_slash_commands(self) -> None:
-        sent: list[list[str]] = []
+        host = FakeSessionHost(panes=(self.term,), screens=("dev@host:~/workspace$",))
         fresh = mock.Mock(return_value=self.command)
         patches = self._common_run_patches() + [
-            mock.patch.object(
-                dispatch,
-                "_orca_json",
-                return_value={"terminal": {"tail": ["dev@host:~/workspace$"]}},
-            ),
-            mock.patch.object(dispatch, "_orca", side_effect=sent.append),
             mock.patch.object(dispatch, "_stop_and_confirm", return_value=True),
             mock.patch.object(dispatch, "_spawn_fresh_terminal", fresh),
         ]
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9], patches[10], patches[11]:
-            self.assertEqual(dispatch.run("retro"), 0)
+        with self._running(patches):
+            self.assertEqual(dispatch.run("retro", host=host), 0)
 
         fresh.assert_called_once()
-        self.assertEqual(sent, [])
+        self.assertEqual(host.sends, [])
         self.assertEqual(self._actions(), ["warm-repl-restart"])
+
+    def test_the_panel_is_read_as_a_bounded_screen_not_a_whole_scrollback(self) -> None:
+        """The 200-line window the REPL check has always been decided on travels with the read."""
+        host = FakeSessionHost(screens=("Claude Code\n❯",))
+        self.assertTrue(dispatch._agent_repl_visible("term-live", host=host))
+        self.assertEqual(host.reads, [("term-live", 200)])
 
     def test_shell_output_above_the_repl_prompt_does_not_restart_a_live_agent(self) -> None:
         screen = "\n".join(["Claude Code", "dev@host:~/workspace$ from Bash output", "❯"])
-        with mock.patch.object(dispatch, "_terminal_screen", return_value=screen):
-            self.assertTrue(dispatch._agent_repl_visible("term-live"))
+        self.assertTrue(
+            dispatch._agent_repl_visible("term-live", host=FakeSessionHost(screens=(screen,)))
+        )
 
     def test_claude_user_turn_after_reads_the_workspace_session_log(self) -> None:
         projects = Path(self.tmp.name) / "claude-projects"
@@ -115,22 +310,17 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
 
     def test_unconfirmed_reuse_recovers_steward_card_and_fails_dispatch(self) -> None:
         command = dispatch.DispatchCommand("/steward --card secretary-817", "claude", None, "secretary-817")
-        screens = iter([
-            {"terminal": {"tail": ["Claude Code", "❯"]}},
-            {"terminal": {"tail": ["Claude Code", "❯"]}},
-        ])
+        host = FakeSessionHost(panes=(self.term,), screens=("Claude Code\n❯",))
         moved: list[tuple] = []
         patches = self._common_run_patches() + [
             mock.patch.object(dispatch, "_fresh_steward_report_in_progress", return_value=None),
             mock.patch.object(dispatch, "_dispatch_command", return_value=command),
-            mock.patch.object(dispatch, "_orca_json", side_effect=lambda args: next(screens)),
-            mock.patch.object(dispatch, "_orca"),
             mock.patch.object(dispatch, "REUSE_DELIVERY_TIMEOUT_S", 0),
             mock.patch("triggered_agents.agents.pipeline.ops.move_card", side_effect=lambda *args, **kwargs: moved.append((args, kwargs))),
         ]
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8], patches[9], patches[10], patches[11], patches[12], patches[13]:
+        with self._running(patches):
             with self.assertRaises(dispatch.ReuseDeliveryError):
-                dispatch.run("steward")
+                dispatch.run("steward", host=host)
 
         self.assertEqual(moved[0][0], ("steward", "secretary-817", "Done"))
         self.assertIn("dispatch failed", moved[0][1]["reason"])
@@ -180,66 +370,46 @@ class TriggeredCodexHeadTests(unittest.TestCase):
         # run before the pane exists reads the same CODEX_HOME the launch names.
         self.assertEqual(profile_data, self.REGISTRY["profiles"]["codex"])
 
-    def _orca_calls(self, calls: list[list[str]]):
-        """Answer the shared interactive delivery path's Orca calls: idle pane, accepted send."""
-        def run(args: list[str]) -> dict:
-            calls.append(list(args))
-            if "wait" in args:
-                return {"wait": {"satisfied": True}}
-            return {}
-
-        return run
-
-    def _sent_text(self, calls: list[list[str]]) -> list[str]:
-        return [call[call.index("--text") + 1] for call in calls if "send" in call]
-
     def test_the_fresh_terminal_is_given_its_skill_once_the_pane_is_ready(self) -> None:
         """Through the product's one interactive delivery path, not a launch-only one."""
         command = dispatch.DispatchCommand("/retro", "codex", "codex", None, prompt_after_start=True)
-        calls: list[list[str]] = []
+        host = FakeSessionHost()
         state = mock.Mock()
 
         with mock.patch.object(dispatch, "_dispatch_command", return_value=command), \
              mock.patch.object(dispatch, "_ensure_claude_ready"), \
              mock.patch.object(dispatch, "_create_terminal", return_value="term-codex"), \
-             mock.patch.object(dispatch, "_orca_json", side_effect=self._orca_calls(calls)), \
-             mock.patch.object(dispatch, "_orca") as legacy_send, \
              mock.patch.object(dispatch, "_codex_turn_after", return_value=True), \
              mock.patch("triggered_agents.runtime.tui_delivery.time.sleep"):
-            dispatch._spawn_fresh_terminal("retro", None, self.workspace, state, "dispatch")
+            dispatch._spawn_fresh_terminal("retro", None, self.workspace, state, "dispatch",
+                                           host=host)
 
-        sends = [call for call in calls if "send" in call]
         self.assertEqual(
-            self._sent_text(calls), [f"{BRACKETED_PASTE_START}/retro{BRACKETED_PASTE_END}", ""]
+            host.sends, [f"{BRACKETED_PASTE_START}/retro{BRACKETED_PASTE_END}", ""]
         )
-        self.assertNotIn("--enter", sends[0])
-        self.assertIn("--enter", sends[1])
-        self.assertIn(["terminal", "wait", "--terminal", "term-codex", "--for", "tui-idle",
-                       "--timeout-ms", str(tui_delivery.TUI_IDLE_TIMEOUT_MS)], calls)
-        legacy_send.assert_not_called()
+        self.assertEqual(host.enters, [False, True])
+        self.assertIn(("term-codex", tui_delivery.TUI_IDLE_TIMEOUT_MS), host.waits)
+        # The skill itself is never typed the warm-reuse way into a head being brought up.
+        self.assertNotIn("/retro", host.sends)
 
     def test_a_warm_codex_head_is_prompted_through_the_same_path(self) -> None:
         """Warm reuse is the same delivery contract: no second transport for an older pane."""
         command = dispatch.DispatchCommand("/retro", "codex", "codex", None, prompt_after_start=True)
-        calls: list[list[str]] = []
+        host = FakeSessionHost()
 
         with mock.patch.object(dispatch, "_dispatch_command", return_value=command), \
-             mock.patch.object(dispatch, "_orca_json", side_effect=self._orca_calls(calls)), \
-             mock.patch.object(dispatch, "_orca") as legacy_send, \
              mock.patch.object(dispatch, "_codex_turn_after", return_value=True), \
              mock.patch.object(dispatch, "_claude_user_turn_after", return_value=False), \
              mock.patch("triggered_agents.runtime.tui_delivery.time.sleep"):
             dispatch._send_reuse_dispatch(
-                "retro", None, "term-codex", self.workspace, mock.Mock(), "dispatch"
+                "retro", None, "term-codex", self.workspace, mock.Mock(), "dispatch", host=host
             )
 
-        sends = [call for call in calls if "send" in call]
         self.assertEqual(
-            self._sent_text(calls), [f"{BRACKETED_PASTE_START}/retro{BRACKETED_PASTE_END}", ""]
+            host.sends, [f"{BRACKETED_PASTE_START}/retro{BRACKETED_PASTE_END}", ""]
         )
-        self.assertNotIn("--enter", sends[0])
-        self.assertIn("--enter", sends[1])
-        legacy_send.assert_not_called()
+        self.assertEqual(host.enters, [False, True])
+        self.assertNotIn("/retro", host.sends)
 
     def test_an_unconfirmed_codex_prompt_fails_on_the_shared_delivery_contract(self) -> None:
         """A pane that takes the prompt but never records a turn is the shared path's failure."""
@@ -248,26 +418,26 @@ class TriggeredCodexHeadTests(unittest.TestCase):
         with mock.patch.object(dispatch, "_dispatch_command", return_value=command), \
              mock.patch.object(dispatch, "_ensure_claude_ready"), \
              mock.patch.object(dispatch, "_create_terminal", return_value="term-codex"), \
-             mock.patch.object(dispatch, "_orca_json", side_effect=self._orca_calls([])), \
              mock.patch.object(dispatch, "_codex_turn_after", return_value=False), \
              mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.05), \
              mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01), \
              mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0):
             with self.assertRaises(tui_delivery.TuiDeliveryError):
-                dispatch._spawn_fresh_terminal("retro", None, self.workspace, mock.Mock(), "dispatch")
+                dispatch._spawn_fresh_terminal("retro", None, self.workspace, mock.Mock(),
+                                               "dispatch", host=FakeSessionHost())
 
     def test_a_claude_service_head_is_not_typed_at_after_its_launch(self) -> None:
         """Its command already seeds the skill; sending it again would run the agent twice."""
         command = dispatch.DispatchCommand("/retro", "claude '/retro'", "claude-opus", None)
-        sent: list[list[str]] = []
+        host = FakeSessionHost()
 
         with mock.patch.object(dispatch, "_dispatch_command", return_value=command), \
              mock.patch.object(dispatch, "_ensure_claude_ready"), \
-             mock.patch.object(dispatch, "_create_terminal", return_value="term-claude"), \
-             mock.patch.object(dispatch, "_orca", side_effect=sent.append):
-            dispatch._spawn_fresh_terminal("retro", None, self.workspace, mock.Mock(), "dispatch")
+             mock.patch.object(dispatch, "_create_terminal", return_value="term-claude"):
+            dispatch._spawn_fresh_terminal("retro", None, self.workspace, mock.Mock(), "dispatch",
+                                           host=host)
 
-        self.assertEqual(sent, [])
+        self.assertEqual(host.sends, [])
 
     def test_a_pane_that_never_becomes_ready_fails_the_dispatch(self) -> None:
         """The terminal is left up on purpose: the next tick finds it idle and re-sends there,
@@ -275,21 +445,23 @@ class TriggeredCodexHeadTests(unittest.TestCase):
         command = dispatch.DispatchCommand("/retro", "codex", "codex", None, prompt_after_start=True)
         state = mock.Mock()
 
-        def never_ready(args: list[str]) -> dict:
-            if "wait" in args:
-                raise RuntimeError('orca wait failed: {"error": {"code": "timeout"}}')
-            raise AssertionError("a pane that never came up must not be sent a prompt")
+        class NeverReady(FakeSessionHost):
+            def send(self, handle: str, text: str, *, enter: bool) -> dict:
+                raise AssertionError("a pane that never came up must not be sent a prompt")
+
+        host = NeverReady(
+            wait_error=RuntimeError('orca wait failed: {"error": {"code": "timeout"}}')
+        )
 
         with mock.patch.object(dispatch, "_dispatch_command", return_value=command), \
              mock.patch.object(dispatch, "_ensure_claude_ready"), \
              mock.patch.object(dispatch, "_create_terminal", return_value="term-codex"), \
-             mock.patch.object(dispatch, "_orca_json", side_effect=never_ready), \
-             mock.patch.object(dispatch, "_orca") as orca, \
              mock.patch.object(dispatch, "_stop_and_confirm") as stop:
             with self.assertRaises(RuntimeError):
-                dispatch._spawn_fresh_terminal("retro", None, self.workspace, state, "dispatch")
+                dispatch._spawn_fresh_terminal("retro", None, self.workspace, state, "dispatch",
+                                               host=host)
 
-        orca.assert_not_called()
+        self.assertEqual(host.sends, [])
         stop.assert_not_called()
         state.save_active_report.assert_not_called()
 
@@ -361,7 +533,7 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
     def test_a_fresh_codex_service_workspace_is_trusted_before_its_pane_exists(self) -> None:
         order: list[str] = []
 
-        def create(agent, ws, launch, state, profile):
+        def create(agent, ws, launch, state, profile, *, host):
             order.append("create")
             # What the pane is created against has to be a workspace already recorded as trusted;
             # answering the dialog afterwards would be answering it too late.
@@ -371,8 +543,9 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
         with mock.patch.object(dispatch, "_dispatch_command", return_value=self.command), \
              mock.patch.object(dispatch, "_create_terminal", side_effect=create), \
              mock.patch.object(dispatch, "_deliver_interactive_skill",
-                               side_effect=lambda *a: order.append("deliver")):
-            dispatch._spawn_fresh_terminal("retro", None, self.workspace, mock.Mock(), "dispatch")
+                               side_effect=lambda *a, **kw: order.append("deliver")):
+            dispatch._spawn_fresh_terminal("retro", None, self.workspace, mock.Mock(), "dispatch",
+                                           host=FakeSessionHost())
 
         self.assertEqual(order, ["create", "trusted", "deliver"])
         trusted = self._trusted()
@@ -386,9 +559,9 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
 
         with mock.patch.object(dispatch, "_dispatch_command", return_value=command), \
              mock.patch.object(dispatch, "_ensure_claude_ready") as claude_ready, \
-             mock.patch.object(dispatch, "_create_terminal", return_value="term-claude"), \
-             mock.patch.object(dispatch, "_orca"):
-            dispatch._spawn_fresh_terminal("retro", None, self.workspace, mock.Mock(), "dispatch")
+             mock.patch.object(dispatch, "_create_terminal", return_value="term-claude"):
+            dispatch._spawn_fresh_terminal("retro", None, self.workspace, mock.Mock(), "dispatch",
+                                           host=FakeSessionHost())
 
         claude_ready.assert_called_once_with(self.workspace)
         self.assertFalse(self.codex_home.exists())
@@ -407,7 +580,8 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
              mock.patch.object(dispatch, "_create_terminal") as create, \
              mock.patch.object(dispatch, "_deliver_interactive_skill") as deliver:
             with self.assertRaises(dispatch.CodexPreflightError):
-                dispatch._spawn_fresh_terminal("retro", None, self.workspace, state, "dispatch")
+                dispatch._spawn_fresh_terminal("retro", None, self.workspace, state, "dispatch",
+                                               host=FakeSessionHost())
 
         create.assert_not_called()
         deliver.assert_not_called()
@@ -438,7 +612,8 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
              mock.patch("triggered_agents.agents.pipeline.ops.move_card",
                         side_effect=lambda *args, **kwargs: moved.append((args, kwargs))):
             with self.assertRaises(dispatch.CodexPreflightError):
-                dispatch._spawn_fresh_terminal("steward", None, self.workspace, state, "dispatch")
+                dispatch._spawn_fresh_terminal("steward", None, self.workspace, state, "dispatch",
+                                               host=FakeSessionHost())
 
         create.assert_not_called()
         self.assertEqual(moved[0][0], ("steward", "secretary-817", "Blocked"))

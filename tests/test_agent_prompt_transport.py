@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import threading
 import unittest
 from unittest import mock
@@ -13,7 +14,7 @@ from triggered_agents.runtime.agent_prompt_transport import (
     prepare_agent_prompt,
     send_agent_prompt,
 )
-from triggered_agents.runtime.dispatch import _safe_orca_args_label
+from triggered_agents.runtime import dispatch
 from triggered_agents.runtime.tui_delivery import read_pane, wait_for_tui_idle
 
 
@@ -185,13 +186,24 @@ class AgentPromptTransportTests(unittest.TestCase):
             send_agent_prompt("term-1", prepared)
 
     def test_public_runner_labels_never_include_the_prompt_body(self) -> None:
+        """Both runners that reach Orca redact before a failure of theirs becomes durable.
+
+        The dispatcher's is a label predicate; the mechanical-role scheduler's is the failure its
+        runner raises, which is where its prompt could otherwise end up — it has no redactor of its
+        own any more, it runs the vectors `pane_host` spells and labels them with `pane_host`'s
+        own predicate (secretary-1416).
+        """
         prompt = "do not retain this 🔐\nsecond line"
         dispatcher_label = safe_command_label(
             ["orca", "terminal", "send", "--terminal", "term-1", "--text", prompt, "--json"]
         )
-        service_label = _safe_orca_args_label(
-            ["terminal", "send", "--terminal", "term-1", "--text", prompt]
-        )
+        refused = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="nope")
+        with mock.patch("triggered_agents.runtime.dispatch.subprocess.run", return_value=refused):
+            with self.assertRaises(RuntimeError) as raised:
+                dispatch._run_json(
+                    ["orca", "terminal", "send", "--terminal", "term-1", "--text", prompt, "--json"]
+                )
+        service_label = str(raised.exception)
 
         self.assertNotIn(prompt, dispatcher_label)
         self.assertNotIn(prompt, service_label)

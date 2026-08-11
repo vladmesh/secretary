@@ -11,6 +11,7 @@ import sys
 import time
 
 from . import role_env
+from .pane_host import SessionHost, session_host
 from .state import AgentState
 
 
@@ -59,7 +60,8 @@ def spawn_finalizer(agent: str, generation: int | None = None) -> int:
     return 0
 
 
-def _finalize_locked(agent: str, ws: str, state: AgentState, generation: int | None) -> int:
+def _finalize_locked(agent: str, ws: str, state: AgentState, generation: int | None, *,
+                     host: SessionHost) -> int:
     """Tear down a completed terminal while holding its lifecycle lock.
 
     A helper for an older generation only reaps its ghost tab. It must never issue the
@@ -75,7 +77,7 @@ def _finalize_locked(agent: str, ws: str, state: AgentState, generation: int | N
         print(f"dispatch[{agent}]: finalize — terminal already superseded by a newer run"
               f"{f'; reaped {reaped} ghost(s)' if reaped else ''}{tail}")
         return 0
-    if dispatch._stop_and_confirm_workspace_empty(ws):
+    if dispatch._stop_and_confirm_workspace_empty(ws, host=host):
         _, ok = dispatch._reap_ghosts(ws)
         state.save_terminal_handle(None)
         if ok:
@@ -102,10 +104,13 @@ def finalize(agent: str, generation: int | None = None) -> int:
         return 0
     ws = dispatch._workspace(agent)
     state = AgentState(agent)
+    # This helper runs in its own detached process, so it resolves the session manager once here
+    # and hands it down, exactly as a tick does — nothing below opens a route to Orca of its own.
+    host = session_host(dispatch._run_json)
     for attempt in range(dispatch.FINALIZE_LOCK_ATTEMPTS):
         try:
             with state.lock():
-                return _finalize_locked(agent, ws, state, generation)
+                return _finalize_locked(agent, ws, state, generation, host=host)
         except SystemExit:
             if attempt + 1 >= dispatch.FINALIZE_LOCK_ATTEMPTS:
                 state.log_run("finalize", action="self-teardown-deferred", generation=generation)

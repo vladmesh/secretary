@@ -287,14 +287,22 @@ def payload_fingerprint(prompt: str) -> tuple[int, str]:
     return len(raw), _digest(prompt or "")
 
 
-def read_pane(handle: str, *, run_json: RunJson | None = None, host: PaneHost | None = None) -> PaneRead:
+def read_pane(
+    handle: str, *, run_json: RunJson | None = None, host: PaneHost | None = None,
+    limit: int | None = None,
+) -> PaneRead:
     """One pane read: the tail, ANSI stripped, and the session manager's output cursor with it.
 
     A pane that cannot be read is not a failure here: it costs the delivery its composer and
     cursor evidence and leaves it on readiness alone, which is strictly what it had before.
+
+    `limit` bounds the retained output asked for, for a caller that reads a panel rather than a
+    position: the scheduler decides "is an agent REPL on screen" on the last screenful and would
+    answer differently off a whole scrollback. Delivery itself passes none — its evidence is the
+    cursor, and a bounded window would only cost it composer text.
     """
     try:
-        data = resolve_pane_host(run_json, host=host).read(handle)
+        data = resolve_pane_host(run_json, host=host).read(handle, limit=limit)
     except Exception:
         return PaneRead()
     terminal = data.get("terminal") if isinstance(data, dict) and isinstance(data.get("terminal"), dict) else data
@@ -323,10 +331,11 @@ def read_pane(handle: str, *, run_json: RunJson | None = None, host: PaneHost | 
 
 
 def read_pane_text(
-    handle: str, *, run_json: RunJson | None = None, host: PaneHost | None = None
+    handle: str, *, run_json: RunJson | None = None, host: PaneHost | None = None,
+    limit: int | None = None,
 ) -> str:
     """The pane's text alone, for callers that read a screen rather than a position."""
-    return read_pane(handle, run_json=run_json, host=host).text
+    return read_pane(handle, run_json=run_json, host=host, limit=limit).text
 
 
 def strip_ansi(text: str) -> str:
