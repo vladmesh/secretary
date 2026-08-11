@@ -14,7 +14,7 @@ from unittest import mock
 from secretary.board import (
     Actor, BoardEventCanon, BoardEventPending, BoardProtocolError, Card, CardState,
     Create, EntityKind, Event, EventKind, FakeBoardHost, InvalidTransition,
-    KanboardBoardHost, MutationEventTransaction, RelatedRefs, Replace, TRANSITIONS,
+    KanboardBoardHost, MutationEventTransaction, RelatedRefs, Replace, SprintState, TRANSITIONS,
     TransitionRequest,
 )
 from secretary.board.card_transitions import CARD_TRANSITIONS, CardTransitionForbidden, card_transition
@@ -557,6 +557,21 @@ class KanboardBoardHostTests(unittest.TestCase):
             self.assertEqual([card.ref for card in cards], ["secretary-1417"])
             with self.assertRaises(BoardProtocolError):
                 host.read(EntityKind.CARD, "issue:1417")
+
+    def test_only_card_transitions_are_migrated_off_the_established_writers(self) -> None:
+        """Card state edges are this slice; every other mutation still names its own migration."""
+        host = KanboardBoardHost(mock.sentinel.client, data_dir="/data", instance="/instance")
+        card = Card("secretary-1420", "Card host transitions", CardState.READY)
+
+        with self.assertRaisesRegex(BoardProtocolError, "create for card is not migrated"):
+            host.create(Create(card, Actor("po", "operator"), "accepted"))
+        with self.assertRaisesRegex(BoardProtocolError, "replace for card is not migrated"):
+            host.replace(Replace(card, Actor("po", "operator"), "edited"))
+        with self.assertRaisesRegex(BoardProtocolError, "transition for sprint is not migrated"):
+            host.transition(TransitionRequest(
+                EntityKind.SPRINT, "sprint:943", SprintState.CLOSED, Actor("po", "operator"),
+                "closing the sprint",
+            ))
 
     def test_sprint_product_ref_can_read_the_linked_product(self) -> None:
         sprint = {

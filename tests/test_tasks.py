@@ -11,14 +11,15 @@ import subprocess
 import tempfile
 import threading
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
 from secretary.cli import main
 from secretary.board.card_transitions import CARD_TRANSITIONS
 from secretary.board.host import TransitionRequest
-from secretary.board.models import Actor, CardState, EntityKind, RelatedRefs
-from secretary.board.transitions import TRANSITIONS
+from secretary.board.models import Actor, CardState, EntityKind, Event, RelatedRefs
+from secretary.board.transitions import TRANSITIONS, transition_for
 from secretary.board_transport import BoardTransport
 from secretary.data import export_board
 from secretary.sprints import refresh_active_sprint_projects
@@ -515,6 +516,95 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
         self.assertEqual(moves, len([call for call in self.client.calls if call[0] == "moveTaskPosition"]))
 
+    def test_the_typed_event_is_staged_exactly_once_before_the_column_effect(self) -> None:
+        """Staging is a precondition of the effect, and the committed event is that same record."""
+        self.client.tasks[0]["column_id"] = 3
+        staged: list[dict | None] = []
+        real_call = self.client.call
+
+        def call(method: str, **params: object) -> object:
+            if method == "moveTaskPosition":
+                staged.append(self.writer.audit.pending_event("staged-once"))
+            return real_call(method, **params)
+
+        with mock.patch.object(self.client, "call", call):
+            self.writer.move(
+                role="dispatcher", actor="d", reference="secretary-468", target="validate",
+                reason="submit", request_id="staged-once",
+            )
+
+        self.assertEqual(len(staged), 1)
+        self.assertEqual(staged[0]["record_type"], "board.protocol_event")
+        self.assertEqual(staged[0]["transition"], {"source": "in_progress", "target": "validate"})
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+        self.assertEqual(
+            self.writer.audit.committed_event("staged-once")["event_id"], staged[0]["event_id"],
+        )
+
+    def _pending_typed_move(self, request_id: str, target: str = "ready") -> int:
+        """Leave the supported post-effect failure: the column moved, its event did not commit."""
+        self.client.tasks[0]["column_id"] = 3
+        with mock.patch.object(self.writer.audit, "append", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(TaskError, "audit repair"):
+                self.writer.move(
+                    role="dispatcher", actor="d", reference="secretary-468", target=target,
+                    reason="", request_id=request_id,
+                )
+        self.assertEqual(self.writer.reader.show("secretary-468")["state"], target)
+        self.assertEqual(self.client.metadata[12]["claim"], "codex-terra")
+        return len([call for call in self.client.calls if call[0] == "moveTaskPosition"])
+
+    def test_reconcile_finishes_the_ready_cleanup_of_a_typed_pending_transition(self) -> None:
+        """Recovery owes the board the same reset the move owed it, and no second move."""
+        moves = self._pending_typed_move("pending-ready-cleanup")
+
+        self.assertEqual(self.writer.reconcile(), (1, 0))
+
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+        self.assertEqual(moves, len([call for call in self.client.calls if call[0] == "moveTaskPosition"]))
+        task = self.writer.reader.show("secretary-468")
+        self.assertIsNone(task["claim"]["worker"])
+        self.assertEqual(task["retry"], {"same": 0, "switched": 0, "heads": []})
+        committed = self.writer.audit.committed_event("pending-ready-cleanup")
+        self.assertEqual(committed["transition"], {"source": "in_progress", "target": "ready"})
+
+    def test_recovery_refuses_a_typed_pending_transition_the_board_contradicts(self) -> None:
+        moves = self._pending_typed_move("contradicted-ready")
+        # Another writer moved the card on. The recorded target is no longer live, so the
+        # occurrence is not proven and nothing about it may be published or re-applied.
+        self.client.tasks[0]["column_id"] = 5
+
+        self.assertEqual(self.writer.reconcile(), (0, 1))
+
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+        self.assertEqual(moves, len([call for call in self.client.calls if call[0] == "moveTaskPosition"]))
+        self.assertEqual(self.client.metadata[12]["claim"], "codex-terra")
+        pending = self.writer.audit.pending_event("contradicted-ready")
+        self.assertEqual(pending["transition"], {"source": "in_progress", "target": "ready"})
+
+    def test_recovery_refuses_a_typed_pending_transition_whose_card_vanished(self) -> None:
+        moves = self._pending_typed_move("vanished-ready")
+        self.client.tasks.pop(0)
+
+        self.assertEqual(self.writer.reconcile(), (0, 1))
+
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+        self.assertEqual(moves, len([call for call in self.client.calls if call[0] == "moveTaskPosition"]))
+        self.assertIsNotNone(self.writer.audit.pending_event("vanished-ready"))
+
+    def test_a_refused_card_edge_stages_no_typed_event(self) -> None:
+        with self.assertRaisesRegex(TaskError, "may not move") as raised:
+            self.writer.move(
+                role="po", actor="p", reference="secretary-468", target="ready", reason="",
+                request_id="refused-edge",
+            )
+
+        self.assertEqual(raised.exception.code, "transition_forbidden")
+        self.assertFalse(any(call[0] == "moveTaskPosition" for call in self.client.calls))
+        self.assertIsNone(self.writer.audit.event("refused-edge"))
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+        self.assertFalse(Path(self.writer.audit.events_path).exists())
+
     def test_generic_pending_contender_cannot_be_published_as_a_typed_transition(self) -> None:
         self.client.tasks[0]["column_id"] = 3
         self.writer.audit.stage("contended-transition", {
@@ -925,13 +1015,29 @@ class TaskWriterTests(unittest.TestCase):
         )
 
     def test_post_transition_comment_failure_leaves_the_typed_event_committed(self) -> None:
+        """The comment is the one follow-up a replay must not repeat.
+
+        The released reconciliation never recreated a move comment either: it is not idempotent,
+        so a second attempt would put the same text on the card twice.
+        """
         self.client.tasks[0]["column_id"] = 3
         self.client.fail_comments = True
-        with self.assertRaisesRegex(TaskError, "follow-up board cleanup") as raised:
-            self.writer.move(role="dispatcher", actor="d", reference="secretary-468", target="validate", reason="why")
+        with self.assertRaisesRegex(TaskError, "finish the board cleanup") as raised:
+            self.writer.move(
+                role="dispatcher", actor="d", reference="secretary-468", target="validate",
+                reason="why", request_id="comment-failure",
+            )
         self.assertEqual(raised.exception.code, "audit_pending")
         self.assertEqual(self.client.tasks[0]["column_id"], 4)
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+
+        self.client.fail_comments = False
+        replayed = self.writer.move(
+            role="dispatcher", actor="d", reference="secretary-468", target="validate",
+            reason="why", request_id="comment-failure",
+        )
+        self.assertTrue(replayed["replayed"])
+        self.assertEqual(self.client.comments[12], [])
 
     def test_restore_move_failure_keeps_pending_audit(self) -> None:
         self.client.fail_move = True
@@ -1000,10 +1106,11 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(result["task"]["ref"], "secretary-restore")
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
 
-    def test_ready_cleanup_failure_leaves_no_generic_pending_transition(self) -> None:
+    def test_ready_cleanup_failure_records_the_typed_event_and_leaves_the_board_repairable(self) -> None:
+        """The state edge and its event are durable; only the idempotent reset is outstanding."""
         self.client.tasks[0]["column_id"] = 3
         self.client.fail_metadata = True
-        with self.assertRaisesRegex(TaskError, "follow-up board cleanup") as raised:
+        with self.assertRaisesRegex(TaskError, "finish the board cleanup") as raised:
             self.writer.move(role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="")
         self.assertEqual(raised.exception.code, "audit_pending")
         self.assertEqual(self.client.tasks[0]["column_id"], 2)
@@ -1011,13 +1118,14 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
         event = json.loads(Path(self.writer.audit.events_path).read_text(encoding="utf-8"))
         self.assertEqual(event["record_type"], "board.protocol_event")
+        self.assertEqual(event["transition"], {"source": "in_progress", "target": "ready"})
 
-    def test_committed_ready_replay_does_not_repeat_the_column_move(self) -> None:
+    def test_committed_ready_replay_finishes_cleanup_without_repeating_the_column_move(self) -> None:
         self.client.tasks[0]["column_id"] = 3
         self.client.metadata[12]["resolved_head"] = "codex-terra"
         self.client.metadata[12]["resolved_review_head"] = "codex-reviewer"
         self.client.fail_metadata = True
-        with self.assertRaisesRegex(TaskError, "follow-up board cleanup"):
+        with self.assertRaisesRegex(TaskError, "finish the board cleanup"):
             self.writer.move(
                 role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="",
                 request_id="ready-replay",
@@ -1026,6 +1134,7 @@ class TaskWriterTests(unittest.TestCase):
         moves = len([call for call in self.client.calls if call[0] == "moveTaskPosition"])
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
 
+        self.client.fail_metadata = False
         replayed = self.writer.move(
             role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="",
             request_id="ready-replay",
@@ -1033,8 +1142,15 @@ class TaskWriterTests(unittest.TestCase):
         self.assertTrue(replayed["replayed"])
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
         self.assertEqual(moves, len([call for call in self.client.calls if call[0] == "moveTaskPosition"]))
+        with open(self.writer.audit.events_path, encoding="utf-8") as events:
+            self.assertEqual(len(events.readlines()), 1)
 
         self.assertEqual(replayed["task"]["state"], "ready")
+        task = self.writer.reader.show("secretary-468")
+        self.assertIsNone(task["claim"]["worker"])
+        self.assertIsNone(task["routing"]["resolved_worker_head"])
+        self.assertIsNone(task["routing"]["resolved_review_head"])
+        self.assertEqual(task["retry"], {"same": 0, "switched": 0, "heads": []})
 
     def test_dispatcher_claim_stamps_metadata_moves_and_audits(self) -> None:
         self.client.metadata[12]["claim"] = ""
@@ -1793,6 +1909,10 @@ class AssessmentStateTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "decision_required")
         self.assertEqual(self.client.tasks[0]["column_id"], 7)
+        # The decision rule runs before the typed canon is touched at all: a refused release
+        # leaves neither a staged event to recover nor a request id somebody has to release.
+        self.assertIsNone(self.writer.audit.event("undecided-release"))
+        self.assertEqual(self.writer.audit.status()["pending"], 0)
 
     def test_a_move_naming_a_decision_nobody_recorded_is_refused(self) -> None:
         """Carrying the word is not deciding: the audit is what the refusal reads."""
@@ -1985,6 +2105,44 @@ class AssessmentStateTests(unittest.TestCase):
             self.assertTrue(is_significant_observer_event(
                 semantic, linked_refs=refs, sprint_ref=SPRINT,
             ))
+
+    def test_observer_wake_predicate_reads_typed_transitions_by_their_own_shape(self) -> None:
+        """The migrated representation carries the same semantics, in its own fields.
+
+        The predicate is told which record it holds by ``record_type``; it never reads a
+        transition out of a generic payload or an outcome out of a typed one.
+        """
+        refs = {"secretary-468"}
+
+        def typed(source: CardState, target: CardState, *, actor: str = "dispatcher") -> dict:
+            declaration = transition_for(EntityKind.CARD, source, target)
+            return Event(
+                f"board-event-{actor}-{source.value}-{target.value}", declaration.event_kind,
+                EntityKind.CARD, "secretary-468", Actor(actor, actor), "why",
+                datetime(2026, 8, 11, tzinfo=UTC),
+                source_state=source.value, target_state=target.value,
+            ).to_record(f"request-{actor}-{source.value}-{target.value}")
+
+        for routine in (
+            typed(CardState.READY, CardState.IN_PROGRESS),
+            typed(CardState.IN_PROGRESS, CardState.VALIDATE),
+            typed(CardState.VALIDATE, CardState.IN_PROGRESS),
+            typed(CardState.IN_PROGRESS, CardState.READY),
+            # The observer's own writes never wake it again, whatever the edge says.
+            typed(CardState.VALIDATE, CardState.BLOCKED, actor="observer"),
+        ):
+            self.assertFalse(
+                is_significant_observer_event(routine, linked_refs=refs, sprint_ref=SPRINT), routine,
+            )
+        for semantic in (
+            typed(CardState.VALIDATE, CardState.ASSESSMENT),
+            typed(CardState.IN_PROGRESS, CardState.BLOCKED),
+            typed(CardState.ASSESSMENT, CardState.DONE),
+            typed(CardState.IN_PROGRESS, CardState.ISSUES, actor="po"),
+        ):
+            self.assertTrue(
+                is_significant_observer_event(semantic, linked_refs=refs, sprint_ref=SPRINT), semantic,
+            )
 
     def test_a_decision_needs_a_parked_card_a_reason_and_a_permitted_role(self) -> None:
         self._park()
@@ -2740,6 +2898,10 @@ class BlockedContractTests(unittest.TestCase):
         event = self._events("card.unblocked")[-1]
         self.assertEqual(event["transition"], {"source": "blocked", "target": "ready"})
         self.assertEqual(event["reason"], reason)
+        # The sprint the card belongs to is related to its transition without the caller
+        # having to say so, which is what keeps a sprint's own history complete.
+        self.assertEqual(event["related_refs"], [SPRINT])
+        self.assertEqual(event["actor"], {"role": "observer", "id": "observer"})
         self.assertIn(reason, self.client.comments[12][-1]["comment"])
 
         # Every exit is guarded, not just the requeue to Ready.

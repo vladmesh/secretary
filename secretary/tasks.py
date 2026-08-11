@@ -20,8 +20,8 @@ from typing import Any, Callable
 
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
 from secretary.board.events import BoardEventPending
-from secretary.board.host import TransitionRequest
-from secretary.board.models import Actor, CardState, EntityKind, RelatedRefs
+from secretary.board.host import MutationResult, TransitionRequest
+from secretary.board.models import Actor, CardState, EntityKind, Event, RelatedRefs
 from secretary.board.transitions import BoardProtocolError
 from secretary.board_transport import (
     BoardTransport, BoardTransportError, resolve, transport_path,
@@ -193,6 +193,15 @@ def _forbidden_move_message(role: str, source: str, target: str) -> str:
             "record it with `task decide` instead of moving the card"
         )
     return f"{role} may not move {source} to {target}"
+
+
+def _transition_reason(reason: str, target: str) -> str:
+    """The non-empty reason a typed Card transition event carries.
+
+    Not every released move required one, and the protocol event does. The substitute names the
+    edge rather than inventing a motive the caller never gave.
+    """
+    return reason if reason.strip() else f"Card transition to {target}"
 
 
 def assessment_resolution(events: Iterable[dict[str, Any]]) -> tuple[str, dict[str, Any] | None]:
@@ -562,8 +571,10 @@ class TaskAudit:
     # Generic journal records intentionally have no discriminator.  This explicit value is
     # the only distinction the released audit substrate needs to make: a protocol pending
     # record may describe an effect that has already reached the backend, while a generic
-    # record retains its released same-writer restaging behaviour.
-    _PROTOCOL_EVENT_RECORD_TYPE = "board.protocol_event"
+    # record retains its released same-writer restaging behaviour.  It is taken from the
+    # typed record itself: recovery now routes on this discriminator, so the two spellings
+    # must not be able to drift apart.
+    _PROTOCOL_EVENT_RECORD_TYPE = Event.RECORD_TYPE
 
     def __init__(self, data_dir: str | os.PathLike[str]) -> None:
         self.board_dir = os.path.join(os.fspath(data_dir), "board")
@@ -1670,18 +1681,38 @@ class TaskWriter:
         request_id = request_id or str(uuid.uuid4())
         task = self.reader.show(reference)
         existing = self._typed_event(request_id)
+        # The replay is answered before the sprint guard, not after it: this request id already
+        # owns a typed event, and a denial would have to be written under the same id. A retry of
+        # a transition that already happened cannot be turned into a guard record.
         if existing is not None:
             try:
                 target_state = CardState(target)
             except ValueError:
-                raise TaskError("validation", f"unknown Card target {target!r}", 2) from None
-            event_reason = reason if reason.strip() else f"Card transition to {target}"
+                raise TaskError(
+                    "transition_forbidden", _forbidden_move_message(role, task["state"], target), 3,
+                ) from None
             result = self._transition_card(
                 reference=reference, target=target_state, role=role, actor=actor,
-                reason=event_reason, request_id=request_id,
+                reason=_transition_reason(reason, target), request_id=request_id,
             )
+            # A replay repeats no admission check and no backend move, but it does finish the
+            # idempotent board cleanup the first attempt may have lost. Retrying the original
+            # request is how the released path completed a half-written move too.
+            replayed = self.reader.show(reference)
+            if replayed["state"] == target:
+                try:
+                    self._reset_transition_metadata(
+                        replayed, source=str(existing.source_state or ""), target=target,
+                    )
+                except Exception:
+                    raise TaskError(
+                        "audit_pending",
+                        "Card transition committed; retry this request id to finish the board cleanup",
+                        4,
+                    ) from None
+                replayed = self.reader.show(reference)
             return {
-                "action": "moved", "task": self.reader.show(reference),
+                "action": "moved", "task": replayed,
                 "event_id": result.event.event_id, "replayed": True,
             }
         override_payload = self._guard_sprint_write(
@@ -1700,31 +1731,45 @@ class TaskWriter:
             raise TaskError("transition_forbidden", _forbidden_move_message(role, source, target), 3) from None
         if role == "steward" and (target == "blocked" or (source, target) == ("blocked", "done")) and not reason.strip():
             raise TaskError("validation", "this steward transition requires a non-empty reason", 2)
-            # The observer's disposition of a Blocked card is the other half of the worker's
-            # classification: the card says why it stopped, and the move out says what was done
-            # about it. Without this a card leaves Blocked with nothing recorded, and a head that
-            # blocks without cause repeatedly is invisible.
+        # The observer's disposition of a Blocked card is the other half of the worker's
+        # classification: the card says why it stopped, and the move out says what was done
+        # about it. Without this a card leaves Blocked with nothing recorded, and a head that
+        # blocks without cause repeatedly is invisible.
         if role == "observer" and source == "blocked" and not reason.strip():
             raise TaskError("validation", "moving a card out of Blocked requires a non-empty reason", 2)
         self._check_decision(task, source, target, decision, role)
-        event_reason = reason if reason.strip() else f"Card transition to {target}"
         result = self._transition_card(
-            reference=reference, target=target_state, role=role, actor=actor, reason=event_reason,
-            request_id=request_id,
+            reference=reference, target=target_state, role=role, actor=actor,
+            reason=_transition_reason(reason, target), request_id=request_id,
         )
         try:
-            if target in {"ready", "done"}:
-                self.client.call("saveTaskMetadata", task_id=_task_number(task), values=_READY_RESET_METADATA)
-            elif source == "validate":
-                self.client.call("saveTaskMetadata", task_id=_task_number(task), values={"resolved_review_head": ""})
+            self._reset_transition_metadata(task, source=source, target=target)
             if reason.strip():
                 self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{role}]\n{reason}")
         except Exception:
-            raise TaskError("audit_pending", "Card transition committed; follow-up board cleanup is required", 4) from None
+            # The state edge and its event are both durable at this point. The metadata reset is
+            # idempotent, so the same request id can finish it; the comment is not repeated by
+            # that replay, exactly as the released reconciliation never recreated one.
+            raise TaskError(
+                "audit_pending",
+                "Card transition committed; retry this request id to finish the board cleanup",
+                4,
+            ) from None
         return {
             "action": "moved", "task": self.reader.show(reference),
-            "event_id": result.event.event_id, "replayed": existing is not None,
+            "event_id": result.event.event_id, "replayed": False,
         }
+
+    def _reset_transition_metadata(self, task: dict[str, Any], *, source: str, target: str) -> None:
+        """Apply the board metadata a Card state edge resets.
+
+        Kept idempotent on purpose: this is the one part of a migrated move that a retry or
+        :meth:`reconcile` may repeat after the column effect and its typed event are durable.
+        """
+        if target in {"ready", "done"}:
+            self.client.call("saveTaskMetadata", task_id=_task_number(task), values=_READY_RESET_METADATA)
+        elif source == "validate":
+            self.client.call("saveTaskMetadata", task_id=_task_number(task), values={"resolved_review_head": ""})
 
     def _transition_card(
         self,
@@ -1735,14 +1780,16 @@ class TaskWriter:
         actor: str,
         reason: str,
         request_id: str,
-    ) -> Any:
-        """Run one state edge through the typed adapter and its shared journal."""
-        task = self.reader.show(reference)
-        refs = (str(task["sprint"]),) if task.get("sprint") else ()
+    ) -> MutationResult:
+        """Run one state edge through the typed adapter and its shared journal.
+
+        The sprint the card belongs to is not passed here: the adapter reads the live card to
+        authorize the edge anyway, and relates the event to that card's own sprint.
+        """
         try:
             return self.board_host.transition(TransitionRequest(
                 EntityKind.CARD, reference, target, Actor(role, actor), reason,
-                RelatedRefs(refs), request_id,
+                RelatedRefs(()), request_id,
             ))
         except BoardEventPending:
             raise TaskError(
@@ -2223,7 +2270,7 @@ class TaskWriter:
         for event in self.audit.pending_events():
             try:
                 if event.get("record_type") == TaskAudit._PROTOCOL_EVENT_RECORD_TYPE:
-                    self.board_host.recover_transition(str(event["request_id"]))
+                    self._finish_pending_transition(event)
                     repaired += 1
                     continue
                 if str(event.get("backend", {}).get("kind") or "") == "dispatcher":
@@ -2260,6 +2307,23 @@ class TaskWriter:
             except (TaskError, BoardProtocolError, OSError, KeyError, TypeError, ValueError):
                 unresolved += 1
         return repaired, unresolved
+
+    def _finish_pending_transition(self, event: dict[str, Any]) -> None:
+        """Finish one typed pending Card transition: prove it, clean up, then commit it.
+
+        A typed pending record is a different obligation from a generic one, and it is read as
+        the transition it declares rather than guessed from a payload. The adapter proves the
+        exact target on the board and never repeats a move; the metadata reset runs only once
+        that target is live, so a transition whose effect was lost cannot strip a card's claim.
+        """
+        transition = event.get("transition") if isinstance(event.get("transition"), dict) else {}
+        target = str(transition.get("target") or "")
+        card = self.reader.show(str(event["ref"]))
+        if card["state"] == target:
+            self._reset_transition_metadata(
+                card, source=str(transition.get("source") or ""), target=target,
+            )
+        self.board_host.recover_transition(str(event["request_id"]))
 
     def _finish_pending_cleanup(
         self,

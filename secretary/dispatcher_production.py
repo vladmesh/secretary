@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary._fsutil import try_file_lock, write_json
+from secretary.board.models import Event
 from secretary.checkpoint import checkpoint_snapshot
 from secretary.dispatcher_observer import (
     observer_snapshot,
@@ -1504,7 +1505,7 @@ def _budget_event_type(event: dict[str, Any]) -> str | None:
     marker = str(payload.get("marker") or "")
     if event.get("kind") == "verdict" and marker == "review:red":
         return "red_review"
-    if event.get("record_type") == "board.protocol_event":
+    if event.get("record_type") == Event.RECORD_TYPE:
         transition = event.get("transition") if isinstance(event.get("transition"), dict) else {}
         target = str(transition.get("target") or "")
         source = str(transition.get("source") or "")

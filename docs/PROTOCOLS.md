@@ -659,6 +659,18 @@ Every write command passes role guards and transition checks. A mutation first r
 pending audit event, is then checked against the live board, and only then counts as committed. An
 unresolved pending write blocks a consistent export and the recovery checkpoint until `reconcile-audit`.
 
+A Card state change is the one mutation that has moved to the board protocol. `move` and the column half
+of `claim` run through the board host, which records each occurrence as a typed protocol event in the same
+`events.ndjson`: `record_type` is `board.protocol_event`, the lifecycle edge is the object
+`transition: {source, target}`, and the reason is carried as text rather than as a digest. Released
+generic `moved` and `claimed` rows stay readable exactly as they were written, and every other operation
+(`report`, `verdict`, `decide`, `routing`, comments, create/edit/archive) keeps its generic record. A
+reader that cares about card transitions therefore has to handle both shapes explicitly; `record_type` is
+what tells them apart. Recovery is likewise split: a pending typed transition is repaired by re-reading
+the card and committing its exact event only when the requested target is live on the board. It never
+repeats a column move, and it refuses an effect that is unproven, contradicted or gone, leaving the
+pending record for an operator instead of publishing a transition that never happened.
+
 A `--request-id` is an ownership claim over the operation it recorded, not only a de-duplication key for
 the append. A retry under an id the audit already holds, committed or still staged, is answered from that
 record only when the caller means the same operation: the same event kind, the same card, and the same
@@ -693,8 +705,8 @@ without parsing the report prose. Both are written by the one backend write the 
 classification is deliberately not card metadata, because a second write that can fail on its own would leave
 a card field that silently disagrees with the audit. `--kind done` takes no classification and is refused if
 given one. An observer moving a card out of Blocked must give a non-empty reason, the same requirement the
-steward carries moving one into it; the reason is a comment on the card and its digest is in the `moved`
-event, so how a Blocked card was disposed of stays answerable.
+steward carries moving one into it; the reason is a comment on the card and is carried by the card's
+transition event, so how a Blocked card was disposed of stays answerable.
 
 The `reported` events are the authoritative copy and keep the classification of every block, so counting how
 often one head blocks is a question for the audit. The compatibility CLI (`triggered_agents pipeline report`)

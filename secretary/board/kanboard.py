@@ -13,8 +13,8 @@ from secretary.board.card_transitions import CardTransitionForbidden, card_trans
 from secretary.board.events import BoardEventCanon, MutationEventTransaction
 from secretary.board.host import Create, MutationResult, Replace, TransitionRequest
 from secretary.board.models import (
-    BoardEntity, Card, CardState, EntityKind, Event, Issue, IssueState, Product,
-    ProductState, Sprint, SprintState,
+    BoardEntity, Card, CardState, EntityKind, Event, EventKind, Issue, IssueState, Product,
+    ProductState, RelatedRefs, Sprint, SprintState,
 )
 from secretary.board.transitions import BoardProtocolError
 from secretary.product_issues import ProductIssueStore
@@ -23,11 +23,13 @@ from secretary.tasks import KanboardClient, TaskReader, _positive_int, _target_c
 
 
 class KanboardBoardHost:
-    """Translate the current Kanboard-backed readers at the BoardHost seam.
+    """Translate the current Kanboard-backed readers and Card state edges at the BoardHost seam.
 
-    Mutations intentionally remain unavailable until the dedicated migration can
-    preserve each legacy writer's durable retry and audit semantics.  The typed
-    methods exist now so a caller cannot bypass the contract accidentally.
+    Card ``transition`` is the migrated mutation: it is the one authority for a
+    Card state change and owns its typed event transaction.  The remaining
+    mutations stay unavailable until their own migration can preserve each
+    legacy writer's durable retry and audit semantics, so a caller cannot bypass
+    the contract accidentally.
     """
 
     def __init__(
@@ -74,6 +76,13 @@ class KanboardBoardHost:
         self._migration_pending("replace", operation.entity.kind)
 
     def transition(self, operation: TransitionRequest) -> MutationResult:
+        """Move one Card along a declared, role-authorized lifecycle edge.
+
+        The order is the contract: validate the live Card and the caller's authority for its
+        edge, stage the exact event this occurrence will publish, perform the single column
+        operation, then commit that event.  A failed effect owes the journal nothing; a failed
+        commit owes the caller a repair and keeps the pending event that names it.
+        """
         if operation.kind is not EntityKind.CARD:
             self._migration_pending("transition", operation.kind)
         if self.canon is None:
@@ -106,7 +115,9 @@ class KanboardBoardHost:
             declaration = card_transition(operation.actor.role, current.state, operation.target)
             related = operation.related_refs
             if current.sprint_ref and current.sprint_ref not in related.refs:
-                related = type(related)(related.refs + (current.sprint_ref,))
+                # The sprint the Card belongs to is a related ref of every one of its
+                # transitions, whether or not the caller happened to pass it.
+                related = RelatedRefs(related.refs + (current.sprint_ref,))
             event = self._event(current, declaration.event_kind, operation, related, request_id)
 
         def replay() -> Card:
@@ -174,8 +185,14 @@ class KanboardBoardHost:
 
     @staticmethod
     def _event(
-        card: Card, kind: Any, operation: TransitionRequest, related: Any, request_id: str,
+        card: Card, kind: EventKind, operation: TransitionRequest, related: RelatedRefs,
+        request_id: str,
     ) -> Event:
+        """Build the one complete occurrence this request publishes.
+
+        The id is derived from the request and its exact payload, so a retry of the same request
+        names the same occurrence and a different payload can never borrow it.
+        """
         payload = json.dumps({
             "request_id": request_id, "kind": kind.value, "ref": card.ref,
             "actor": [operation.actor.role, operation.actor.id, operation.actor.head_run_ref],
