@@ -174,6 +174,30 @@ class BoardHostContractTests(unittest.TestCase):
             recorded = BoardEventCanon(tmpdir).events()
             self.assertEqual(len(recorded), sum(len(edges) for edges in TRANSITIONS.values()))
 
+    def test_no_fake_mutation_completes_when_its_event_cannot_be_recorded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host = FakeBoardHost([Card("card:1", "Card", CardState.READY)], data_dir=tmpdir)
+            mutations = (
+                lambda: host.create(Create(
+                    Card("card:2", "Card", CardState.READY), self.actor, "accepted", request_id="create-fail",
+                )),
+                lambda: host.replace(Replace(
+                    Card("card:1", "Card v2", CardState.READY), self.actor, "retitle", request_id="replace-fail",
+                )),
+                lambda: host.transition(TransitionRequest(
+                    EntityKind.CARD, "card:1", CardState.IN_PROGRESS, self.actor, "start",
+                    request_id="transition-fail",
+                )),
+            )
+
+            with mock.patch.object(host.canon.audit, "append", side_effect=OSError("disk full")):
+                for mutation in mutations:
+                    with self.assertRaises(BoardEventPending):
+                        mutation()
+
+            self.assertEqual(BoardEventCanon(tmpdir).events(), ())
+            self.assertEqual(host.canon.audit.status(), {"ok": False, "pending": len(mutations)})
+
 
 class BoardMutationTransactionTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -209,6 +233,36 @@ class BoardMutationTransactionTests(unittest.TestCase):
         )
         self.assertEqual(recovered, "confirmed")
         self.assertEqual(self.canon.events(), (self.event,))
+
+    def test_released_generic_records_share_the_journal_and_stay_readable(self) -> None:
+        generic = {
+            "event_id": "evt_released", "schema_version": 1, "occurred_at": "2026-08-10T10:00:00Z",
+            "actor": {"role": "worker", "id": "worker-1"}, "kind": "moved", "outcome": "success",
+            "task_id": "task_kanboard_7", "ref": "secretary-1419", "request_id": "released-1",
+            "backend": {"kind": "kanboard", "task_id": 7, "revision": "updated_at:1"},
+            "payload": {"to": "in_progress"},
+        }
+        self.canon.audit.stage("released-1", generic)
+        self.canon.audit.append("released-1", generic)
+
+        self.canon.commit("typed-1", self.event)
+
+        # The released record is untouched and still visible to its own consumers,
+        # while the typed canon reports only protocol events.
+        self.assertEqual(self.canon.audit.events("secretary-1419"), [generic, self.event.to_record("typed-1")])
+        self.assertEqual(self.canon.events(ref="secretary-1419"), (self.event,))
+        with self.assertRaisesRegex(ValueError, "generic audit record"):
+            self.canon.event("released-1")
+
+    def test_reconcile_repairs_a_pending_typed_event_like_a_released_record(self) -> None:
+        transaction = MutationEventTransaction(self.canon, request_id="reconcile-1", event=self.event)
+        with mock.patch.object(self.canon.audit, "append", side_effect=OSError("disk full")):
+            with self.assertRaises(BoardEventPending):
+                transaction.execute(lambda: "backend result", replay=lambda: "never")
+
+        self.assertEqual(self.canon.audit.reconcile(), (1, 0))
+        self.assertEqual(self.canon.events(), (self.event,))
+        self.assertEqual(self.canon.audit.status(), {"ok": True, "pending": 0})
 
     def test_committed_request_id_replay_does_not_repeat_backend_effect(self) -> None:
         transaction = MutationEventTransaction(self.canon, request_id="replay-1", event=self.event)
