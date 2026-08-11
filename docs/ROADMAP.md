@@ -333,9 +333,16 @@ carries an identity the session manager cannot move by aliasing a pane handle, t
 test_head_operations.py` runs all three against a fake host with no session manager installed,
 which is the first backend-independent contract suite this milestone asks for, and the production
 dispatcher's worker path — bring-up, delivery, stop — goes through those operations rather than
-beside them. Worktree registration and computer use remain session-manager-specific, the reviewer
-path still closes its own pane, and the second `SessionHost` implementation that would settle the
-backend question by measurement has not been started.
+beside them.
+
+The reviewer path followed (secretary-1414): its head has a durable `HeadRun` of its own, every one
+of the places that ends a reviewer — a verdict, the wait watchdog, a pipeline freeze, launch
+recovery, reconciliation — names itself as the initiator, and the pane inventory the liveness read
+uses is the session host's rather than an argument vector of its own. What is left of `orca
+terminal` outside `head` and `pane_host` is the by-workspace stop and the screen read the TUI
+helpers do. Worktree registration and computer use remain session-manager-specific, and the second
+`SessionHost` implementation that would settle the backend question by measurement has not been
+started.
 
 ### Open questions
 

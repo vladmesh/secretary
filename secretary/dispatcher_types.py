@@ -50,12 +50,17 @@ class HeadLaunchAborted(HostError):
         workspace: str = "",
         pid_file: str = "",
         evidence: dict[str, Any] | None = None,
+        head_run: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.handle = handle
         self.leaf = leaf
         self.workspace = workspace
         self.pid_file = pid_file
+        # The run of the head this bring-up did start, where it got that far (secretary-1414). An
+        # abort is the case where the pane may be live, so the identity of what is in it travels
+        # with the failure: the intent keeps it, and the adoption continues that run.
+        self.head_run = dict(head_run or {})
         # What the shared delivery boundary saw, when this bring-up failed delivering a prompt.
         # It travels with the ambiguity rather than being read off a pane nobody may touch: the
         # caller persists it before it decides anything about the head that may still be running.
@@ -105,6 +110,11 @@ class ReviewLaunch:
     # The launch configuration of the reviewer head this bring-up started, snapshotted by the
     # launcher itself (secretary-716). The runtime writes it to the routing journal as-is.
     run: dict[str, Any] = field(default_factory=dict)
+    # The reviewer's own head run, as the three head operations keep it (secretary-1414). Distinct
+    # from `run` above, which is the routing snapshot of the configuration this head launched with:
+    # this is the state of the head itself — the identity a later stop addresses, and the lifecycle
+    # that stop moves. The caller writes it onto the record, which is where it becomes durable.
+    head_run: dict[str, Any] = field(default_factory=dict)
     delivery_evidence: dict[str, Any] = field(default_factory=dict)
 
 
@@ -127,3 +137,12 @@ STOPPED_BY_REPLACEMENT = "replacement"
 STOPPED_BY_OPERATOR = "operator"
 STOPPED_BY_RECONCILIATION = "reconciliation"
 STOPPED_BY_LAUNCH_RECOVERY = "launch-recovery"
+# The reviewer's round is over: a red verdict handing the checkout back, a green one parking it,
+# a parked round released for rework. All of them are the verdict ending that head, which is the
+# distinction an operator reads this field for — a reviewer that finished is not a reviewer that
+# was killed (secretary-1414).
+STOPPED_BY_REVIEW_VERDICT = "review-verdict"
+# The wait watchdog ending a head that stopped answering: the respawn of a silent reviewer and the
+# escalation that follows the second stall. The head may well still be running, which is exactly
+# why the record has to name who decided it should not be.
+STOPPED_BY_WATCHDOG = "watchdog"

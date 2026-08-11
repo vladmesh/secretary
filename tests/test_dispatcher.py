@@ -25,9 +25,13 @@ from secretary.dispatcher import (
     LaunchedHead,
     HostError,
     InstanceCatalog,
+    STOPPED_BY_DISPATCHER,
     STOPPED_BY_OPERATOR,
+    STOPPED_BY_RECONCILIATION,
     STOPPED_BY_REPLACEMENT,
     STOPPED_BY_REVIEW_FREEZE,
+    STOPPED_BY_REVIEW_VERDICT,
+    STOPPED_BY_WATCHDOG,
     _body_file_path,
     _continuation_note,
     _gate_attestation_for_prompt,
@@ -767,6 +771,8 @@ class FakeHost:
         self.calls: list[str] = []
         self.prepared: list[str] = []
         self.prepare_requires_existing: list[bool] = []
+        # Every launch this fake performs gets its own head run identity, numbered in order.
+        self.head_runs = 0
         self.reviews: list[str] = []
         self.stopped: list[str] = []
         self.torn_down: list[str] = []
@@ -804,6 +810,7 @@ class FakeHost:
         # what start_review pins; reassign it to model a checkout that moved under a green verdict.
         self.split_from: list[str] = []
         self.stopped_reviews: list[str] = []
+        self.review_stop_initiators: list[str] = []
         self.commit = "c0ffee1234567890"
         self.instance_publish_recoveries: set[tuple[str, str]] = set()
         # Observer heads (secretary-793): which sprints got one, which handles were stopped, and
@@ -934,9 +941,8 @@ class FakeHost:
             # The real host always carries this bounded receipt, even when noop mode has no pane
             # and therefore no delivery facts to record yet.
             "delivery_evidence": {},
-            # The head's own run, as `spawn` returns it (secretary-1412). This fake never opens a
-            # pane, so it has no lifecycle to report and says so rather than inventing one.
-            "head_run": {},
+            # The head's own run, as `spawn` returns it (secretary-1412).
+            "head_run": dict(launched.head_run),
         }
 
     def observer_workspace(self, reference: str) -> str:
@@ -1045,12 +1051,17 @@ class FakeHost:
                 workspace=record.workspace,
                 pid_file=pid_file_path("review", task["ref"]),
                 evidence=dict(launched.delivery_evidence),
+                # The pane is up, so the run of the head in it travels with the failure: the
+                # adoption that follows continues that run rather than opening a new identity
+                # for a reviewer this launch did start (secretary-1414).
+                head_run=dict(launched.head_run),
             ) from None
         return ReviewLaunch(
             handle=launched.handle,
             leaf=f"leaf:{task['ref']}",
             commit=self.commit,
             run=launched.run,
+            head_run=dict(launched.head_run),
             delivery_evidence=dict(launched.delivery_evidence),
         )
 
@@ -1078,15 +1089,35 @@ class FakeHost:
         self, handle: str, head: str, task: dict, role: str, workspace: str = "",
         failover: bool = False, delivery_evidence: dict[str, object] | None = None,
     ) -> LaunchedHead:
+        leaf = f"leaf:{handle}"
         return LaunchedHead(
             handle=handle,
             head=head,
             run=self.catalog.head_run(
                 task, role=role, head=head, workspace=workspace, failover=failover
             ).to_json(),
-            leaf=f"leaf:{handle}",
+            leaf=leaf,
             delivery_evidence=dict(delivery_evidence or {}),
+            # The head's own run, as `spawn` hands it back on the real host (secretary-1412). The
+            # fake opens no pane, but it does report an identity: what a bring-up owes the record
+            # is that this head can be named afterwards, and a fake that answered `{}` could not
+            # show a recovery continuing the same run.
+            head_run=self._head_run(handle, head, task, role, workspace, leaf),
         )
+
+    def _head_run(
+        self, handle: str, head: str, task: dict, role: str, workspace: str, leaf: str
+    ) -> dict:
+        self.head_runs += 1
+        return head_ops.HeadRun(
+            run_id=f"run-{role}-{self.head_runs}",
+            spec=head_ops.HeadSpec(profile_id=head, adapter="codex"),
+            workspace=workspace or str(self.root / f"{task['ref']}-pilot"),
+            task_ref=head_ops.TaskRef.card(task["ref"]),
+            handle=handle,
+            leaf=leaf,
+            pid_file=pid_file_path("review" if role == "reviewer" else "worker", task["ref"]),
+        ).to_json()
 
     def review_running(self, task: dict, record) -> bool:
         self.calls.append("review_running")
@@ -1269,8 +1300,12 @@ class FakeHost:
         if pid_file:
             Path(pid_file).unlink(missing_ok=True)
 
-    def stop_review(self, record) -> None:
+    def stop_review(self, record, initiator: str = STOPPED_BY_DISPATCHER) -> None:
         self.calls.append("stop_review")
+        # Who ended this reviewer, as the runtime named it. The real host writes it onto the
+        # record's run; this double only has to prove the caller passed one, which is what the
+        # initiator-per-path assertions read.
+        self.review_stop_initiators.append(initiator)
         if not record.review_handle and not record.review_leaf and not record.review_pid_file:
             return
         if self.fail_stop_review_reason:
@@ -3247,6 +3282,12 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(escalated["to"], "blocked")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
         self.assertEqual(len(self.host.reviews), 2, "escalation must not start a third reviewer")
+        # secretary-1414: both of those stops were the watchdog's decision over a head that may
+        # well still have been running, and the record says so rather than saying only that the
+        # reviewer went.
+        self.assertEqual(
+            self.host.review_stop_initiators, [STOPPED_BY_WATCHDOG, STOPPED_BY_WATCHDOG]
+        )
 
     def test_second_reviewer_stall_retries_an_unconfirmed_stop_before_blocking(self) -> None:
         self.start_dispatcher()
@@ -5862,6 +5903,25 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(record["review_commit"], "")
         self.assertEqual(record["handle"], "rework:secretary-510-pilot")
         self.assertEqual(self.host.torn_down, [], "the checkout must survive a red verdict")
+
+    def test_a_red_verdict_names_itself_as_the_reviewers_initiator(self) -> None:
+        """secretary-1414: a reviewer that finished its round is not a reviewer that was killed,
+        and only the initiator on its run tells the two apart afterwards."""
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.tick()
+        self.writer.verdict(
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="red",
+            body="fix it",
+            request_id="review-red-initiator",
+        )
+
+        self._park_and_decide("rework")
+
+        self.assertEqual(self.host.review_stop_initiators, [STOPPED_BY_REVIEW_VERDICT])
 
     def test_green_verdict_for_a_moved_checkout_is_not_merged(self) -> None:
         """The reviewer judged one commit; if the checkout has moved on, that verdict says nothing
@@ -12558,6 +12618,207 @@ class WorkerLifecycleTests(unittest.TestCase):
         self.assertEqual(record.worker_head_run["lifecycle"], "exited")
 
 
+class ReviewerLifecycleTests(unittest.TestCase):
+    """secretary-1414: the reviewer path runs on `spawn` / `nudge` / `stop`, like the worker's.
+
+    The reviewer is the head this dispatcher stops from the most places, and until it had a durable
+    run of its own every one of those stops left the same record behind: a reviewer that was simply
+    gone. What is asserted here is the run — one identity from bring-up to stop, re-addressed by its
+    leaf rather than by a handle Orca may have aliased, an initiator written down before the pane is
+    touched and still there when the stop is refused — and the one thing the reviewer's stop must
+    keep doing differently: closing its own split leaf and nothing else in the worker's worktree.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.workspace = self.root / "ws"
+        self.workspace.mkdir()
+        _clear_env(self, "SECRETARY_DISPATCHER_REVIEW_COMMAND")
+        _clear_env(self, "SECRETARY_DISPATCHER_PROMPT_DIR")
+        os.environ["SECRETARY_DISPATCHER_BODY_DIR"] = str(self.root)
+        os.environ["SECRETARY_CODEX_SESSIONS"] = str(self.root / "sessions")
+        self.addCleanup(os.environ.pop, "SECRETARY_CODEX_SESSIONS", None)
+        self.task = {
+            "ref": "secretary-1414",
+            "project": "secretary",
+            "description": "a card",
+            "workspace": {"base_branch": "main"},
+            "routing": {},
+        }
+
+    def _record(self, **fields) -> DispatcherRecord:
+        record = DispatcherRecord(
+            worker="secretary-1414-w",
+            workspace=str(self.workspace),
+            handle="term-worker",
+            head="codex",
+            review_head="codex-reviewer",
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="reviewing",
+            claimed_at=0.0,
+        )
+        for name, value in fields.items():
+            setattr(record, name, value)
+        return record
+
+    def _stored_run(self, **fields) -> dict:
+        """A reviewer run as a previous tick wrote it down, before this one reads it back."""
+        run = {
+            "run_id": "run-reviewer-1",
+            "spec": {"profile_id": "codex-reviewer", "adapter": "codex"},
+            "workspace": str(self.workspace),
+            "task_ref": {"kind": "card", "ref": "secretary-1414", "document": ""},
+            "handle": "term-review-create",
+            "leaf": "leaf-review",
+            "pid_file": "",
+            "lifecycle": "working",
+            "stopped_by": {},
+        }
+        run.update(fields)
+        return run
+
+    def _bounded_delivery(self):
+        return mock.patch.multiple(
+            "triggered_agents.runtime.tui_delivery",
+            TUI_DELIVERY_TIMEOUT_S=0.05,
+            TUI_DELIVERY_POLL_S=0.01,
+            TUI_DELIVERY_RESEND_GRACE_S=0,
+        )
+
+    def test_a_reviewer_bring_up_hands_back_the_run_that_head_is(self) -> None:
+        host = NudgingReviewHost(self.root, screen="working\n› ")
+
+        with self._bounded_delivery():
+            launch = host.start_review(self.task, self._record())
+
+        run = launch.head_run
+        self.assertTrue(run["run_id"], "the reviewer has an identity of its own")
+        self.assertEqual(run["lifecycle"], "working", "it was given its review")
+        self.assertEqual(run["handle"], launch.handle)
+        self.assertEqual(run["leaf"], launch.leaf)
+        self.assertEqual(run["spec"]["profile_id"], "codex-reviewer")
+        self.assertEqual(run["task_ref"]["ref"], "secretary-1414")
+
+    def test_the_reviewer_stop_addresses_the_head_its_leaf_names_now(self) -> None:
+        """The reincarnation case: the leaf is where it was, the handle now names another pane.
+
+        Closing the recorded handle here would close a stranger's pane and leave the reviewer
+        running, which is the failure the run's stable leaf exists to prevent.
+        """
+        host = RecordingReviewHost(
+            self.root,
+            terminals=[
+                # Orca handed the reviewer's create-time handle to a different pty.
+                {"handle": "term-review-create", "leafId": "leaf-stranger", "connected": True},
+                {"handle": "term-review-alias", "leafId": "leaf-review", "connected": True},
+            ],
+        )
+        record = self._record(
+            handle="",
+            review_handle="term-review-create",
+            review_leaf="leaf-review",
+            review_head_run=self._stored_run(),
+        )
+
+        host.stop_review(record, STOPPED_BY_REVIEW_VERDICT)
+
+        closed = [
+            call[call.index("--terminal") + 1]
+            for call in host.calls
+            if call[:3] == ["orca", "terminal", "close"]
+        ]
+        self.assertEqual(closed, ["term-review-alias"], "the stop addressed the head, not a pane")
+        self.assertEqual(record.review_head_run["run_id"], "run-reviewer-1", "same head, readdressed")
+        self.assertEqual(record.review_head_run["lifecycle"], "exited")
+
+    def test_a_stopped_reviewer_records_who_stopped_it_and_that_survives_a_restart(self) -> None:
+        host = RecordingReviewHost(self.root)
+        record = self._record(
+            review_handle="term-review", review_head_run=self._stored_run(leaf="")
+        )
+
+        host.stop_review(record, STOPPED_BY_REVIEW_VERDICT)
+
+        self.assertEqual(record.review_head_run["lifecycle"], "exited")
+        self.assertEqual(
+            record.review_head_run["stopped_by"]["actor"], STOPPED_BY_REVIEW_VERDICT
+        )
+        restarted = DispatcherRecord.from_json(json.loads(json.dumps(record.to_json())))
+        self.assertEqual(
+            restarted.review_head_run["stopped_by"]["actor"], STOPPED_BY_REVIEW_VERDICT
+        )
+
+    def test_a_refused_reviewer_stop_is_continued_rather_than_begun_again(self) -> None:
+        """The stop the dispatcher could not finish: `commit` runs before the pane is touched, so
+        the record is in `finishing` with its initiator, and the next tick continues that stop."""
+        host = RecordingReviewHost(self.root, fail_ops={"close"})
+        record = self._record(
+            handle="",
+            review_handle="term-review",
+            review_pid_file=str(self.root / "review.pid"),
+            review_head_run=self._stored_run(leaf="", pid_file=str(self.root / "review.pid")),
+        )
+        # A reviewer whose heartbeat still answers: the close was refused and nothing here can say
+        # the head is gone, which is the stop that has to survive to the next tick.
+        Path(record.review_pid_file).write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+        with mock.patch.object(dispatcher_module, "HEAD_STOP_GRACE_SECONDS", 0.05):
+            with mock.patch.object(host, "_signal_head", lambda *a: None):
+                with self.assertRaises(HostError):
+                    host.stop_review(record, STOPPED_BY_WATCHDOG)
+
+        self.assertEqual(record.review_head_run["lifecycle"], "finishing")
+        self.assertEqual(record.review_head_run["stopped_by"]["actor"], STOPPED_BY_WATCHDOG)
+
+        # The next tick, through another path with another actor. It continues this stop: same
+        # run, and the actor that began it is the one the record keeps.
+        host.fail_ops = set()
+        record.review_pid_file = ""
+        record.review_head_run = json.loads(json.dumps(record.review_head_run))
+        host.stop_review(record, STOPPED_BY_RECONCILIATION)
+
+        self.assertEqual(record.review_head_run["run_id"], "run-reviewer-1")
+        self.assertEqual(record.review_head_run["lifecycle"], "exited")
+        self.assertEqual(record.review_head_run["stopped_by"]["actor"], STOPPED_BY_WATCHDOG)
+
+    def test_stopping_the_reviewer_leaves_the_workers_checkout_alone(self) -> None:
+        """The split-leaf semantics, which this card moves onto the operations without changing.
+
+        A red verdict hands the worktree back to the worker moments later. A reviewer stop that
+        reached for the workspace would take the checkout's own terminals down with it, and the
+        worker the card is about to resume would be the head that lost them.
+        """
+        host = RecordingReviewHost(
+            self.root,
+            terminals=[
+                {"handle": "term-worker", "leafId": "leaf-worker", "connected": True},
+                {"handle": "term-review", "leafId": "leaf-review", "connected": True},
+            ],
+        )
+        record = self._record(
+            handle="term-worker",
+            worker_leaf="leaf-worker",
+            review_handle="term-review",
+            review_leaf="leaf-review",
+            review_head_run=self._stored_run(handle="term-review"),
+        )
+
+        host.stop_review(record, STOPPED_BY_REVIEW_VERDICT)
+
+        closed = [
+            call[call.index("--terminal") + 1]
+            for call in host.calls
+            if call[:3] == ["orca", "terminal", "close"]
+        ]
+        self.assertEqual(closed, ["term-review"], "only the reviewer's own pane was closed")
+        self.assertNotIn("stop", host.ops(), "the worker's worktree was never stopped")
+        self.assertEqual(record.worker_head_run, {}, "the worker's own run was not touched")
+
+
 class PromptAfterStartCatalog(ReviewCatalog):
     """A catalog whose heads take their prompt after the pane is up, the way a TUI provider does."""
 
@@ -12776,6 +13037,28 @@ class ReviewLivenessTests(unittest.TestCase):
         for name, value in fields.items():
             setattr(record, name, value)
         return record
+
+    def test_an_unreadable_inventory_raises_for_either_role(self) -> None:
+        """secretary-1414: the inventory is the session host's now, and what it cannot read it
+        refuses. A shape this cannot parse says nothing about which panes exist, so it must not
+        arrive as `missing-terminal`: that reads as a dead head and respawns over a live one."""
+        for kind, status in (("worker", "worker_status"), ("review", "review_status")):
+            with self.subTest(kind=kind):
+                host = self._host([])
+                host._run_json = lambda _args: {"ok": False}  # type: ignore[method-assign]
+                record = self._record(review_handle="term-review", review_leaf="leaf-review")
+
+                with self.assertRaises(HostError):
+                    getattr(host, status)(self.task, record)
+
+    def test_an_inventory_of_an_unsupported_shape_is_not_an_empty_worktree(self) -> None:
+        for status in ("worker_status", "review_status"):
+            with self.subTest(status=status):
+                host = self._host([])
+                host._run_json = lambda _args: {"terminals": "not-a-list"}  # type: ignore[method-assign]
+
+                with self.assertRaises(HostError):
+                    getattr(host, status)(self.task, self._record(review_handle="term-review"))
 
     def test_persisted_handle_survives_the_heads_own_title_rewrite(self) -> None:
         """A codex head overwrites the terminal title with its own OSC sequence seconds after

@@ -155,7 +155,6 @@ from secretary.dispatcher_tui import (
     READINESS_UNKNOWN,
     DeliveryOutcome,
     TuiDeliveryError,
-    close_terminal as _close_tui_terminal,
     close_terminal_strict as _close_tui_terminal_strict,
     deliver_interactive_prompt as _deliver_interactive_prompt,
     terminal_readiness as _terminal_readiness,
@@ -164,13 +163,17 @@ from secretary.dispatcher_tui import (
 )
 from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
 from secretary.dispatcher_types import (
-    # Who a stop is recorded as having been initiated by. Every worker stop the dispatcher performs
-    # has an agent — the reviewer taking the checkout, a replacement opening, an operator pausing
-    # the pipeline, reconciliation settling a record — and the run now says which.
+    # Who a stop is recorded as having been initiated by. Every stop the dispatcher performs has an
+    # agent — the reviewer taking the checkout, a verdict ending the review round, a watchdog over
+    # a head that stopped answering, a replacement opening, an operator pausing the pipeline,
+    # reconciliation settling a record — and both heads' runs now say which.
     STOPPED_BY_DISPATCHER,
     STOPPED_BY_OPERATOR,
+    STOPPED_BY_RECONCILIATION,
     STOPPED_BY_REPLACEMENT,
     STOPPED_BY_REVIEW_FREEZE,
+    STOPPED_BY_REVIEW_VERDICT,
+    STOPPED_BY_WATCHDOG,
     DispatcherError,
     GateTransportError,
     HeadLaunchAborted,
@@ -1260,12 +1263,14 @@ class CommandHostRuntime:
                 workspace=record.workspace,
                 pid_file=_pid_file_path("review", task["ref"]),
                 evidence=dict(launched.delivery_evidence),
+                head_run=dict(launched.head_run),
             ) from None
         return ReviewLaunch(
             handle=launched.handle,
             leaf=launched.leaf,
             commit=self.head_commit(record),
             run=launched.run,
+            head_run=dict(launched.head_run),
             delivery_evidence=dict(launched.delivery_evidence),
         )
 
@@ -1278,7 +1283,9 @@ class CommandHostRuntime:
     def review_status(self, task: dict[str, Any], record: DispatcherRecord) -> dict[str, Any]:
         return _command_terminal_status(self, task, record, kind="review")
 
-    def stop_review(self, record: DispatcherRecord) -> None:
+    def stop_review(
+        self, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER
+    ) -> None:
         """End the reviewer's lifecycle alone. `stop` would take the whole worktree down with it,
         which on a red verdict means killing the checkout's terminals the worker is about to get
         back. Closing the reviewer's own split leaf removes that pane and leaves the rest alone.
@@ -1290,7 +1297,7 @@ class CommandHostRuntime:
             record.review_handle or record.review_leaf or record.review_pid_file
         ):
             return
-        self.stop_head(record, "review")
+        self.stop_head(record, "review", initiator)
 
     def head_commit(self, record: DispatcherRecord) -> str:
         """Commit the workspace checkout currently sits on, or "" when it cannot be read. Pinned
@@ -1593,12 +1600,13 @@ class CommandHostRuntime:
     def stop_head(
         self, record: DispatcherRecord, kind: str, initiator: str = STOPPED_BY_DISPATCHER
     ) -> None:
-        """Stop one role's head and confirm it is gone, or raise.
+        """Stop one role's head through the head operation, recording who ended it.
 
-        A saved leaf is resolved to the inventory's current handle before any close.  Orca can
-        alias a create-time handle away while leaving that leaf stable, and using the stale handle
-        could close a different pane.  The create-time handle and pid heartbeat remain the legacy
-        fallback only when no leaf was ever persisted.
+        Both roles live on the same three operations now (secretary-1414): whichever head this is,
+        the run enters `finishing` with its initiator and is written down before the pane is
+        touched, the saved leaf is resolved to the inventory's current handle so a stop cannot
+        close a pane Orca has since aliased away, and the heartbeat is what confirms the head is
+        actually gone.
 
         The pane close stays best-effort because Orca answers `tab_not_found` for a pane it never
         gave a UI tab, which is every pane a dispatcher-launched head gets on a headless serve. The
@@ -1607,30 +1615,104 @@ class CommandHostRuntime:
         """
         if self.mode == "noop":
             return
-        if kind != "review":
-            # The worker's stop is the head operation, initiator and all (secretary-1412). The
-            # reviewer's is still the pane close below; that path is the next card's.
-            self.stop_worker_head(record, initiator)
+        if kind == "review":
+            self.stop_review_head(record, initiator)
             return
-        handle = record.review_handle
-        leaf = record.review_leaf
-        pid_file = record.review_pid_file
-        if leaf:
-            # This read is part of the stop proof, unlike liveness and anchor selection. An
-            # unreadable inventory cannot be read as an absent leaf: the record must survive so
-            # the next tick cannot put a replacement beside a head we failed to address.
-            current = self._pane_handle_for_leaf_or_raise(record.workspace, leaf)
-            if current:
-                _close_tui_terminal(current, run_json=self._run_json)
-        elif handle:
-            _close_tui_terminal(handle, run_json=self._run_json)
-        elif not pid_file:
-            # Neither identity: nothing here can name that head, so nothing here can promise it is
-            # gone. The caller answers by not launching a replacement.
-            raise HostError(
-                f"{kind} head has neither a pane handle nor a pid heartbeat (and no pane leaf)"
+        self.stop_worker_head(record, initiator)
+
+    def stop_review_head(
+        self, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER
+    ) -> None:
+        """End this card's reviewer through the head operation, recording who ended it.
+
+        The worker's twin (`stop_worker_head`), and deliberately its twin rather than a variant:
+        the reviewer is the head this dispatcher stops from the most places — a red verdict, a
+        green one parking the round, a stalled reviewer's respawn, a pipeline freeze, launch
+        recovery, reconciliation — and every one of them used to leave the same record behind, a
+        reviewer that was simply gone. Each of those callers now names itself.
+
+        What stays exactly as it was is the split-leaf semantics `stop_review` exists for: this
+        closes the reviewer's own pane inside the worker's worktree and nothing else. The worker's
+        checkout, and the terminals a red verdict is about to hand back to it, are untouched.
+        """
+        run = self.review_lifecycle_run(record)
+        try:
+            outcome = head_ops.stop(
+                run,
+                head_ops.StopInitiator(actor=initiator),
+                host=self.session,
+                transport=self._head_transport(record.workspace),
+                commit=lambda finishing: self._commit_review_run(record, finishing),
+                confirm_gone=self._confirm_head_process_gone,
             )
-        self._confirm_head_process_gone(pid_file)
+        except head_ops.HeadStopFailed as exc:
+            # The stop did not happen, and the run says who was ending it. The next tick continues
+            # this stop rather than opening a second one over a reviewer nothing can name.
+            self._commit_review_run(record, exc.run)
+            raise HostError(str(exc)) from None
+        self._commit_review_run(record, outcome.run)
+
+    def _commit_review_run(self, record: DispatcherRecord, run: head_ops.HeadRun) -> None:
+        """Write this reviewer's run onto the record, flushing it when the caller lent us the state.
+
+        Same contract as `_commit_worker_run`: the record is the run's durable home, this runtime
+        does not own the file that record lives in, and a caller that installed `commit_state` gets
+        the transition on disk immediately rather than at the end of a tick that may not get there.
+        """
+        record.review_head_run = run.to_json()
+        if self.commit_state is not None:
+            self.commit_state()
+
+    def review_lifecycle_run(self, record: DispatcherRecord) -> head_ops.HeadRun:
+        """This card's reviewer as the head operations see it.
+
+        The worker's rule, applied to the other head: the stored run decides which head a stop is
+        continuing and reconciliation may only readdress it, so the handle, leaf and heartbeat the
+        record currently carries are bound onto it while its identity, lifecycle and initiator are
+        left alone. A run in `finishing` is continued, initiator and all.
+
+        `settled` is dropped for the same reason it is on the worker path, and only `settled`: a
+        run whose head was confirmed gone cannot be what the record's pane or heartbeat still names,
+        and stopping that pane *as* that run would skip a live reviewer on the strength of an older
+        confirmation. `finishing` is neither running nor finished with, and is kept.
+
+        A reviewer recorded before this field existed has no stored run, so one is reconstructed —
+        same head, same pane, same heartbeat, fresh identity. A reviewer that is running has to be
+        stoppable whichever dispatcher started it. An adopted reviewer is not such a case: its
+        launch intent carries the run its bring-up started, and the adoption puts it back on the
+        record before anything reads it here.
+        """
+        stored = record.review_head_run if isinstance(record.review_head_run, dict) else {}
+        run: head_ops.HeadRun | None = None
+        if stored.get("run_id"):
+            try:
+                run = head_ops.HeadRun.from_json(stored)
+            except (head_ops.HeadRunError, head_ops.TaskRefError):
+                run = None
+            if run is not None and run.settled and record.owns_head(REVIEW_ROLE):
+                run = None
+        if run is None:
+            run = head_ops.HeadRun(
+                run_id=head_ops.new_run_id(),
+                spec=HeadSpec(
+                    profile_id=record.review_head,
+                    adapter=self._prompt_adapter(record.review_run, record.review_head),
+                ),
+                workspace=record.workspace,
+                # The reviewer's own worker id is the card's, as the claim built it: `<ref>-<slug>`.
+                # A pointer that names the head being reconstructed is the truthful one; inventing
+                # a card reference this call never received would not be.
+                task_ref=head_ops.TaskRef.card(
+                    record.worker or record.review_head or "unknown-reviewer"
+                ),
+            )
+        return replace(
+            run,
+            workspace=record.workspace or run.workspace,
+            handle=record.review_handle,
+            leaf=record.review_leaf,
+            pid_file=record.review_pid_file,
+        )
 
     def stop_worker_head(
         self, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER
@@ -1704,7 +1786,9 @@ class CommandHostRuntime:
 
         A record from before this field existed has no run to read, so one is reconstructed — same
         head, same pane, same heartbeat, a fresh identity — because a worker that is running has to
-        be stoppable whichever dispatcher started it.
+        be stoppable whichever dispatcher started it. That is the whole of the reconstruction: a
+        worker adopted from a launch intent arrives here with the run its bring-up started, which
+        the adoption restored from that intent.
         """
         stored = record.worker_head_run if isinstance(record.worker_head_run, dict) else {}
         run: head_ops.HeadRun | None = None
@@ -2121,6 +2205,7 @@ class CommandHostRuntime:
                 workspace=workspace or exc.run.workspace,
                 pid_file=pid_file or exc.run.pid_file,
                 evidence=evidence,
+                head_run=exc.run.to_json(),
             )
         if isinstance(exc, head_ops.HeadPaneBusy):
             return HeadPaneNotReady(
@@ -2222,24 +2307,6 @@ class CommandHostRuntime:
                 if pane.handle == record.handle:
                     return record.handle
         return connected[0].handle if connected else ""
-
-    def _pane_handle_for_leaf(self, workspace: str, leaf: str) -> str:
-        for pane in self._worktree_terminals(workspace):
-            if pane.leaf == leaf:
-                return pane.handle
-        return ""
-
-    def _pane_handle_for_leaf_or_raise(self, workspace: str, leaf: str) -> str:
-        for pane in self._worktree_terminals_or_raise(workspace):
-            if pane.leaf == leaf:
-                return pane.handle
-        return ""
-
-    def _pane_leaf_for_handle_or_raise(self, workspace: str, handle: str) -> str:
-        for pane in self._worktree_terminals_or_raise(workspace):
-            if pane.handle == handle:
-                return pane.leaf
-        return ""
 
     def _worktree_terminals(self, workspace: str) -> list[Pane]:
         """Pane inventory for a worktree, or [] when it cannot be read. Callers use it to pick
@@ -3287,7 +3354,8 @@ class DispatcherRuntime:
                 # `start_review` but the reviewer still up. Left alone it keeps reading the same
                 # checkout the new worker gets, and its verdict would land on the new attempt.
                 unconfirmed = self._end_review_pane_confirmed(
-                    active, records, payload, ref, step="claim", attempt_id=attempt_id
+                    active, records, payload, ref, step="claim", attempt_id=attempt_id,
+                    initiator=STOPPED_BY_REPLACEMENT,
                 )
                 if unconfirmed is not None:
                     return unconfirmed
@@ -3487,10 +3555,10 @@ class DispatcherRuntime:
             self.save_records(payload, records)
             return {"status": "blocked", "step": "claim", "pilot_ref": ref, "reason": "host bring-up failed"}
         record.workspace = prepared["workspace"]
-        record.worker_head_run = dict(prepared.get("head_run") or {})
         _record_worker_delivery_evidence(record, prepared.get("delivery_evidence"))
-        # The intent carries the pane and the launch snapshot before the record does: from here on
-        # every failure is one over a worker that is already running.
+        # The intent carries the pane, the launch snapshot and this head's own run before the record
+        # is told anything else about it: from here on every failure is one over a worker that is
+        # already running, and one that survives a tick dying carries the run it launched with.
         _confirm_launch_intent(
             self,
             payload,
@@ -3500,6 +3568,7 @@ class DispatcherRuntime:
             handle=str(prepared.get("handle") or ""),
             leaf=str(prepared.get("leaf") or ""),
             run=prepared.get("run"),
+            head_run=dict(prepared.get("head_run") or {}),
         )
         try:
             self._settle_worker_pane(
@@ -3565,16 +3634,21 @@ class DispatcherRuntime:
         *,
         step: str,
         attempt_id: str,
+        initiator: str,
     ) -> dict[str, Any] | None:
         """End the reviewer before a replacement head opens. Returns the tick's outcome on refusal.
 
         A refusal leaves the record pointing at that reviewer exactly as it was, so the next tick
-        retries the same stop. Nothing after this call runs on this tick: whatever it was going to
-        open — the rework worker, the replacement reviewer — would be the second process in a
-        checkout the previous head may still be holding.
+        retries the same stop, initiator and all — the run is in `finishing` by then and the actor
+        that began the stop is the one it keeps. Nothing after this call runs on this tick: whatever
+        it was going to open — the rework worker, the replacement reviewer — would be the second
+        process in a checkout the previous head may still be holding.
+
+        `initiator` has no default: these callers are the ones an operator asks about later, and a
+        verdict, a watchdog and a gate ending a reviewer are three different facts.
         """
         try:
-            _end_review_pane(self.host, record)
+            _end_review_pane(self.host, record, initiator)
         except HostError as exc:
             return _head_stop_unconfirmed(
                 step=step,
@@ -3751,13 +3825,14 @@ class DispatcherRuntime:
                 request_id=blocked_request_id,
                 error=exc,
             )
-        # The head is up. Its pane and its launch configuration go into the intent before anything
-        # else is attempted with them, so an adoption gets the run that actually launched.
+        # The head is up. Its pane, its launch configuration and its own run go into the intent
+        # before anything else is attempted with them, so an adoption gets the run that actually
+        # launched rather than a fresh identity for the same process.
         _confirm_launch_intent(
             self, payload, records, ref, record,
             handle=launched.handle, leaf=launched.leaf, run=launched.run,
+            head_run=dict(launched.head_run),
         )
-        record.worker_head_run = dict(launched.head_run)
         _record_worker_delivery_evidence(record, launched.delivery_evidence)
         try:
             self._settle_worker_pane(ref, record, launched.handle, launched.leaf)
@@ -4143,7 +4218,8 @@ class DispatcherRuntime:
             # release may land is that commit and nothing else.
             reviewed = record.review_commit or self.host.head_commit(record)
             unconfirmed = self._end_review_pane_confirmed(
-                record, records, payload, ref, step="review", attempt_id=attempt_id
+                record, records, payload, ref, step="review", attempt_id=attempt_id,
+                initiator=STOPPED_BY_REVIEW_VERDICT,
             )
             if unconfirmed is not None:
                 return unconfirmed
@@ -4480,7 +4556,8 @@ class DispatcherRuntime:
             # a death: the head this respawn replaces may well still be running, so a stop the host
             # will not confirm ends the tick here rather than putting a second reviewer beside it.
             unconfirmed = self._end_review_pane_confirmed(
-                record, records, payload, ref, step=step, attempt_id=attempt_id
+                record, records, payload, ref, step=step, attempt_id=attempt_id,
+                initiator=STOPPED_BY_WATCHDOG,
             )
             if unconfirmed is not None:
                 return unconfirmed
@@ -4603,7 +4680,8 @@ class DispatcherRuntime:
             # through the same confirmed boundary that protects a reviewer respawn; a refused
             # stop leaves the record untouched for this exact retry.
             unconfirmed = self._end_review_pane_confirmed(
-                record, records, payload, ref, step=step, attempt_id=attempt_id
+                record, records, payload, ref, step=step, attempt_id=attempt_id,
+                initiator=STOPPED_BY_WATCHDOG,
             )
             if unconfirmed is not None:
                 return unconfirmed
@@ -4820,7 +4898,8 @@ class DispatcherRuntime:
         # retained worker resumes, but the worker itself stays suspended until the continuation
         # has either been delivered or conclusively fallen back to a replacement.
         unconfirmed = self._end_review_pane_confirmed(
-            record, records, payload, ref, step="gate", attempt_id=attempt_id
+            record, records, payload, ref, step="gate", attempt_id=attempt_id,
+            initiator=STOPPED_BY_REPLACEMENT,
         )
         if unconfirmed is not None:
             return unconfirmed
@@ -5439,7 +5518,8 @@ class DispatcherRuntime:
         # nobody is watching, for as long as the park lasts. Its commit outlives its pane.
         reviewed = record.review_commit or self.host.head_commit(record)
         unconfirmed = self._end_review_pane_confirmed(
-            record, records, payload, ref, step="review", attempt_id=attempt_id
+            record, records, payload, ref, step="review", attempt_id=attempt_id,
+            initiator=STOPPED_BY_REVIEW_VERDICT,
         )
         if unconfirmed is not None:
             return unconfirmed
@@ -5603,7 +5683,8 @@ class DispatcherRuntime:
         # will not confirm gone.
         if record.owns_head("review"):
             unconfirmed = self._end_review_pane_confirmed(
-                record, records, payload, ref, step="assessment", attempt_id=attempt_id
+                record, records, payload, ref, step="assessment", attempt_id=attempt_id,
+                initiator=STOPPED_BY_REVIEW_VERDICT,
             )
             if unconfirmed is not None:
                 return unconfirmed

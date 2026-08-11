@@ -369,7 +369,7 @@ def _freeze_heads(
                 stopped_worker.append(ref)
         if record.review_handle or record.review_leaf or record.review_pid_file:
             try:
-                end_review_pane(runtime.host, record)
+                end_review_pane(runtime.host, record, STOPPED_BY_OPERATOR)
             except HostError:
                 continue
             record.paused_reviewer_at = now
@@ -487,6 +487,7 @@ def _resume_heads(
         confirm_launch_intent(
             runtime, payload, records, ref, record,
             handle=launched.handle, leaf=launched.leaf, run=launched.run,
+            head_run=dict(launched.head_run),
         )
         record.handle = launched.handle
         record.worker_leaf = launched.leaf

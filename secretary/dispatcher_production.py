@@ -1139,7 +1139,7 @@ def _stop_record_heads(
         # before closing it. Keep the workspace-wide stop only for legacy records that never got
         # any role identity at all: there is no other safe way to settle an unnamed possible head.
         if record.owns_head(REVIEW_ROLE):
-            runtime.host.stop_head(record, REVIEW_ROLE)
+            runtime.host.stop_head(record, REVIEW_ROLE, STOPPED_BY_RECONCILIATION)
         if record.owns_head(WORKER_ROLE):
             runtime.host.stop_head(record, WORKER_ROLE, STOPPED_BY_RECONCILIATION)
         if not record.owns_head() and record.workspace and not record.workspace_settled:
