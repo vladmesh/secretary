@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Sequence
 
 from secretary._fsutil import write_json
+from secretary.dispatcher_types import HostError
 
 
 PROBE_TTL_SECONDS = 300
@@ -169,7 +170,10 @@ class HeadHealth:
             profile = self.catalog.head_profile(head)
             resource = str(profile["resource"])
             probe = str(self.catalog.resource(resource).get("probe") or "")
-        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        # HostError is how the catalog says "no such head"; a health probe answers that the same
+        # way it answers every other unreadable configuration — unknown, not a crash on the
+        # claim-time walk that is only asking whether this candidate is usable.
+        except (AttributeError, HostError, KeyError, TypeError, ValueError) as exc:
             return HeadReadiness("", "unknown", f"head health configuration unavailable: {type(exc).__name__}", time.time())
         if not probe:
             return HeadReadiness(resource, "unknown", "resource has no probe command", time.time())

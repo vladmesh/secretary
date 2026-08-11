@@ -639,6 +639,13 @@ class FakeCatalog:
             task.get("routing", {}).get("review_head_override") or self.role_defaults["reviewer"]
         )
 
+    def head_profile(self, head: str) -> dict:
+        # The registry entry behind a head, as InstanceCatalog answers it: prompt delivery resolves
+        # the adapter through this, and an unknown head is an error rather than an empty profile.
+        if head not in self.profiles:
+            raise HostError(f"unknown head {head!r}")
+        return self.profiles[head]
+
     def head_fallback(self, head: str) -> list[str]:
         # Same rule as InstanceCatalog: the chain is whatever the registry writes down, and an
         # unknown head is an error rather than an empty chain, so the claim-time walk can tell

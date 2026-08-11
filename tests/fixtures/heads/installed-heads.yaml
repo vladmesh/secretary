@@ -1,0 +1,191 @@
+# A copy of a real installation's `heads/heads.yaml` snapshot, taken 2026-08-11, kept as a
+# fixture so the head-spec loader is tested against every profile a live host actually runs —
+# observer heads, the mechanical curator/steward/retro roles, the interactive codex-*-tui ids,
+# the claude family that pins no effort, and the hermes profile. It is test data: the
+# installation is never read by the suite and never written by it.
+resources:
+  claude-sub:
+    account: claude-subscription
+    probe: python3 -m triggered_agents pipeline probe --resource claude-sub
+  openrouter:
+    account: openrouter-pooled-key
+    probe: python3 -m triggered_agents pipeline probe --resource openrouter
+  openai-sub:
+    account: openai-subscription
+    probe: python3 -m triggered_agents pipeline probe --resource openai-sub
+profiles:
+  codex:
+    resource: openai-sub
+    adapter: codex
+    model: gpt-5.6-terra
+    effort: default
+    fallback: []
+  codex-sol:
+    resource: openai-sub
+    adapter: codex
+    model: gpt-5.6-sol
+    effort: default
+    fallback: []
+  codex-terra:
+    resource: openai-sub
+    adapter: codex
+    model: gpt-5.6-terra
+    effort: default
+    fallback: []
+  codex-luna:
+    resource: openai-sub
+    adapter: codex
+    model: gpt-5.6-luna
+    effort: default
+    fallback: []
+  codex-5-4:
+    resource: openai-sub
+    adapter: codex
+    model: gpt-5.4
+    effort: default
+    fallback: []
+  codex-mini:
+    resource: openai-sub
+    adapter: codex
+    model: gpt-5.4-mini
+    effort: default
+    fallback: []
+  codex-spark:
+    resource: openai-sub
+    adapter: codex
+    model: gpt-5.3-codex-spark
+    effort: default
+    fallback: []
+  codex-high:
+    resource: openai-sub
+    adapter: codex
+    model: gpt-5.6-terra
+    effort: high
+    fallback: []
+  codex-extra:
+    resource: openai-sub
+    adapter: codex
+    model: gpt-5.6-terra
+    effort: extra
+    fallback: []
+  codex-tui:
+    resource: openai-sub
+    adapter: codex
+    model: gpt-5.6-terra
+    effort: default
+    codex_mode: tui
+    fallback: []
+  codex-high-tui:
+    resource: openai-sub
+    adapter: codex
+    model: gpt-5.6-terra
+    effort: high
+    codex_mode: tui
+    fallback: []
+  codex-extra-tui:
+    resource: openai-sub
+    adapter: codex
+    model: gpt-5.6-terra
+    effort: extra
+    codex_mode: tui
+    fallback: []
+  codex-reviewer:
+    resource: openai-sub
+    adapter: codex
+    model: gpt-5.6-terra
+    effort: extra
+    fallback:
+    - claude-opus
+  codex-reviewer-tui:
+    resource: openai-sub
+    adapter: codex
+    model: gpt-5.6-terra
+    effort: extra
+    codex_mode: tui
+    fallback:
+    - claude-opus
+  codex-curator:
+    resource: openai-sub
+    adapter: codex
+    model: gpt-5.6-terra
+    effort: extra
+    fallback:
+    - claude-default
+  codex-steward:
+    resource: openai-sub
+    adapter: codex
+    model: gpt-5.6-terra
+    effort: extra
+    fallback:
+    - claude-fable
+  codex-retro:
+    resource: openai-sub
+    adapter: codex
+    model: gpt-5.6-terra
+    effort: high
+    fallback:
+    - claude-default
+  codex-observer:
+    resource: openai-sub
+    adapter: codex
+    model: gpt-5.6-terra
+    effort: extra
+    codex_mode: tui
+    fallback: []
+  claude-default:
+    resource: claude-sub
+    adapter: claude
+    fallback: []
+  claude-sonnet:
+    resource: claude-sub
+    adapter: claude
+    model: sonnet
+    fallback: []
+  claude-opus:
+    resource: claude-sub
+    adapter: claude
+    model: opus
+    fallback: []
+  claude-opus-medium:
+    resource: claude-sub
+    adapter: claude
+    model: opus
+    effort: medium
+    fallback: []
+  claude-opus-high:
+    resource: claude-sub
+    adapter: claude
+    model: opus
+    effort: high
+    fallback: []
+  claude-observer:
+    resource: claude-sub
+    adapter: claude
+    model: opus
+    fallback: []
+  claude-observer-medium:
+    resource: claude-sub
+    adapter: claude
+    model: opus
+    effort: medium
+    fallback: []
+  claude-fable:
+    resource: claude-sub
+    adapter: claude
+    model: fable
+    fallback:
+    - claude-opus
+    - hermes
+  hermes:
+    resource: openrouter
+    adapter: hermes
+    model: openai/gpt-5.5
+    provider: openrouter
+    fallback: []
+role_defaults:
+  new_card: claude-opus
+  reviewer: claude-opus-high
+  curator: claude-opus-medium
+  steward: claude-opus-medium
+  retro: claude-opus-medium
+  observer: claude-observer
