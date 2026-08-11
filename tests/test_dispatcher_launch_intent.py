@@ -29,6 +29,8 @@ from secretary.dispatcher import (
     LaunchedHead,
 )
 from secretary.dispatcher_launcher import HeadLaunch
+from triggered_agents.runtime.head import operations as head_ops
+from triggered_agents.runtime.prompt_document import NUDGE_FILE_MODE, NUDGE_MAX_BYTES
 from secretary.dispatcher_tui import TuiDeliveryError, claude_project_dir_name
 from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_launch import launch_intent_liveness
@@ -2716,9 +2718,20 @@ class HostLaunchContourTests(unittest.TestCase):
 
         self.assertIn("worker-report-done-secretary-510-pilot-3", task_at_delivery[0])
         # The document the worker is sent back to and the prompt that wakes it name one round.
-        self.assertIn("report generation 3", prompt_at_delivery[0])
-        self.assertIn("both end in 3", prompt_at_delivery[0])
+        self.assertIn("Report generation 3", prompt_at_delivery[0])
+        self.assertIn("ends in 3", prompt_at_delivery[0])
         self.assertTrue(any(command[2] == "send" for command in calls))
+        # secretary-1413: the round travels as the document it was just written to, and the pane
+        # gets the bounded line naming it. The evidence is what says which of the two happened.
+        evidence = record.worker_delivery_evidence
+        self.assertEqual(evidence["delivery_mode"], NUDGE_FILE_MODE)
+        self.assertEqual(evidence["document_path"], str(self.data_dir / "TASK.md"))
+        self.assertLessEqual(evidence["payload_bytes"], NUDGE_MAX_BYTES)
+        self.assertLess(
+            evidence["payload_bytes"],
+            len(task_at_delivery[0].encode("utf-8")),
+            "the round is in the document, not in the pane",
+        )
 
     def test_a_running_retained_claude_replays_delivery_after_a_crash_before_send(self) -> None:
         """SIGCONT alone is not a delivered continuation.
@@ -3026,7 +3039,12 @@ class WorkerPathReachesOnlyTheSessionHostTests(unittest.TestCase):
         record = self.record(self.spawn_worker().head_run)
         self.session.calls.clear()
 
-        self.host._nudge_worker(record, "report now", "worker report", subject="worker-report")
+        self.host._nudge_worker(
+            record,
+            head_ops.NudgePointer.line("report now"),
+            "worker report",
+            subject="worker-report",
+        )
 
         self.assertIn("send", [call[0] for call in self.session.calls])
         self.assertEqual(self.runner.calls, [])

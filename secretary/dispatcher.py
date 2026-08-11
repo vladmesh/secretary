@@ -2394,7 +2394,12 @@ class CommandHostRuntime:
         if not workspace.is_dir():
             raise HostError("worker workspace is missing")
         prompt = _report_nudge_prompt(record.report_generation, task["ref"])
-        self._nudge_worker(record, prompt, "worker report prompt", subject="worker-report")
+        self._nudge_worker(
+            record,
+            head_ops.NudgePointer.line(prompt),
+            "worker report prompt",
+            subject="worker-report",
+        )
 
     def resume_worker(self, task: dict[str, Any], record: DispatcherRecord) -> None:
         """Resume an addressable retained worker and deliver its updated rework task.
@@ -2444,22 +2449,40 @@ class CommandHostRuntime:
         )
         if status.get("stopped"):
             self._signal_head(record.worker_pid_file, signal.SIGCONT)
-        prompt = _continuation_prompt(continuation.phase, generation, task["ref"], decision)
+        # The continuation travels as a pointer at the document just written, not as the round
+        # typed into the composer: that is the delivery shape the product has never lost a prompt
+        # on, and the one this path was still missing (secretary-1413).
         self._nudge_worker(
-            record, prompt, "retained worker continuation", subject="worker-continuation"
+            record,
+            head_ops.NudgePointer(
+                text=_continuation_nudge(generation, decision),
+                document=str(workspace / "TASK.md"),
+            ),
+            "retained worker continuation",
+            subject="worker-continuation",
         )
 
     def _nudge_worker(
-        self, record: DispatcherRecord, prompt: str, what: str, *, subject: str
+        self,
+        record: DispatcherRecord,
+        pointer: head_ops.NudgePointer,
+        what: str,
+        *,
+        subject: str,
     ) -> None:
         """Point this card's live worker at one thing, through the head operation (secretary-1412).
 
         Both prompts a running worker ever gets — "report the round you are in" and "here is your
         continuation" — go through `nudge`, so the pane is re-found by the run's own leaf before
         anything is typed into it and the delivery is recorded against the head rather than against
-        a handle. What is delivered and how a turn is confirmed are unchanged: this passes the same
-        confirming transport the launch nudge uses, because the criterion is the product's, not the
-        operation's.
+        a handle. How a turn is confirmed is unchanged: this passes the same confirming transport
+        the launch nudge uses, because the criterion is the product's, not the operation's.
+
+        What is delivered is the caller's pointer, and the two callers do not deliver the same
+        shape. The continuation opens a round, so it points at the round's document and the pane
+        receives a bounded line; the report prompt opens nothing and is the other legitimate case,
+        where the line is the whole message. Taking a `NudgePointer` rather than a string is what
+        keeps that difference at the call site instead of guessing it here.
 
         The failure is the caller's to read as it always was: a worker prompt that did not reach
         its confirmation is a `HostError` carrying the delivery boundary's own evidence.
@@ -2468,7 +2491,7 @@ class CommandHostRuntime:
         try:
             outcome = head_ops.nudge(
                 run,
-                head_ops.NudgePointer.line(prompt),
+                pointer,
                 host=self.session,
                 transport=self._head_transport(
                     record.workspace, "TASK.md",
@@ -6065,42 +6088,36 @@ def _gate_attestation_for_prompt(
     return _accepted_gate_receipt(source, current_sha)
 
 
-def _continuation_prompt(
-    phase: str, generation: int = 0, reference: str = "", decision: str = ""
-) -> str:
-    """What the resumed conversation is told. The updated TASK.md carries the detail; this names
-    which of the two red verdicts sent the card back, which report round it opens, and, when an
-    observer decision opened the round, that the decision outranks the findings.
+def _continuation_nudge(generation: int = 0, decision: str = "") -> str:
+    """The bounded line a resumed conversation is sent with its rework document.
 
-    The generation is spelled out because the retained conversation still has the previous round's
-    report command in its own scrollback. "Read the updated TASK.md" is exactly the instruction the
-    incident worker did not follow; a number both the agent and a human reading the pane can
-    compare makes a replayed command visibly the wrong one.
+    What sent the card back and what the round owes are in the document, because a round typed
+    into a composer is the payload that gets swallowed there: `enter-accepted-without-turn` with
+    the text still in the pane, twice in one day on this path alone, each one costing a retained
+    worker's context and a fresh head. So this is a pointer like every other prompt in the product
+    (`prompt_document`), and only what a pointer cannot delegate stays in the line.
 
-    The decision is named for the same reason: a prompt that only points at a document leaves the
-    retained conversation to rank the document's sections itself, and a worker that read the
-    reviewer's findings as the instruction reworked findings the observer had rejected
-    (secretary-1064).
+    Two things cannot. The generation, because the retained conversation still has the previous
+    round's report command in its own scrollback: "read the updated TASK.md" is exactly the
+    instruction the incident worker followed while re-running the old command, and a number both
+    the agent and a human reading the pane can compare is what makes a replayed one visibly the
+    wrong one. And the standing of the decision, because a pointer that only names a document
+    leaves the retained conversation to rank that document's sections itself — the worker that did
+    so read the reviewer's findings as the instruction and reworked findings the observer had
+    rejected (secretary-1064). Naming the ranking here is not a second copy of the decision: the
+    decision's text stays in the document, under the heading this sentence points at.
+
+    The line stays inside `NUDGE_MAX_BYTES` with both discriminators present, which is why the
+    wording is this terse — a discriminator is not what gets cut to fit.
     """
-    if phase == "review":
-        cause, work = "The review verdict is red.", "address the findings"
-    else:
-        cause, work = "The mechanical validation gate returned red.", "fix the failure"
-    if decision.strip():
-        work = (
-            "follow the observer decision under \"Observer rework decision to follow\", which is "
-            "the authoritative instruction for this round and outranks the reviewer findings kept "
-            "below it as context"
-        )
-    card = f" for {reference}" if reference else ""
-    return (
-        f"{cause} This opens report generation {generation}{card}. TASK.md at the workspace root "
-        f"has been rewritten for it: read it again, {work}, then report with the command in that "
-        f"file. Its --request-id and its body file both end in {generation}. A report command from "
-        "an earlier turn of this conversation ends in a different number and belongs to a round "
-        "that is over: that id already names that round's report and its body file is gone, so "
-        "running it reports nothing here, whether it fails or answers from the old round's record."
+    nudge = (
+        f"Report generation {generation}: re-read TASK.md at the workspace root and follow it, "
+        f"then report with the command there, whose id ends in {generation}, not an earlier "
+        "turn's."
     )
+    if decision.strip():
+        nudge += " The observer decision in it outranks the reviewer findings kept below it."
+    return nudge
 
 
 def _safe_orca_command_label(args: list[str]) -> str:

@@ -29,7 +29,7 @@ from secretary.dispatcher import (
     STOPPED_BY_REPLACEMENT,
     STOPPED_BY_REVIEW_FREEZE,
     _body_file_path,
-    _continuation_prompt,
+    _continuation_nudge,
     _gate_attestation_for_prompt,
     _legacy_worker_branch,
     _render_codex_command,
@@ -1251,10 +1251,7 @@ class FakeHost:
             record.report_decision,
         )
         self.resumed_continuations.append(
-            _continuation_prompt(
-                record.worker_continuation.phase, record.report_generation, task["ref"],
-                record.report_decision,
-            )
+            _continuation_nudge(record.report_generation, record.report_decision)
         )
         self.resumed_workers.append(record.handle)
 
@@ -6839,8 +6836,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
             self.assertEqual(reworked["action"], "review-red-reused-worker")
             generation = self._pilot_record()["report_generation"]
             self._assert_one_generation(generation)
-            self.assertIn(f"report generation {generation}", self.host.resumed_continuations[-1])
-            self.assertIn(f"both end in {generation}", self.host.resumed_continuations[-1])
+            self.assertIn(f"Report generation {generation}", self.host.resumed_continuations[-1])
+            self.assertIn(f"ends in {generation}", self.host.resumed_continuations[-1])
             generations.append(generation)
 
         self.assertEqual(generations, sorted(set(generations)), f"repeated or backwards: {generations}")
@@ -6903,7 +6900,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertEqual(recovered["action"], "review-red-reused-worker")
         self._assert_one_generation(2)
-        self.assertIn("report generation 2", self.host.resumed_continuations[-1])
+        self.assertIn("Report generation 2", self.host.resumed_continuations[-1])
 
     def test_a_crash_between_the_generation_and_the_delivery_reuses_its_reservation(self) -> None:
         """One rework round, one generation, however many ticks it takes to finish the transition.
@@ -6938,7 +6935,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertEqual(recovered["action"], "review-red-reused-worker")
         self._assert_one_generation(2)
-        self.assertIn("report generation 2", self.host.resumed_continuations[-1])
+        self.assertIn("Report generation 2", self.host.resumed_continuations[-1])
 
     def test_a_new_round_removes_the_previous_rounds_report_body(self) -> None:
         """The last thing that could make a command from a round that is over report this one.
@@ -7107,7 +7104,12 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
     def test_the_continuation_prompt_names_the_decision_as_authoritative(self) -> None:
         """The retained conversation is told what outranks what before it re-reads the file: a
-        prompt that only points at a document leaves the ranking to the worker."""
+        pointer that only names a document leaves the ranking to the worker (secretary-1064).
+
+        The line is a pointer now (secretary-1413), so it names the ranking and not the decision:
+        the decision's own text is in the document, and duplicating it into the pane is exactly the
+        payload this delivery shape exists to keep out of a composer.
+        """
         self.host.fail_resume_worker_reason = ""
         self.start_dispatcher()
         self.tick()
@@ -7115,9 +7117,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self._drive_red_round(1, "three blockers", "accept the first, reject the rest")
 
         prompt = self.host.resumed_continuations[-1]
-        self.assertIn("Observer rework decision to follow", prompt)
-        self.assertIn("authoritative instruction for this round", prompt)
-        self.assertIn("outranks the reviewer findings", prompt)
+        self.assertIn("observer decision in it outranks the reviewer findings", prompt)
+        self.assertNotIn("accept the first, reject the rest", prompt)
+        self.assertIn("accept the first, reject the rest", self._task_document())
 
     def test_the_replacement_worker_is_handed_the_same_decision(self) -> None:
         """The retained session is not the only path: a round whose conversation could not take
@@ -7231,7 +7233,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertEqual(recovered["action"], "review-red-reused-worker")
         self.assertEqual(self._document_decision(), "add a live check")
-        self.assertIn("Observer rework decision to follow", self.host.resumed_continuations[-1])
+        self.assertIn(
+            "observer decision in it outranks", self.host.resumed_continuations[-1]
+        )
 
     def test_a_crash_before_the_move_reuses_the_frozen_decision(self) -> None:
         """The other order: the transition is on disk and the board has not moved yet. Whichever
@@ -7287,7 +7291,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(recovered["action"], "review-red-reused-worker")
         self.assertEqual(self.host.resumed_workers, ["term:secretary-510-pilot-pilot"])
         self.assertEqual(self._document_decision(), "add a live check")
-        self.assertIn("Observer rework decision to follow", self.host.resumed_continuations[-1])
+        self.assertIn(
+            "observer decision in it outranks", self.host.resumed_continuations[-1]
+        )
         self.assertNotIn("revert the whole thing", self._task_document())
 
     def test_a_crash_between_the_document_and_the_launch_keeps_the_decision(self) -> None:
@@ -7384,9 +7390,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self._document_decision(), "")
         self.assertNotIn("Observer rework decision", self._task_document())
         self.assertEqual(self._pilot_record()["report_decision"], "")
-        self.assertNotIn(
-            "Observer rework decision", self.host.resumed_continuations[-1]
-        )
+        self.assertNotIn("observer decision", self.host.resumed_continuations[-1])
 
     def test_a_gate_red_round_does_not_inherit_the_previous_decision(self) -> None:
         """A round opened by the gate is not the observer's round: the adjudication of a review
@@ -8851,6 +8855,57 @@ class ReportPromptDeliveryTests(unittest.TestCase):
         self.assertIn("Committing, pushing, a green test run", prompt)
         self.assertIn("is not a report of this round", prompt)
         self.assertIn("If it is not done, carry on", prompt)
+
+
+class ContinuationNudgeTests(unittest.TestCase):
+    """secretary-1413: the continuation is a pointer, and what a pointer may not delegate.
+
+    The round's instructions ride in TASK.md, so what is left in the line is only the two
+    discriminators the incidents bought — which round this is, and that the observer decision
+    outranks the findings under it. Both have to survive inside the nudge ceiling, because a
+    pointer that does not fit is not a pointer.
+    """
+
+    def test_the_line_names_the_round_so_a_replayed_command_is_visibly_wrong(self) -> None:
+        """The scrollback of a retained conversation still holds the previous round's report
+        command; a number is what makes the old one visibly somebody else's."""
+        nudge = _continuation_nudge(4)
+
+        self.assertIn("Report generation 4", nudge)
+        self.assertIn("ends in 4", nudge)
+        self.assertIn("not an earlier turn's", nudge)
+
+    def test_the_line_ranks_the_decision_above_the_findings(self) -> None:
+        """secretary-1064: a pointer that only names a document left the retained conversation to
+        rank its sections, and the worker reworked findings the observer had rejected."""
+        nudge = _continuation_nudge(4, "accept the first, reject the rest")
+
+        self.assertIn("observer decision in it outranks the reviewer findings", nudge)
+        self.assertNotIn(
+            "accept the first, reject the rest", nudge, "the decision's text stays in the document"
+        )
+
+    def test_a_round_with_no_decision_ranks_nothing(self) -> None:
+        """A gate-red round has no adjudication, and a line claiming one would point the worker at
+        a section its document does not have."""
+        self.assertNotIn("observer decision", _continuation_nudge(4))
+        self.assertNotIn("observer decision", _continuation_nudge(4, "   "))
+
+    def test_every_shape_of_the_line_fits_the_nudge_ceiling(self) -> None:
+        """The boundary itself, not a glance at the wording: both discriminators are present in
+        the longest shape and the whole line is still under `NUDGE_MAX_BYTES`."""
+        longest = _continuation_nudge(10**9, "a decision of any length at all")
+
+        self.assertIn("10", longest)
+        self.assertIn("observer decision in it outranks", longest)
+        for nudge in (
+            _continuation_nudge(0),
+            _continuation_nudge(7),
+            _continuation_nudge(7, "d"),
+            longest,
+        ):
+            self.assertLessEqual(len(nudge.encode("utf-8")), NUDGE_MAX_BYTES, nudge)
+        self.assertEqual(longest.splitlines(), [longest], "a nudge is one line")
 
 
 class WaitWatchdogTests(unittest.TestCase):
