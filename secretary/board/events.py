@@ -131,6 +131,10 @@ class MutationEventTransaction:
         committed = self.canon.committed(self.request_id)
         if committed is not None:
             self._require_same_event(committed)
+            # Replay still passes through the canon's ownership gate.  It is a no-op for the
+            # already committed exact event, but keeps all transaction contours on the same
+            # lock-protected protocol boundary.
+            self._commit_or_raise()
             return replay()
 
         pending = self.canon.event(self.request_id)
@@ -148,7 +152,7 @@ class MutationEventTransaction:
         except Exception:
             # No effect completed, so its exact staged event is not a recovery
             # obligation.  TaskAudit's discard keeps its released semantics.
-            self.canon.audit.discard(self.request_id)
+            self.canon.audit.discard(self.request_id, self.event.to_record(self.request_id))
             raise
         self._commit_or_raise()
         return result
