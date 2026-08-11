@@ -3793,6 +3793,7 @@ class ObserverConfigurationTests(unittest.TestCase):
             host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
             record = ObserverRecord(
                 sprint="sprint:1",
+                head="codex-observer",
                 workspace="/workspace",
                 handle="observer:sprint:1",
                 delivery=ObserverDelivery(
@@ -3863,6 +3864,7 @@ class ObserverConfigurationTests(unittest.TestCase):
             host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
             record = ObserverRecord(
                 sprint="sprint:1",
+                head="codex-observer",
                 workspace="/workspace",
                 handle="observer:create-time",
                 leaf="leaf-observer",
@@ -3915,6 +3917,7 @@ class ObserverConfigurationTests(unittest.TestCase):
             host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
             record = ObserverRecord(
                 sprint="sprint:1",
+                head="codex-observer",
                 workspace="/workspace",
                 handle="observer:sprint:1",
                 delivery=ObserverDelivery(delivery_id="delivery-3", through_event="evt-card-3"),

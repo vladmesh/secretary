@@ -200,6 +200,7 @@ from triggered_agents.agents.pipeline.heads import (
     resolve_head_id as _resolve_head_id,
 )
 from triggered_agents.agents.pipeline.task_protocol import pythonpath_prefix
+from triggered_agents.runtime.head import HeadSpec, HeadSpecError
 from triggered_agents.runtime.prompt_document import (
     PromptDocumentError,
     nudge_for as _nudge_for,
@@ -606,12 +607,20 @@ class CommandHostRuntime:
         self.mode = mode
 
     def _prompt_adapter(self, run: Any, head: str) -> str:
-        """Resolve the provider for a retained pane without downgrading old Codex records.
+        """The provider whose framing a prompt for this pane is delivered in.
 
-        New records carry the immutable run snapshot.  Older records can lack it, so resolve the
-        current head profile when available; a missing profile still chooses Codex, whose framing
-        is the safe default for the historical TUI-only path rather than silently falling back to
-        the generic unframed send that lost the reproduced prompt.
+        The run snapshot wins: it is what the head was actually started as, and it is immutable, so
+        a record written before the registry moved keeps being addressed the way its session
+        expects. A record that predates the snapshot has only the head's name, so the current
+        profile is resolved into a `HeadSpec`, which is the type that cannot exist without an
+        adapter.
+
+        Neither of those is allowed to fall through to a guess. This used to answer `"codex"` when
+        the head was unknown or its profile carried no adapter, on the reasoning that Codex framing
+        was the historical shape; what that actually does is send Codex framing at whatever is
+        running in the pane, and the delivery it was meant to protect is exactly the one it then
+        loses. An unresolvable head is a fact about the installation, so it stops the delivery by
+        name and lets the caller report it.
         """
         if isinstance(run, dict):
             adapter = str(run.get("adapter") or "").lower()
@@ -619,13 +628,14 @@ class CommandHostRuntime:
                 return adapter
         try:
             profile = self.catalog.head_profile(head)
-        except (AttributeError, HostError):
-            profile = {}
-        if isinstance(profile, dict):
-            adapter = str(profile.get("adapter") or "").lower()
-            if adapter:
-                return adapter
-        return "codex"
+        except (AttributeError, HostError) as exc:
+            raise HostError(
+                f"cannot resolve the prompt adapter for head {head!r}: {exc or 'unknown head'}"
+            ) from None
+        try:
+            return HeadSpec.from_profile(head, profile).adapter.lower()
+        except HeadSpecError as exc:
+            raise HostError(f"cannot resolve the prompt adapter for head {head!r}: {exc}") from None
 
     def prepare_worker(
         self,
