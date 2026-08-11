@@ -1504,9 +1504,16 @@ def _budget_event_type(event: dict[str, Any]) -> str | None:
     marker = str(payload.get("marker") or "")
     if event.get("kind") == "verdict" and marker == "review:red":
         return "red_review"
-    if event.get("kind") == "moved":
+    if event.get("record_type") == "board.protocol_event":
+        transition = event.get("transition") if isinstance(event.get("transition"), dict) else {}
+        target = str(transition.get("target") or "")
+        source = str(transition.get("source") or "")
+    elif event.get("kind") == "moved":
         target = str(payload.get("to") or "")
         source = str(payload.get("from") or "")
+    else:
+        target = source = ""
+    if target:
         request_id = str(event.get("request_id") or "")
         if target == "blocked":
             return "blocked"

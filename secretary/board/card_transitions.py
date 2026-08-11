@@ -26,6 +26,9 @@ _CARD_STATES = tuple(CardState)
 CARD_TRANSITIONS: dict[str, frozenset[CardTransitionKey]] = {
     "po": frozenset((source, target) for source in _CARD_STATES for target in _CARD_STATES if source != target),
     "dispatcher": frozenset({
+        # Claim is a dispatcher-owned Ready-to-In progress lifecycle edge.  It
+        # used to bypass this registry through TaskWriter's raw Kanboard move.
+        (CardState.READY, CardState.IN_PROGRESS),
         (CardState.IN_PROGRESS, CardState.VALIDATE), (CardState.IN_PROGRESS, CardState.BLOCKED),
         (CardState.IN_PROGRESS, CardState.READY), (CardState.VALIDATE, CardState.IN_PROGRESS),
         (CardState.VALIDATE, CardState.BLOCKED), (CardState.VALIDATE, CardState.DONE),

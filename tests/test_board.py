@@ -80,8 +80,10 @@ class BoardHostContractTests(unittest.TestCase):
     def test_role_aware_registry_rejects_invalid_role_and_edge(self) -> None:
         with self.assertRaises(CardTransitionForbidden):
             card_transition("worker", CardState.READY, CardState.IN_PROGRESS)
-        with self.assertRaises(CardTransitionForbidden):
-            card_transition("dispatcher", CardState.READY, CardState.IN_PROGRESS)
+        self.assertEqual(
+            card_transition("dispatcher", CardState.READY, CardState.IN_PROGRESS).event_kind,
+            EventKind.CARD_STARTED,
+        )
         with self.assertRaises(CardTransitionForbidden):
             card_transition("po", CardState.READY, CardState.READY)
 

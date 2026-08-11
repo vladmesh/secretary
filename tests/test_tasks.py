@@ -16,7 +16,9 @@ from unittest import mock
 
 from secretary.cli import main
 from secretary.board.card_transitions import CARD_TRANSITIONS
-from secretary.board.models import CardState
+from secretary.board.host import TransitionRequest
+from secretary.board.models import Actor, CardState, EntityKind, RelatedRefs
+from secretary.board.transitions import TRANSITIONS
 from secretary.board_transport import BoardTransport
 from secretary.data import export_board
 from secretary.sprints import refresh_active_sprint_projects
@@ -471,6 +473,63 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "transition_forbidden")
         self.assertFalse(any(call[0] == "moveTaskPosition" for call in self.client.calls))
 
+    def test_kanboard_host_executes_every_declared_card_edge_through_the_typed_canon(self) -> None:
+        columns = {
+            state: identifier
+            for identifier, title in self.writer.reader._board()[1].items()
+            if (state := _STATE_BY_COLUMN.get(title))
+        }
+        host = self.writer.board_host
+        self.client.tasks[1]["swimlane_id"] = 0
+        for index, declaration in enumerate(TRANSITIONS[EntityKind.CARD].values()):
+            self.client.tasks[0]["column_id"] = columns[declaration.source.value]
+            result = host.transition(TransitionRequest(
+                EntityKind.CARD, "secretary-468", declaration.target, Actor("po", "operator"),
+                "registry contract", RelatedRefs(("sprint:1031",)), f"host-edge-{index}",
+            ))
+            self.assertEqual(result.entity.state, declaration.target)
+            self.assertEqual(result.event.kind, declaration.event_kind)
+            self.assertEqual(
+                (result.event.source_state, result.event.target_state),
+                (declaration.source.value, declaration.target.value),
+            )
+        self.assertEqual(len(host.canon.events(ref="secretary-468")), len(TRANSITIONS[EntityKind.CARD]))
+
+    def test_typed_pending_transition_recovers_only_after_proving_the_live_target(self) -> None:
+        self.client.metadata[12]["claim"] = ""
+        with mock.patch.object(self.writer.audit, "append", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(TaskError, "audit repair") as raised:
+                self.writer.claim(
+                    role="dispatcher", actor="d", reference="secretary-468", worker="worker-a",
+                    request_id="typed-pending-claim",
+                )
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(self.writer.reader.show("secretary-468")["state"], "in_progress")
+        pending = self.writer.audit.pending_event("typed-pending-claim")
+        assert pending is not None
+        self.assertEqual(pending["record_type"], "board.protocol_event")
+        self.assertEqual(pending["transition"], {"source": "ready", "target": "in_progress"})
+        moves = len([call for call in self.client.calls if call[0] == "moveTaskPosition"])
+
+        self.assertEqual(self.writer.reconcile(), (1, 0))
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+        self.assertEqual(moves, len([call for call in self.client.calls if call[0] == "moveTaskPosition"]))
+
+    def test_generic_pending_contender_cannot_be_published_as_a_typed_transition(self) -> None:
+        self.client.tasks[0]["column_id"] = 3
+        self.writer.audit.stage("contended-transition", {
+            "request_id": "contended-transition", "event_id": "legacy-contender",
+            "kind": "moved", "ref": "secretary-468", "payload": {"to": "validate"},
+        })
+
+        with self.assertRaisesRegex(TaskError, "released generic audit record"):
+            self.writer.move(
+                role="dispatcher", actor="d", reference="secretary-468", target="validate",
+                reason="submit", request_id="contended-transition",
+            )
+        self.assertEqual(self.writer.audit.pending_event("contended-transition")["event_id"], "legacy-contender")
+        self.assertFalse(any(call[0] == "moveTaskPosition" for call in self.client.calls))
+
     def test_retry_does_not_repeat_backend_write_or_event(self) -> None:
         result = self.writer.comment(role="worker", actor="w", reference="secretary-468", body="safe", request_id="same")
         second = self.writer.comment(role="worker", actor="w", reference="secretary-468", body="safe", request_id="same")
@@ -865,16 +924,13 @@ class TaskWriterTests(unittest.TestCase):
             ["first", "second", "second"],
         )
 
-    def test_partial_move_failure_keeps_pending_until_reconcile(self) -> None:
+    def test_post_transition_comment_failure_leaves_the_typed_event_committed(self) -> None:
         self.client.tasks[0]["column_id"] = 3
         self.client.fail_comments = True
-        with self.assertRaisesRegex(TaskError, "audit repair") as raised:
+        with self.assertRaisesRegex(TaskError, "follow-up board cleanup") as raised:
             self.writer.move(role="dispatcher", actor="d", reference="secretary-468", target="validate", reason="why")
         self.assertEqual(raised.exception.code, "audit_pending")
         self.assertEqual(self.client.tasks[0]["column_id"], 4)
-        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
-        self.client.fail_comments = False
-        self.assertEqual(self.writer.reconcile(), (1, 0))
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
 
     def test_restore_move_failure_keeps_pending_audit(self) -> None:
@@ -944,53 +1000,41 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(result["task"]["ref"], "secretary-restore")
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
 
-    def test_reconcile_completes_stale_ready_cleanup_before_closing_pending(self) -> None:
+    def test_ready_cleanup_failure_leaves_no_generic_pending_transition(self) -> None:
         self.client.tasks[0]["column_id"] = 3
         self.client.fail_metadata = True
-        with self.assertRaisesRegex(TaskError, "audit repair") as raised:
+        with self.assertRaisesRegex(TaskError, "follow-up board cleanup") as raised:
             self.writer.move(role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="")
         self.assertEqual(raised.exception.code, "audit_pending")
         self.assertEqual(self.client.tasks[0]["column_id"], 2)
         self.assertEqual(self.client.metadata[12]["claim"], "codex-terra")
-        self.assertEqual(self.writer.reconcile(), (0, 1))
-        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
-
-        self.client.fail_metadata = False
-        self.assertEqual(self.writer.reconcile(), (1, 0))
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
-        task = self.writer.reader.show("secretary-468")
-        self.assertIsNone(task["claim"]["worker"])
-        self.assertEqual(task["retry"], {"same": 0, "switched": 0, "heads": []})
+        event = json.loads(Path(self.writer.audit.events_path).read_text(encoding="utf-8"))
+        self.assertEqual(event["record_type"], "board.protocol_event")
 
-    def test_pending_ready_replay_finishes_cleanup_before_success_audit(self) -> None:
+    def test_committed_ready_replay_does_not_repeat_the_column_move(self) -> None:
         self.client.tasks[0]["column_id"] = 3
         self.client.metadata[12]["resolved_head"] = "codex-terra"
         self.client.metadata[12]["resolved_review_head"] = "codex-reviewer"
         self.client.fail_metadata = True
-        with self.assertRaisesRegex(TaskError, "audit repair"):
-            self.writer.move(role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="", request_id="ready-replay")
+        with self.assertRaisesRegex(TaskError, "follow-up board cleanup"):
+            self.writer.move(
+                role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="",
+                request_id="ready-replay",
+            )
 
         moves = len([call for call in self.client.calls if call[0] == "moveTaskPosition"])
-        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
 
-        with self.assertRaisesRegex(TaskError, "audit repair"):
-            self.writer.move(role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="", request_id="ready-replay")
-        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
-        self.assertEqual(moves, len([call for call in self.client.calls if call[0] == "moveTaskPosition"]))
-
-        self.client.fail_metadata = False
-        result = self.writer.move(role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="", request_id="ready-replay")
-
-        self.assertEqual(result["task"]["state"], "ready")
+        replayed = self.writer.move(
+            role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="",
+            request_id="ready-replay",
+        )
+        self.assertTrue(replayed["replayed"])
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
         self.assertEqual(moves, len([call for call in self.client.calls if call[0] == "moveTaskPosition"]))
-        with open(self.writer.audit.events_path, encoding="utf-8") as events:
-            self.assertEqual(len(events.readlines()), 1)
-        task = self.writer.reader.show("secretary-468")
-        self.assertIsNone(task["claim"]["worker"])
-        self.assertIsNone(task["routing"]["resolved_worker_head"])
-        self.assertIsNone(task["routing"]["resolved_review_head"])
-        self.assertEqual(task["retry"], {"same": 0, "switched": 0, "heads": []})
+
+        self.assertEqual(replayed["task"]["state"], "ready")
 
     def test_dispatcher_claim_stamps_metadata_moves_and_audits(self) -> None:
         self.client.metadata[12]["claim"] = ""
@@ -1011,8 +1055,8 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(self.client.metadata[12]["resolved_review_head"], "codex-reviewer")
         with open(self.writer.audit.events_path, encoding="utf-8") as events:
             event = json.loads(events.readline())
-        self.assertEqual(event["kind"], "claimed")
-        self.assertEqual(event["payload"]["worker"], "secretary-468-runtime")
+        self.assertEqual(event["kind"], "card.started")
+        self.assertEqual(event["transition"], {"source": "ready", "target": "in_progress"})
 
     def test_create_stores_codex_launch_mode_and_audits(self) -> None:
         with open_sprint() as sprint:
@@ -1398,11 +1442,11 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "role_forbidden")
         self.assertFalse(any(call[0] == "createTask" for call in self.client.calls))
 
-    def test_pending_claim_replay_finishes_move_before_success_audit(self) -> None:
+    def test_failed_claim_move_discards_its_typed_event_and_retries_exactly(self) -> None:
         self.client.metadata[12]["claim"] = ""
         self.client.fail_move = True
 
-        with self.assertRaisesRegex(TaskError, "audit repair") as raised:
+        with self.assertRaisesRegex(TaskError, "rejected the move") as raised:
             self.writer.claim(
                 role="dispatcher",
                 actor="d",
@@ -1412,8 +1456,8 @@ class TaskWriterTests(unittest.TestCase):
                 request_id="claim-replay",
             )
 
-        self.assertEqual(raised.exception.code, "audit_pending")
-        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+        self.assertEqual(raised.exception.code, "backend_error")
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
         task = self.writer.reader.show("secretary-468")
         self.assertEqual(task["state"], "ready")
         self.assertEqual(task["claim"]["worker"], "secretary-468-runtime")
@@ -1433,10 +1477,10 @@ class TaskWriterTests(unittest.TestCase):
         with open(self.writer.audit.events_path, encoding="utf-8") as events:
             self.assertEqual(len(events.readlines()), 1)
 
-    def test_reconcile_finishes_pending_claim_move(self) -> None:
+    def test_reconcile_does_not_repeat_a_failed_claim_move(self) -> None:
         self.client.metadata[12]["claim"] = ""
         self.client.fail_move = True
-        with self.assertRaisesRegex(TaskError, "audit repair"):
+        with self.assertRaisesRegex(TaskError, "rejected the move"):
             self.writer.claim(
                 role="dispatcher",
                 actor="d",
@@ -1446,11 +1490,9 @@ class TaskWriterTests(unittest.TestCase):
                 request_id="claim-reconcile",
             )
 
-        self.client.fail_move = False
-
-        self.assertEqual(self.writer.reconcile(), (1, 0))
+        self.assertEqual(self.writer.reconcile(), (0, 0))
         task = self.writer.reader.show("secretary-468")
-        self.assertEqual(task["state"], "in_progress")
+        self.assertEqual(task["state"], "ready")
         self.assertEqual(task["claim"]["worker"], "secretary-468-runtime")
 
     def test_claim_rejects_project_code_capacity_without_write(self) -> None:
@@ -1630,6 +1672,7 @@ class AssessmentStateTests(unittest.TestCase):
         self.assertEqual(
             CARD_TRANSITIONS["dispatcher"],
             {
+                (CardState.READY, CardState.IN_PROGRESS),
                 (CardState.IN_PROGRESS, CardState.VALIDATE), (CardState.IN_PROGRESS, CardState.BLOCKED),
                 (CardState.IN_PROGRESS, CardState.READY), (CardState.VALIDATE, CardState.IN_PROGRESS),
                 (CardState.VALIDATE, CardState.BLOCKED), (CardState.VALIDATE, CardState.DONE),
@@ -1660,6 +1703,7 @@ class AssessmentStateTests(unittest.TestCase):
     def test_writer_preserves_the_complete_legacy_role_by_edge_contract(self) -> None:
         """Exercise the public writer instead of proving a copied table equals the registry."""
         dispatcher = {
+            ("ready", "in_progress"),
             ("in_progress", "validate"), ("in_progress", "blocked"),
             ("in_progress", "ready"), ("validate", "in_progress"),
             ("validate", "blocked"), ("validate", "done"),
@@ -2693,9 +2737,9 @@ class BlockedContractTests(unittest.TestCase):
             reason=reason, request_id="observer-disposition",
         )
         self.assertEqual(moved["task"]["state"], "ready")
-        payload = self._events("moved")[-1]["payload"]
-        self.assertEqual((payload["from"], payload["to"]), ("blocked", "ready"))
-        self.assertEqual(payload["reason_sha256"], hashlib.sha256(reason.encode()).hexdigest())
+        event = self._events("card.unblocked")[-1]
+        self.assertEqual(event["transition"], {"source": "blocked", "target": "ready"})
+        self.assertEqual(event["reason"], reason)
         self.assertIn(reason, self.client.comments[12][-1]["comment"])
 
         # Every exit is guarded, not just the requeue to Ready.
@@ -3045,7 +3089,7 @@ class RequestIdOwnershipTests(unittest.TestCase):
                 request_id="round-1",
             )
 
-        self.assertEqual(self._events("round-1")[0]["payload"]["worker"], "worker-a")
+        self.assertEqual(self._events("round-1")[0]["reason"], "claimed by worker-a")
         self.assertEqual(self.client.metadata[12]["claim"], "worker-a")
 
     def test_a_reused_move_id_with_another_destination_is_refused(self) -> None:
@@ -3067,7 +3111,7 @@ class RequestIdOwnershipTests(unittest.TestCase):
             )
 
         self.assertEqual(len(self._events("round-1")), 1)
-        self.assertEqual(self._events("round-1")[0]["payload"]["to"], "ready")
+        self.assertEqual(self._events("round-1")[0]["transition"]["target"], "ready")
 
     def test_a_move_retried_after_it_landed_stays_idempotent(self) -> None:
         """`from` is the column the move left, so a retry must not compare it."""
@@ -3081,7 +3125,7 @@ class RequestIdOwnershipTests(unittest.TestCase):
 
         self.assertEqual(first["event_id"], second["event_id"])
         self.assertIs(second["replayed"], True)
-        self.assertEqual(self._events("round-1")[0]["payload"]["from"], "in_progress")
+        self.assertEqual(self._events("round-1")[0]["transition"]["source"], "in_progress")
 
     def test_a_reused_restore_id_with_another_placement_is_refused(self) -> None:
         self.writer.restore_card(

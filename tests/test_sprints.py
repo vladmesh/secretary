@@ -2560,8 +2560,8 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
         denial = next(event for event in events if event["kind"] == "sprint_guard_denied")
         self.assertEqual(denial["payload"]["operation_request_id"], "po-override-retry")
         success = next(event for event in events if event["request_id"] == "po-override-retry")
-        self.assertEqual(success["kind"], "moved")
-        self.assertEqual(success["payload"]["sprint_override_reason"], "production incident")
+        self.assertEqual(success["record_type"], "board.protocol_event")
+        self.assertEqual(success["transition"], {"source": "ready", "target": "blocked"})
 
     def test_denied_create_request_can_succeed_after_sprint_closes(self) -> None:
         with self.assertRaisesRegex(TaskError, self.ref) as denied:
