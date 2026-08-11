@@ -5,7 +5,7 @@ import os
 import shlex
 from pathlib import Path
 
-from ...runtime.paths import PRODUCT_DIRNAME, configured_product_root
+from .paths import PRODUCT_DIRNAME, configured_product_root
 
 
 SECRETARY_REPO_ENV = "TA_SECRETARY_REPO"

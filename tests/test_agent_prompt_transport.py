@@ -4,7 +4,7 @@ import threading
 import unittest
 from unittest import mock
 
-from secretary.dispatcher import _safe_orca_command_label
+from triggered_agents.runtime.pane_host import safe_command_label
 from triggered_agents.runtime.agent_prompt_transport import (
     AGENT_PROMPT_MAX_BYTES,
     BRACKETED_PASTE_END,
@@ -186,7 +186,7 @@ class AgentPromptTransportTests(unittest.TestCase):
 
     def test_public_runner_labels_never_include_the_prompt_body(self) -> None:
         prompt = "do not retain this 🔐\nsecond line"
-        dispatcher_label = _safe_orca_command_label(
+        dispatcher_label = safe_command_label(
             ["orca", "terminal", "send", "--terminal", "term-1", "--text", prompt, "--json"]
         )
         service_label = _safe_orca_args_label(

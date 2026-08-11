@@ -14,9 +14,13 @@ matters is where they reach:
   * **the pane is not the head.** `spawn` returns a `HeadRun` whose identity outlives the handle,
     and `stop` re-finds the pane by its stable leaf before closing anything, because a session
     manager that aliased a handle must not be able to make a stop close somebody else's pane;
-  * **what to run stays with the caller, and how a prompt is delivered stays behind the host.**
-    `command` is rendered by whoever owns the registry (`render_command` is untouched by this
-    package). Delivery and pane-closing semantics a product has of its own — the provider
+  * **what to run is passed in, and how a prompt is delivered stays behind the host.** `command`
+    is a string these operations never build: the head that is being spawned decided what it runs
+    before anything was opened, and an operation that re-derived it could open a pane running
+    something other than what its caller recorded. It comes from `command.render_head_command`,
+    which is in this package but beside these operations rather than inside them — one renderer for
+    the dispatcher, a tick and an operator shell alike, fed a registry profile as data by whoever
+    owns the registry. Delivery and pane-closing semantics a product has of its own — the provider
     transcript that proves a turn started, a close whose refusal only matters when no heartbeat
     can be read — arrive as a `HeadTransport`, which is handed the host and reaches the session
     manager through it. That is deliberately not a callback the caller closes over its own backend
@@ -222,9 +226,10 @@ def spawn(
 ) -> HeadOutcome:
     """Bring one head up in its own pane and, when a pointer is given, point it at its task.
 
-    `command` is what the pane runs; this package renders nothing, because what a Claude or a Codex
-    invocation looks like is the registry's business and re-deriving it here would be the second
-    opinion `HeadSpec` exists to prevent.
+    `command` is what the pane runs, and it is decided before this is called — by
+    `command.render_head_command`, from the profile the caller resolved. This operation renders
+    nothing itself: a bring-up that re-derived its own command could open a pane running something
+    other than what its caller recorded, which is the second opinion `HeadSpec` exists to prevent.
 
     `transport` is how this product delivers a prompt and how its cleanup proves a pane it opened
     left no head behind — a pid heartbeat, in the production dispatcher. It performs both through

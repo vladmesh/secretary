@@ -49,7 +49,7 @@ from secretary.tasks import (
     all_project_cards,
 )
 from secretary.product_issues import ProductIssueValidationError, registered_projects, validate_product_issue_records
-from triggered_agents.agents.pipeline.heads import CODEX_LAUNCH_MODES
+from triggered_agents.runtime.head import CODEX_LAUNCH_MODES
 
 
 @dataclass(frozen=True)

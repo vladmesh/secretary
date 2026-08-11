@@ -20,7 +20,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from triggered_agents.agents.pipeline.heads import CODEX_TUI_MODE
+from triggered_agents.runtime.head import CODEX_TUI_MODE
 
 
 ROUTING_KIND = "routing"

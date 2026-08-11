@@ -28,7 +28,7 @@ from secretary.dispatcher import (
     DispatcherRuntime,
     LaunchedHead,
 )
-from secretary.dispatcher_launcher import HeadLaunch
+from triggered_agents.runtime.head import HeadCommand
 from triggered_agents.runtime.head import operations as head_ops
 from triggered_agents.runtime.prompt_document import NUDGE_FILE_MODE, NUDGE_MAX_BYTES
 from secretary.dispatcher_tui import TuiDeliveryError, claude_project_dir_name
@@ -2577,10 +2577,10 @@ class HostLaunchContourTests(unittest.TestCase):
     @contextlib.contextmanager
     def delivery_fails(self, close: Exception | None):
         """A bring-up whose head takes its terminal but never its prompt."""
-        launch = HeadLaunch("run-worker", prompt_after_start=True)
+        launch = HeadCommand("run-worker", prompt_after_start=True)
 
         class Catalog:
-            def head_launch(self, *args: Any, **kwargs: Any) -> HeadLaunch:
+            def head_launch(self, *args: Any, **kwargs: Any) -> HeadCommand:
                 return launch
 
         created: dict[str, Any] = {"terminal create": {"terminal": {"handle": "term:1"}}}
@@ -2646,10 +2646,10 @@ class HostLaunchContourTests(unittest.TestCase):
         package with `spawn` (secretary-1412). What is asserted here is unchanged and is what this
         layer still owns: which dispatcher failure each of those outcomes becomes.
         """
-        launch = HeadLaunch("run-review")
+        launch = HeadCommand("run-review")
 
         class Catalog:
-            def head_launch(self, *args: Any, **kwargs: Any) -> HeadLaunch:
+            def head_launch(self, *args: Any, **kwargs: Any) -> HeadCommand:
                 return launch
 
         with mock.patch.object(self.host, "catalog", Catalog()):
@@ -3093,7 +3093,7 @@ class WorkerPathReachesOnlyTheSessionHostTests(unittest.TestCase):
 
         def head_launch(self, head, prompt_file, *, workspace, role, launch_prompt=None,
                         identity=None):
-            return HeadLaunch("run-worker", prompt_after_start=True, adapter="codex")
+            return HeadCommand("run-worker", prompt_after_start=True, adapter="codex")
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()

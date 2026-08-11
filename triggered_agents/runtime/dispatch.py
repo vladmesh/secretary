@@ -91,6 +91,15 @@ More invariants, all from PR #95 review rounds (triggered-agents-445):
     (create). `_stop_and_confirm_workspace_empty` (not the narrower `_stop_and_confirm`) verifies
     via the same unfiltered `_raw_terminal_count`, since the filtered view would "confirm" success
     on a stray it could never recognize either way, stopped or not (round 2 review B3).
+
+This module is the one named exception to the `PaneHost`/`SessionHost` seam (secretary-1415,
+`tests/test_head_command.py:_SEAM_EXCEPTIONS`). Every other caller in `secretary/` and
+`triggered_agents/` reaches Orca through the host; here `_orca`/`_orca_json` still build
+`["terminal", ...]` vectors themselves and `_terminal_screen` still reads a pane directly, because
+the idle/wait semantics, the `/clear` warm-reuse path and the duplicate cleanup above them are
+this scheduler's own and do not survive a mechanical rewrite. Moving them behind the seam is the
+next card of sprint:927; until it lands, the sprint's DoD item about the grep invariant is not
+closed, and adding a new terminal call anywhere else is still caught by that test.
 """
 from __future__ import annotations
 
@@ -107,9 +116,10 @@ from pathlib import Path
 
 import tomllib
 
-from . import claude_env, finalizer, orca_rpc, role_env
+from . import claude_env, finalizer, orca_rpc
 from .claude_sessions import claude_session_paths
 from .codex_preflight import CodexPreflightError, ensure_codex_workspace_trusted
+from .head import RUNTIME_ROLE_ENV, render_head_command
 from .state import AgentState
 from .tui_delivery import TuiDeliveryError, deliver_interactive_prompt
 
@@ -455,7 +465,14 @@ def _launch_cmd(agent: str, variant: str | None = None,
     if card_ref:
         skill = f"{skill} --card {card_ref}"
     head = _preferred_head(agent, spec)
-    bare_claude = role_env.wrap_shell_command(agent, f"claude --dangerously-skip-permissions {skill!r}")
+    # The head a registry routes this agent to is the ordinary case; a bare default-model `claude`
+    # is what an agent routed nowhere, or a registry that will not load, still gets dispatched
+    # with. Both are rendered by the same renderer from a profile — the fallback's profile is just
+    # the emptiest one there is — so a background agent's command cannot drift from a pipeline
+    # head's by being assembled somewhere else.
+    bare_claude = render_head_command(
+        {"adapter": "claude"}, prompt=skill, role=agent, binding=RUNTIME_ROLE_ENV,
+    ).command
     if not head:
         return skill, bare_claude, None, False, None
     try:
@@ -464,11 +481,12 @@ def _launch_cmd(agent: str, variant: str | None = None,
         statuses = pipeline_health.refresh()
         resolved = pipeline_health.resolve_head(head, statuses) or head
         registry = pipeline_heads.load_registry()
-        rendered = pipeline_heads.render_command(
-            resolved, role=agent, prompt=skill, workspace=_workspace(agent), registry=registry
+        profile = registry.profile(resolved)
+        rendered = render_head_command(
+            profile, prompt=skill, role=agent, workspace=_workspace(agent),
+            binding=RUNTIME_ROLE_ENV,
         )
-        return (skill, rendered.command, resolved, rendered.prompt_after_start,
-                registry.profile(resolved))
+        return (skill, rendered.command, resolved, rendered.prompt_after_start, profile)
     except Exception:
         return skill, bare_claude, None, False, None
 
