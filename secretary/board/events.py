@@ -42,14 +42,20 @@ class BoardEventCanon:
         self.audit = audit
 
     def stage(self, request_id: str, event: Event) -> Event:
-        """Durably stage the exact event before a backend mutation begins."""
+        """Durably stage the exact event before a backend mutation begins.
+
+        This is the one staging route of the typed canon, and it owns same-request
+        idempotency itself: reading the committed record, reading the pending record,
+        checking event-id identity and writing the new pending record all happen inside a
+        single TaskAudit lock hold.  A second caller reusing the request id therefore either
+        gets the event that already owns it or fails; it can never replace a pending event a
+        backend effect is already running against.
+        """
         record = event.to_record(request_id)
-        existing = self.audit.event(request_id)
-        if existing is not None:
-            self._require_same(existing, record)
-            return Event.from_record(existing)
-        self.audit.stage(request_id, record)
-        return event
+        existing = self._claim(request_id, record)
+        if existing is None:
+            return event
+        return self._typed(existing)
 
     def commit(self, request_id: str, event: Event) -> Event:
         """Append the staged event and clear its pending record."""
@@ -60,19 +66,11 @@ class BoardEventCanon:
 
     def event(self, request_id: str) -> Event | None:
         record = self.audit.event(request_id)
-        if record is None:
-            return None
-        if record.get("record_type") != Event.RECORD_TYPE:
-            raise ValueError("request id belongs to a released generic audit record")
-        return Event.from_record(record)
+        return None if record is None else self._typed(record)
 
     def committed(self, request_id: str) -> Event | None:
         record = self.audit.committed_event(request_id)
-        if record is None:
-            return None
-        if record.get("record_type") != Event.RECORD_TYPE:
-            raise ValueError("request id belongs to a released generic audit record")
-        return Event.from_record(record)
+        return None if record is None else self._typed(record)
 
     def events(self, *, ref: str = "") -> Sequence[Event]:
         result: list[Event] = []
@@ -82,10 +80,36 @@ class BoardEventCanon:
             result.append(Event.from_record(record))
         return tuple(result)
 
+    def _claim(self, request_id: str, record: dict[str, Any]) -> dict[str, Any] | None:
+        # Kept local for the same reason as the TaskAudit import above: secretary.tasks
+        # imports this package for its transition registry.
+        from secretary.tasks import TaskError
+
+        try:
+            return self.audit.claim(request_id, record, verify=self._require_unclaimed_event_id)
+        except TaskError as exc:
+            if exc.code != "validation":
+                raise
+            # The typed boundary speaks ValueError; a command-level TaskError would leak
+            # TaskAudit's exit-code protocol into board callers.
+            raise ValueError(exc.message) from None
+
+    def _require_unclaimed_event_id(self, record: dict[str, Any]) -> None:
+        """An event id names one occurrence, so refuse to publish a second one under it.
+
+        This runs inside TaskAudit's lock, which is what makes it a real precondition of
+        the write rather than an advisory check some other writer can race past.
+        """
+        event_id = record.get("event_id")
+        owner = self.audit.event_id_owner(str(event_id))
+        if owner is not None and owner != record.get("request_id"):
+            raise ValueError(f"event id {event_id!r} already belongs to another request")
+
     @staticmethod
-    def _require_same(existing: dict[str, Any], expected: dict[str, Any]) -> None:
-        if existing != expected:
-            raise ValueError("request id belongs to another operation or payload")
+    def _typed(record: dict[str, Any]) -> Event:
+        if record.get("record_type") != Event.RECORD_TYPE:
+            raise ValueError("request id belongs to a released generic audit record")
+        return Event.from_record(record)
 
 
 class MutationEventTransaction:

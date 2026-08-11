@@ -553,6 +553,9 @@ class TaskAudit:
         # каждой записи, а append/stage зовут его на каждое событие: прогон получался
         # квадратичным по числу событий.
         self._committed_offsets: dict[str, int] = {}
+        # event_id -> request_id, заполняется тем же проходом: владельца идентификатора
+        # надо уметь спросить под замком, не разбирая журнал заново.
+        self._committed_event_ids: dict[str, str] = {}
         self._committed_read = 0
         self._committed_ident: tuple[int, int] | None = None
         self._committed_anchor = b""
@@ -589,6 +592,59 @@ class TaskAudit:
                 self._atomic_json(self._pending_path(request_id), event)
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def claim(
+        self,
+        request_id: str,
+        event: dict[str, Any],
+        *,
+        verify: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict[str, Any] | None:
+        """Resolve request-id ownership and stage the record in one critical section.
+
+        `stage` keeps its released contract: it compares the committed record only, because a
+        generic writer that re-stages after a partial write legitimately replaces its own
+        transient payload. A protocol event is the opposite promise: its pending record is
+        what a backend effect is already running against, so the comparison has to cover the
+        pending record too and has to happen without releasing the lock in between. `verify`
+        runs under the same lock for invariants the caller owns, such as event-id identity.
+
+        Returns the record that already owns `request_id`, or None once `event` is staged.
+        """
+        os.makedirs(self.pending_dir, exist_ok=True)
+        self._require_v2_pending_layout()
+        with open(self.lock_path, "a+", encoding="utf-8") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                committed = self.committed_event(request_id)
+                if committed is not None:
+                    self._require_same_event(committed, event)
+                    return committed
+                pending = self.pending_event(request_id)
+                if pending is not None:
+                    self._require_same_event(pending, event)
+                    return pending
+                if self._product_issue_pending(request_id):
+                    raise TaskError("validation", "request id belongs to another operation or payload", 2)
+                if verify is not None:
+                    verify(event)
+                self._atomic_json(self._pending_path(request_id), event)
+                return None
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def event_id_owner(self, event_id: str) -> str | None:
+        """Which request id already published `event_id`, committed or pending."""
+        self._refresh_committed_index()
+        owner = self._committed_event_ids.get(event_id)
+        if owner is not None:
+            return owner
+        for record in self.pending_events():
+            if record.get("event_id") == event_id:
+                candidate = record.get("request_id")
+                if isinstance(candidate, str):
+                    return candidate
+        return None
 
     def append(self, request_id: str, event: dict[str, Any]) -> str:
         os.makedirs(self.board_dir, exist_ok=True)
@@ -718,6 +774,7 @@ class TaskAudit:
             stat = os.stat(self.events_path)
         except FileNotFoundError:
             self._committed_offsets = {}
+            self._committed_event_ids = {}
             self._committed_read = 0
             self._committed_ident = None
             self._committed_anchor = b""
@@ -726,6 +783,7 @@ class TaskAudit:
         if ident != self._committed_ident or stat.st_size < self._committed_read or not self._anchor_intact():
             # журнал пересоздан, усечён или переписан — индекс больше не про этот файл
             self._committed_offsets = {}
+            self._committed_event_ids = {}
             self._committed_read = 0
             self._committed_ident = ident
             self._committed_anchor = b""
@@ -753,6 +811,9 @@ class TaskAudit:
             # первым побеждает самое раннее совпадение — так вёл себя скан сверху вниз
             if isinstance(request_id, str) and request_id not in self._committed_offsets:
                 self._committed_offsets[request_id] = offset
+            event_id = candidate.get("event_id")
+            if isinstance(event_id, str) and isinstance(request_id, str) and event_id not in self._committed_event_ids:
+                self._committed_event_ids[event_id] = request_id
         self._committed_read += consumed
 
     def committed_event(self, request_id: str) -> dict[str, Any] | None:

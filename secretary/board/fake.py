@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import uuid
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
-from itertools import count
 from pathlib import Path
 from typing import TypeVar
 
@@ -30,7 +32,6 @@ class FakeBoardHost:
     ) -> None:
         self._entities = {(entity.kind, entity.ref): entity for entity in entities}
         self.events: list[Event] = []
-        self._ids = count(1)
         self._requests: dict[str, Event] = {}
         self.canon = BoardEventCanon(data_dir) if data_dir is not None else None
 
@@ -130,12 +131,43 @@ class FakeBoardHost:
             existing = self._requests[request_id]
             self._require_same_operation(existing, entity, kind, operation)
             return existing, request_id
-        sequence = next(self._ids)
+        # A caller that declares no request id still gets its own idempotency key, instead
+        # of borrowing one from the generated event id.
+        request_id = request_id or f"fake-request-{uuid.uuid4().hex}"
         event = Event(
-            f"board-event-{sequence}", kind, entity.kind, entity.ref, operation.actor,
-            operation.reason, datetime.now(UTC).replace(microsecond=0), operation.related_refs,
+            self._event_id(request_id, entity, kind, operation), kind, entity.kind, entity.ref,
+            operation.actor, operation.reason, datetime.now(UTC).replace(microsecond=0),
+            operation.related_refs,
         )
-        return event, request_id or event.event_id
+        return event, request_id
+
+    @staticmethod
+    def _event_id(
+        request_id: str,
+        entity: BoardEntity,
+        kind: EventKind,
+        operation: Create | Replace | TransitionRequest,
+    ) -> str:
+        """Derive a collision-resistant id from what the occurrence durably is.
+
+        A per-host counter cannot do this: the durable journal outlives the host, so a
+        recreated host would restart at one and publish a second `board-event-1` for an
+        unrelated occurrence.  Digesting the request id together with the operation keeps a
+        genuine same-request replay on its original id and separates everything else.
+        """
+        payload = json.dumps(
+            {
+                "request_id": request_id,
+                "kind": kind.value,
+                "entity_kind": entity.kind.value,
+                "ref": entity.ref,
+                "actor": [operation.actor.role, operation.actor.id, operation.actor.head_run_ref],
+                "reason": operation.reason,
+                "related_refs": list(operation.related_refs.refs),
+            },
+            sort_keys=True, separators=(",", ":"),
+        )
+        return "board-event-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
     @staticmethod
     def _require_same_operation(
