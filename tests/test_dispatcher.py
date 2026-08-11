@@ -10158,6 +10158,7 @@ class GitBranchHost(CommandHostRuntime):
         self.root = root
         self.launched: list[tuple[str, str]] = []
         self.launch_prompts: list[str | None] = []
+        self.launch_documents: list[str] = []
 
     def _create_workspace(
         self, project: str, worker_id: str, base: str, *, expected: str = ""
@@ -10185,12 +10186,14 @@ class GitBranchHost(CommandHostRuntime):
         role: str,
         env_name: str,
         launch_prompt: str | None = None,
+        prompt_document: str = "",
         split_from: str = "",
         task: dict | None = None,
         failover: bool = False,
     ) -> LaunchedHead:
         self.launched.append((head, prompt_file))
         self.launch_prompts.append(launch_prompt)
+        self.launch_documents.append(prompt_document)
         return LaunchedHead(f"test:{head}", head)
 
 
@@ -11945,11 +11948,14 @@ class ReviewPaneTests(unittest.TestCase):
 
 
 class NudgingReviewHost(RecordingReviewHost):
-    """A reviewer bring-up whose pane answers reads, so its launch delivery runs end to end.
+    """A bring-up whose pane answers reads, so its launch delivery runs end to end.
 
     The screen is what the confirmation criterion falls back to when no provider session file
     names this workspace, which is every test workspace: a codex pane painting `working` above its
     composer marker is a head that took its turn.
+
+    Either role's launch runs through it. Both are nudged at a task document — the reviewer at its
+    review, the worker at the TASK.md in its checkout — and the rule under test is the same rule.
     """
 
     def __init__(self, root: Path, *, screen: str = "working\n› ", **kwargs) -> None:
@@ -12174,6 +12180,116 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
 
         self.assertIn("task document could not be prepared", str(caught.exception))
         self.assertEqual(host.ops(), [], "no pane is opened for a head with nothing to read")
+
+
+class WorkerNudgeDeliveryTests(unittest.TestCase):
+    """secretary-1410: the same invariant, on the bring-up that was still killing its own heads.
+
+    The worker's launch prompt has always been a pointer at the TASK.md written into its checkout —
+    the reviewer's rule applied to the other role — but the bring-up was never told so, and answered
+    an unconfirmed delivery by closing the pane. On 2026-08-11 that closed six consecutive live
+    Claude workers on `codegen-orchestrator-1166`, each twelve seconds after it had started, taken
+    its prompt and begun work: the transcripts they left behind are the proof they were healthy.
+    What made the classification wrong is fixed elsewhere in this card; what this class fixes is
+    that a wrong classification could carry that verdict at all.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.workspace = self.root / "ws"
+        self.workspace.mkdir()
+        _clear_env(self, "SECRETARY_DISPATCHER_WORKER_COMMAND")
+        os.environ["SECRETARY_DISPATCHER_BODY_DIR"] = str(self.root)
+        # Neither provider may have a session file naming this workspace, so the delivery falls
+        # back to the screen the host paints instead of the developer's own transcripts.
+        os.environ["SECRETARY_CODEX_SESSIONS"] = str(self.root / "sessions")
+        os.environ["SECRETARY_CLAUDE_PROJECTS"] = str(self.root / "claude-projects")
+        self.addCleanup(os.environ.pop, "SECRETARY_CODEX_SESSIONS", None)
+        self.addCleanup(os.environ.pop, "SECRETARY_CLAUDE_PROJECTS", None)
+        self.task = {
+            "ref": "secretary-1410",
+            "project": "secretary",
+            "description": "a card with an \x1b[201~ terminator in it",
+            "workspace": {"base_branch": "main"},
+            "routing": {},
+        }
+
+    def _record(self) -> DispatcherRecord:
+        return DispatcherRecord(
+            worker="secretary-1410-w",
+            workspace=str(self.workspace),
+            handle="term-worker",
+            head="claude-opus",
+            review_head="codex-reviewer",
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="claimed",
+            claimed_at=0.0,
+        )
+
+    def _bounded_delivery(self):
+        return mock.patch.multiple(
+            "triggered_agents.runtime.tui_delivery",
+            TUI_DELIVERY_TIMEOUT_S=0.05,
+            TUI_DELIVERY_POLL_S=0.01,
+            TUI_DELIVERY_RESEND_GRACE_S=0,
+        )
+
+    def test_an_unconfirmed_worker_nudge_leaves_the_pane_and_the_intent(self) -> None:
+        """Symmetric to `ReviewNudgeDeliveryTests`: no pane dies of a delivery classification.
+
+        The pane is handed back inside `HeadLaunchAborted`, which is what keeps the caller's launch
+        intent on disk; the next tick then adopts that head or stops it by its own retained
+        identity, with the cleanup recorded as the initiator.
+        """
+        host = NudgingReviewHost(self.root, screen="idle\n› ")
+
+        with self._bounded_delivery(), self.assertRaises(HeadLaunchAborted) as caught:
+            host.restart_worker(self.task, self._record())
+
+        self.assertEqual(host.closed_panes(), [], "the worker pane survives an unconfirmed nudge")
+        self.assertEqual(caught.exception.handle, "term-created")
+        self.assertEqual(caught.exception.workspace, str(self.workspace))
+        evidence = caught.exception.evidence
+        self.assertEqual(evidence["delivery_mode"], NUDGE_FILE_MODE)
+        self.assertEqual(evidence["document_path"], str(self.workspace / "TASK.md"))
+        self.assertLessEqual(evidence["payload_bytes"], NUDGE_MAX_BYTES)
+        self.assertTrue(evidence["submit_count"], "the submits are counted, the text is not kept")
+        self.assertNotIn("terminator", json.dumps(evidence), "no prompt text in the telemetry")
+
+    def test_the_task_the_head_was_pointed_at_is_on_disk_whatever_the_classification_said(
+        self,
+    ) -> None:
+        """Why not closing it is safe: the pointer named a file, and the file is there.
+
+        A head that took the nudge has its whole task; a head that did not can be nudged again at
+        the same path next tick. Nothing about the round depends on the pane having answered.
+        """
+        host = NudgingReviewHost(self.root, screen="idle\n› ")
+
+        with self._bounded_delivery(), self.assertRaises(HeadLaunchAborted):
+            host.restart_worker(self.task, self._record())
+
+        body = (self.workspace / "TASK.md").read_text(encoding="utf-8")
+        self.assertIn("secretary-1410", body)
+        self.assertIn("\x1b[201~ terminator", body, "the card reaches the head unmodified")
+        nudge = next(text for text in host.sends() if text)
+        self.assertNotIn("terminator", nudge, "the pane got the pointer, not the card")
+
+    def test_a_confirmed_worker_nudge_reports_the_document_it_pointed_at(self) -> None:
+        host = NudgingReviewHost(self.root, screen="working\n› ")
+
+        with self._bounded_delivery():
+            launched = host.restart_worker(self.task, self._record())
+
+        self.assertEqual(host.closed_panes(), [])
+        self.assertEqual(
+            launched.delivery_evidence["document_path"], str(self.workspace / "TASK.md")
+        )
+        self.assertEqual(launched.delivery_evidence["delivery_mode"], NUDGE_FILE_MODE)
 
 
 class PromptAfterStartCatalog(ReviewCatalog):

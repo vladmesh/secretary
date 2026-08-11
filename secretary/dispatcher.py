@@ -664,6 +664,7 @@ class CommandHostRuntime:
             role="worker",
             env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
             launch_prompt=self._worker_launch_prompt(),
+            prompt_document=str(Path(workspace) / "TASK.md"),
             task=task,
             failover=failover,
         )
@@ -703,6 +704,7 @@ class CommandHostRuntime:
             role="worker",
             env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
             launch_prompt=self._worker_launch_prompt(),
+            prompt_document=str(workspace / "TASK.md"),
             task=task,
             failover=bool(record.preferred_head),
         )
@@ -1845,12 +1847,15 @@ class CommandHostRuntime:
                     # A nudge that could not be confirmed says nothing about the head. The line was
                     # short enough that no provider has ever failed to take one, the task is on
                     # disk either way, and the classification that would be trusted here is the one
-                    # that reported 24 delivered prompts as failures on the canary. So the pane is
-                    # not closed over it: the bring-up hands it back as the ambiguity it is, the
-                    # caller keeps its launch intent, and the next tick either adopts that head —
-                    # which is what a head that did take the nudge looks like — or stops it by its
-                    # own retained identity, with the cleanup recorded as the initiator. A pane is
-                    # never closed on the strength of a delivery classification.
+                    # that reported 24 delivered prompts as failures on the canary — and then, on
+                    # the worker path, killed six live Claude heads in eight minutes because the
+                    # transcript it read for proof was globbed under a directory name Claude Code
+                    # has never used (2026-08-11). So the pane is not closed over it: the bring-up
+                    # hands it back as the ambiguity it is, the caller keeps its launch intent, and
+                    # the next tick either adopts that head — which is what a head that did take the
+                    # nudge looks like — or stops it by its own retained identity, with the cleanup
+                    # recorded as the initiator. A pane is never closed on the strength of a
+                    # delivery classification, whichever role's head is sitting in it.
                     raise HeadLaunchAborted(
                         f"the launch nudge was not confirmed delivered, and the {role or 'head'} "
                         f"pane may have taken it anyway: {exc}",
@@ -2436,7 +2441,11 @@ class CommandHostRuntime:
     def _worker_launch_prompt(self) -> str:
         """Short pointer delivered to the worker head at launch. The full spec lives in TASK.md
         (written next to the workspace root); duplicating it into the launch prompt would ship
-        the whole task twice. The head opens TASK.md itself and reports with the command there."""
+        the whole task twice. The head opens TASK.md itself and reports with the command there.
+
+        This is a nudge at a task document in exactly the sense the reviewer's is, so the bring-up
+        is told which document it points at: the delivery record then names the mode and the file,
+        and an unconfirmed delivery of it can no longer be answered by closing the pane."""
         return (
             "The full task is in TASK.md at the workspace root. Read it first and follow it. "
             "Report done or blocked with the command given in TASK.md. Do not commit TASK.md."

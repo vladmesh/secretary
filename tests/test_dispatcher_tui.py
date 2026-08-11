@@ -18,10 +18,12 @@ from secretary.dispatcher_tui import (
     READINESS_READY,
     READINESS_UNKNOWN,
     TuiDeliveryError,
+    claude_project_dir_name,
     deliver_interactive_prompt,
     latest_claude_user_turn_for,
     terminal_readiness,
     terminal_turn_started,
+    turn_started_confirm,
 )
 from tests.test_dispatcher_observer import (
     BLOCKED_PANE_WAIT_BODY,
@@ -122,7 +124,7 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             workspace = Path(tmp) / "workspace"
             workspace.mkdir()
             projects = Path(tmp) / "claude-projects"
-            session = projects / str(workspace.resolve()).replace("/", "-") / "session.jsonl"
+            session = projects / claude_project_dir_name(str(workspace)) / "session.jsonl"
             session.parent.mkdir(parents=True)
             session.write_text(
                 json.dumps({"type": "user", "timestamp": "2099-01-02T03:04:05Z"}) + "\n",
@@ -400,6 +402,183 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             )
 
             self.assertIsNone(host.codex_tui_activity({"routing": {}}, record, "worker"))
+
+
+class ClaudeTranscriptPathTests(unittest.TestCase):
+    """Where Claude Code keeps a workspace's transcripts, checked against where it keeps them.
+
+    Both halves of the 2026-08-11 blind bring-up were the same mistake: a claim about another
+    product's format, asserted only against a mock of itself. `path.replace('/', '-')` had never
+    been true — Claude Code replaces every non-alphanumeric character — and the unit tests could
+    not notice, because they built the fixture directory with the same wrong rule they were
+    testing. So one test here reads the real catalogue, and the hermetic one takes its directory
+    name from production code rather than restating it.
+    """
+
+    def test_the_project_folder_name_matches_the_real_claude_catalogue(self) -> None:
+        """The rule against the directories Claude Code actually wrote on this host.
+
+        Every session log records the `cwd` it was opened in, so each project directory carries the
+        workspace path it was named after and the pair can be checked without guessing. Skipped
+        where there is no catalogue to read — a machine without one cannot answer the question, and
+        a mock of the answer would be the defect this test exists for.
+        """
+        root = Path.home() / ".claude" / "projects"
+        if not root.is_dir():
+            self.skipTest("no ~/.claude/projects on this host")
+        pairs = [
+            (project.name, cwd)
+            for project in sorted(root.iterdir())
+            if project.is_dir()
+            for cwd in [_recorded_cwd(project)]
+            if cwd
+        ]
+        if not pairs:
+            self.skipTest("no Claude session log on this host records its workspace")
+        underscored = [pair for pair in pairs if "_" in pair[1]]
+        if not underscored:
+            self.skipTest("no workspace with an underscore in the catalogue on this host")
+
+        self.assertEqual(
+            [(name, cwd) for name, cwd in pairs if claude_project_dir_name(cwd) != name], []
+        )
+        # And the rule that was there before really does miss those workspaces, which is why six
+        # healthy heads were closed on a product whose workspaces carry one.
+        self.assertEqual(
+            [
+                (name, cwd)
+                for name, cwd in underscored
+                if str(Path(cwd).resolve(strict=False)).replace("/", "-") == name
+            ],
+            [],
+        )
+
+    def test_an_underscore_workspace_is_confirmed_by_its_transcript_alone(self) -> None:
+        """The delivery criterion, on the shape of workspace the incident was reported against.
+
+        The pane is painting nothing this confirmation could recognise, and it does not have to:
+        the user turn Claude persisted after the send is the proof, and it is read from the
+        directory Claude actually writes.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "codegen_orchestrator" / "codegen-orchestrator-1166"
+            workspace.mkdir(parents=True)
+            projects = Path(tmp) / "claude-projects"
+            folder = projects / claude_project_dir_name(str(workspace))
+            self.assertIn("-codegen-orchestrator-codegen-orchestrator-1166", str(folder))
+            folder.mkdir(parents=True)
+            (folder / "session.jsonl").write_text(
+                json.dumps({
+                    "type": "user",
+                    "timestamp": "2099-01-02T03:04:05Z",
+                    "cwd": str(workspace),
+                }) + "\n",
+                encoding="utf-8",
+            )
+            # A pane with nothing on it: no spinner, no status line, no glyph of any generation.
+            def run_json(command: list[str]) -> dict:
+                return {"terminal": {"tail": ["", "❯"]}}
+
+            with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(projects)}):
+                confirm = turn_started_confirm(
+                    "term-claude", str(workspace), "claude", run_json=run_json
+                )
+                self.assertTrue(confirm(1.0))
+                # Everything the criterion says is about the boundary: a turn older than the send
+                # is not this delivery's, and no screen glyph can make it one.
+                self.assertFalse(confirm(4102462000.0))
+
+    def test_a_transcript_under_the_old_folder_name_is_not_read(self) -> None:
+        """The path the reader used to look under is not a second place to look.
+
+        It is a directory Claude Code never writes, so anything found there would be evidence
+        somebody else planted. Keeping the old glob alive "just in case" would also keep the
+        defect alive on any host where such a directory did exist.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "codegen_orchestrator" / "ws"
+            workspace.mkdir(parents=True)
+            projects = Path(tmp) / "claude-projects"
+            stale = projects / str(workspace.resolve()).replace("/", "-")
+            stale.mkdir(parents=True)
+            (stale / "session.jsonl").write_text(
+                json.dumps({"type": "user", "timestamp": "2099-01-02T03:04:05Z"}) + "\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(projects)}):
+                self.assertIsNone(latest_claude_user_turn_for(str(workspace), 0.0))
+
+
+def _recorded_cwd(project: Path) -> str:
+    """The workspace one Claude project directory was named after, as its own logs record it."""
+    for log in sorted(project.glob("*.jsonl")):
+        try:
+            with log.open(encoding="utf-8", errors="replace") as source:
+                for index, line in enumerate(source):
+                    if index >= 200:
+                        break
+                    try:
+                        record = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    cwd = record.get("cwd") if isinstance(record, dict) else None
+                    if isinstance(cwd, str) and cwd:
+                        return cwd
+        except OSError:
+            continue
+    return ""
+
+
+class ClaudeScreenHintTests(unittest.TestCase):
+    """The screen is a hint about a foreign TUI, and it is only ever read as one.
+
+    The pattern it used to be pinned to — one of five spinner glyphs, then a word, then a
+    parenthesised `(4s · ↑ 13.2k tokens)` — matched nothing Claude 2.1.227 paints, and while it
+    silently matched nothing it was also the only thing masking the transcript-path defect. The
+    lines below are what `orca terminal read` really returned from a working Claude pane on
+    2026-08-11, alternate-screen overlay and all.
+    """
+
+    LIVE_STATUS_LINES = [
+        "· Tempering…e /btw to ask a 9u ck side question without interrupting Claude's current work",
+        "✽ Tempering…e /btw to ask a 5u ck side question without)interrupting Claude's current work",
+        "● Tempering…e /btw5to ask a 6u ck side question without)interrupting Claude's current work",
+        "✢ Tempering…e /btw5to ask a 6u ck side question without)interrupting Claude's current work",
+        # The version whose suffix survives, and the one the incident report quoted.
+        "✻ Forming... (4s · ↑ 13.2k tokens)",
+        "●─Bloviating…──2──(12.4k tokens)",
+    ]
+
+    def screen(self, *lines: str):
+        def run_json(_command: list[str]) -> dict:
+            return {"terminal": {"tail": list(lines)}}
+
+        return run_json
+
+    def test_every_status_line_a_live_claude_pane_paints_is_a_turn(self) -> None:
+        for line in self.LIVE_STATUS_LINES:
+            with self.subTest(line=line):
+                self.assertTrue(
+                    terminal_turn_started(
+                        "term-claude", adapter="claude", run_json=self.screen("Claude Code", line)
+                    )
+                )
+
+    def test_a_pane_that_is_not_working_is_not_read_as_working(self) -> None:
+        for line in (
+            "The completed response says it was thinking while working.",
+            "⏺ Read(TASK.md)",
+            "  ⎿  Read 131 lines",
+            "❯ ",
+            "",
+        ):
+            with self.subTest(line=line):
+                self.assertFalse(
+                    terminal_turn_started(
+                        "term-claude", adapter="claude", run_json=self.screen("Claude Code", line)
+                    )
+                )
 
 
 class TuiCatalog:

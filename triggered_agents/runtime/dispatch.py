@@ -108,6 +108,7 @@ from pathlib import Path
 import tomllib
 
 from . import claude_env, finalizer, orca_rpc, role_env
+from .claude_sessions import claude_session_paths
 from .codex_preflight import CodexPreflightError, ensure_codex_workspace_trusted
 from .state import AgentState
 from .tui_delivery import TuiDeliveryError, deliver_interactive_prompt
@@ -249,13 +250,12 @@ def _claude_projects_root() -> Path:
 
 
 def _claude_session_paths_for(workspace: str):
-    """Yield Claude session logs for one workspace without scanning other projects."""
-    root = _claude_projects_root()
-    project = str(Path(workspace).resolve(strict=False)).replace("/", "-")
-    try:
-        yield from (root / project).glob("*.jsonl")
-    except OSError:
-        return
+    """Yield Claude session logs for one workspace without scanning other projects.
+
+    The directory name is Claude Code's, not ours: see `runtime/claude_sessions`, which owns the
+    one reading of that convention both this driver and the dispatcher's delivery boundary use.
+    """
+    return claude_session_paths(workspace, root=_claude_projects_root())
 
 
 def _claude_user_turn_after(workspace: str, since: float) -> bool:
