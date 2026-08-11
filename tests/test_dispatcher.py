@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import inspect
 import json
 import os
@@ -24,6 +25,9 @@ from secretary.dispatcher import (
     LaunchedHead,
     HostError,
     InstanceCatalog,
+    STOPPED_BY_OPERATOR,
+    STOPPED_BY_REPLACEMENT,
+    STOPPED_BY_REVIEW_FREEZE,
     _body_file_path,
     _continuation_prompt,
     _gate_attestation_for_prompt,
@@ -830,6 +834,7 @@ class FakeHost:
         # a replacement head, and these are how a test makes one refuse.
         self.fail_stop_workspace_reason = ""
         self.fail_stop_head_reason = ""
+        self.stop_initiators: list[tuple[str, str]] = []
         self.fail_stop_review_reason = ""
         self.fail_freeze_worker_reason = ""
         self.fail_retain_worker_reason = ""
@@ -928,6 +933,9 @@ class FakeHost:
             # The real host always carries this bounded receipt, even when noop mode has no pane
             # and therefore no delivery facts to record yet.
             "delivery_evidence": {},
+            # The head's own run, as `spawn` returns it (secretary-1412). This fake never opens a
+            # pane, so it has no lifecycle to report and says so rather than inventing one.
+            "head_run": {},
         }
 
     def observer_workspace(self, reference: str) -> str:
@@ -1142,8 +1150,26 @@ class FakeHost:
             raise HostError(self.fail_stop_workspace_reason)
         self.stop(record)
 
-    def stop_head(self, record, kind: str) -> None:
+    @contextlib.contextmanager
+    def committing(self, flush):
+        """The real host's durable-commit seam (secretary-1412), lent for the caller's span.
+
+        The fake performs no host I/O, so it never commits mid-operation; it still has to accept
+        the loan, because the tick and the freeze hand it out unconditionally and a host that
+        could not take it would be a host the production paths cannot use.
+        """
+        previous = getattr(self, "commit_state", None)
+        self.commit_state = flush
+        try:
+            yield
+        finally:
+            self.commit_state = previous
+
+    def stop_head(self, record, kind: str, initiator: str = "dispatcher") -> None:
+        # The initiator the real host records on the run (secretary-1412). Kept in the call log so
+        # a test can say not only that a head was stopped but who this dispatcher said stopped it.
         self.calls.append(f"stop_head:{kind}")
+        self.stop_initiators.append((kind, initiator))
         if self.fail_stop_head_reason:
             raise HostError(self.fail_stop_head_reason)
         handle = record.review_handle if kind == "review" else record.handle
@@ -1158,7 +1184,7 @@ class FakeHost:
         if self.fail_freeze_worker_reason:
             raise HostError(self.fail_freeze_worker_reason)
         if record.handle or record.worker_leaf or record.worker_pid_file:
-            self.stop_head(record, "worker")
+            self.stop_head(record, "worker", STOPPED_BY_REVIEW_FREEZE)
 
     def retain_worker(self, record) -> None:
         self.calls.append("retain_worker")
@@ -12297,6 +12323,143 @@ class WorkerNudgeDeliveryTests(unittest.TestCase):
             launched.delivery_evidence["document_path"], str(self.workspace / "TASK.md")
         )
         self.assertEqual(launched.delivery_evidence["delivery_mode"], NUDGE_FILE_MODE)
+
+
+class WorkerLifecycleTests(unittest.TestCase):
+    """secretary-1412: the production worker path runs on `spawn` / `nudge` / `stop`.
+
+    The three operations own the head's life now, and the dispatcher's job is what only it can do:
+    render the command, confirm a provider turn, prove a process is gone, and say who is ending a
+    head. What is asserted here is that the worker really does travel through them — one run
+    identity from bring-up to stop, a pane re-found by its leaf rather than by a handle Orca may
+    have aliased, and an initiator that is on the record afterwards and survives being written down.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.workspace = self.root / "ws"
+        self.workspace.mkdir()
+        _clear_env(self, "SECRETARY_DISPATCHER_WORKER_COMMAND")
+        os.environ["SECRETARY_DISPATCHER_BODY_DIR"] = str(self.root)
+        os.environ["SECRETARY_CODEX_SESSIONS"] = str(self.root / "sessions")
+        os.environ["SECRETARY_CLAUDE_PROJECTS"] = str(self.root / "claude-projects")
+        self.addCleanup(os.environ.pop, "SECRETARY_CODEX_SESSIONS", None)
+        self.addCleanup(os.environ.pop, "SECRETARY_CLAUDE_PROJECTS", None)
+        self.task = {
+            "ref": "secretary-1412",
+            "project": "secretary",
+            "description": "a card",
+            "workspace": {"base_branch": "main"},
+            "routing": {},
+        }
+
+    def _record(self, **kwargs) -> DispatcherRecord:
+        record = DispatcherRecord(
+            worker="secretary-1412-w",
+            workspace=str(self.workspace),
+            handle="term-worker",
+            head="codex",
+            review_head="codex-reviewer",
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="claimed",
+            claimed_at=0.0,
+        )
+        for name, value in kwargs.items():
+            setattr(record, name, value)
+        return record
+
+    def _bounded_delivery(self):
+        return mock.patch.multiple(
+            "triggered_agents.runtime.tui_delivery",
+            TUI_DELIVERY_TIMEOUT_S=0.05,
+            TUI_DELIVERY_POLL_S=0.01,
+            TUI_DELIVERY_RESEND_GRACE_S=0,
+        )
+
+    def test_a_worker_bring_up_hands_back_the_run_that_head_is(self) -> None:
+        host = NudgingReviewHost(self.root, screen="working\n› ")
+
+        with self._bounded_delivery():
+            launched = host.restart_worker(self.task, self._record())
+
+        run = launched.head_run
+        self.assertTrue(run["run_id"], "the head has an identity of its own")
+        self.assertEqual(run["lifecycle"], "working", "it was given its task")
+        self.assertEqual(run["handle"], launched.handle)
+        self.assertEqual(run["task_ref"], {
+            "kind": "card", "ref": "secretary-1412",
+            "document": str(self.workspace / "TASK.md"),
+        })
+        self.assertEqual(run["spec"]["adapter"], "codex")
+
+    def test_the_worker_report_prompt_goes_to_the_pane_the_leaf_names_now(self) -> None:
+        """The reincarnation case, on the production nudge: the handle moved, the head did not."""
+        host = NudgingReviewHost(self.root, screen="working\n› ")
+        host.terminals = [{"handle": "term-alias", "leafId": "leaf-worker", "connected": True}]
+        record = self._record(
+            worker_leaf="leaf-worker", report_generation=2,
+            worker_pid_file=str(self.root / "w.pid"),
+            worker_run={"adapter": "codex", "codex_mode": "tui"},
+        )
+        # The heartbeat of a worker that is running: a report prompt is refused over any other.
+        Path(record.worker_pid_file).write_text(f"{os.getpid()}\n", encoding="utf-8")
+        (self.workspace / "TASK.md").write_text("task\n", encoding="utf-8")
+
+        with self._bounded_delivery():
+            host.prompt_worker_report(self.task, record)
+
+        sent = [call for call in host.calls if call[:3] == ["orca", "terminal", "send"]]
+        self.assertTrue(sent, "the prompt was delivered")
+        for call in sent:
+            self.assertEqual(call[call.index("--terminal") + 1], "term-alias")
+        self.assertEqual(record.worker_head_run["handle"], "term-alias")
+        self.assertEqual(record.worker_head_run["lifecycle"], "working")
+
+    def test_a_stopped_worker_records_who_stopped_it_and_that_survives_a_restart(self) -> None:
+        host = NudgingReviewHost(self.root)
+        record = self._record(worker_leaf="leaf-worker")
+
+        host.stop_head(record, "worker", STOPPED_BY_REVIEW_FREEZE)
+
+        self.assertEqual(record.worker_head_run["lifecycle"], "exited")
+        self.assertEqual(record.worker_head_run["stopped_by"]["actor"], STOPPED_BY_REVIEW_FREEZE)
+        restarted = DispatcherRecord.from_json(json.loads(json.dumps(record.to_json())))
+        self.assertEqual(
+            restarted.worker_head_run["stopped_by"]["actor"], STOPPED_BY_REVIEW_FREEZE
+        )
+
+    def test_a_stop_that_is_refused_still_names_its_initiator(self) -> None:
+        """The dispatcher may die between the two; the record must not lose who was ending this."""
+        host = NudgingReviewHost(self.root, fail_ops={"close"})
+        record = self._record(worker_leaf="leaf-worker", worker_pid_file=str(self.root / "w.pid"))
+        Path(record.worker_pid_file).write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+        with mock.patch.object(dispatcher_module, "HEAD_STOP_GRACE_SECONDS", 0.05):
+            with mock.patch.object(host, "_signal_head", lambda *a: None):
+                with self.assertRaises(HostError):
+                    host.stop_head(record, "worker", STOPPED_BY_OPERATOR)
+
+        self.assertEqual(record.worker_head_run["lifecycle"], "finishing")
+        self.assertEqual(record.worker_head_run["stopped_by"]["actor"], STOPPED_BY_OPERATOR)
+
+    def test_the_run_identity_is_the_same_one_from_bring_up_to_stop(self) -> None:
+        host = NudgingReviewHost(self.root, screen="working\n› ")
+        record = self._record()
+
+        with self._bounded_delivery():
+            launched = host.restart_worker(self.task, record)
+        record.worker_head_run = dict(launched.head_run)
+        record.handle = launched.handle
+        record.worker_leaf = launched.leaf
+
+        host.stop_head(record, "worker", STOPPED_BY_REPLACEMENT)
+
+        self.assertEqual(record.worker_head_run["run_id"], launched.head_run["run_id"])
+        self.assertEqual(record.worker_head_run["lifecycle"], "exited")
 
 
 class PromptAfterStartCatalog(ReviewCatalog):

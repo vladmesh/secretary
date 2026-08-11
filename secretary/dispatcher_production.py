@@ -36,7 +36,7 @@ from secretary.dispatcher_state import (
     record_divergence,
     request_token,
 )
-from secretary.dispatcher_types import HostError
+from secretary.dispatcher_types import STOPPED_BY_RECONCILIATION, HostError
 from secretary.tasks import ACTIVE_STATES, TaskError
 from secretary.sprints import SprintWriter, budget_thresholds
 
@@ -359,6 +359,21 @@ def production_tick(runtime: Any) -> dict[str, Any]:
             raise
 
 
+def _committing_records(
+    runtime: Any, payload: dict[str, Any], records: dict[str, DispatcherRecord]
+):
+    """Lend the host a flush of this tick's records, for the span the tick holds them.
+
+    A head lifecycle transition — a stop entering `finishing` with its initiator (secretary-1412) —
+    has to be durable *before* the host call it describes, and the host is the one object that has
+    the record in hand and not the file it lives in. Handing it the tick's own save is what closes
+    that: a dispatcher killed between the transition and the pane close comes back to a record that
+    still knows which head was being stopped and by whom, instead of one that has forgotten there
+    was a stop.
+    """
+    return runtime.host.committing(lambda: runtime.save_records(payload, records))
+
+
 def _production_tick_body(
     runtime: Any,
     payload: dict[str, Any],
@@ -370,8 +385,23 @@ def _production_tick_body(
     Split out from `production_tick` so the caller can wrap exactly the region that runs under the
     lock with the state already proven writable: everything before it either writes nothing or
     records its own outcome.
+
+    The records are loaded here and lent to the host for the whole of it, so a head lifecycle
+    transition can be made durable at the moment it is decided rather than at the end of the tick.
     """
     records = runtime.production_state.records(payload)
+    with _committing_records(runtime, payload, records):
+        return _production_tick_work(runtime, payload, records, pause, auto_resume)
+
+
+def _production_tick_work(
+    runtime: Any,
+    payload: dict[str, Any],
+    records: dict[str, DispatcherRecord],
+    pause: dict[str, Any],
+    auto_resume: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Everything the tick does with the records it has loaded."""
     payload.update({
         "version": 1,
         "mode": "production",
@@ -1111,7 +1141,7 @@ def _stop_record_heads(
         if record.owns_head(REVIEW_ROLE):
             runtime.host.stop_head(record, REVIEW_ROLE)
         if record.owns_head(WORKER_ROLE):
-            runtime.host.stop_head(record, WORKER_ROLE)
+            runtime.host.stop_head(record, WORKER_ROLE, STOPPED_BY_RECONCILIATION)
         if not record.owns_head() and record.workspace and not record.workspace_settled:
             runtime.host.stop_workspace(record)
     except HostError as exc:

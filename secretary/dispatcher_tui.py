@@ -20,6 +20,7 @@ from triggered_agents.runtime.claude_sessions import (
     claude_project_dir_name,
     claude_session_paths,
 )
+from triggered_agents.runtime.pane_host import OrcaSessionHost, PaneHost
 from triggered_agents.runtime.tui_delivery import (
     COMPOSER_EMPTY,
     COMPOSER_UNKNOWN,
@@ -101,7 +102,8 @@ def deliver_tui_prompt(
     workspace: str,
     prompt_file: str,
     *,
-    run_json: RunJson,
+    run_json: RunJson | None = None,
+    host: PaneHost | None = None,
     adapter: str = "codex",
     session_root: Path | None = None,
     prompt_text: str | None = None,
@@ -116,6 +118,10 @@ def deliver_tui_prompt(
 
     A caller that has already written its task to a document passes that document's path with the
     nudge it wants sent, so the evidence records which of the two the pane received.
+
+    The pane is reached through `host` when the caller has one and through its own runner when it
+    does not. A head operation always has one: that is what keeps the product's delivery — this
+    criterion included — inside the session-manager seam instead of beside it.
     """
     if prompt_text is not None:
         prompt = prompt_text
@@ -128,9 +134,10 @@ def deliver_tui_prompt(
         handle,
         prompt,
         run_json=run_json,
+        host=host,
         adapter=adapter,
         confirm=turn_started_confirm(
-            handle, workspace, adapter, run_json=run_json, session_root=session_root
+            handle, workspace, adapter, run_json=run_json, host=host, session_root=session_root
         ),
         subject=subject,
         document_path=document_path,
@@ -142,7 +149,8 @@ def turn_started_confirm(
     workspace: str,
     adapter: str,
     *,
-    run_json: RunJson,
+    run_json: RunJson | None = None,
+    host: PaneHost | None = None,
     session_root: Path | None = None,
 ) -> Callable[[float], bool]:
     """The worker and reviewer delivery criterion, on whichever head that role was given.
@@ -156,13 +164,14 @@ def turn_started_confirm(
         if terminal_turn_started(
             handle,
             run_json=run_json,
+            host=host,
             workspace=workspace,
             since=sent_at,
             adapter=adapter,
             session_root=session_root,
         ):
             return True
-        return terminal_turn_started(handle, run_json=run_json, adapter=adapter)
+        return terminal_turn_started(handle, run_json=run_json, host=host, adapter=adapter)
 
     return confirm
 
@@ -170,7 +179,8 @@ def turn_started_confirm(
 def terminal_turn_started(
     handle: str,
     *,
-    run_json: RunJson,
+    run_json: RunJson | None = None,
+    host: PaneHost | None = None,
     workspace: str = "",
     since: float = 0.0,
     adapter: str = "",
@@ -193,7 +203,9 @@ def terminal_turn_started(
             return bool(latest_claude_user_turn_for(workspace, since))
         if adapter == "codex":
             return bool(latest_user_turn_for(workspace, since, session_root=session_root))
-    return _screen_started_turn(read_terminal_text(handle, run_json=run_json), adapter=adapter)
+    return _screen_started_turn(
+        read_terminal_text(handle, run_json=run_json, host=host), adapter=adapter
+    )
 
 
 def close_terminal(handle: str, *, run_json: RunJson) -> None:
@@ -208,13 +220,18 @@ def close_terminal_strict(handle: str, *, run_json: RunJson) -> None:
 
     Cleanup paths swallow the failure because they already have one to report. A caller whose
     record is the only pointer to the pane cannot: a refused close leaves the head alive.
+
+    The reviewer's lifecycle paths are the callers left here; the worker's close is the head
+    operation's, through the session host it was given (secretary-1412).
     """
-    run_json(["orca", "terminal", "close", "--terminal", handle, "--json"])
+    OrcaSessionHost(run_json).close_pane(handle)
 
 
-def read_terminal_text(handle: str, *, run_json: RunJson) -> str:
+def read_terminal_text(
+    handle: str, *, run_json: RunJson | None = None, host: PaneHost | None = None
+) -> str:
     """The pane's text, read the one way the delivery boundary reads it."""
-    return read_pane_text(handle, run_json=run_json)
+    return read_pane_text(handle, run_json=run_json, host=host)
 
 
 def latest_user_turn_for(

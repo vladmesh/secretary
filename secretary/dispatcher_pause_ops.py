@@ -46,7 +46,12 @@ from secretary.dispatcher_pause import (
 )
 from secretary.dispatcher_review import end_review_pane, start_review
 from secretary.dispatcher_state import DispatcherRecord, now_rfc3339
-from secretary.dispatcher_types import DispatcherError, HeadLaunchAborted, HostError
+from secretary.dispatcher_types import (
+    STOPPED_BY_OPERATOR,
+    DispatcherError,
+    HeadLaunchAborted,
+    HostError,
+)
 from secretary.tasks import TaskError
 
 WORKER_MARKERS = {"report:done", "report:blocked"}
@@ -111,9 +116,15 @@ def pause(
                 )
             else:
                 records = runtime.production_state.records(payload)
-                stopped_worker, stopped_reviewer, excluded = _freeze_heads(
-                    runtime, records, _excluded_paths(exclude_workspaces)
-                )
+                # The freeze is a stop path like any other, and its stops have to be durable
+                # before the panes are touched (secretary-1412): an operator freeze interrupted
+                # half-way must still leave every head it had begun stopping named on its record,
+                # with `operator` as the initiator, or the next tick opens a second stop of a head
+                # nothing can identify.
+                with _freeze_state_committing(runtime, payload, records):
+                    stopped_worker, stopped_reviewer, excluded = _freeze_heads(
+                        runtime, records, _excluded_paths(exclude_workspaces)
+                    )
                 # Observer heads stop with everything else, with the freeze's own reason on the
                 # record. The next tick after the resume brings them back.
                 observer_stops = freeze_observers(
@@ -300,6 +311,17 @@ def _excluded_paths(exclude_workspaces: list[str] | None) -> set[str]:
     return {os.path.abspath(os.path.expanduser(path)) for path in (exclude_workspaces or []) if path}
 
 
+def _freeze_state_committing(
+    runtime: Any, payload: dict[str, Any], records: dict[str, DispatcherRecord]
+):
+    """Lend the host a flush of the freeze's own records, for the span it holds them."""
+    def flush() -> None:
+        runtime.production_state.put_records(payload, records)
+        runtime.production_state.save(payload)
+
+    return runtime.host.committing(flush)
+
+
 def _freeze_heads(
     runtime: Any, records: dict[str, DispatcherRecord], excluded_paths: set[str]
 ) -> tuple[list[str], list[str], list[str]]:
@@ -354,7 +376,7 @@ def _freeze_heads(
             stopped_reviewer.append(ref)
         if record.handle or record.worker_leaf or record.worker_pid_file:
             try:
-                runtime.host.stop_head(record, WORKER_ROLE)
+                runtime.host.stop_head(record, WORKER_ROLE, STOPPED_BY_OPERATOR)
             except HostError:
                 continue
             forget_role_head(record, WORKER_ROLE)

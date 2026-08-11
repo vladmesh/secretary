@@ -162,6 +162,14 @@ class DispatcherRecord:
     # record reports the configuration the heads actually started with rather than re-reading a
     # `heads.toml` that may have been edited since. Canon is the journal; this is the live copy.
     attempt_round: int = 0
+    # The worker head's own run, as the three head operations keep it (secretary-1412): an identity
+    # that survives Orca aliasing its pane handle, the lifecycle it has reached, and — once a stop
+    # has begun — who initiated that stop. `worker_run` beside it is the routing snapshot of the
+    # configuration the head launched with; this is the state of the head itself, and it is durable
+    # for the same reason the pane identity is: the process that spawned a head is not necessarily
+    # the process that ends it, and a restarted dispatcher must still be able to say who was
+    # ending this one.
+    worker_head_run: dict[str, Any] = field(default_factory=dict)
     worker_run: dict[str, Any] = field(default_factory=dict)
     review_run: dict[str, Any] = field(default_factory=dict)
     # Deferred bring-ups (secretary-1163): how many launches of this role's head have been parked
@@ -267,6 +275,7 @@ class DispatcherRecord:
             "worker_continuation": self.worker_continuation.to_json(),
             "worker_respawns": self.worker_respawns,
             "worker_started_at": self.worker_started_at,
+            "worker_head_run": dict(self.worker_head_run),
             "worker_run": self.worker_run,
             "review_run": self.review_run,
             "worker_launch_attempts": self.worker_launch_attempts,
@@ -319,6 +328,7 @@ class DispatcherRecord:
             preferred_review_head=str(payload.get("preferred_review_head") or ""),
             attempt_id=str(payload.get("attempt_id") or ""),
             attempt_round=int(payload.get("attempt_round") or 0),
+            worker_head_run=_run_snapshot(payload.get("worker_head_run")),
             worker_run=_run_snapshot(payload.get("worker_run")),
             review_run=_run_snapshot(payload.get("review_run")),
             launch_intent=_run_snapshot(payload.get("launch_intent")),

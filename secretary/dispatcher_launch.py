@@ -61,7 +61,12 @@ from typing import Any
 from secretary.dispatcher_helpers import scrub_host_output
 from secretary.dispatcher_state import DispatcherRecord
 from secretary.dispatcher_tui import READINESS_BLOCKED, READINESS_BUSY
-from secretary.dispatcher_types import HeadLaunchAborted, HeadPaneNotReady, HostError
+from secretary.dispatcher_types import (
+    STOPPED_BY_LAUNCH_RECOVERY,
+    HeadLaunchAborted,
+    HeadPaneNotReady,
+    HostError,
+)
 from secretary.dispatcher_watchdog import (
     bring_up_defer_attempts,
     head_process_status,
@@ -505,7 +510,7 @@ def stop_launch_intent(
 
             end_review_pane(runtime.host, record)
         elif named:
-            runtime.host.stop_head(record, WORKER_ROLE)
+            runtime.host.stop_head(record, WORKER_ROLE, STOPPED_BY_LAUNCH_RECOVERY)
             forget_role_head(record, WORKER_ROLE)
         else:
             # A legacy launch without a role identity can only be settled by its workspace.  A

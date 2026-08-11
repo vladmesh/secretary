@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -152,6 +153,7 @@ from secretary.dispatcher_tui import (
     READINESS_BUSY,
     READINESS_READY,
     READINESS_UNKNOWN,
+    DeliveryOutcome,
     TuiDeliveryError,
     close_terminal as _close_tui_terminal,
     close_terminal_strict as _close_tui_terminal_strict,
@@ -162,6 +164,13 @@ from secretary.dispatcher_tui import (
 )
 from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
 from secretary.dispatcher_types import (
+    # Who a stop is recorded as having been initiated by. Every worker stop the dispatcher performs
+    # has an agent — the reviewer taking the checkout, a replacement opening, an operator pausing
+    # the pipeline, reconciliation settling a record — and the run now says which.
+    STOPPED_BY_DISPATCHER,
+    STOPPED_BY_OPERATOR,
+    STOPPED_BY_REPLACEMENT,
+    STOPPED_BY_REVIEW_FREEZE,
     DispatcherError,
     GateTransportError,
     HeadLaunchAborted,
@@ -200,7 +209,14 @@ from triggered_agents.agents.pipeline.heads import (
     resolve_head_id as _resolve_head_id,
 )
 from triggered_agents.agents.pipeline.task_protocol import pythonpath_prefix
+from triggered_agents.runtime import head as head_ops
 from triggered_agents.runtime.head import HeadSpec, HeadSpecError
+from triggered_agents.runtime.pane_host import (
+    OrcaSessionHost,
+    Pane,
+    PaneHostError,
+    SessionHost,
+)
 from triggered_agents.runtime.prompt_document import (
     PromptDocumentError,
     nudge_for as _nudge_for,
@@ -256,14 +272,6 @@ def _same_repo(first: Path, second: Path) -> bool:
         return first.expanduser().absolute() == second.expanduser().absolute()
 
 
-def _pane_key_leaf(value: Any) -> str:
-    """Read Orca's stable leaf id from its create-time `tabId:leafId` pane key."""
-    if not isinstance(value, str):
-        return ""
-    _tab, separator, leaf = value.partition(":")
-    return leaf if separator and leaf else ""
-
-
 @dataclass(frozen=True)
 class LaunchedHead:
     """One head bring-up as it happened: the pane it runs in and the configuration it runs with."""
@@ -278,14 +286,16 @@ class LaunchedHead:
     # The completed launch prompt's bounded transport receipt.  This belongs beside the head
     # identity so caller recovery never has to infer a successful body/submit pair from the pane.
     delivery_evidence: dict[str, Any] = field(default_factory=dict)
+    # The head's own run, as the three head operations keep it: identity that outlives a pane
+    # handle, lifecycle, and later the initiator that ended it. Empty for a bring-up whose caller
+    # keeps no lifecycle of its own (the in-process host seams, and noop mode).
+    head_run: dict[str, Any] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
-class PaneIdentity:
-    """The identity Orca returns while creating one pane."""
-
-    handle: str
-    leaf: str = ""
+# The identity a session manager returns while creating one pane. It is `pane_host.Pane` now: the
+# pane verbs moved to the host protocol, and a second local copy of "a handle and a leaf" would be
+# a type the head operations and the dispatcher had to translate between for no reason.
+PaneIdentity = Pane
 
 
 class InstanceCatalog:
@@ -600,11 +610,76 @@ class InstanceCatalog:
         return loaded if isinstance(loaded, dict) else {}
 
 
+@dataclass(frozen=True)
+class DispatcherHeadTransport:
+    """How this dispatcher delivers to a head and closes its pane, against whatever host it is on.
+
+    The one implementation of `head_ops.HeadTransport` the production paths use. It carries no
+    command runner and holds no argument vector: every session-manager call it makes goes to the
+    `SessionHost` the operation passes in, which is what lets the same object that runs in
+    production run in the contract suite against a fake. What it does own is the product's two
+    pieces of knowledge the operations must not invent — the confirmation criterion for a delivered
+    prompt, and what a refused close means over a pid heartbeat.
+    """
+
+    runtime: "CommandHostRuntime"
+    workspace: str = ""
+    prompt_file: str = ""
+    adapter: str = ""
+
+    def deliver(
+        self,
+        run: head_ops.HeadRun,
+        pointer: head_ops.NudgePointer,
+        *,
+        host: SessionHost,
+        subject: str,
+    ) -> DeliveryOutcome:
+        # The framing is the *rendered command's* fact, not the profile's: what is running in that
+        # pane is what the launcher just started, and a registry edited since would frame a prompt
+        # for a head this launch never ran. The run offers its own view of the adapter and this
+        # deliberately keeps the launcher's when there is one.
+        return _deliver_tui_prompt(
+            run.handle,
+            self.workspace,
+            self.prompt_file,
+            host=host,
+            adapter=self.adapter or run.spec.adapter,
+            prompt_text=pointer.text or None,
+            subject=subject,
+            document_path=pointer.document,
+        )
+
+    def close(self, run: head_ops.HeadRun, *, host: SessionHost) -> None:
+        self.runtime._close_head_pane(run.handle, run.pid_file, host=host)
+
+
 class CommandHostRuntime:
     def __init__(self, catalog: InstanceCatalog, data_dir: Path, *, mode: str = "real") -> None:
         self.catalog = catalog
         self.data_dir = data_dir
         self.mode = mode
+        # Where a head run is flushed the moment an operation commits it, ahead of the tick's own
+        # save (secretary-1412). Installed by the owner of the durable state for the span in which
+        # it has that state loaded — `CommandHostRuntime` has a record in hand but not the file it
+        # belongs to. Unset, a run reaches disk with the tick's records, which is all a caller
+        # outside a tick can promise.
+        self.commit_state: Callable[[], None] | None = None
+
+    @contextlib.contextmanager
+    def committing(self, flush: Callable[[], None]):
+        """Lend this runtime a way to flush the durable state, for as long as the caller holds it.
+
+        Restores whatever was there before rather than clearing, so a nested span — a pause
+        performed inside a tick — hands the state back to the span that owns it instead of leaving
+        the runtime unable to commit.
+        """
+        previous = self.commit_state
+        self.commit_state = flush
+        try:
+            yield
+        finally:
+            self.commit_state = previous
 
     def _prompt_adapter(self, run: Any, head: str) -> str:
         """The provider whose framing a prompt for this pane is delivered in.
@@ -687,6 +762,9 @@ class CommandHostRuntime:
             # re-reading the registry, which a later edit would answer differently.
             "run": launched.run,
             "delivery_evidence": dict(launched.delivery_evidence),
+            # The head's own run (secretary-1412): the identity every later nudge and the stop
+            # address this worker by, and where the initiator of that stop is eventually written.
+            "head_run": dict(launched.head_run),
         }
 
     def restart_worker(self, task: dict[str, Any], record: DispatcherRecord) -> LaunchedHead:
@@ -989,31 +1067,27 @@ class CommandHostRuntime:
             raise HostError("observer record names no terminal to read")
         terminals = self._worktree_terminals(str(record.workspace))
         terminal = next(
-            (item for item in terminals if record.leaf and item.get("leafId") == record.leaf),
+            (pane for pane in terminals if record.leaf and pane.leaf == record.leaf),
             None,
         )
         if terminal is None and not record.leaf:
             terminal = next(
-                (item for item in terminals if record.handle and item.get("handle") == record.handle),
+                (pane for pane in terminals if record.handle and pane.handle == record.handle),
                 None,
             )
         if terminal is None:
             raise HostError("observer terminal is not in the inventory of its workspace")
-        if terminal.get("connected") is False:
+        if not terminal.connected:
             raise HostError("observer terminal is not connected")
-        readiness = _terminal_readiness(
-            str(terminal.get("handle") or ""), run_json=self._run_json
-        )
+        readiness = _terminal_readiness(terminal.handle, run_json=self._run_json)
         if readiness == READINESS_UNKNOWN:
             # A probe that failed is not a working observer. Raising puts it on the lifecycle's
             # bounded failure path, where a busy pane would wait forever instead.
             raise HostError("observer terminal readiness could not be read")
         status: dict[str, Any] = {"idle": readiness == READINESS_READY}
-        try:
-            status["last_activity"] = float(terminal.get("lastOutputAt")) / 1000.0
-        except (TypeError, ValueError):
-            # Only the idle-recovery path needs the clock, and it says so itself when it is missing.
-            pass
+        if terminal.last_output_at:
+            status["last_activity"] = terminal.last_output_at
+        # Only the idle-recovery path needs that clock, and it says so itself when it is missing.
         return status
 
     def nudge_observer(self, record: Any) -> str:
@@ -1032,10 +1106,10 @@ class CommandHostRuntime:
         if not workspace or not (handle or leaf):
             raise HostError("observer has no terminal handle for an event wake")
         terminals = self._worktree_terminals(workspace)
-        terminal = next((item for item in terminals if leaf and item.get("leafId") == leaf), None)
+        terminal = next((pane for pane in terminals if leaf and pane.leaf == leaf), None)
         if terminal is None and not leaf:
-            terminal = next((item for item in terminals if handle and item.get("handle") == handle), None)
-        current = str(terminal.get("handle") or "") if isinstance(terminal, dict) else ""
+            terminal = next((pane for pane in terminals if handle and pane.handle == handle), None)
+        current = terminal.handle if terminal is not None else ""
         if not current:
             raise HostError("observer terminal is unavailable for an event wake")
         delivery = getattr(record, "delivery", None)
@@ -1516,7 +1590,9 @@ class CommandHostRuntime:
         for pid_file in (record.worker_pid_file, record.review_pid_file):
             self._confirm_head_process_gone(pid_file)
 
-    def stop_head(self, record: DispatcherRecord, kind: str) -> None:
+    def stop_head(
+        self, record: DispatcherRecord, kind: str, initiator: str = STOPPED_BY_DISPATCHER
+    ) -> None:
         """Stop one role's head and confirm it is gone, or raise.
 
         A saved leaf is resolved to the inventory's current handle before any close.  Orca can
@@ -1529,11 +1605,16 @@ class CommandHostRuntime:
         heartbeat is what actually decides: a head still answering it after the close is a stop
         that did not happen, and it raises rather than letting a replacement start.
         """
-        handle = record.review_handle if kind == "review" else record.handle
-        leaf = record.review_leaf if kind == "review" else record.worker_leaf
-        pid_file = record.review_pid_file if kind == "review" else record.worker_pid_file
         if self.mode == "noop":
             return
+        if kind != "review":
+            # The worker's stop is the head operation, initiator and all (secretary-1412). The
+            # reviewer's is still the pane close below; that path is the next card's.
+            self.stop_worker_head(record, initiator)
+            return
+        handle = record.review_handle
+        leaf = record.review_leaf
+        pid_file = record.review_pid_file
         if leaf:
             # This read is part of the stop proof, unlike liveness and anchor selection. An
             # unreadable inventory cannot be read as an absent leaf: the record must survive so
@@ -1550,6 +1631,114 @@ class CommandHostRuntime:
                 f"{kind} head has neither a pane handle nor a pid heartbeat (and no pane leaf)"
             )
         self._confirm_head_process_gone(pid_file)
+
+    def stop_worker_head(
+        self, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER
+    ) -> None:
+        """End this card's worker through the head operation, recording who ended it.
+
+        The initiator is the point. Every stop the dispatcher performs has an agent — the reviewer
+        taking the checkout, the idle watchdog, a red verdict opening a rework, an operator pausing
+        the pipeline, reconciliation settling an orphaned record, launch recovery ending a head it
+        could not adopt — and until now none of that reached the record: a worker that was gone
+        looked the same however it had gone. Every one of those paths arrives here, and here is
+        where the record learns who was ending this head.
+
+        `commit` is the ordering that makes it survive: the run enters `finishing` with its
+        initiator and is written down before the operation touches the pane, so a stop that is
+        refused, or one whose dispatcher dies between the close and the heartbeat, leaves a durable
+        run the next tick continues rather than a record that has forgotten there was a stop at
+        all. `finishing` being idempotent by initiator is the other half — the retry that arrives
+        as `reconciliation` does not rename the freeze that began this.
+
+        The close and the heartbeat confirmation are the transport's and this runtime's: a close is
+        best-effort because Orca answers `tab_not_found` for a pane it never gave a UI tab, and the
+        heartbeat is what actually decides whether the head is gone.
+        """
+        run = self.worker_lifecycle_run(record)
+        try:
+            outcome = head_ops.stop(
+                run,
+                head_ops.StopInitiator(actor=initiator),
+                host=self.session,
+                transport=self._head_transport(record.workspace),
+                commit=lambda finishing: self._commit_worker_run(record, finishing),
+                confirm_gone=self._confirm_head_process_gone,
+            )
+        except head_ops.HeadStopFailed as exc:
+            # The stop did not happen, and the run says who was ending it. Recording that here is
+            # what makes the next tick's retry a continuation of this stop rather than a new one.
+            self._commit_worker_run(record, exc.run)
+            raise HostError(str(exc)) from None
+        self._commit_worker_run(record, outcome.run)
+
+    def _commit_worker_run(self, record: DispatcherRecord, run: head_ops.HeadRun) -> None:
+        """Write this worker's run onto the record, and flush it if the caller gave us the state.
+
+        The record is the durable home of the run, but this runtime does not own the file it lives
+        in: a tick loads the production state, hands records around and saves them at the end. So
+        the owner installs `commit_state` for the span it has that state loaded, and a lifecycle
+        transition committed here reaches disk immediately rather than at the end of a tick that
+        may not get there. Without one — a caller outside a tick — the record still carries the run
+        and is saved by whoever loaded it, which is exactly the guarantee that path already has.
+        """
+        record.worker_head_run = run.to_json()
+        if self.commit_state is not None:
+            self.commit_state()
+
+    def worker_lifecycle_run(self, record: DispatcherRecord) -> head_ops.HeadRun:
+        """This card's worker as the head operations see it.
+
+        The durable run decides which head a stop is continuing; reconciliation may only readdress
+        it. A tick that re-found the pane, or an adoption that took a launch intent back, wrote the
+        current handle, leaf and heartbeat onto the record, and those are bound onto the stored run
+        below — the identity, the lifecycle and the initiator are not touched by any of it. A run in
+        `finishing` is therefore continued, initiator and all, however many ticks the stop takes.
+
+        A run that is `settled` is the one case where the stored value is dropped: its head was
+        confirmed gone, so whatever the record still names a pane or a heartbeat for is not that
+        run, and stopping it *as* that run would quietly skip a live head on the strength of a
+        previous confirmation. Note that this is `settled`, not `not running`: `finishing` is
+        neither running nor finished with, and reading the two as one is what used to hand the
+        retry a new identity and no initiator.
+
+        A record from before this field existed has no run to read, so one is reconstructed — same
+        head, same pane, same heartbeat, a fresh identity — because a worker that is running has to
+        be stoppable whichever dispatcher started it.
+        """
+        stored = record.worker_head_run if isinstance(record.worker_head_run, dict) else {}
+        run: head_ops.HeadRun | None = None
+        if stored.get("run_id"):
+            try:
+                run = head_ops.HeadRun.from_json(stored)
+            except (head_ops.HeadRunError, head_ops.TaskRefError):
+                run = None
+            if run is not None and run.settled and record.owns_head(WORKER_ROLE):
+                # The record still names a pane or a heartbeat while the run says that head was
+                # confirmed gone: whatever is there is not the run that ended, so it is not stopped
+                # as that run either. A fresh identity below is what keeps a stop from quietly
+                # skipping a head because a previous one was confirmed.
+                run = None
+        if run is None:
+            run = head_ops.HeadRun(
+                run_id=head_ops.new_run_id(),
+                spec=HeadSpec(
+                    profile_id=record.head,
+                    adapter=self._prompt_adapter(record.worker_run, record.head),
+                ),
+                workspace=record.workspace,
+                # No card reference reaches this call, and the worker id it does have carries one:
+                # `<ref>-<slug>` is what the claim built it from. A pointer that names the worker
+                # is the truthful reconstruction; inventing a card reference would not be.
+                task_ref=head_ops.TaskRef.card(record.worker or record.head or "unknown-worker"),
+            )
+        return replace(
+            run,
+            workspace=record.workspace or run.workspace,
+            handle=record.handle,
+            leaf=record.worker_leaf,
+            pid_file=record.worker_pid_file,
+        )
 
     def _confirm_head_process_gone(self, pid_file: str) -> None:
         """Make sure the process behind a heartbeat is not running, escalating if it is.
@@ -1827,111 +2016,139 @@ class CommandHostRuntime:
             command = launch.command
             if pid_file:
                 command = _with_pid_heartbeat(command, pid_file)
-        if split_from:
-            pane = self._split_pane(
-                split_from, title, command, workspace=workspace, pid_file=pid_file
-            )
-        else:
-            pane = self._create_terminal(workspace, title, command)
-        # A few in-process host seams predate paneKey and still return a bare handle.  They model
-        # an older Orca response, so retain that as an explicitly leafless legacy launch rather
-        # than looking it up again through the unstable alias.
-        if isinstance(pane, str):
-            pane = PaneIdentity(pane)
-        delivery_evidence: dict[str, Any] = {}
+        adapter = (getattr(launch, "adapter", "") or "codex") if launch else "codex"
+        subject = f"{role or 'head'}-launch"
+        pointer = None
         if launch and launch.prompt_after_start:
-            try:
-                outcome = _deliver_tui_prompt(
-                    pane.handle, workspace, prompt_file, run_json=self._run_json,
-                    adapter=launch.adapter or "codex",
-                    prompt_text=launch_prompt, subject=f"{role or 'head'}-launch",
-                    document_path=prompt_document,
-                )
-                delivery_evidence = _delivery_evidence_json(outcome, f"{role or 'head'}-launch")
-            except (TuiDeliveryError, HostError) as exc:
-                # The pane is about to be closed, so this is the last moment anything can be known
-                # about the prompt it would not take. The evidence travels with every way out of
-                # here, because the caller's own record is where it has to end up.
-                evidence = _delivery_evidence_json(exc, f"{role or 'head'}-launch")
-                if prompt_document:
-                    # A nudge that could not be confirmed says nothing about the head. The line was
-                    # short enough that no provider has ever failed to take one, the task is on
-                    # disk either way, and the classification that would be trusted here is the one
-                    # that reported 24 delivered prompts as failures on the canary — and then, on
-                    # the worker path, killed six live Claude heads in eight minutes because the
-                    # transcript it read for proof was globbed under a directory name Claude Code
-                    # has never used (2026-08-11). So the pane is not closed over it: the bring-up
-                    # hands it back as the ambiguity it is, the caller keeps its launch intent, and
-                    # the next tick either adopts that head — which is what a head that did take the
-                    # nudge looks like — or stops it by its own retained identity, with the cleanup
-                    # recorded as the initiator. A pane is never closed on the strength of a
-                    # delivery classification, whichever role's head is sitting in it.
-                    raise HeadLaunchAborted(
-                        f"the launch nudge was not confirmed delivered, and the {role or 'head'} "
-                        f"pane may have taken it anyway: {exc}",
-                        handle=pane.handle,
-                        leaf=pane.leaf,
-                        workspace=workspace,
-                        pid_file=pid_file,
-                        evidence=evidence,
-                    ) from None
-                # What the pane was doing when it refused the prompt, asked before it is closed
-                # because afterwards there is nothing left to ask (secretary-1163). A pane that is
-                # working, or held in a dialog its head cannot leave on its own, is a launch worth
-                # making again rather than a failed round, and it goes back as `HeadPaneNotReady`
-                # so the caller can defer instead of blocking the card. A probe that goes
-                # unanswered is not that and takes the ordinary failure path below: a pane nothing
-                # can ask about is not a busy pane, it is a pane nothing can wait for.
-                readiness = _terminal_readiness(pane.handle, run_json=self._run_json)
-                # The terminal is already up, so a failure here is not proof that no head exists.
-                # The close decides which: confirmed, nothing of this bring-up is left and the
-                # caller may treat it as a launch that did not happen; refused, the pane goes back
-                # with the failure so the caller keeps its launch intent and the next tick settles
-                # the head instead of opening a second one beside it.
-                try:
-                    self._close_launched_pane(pane.handle, pid_file)
-                except HostError as stop_exc:
-                    raise HeadLaunchAborted(
-                        f"{exc}; head terminal stop failed: {stop_exc}",
-                        handle=pane.handle,
-                        leaf=pane.leaf,
-                        workspace=workspace,
-                        pid_file=pid_file,
-                        evidence=evidence,
-                    ) from None
-                if readiness in (READINESS_BUSY, READINESS_BLOCKED):
-                    raise HeadPaneNotReady(
-                        f"the head pane was {_pane_state_label(readiness)} and never took its "
-                        f"launch prompt: {exc}",
-                        readiness=readiness,
-                        pane=pane.handle,
-                        evidence=evidence,
-                    ) from None
-                failure = HostError(str(exc))
-                failure.evidence = evidence
-                raise failure from None
+            # Which of the two prompt shapes this head is in is decided by the rendered command,
+            # not by the profile: a raw command override runs a provider in a shape no profile
+            # describes. A caller that has already written its task passes the document, and the
+            # pointer is then the bounded line naming it.
+            # An empty pointer text is the legacy shape and not an empty prompt: a caller that
+            # passes no launch prompt is one whose head is sent the prompt file's own contents,
+            # which the delivery below reads. A caller that has written a task document passes the
+            # bounded line naming it, and that line is the whole payload.
+            pointer = head_ops.NudgePointer(text=launch_prompt or "", document=prompt_document)
+        try:
+            outcome = head_ops.spawn(
+                self._head_spec(head, adapter),
+                workspace,
+                self._task_ref(task, role, prompt_document),
+                host=self.session,
+                command=command,
+                title=title,
+                pointer=pointer,
+                pid_file=pid_file,
+                split_from=split_from,
+                transport=self._head_transport(workspace, prompt_file, adapter),
+                subject=subject,
+            )
+        except head_ops.HeadOperationError as exc:
+            raise self._launch_failure(exc, workspace, pid_file, subject) from None
+        delivery = outcome.delivery
         return self._launched(
-            pane.handle,
+            outcome.run.handle,
             head,
             task,
             role,
             workspace,
             failover,
-            leaf=pane.leaf,
-            delivery_evidence=delivery_evidence,
+            leaf=outcome.run.leaf,
+            delivery_evidence=(
+                _delivery_evidence_json(delivery, subject) if delivery is not None else {}
+            ),
+            head_run=outcome.run.to_json(),
         )
 
-    def _close_launched_pane(self, handle: str, pid_file: str) -> None:
-        """Close a pane this bring-up opened and confirm nothing of its head survived.
+    def _head_spec(self, head: str, adapter: str) -> HeadSpec:
+        """The launch shape the run is recorded with, degrading rather than failing a live bring-up.
+
+        A registry that no longer describes this head — or a caller running a raw command override
+        with no profile behind it at all — still has to yield a usable run: the head is about to
+        exist whatever the table says. So the profile is preferred and the adapter the command was
+        rendered for stands in for it, which is the same degradation the routing snapshot makes.
+        """
+        try:
+            return HeadSpec.from_profile(head, self.catalog.head_profile(head))
+        except (HeadSpecError, HostError, AttributeError, KeyError, TypeError):
+            return HeadSpec(profile_id=head, adapter=adapter or "unknown")
+
+    @staticmethod
+    def _task_ref(task: dict[str, Any] | None, role: str, document: str) -> head_ops.TaskRef:
+        """What this head is being pointed at.
+
+        A card when the bring-up has one, and the role's standing instruction when it does not:
+        the in-process host seams and the service heads run without a Pipeline card, and inventing
+        one for them would put a card reference in a record no card ever opened.
+        """
+        pointer = document if document and os.path.isabs(document) else ""
+        if task and task.get("ref"):
+            return head_ops.TaskRef.card(str(task["ref"]), document=pointer)
+        return head_ops.TaskRef.standing(role or "head", document=pointer)
+
+    def _head_transport(
+        self, workspace: str, prompt_file: str = "", adapter: str = ""
+    ) -> "DispatcherHeadTransport":
+        """This product's delivery and close semantics, for the operation to perform through
+        the host it is running on.
+
+        The head package can deliver and close through a session host by itself; what it cannot do
+        is what this product knows on top of that — the provider transcript this role's head writes
+        when its turn starts, and the fact that Orca answers `tab_not_found` for every pane it never
+        gave a UI tab, so a refused close decides nothing while a heartbeat can still be read. Both
+        of those are policy, and both arrive here as a transport rather than as a callback holding
+        this runtime's command runner: whatever the operation reaches, it reaches through the
+        `SessionHost` it was given.
+        """
+        return DispatcherHeadTransport(self, workspace, prompt_file, adapter)
+
+    def _launch_failure(
+        self, exc: head_ops.HeadOperationError, workspace: str, pid_file: str, subject: str
+    ) -> Exception:
+        """Translate one operation's refusal into the failure the dispatcher's callers already read.
+
+        The three kinds are the ones the bring-up path has always had, and the distinction between
+        them is the whole reason they are three: a pane that may still hold a head keeps the
+        caller's launch intent, a pane that was busy is a launch worth making again, and only a
+        bring-up that left nothing running may block the card.
+        """
+        evidence = _delivery_evidence_json(exc, subject)
+        if isinstance(exc, head_ops.HeadSpawnAborted):
+            return HeadLaunchAborted(
+                str(exc),
+                handle=exc.run.handle,
+                leaf=exc.run.leaf,
+                workspace=workspace or exc.run.workspace,
+                pid_file=pid_file or exc.run.pid_file,
+                evidence=evidence,
+            )
+        if isinstance(exc, head_ops.HeadPaneBusy):
+            return HeadPaneNotReady(
+                f"the head pane was {_pane_state_label(exc.readiness)} and never took its launch "
+                f"prompt: {exc}",
+                readiness=exc.readiness,
+                pane=exc.pane,
+                evidence=evidence,
+            )
+        failure = HostError(str(exc))
+        failure.evidence = evidence
+        return failure
+
+    def _close_head_pane(self, handle: str, pid_file: str, *, host: SessionHost) -> None:
+        """Close a head's pane through the session host and confirm nothing of it survived.
 
         The close is asked strictly, but its refusal is not the answer on its own: Orca reports
         `tab_not_found` for a pane it never gave a UI tab, which is every pane a dispatcher-launched
         head gets on a headless serve. The heartbeat decides. Only when there is no heartbeat to
         read is a refused close taken at face value, because then nothing else can say whether the
         head is still there.
+
+        The heartbeat half is not session-manager business at all — it is a pid this product wrote
+        and this product signals — which is why it stays here while the pane itself is closed
+        through the host the operation handed in.
         """
         try:
-            _close_tui_terminal_strict(handle, run_json=self._run_json)
+            host.close_pane(handle)
         except Exception as exc:  # noqa: BLE001 — any refusal, whatever the transport called it
             status = _head_process_status(pid_file) if pid_file else {"known": False}
             if not status.get("known"):
@@ -1941,6 +2158,7 @@ class CommandHostRuntime:
     def _launched(
         self, handle: str, head: str, task: dict[str, Any] | None, role: str, workspace: str = "",
         failover: bool = False, leaf: str = "", delivery_evidence: dict[str, Any] | None = None,
+        head_run: dict[str, Any] | None = None,
     ) -> LaunchedHead:
         """Pair the pane with the launch snapshot of the head running in it.
 
@@ -1951,7 +2169,9 @@ class CommandHostRuntime:
         """
         if task is None:
             return LaunchedHead(
-                handle=handle, head=head, leaf=leaf, delivery_evidence=dict(delivery_evidence or {})
+                handle=handle, head=head, leaf=leaf,
+                delivery_evidence=dict(delivery_evidence or {}),
+                head_run=dict(head_run or {}),
             )
         try:
             run = self.catalog.head_run(
@@ -1967,142 +2187,62 @@ class CommandHostRuntime:
             run=run,
             leaf=leaf,
             delivery_evidence=dict(delivery_evidence or {}),
+            head_run=dict(head_run or {}),
         )
 
+    @property
+    def session(self) -> OrcaSessionHost:
+        """The session manager this runtime opens, addresses and closes panes through.
+
+        Everything about which session manager that is lives in `pane_host` now. This runtime's own
+        pane verbs — `_create_terminal` below, the terminal inventory, the by-workspace stop — are
+        thin translations of that host's answers into the errors the dispatcher's callers already
+        handle, and the head operations reach the same host directly.
+        """
+        return OrcaSessionHost(self._run_json)
+
     def _create_terminal(self, workspace: str, title: str, command: str) -> PaneIdentity:
-        result = self._run_json([
-            "orca", "terminal", "create",
-            "--worktree", f"path:{workspace}",
-            "--title", title,
-            "--command", command,
-            "--json",
-        ])
-        terminal = result.get("terminal") if isinstance(result.get("terminal"), dict) else result
-        handle = terminal.get("handle") or terminal.get("id") if isinstance(terminal, dict) else None
-        if not isinstance(handle, str) or not handle:
-            raise HostError("orca did not return a terminal handle")
-        return PaneIdentity(handle=handle, leaf=_pane_key_leaf(terminal.get("paneKey")))
-
-    def _split_pane(
-        self,
-        split_from: str,
-        title: str,
-        command: str,
-        *,
-        workspace: str = "",
-        pid_file: str = "",
-    ) -> PaneIdentity:
-        """Run `command` in a new pane beside an existing one. `terminal split` takes no --title,
-        so the label goes on afterwards; a label that will not stick is a failed bring-up rather
-        than an unlabelled pane, because the operator has no other way to tell the panes apart.
-
-        The head is already running by then, so the cleanup decides what kind of failure this is:
-        a confirmed close leaves nothing of the bring-up and the rename failure travels as the
-        ordinary error it is, while a close that cannot promise the head is gone hands the pane
-        back as `HeadLaunchAborted` and the caller keeps its launch intent."""
-        result = self._run_json([
-            "orca", "terminal", "split",
-            "--terminal", split_from,
-            "--direction", "vertical",
-            "--command", command,
-            "--json",
-        ])
-        split = result.get("split") if isinstance(result.get("split"), dict) else result
-        handle = split.get("handle") if isinstance(split, dict) else None
-        if not isinstance(handle, str) or not handle:
-            raise HostError("orca did not return a split terminal handle")
-        leaf = _pane_key_leaf(split.get("paneKey"))
-        if not leaf:
-            # Orca's current split reply names the new pane by handle, tab id and runtime id but
-            # does not include paneKey. At this launch boundary that handle can still identify the
-            # just-created pane in a fresh inventory, which gives the reviewer the same stable
-            # leaf create returns directly. Do not let a new reviewer become leafless: that
-            # fallback is only for historical records that predate pane identity.
-            try:
-                leaf = self._pane_leaf_for_handle_or_raise(workspace, handle)
-            except HostError as exc:
-                try:
-                    self._close_launched_pane(handle, pid_file)
-                except HostError as stop_exc:
-                    raise HeadLaunchAborted(
-                        f"{exc}; head terminal stop failed: {stop_exc}",
-                        handle=handle,
-                        workspace=workspace,
-                        pid_file=pid_file,
-                    ) from None
-                raise
-            if not leaf:
-                try:
-                    self._close_launched_pane(handle, pid_file)
-                except HostError as stop_exc:
-                    raise HeadLaunchAborted(
-                        "orca did not expose a stable leaf for the split pane; "
-                        f"head terminal stop failed: {stop_exc}",
-                        handle=handle,
-                        workspace=workspace,
-                        pid_file=pid_file,
-                    ) from None
-                raise HostError("orca did not expose a stable leaf for the split pane")
         try:
-            self._run_json([
-                "orca", "terminal", "rename",
-                "--terminal", handle,
-                "--title", title,
-                "--json",
-            ])
-        except HostError as exc:
-            try:
-                self._close_launched_pane(handle, pid_file)
-            except HostError as stop_exc:
-                raise HeadLaunchAborted(
-                    f"{exc}; head terminal stop failed: {stop_exc}",
-                    handle=handle,
-                    leaf=leaf,
-                    workspace=workspace,
-                    pid_file=pid_file,
-                ) from None
-            raise
-        return PaneIdentity(handle=handle, leaf=leaf)
+            return self.session.open_pane(workspace, title, command)
+        except PaneHostError as exc:
+            raise HostError(str(exc)) from None
 
     def _split_anchor(self, record: DispatcherRecord) -> str:
         """Pane to split the reviewer off. The worker's own pane when it is still connected, so
         both heads of a card end up in one tab; otherwise any live pane in the same worktree.
         Empty when the worktree has no live pane left — the caller then falls back to creating a
         terminal, which is less visible but still gets the card reviewed."""
-        terminals = self._worktree_terminals(record.workspace)
-        connected = [
-            terminal for terminal in terminals if terminal.get("connected") is not False
-        ]
+        connected = [pane for pane in self._worktree_terminals(record.workspace) if pane.connected]
         if record.worker_leaf:
-            for terminal in connected:
-                if terminal.get("leafId") == record.worker_leaf:
-                    return str(terminal.get("handle") or "")
+            for pane in connected:
+                if pane.leaf == record.worker_leaf:
+                    return pane.handle
         elif record.handle:
-            for terminal in connected:
-                if terminal.get("handle") == record.handle:
+            for pane in connected:
+                if pane.handle == record.handle:
                     return record.handle
-        return str(connected[0].get("handle") or "") if connected else ""
+        return connected[0].handle if connected else ""
 
     def _pane_handle_for_leaf(self, workspace: str, leaf: str) -> str:
-        for terminal in self._worktree_terminals(workspace):
-            if terminal.get("leafId") == leaf:
-                return str(terminal.get("handle") or "")
+        for pane in self._worktree_terminals(workspace):
+            if pane.leaf == leaf:
+                return pane.handle
         return ""
 
     def _pane_handle_for_leaf_or_raise(self, workspace: str, leaf: str) -> str:
-        for terminal in self._worktree_terminals_or_raise(workspace):
-            if terminal.get("leafId") == leaf:
-                return str(terminal.get("handle") or "")
+        for pane in self._worktree_terminals_or_raise(workspace):
+            if pane.leaf == leaf:
+                return pane.handle
         return ""
 
     def _pane_leaf_for_handle_or_raise(self, workspace: str, handle: str) -> str:
-        for terminal in self._worktree_terminals_or_raise(workspace):
-            if terminal.get("handle") == handle:
-                return str(terminal.get("leafId") or "")
+        for pane in self._worktree_terminals_or_raise(workspace):
+            if pane.handle == handle:
+                return pane.leaf
         return ""
 
-    def _worktree_terminals(self, workspace: str) -> list[dict[str, Any]]:
-        """Terminal inventory for a worktree, or [] when it cannot be read. Callers use it to pick
+    def _worktree_terminals(self, workspace: str) -> list[Pane]:
+        """Pane inventory for a worktree, or [] when it cannot be read. Callers use it to pick
         a pane, never to decide a head is dead, so an unreadable inventory degrades into a weaker
         choice rather than a failed tick."""
         if self.mode == "noop" or not workspace:
@@ -2112,18 +2252,14 @@ class CommandHostRuntime:
         except HostError:
             return []
 
-    def _worktree_terminals_or_raise(self, workspace: str) -> list[dict[str, Any]]:
+    def _worktree_terminals_or_raise(self, workspace: str) -> list[Pane]:
         """Read a worktree inventory when its absence would make a lifecycle decision unsafe."""
         if self.mode == "noop":
             return []
-        if not workspace:
-            raise HostError("terminal inventory needs a workspace")
-        data = self._run_json([
-            "orca", "terminal", "list", "--worktree", f"path:{workspace}", "--json"
-        ])
-        payload = data.get("result") if isinstance(data.get("result"), dict) else data
-        terminals = payload.get("terminals") if isinstance(payload, dict) else []
-        return [terminal for terminal in terminals if isinstance(terminal, dict)] if isinstance(terminals, list) else []
+        try:
+            return list(self.session.panes(workspace))
+        except PaneHostError as exc:
+            raise HostError(str(exc)) from None
 
     def _freeze_worker(self, record: DispatcherRecord) -> None:
         """Shut the worker head down now that the reviewer is up. Nothing else stops the worker
@@ -2135,7 +2271,7 @@ class CommandHostRuntime:
         worker editing the tree the reviewer is judging."""
         if self.mode == "noop" or not (record.handle or record.worker_leaf or record.worker_pid_file):
             return
-        self.stop_head(record, "worker")
+        self.stop_head(record, "worker", STOPPED_BY_REVIEW_FREEZE)
 
     def retain_worker(self, record: DispatcherRecord) -> None:
         """Suspend a completed worker without throwing its provider conversation away.
@@ -2257,22 +2393,8 @@ class CommandHostRuntime:
         workspace = Path(record.workspace)
         if not workspace.is_dir():
             raise HostError("worker workspace is missing")
-        adapter = self._prompt_adapter(record.worker_run, record.head)
         prompt = _report_nudge_prompt(record.report_generation, task["ref"])
-        try:
-            outcome = _deliver_tui_prompt(
-                record.handle,
-                str(workspace),
-                "TASK.md",
-                run_json=self._run_json,
-                adapter=adapter,
-                prompt_text=prompt,
-            )
-            _record_worker_delivery_evidence(record, outcome)
-        except (TuiDeliveryError, HostError) as exc:
-            failure = HostError(f"worker report prompt was not delivered: {exc}")
-            failure.evidence = getattr(exc, "evidence", None)
-            raise failure from None
+        self._nudge_worker(record, prompt, "worker report prompt", subject="worker-report")
 
     def resume_worker(self, task: dict[str, Any], record: DispatcherRecord) -> None:
         """Resume an addressable retained worker and deliver its updated rework task.
@@ -2320,23 +2442,50 @@ class CommandHostRuntime:
             workspace / "TASK.md",
             self._worker_task_doc(task, base, record.attempt_id, generation, decision),
         )
+        if status.get("stopped"):
+            self._signal_head(record.worker_pid_file, signal.SIGCONT)
+        prompt = _continuation_prompt(continuation.phase, generation, task["ref"], decision)
+        self._nudge_worker(
+            record, prompt, "retained worker continuation", subject="worker-continuation"
+        )
+
+    def _nudge_worker(
+        self, record: DispatcherRecord, prompt: str, what: str, *, subject: str
+    ) -> None:
+        """Point this card's live worker at one thing, through the head operation (secretary-1412).
+
+        Both prompts a running worker ever gets — "report the round you are in" and "here is your
+        continuation" — go through `nudge`, so the pane is re-found by the run's own leaf before
+        anything is typed into it and the delivery is recorded against the head rather than against
+        a handle. What is delivered and how a turn is confirmed are unchanged: this passes the same
+        confirming transport the launch nudge uses, because the criterion is the product's, not the
+        operation's.
+
+        The failure is the caller's to read as it always was: a worker prompt that did not reach
+        its confirmation is a `HostError` carrying the delivery boundary's own evidence.
+        """
+        run = self.worker_lifecycle_run(record)
         try:
-            if status.get("stopped"):
-                self._signal_head(record.worker_pid_file, signal.SIGCONT)
-            prompt = _continuation_prompt(continuation.phase, generation, task["ref"], decision)
-            outcome = _deliver_tui_prompt(
-                record.handle,
-                str(workspace),
-                "TASK.md",
-                run_json=self._run_json,
-                adapter=adapter,
-                prompt_text=prompt,
+            outcome = head_ops.nudge(
+                run,
+                head_ops.NudgePointer.line(prompt),
+                host=self.session,
+                transport=self._head_transport(
+                    record.workspace, "TASK.md",
+                    self._prompt_adapter(record.worker_run, record.head),
+                ),
+                subject=subject,
             )
-            _record_worker_delivery_evidence(record, outcome)
-        except (TuiDeliveryError, HostError) as exc:
-            failure = HostError(f"retained worker continuation was not delivered: {exc}")
+        except head_ops.HeadOperationError as exc:
+            failure = HostError(f"{what} was not delivered: {exc}")
             failure.evidence = getattr(exc, "evidence", None)
             raise failure from None
+        except (TuiDeliveryError, HostError) as exc:
+            failure = HostError(f"{what} was not delivered: {exc}")
+            failure.evidence = getattr(exc, "evidence", None)
+            raise failure from None
+        record.worker_head_run = outcome.run.to_json()
+        _record_worker_delivery_evidence(record, outcome.delivery)
 
     def _set_worker_branch(self, workspace: str, branch: str) -> None:
         if self.mode == "noop":
@@ -3313,6 +3462,7 @@ class DispatcherRuntime:
             self.save_records(payload, records)
             return {"status": "blocked", "step": "claim", "pilot_ref": ref, "reason": "host bring-up failed"}
         record.workspace = prepared["workspace"]
+        record.worker_head_run = dict(prepared.get("head_run") or {})
         _record_worker_delivery_evidence(record, prepared.get("delivery_evidence"))
         # The intent carries the pane and the launch snapshot before the record does: from here on
         # every failure is one over a worker that is already running.
@@ -3421,7 +3571,7 @@ class DispatcherRuntime:
         """Stop this card's worker head before a replacement opens, or answer with the refusal."""
         try:
             if record.handle or record.worker_leaf or record.worker_pid_file:
-                self.host.stop_head(record, "worker")
+                self.host.stop_head(record, "worker", STOPPED_BY_REPLACEMENT)
             else:
                 # A preempted head can lose its own identity with a dispatcher crash while the
                 # workspace is still known. Sweep that workspace before opening a replacement;
@@ -3582,6 +3732,7 @@ class DispatcherRuntime:
             self, payload, records, ref, record,
             handle=launched.handle, leaf=launched.leaf, run=launched.run,
         )
+        record.worker_head_run = dict(launched.head_run)
         _record_worker_delivery_evidence(record, launched.delivery_evidence)
         try:
             self._settle_worker_pane(ref, record, launched.handle, launched.leaf)
