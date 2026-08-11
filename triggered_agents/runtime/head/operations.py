@@ -126,9 +126,18 @@ class NudgePointer:
     document: str = ""
 
     @classmethod
-    def at_document(cls, path: str) -> "NudgePointer":
-        """The nudge for a task document already written to disk."""
-        return cls(text=nudge_for(path), document=str(path))
+    def at_document(cls, path: str, note: str = "") -> "NudgePointer":
+        """The nudge for a task document already written to disk.
+
+        `note` is the discriminating tail a caller may need in the delivered line itself — which
+        round this document is, what inside it outranks what — for a head whose scrollback holds
+        an earlier round's instructions and could otherwise act on them. It is built into the same
+        line through `nudge_for`, so the path is still absolute and the ceiling is still checked
+        over path and note together; a caller that assembled its own text beside the pointer would
+        be delivering a line nothing validated, which is how a pointer stopped carrying its
+        document at all (secretary-1413).
+        """
+        return cls(text=nudge_for(path, note), document=str(path))
 
     @classmethod
     def line(cls, text: str) -> "NudgePointer":
