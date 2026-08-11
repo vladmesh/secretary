@@ -36,6 +36,7 @@ from .agent_prompt_transport import (
     send_agent_prompt,
 )
 from .pane_host import PaneHost, pane_host as resolve_pane_host
+from .prompt_document import NUDGE_FILE_MODE
 from .tui_delivery_types import RunJson
 
 
@@ -115,6 +116,13 @@ class DeliveryEvidence:
     stage: str = STAGE_NONE
     payload_bytes: int = 0
     payload_sha256: str = ""
+    # How the head was given its task. `nudge-file` is the protocol rule: the pane received a
+    # bounded line naming a document and the content never entered the terminal, so `payload_bytes`
+    # here is the size of that line rather than the size of the task. The path is kept because it
+    # is the run's own pointer to what the head was asked to do; the document's text is not, here
+    # or anywhere else in this record. An empty mode is a delivery that carried its own content.
+    delivery_mode: str = ""
+    document_path: str = ""
     # The public terminal-send adapter that carried the prompt.  The body and its submission are
     # intentionally recorded independently: neither write acceptance is proof the head began a
     # turn, which remains the later confirmation stages below.
@@ -159,6 +167,8 @@ class DeliveryEvidence:
             "stage": self.stage,
             "payload_bytes": self.payload_bytes,
             "payload_sha256": self.payload_sha256,
+            "delivery_mode": self.delivery_mode,
+            "document_path": self.document_path,
             "transport_version": self.transport_version,
             "adapter": self.adapter,
             "framing": self.framing,
@@ -474,6 +484,7 @@ def deliver_interactive_prompt(
     confirm: Callable[[float], bool] | None = None,
     ack_out_of_band: bool = False,
     subject: str = "",
+    document_path: str = "",
 ) -> DeliveryOutcome:
     """Deliver a prompt into a live interactive head, on one path for every role that has one.
 
@@ -491,6 +502,12 @@ def deliver_interactive_prompt(
     `tui-idle` satisfied the whole time, because a pane holding a composer really is idle. So a
     send that reports bytes and a pane that reports idle are not delivery, here or anywhere else
     in the product; the pre/post fingerprints of the composer and of the output are.
+
+    `document_path` says the prompt being delivered is a nudge at a task document rather than the
+    task itself. It changes nothing about how the four stages are observed — a short line is
+    delivered and confirmed exactly like a long one — and everything about what the evidence means:
+    the payload fingerprint below is then the fingerprint of a pointer, so the record names the mode
+    and the document it pointed at rather than looking like a task that shrank to one line.
 
     Callers pass `confirm`, the criterion they always had: their head's turn having visibly
     started, which is stage 4. A caller whose proof arrives later sets `ack_out_of_band` and passes
@@ -513,6 +530,8 @@ def deliver_interactive_prompt(
         subject=subject,
         payload_bytes=payload_bytes,
         payload_sha256=payload_hash,
+        delivery_mode=NUDGE_FILE_MODE if document_path else "",
+        document_path=document_path,
     )
     try:
         prepared = prepare_agent_prompt(prompt, adapter=adapter)

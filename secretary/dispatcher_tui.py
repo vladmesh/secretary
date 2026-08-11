@@ -93,12 +93,16 @@ def deliver_tui_prompt(
     session_root: Path | None = None,
     prompt_text: str | None = None,
     subject: str = "",
+    document_path: str = "",
 ) -> DeliveryOutcome:
     """Deliver one provider TUI prompt through the shared transport and confirmation path.
 
     Nothing here is a second delivery path. It resolves what to send, which is the caller's
     business, and hands the same criterion worker and reviewer use on any other head: their head's
     turn having visibly started.
+
+    A caller that has already written its task to a document passes that document's path with the
+    nudge it wants sent, so the evidence records which of the two the pane received.
     """
     if prompt_text is not None:
         prompt = prompt_text
@@ -116,6 +120,7 @@ def deliver_tui_prompt(
             handle, workspace, adapter, run_json=run_json, session_root=session_root
         ),
         subject=subject,
+        document_path=document_path,
     )
 
 
