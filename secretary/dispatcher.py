@@ -80,6 +80,7 @@ from secretary.dispatcher_observer import (
 )
 from secretary.observer_root import OBSERVER_REPO_NAME, observer_root_repo
 from secretary.dispatcher_launch import (
+    REVIEW_ROLE,
     WORKER_ROLE,
     bring_up_blocked_reason as _bring_up_blocked_reason,
     clear_launch_intent as _clear_launch_intent,
@@ -199,6 +200,11 @@ from triggered_agents.agents.pipeline.heads import (
     resolve_head_id as _resolve_head_id,
 )
 from triggered_agents.agents.pipeline.task_protocol import pythonpath_prefix
+from triggered_agents.runtime.prompt_document import (
+    PromptDocumentError,
+    nudge_for as _nudge_for,
+    write_prompt_document as _write_prompt_document,
+)
 
 # The prompts below are read and run by a head in its own shell, so the checkout fallback stays a
 # shell expression rather than a path this process resolved.
@@ -1113,7 +1119,10 @@ class CommandHostRuntime:
         `terminal create` on a headless serve lands as a background surface a client that already
         has the worktree open never materialises, so the operator would have no reviewer to watch.
         Once the reviewer has its own pane the worker head is shut down and the commit it left is
-        pinned, so the reviewer judges a checkout nothing else is still editing."""
+        pinned, so the reviewer judges a checkout nothing else is still editing.
+
+        What that pane is given is a nudge, not the review: the task itself is a document written
+        outside the checkout, and only its path travels through the keyboard."""
         if not record.workspace:
             raise HostError("review workspace is unavailable")
         workspace = Path(record.workspace)
@@ -1121,19 +1130,17 @@ class CommandHostRuntime:
             workspace.mkdir(parents=True, exist_ok=True)
         elif not workspace.is_dir():
             raise HostError("review workspace is missing")
-        review_file = Path(record.workspace) / "REVIEW.md"
         self._clear_body_file("verdict", task["ref"], record.review_baseline)
-        self._write_prompt(
-            review_file,
-            self._review_prompt(task, record.attempt_id, record.review_baseline, record=record),
-        )
+        document, nudge = self._review_document(task, record)
         launched = self._launch(
             record.workspace,
             review_pane_label(task["ref"]),
             record.review_head,
-            "REVIEW.md",
+            str(document),
             role="reviewer",
             env_name="SECRETARY_DISPATCHER_REVIEW_COMMAND",
+            launch_prompt=nudge,
+            prompt_document=str(document),
             split_from=self._split_anchor(record),
             task=task,
             failover=bool(record.preferred_review_head),
@@ -1762,6 +1769,7 @@ class CommandHostRuntime:
         role: str,
         env_name: str,
         launch_prompt: str | None = None,
+        prompt_document: str = "",
         split_from: str = "",
         task: dict[str, Any] | None = None,
         failover: bool = False,
@@ -1772,11 +1780,15 @@ class CommandHostRuntime:
         (the real launcher, the `SECRETARY_DISPATCHER_*_COMMAND` override, noop mode) reports the
         same thing, and no caller has to re-read the registry afterwards. `failover` travels with
         it because only the caller's record knows the claim walked a chain to reach this head.
+
+        `prompt_document` names the file `launch_prompt` is a nudge at, for a caller that has
+        already written its task there. It is what the delivery record is told, and it is what
+        decides how a delivery this bring-up could not confirm is answered — see below.
         """
         if self.mode == "noop":
             return self._launched(
-                f"noop:{head}:{Path(workspace).name}:{prompt_file}", head, task, role, workspace,
-                failover,
+                f"noop:{head}:{Path(workspace).name}:{Path(prompt_file).name}", head, task, role,
+                workspace, failover,
             )
         pid_file = _pid_file_path(_watchdog_kind(role), task["ref"]) if task else ""
         if pid_file:
@@ -1821,6 +1833,7 @@ class CommandHostRuntime:
                     pane.handle, workspace, prompt_file, run_json=self._run_json,
                     adapter=launch.adapter or "codex",
                     prompt_text=launch_prompt, subject=f"{role or 'head'}-launch",
+                    document_path=prompt_document,
                 )
                 delivery_evidence = _delivery_evidence_json(outcome, f"{role or 'head'}-launch")
             except (TuiDeliveryError, HostError) as exc:
@@ -1828,6 +1841,25 @@ class CommandHostRuntime:
                 # about the prompt it would not take. The evidence travels with every way out of
                 # here, because the caller's own record is where it has to end up.
                 evidence = _delivery_evidence_json(exc, f"{role or 'head'}-launch")
+                if prompt_document:
+                    # A nudge that could not be confirmed says nothing about the head. The line was
+                    # short enough that no provider has ever failed to take one, the task is on
+                    # disk either way, and the classification that would be trusted here is the one
+                    # that reported 24 delivered prompts as failures on the canary. So the pane is
+                    # not closed over it: the bring-up hands it back as the ambiguity it is, the
+                    # caller keeps its launch intent, and the next tick either adopts that head —
+                    # which is what a head that did take the nudge looks like — or stops it by its
+                    # own retained identity, with the cleanup recorded as the initiator. A pane is
+                    # never closed on the strength of a delivery classification.
+                    raise HeadLaunchAborted(
+                        f"the launch nudge was not confirmed delivered, and the {role or 'head'} "
+                        f"pane may have taken it anyway: {exc}",
+                        handle=pane.handle,
+                        leaf=pane.leaf,
+                        workspace=workspace,
+                        pid_file=pid_file,
+                        evidence=evidence,
+                    ) from None
                 # What the pane was doing when it refused the prompt, asked before it is closed
                 # because afterwards there is nothing left to ask (secretary-1163). A pane that is
                 # working, or held in a dialog its head cannot leave on its own, is a launch worth
@@ -2300,6 +2332,61 @@ class CommandHostRuntime:
 
     def _write_prompt(self, path: Path, body: str) -> None:
         write_text_atomic(path, body)
+
+    def _review_document(
+        self, task: dict[str, Any], record: DispatcherRecord
+    ) -> tuple[Path, str]:
+        """This round's review task, on disk, and the one line that points a reviewer at it.
+
+        The review used to be typed into the pane in full — some 12 KiB of it, card description
+        included — and that is the payload Codex kept in its composer while consuming the Enter,
+        24 times in a row on one card (`codegen-orchestrator-1165`, 2026-08-10). Nothing about the
+        text was wrong; its size was. So the text stops travelling: it is written where the head
+        can open it and the pane receives a bounded pointer, which is the one shape of delivery
+        that has never failed.
+
+        A retry re-renders the same document at the same path and sends a fresh nudge, so the
+        pointer always names the round's current task rather than a version a previous attempt
+        left. A document that cannot be written or a path no nudge can carry stops the bring-up
+        before a pane is opened: an unprompted reviewer would sit at its prompt forever, and the
+        caller's infrastructure retry is the right answer to a launch that has not started.
+        """
+        document = self._prompt_document_path(REVIEW_ROLE, task["ref"], record.review_baseline)
+        prompt = self._review_prompt(
+            task, record.attempt_id, record.review_baseline, record=record
+        )
+        try:
+            _write_prompt_document(document, prompt, outside=Path(record.workspace))
+            nudge = _nudge_for(document)
+        except PromptDocumentError as exc:
+            raise HostError(f"the reviewer task document could not be prepared: {exc}") from None
+        # A checkout carried over from before this seam still holds the review it was handed then.
+        # Nothing reads it now, and a document a round out of date beside a live one is exactly the
+        # sort of thing a reviewer opens by habit.
+        try:
+            (Path(record.workspace) / "REVIEW.md").unlink(missing_ok=True)
+        except OSError:
+            pass
+        return document, nudge
+
+    def _prompt_document_path(self, role: str, reference: str, round_number: int) -> Path:
+        """Where a head's task document lives: outside every worktree, with the run's artifacts.
+
+        Not the body directory the report and verdict files use. Those are scratch a head writes
+        and the dispatcher consumes inside one round; this is the record of what a head was asked
+        to do, so it is kept where run artifacts are kept and inherits their retention rather than
+        a temporary directory's. Outside the workspace for the reason the writer enforces: a
+        receipt names the code it is evidence for by hashing the checkout's own content, and a
+        prompt dropped in there would move that identity for nothing.
+
+        The round is in the name for the same reason it is in a body file's: a re-review is a
+        different task, and a pointer that resolved to the previous round's document would have a
+        head reviewing the wrong one.
+        """
+        root = os.environ.get("SECRETARY_DISPATCHER_PROMPT_DIR")
+        base = Path(root).expanduser() if root else self.data_dir / "artifacts" / "prompts"
+        name = f"{_request_token(role)}-{_request_token(str(round_number))}.md"
+        return (base / _request_token(reference) / name).resolve()
 
     def _clear_body_file(self, kind: str, reference: str, review_round: int) -> None:
         """Drop the body file before launching the head that is supposed to write it.

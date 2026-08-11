@@ -272,9 +272,29 @@ and its evidence still kept. They reach the head that has to report them through
 and through a replacement head's launch document, and they are readable from outside in
 `sprint status` (`observer.delivery`) and in `secretary status` (`delivery_failures`).
 
+What the input channel carries is bounded by the same rule for every head that takes one: a task is
+a document on disk and the pane receives one short line naming its absolute path. The reviewer is the
+first role on that seam. Its review — description, gate attestation, verdict commands, some 12 KiB of
+it — is written under the run artifacts, private and outside the checkout, because a workspace's
+identity is the tracked diff and untracked files a receipt hashes to say which code it is evidence
+for. The nudge is derived from that path alone, so nothing a card description carries (an ESC, a
+bracketed-paste terminator, the CRLF the board's web form submits) can reach a terminal write, and
+there is no payload left for a composer to swallow: the 24 consecutive `payload-left-in-composer`
+failures that stopped two products on `codegen-orchestrator-1165` were all large pastes, and short
+lines have never failed. A retry re-renders the same document and sends the same pointer, so the
+head always opens the round's current task. The delivery record says which mode it was and which
+document it named, and never what the document says.
+
+The pane's fate is not decided by that delivery's classification. A nudge the boundary could not
+confirm is ambiguous by construction — the head may well have taken it — so the bring-up hands the
+pane back as an abort with its evidence rather than closing it, the launch intent stays on disk, and
+the next tick either adopts that reviewer or stops it through its own retained identity with the
+cleanup recorded as the initiator. Closing a pane on a classification is what killed reviewers that
+had their task in hand.
+
 The reviewer keeps the same evidence on its own record. A reviewer prompt that the shared boundary
 saw fail leaves `review_delivery_failures` and `review_delivery_evidence` on the card, because the
-pane is closed behind that failure and nothing can be asked of it afterwards. Every reviewer
+pane cannot be asked afterwards for what it did with the prompt. Every reviewer
 bring-up failure goes through one recorder in `start_review`, before any branch takes a transition,
 writes a launch intent, decides a retry or returns an outcome — including the ambiguous abort, where
 the pane is still open and the intent has to be kept: the evidence is written first, and refusing to

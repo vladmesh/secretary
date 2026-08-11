@@ -426,9 +426,9 @@ def _escalate_stuck_review_launch(
 ) -> None:
     """Comment once when a reviewer launch has aborted past the stuck ceiling.
 
-    The abort keeps the record on purpose — the reviewer pane is up and its worker could not be
-    confirmed gone, so nothing here may block or drop the card. That safety is also what makes the
-    loop silent: every tick looks like the last, and only the steward's degraded-health line marks
+    The abort keeps the record on purpose — the reviewer pane is up and nothing can say what became
+    of the head in it, so nothing here may block or drop the card. That safety is also what makes
+    the loop silent: every tick looks like the last, and only the steward's degraded-health line marks
     it at all. Past the ceiling this leaves one durable, operator-addressed note on the card so the
     stall is something a person is pointed at, not just an unhealthy tick that repeats. The request
     id is stable within the stuck episode and distinct across episodes, so the board carries one
@@ -441,18 +441,19 @@ def _escalate_stuck_review_launch(
     # The body is fixed for the episode on purpose: TaskWriter answers a repeated request id only
     # when its payload is unchanged, and a re-post that differed would raise instead. So nothing
     # that can vary tick to tick goes in — not the live count, and not the abort reason, which the
-    # bring-up can word differently across ticks (a freeze that would not confirm, then a pane
-    # identity that would not read). The ceiling is the whole stable body; the per-tick reason
-    # stays where it already is, on the degraded tick the steward reads.
+    # bring-up can word differently across ticks (a freeze that would not confirm, a nudge whose
+    # delivery was never confirmed, a pane identity that would not read). The ceiling is the whole
+    # stable body; the per-tick reason stays where it already is, on the degraded tick the steward
+    # reads.
     runtime.writer.comment(
         role="dispatcher",
         actor=runtime.owner,
         reference=ref,
         body=(
             f"⚠️ Reviewer launch has aborted for at least {ceiling} ticks running and is not "
-            "recovering on its own: the reviewer pane came up but its worker session could not be "
-            "confirmed frozen or gone, so the card is stuck before review. An operator should "
-            "look, and the dispatcher tick's own reason field carries what each attempt failed on."
+            "recovering on its own: the reviewer pane came up and the bring-up could not be "
+            "finished over it, so the card is stuck before review. An operator should look, and "
+            "the dispatcher tick's own reason field carries what each attempt failed on."
         ),
         request_id=_attempt_request_id(
             record.attempt_id or attempt_id,

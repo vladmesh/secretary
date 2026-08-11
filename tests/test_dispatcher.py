@@ -64,6 +64,15 @@ from secretary.dispatcher_tui import (
     DELIVERY_CONFIRMED,
     TuiDeliveryError,
 )
+from triggered_agents.runtime.agent_prompt_transport import (
+    BRACKETED_PASTE_END,
+    BRACKETED_PASTE_START,
+)
+from triggered_agents.runtime.prompt_document import (
+    NUDGE_FILE_MODE,
+    NUDGE_MAX_BYTES,
+    PromptDocumentError,
+)
 from triggered_agents.runtime.tui_delivery import TUI_IDLE_PROBE_TIMEOUT_MS
 from secretary.dispatcher_state import (
     DispatcherRecord,
@@ -6010,8 +6019,17 @@ class DispatcherRuntimeTests(unittest.TestCase):
             "an infrastructure retry charges the sprint no budget event",
         )
 
-    def test_pane_stayed_ready_retries_only_the_reviewer_with_the_exact_green_evidence(self) -> None:
-        """The live failure is a generic HostError from prompt delivery, not HeadPaneNotReady."""
+    def test_an_unconfirmed_reviewer_nudge_keeps_the_pane_and_the_exact_green_evidence(self) -> None:
+        """The live failure is a generic HostError from prompt delivery, not HeadPaneNotReady.
+
+        The reviewer receives a nudge at a task document, so an unconfirmed delivery is ambiguous
+        by construction: the line is short enough that no provider has failed to take one, and the
+        classification that would decide otherwise is the one that called 24 delivered prompts
+        failures on the canary. The pane therefore stays open and the bring-up hands it back as an
+        abort, which keeps the launch intent for the next tick to adopt or stop. Everything the
+        green gate left on the record is untouched, exactly as it was under the infrastructure
+        retry this replaces.
+        """
         self.start_dispatcher()
         self.catalog._adapter = {"validation": {"ci": "local", "command": "python3 -m unittest"}}
         self.host.commit = "d" * 40
@@ -6054,10 +6072,14 @@ class DispatcherRuntimeTests(unittest.TestCase):
             held = self.tick()
 
         self.assertEqual(held["status"], "degraded", held)
-        self.assertEqual(held["action"], "review-infrastructure-retry")
-        self.assertEqual(held["candidate_sha"], self.host.commit)
-        self.assertIn("pane-stayed-ready", held["reason"])
+        self.assertEqual(held["action"], "review-launch-aborted")
+        self.assertIn("nudge", held["reason"])
         record = self._record_of()
+        self.assertEqual(record.state, "review_starting")
+        self.assertEqual(
+            record.launch_intent.get("handle"), "term-review",
+            "the intent names the pane, so the next tick adopts that reviewer or stops it",
+        )
         self.assertEqual(record.gate_attestation, receipt)
         self.assertEqual(record.report_generation, report_generation)
         self.assertEqual(self._worker_report_request_id(), report_request)
@@ -6065,18 +6087,19 @@ class DispatcherRuntimeTests(unittest.TestCase):
             (record.handle, record.worker_leaf, record.worker_pid_file, record.worker_run),
             worker_identity,
         )
-        self.assertEqual(record.review_infra_failures, 1)
+        self.assertEqual(record.review_launch_aborts, 1)
         self.assertEqual(record.review_launch_attempts, 0)
-        # The reviewer's prompt went through the shared delivery boundary, so what that boundary
-        # saw is durable card telemetry rather than a scrubbed sentence. The pane is closed by now
-        # and nothing else can be asked about it. Routing is untouched: the same infrastructure
-        # retry, the same counter, the same held green evidence as before this was recorded.
+        # The reviewer's nudge went through the shared delivery boundary, so what that boundary saw
+        # is durable card telemetry rather than a scrubbed sentence: the mode, the document it
+        # pointed at, and the size of the pointer rather than of the review.
         self.assertEqual(record.review_delivery_failures, 1)
         evidence = record.review_delivery_evidence
         self.assertEqual(evidence["subject"], "reviewer-launch")
         self.assertEqual(evidence["stage"], "payload_written")
         self.assertEqual(evidence["reason"], "pane-stayed-ready")
-        self.assertTrue(evidence["payload_bytes"])
+        self.assertEqual(evidence["delivery_mode"], NUDGE_FILE_MODE)
+        self.assertTrue(Path(evidence["document_path"]).is_file())
+        self.assertLessEqual(evidence["payload_bytes"], NUDGE_MAX_BYTES)
         self.assertEqual(len(evidence["payload_sha256"]), 16)
         self.assertEqual(
             self._record_of().review_delivery_evidence, evidence, "it survives the state write"
@@ -6086,7 +6109,10 @@ class DispatcherRuntimeTests(unittest.TestCase):
             for call in real_host.calls
             if call[:3] == ["orca", "terminal", "close"]
         ]
-        self.assertEqual(closed, ["term-review"], "only the failed reviewer pane is torn down")
+        self.assertEqual(
+            closed, [],
+            "a delivery classification never closes a pane: the head may be working on the nudge",
+        )
 
     def test_a_reviewer_that_never_starts_blocks_the_card_naming_the_held_candidate(self) -> None:
         limit = self._bound_review_infra_retries(3)
@@ -11916,6 +11942,222 @@ class ReviewPaneTests(unittest.TestCase):
 
         self.assertEqual(host.ops(), ["close"])
         self.assertEqual(host.call_for("close")[host.call_for("close").index("--terminal") + 1], "term-review")
+
+
+class NudgingReviewHost(RecordingReviewHost):
+    """A reviewer bring-up whose pane answers reads, so its launch delivery runs end to end.
+
+    The screen is what the confirmation criterion falls back to when no provider session file
+    names this workspace, which is every test workspace: a codex pane painting `working` above its
+    composer marker is a head that took its turn.
+    """
+
+    def __init__(self, root: Path, *, screen: str = "working\n› ", **kwargs) -> None:
+        super().__init__(root, catalog=PromptAfterStartCatalog(), **kwargs)
+        self.screen = screen
+
+    def _run_json(self, args: list[str]) -> dict:
+        if args[:3] == ["orca", "terminal", "read"]:
+            self.calls.append(args)
+            return {"terminal": {"tail": self.screen.splitlines(), "nextCursor": "1"}}
+        return super()._run_json(args)
+
+    def sends(self) -> list[str]:
+        return [
+            call[call.index("--text") + 1]
+            for call in self.calls
+            if call[:3] == ["orca", "terminal", "send"]
+        ]
+
+    def closed_panes(self) -> list[str]:
+        return [
+            call[call.index("--terminal") + 1]
+            for call in self.calls
+            if call[:3] == ["orca", "terminal", "close"]
+        ]
+
+
+class ReviewNudgeDeliveryTests(unittest.TestCase):
+    """secretary-1409: the reviewer is nudged at a task document, never handed the review itself.
+
+    A ~12 KiB review typed into a Codex pane is what produced 24 consecutive
+    `payload-left-in-composer` failures on `codegen-orchestrator-1165` and stopped two products.
+    The rule that replaces it: the input channel carries only bounded pointers, content lives in a
+    file, and a delivery classification never decides the fate of a pane.
+    """
+
+    # An ESC, a bracketed-paste terminator and the CRLF the board's web form submits — all of it
+    # arriving the way it really does, inside the card description the review prompt renders.
+    HOSTILE_DESCRIPTION = (
+        "spec\r\n\x1b[201~ terminator\r\n\x1b[200~ opener\r\n\x1b]0;retitle\x07\r\n"
+    )
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.workspace = self.root / "ws"
+        self.workspace.mkdir()
+        _clear_env(self, "SECRETARY_DISPATCHER_REVIEW_COMMAND")
+        _clear_env(self, "SECRETARY_DISPATCHER_PROMPT_DIR")
+        os.environ["SECRETARY_DISPATCHER_BODY_DIR"] = str(self.root)
+        # No provider session file may name this workspace, so the confirmation falls back to the
+        # screen the host paints rather than reading the developer's own codex sessions.
+        os.environ["SECRETARY_CODEX_SESSIONS"] = str(self.root / "sessions")
+        self.addCleanup(os.environ.pop, "SECRETARY_CODEX_SESSIONS", None)
+        self.task = {
+            "ref": "secretary-1409",
+            "project": "secretary",
+            "description": self.HOSTILE_DESCRIPTION,
+            "workspace": {"base_branch": "main"},
+            "routing": {},
+        }
+
+    def _record(self) -> DispatcherRecord:
+        return DispatcherRecord(
+            worker="secretary-1409-w",
+            workspace=str(self.workspace),
+            handle="term-worker",
+            head="codex",
+            review_head="codex-reviewer",
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="review_starting",
+            claimed_at=0.0,
+        )
+
+    def _bounded_delivery(self):
+        return mock.patch.multiple(
+            "triggered_agents.runtime.tui_delivery",
+            TUI_DELIVERY_TIMEOUT_S=0.05,
+            TUI_DELIVERY_POLL_S=0.01,
+            TUI_DELIVERY_RESEND_GRACE_S=0,
+        )
+
+    def _document_of(self, host: NudgingReviewHost) -> Path:
+        return host._prompt_document_path("review", self.task["ref"], 0)
+
+    def test_the_pane_receives_a_bounded_pointer_and_never_the_review(self) -> None:
+        host = NudgingReviewHost(self.root)
+
+        with self._bounded_delivery():
+            host.start_review(self.task, self._record())
+
+        document = self._document_of(host)
+        body = next(text for text in host.sends() if text)
+        # The transport's bracketed-paste frame is the only escape in the write; what it wraps is
+        # the nudge, and that is the thing the ceiling and the one-line rule are about.
+        self.assertTrue(body.startswith(BRACKETED_PASTE_START) and body.endswith(BRACKETED_PASTE_END))
+        nudge = body[len(BRACKETED_PASTE_START):-len(BRACKETED_PASTE_END)]
+        self.assertLessEqual(len(nudge.encode("utf-8")), NUDGE_MAX_BYTES)
+        self.assertEqual(nudge.splitlines(), [nudge], "the pane is given one line")
+        self.assertNotIn("\x1b", nudge)
+        self.assertIn(str(document), nudge)
+        self.assertTrue(document.is_absolute())
+        # The review itself never reaches a terminal write, hostile bytes included.
+        written = "".join(host.sends())
+        self.assertNotIn("\r", written)
+        self.assertNotIn("BLOCKER-", written, "the review prompt's own text stayed on disk")
+        self.assertNotIn("terminator", written)
+
+    def test_the_document_holds_the_whole_review_outside_the_checkout(self) -> None:
+        host = NudgingReviewHost(self.root)
+
+        with self._bounded_delivery():
+            host.start_review(self.task, self._record())
+
+        document = self._document_of(host)
+        body = document.read_text(encoding="utf-8")
+        self.assertIn("# Review secretary-1409", body)
+        self.assertIn("\x1b[201~ terminator", body, "the description reaches the head unmodified")
+        self.assertNotIn(
+            str(self.workspace.resolve()), str(document.resolve()),
+            "a prompt inside the checkout would move the identity receipts hash",
+        )
+        self.assertEqual(oct(document.stat().st_mode & 0o777), oct(0o600))
+        self.assertFalse(
+            (self.workspace / "REVIEW.md").exists(),
+            "the review packet is the document, and it does not live in the worktree",
+        )
+
+    def test_a_stale_packet_from_before_the_seam_is_dropped_from_the_checkout(self) -> None:
+        (self.workspace / "REVIEW.md").write_text("last round's review\n", encoding="utf-8")
+        host = NudgingReviewHost(self.root)
+
+        with self._bounded_delivery():
+            host.start_review(self.task, self._record())
+
+        self.assertFalse((self.workspace / "REVIEW.md").exists())
+
+    def test_a_retry_rewrites_the_same_document_and_sends_a_fresh_nudge(self) -> None:
+        """The pointer always names the round's current task, so a retry cannot review a stale one."""
+        host = NudgingReviewHost(self.root)
+        with self._bounded_delivery():
+            host.start_review(self.task, self._record())
+        first = list(host.sends())
+
+        self.task["description"] = "the card was edited between attempts"
+        with self._bounded_delivery():
+            host.start_review(self.task, self._record())
+
+        document = self._document_of(host)
+        self.assertIn("the card was edited between attempts", document.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [text for text in host.sends() if text],
+            [text for text in first if text] * 2,
+            "the same path is nudged again rather than a second document being written",
+        )
+        self.assertEqual(
+            sorted(path.name for path in document.parent.iterdir()), ["review-0.md"]
+        )
+
+    def test_a_second_round_gets_its_own_document(self) -> None:
+        host = NudgingReviewHost(self.root)
+        record = self._record()
+        record.review_baseline = 1
+
+        with self._bounded_delivery():
+            host.start_review(self.task, record)
+
+        self.assertTrue(host._prompt_document_path("review", self.task["ref"], 1).is_file())
+        self.assertFalse(self._document_of(host).exists())
+
+    def test_an_unconfirmed_nudge_leaves_the_pane_open_for_the_next_tick(self) -> None:
+        """The invariant: no pane is closed on the strength of a delivery classification.
+
+        That classification called 24 delivered prompts failures on the canary, and closing the
+        pane behind it killed a reviewer that had the task in hand. The bring-up hands the pane
+        back instead, with what the boundary saw, and the launch intent settles it next tick.
+        """
+        host = NudgingReviewHost(self.root, screen="idle\n› ")
+
+        with self._bounded_delivery(), self.assertRaises(HeadLaunchAborted) as caught:
+            host.start_review(self.task, self._record())
+
+        self.assertEqual(host.closed_panes(), [], "the reviewer pane survives an unconfirmed nudge")
+        self.assertEqual(caught.exception.handle, "term-review")
+        self.assertEqual(caught.exception.leaf, "leaf-review")
+        evidence = caught.exception.evidence
+        self.assertEqual(evidence["delivery_mode"], NUDGE_FILE_MODE)
+        self.assertEqual(evidence["document_path"], str(self._document_of(host)))
+        self.assertLessEqual(evidence["payload_bytes"], NUDGE_MAX_BYTES)
+        self.assertTrue(evidence["submit_count"], "the submits are counted, the text is not kept")
+        self.assertNotIn("terminator", json.dumps(evidence), "no prompt text in the telemetry")
+
+    def test_a_document_that_cannot_be_written_stops_the_bring_up_before_any_pane(self) -> None:
+        """An unprompted reviewer would sit at its prompt forever; the caller's infrastructure
+        retry is the right answer to a launch that never started."""
+        host = NudgingReviewHost(self.root)
+        with mock.patch.object(
+            dispatcher_module, "_write_prompt_document",
+            side_effect=PromptDocumentError("read-only artifacts directory"),
+        ):
+            with self.assertRaises(HostError) as caught:
+                host.start_review(self.task, self._record())
+
+        self.assertIn("task document could not be prepared", str(caught.exception))
+        self.assertEqual(host.ops(), [], "no pane is opened for a head with nothing to read")
 
 
 class PromptAfterStartCatalog(ReviewCatalog):
