@@ -347,24 +347,20 @@ def _module_paths() -> list[Path]:
 
 # The subcommands the Orca terminal CLI has. A vector is recognised by this shape rather than by
 # the spelling of the binary in front of it, because the binary is exactly the part a module is
-# free to hold in a variable: `dispatch.py` keeps it in `ORCA` (itself `ORCA_BIN` or
-# `shutil.which("orca")`) and hands its runner only the `["terminal", ...]` suffix. A check that
-# recognised the literal `["orca", "terminal", ...]` alone would call that module clean.
+# free to hold in a variable: the scheduler used to keep it in an `ORCA` constant and hand its
+# runner only the `["terminal", ...]` suffix. A check that recognised the literal
+# `["orca", "terminal", ...]` alone would have called that module clean.
 _TERMINAL_SUBCOMMANDS = frozenset(
     {"create", "close", "list", "read", "send", "stop", "wait"}
 )
 
-# The one module outside the seam that still drives terminals itself, named rather than matched by
-# a pattern, with the reason it is still here. `triggered_agents/runtime/dispatch.py` is the
-# scheduler of mechanical roles: idle/wait semantics, the `/clear` warm-reuse path and duplicate
-# cleanup all sit on top of its own terminal calls, and moving them is the next card of
-# sprint:927 rather than a rider on this one. Until that card lands, the sprint's DoD item about
-# the grep invariant is NOT closed, and this dict is what says so out loud instead of a silent
-# skip. `test_the_only_exception_is_the_one_named_scheduler_module` fails if anything else is
-# added here.
-_SEAM_EXCEPTIONS = {
-    Path("triggered_agents/runtime/dispatch.py"): "sprint:927",
-}
+# Modules excused from the two checks below. Empty, and that is the point: the mechanical-role
+# scheduler was the last entry (`triggered_agents/runtime/dispatch.py`, sprint:927) and it went
+# behind the host in secretary-1416, which is what turned "no terminal driving outside the seam
+# except there" into an assertion about the whole tree. The mechanism is kept rather than deleted
+# so that excusing a module stays something written down and argued for; the test below fails on
+# any entry at all, so the way to make a new violation green is to fix it.
+_SEAM_EXCEPTIONS: dict[Path, str] = {}
 
 
 def _terminal_vectors(tree: ast.AST) -> list[tuple[int, str]]:
@@ -397,9 +393,9 @@ def _pane_screen_reads(tree: ast.AST) -> list[int]:
     """Every place this module asks a pane for its rendered screen, by name.
 
     A rule of its own rather than a consequence of the one above: a module can read a screen
-    through a vector built some other way, and `dispatch.py:210` is the live proof that assuming
-    `terminal read` is spelled only inside `pane_host` was wrong. So the words are looked for both
-    as a vector and as a non-docstring string constant.
+    through a vector built some other way, and the scheduler's own screen read was the live proof
+    that assuming `terminal read` is spelled only inside `pane_host` was wrong. So the words are
+    looked for both as a vector and as a non-docstring string constant.
     """
     prose = _docstring_nodes(tree)
     lines = [lineno for lineno, sub in _terminal_vectors(tree) if sub == "read"]
@@ -452,11 +448,11 @@ class SeamGrepTests(unittest.TestCase):
     and its own flag. Both are read out of the AST with docstrings excluded, so the modules that
     own these things stay free to explain them in prose — which several of them have to.
 
-    Reading a pane's screen gets a rule of its own rather than riding on the vector rule, and one
-    module — the mechanical-role scheduler — is a named exception with its reason written down.
-    The invariant these tests hold is therefore "no terminal driving outside the seam except in
-    `runtime/dispatch.py`", not "none anywhere": the second is what the sprint owes, and the card
-    that pays it is the next one.
+    Reading a pane's screen gets a rule of its own rather than riding on the vector rule. The
+    invariant these tests hold is "no terminal driving outside the seam anywhere" — with the
+    mechanical-role scheduler moved behind the host (secretary-1416) there is no module left to
+    excuse, and `_SEAM_EXCEPTIONS` is empty rather than absent so that re-excusing one is a visible
+    edit that fails a test rather than a quiet skip.
     """
 
     def test_no_module_outside_the_seam_calls_orca_terminal(self) -> None:
@@ -472,9 +468,9 @@ class SeamGrepTests(unittest.TestCase):
     def test_the_check_sees_a_vector_whose_binary_came_from_a_variable(self) -> None:
         """The check is not vacuous, in both of the forms a live call is written in.
 
-        The second fixture is `dispatch.py`'s own shape — the one that walked past the previous
-        spelling of this test — and the third is the counter-example the rule must NOT flag: an
-        argument vector that runs a different CLI entirely.
+        The second fixture is the shape the scheduler used to have — the one that walked past the
+        previous spelling of this test — and the third is the counter-example the rule must NOT
+        flag: an argument vector that runs a different CLI entirely.
         """
         literal = "run(['orca', 'terminal', 'send', '--terminal', t])"
         from_variable = (
@@ -521,21 +517,21 @@ class SeamGrepTests(unittest.TestCase):
             _pane_screen_reads(ast.parse("raise HostError('terminal readiness unreadable')")), []
         )
 
-    def test_the_only_exception_is_the_one_named_scheduler_module(self) -> None:
-        """A single concrete module, not a pattern, and its reason lives in the code it excuses.
+    def test_no_module_is_excused_from_the_seam_at_all(self) -> None:
+        """The invariant covers the whole tree, and the scheduler is inside it like everything else.
 
-        If a second entry ever shows up here this fails, so the way to make a new violation green
-        is to fix it or to argue for it out loud — never to widen a glob.
+        An entry here — any entry, not just a second one — fails this, so the way to make a new
+        violation green is to fix it or to argue for it out loud, never to widen a glob. The last
+        module that had one is checked directly as well: it has to be a file the two checks above
+        actually walk, with no terminal vector and no pane screen read left in it, or an empty
+        exception dict would be saying nothing (secretary-1416).
         """
-        self.assertEqual(
-            set(_SEAM_EXCEPTIONS), {Path("triggered_agents/runtime/dispatch.py")}
-        )
-        excused = REPO_ROOT / "triggered_agents" / "runtime" / "dispatch.py"
-        self.assertTrue(excused.is_file())
-        source = excused.read_text(encoding="utf-8")
-        self.assertIn("sprint:927", source)
-        # The exception is only worth having while the thing it excuses is really there.
-        self.assertTrue(_terminal_vectors(ast.parse(source)))
+        self.assertEqual(_SEAM_EXCEPTIONS, {})
+        scheduler = REPO_ROOT / "triggered_agents" / "runtime" / "dispatch.py"
+        self.assertIn(scheduler, _module_paths())
+        source = scheduler.read_text(encoding="utf-8")
+        self.assertEqual(_terminal_vectors(ast.parse(source)), [])
+        self.assertEqual(_pane_screen_reads(ast.parse(source)), [])
 
     def test_no_module_outside_the_seam_builds_a_head_command(self) -> None:
         offenders = []

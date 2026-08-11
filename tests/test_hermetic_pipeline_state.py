@@ -27,7 +27,9 @@ from unittest import mock
 
 from triggered_agents.agents.pipeline import pause as pipeline_pause
 from triggered_agents.agents.pipeline import state as pipeline_state
+from tests.test_triggered_dispatch import FakeSessionHost
 from triggered_agents.runtime import dispatch
+from triggered_agents.runtime.pane_host import Pane
 from triggered_agents.runtime import shared_state
 from triggered_agents.runtime import state as runtime_state
 
@@ -130,30 +132,29 @@ class TriggeredDispatchIgnoresAProductionFreezeTests(unittest.TestCase):
         return [json.loads(line)["action"] for line in runs.read_text(encoding="utf-8").splitlines()]
 
     def test_a_hard_freeze_in_a_production_like_state_dir_does_not_skip_a_dispatch(self) -> None:
-        screens = iter([
-            {"terminal": {"tail": ["Claude Code", "❯"]}},
-            {"terminal": {"tail": ["Claude Code", "✻ Forming... (4s · ↑ 13.2k tokens)"]}},
-        ])
-        sent: list[list[str]] = []
+        host = FakeSessionHost(
+            panes=(Pane(handle="term-live", title="triggered-agent:retro", last_output_at=1.0),),
+            screens=(
+                "Claude Code\n❯",
+                "Claude Code\n✻ Forming... (4s · ↑ 13.2k tokens)",
+            ),
+        )
         with tempfile.TemporaryDirectory() as tmp:
             workspaces = Path(tmp) / "workspaces"
             _write_production_like_state_dir(workspaces)
             with mock.patch.object(shared_state, "WORKSPACES_ROOT", workspaces), \
                  mock.patch.object(dispatch, "_workspace", return_value=self.workspace), \
-                 mock.patch.object(dispatch, "_agent_terminals", return_value=[{"handle": "term-live", "lastOutputAt": 1}]), \
                  mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)), \
                  mock.patch.object(dispatch, "_is_idle", return_value=True), \
                  mock.patch.object(dispatch, "_is_ephemeral", return_value=False), \
                  mock.patch.object(dispatch, "_reuse_head_is_red", return_value=False), \
                  mock.patch.object(dispatch, "_dispatch_command", return_value=self.command), \
                  mock.patch("triggered_agents.runtime.dispatch.time.sleep"), \
-                 mock.patch.object(dispatch, "_orca_json", side_effect=lambda args: next(screens)), \
-                 mock.patch.object(dispatch, "_orca", side_effect=sent.append), \
                  mock.patch.object(dispatch, "_claude_user_turn_after", side_effect=[False, True]):
-                self.assertEqual(dispatch.run("retro"), 0)
+                self.assertEqual(dispatch.run("retro", host=host), 0)
 
         self.assertEqual(self._actions(), ["reused"])
-        self.assertEqual([call[call.index("--text") + 1] for call in sent], ["/clear", "/retro"])
+        self.assertEqual(host.sends, ["/clear", "/retro"])
 
 
 if __name__ == "__main__":

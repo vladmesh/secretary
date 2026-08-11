@@ -92,27 +92,34 @@ More invariants, all from PR #95 review rounds (triggered-agents-445):
     via the same unfiltered `_raw_terminal_count`, since the filtered view would "confirm" success
     on a stray it could never recognize either way, stopped or not (round 2 review B3).
 
-This module is the one named exception to the `PaneHost`/`SessionHost` seam (secretary-1415,
-`tests/test_head_command.py:_SEAM_EXCEPTIONS`). Every other caller in `secretary/` and
-`triggered_agents/` reaches Orca through the host; here `_orca`/`_orca_json` still build
-`["terminal", ...]` vectors themselves and `_terminal_screen` still reads a pane directly, because
-the idle/wait semantics, the `/clear` warm-reuse path and the duplicate cleanup above them are
-this scheduler's own and do not survive a mechanical rewrite. Moving them behind the seam is the
-next card of sprint:927; until it lands, the sprint's DoD item about the grep invariant is not
-closed, and adding a new terminal call anywhere else is still caught by that test.
+Every terminal this scheduler drives it drives through `SessionHost` (secretary-1416). The pane
+verbs — create, list, read, send, stop, close, the tui-idle probe — live in `pane_host` and nowhere
+else, and this module holds only what is actually its own: which pane is the survivor, when idle
+means reuse and when it means teardown, what a stuck terminal is, and how many kinds of failure a
+stop has. `_run_json` is the one subprocess left here, and it runs the argument vectors the host
+hands it rather than building any: which words an `orca terminal` call is made of is a fact about
+that CLI, and this file has no opinion about it. That is what makes the sprint's grep invariant
+(`tests/test_head_command.py`) an assertion about the whole tree with no exceptions in it.
+
+What did NOT move is the reading of those answers. A pane that answers `tui-idle` within
+`IDLE_PROBE_MS` is idle here and a probe that times out is busy — two states, not the three the
+interactive delivery path classifies, because this scheduler acts on "may I send into it" and not
+on why it may not. Likewise the calls whose outcome this module has never checked (`/clear`, the
+warm-reuse send, the by-worktree stop, closing a legacy duplicate) still ignore a refusal, and the
+ones that gate a spawn still raise: moving a call behind the host changed neither.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Callable
 
 import tomllib
 
@@ -120,11 +127,15 @@ from . import claude_env, finalizer, orca_rpc
 from .claude_sessions import claude_session_paths
 from .codex_preflight import CodexPreflightError, ensure_codex_workspace_trusted
 from .head import RUNTIME_ROLE_ENV, render_head_command
+from .pane_host import Pane, SessionHost, safe_command_label, session_host
 from .state import AgentState
-from .tui_delivery import TuiDeliveryError, deliver_interactive_prompt
+from .tui_delivery import (
+    TuiDeliveryError,
+    deliver_interactive_prompt,
+    read_pane_text,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-ORCA = os.environ.get("ORCA_BIN") or shutil.which("orca") or str(Path.home() / ".local/bin/orca")
 CLAUDE_JSON = Path(os.environ.get("TA_CLAUDE_JSON", str(Path.home() / ".claude.json")))
 WATCHDOG_SECONDS = int(os.environ.get("TA_WATCHDOG_SECONDS", "1200"))  # busy + this quiet = stuck
 IDLE_PROBE_MS = 2500        # tui-idle satisfied within this = idle; timeout = busy
@@ -149,7 +160,10 @@ REPORT_VISIBILITY_GAP_SECONDS = 60
 # scheduler invocation.
 REUSE_DELIVERY_TIMEOUT_S = float(os.environ.get("TA_REUSE_DELIVERY_TIMEOUT_S", "12"))
 REUSE_DELIVERY_POLL_S = float(os.environ.get("TA_REUSE_DELIVERY_POLL_S", "0.25"))
-_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+# How much of a pane's retained output "is an agent REPL still here" is decided on. The panel as
+# an operator would see it, not the whole scrollback: a marker from a session that ended hours ago
+# must not answer for the pane as it is now.
+_SCREEN_READ_LINES = 200
 _SHELL_PROMPT_RE = re.compile(
     r"(?:^[^\n]*@[^\n:]+:[^\n]*[#$](?:\s|$)|^(?:bash|zsh|fish|sh)[^\n]*[#$](?:\s|$))",
     re.MULTILINE,
@@ -181,57 +195,59 @@ class ReuseDeliveryError(TuiDeliveryError):
     """
 
 
-def _orca_json(args: list[str]) -> dict:
-    p = subprocess.run([ORCA, *args, "--json"], capture_output=True, text=True, timeout=ORCA_TIMEOUT_S)
+def _run_json(args: list[str]) -> dict:
+    """Run one of `pane_host`'s argument vectors and hand back Orca's result payload.
+
+    The vector arrives complete, binary and `--json` included, and is executed verbatim: the words
+    of an `orca terminal` call belong to the module that spells them, and a runner that edited them
+    would be a second opinion about the CLI. What stays this scheduler's own is the bound — a tick
+    holds the agent's run lock across every one of these calls, so a hung Orca has to fail rather
+    than wedge the lock — and the redaction, which happens before the process starts because a
+    failure outlives the pane it names.
+    """
+    p = subprocess.run(args, capture_output=True, text=True, timeout=ORCA_TIMEOUT_S)
     if p.returncode != 0:
-        raise RuntimeError(f"orca {_safe_orca_args_label(args)} failed: {(p.stderr or p.stdout).strip()}")
+        raise RuntimeError(f"{safe_command_label(args)} failed: {(p.stderr or p.stdout).strip()}")
     data = json.loads(p.stdout)
     return data.get("result", data)
 
 
-def _safe_orca_args_label(args: list[str]) -> str:
-    """Keep a failed terminal send from formatting its prompt into runtime logs."""
-    if args[:2] != ["terminal", "send"]:
-        return " ".join(args)
-    safe: list[str] = []
-    redact_next = False
-    for arg in args:
-        if redact_next:
-            safe.append("<prompt-redacted>")
-            redact_next = False
-        else:
-            safe.append(arg)
-            redact_next = arg == "--text"
-    return " ".join(safe)
+def _unchecked(work: Callable[[], Any]) -> None:
+    """Perform a host call this scheduler has never looked at the outcome of.
+
+    Four calls are like this and were like this before they went behind the host: the `/clear` that
+    precedes a warm reuse, the warm-reuse send itself, the by-worktree stop (whose success is
+    proven by re-listing, never by its own exit code) and the close of a legacy duplicate. Their
+    refusals were dropped by the fire-and-forget runner that issued them, and dropping them here
+    keeps that: a `/clear` Orca declined must not become an exception that skips the dispatch it
+    was clearing for, and a stop must still be judged by the inventory that follows it.
+
+    A refusal and an answer that cannot be read are both ignored, which is exactly what a runner
+    that never parsed the output did. A call that hangs is not: `_run_json`'s timeout still reaches
+    the caller, so a wedged Orca fails the tick instead of being waited on inside the run lock.
+    """
+    try:
+        work()
+    except (RuntimeError, ValueError):
+        return
 
 
-def _orca(args: list[str]) -> None:
-    subprocess.run([ORCA, *args], capture_output=True, text=True, timeout=ORCA_TIMEOUT_S)
-
-
-def _terminal_screen(handle: str) -> str:
+def _terminal_screen(handle: str, *, host: SessionHost) -> str:
     """Rendered terminal text, or an empty string when Orca cannot provide it.
 
     This deliberately reads the panel instead of inferring liveness from the terminal record.
     A completed agent leaves a perfectly live PTY behind, now owned by bash.
+
+    The read, the tail-or-text shapes Orca answers it in and the ANSI stripping are the delivery
+    path's `read_pane_text`, not a second reading of them here. The window stays this caller's:
+    200 lines is what "is an agent REPL on screen" has always been decided on, and a whole
+    retained scrollback would let a marker from a session that ended hours ago answer for the
+    pane as it is now.
     """
-    try:
-        data = _orca_json(["terminal", "read", "--terminal", handle, "--limit", "200"])
-    except Exception:
-        return ""
-    terminal = data.get("terminal") if isinstance(data.get("terminal"), dict) else data
-    if not isinstance(terminal, dict):
-        return ""
-    tail = terminal.get("tail")
-    if isinstance(tail, list):
-        text = "\n".join(str(line) for line in tail)
-    else:
-        text = next((value for key in ("text", "content", "screen")
-                     if isinstance((value := terminal.get(key)), str)), "")
-    return _ANSI_ESCAPE_RE.sub("", text)
+    return read_pane_text(handle, host=host, limit=_SCREEN_READ_LINES)
 
 
-def _agent_repl_visible(handle: str) -> bool:
+def _agent_repl_visible(handle: str, *, host: SessionHost) -> bool:
     """Whether the observed panel is an agent REPL, not the shell it may have returned to.
 
     The prompt glyphs cover the supported interactive runtimes.  We require a positive REPL
@@ -240,7 +256,7 @@ def _agent_repl_visible(handle: str) -> bool:
     fresh-terminal path. Tool output can legitimately contain a shell prompt, so it must not
     classify the whole scrollback as a shell.
     """
-    screen = _terminal_screen(handle)
+    screen = _terminal_screen(handle, host=host)
     if not screen or _shell_prompt_at_tail(screen):
         return False
     return any(marker in screen for marker in _AGENT_REPL_MARKERS)
@@ -311,7 +327,7 @@ def _codex_turn_after(workspace: str, since: float) -> bool:
     return latest is not None and latest > since
 
 
-def _confirm_delivery(handle: str, workspace: str, sent_at: float) -> None:
+def _confirm_delivery(handle: str, workspace: str, sent_at: float, *, host: SessionHost) -> None:
     """Wait until the head durably records the command just sent into its live session.
 
     For a head whose launch command seeds its own prompt, which is a Claude or Hermes one. An
@@ -323,7 +339,7 @@ def _confirm_delivery(handle: str, workspace: str, sent_at: float) -> None:
     while time.monotonic() < deadline:
         if _claude_user_turn_after(workspace, sent_at):
             return
-        screen = _terminal_screen(handle)
+        screen = _terminal_screen(handle, host=host)
         if not screen:
             last_reason = "panel-unreadable"
         elif _shell_prompt_at_tail(screen):
@@ -539,17 +555,16 @@ def _dispatch_command(agent: str, variant: str | None) -> DispatchCommand:
                            head_profile=profile_data)
 
 
-def _terminal_handle_live(ws: str, handle: str) -> bool:
+def _terminal_handle_live(ws: str, handle: str, *, host: SessionHost) -> bool:
     try:
-        terms = _orca_json(["terminal", "list", "--worktree", f"path:{ws}", "--limit", "50"]) \
-            .get("terminals", []) or []
+        panes = host.panes(ws)
     except Exception:
         return False
-    return any((t.get("handle") or t.get("id")) == handle for t in terms)
+    return any(pane.handle == handle for pane in panes)
 
 
-def _fresh_steward_report_in_progress(agent: str, now: float, ws: str,
-                                      state: AgentState) -> dict | None:
+def _fresh_steward_report_in_progress(agent: str, now: float, ws: str, state: AgentState, *,
+                                      host: SessionHost) -> dict | None:
     """A secondary run guard for steward dispatch.
 
     Orca terminal creation is not immediately visible in `terminal list` on every host. If two
@@ -575,7 +590,8 @@ def _fresh_steward_report_in_progress(agent: str, now: float, ws: str,
             if active.get("reference") != card.get("reference") or not handle:
                 state.clear_active_report(card.get("reference"))
                 continue
-            if _terminal_handle_live(ws, handle) or now - moved < REPORT_VISIBILITY_GAP_SECONDS:
+            if _terminal_handle_live(ws, handle, host=host) \
+                    or now - moved < REPORT_VISIBILITY_GAP_SECONDS:
                 return card
             state.clear_active_report(card.get("reference"))
     except Exception:
@@ -622,14 +638,18 @@ def _ensure_claude_ready(ws: str) -> None:
         print(f"dispatch: claude config prep failed ({e})")
 
 
-def _agent_terminals(ws: str, state: AgentState | None = None) -> list[dict] | None:
+def _agent_terminals(ws: str, state: AgentState | None = None, *,
+                     host: SessionHost) -> list[Pane] | None:
     """Live terminals in the workspace running this singleton agent.
 
     New spawns get an explicit `triggered-agent:<name>` title. The legacy `Claude` match keeps
     already-warm Claude terminals reusable until they are naturally restarted. Codex may rename
-    its tab back to the shell cwd after startup, so the latest saved Orca handle is also accepted."""
+    its tab back to the shell cwd after startup, so the latest saved Orca handle is also accepted.
+
+    The inventory arrives as `Pane`s, so the title this recognises by and the last-output clock the
+    watchdog reads are fields of the pane rather than keys this module knows the spelling of."""
     try:
-        terms = _orca_json(["terminal", "list", "--worktree", f"path:{ws}", "--limit", "50"]).get("terminals", []) or []
+        panes = host.panes(ws)
     except Exception as exc:
         # An unreadable list is not an empty workspace. Every caller treats None as a deferred
         # decision so an Orca hiccup cannot turn into a second curator or a healthy teardown.
@@ -637,14 +657,14 @@ def _agent_terminals(ws: str, state: AgentState | None = None) -> list[dict] | N
         return None
     saved_handle = state.load_terminal_handle() if state else None
     return [
-        t for t in terms
-        if (saved_handle and (t.get("handle") or t.get("id")) == saved_handle)
-        or (t.get("title") or "").startswith("triggered-agent:")
-        or "Claude" in (t.get("title") or "")
+        pane for pane in panes
+        if (saved_handle and pane.handle == saved_handle)
+        or pane.title.startswith("triggered-agent:")
+        or "Claude" in pane.title
     ]
 
 
-def _raw_terminal_count(ws: str) -> int | None:
+def _raw_terminal_count(ws: str, *, host: SessionHost) -> int | None:
     """Every live terminal Orca reports for `ws`, unfiltered by title/handle — unlike
     `_agent_terminals`, this also counts a stray terminal the recognition filter would otherwise
     miss entirely: an orphan stuck on the shell's default title from a past incident (found live
@@ -659,10 +679,10 @@ def _raw_terminal_count(ws: str) -> int | None:
     (`_stop_and_confirm_workspace_empty`) must never read an Orca hiccup as "confirmed empty" and
     log a healthy teardown over a terminal/tab that is actually still there; a pre-create/cleanup
     check must not create on top of, or declare clean, a workspace whose real contents it couldn't
-    read. Every caller distinguishes the three cases (0 / >0 / None) explicitly."""
+    read. Every caller distinguishes the three cases (0 / >0 / None) explicitly. An inventory the
+    host cannot parse refuses rather than answering none, which lands here as the same "unknown"."""
     try:
-        return len(_orca_json(["terminal", "list", "--worktree", f"path:{ws}", "--limit", "50"])
-                   .get("terminals", []) or [])
+        return len(host.panes(ws))
     except (RuntimeError, subprocess.TimeoutExpired):
         return None
 
@@ -673,7 +693,14 @@ finalize = finalizer.finalize
 
 
 def _create_terminal(agent: str, ws: str, launch: str, state: AgentState,
-                     profile: str | None) -> str | None:
+                     profile: str | None, *, host: SessionHost) -> str:
+    """Open this agent's pane and record what was opened.
+
+    The pane comes back named: `open_pane` refuses a create Orca answered without a handle instead
+    of returning one, so a spawn that could not be addressed fails here rather than being recorded
+    under a null handle and then delivered to. That is the one place this move made a swallow into
+    a refusal, and it is the right way round — a handle nothing can address is not a terminal this
+    tick may claim to have created (secretary-1416)."""
     generation = None
     if _is_ephemeral(agent):
         # Stamp a fresh monotonic generation and bake it into the terminal's own self-teardown
@@ -681,16 +708,13 @@ def _create_terminal(agent: str, ws: str, launch: str, state: AgentState,
         # current terminal is still this one before stopping it (review B2, round 4).
         generation = state.next_terminal_generation()
         launch = _with_finalizer(agent, launch, generation)
-    data = _orca_json(["terminal", "create", "--worktree", f"path:{ws}",
-                       "--title", f"triggered-agent:{agent}", "--command", launch])
-    term = data.get("terminal", data)
+    pane = host.open_pane(ws, f"triggered-agent:{agent}", launch)
     # created_at only here (never on a plain warm-reuse re-save): see save_terminal_handle's own
     # docstring and the "no terminal" branch's visibility-gap guard below.
-    handle = term.get("handle") or term.get("id")
-    state.save_terminal_handle(handle, created_at=time.time(),
+    state.save_terminal_handle(pane.handle, created_at=time.time(),
                                generation=generation)
     state.save_head_profile(profile)
-    return handle
+    return pane.handle
 
 
 def _recover_steward_dispatch_failure(state: AgentState, event: str, cmd: DispatchCommand,
@@ -747,22 +771,8 @@ def _escalate_steward_preflight_failure(state: AgentState, event: str, cmd: Disp
                       error=f"{failure} (escalation failed: {escalation_error})")
 
 
-def _tui_run_json(args: list[str]) -> dict:
-    """Run the shared delivery path's Orca calls the way this module runs every other one.
-
-    That path speaks full `orca … --json` argument vectors, since its other caller hands it a
-    runner that executes them verbatim; `_orca_json` supplies the binary and the flag itself, so
-    they are stripped back off here rather than a second Orca runner being kept for one caller.
-    """
-    argv = list(args)
-    if argv and argv[0] == "orca":
-        argv = argv[1:]
-    if argv and argv[-1] == "--json":
-        argv = argv[:-1]
-    return _orca_json(argv)
-
-
-def _deliver_interactive_skill(handle: str, workspace: str, skill: str) -> None:
+def _deliver_interactive_skill(handle: str, workspace: str, skill: str, *,
+                               host: SessionHost) -> None:
     """Put a service head's skill in front of it, on the product's one interactive delivery path.
 
     A Codex head starts with an empty composer, fresh or warm: nothing has been asked of it until
@@ -780,14 +790,14 @@ def _deliver_interactive_skill(handle: str, workspace: str, skill: str) -> None:
     deliver_interactive_prompt(
         handle,
         skill,
-        run_json=_tui_run_json,
+        host=host,
         adapter="codex",
         confirm=lambda sent_at: _codex_turn_after(workspace, sent_at),
     )
 
 
 def _spawn_fresh_terminal(agent: str, variant: str | None, ws: str, state: AgentState,
-                          event: str) -> DispatchCommand:
+                          event: str, *, host: SessionHost) -> DispatchCommand:
     """Bring a fresh head up in `ws`: prepare the workspace, create the pane, deliver the skill.
 
     The preparation is deliberately outside the recovery below. Once a pane exists the head may
@@ -802,9 +812,9 @@ def _spawn_fresh_terminal(agent: str, variant: str | None, ws: str, state: Agent
         _escalate_steward_preflight_failure(state, event, cmd, exc)
         raise
     try:
-        handle = _create_terminal(agent, ws, cmd.launch, state, cmd.profile)
+        handle = _create_terminal(agent, ws, cmd.launch, state, cmd.profile, host=host)
         if cmd.prompt_after_start:
-            _deliver_interactive_skill(handle, ws, cmd.skill)
+            _deliver_interactive_skill(handle, ws, cmd.skill, host=host)
     except Exception as exc:
         _recover_steward_dispatch_failure(state, event, cmd, exc)
         raise
@@ -813,18 +823,19 @@ def _spawn_fresh_terminal(agent: str, variant: str | None, ws: str, state: Agent
 
 
 def _send_reuse_dispatch(agent: str, variant: str | None, terminal_handle: str, workspace: str,
-                         state: AgentState, event: str) -> DispatchCommand:
+                         state: AgentState, event: str, *, host: SessionHost) -> DispatchCommand:
     cmd = _dispatch_command(agent, variant)
     try:
         if cmd.prompt_after_start:
             # An interactive head is prompted the one way the product prompts one, whether this
             # is the terminal's first skill or its fifth.
-            _deliver_interactive_skill(terminal_handle, workspace, cmd.skill)
+            _deliver_interactive_skill(terminal_handle, workspace, cmd.skill, host=host)
         else:
             sent_at = time.time()
-            _orca(["terminal", "send", "--terminal", terminal_handle,
-                   "--text", cmd.skill, "--enter"])
-            _confirm_delivery(terminal_handle, workspace, sent_at)
+            # The send stays unchecked and the confirmation stays the proof: what makes this
+            # dispatch real is the head's own record of the turn, never the send's exit code.
+            _unchecked(lambda: host.send(terminal_handle, cmd.skill, enter=True))
+            _confirm_delivery(terminal_handle, workspace, sent_at, host=host)
     except Exception as exc:
         _recover_steward_dispatch_failure(state, event, cmd, exc)
         raise
@@ -832,11 +843,14 @@ def _send_reuse_dispatch(agent: str, variant: str | None, terminal_handle: str, 
     return cmd
 
 
-def _stop_and_confirm(ws: str, state: AgentState) -> bool:
+def _stop_and_confirm(ws: str, state: AgentState, *, host: SessionHost) -> bool:
     """Stop every live terminal in `ws` and verify the workspace actually went quiet before the
     caller treats the stop as done. `terminal stop`'s own exit code is not trustworthy enough to
-    gate a fresh spawn on (triggered-agents-445, PR #95 review B3): `_orca` doesn't even look at
-    it, and Orca itself can report success while a pty lingers. `terminal list` (via
+    gate a fresh spawn on (triggered-agents-445, PR #95 review B3): the stop is issued through
+    `_unchecked` for exactly that reason, and Orca itself can report success while a pty lingers.
+    The stop is by worktree, not by pane — it is the whole workspace going quiet that the
+    confirmation below then reads, and stopping the survivor alone would leave the others.
+    `terminal list` (via
     `_agent_terminals`) is the ground truth every other check in this module already trusts, so
     re-list and require it to come back empty instead. A caller that gets False back must NOT
     proceed to `_create_terminal` — that would risk two live sessions for one singleton agent.
@@ -847,16 +861,16 @@ def _stop_and_confirm(ws: str, state: AgentState) -> bool:
     empty` instead — the filtered view here would "confirm" success on a stray it could never see
     either way, stop or no stop."""
     try:
-        _orca(["terminal", "stop", "--worktree", f"path:{ws}"])
+        _unchecked(lambda: host.stop_workspace(ws))
         time.sleep(1.0)
-        terms = _agent_terminals(ws, state)
+        terms = _agent_terminals(ws, state, host=host)
     except Exception as exc:
         print(f"dispatch: terminal stop/confirm failed for {ws} ({exc})")
         return False
     return terms == []  # None means the confirmation list was unavailable, not empty
 
 
-def _stop_and_confirm_workspace_empty(ws: str) -> bool:
+def _stop_and_confirm_workspace_empty(ws: str, *, host: SessionHost) -> bool:
     """Stop every live terminal in `ws` and verify via Orca's UNFILTERED terminal list
     (`_raw_terminal_count`) that the workspace is truly empty — for the stray-sweep paths only
     (triggered-agents-445, PR #95 review B3, round 2). `_stop_and_confirm`'s own re-check goes
@@ -868,26 +882,34 @@ def _stop_and_confirm_workspace_empty(ws: str) -> bool:
     stop worked" and leave the terminal for the next tick, never log a healthy teardown over a pty
     that may still be live (triggered-agents-445, PR #95 review B1, round 4)."""
     try:
-        _orca(["terminal", "stop", "--worktree", f"path:{ws}"])
+        _unchecked(lambda: host.stop_workspace(ws))
         time.sleep(1.0)
-        return _raw_terminal_count(ws) == 0  # None (list failed) != 0 -> not confirmed
+        return _raw_terminal_count(ws, host=host) == 0  # None (list failed) != 0 -> not confirmed
     except Exception as exc:
         print(f"dispatch: terminal stop/confirm failed for {ws} ({exc})")
         return False
 
 
-def _is_idle(handle: str) -> bool:
+def _is_idle(handle: str, *, host: SessionHost) -> bool:
+    """Whether the pane will take input now, in the two states this scheduler acts on.
+
+    The probe is the host's `tui-idle` wait with this module's own `IDLE_PROBE_MS` budget, and the
+    reading is unchanged: an answer that says satisfied is idle, and everything else — a refusal,
+    the probe timing out, an answer that says anything else — is busy. Deliberately not the three
+    states `tui_delivery.terminal_readiness` classifies for a delivery: a tick that cannot ask the
+    question and a tick looking at a working head both do the same thing here, which is leave the
+    terminal alone, so a third state would be a distinction with no branch behind it.
+    """
     try:
-        res = _orca_json(["terminal", "wait", "--terminal", handle, "--for", "tui-idle",
-                          "--timeout-ms", str(IDLE_PROBE_MS)])
+        res = host.wait_idle(handle, timeout_ms=IDLE_PROBE_MS)
     except (RuntimeError, subprocess.TimeoutExpired):
         return False
     return bool((res.get("wait") or {}).get("satisfied"))
 
 
-def _quiet_seconds(term: dict, now: float) -> float:
-    last = term.get("lastOutputAt")
-    return (now - last / 1000.0) if last else 0.0
+def _quiet_seconds(pane: Pane, now: float) -> float:
+    """How long this pane has been silent, from the clock the inventory carries."""
+    return (now - pane.last_output_at) if pane.last_output_at else 0.0
 
 
 def _reap_ghosts(ws: str) -> tuple[int, bool]:
@@ -948,7 +970,8 @@ def _reap_ghosts(ws: str) -> tuple[int, bool]:
     return closed, ok
 
 
-def _cleanup_only(agent: str, ws: str, state: AgentState, event: str, terms: list[dict]) -> int:
+def _cleanup_only(agent: str, ws: str, state: AgentState, event: str, terms: list[Pane], *,
+                  host: SessionHost) -> int:
     """Tear-down-only pass for an ephemeral agent's finished or stuck terminal, run in place of a
     real dispatch when precheck signalled no new work (triggered-agents-445, PR #95 review B1):
     `ta-gate.sh` skips `dispatch` entirely on a precheck skip, so without this a finished
@@ -965,7 +988,7 @@ def _cleanup_only(agent: str, ws: str, state: AgentState, event: str, terms: lis
         # recognized as this agent's own (review B3) -- sweep the whole workspace so accumulated
         # live orphans actually converge to zero on a no-work tick instead of surviving every
         # "nothing recognized" cleanup forever.
-        raw = _raw_terminal_count(ws)
+        raw = _raw_terminal_count(ws, host=host)
         if raw is None:
             # The raw list itself failed (round 4, review B1): "unknown", not "zero". Declaring the
             # workspace clean off an Orca hiccup would log a healthy no-op over a stray that is
@@ -975,7 +998,7 @@ def _cleanup_only(agent: str, ws: str, state: AgentState, event: str, terms: lis
                   "workspace is clear; leaving it for the next tick")
             return 0
         if raw > 0:
-            if not _stop_and_confirm_workspace_empty(ws):
+            if not _stop_and_confirm_workspace_empty(ws, host=host):
                 state.log_run(event, action="cleanup-stray-sweep-failed")
                 print(f"dispatch[{agent}]: cleanup could not confirm the workspace is clear of "
                       "stray terminals — leaving it for the next tick")
@@ -990,12 +1013,12 @@ def _cleanup_only(agent: str, ws: str, state: AgentState, event: str, terms: lis
             print(f"dispatch[{agent}]: cleanup — swept stray unrecognized terminal(s)"
                   f"{f'; reaped {reaped} ghost(s)' if reaped else ''}, no new work to dispatch")
         return 0
-    survivor = max(terms, key=lambda t: t.get("lastOutputAt") or 0)
-    if not _is_idle(survivor["handle"]):
+    survivor = max(terms, key=lambda pane: pane.last_output_at)
+    if not _is_idle(survivor.handle, host=host):
         quiet = _quiet_seconds(survivor, time.time())
         if quiet <= WATCHDOG_SECONDS:
             return 0  # still working -- a no-work tick must never touch a live run
-        if not _stop_and_confirm(ws, state):
+        if not _stop_and_confirm(ws, state, host=host):
             state.log_run(event, action="cleanup-stop-failed")
             print(f"dispatch[{agent}]: cleanup could not confirm the stuck terminal stopped "
                   "— leaving it for the next tick")
@@ -1012,7 +1035,7 @@ def _cleanup_only(agent: str, ws: str, state: AgentState, event: str, terms: lis
 
     # idle: the previous run already finished; tear it down and leave the workspace empty, there
     # is no new work this tick to hand a fresh session to
-    if not _stop_and_confirm(ws, state):
+    if not _stop_and_confirm(ws, state, host=host):
         state.log_run(event, action="cleanup-stop-failed")
         print(f"dispatch[{agent}]: cleanup could not confirm the finished terminal stopped "
               "— leaving it for the next tick")
@@ -1028,7 +1051,8 @@ def _cleanup_only(agent: str, ws: str, state: AgentState, event: str, terms: lis
     return 0
 
 
-def run(agent: str, variant: str | None = None, cleanup_only: bool = False) -> int:
+def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
+        host: SessionHost | None = None) -> int:
     """`variant` selects a differently-scheduled mode of the same agent (e.g. the steward's
     "deep-sweep", triggered-agents-254): a different prompt from `_launch_cmd`, and its own
     runs.jsonl event name (instead of the plain "dispatch" every hourly tick logs) so the two
@@ -1056,12 +1080,16 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False) -> i
     ws = _workspace(agent)
     state = AgentState(agent)
     event = variant or "dispatch"
+    # One session manager for the whole tick, resolved here and passed down: every pane this
+    # tick lists, probes, sends into and stops is the same one, and a helper cannot quietly
+    # open a second route to Orca of its own.
+    host = session_host(_run_json) if host is None else host
     with state.lock():
         if _pipeline_paused():
             state.log_run(event, action="paused")
             print(f"dispatch[{agent}]: pipeline paused — no dispatch")
             return 0
-        active_report = _fresh_steward_report_in_progress(agent, time.time(), ws, state)
+        active_report = _fresh_steward_report_in_progress(agent, time.time(), ws, state, host=host)
         if active_report:
             state.log_run(event, action="active-report-skip", reference=active_report["reference"])
             print(
@@ -1072,14 +1100,14 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False) -> i
         reaped, reap_ok = _reap_ghosts(ws)  # prune dead-pty tabs so ghosts never accumulate
         if reaped:
             print(f"dispatch[{agent}]: reaped {reaped} ghost tab(s)")
-        terms = _agent_terminals(ws, state)
+        terms = _agent_terminals(ws, state, host=host)
         if terms is None:
             state.log_run(event, action="terminal-list-failed")
             print(f"dispatch[{agent}]: terminal list unavailable: deferring lifecycle decision")
             return 0
 
         if cleanup_only:
-            return _cleanup_only(agent, ws, state, event, terms)
+            return _cleanup_only(agent, ws, state, event, terms, host=host)
 
         if not terms:
             # A terminal this same agent just created can take a moment to show up in `terminal
@@ -1107,7 +1135,7 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False) -> i
                     print(f"dispatch[{agent}]: a ghost tab would not close (or tab list "
                           "unavailable) — not creating a fresh session this tick, next tick re-reaps")
                     return 0
-                raw = _raw_terminal_count(ws)
+                raw = _raw_terminal_count(ws, host=host)
                 if raw is None:
                     # The raw list itself failed (round 4, review B1): "unknown", not "zero". We
                     # can't rule out a stray we'd be piling a fresh session on top of, so don't
@@ -1122,7 +1150,7 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False) -> i
                     # past incident, review B3). An ephemeral workspace's whole point is converging
                     # to at most one terminal, so sweep it before creating rather than piling a
                     # fresh session on top of an orphan that would otherwise run forever.
-                    if not _stop_and_confirm_workspace_empty(ws):
+                    if not _stop_and_confirm_workspace_empty(ws, host=host):
                         state.log_run(event, action="stray-sweep-failed")
                         print(f"dispatch[{agent}]: could not confirm the workspace is clear of "
                               "stray terminals before creating — leaving it for the next tick")
@@ -1136,13 +1164,13 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False) -> i
                         print(f"dispatch[{agent}]: swept stray terminal but a ghost tab would not "
                               "close; not creating this tick, next tick re-reaps")
                         return 0
-            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event)
+            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host)
             state.log_run(event, action="created")
             print(f"dispatch[{agent}]: no terminal — created fresh -> {cmd.skill}")
             return 0
 
-        survivor = max(terms, key=lambda t: t.get("lastOutputAt") or 0)
-        if not _is_idle(survivor["handle"]):
+        survivor = max(terms, key=lambda pane: pane.last_output_at)
+        if not _is_idle(survivor.handle, host=host):
             quiet = _quiet_seconds(survivor, time.time())
             if quiet <= WATCHDOG_SECONDS:  # a fresh, working agent — don't interrupt or pile on
                 state.log_run(event, action="busy-skip")
@@ -1152,7 +1180,7 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False) -> i
             # just made right away rather than leaving it for the top of the next run. Bail
             # without creating if the stop can't be confirmed -- proceeding anyway risks a second
             # live session alongside a stuck one that never actually died (review B3).
-            if not _stop_and_confirm(ws, state):
+            if not _stop_and_confirm(ws, state, host=host):
                 state.log_run(event, action="watchdog-stop-failed")
                 print(f"dispatch[{agent}]: watchdog stop could not confirm the stuck terminal "
                       "is gone — leaving it for the next tick")
@@ -1165,7 +1193,7 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False) -> i
                 print(f"dispatch[{agent}]: watchdog stopped the stuck terminal but a ghost tab "
                       "would not close; not restarting this tick, next tick re-reaps")
                 return 0
-            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event)
+            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host)
             state.log_run(event, action="watchdog-restart")
             print(f"dispatch[{agent}]: busy but stuck ({int(quiet)}s silent) — watchdog restart -> {cmd.skill}")
             return 0
@@ -1176,7 +1204,7 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False) -> i
         # restart above minus the profile-red gate below (a fresh spawn always re-resolves the
         # head, so there's nothing to divert from).
         if _is_ephemeral(agent):
-            if not _stop_and_confirm(ws, state):
+            if not _stop_and_confirm(ws, state, host=host):
                 state.log_run(event, action="ephemeral-stop-failed")
                 print(f"dispatch[{agent}]: ephemeral teardown could not confirm the finished "
                       "terminal stopped — leaving it for the next tick")
@@ -1191,7 +1219,7 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False) -> i
                 print(f"dispatch[{agent}]: ephemeral teardown stopped the finished terminal but a "
                       "ghost tab would not close; not restarting this tick, next tick re-reaps")
                 return 0
-            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event)
+            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host)
             state.log_run(event, action="ephemeral-restart")
             tail = f"; reaped {reaped} ghost(s)" if reaped else ""
             print(f"dispatch[{agent}]: ephemeral — torn down finished terminal, fresh session -> {cmd.skill}{tail}")
@@ -1204,12 +1232,12 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False) -> i
         # new one, which would pile up one extra terminal per red tick (triggered-agents-274,
         # triggered-agents-275).
         if _reuse_head_is_red(agent, state):
-            if not _stop_and_confirm(ws, state):
+            if not _stop_and_confirm(ws, state, host=host):
                 state.log_run(event, action="red-fallback-stop-failed")
                 print(f"dispatch[{agent}]: red-fallback stop could not confirm the idle terminal "
                       "stopped — leaving it for the next tick")
                 return 0
-            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event)
+            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host)
             state.log_run(event, action="reused-red-fallback")
             print(f"dispatch[{agent}]: idle terminal's head is red — stopped, fresh fallback terminal -> {cmd.skill}")
             return 0
@@ -1218,8 +1246,8 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False) -> i
         # `tui-idle` reports that shell as idle too, so inspect the rendered panel before any
         # slash command is sent. A dead REPL takes the normal stop/reap/fresh-create route.
         # Its telemetry action is `warm-repl-restart`, not `reused`.
-        if not _agent_repl_visible(survivor["handle"]):
-            if not _stop_and_confirm(ws, state):
+        if not _agent_repl_visible(survivor.handle, host=host):
+            if not _stop_and_confirm(ws, state, host=host):
                 state.log_run(event, action="warm-repl-stop-failed")
                 print(f"dispatch[{agent}]: idle terminal has no live agent REPL, but its stop "
                       "could not be confirmed — leaving it for the next tick")
@@ -1230,21 +1258,21 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False) -> i
                 print(f"dispatch[{agent}]: idle terminal had no live agent REPL; stopped it but "
                       "a ghost tab would not close, not restarting this tick")
                 return 0
-            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event)
+            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host)
             state.log_run(event, action="warm-repl-restart")
             print(f"dispatch[{agent}]: idle terminal had no live agent REPL: fresh terminal -> "
                   f"{cmd.skill}")
             return 0
 
         # idle: warm reuse, killing nothing -> no ghost. Close only legacy duplicates (one-time).
-        state.save_terminal_handle(survivor.get("handle") or survivor.get("id"))
-        extras = [t for t in terms if t["handle"] != survivor["handle"]]
-        for t in extras:
-            _orca(["terminal", "close", "--terminal", t["handle"]])
-        _orca(["terminal", "send", "--terminal", survivor["handle"], "--text", "/clear", "--enter"])
+        state.save_terminal_handle(survivor.handle)
+        extras = [pane for pane in terms if pane.handle != survivor.handle]
+        for pane in extras:
+            _unchecked(lambda handle=pane.handle: host.close_pane(handle))
+        _unchecked(lambda: host.send(survivor.handle, "/clear", enter=True))
         time.sleep(1.0)  # let /clear settle before the skill lands
         try:
-            cmd = _send_reuse_dispatch(agent, variant, survivor["handle"], ws, state, event)
+            cmd = _send_reuse_dispatch(agent, variant, survivor.handle, ws, state, event, host=host)
         except TuiDeliveryError as exc:
             # Both shapes of unconfirmed delivery — a seeded head's own record never appearing and
             # the interactive path never proving the prompt landed — are the same warm-reuse
