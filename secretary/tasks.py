@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from secretary.board.card_transitions import CardTransitionForbidden, card_transition
 from secretary.board_transport import (
     BoardTransport, BoardTransportError, resolve, transport_path,
 )
@@ -121,34 +122,6 @@ _EDITABLE_STATES = {"ready", "blocked"}
 # reslice. A substantive reviewer verdict parks the card here; the dispatcher then performs the
 # recorded decision, so the effect of a verdict is never the verdict's own tick.
 _STATES = ("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done")
-_TRANSITIONS = {
-    # PO is the human operator and may move a card between any two states.
-    "po": {(source, target) for source in _STATES for target in _STATES if source != target},
-    "dispatcher": {
-        ("in_progress", "validate"), ("in_progress", "blocked"),
-        ("in_progress", "ready"), ("validate", "in_progress"),
-        ("validate", "blocked"), ("validate", "done"),
-        ("validate", "assessment"), ("assessment", "in_progress"),
-        ("assessment", "done"), ("assessment", "blocked"),
-    },
-    # The observer moves any card except one that is parked. `release`, `rework` and `reslice`
-    # are effects the dispatcher performs, a merge, a rework round, a reslice, and a board move
-    # that skipped them would put the card in Done with nothing merged. The observer's authority
-    # over a parked card is `task decide`; the PO's override and the steward's Blocked escalation
-    # are the two ways a card leaves Assessment without the dispatcher.
-    "observer": {
-        (source, target)
-        for source in _STATES for target in _STATES
-        if source != target and source != "assessment"
-    },
-    "worker": set(), "reviewer": set(), "retro": set(),
-    "steward": {
-        ("blocked", "ready"), ("blocked", "done"),
-        ("in_progress", "done"), ("ready", "blocked"),
-        ("in_progress", "blocked"), ("validate", "blocked"),
-        ("assessment", "blocked"),
-    },
-}
 _READY_RESET_METADATA = {
     "claim": "",
     "resolved_head": "",
@@ -1530,7 +1503,9 @@ class TaskWriter:
                 raise TaskError("transition_forbidden", "Product issues and products cannot enter execution task columns", 3)
             if role == "observer" and not override_payload and not self._sprint_holds_project(task["project"]):
                 raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
-            if (source, target) not in _TRANSITIONS[role]:
+            try:
+                card_transition(role, source, target)
+            except CardTransitionForbidden:
                 raise TaskError("transition_forbidden", _forbidden_move_message(role, source, target), 3)
             if role == "steward" and (target == "blocked" or (source, target) == ("blocked", "done")) and not reason.strip():
                 raise TaskError("validation", "this steward transition requires a non-empty reason", 2)

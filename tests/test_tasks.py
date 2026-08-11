@@ -15,6 +15,8 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.cli import main
+from secretary.board.card_transitions import CARD_TRANSITIONS
+from secretary.board.models import CardState
 from secretary.board_transport import BoardTransport
 from secretary.data import export_board
 from secretary.sprints import refresh_active_sprint_projects
@@ -34,7 +36,6 @@ from secretary.tasks import (
     standing_decision,
     _STATE_BY_COLUMN,
     _STATES,
-    _TRANSITIONS,
 )
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
 
@@ -1627,34 +1628,86 @@ class AssessmentStateTests(unittest.TestCase):
     def test_dispatcher_transitions_are_exact(self) -> None:
         """Pinned exactly: a later card must widen this table deliberately, not by accident."""
         self.assertEqual(
-            _TRANSITIONS["dispatcher"],
+            CARD_TRANSITIONS["dispatcher"],
             {
-                ("in_progress", "validate"), ("in_progress", "blocked"),
-                ("in_progress", "ready"), ("validate", "in_progress"),
-                ("validate", "blocked"), ("validate", "done"),
-                ("validate", "assessment"), ("assessment", "in_progress"),
-                ("assessment", "done"), ("assessment", "blocked"),
+                (CardState.IN_PROGRESS, CardState.VALIDATE), (CardState.IN_PROGRESS, CardState.BLOCKED),
+                (CardState.IN_PROGRESS, CardState.READY), (CardState.VALIDATE, CardState.IN_PROGRESS),
+                (CardState.VALIDATE, CardState.BLOCKED), (CardState.VALIDATE, CardState.DONE),
+                (CardState.VALIDATE, CardState.ASSESSMENT), (CardState.ASSESSMENT, CardState.IN_PROGRESS),
+                (CardState.ASSESSMENT, CardState.DONE), (CardState.ASSESSMENT, CardState.BLOCKED),
             },
         )
 
     def test_worker_and_reviewer_stay_out_of_assessment(self) -> None:
-        self.assertEqual(_TRANSITIONS["worker"], set())
-        self.assertEqual(_TRANSITIONS["reviewer"], set())
+        self.assertEqual(CARD_TRANSITIONS["worker"], frozenset())
+        self.assertEqual(CARD_TRANSITIONS["reviewer"], frozenset())
         for role in ("po", "observer"):
-            self.assertIn(("validate", "assessment"), _TRANSITIONS[role])
-        self.assertIn(("assessment", "ready"), _TRANSITIONS["po"])
+            self.assertIn((CardState.VALIDATE, CardState.ASSESSMENT), CARD_TRANSITIONS[role])
+        self.assertIn((CardState.ASSESSMENT, CardState.READY), CARD_TRANSITIONS["po"])
         self.assertEqual(
-            {edge for edge in _TRANSITIONS["steward"] if "assessment" in edge},
-            {("assessment", "blocked")},
+            {edge for edge in CARD_TRANSITIONS["steward"] if CardState.ASSESSMENT in edge},
+            {(CardState.ASSESSMENT, CardState.BLOCKED)},
         )
 
     def test_the_observer_takes_no_exit_out_of_assessment(self) -> None:
         """The observer decides; the dispatcher performs. A board move by the observer would be a
         release with nothing merged, so the authority matrix has no exit for it at all."""
         self.assertEqual(
-            {edge for edge in _TRANSITIONS["observer"] if edge[0] == "assessment"}, set()
+            {edge for edge in CARD_TRANSITIONS["observer"] if edge[0] is CardState.ASSESSMENT}, set()
         )
-        self.assertIn(("validate", "assessment"), _TRANSITIONS["observer"])
+        self.assertIn((CardState.VALIDATE, CardState.ASSESSMENT), CARD_TRANSITIONS["observer"])
+
+    def test_writer_preserves_the_complete_legacy_role_by_edge_contract(self) -> None:
+        """Exercise the public writer instead of proving a copied table equals the registry."""
+        dispatcher = {
+            ("in_progress", "validate"), ("in_progress", "blocked"),
+            ("in_progress", "ready"), ("validate", "in_progress"),
+            ("validate", "blocked"), ("validate", "done"),
+            ("validate", "assessment"), ("assessment", "in_progress"),
+            ("assessment", "done"), ("assessment", "blocked"),
+        }
+        steward = {
+            ("blocked", "ready"), ("blocked", "done"), ("in_progress", "done"),
+            ("ready", "blocked"), ("in_progress", "blocked"), ("validate", "blocked"),
+            ("assessment", "blocked"),
+        }
+        column_by_state = {
+            state: column_id
+            for column_id, title in self.writer.reader._board()[1].items()
+            if (state := _STATE_BY_COLUMN.get(title))
+        }
+        self.client.tasks[1]["swimlane_id"] = 0
+
+        def legacy_authorized(role: str, source: str, target: str) -> bool:
+            if source == target:
+                return False
+            if role == "po":
+                return True
+            if role == "observer":
+                return source != "assessment"
+            if role == "dispatcher":
+                return (source, target) in dispatcher
+            if role == "steward":
+                return (source, target) in steward
+            return False
+
+        with as_observer(SPRINT), mock.patch.object(self.writer, "_sprint_holds_project", return_value=True):
+            for role in ("po", "dispatcher", "observer", "steward", "worker", "reviewer", "retro"):
+                for source in _STATES:
+                    for target in _STATES:
+                        card = next(task for task in self.client.tasks if task["reference"] == "secretary-468")
+                        card["column_id"] = column_by_state[source]
+                        try:
+                            self.writer.move(
+                                role=role, actor=role, reference="secretary-468", target=target,
+                                reason="authorization contract",
+                                request_id=f"transition-contract-{role}-{source}-{target}",
+                            )
+                        except TaskError as exc:
+                            admitted = exc.code != "transition_forbidden"
+                        else:
+                            admitted = True
+                        self.assertEqual(admitted, legacy_authorized(role, source, target), (role, source, target))
 
     def _park(self, request_id: str = "into-assessment") -> None:
         self.client.tasks[0]["column_id"] = 4  # Validate

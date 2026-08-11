@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from secretary.board import (
@@ -10,6 +13,7 @@ from secretary.board import (
     FakeBoardHost, InvalidTransition, KanboardBoardHost, RelatedRefs, Replace,
     TRANSITIONS, TransitionRequest,
 )
+from secretary.board.card_transitions import CARD_TRANSITIONS, CardTransitionForbidden, card_transition
 
 
 class BoardHostContractTests(unittest.TestCase):
@@ -34,12 +38,12 @@ class BoardHostContractTests(unittest.TestCase):
         self.assertEqual(result.event.kind, EventKind.CARD_STARTED)
         self.assertEqual(result.event.related_refs.refs, ("sprint:943", "head-run:1417"))
 
-    def test_invalid_card_transition_is_rejected_by_the_registry(self) -> None:
+    def test_same_state_card_transition_is_rejected_by_the_registry(self) -> None:
         self.host.create(Create(Card("secretary-1417", "Protocol seam", CardState.READY), self.actor, "create"))
 
         with self.assertRaises(InvalidTransition):
             self.host.transition(TransitionRequest(
-                EntityKind.CARD, "secretary-1417", CardState.DONE, self.actor, "skip review",
+                EntityKind.CARD, "secretary-1417", CardState.READY, self.actor, "no lifecycle change",
             ))
 
     def test_replace_cannot_bypass_the_lifecycle_registry(self) -> None:
@@ -60,6 +64,39 @@ class BoardHostContractTests(unittest.TestCase):
             for edge, transition in edges.items():
                 self.assertEqual(edge, (transition.source, transition.target))
                 self.assertIn(transition.event_kind.value, declared)
+
+    def test_role_aware_registry_allows_a_previously_missing_steward_recovery(self) -> None:
+        declaration = card_transition("steward", CardState.BLOCKED, CardState.DONE)
+
+        self.assertEqual(declaration.source, CardState.BLOCKED)
+        self.assertEqual(declaration.target, CardState.DONE)
+        self.assertEqual(declaration.event_kind, EventKind.CARD_MOVED)
+
+    def test_role_aware_registry_rejects_invalid_role_and_edge(self) -> None:
+        with self.assertRaises(CardTransitionForbidden):
+            card_transition("worker", CardState.READY, CardState.IN_PROGRESS)
+        with self.assertRaises(CardTransitionForbidden):
+            card_transition("dispatcher", CardState.READY, CardState.IN_PROGRESS)
+        with self.assertRaises(CardTransitionForbidden):
+            card_transition("po", CardState.READY, CardState.READY)
+
+    def test_every_authorized_card_edge_has_a_matching_lifecycle_declaration(self) -> None:
+        for role, edges in CARD_TRANSITIONS.items():
+            for source, target in edges:
+                declaration = card_transition(role, source, target)
+                self.assertEqual(declaration, TRANSITIONS[EntityKind.CARD][(source, target)])
+                self.assertEqual((declaration.source, declaration.target), (source, target))
+
+    def test_task_writer_can_import_the_registry_without_loading_kanboard(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable, "-P", "-c",
+                "import secretary.tasks, sys; assert 'secretary.board.kanboard' not in sys.modules",
+            ],
+            cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class KanboardBoardHostTests(unittest.TestCase):
