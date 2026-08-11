@@ -272,10 +272,11 @@ and its evidence still kept. They reach the head that has to report them through
 and through a replacement head's launch document, and they are readable from outside in
 `sprint status` (`observer.delivery`) and in `secretary status` (`delivery_failures`).
 
-What the input channel carries is bounded by the same rule for every head that takes one: a task is
-a document on disk and the pane receives one short line naming its absolute path. The reviewer is the
-first role on that seam. Its review — description, gate attestation, verdict commands, some 12 KiB of
-it — is written under the run artifacts, private and outside the checkout, because a workspace's
+What the input channel carries is bounded: a task is a document on disk and the pane receives one
+short line naming its absolute path. A worker has always been pointed at its `TASK.md` that way; the
+reviewer is the first role for which the rule is enforced rather than merely followed, and the first
+whose document is kept out of the checkout. Its review — description, gate attestation, verdict
+commands, some 12 KiB of it — is written under the run artifacts, private, because a workspace's
 identity is the tracked diff and untracked files a receipt hashes to say which code it is evidence
 for. The nudge is derived from that path alone, so nothing a card description carries (an ESC, a
 bracketed-paste terminator, the CRLF the board's web form submits) can reach a terminal write, and
