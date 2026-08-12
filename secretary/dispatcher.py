@@ -63,7 +63,7 @@ from secretary.dispatcher_gate_receipt import (
     is_exact_sha as _is_exact_sha,
     render_receipt,
 )
-from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_identity
+from secretary.dispatcher_heartbeat import heartbeat_identity
 from secretary.dispatcher_observer import (
     OBSERVER_HEAD_FALLBACK,
     OBSERVER_PROMPT_FILE,
@@ -118,6 +118,9 @@ from secretary.dispatcher_review import (
 from secretary.dispatcher_watchdog import (
     bind_head_heartbeat as _bind_head_heartbeat,
     clear_head_heartbeat as _clear_head_heartbeat,
+    guard_head_run_identity as _guard_head_run_identity,
+    head_run_process_status as _head_run_process_status,
+    HeadRunIdentityMismatch as _HeadRunIdentityMismatch,
     heartbeat_is_dead as _heartbeat_is_dead,
     heartbeat_is_live_match as _heartbeat_is_live_match,
     heartbeat_is_mismatch as _heartbeat_is_mismatch,
@@ -668,9 +671,8 @@ class DispatcherHeadTransport:
         self.runtime._close_head_pane(
             run.handle,
             run.pid_file,
-            expected=heartbeat_identity(
-                run_id=run.run_id, role=self.role, task_ref=run.task_ref.to_json(), leaf=run.leaf,
-            ),
+            run=run,
+            role=self.role,
             host=host,
         )
 
@@ -1026,7 +1028,10 @@ class CommandHostRuntime:
                     self._stop_observer_terminals(
                         str(workspace),
                         pid_file=pid_file,
-                        expected=self._run_heartbeat_identity(lifecycle_run, OBSERVER_ROLE),
+                        run=lifecycle_run,
+                        role=OBSERVER_ROLE,
+                        task=f"sprint:{reference}",
+                        leaf=pane.leaf,
                     )
                 except Exception as stop_exc:
                     # The pane is still up. Its handle goes back with the failure, because this
@@ -1075,14 +1080,15 @@ class CommandHostRuntime:
         """
         if self.mode == "noop":
             return
-        expected = run_heartbeat_identity(
-            getattr(record, "head_run", {}),
-            role=OBSERVER_ROLE,
+        observer_run = getattr(record, "head_run", {})
+        observer_leaf = str(getattr(record, "leaf", "") or "")
+        pid_file = str(getattr(record, "pid_file", "") or "")
+        self._guard_head_run(
+            observer_run,
+            OBSERVER_ROLE,
+            pid_file=pid_file,
             task=f"sprint:{getattr(record, 'sprint', '')}",
-            leaf=str(getattr(record, "leaf", "") or ""),
-        )
-        self._fence_head_heartbeat(
-            str(getattr(record, "pid_file", "") or ""), expected=expected
+            leaf=observer_leaf,
         )
         workspace = str(getattr(record, "workspace", "") or "")
         if not workspace:
@@ -1093,16 +1099,29 @@ class CommandHostRuntime:
             return
         if not self._observer_workspace_registered(workspace):
             self._confirm_head_process_gone(
-                str(getattr(record, "pid_file", "") or ""), expected=expected
+                pid_file,
+                run=observer_run,
+                role=OBSERVER_ROLE,
+                task=f"sprint:{getattr(record, 'sprint', '')}",
+                leaf=observer_leaf,
             )
             return
         self._stop_observer_terminals(
-            workspace, pid_file=str(getattr(record, "pid_file", "") or ""), expected=expected
+            workspace,
+            pid_file=pid_file,
+            run=observer_run,
+            role=OBSERVER_ROLE,
+            task=f"sprint:{getattr(record, 'sprint', '')}",
+            leaf=observer_leaf,
         )
         # Heartbeat-wrapped heads have their own session, so terminal stop alone cannot prove the
         # observer died. Do not remove its worktree or forget its record until this confirms it.
         self._confirm_head_process_gone(
-            str(getattr(record, "pid_file", "") or ""), expected=expected
+            pid_file,
+            run=observer_run,
+            role=OBSERVER_ROLE,
+            task=f"sprint:{getattr(record, 'sprint', '')}",
+            leaf=observer_leaf,
         )
         self._run_json([
             "orca", "worktree", "rm", "--worktree", f"path:{workspace}", "--force", "--json"
@@ -1212,7 +1231,14 @@ class CommandHostRuntime:
             raise failure from None
 
     def _stop_observer_terminals(
-        self, workspace: str, *, pid_file: str = "", expected: dict[str, str] | None = None
+        self,
+        workspace: str,
+        *,
+        pid_file: str = "",
+        run: Any = None,
+        role: str = "",
+        task: str = "",
+        leaf: str = "",
     ) -> None:
         """Stop every pane of an observer workspace.
 
@@ -1224,7 +1250,8 @@ class CommandHostRuntime:
         pane-lifecycle command like any other, and the only difference from `stop_head` is what it
         addresses — a workspace nothing can name a head in, not a head.
         """
-        self._fence_head_heartbeat(pid_file, expected=expected)
+        if run is not None:
+            self._guard_head_run(run, role, pid_file=pid_file, task=task, leaf=leaf)
         self.session.stop_workspace(workspace)
 
     def _close_observer_pane(self, handle: str) -> None:
@@ -1651,25 +1678,26 @@ class CommandHostRuntime:
         """
         if self.mode == "noop" or not record.workspace:
             return
-        heartbeats: list[tuple[str, dict[str, str]]] = []
+        heartbeats: list[tuple[str, Any, str, str]] = []
         for kind in ("worker", "review"):
             field = "worker_head_run" if kind == "worker" else "review_head_run"
             pid_file = record.worker_pid_file if kind == "worker" else record.review_pid_file
             leaf = record.worker_leaf if kind == "worker" else record.review_leaf
-            expected = run_heartbeat_identity(getattr(record, field, {}), role=kind, leaf=leaf)
-            heartbeats.append((pid_file, expected))
+            heartbeats.append((pid_file, getattr(record, field, {}), kind, leaf))
         # A workspace stop kills every pane it contains.  Fence every recorded head before the
         # first destructive call, not afterwards when an unrelated live process may already have
         # lost its pane.
-        for pid_file, expected in heartbeats:
-            self._fence_head_heartbeat(pid_file, expected=expected)
+        for pid_file, run, kind, leaf in heartbeats:
+            self._guard_head_run(run, kind, pid_file=pid_file, leaf=leaf)
         try:
             self.session.stop_workspace(record.workspace)
         except HostError as exc:
             if "selector_not_found" not in str(exc):
                 raise
-        for pid_file, expected in heartbeats:
-            self._confirm_head_process_gone(pid_file, expected=expected)
+        for pid_file, run, kind, leaf in heartbeats:
+            self._confirm_head_process_gone(
+                pid_file, run=run, role=kind, leaf=leaf,
+            )
 
     def stop_head(
         self, record: DispatcherRecord, kind: str, initiator: str = STOPPED_BY_DISPATCHER
@@ -1710,7 +1738,6 @@ class CommandHostRuntime:
         checkout, and the terminals a red verdict is about to hand back to it, are untouched.
         """
         run = self.review_lifecycle_run(record)
-        expected = self._run_heartbeat_identity(run, "reviewer")
         try:
             outcome = head_ops.stop(
                 run,
@@ -1718,13 +1745,14 @@ class CommandHostRuntime:
                 host=self.session,
                 transport=self._head_transport(record.workspace, role="reviewer"),
                 commit=lambda finishing: self._commit_review_run(record, finishing),
-                preflight=lambda path: self._fence_head_heartbeat(path, expected=expected),
-                confirm_gone=lambda path: self._confirm_head_process_gone(path, expected=expected),
+                preflight=lambda current: self._guard_head_run(current, "reviewer"),
+                confirm_gone=lambda path: self._confirm_head_process_gone(
+                    path, run=run, role="reviewer",
+                ),
             )
         except head_ops.HeadStopFailed as exc:
-            # The stop did not happen, and the run says who was ending it. The next tick continues
-            # this stop rather than opening a second one over a reviewer nothing can name.
-            self._commit_review_run(record, exc.run)
+            # `head_ops.stop` itself commits a proved run before close or signalling. A preflight
+            # mismatch is intentionally uncommitted: that foreign process was never this run.
             raise HostError(str(exc)) from None
         self._commit_review_run(record, outcome.run)
 
@@ -1814,7 +1842,6 @@ class CommandHostRuntime:
         heartbeat is what actually decides whether the head is gone.
         """
         run = self.worker_lifecycle_run(record)
-        expected = self._run_heartbeat_identity(run, "worker")
         try:
             outcome = head_ops.stop(
                 run,
@@ -1822,13 +1849,14 @@ class CommandHostRuntime:
                 host=self.session,
                 transport=self._head_transport(record.workspace, role="worker"),
                 commit=lambda finishing: self._commit_worker_run(record, finishing),
-                preflight=lambda path: self._fence_head_heartbeat(path, expected=expected),
-                confirm_gone=lambda path: self._confirm_head_process_gone(path, expected=expected),
+                preflight=lambda current: self._guard_head_run(current, "worker"),
+                confirm_gone=lambda path: self._confirm_head_process_gone(
+                    path, run=run, role="worker",
+                ),
             )
         except head_ops.HeadStopFailed as exc:
-            # The stop did not happen, and the run says who was ending it. Recording that here is
-            # what makes the next tick's retry a continuation of this stop rather than a new one.
-            self._commit_worker_run(record, exc.run)
+            # A post-attribution stop failure was already committed by `head_ops.stop`; a failed
+            # preflight must leave the persisted HeadRun untouched.
             raise HostError(str(exc)) from None
         self._commit_worker_run(record, outcome.run)
 
@@ -1902,8 +1930,60 @@ class CommandHostRuntime:
             pid_file=record.worker_pid_file,
         )
 
+    @staticmethod
+    def _head_status(
+        pid_file: str,
+        *,
+        run: Any = None,
+        role: str = "",
+        task: str = "",
+        leaf: str = "",
+        expected: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        """Classify a head through its persisted run whenever one is available.
+
+        `expected` remains only for the compatibility seam used by pre-HeadRun records and the
+        low-level close tests. Lifecycle callers pass `run`, so they all construct their expected
+        launch identity at the same watchdog boundary.
+        """
+        if run is not None:
+            return _head_run_process_status(
+                pid_file, run=run, role=role, task=task, leaf=leaf,
+            )
+        return _head_process_status(pid_file, expected=expected)
+
+    def _guard_head_run(
+        self,
+        run: Any,
+        role: str,
+        *,
+        pid_file: str = "",
+        task: str = "",
+        leaf: str = "",
+    ) -> dict[str, Any]:
+        """Fence a live foreign process before any lifecycle attribution or destructive call."""
+        if not pid_file:
+            pid_file = str(getattr(run, "pid_file", "") or "")
+            if isinstance(run, dict):
+                pid_file = str(run.get("pid_file") or pid_file)
+        if not pid_file:
+            return {"known": False, "reason": "missing-pid-file"}
+        try:
+            return _guard_head_run_identity(
+                pid_file, run=run, role=role, task=task, leaf=leaf,
+            )
+        except _HeadRunIdentityMismatch:
+            raise HostError(f"head heartbeat from {pid_file} has a mismatching launch identity") from None
+
     def _confirm_head_process_gone(
-        self, pid_file: str, *, expected: dict[str, str] | None = None
+        self,
+        pid_file: str,
+        *,
+        run: Any = None,
+        role: str = "",
+        task: str = "",
+        leaf: str = "",
+        expected: dict[str, str] | None = None,
     ) -> None:
         """Make sure the process behind a heartbeat is not running, escalating if it is.
 
@@ -1914,7 +1994,9 @@ class CommandHostRuntime:
         if not pid_file:
             return
         for signal_number in (signal.SIGTERM, signal.SIGKILL):
-            status = _head_process_status(pid_file, expected=expected)
+            status = self._head_status(
+                pid_file, run=run, role=role, task=task, leaf=leaf, expected=expected,
+            )
             if _heartbeat_is_mismatch(status):
                 raise HostError(f"head heartbeat from {pid_file} has a mismatching launch identity")
             if not status.get("known") or not status.get("alive"):
@@ -1925,10 +2007,20 @@ class CommandHostRuntime:
             # before the graceful signal so green handoff does not wait out the whole grace period
             # and then kill the worker unconditionally.
             if signal_number == signal.SIGTERM:
-                self._signal_head(pid_file, signal.SIGCONT, expected=expected)
-            self._signal_head(pid_file, signal_number, expected=expected)
-            self._await_head_exit(pid_file, expected=expected)
-        status = _head_process_status(pid_file, expected=expected)
+                self._signal_head(
+                    pid_file, signal.SIGCONT,
+                    run=run, role=role, task=task, leaf=leaf, expected=expected,
+                )
+            self._signal_head(
+                pid_file, signal_number,
+                run=run, role=role, task=task, leaf=leaf, expected=expected,
+            )
+            self._await_head_exit(
+                pid_file, run=run, role=role, task=task, leaf=leaf, expected=expected,
+            )
+        status = self._head_status(
+            pid_file, run=run, role=role, task=task, leaf=leaf, expected=expected,
+        )
         if _heartbeat_is_mismatch(status):
             raise HostError(f"head heartbeat from {pid_file} has a mismatching launch identity")
         if status.get("known") and status.get("alive"):
@@ -1936,27 +2028,20 @@ class CommandHostRuntime:
         if status.get("known"):
             _clear_head_heartbeat(pid_file)
 
-    @staticmethod
-    def _fence_head_heartbeat(
-        pid_file: str, *, expected: dict[str, str] | None = None
-    ) -> None:
-        """Reject a live heartbeat whose process is not the recorded HeadRun.
-
-        This is deliberately weaker than ``_confirm_head_process_gone``: missing and unreadable
-        files retain their existing conservative stop behavior.  Only a readable live mismatch
-        proves that the address now belongs to someone else and therefore fences a close,
-        workspace stop or signal before it starts.
-        """
-        if not pid_file:
-            return
-        status = _head_process_status(pid_file, expected=expected)
-        if _heartbeat_is_mismatch(status):
-            raise HostError(f"head heartbeat from {pid_file} has a mismatching launch identity")
-
     def _signal_head(
-        self, pid_file: str, signal_number: int, *, expected: dict[str, str] | None = None
+        self,
+        pid_file: str,
+        signal_number: int,
+        *,
+        run: Any = None,
+        role: str = "",
+        task: str = "",
+        leaf: str = "",
+        expected: dict[str, str] | None = None,
     ) -> None:
-        status = _head_process_status(pid_file, expected=expected)
+        status = self._head_status(
+            pid_file, run=run, role=role, task=task, leaf=leaf, expected=expected,
+        )
         if not _heartbeat_is_live_match(status):
             return
         pid = int(status["pid"])
@@ -1976,11 +2061,20 @@ class CommandHostRuntime:
             raise HostError(f"head process {pid} could not be signalled: {exc}") from None
 
     def _await_head_exit(
-        self, pid_file: str, *, expected: dict[str, str] | None = None
+        self,
+        pid_file: str,
+        *,
+        run: Any = None,
+        role: str = "",
+        task: str = "",
+        leaf: str = "",
+        expected: dict[str, str] | None = None,
     ) -> None:
         deadline = time.monotonic() + HEAD_STOP_GRACE_SECONDS
         while time.monotonic() < deadline:
-            status = _head_process_status(pid_file, expected=expected)
+            status = self._head_status(
+                pid_file, run=run, role=role, task=task, leaf=leaf, expected=expected,
+            )
             if _heartbeat_is_mismatch(status):
                 return
             if not status.get("known") or not status.get("alive"):
@@ -2315,10 +2409,9 @@ class CommandHostRuntime:
         field = "review_head_run" if kind == "review" else "worker_head_run"
         pid_file = record.review_pid_file if kind == "review" else record.worker_pid_file
         leaf = record.review_leaf if kind == "review" else record.worker_leaf
-        expected = run_heartbeat_identity(
-            getattr(record, field, {}), role=kind, leaf=leaf,
+        return self._head_status(
+            pid_file, run=getattr(record, field, {}), role=kind, leaf=leaf,
         )
-        return _head_process_status(pid_file, expected=expected)
 
     def _launch_failure(
         self, exc: head_ops.HeadOperationError, workspace: str, pid_file: str, subject: str
@@ -2358,6 +2451,10 @@ class CommandHostRuntime:
         handle: str,
         pid_file: str,
         *,
+        run: Any = None,
+        role: str = "",
+        task: str = "",
+        leaf: str = "",
         expected: dict[str, str] | None = None,
         host: SessionHost,
     ) -> None:
@@ -2373,18 +2470,27 @@ class CommandHostRuntime:
         and this product signals — which is why it stays here while the pane itself is closed
         through the host the operation handed in.
         """
-        self._fence_head_heartbeat(pid_file, expected=expected)
+        if run is not None:
+            self._guard_head_run(run, role, pid_file=pid_file, task=task, leaf=leaf)
+        elif pid_file:
+            status = self._head_status(pid_file, expected=expected)
+            if _heartbeat_is_mismatch(status):
+                raise HostError(f"head heartbeat from {pid_file} has a mismatching launch identity")
         try:
             host.close_pane(handle)
         except Exception as exc:  # noqa: BLE001 — any refusal, whatever the transport called it
             status = (
-                _head_process_status(pid_file, expected=expected) if pid_file else {"known": False}
+                self._head_status(
+                    pid_file, run=run, role=role, task=task, leaf=leaf, expected=expected,
+                ) if pid_file else {"known": False}
             )
             if not status.get("known"):
                 raise HostError(f"head terminal close failed: {exc}") from None
             if _heartbeat_is_mismatch(status):
                 raise HostError("head terminal close found a mismatching launch identity") from None
-        self._confirm_head_process_gone(pid_file, expected=expected)
+        self._confirm_head_process_gone(
+            pid_file, run=run, role=role, task=task, leaf=leaf, expected=expected,
+        )
 
     def _launched(
         self, handle: str, head: str, task: dict[str, Any] | None, role: str, workspace: str = "",
@@ -2502,17 +2608,32 @@ class CommandHostRuntime:
             raise HostError("noop runtime cannot retain a worker session")
         if not record.handle:
             raise HostError("worker session has no addressable pane to retain")
-        expected = run_heartbeat_identity(record.worker_head_run, role="worker", leaf=record.worker_leaf)
-        status = _head_process_status(record.worker_pid_file, expected=expected)
+        status = self._head_status(
+            record.worker_pid_file,
+            run=record.worker_head_run,
+            role="worker",
+            leaf=record.worker_leaf,
+        )
         if not _heartbeat_is_live_match(status):
             raise HostError("worker session is unavailable for retention")
         try:
-            self._signal_head(record.worker_pid_file, signal.SIGSTOP, expected=expected)
+            self._signal_head(
+                record.worker_pid_file,
+                signal.SIGSTOP,
+                run=record.worker_head_run,
+                role="worker",
+                leaf=record.worker_leaf,
+            )
         except (KeyError, TypeError, ValueError, OSError) as exc:
             raise HostError(f"worker session could not be suspended: {exc}") from None
         deadline = time.monotonic() + HEAD_STOP_GRACE_SECONDS
         while time.monotonic() < deadline:
-            retained = _head_process_status(record.worker_pid_file, expected=expected)
+            retained = self._head_status(
+                record.worker_pid_file,
+                run=record.worker_head_run,
+                role="worker",
+                leaf=record.worker_leaf,
+            )
             if _heartbeat_is_live_match(retained) and retained.get("stopped"):
                 return
             if not retained.get("alive"):
@@ -2597,8 +2718,12 @@ class CommandHostRuntime:
         A suspended head is refused rather than continued for the same reason: waking one is a
         lifecycle transition with its own durable boundary, and this is not it.
         """
-        expected = run_heartbeat_identity(record.worker_head_run, role="worker", leaf=record.worker_leaf)
-        status = _head_process_status(record.worker_pid_file, expected=expected)
+        status = self._head_status(
+            record.worker_pid_file,
+            run=record.worker_head_run,
+            role="worker",
+            leaf=record.worker_leaf,
+        )
         if not _heartbeat_is_live_match(status):
             raise HostError("worker session exited")
         if status.get("stopped"):
@@ -2626,8 +2751,12 @@ class CommandHostRuntime:
         a crash is only known to have received the prompt when its
         provider turn is visibly underway; otherwise replay resumes at the SIGCONT/send boundary.
         """
-        expected = run_heartbeat_identity(record.worker_head_run, role="worker", leaf=record.worker_leaf)
-        status = _head_process_status(record.worker_pid_file, expected=expected)
+        status = self._head_status(
+            record.worker_pid_file,
+            run=record.worker_head_run,
+            role="worker",
+            leaf=record.worker_leaf,
+        )
         if not _heartbeat_is_live_match(status):
             raise HostError("retained worker session exited")
         if not self._continuation_addressable(record):
@@ -2675,7 +2804,13 @@ class CommandHostRuntime:
         except PromptDocumentError as exc:
             raise HostError(f"the continuation pointer could not be built: {exc}") from None
         if status.get("stopped"):
-            self._signal_head(record.worker_pid_file, signal.SIGCONT, expected=expected)
+            self._signal_head(
+                record.worker_pid_file,
+                signal.SIGCONT,
+                run=record.worker_head_run,
+                role="worker",
+                leaf=record.worker_leaf,
+            )
         self._nudge_worker(
             record, pointer, "retained worker continuation", subject="worker-continuation",
         )
@@ -6305,13 +6440,9 @@ class DispatcherRuntime:
                 leaf=str(raw.get("leaf") or ""),
                 pid_file=pid_file,
             )
-            expected = heartbeat_identity(
-                run_id=recovered.run_id,
-                role=WORKER_ROLE,
-                task_ref=recovered.task_ref.to_json(),
-                leaf=recovered.leaf,
+            verified = _head_run_process_status(
+                pid_file, run=recovered, role=WORKER_ROLE, leaf=recovered.leaf,
             )
-            verified = _head_process_status(pid_file, expected=expected)
             if _heartbeat_is_live_match(verified):
                 record.worker_head_run = recovered.to_json()
                 record.worker_pid_file = pid_file

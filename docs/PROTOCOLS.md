@@ -950,10 +950,13 @@ reused the pid-file path.
 
 Readers classify a matching live record, a dead record, a live identity mismatch, a missing not-yet-written record,
 and an unreadable record separately. Boot, start ticks, run id, role, task and a known leaf all have to agree before
-a process counts as this head. A mismatch is an operator-facing degraded state, not evidence of a head to adopt or a
-process to signal: retention, launch recovery, watchdogs, stop paths and observer reconciliation leave it in place
-and never open a replacement beside it. Every destructive pane close, workspace stop and heartbeat signal checks this
-fence before its first destructive call. Raw command overrides write no heartbeat and receive no synthetic identity;
+a process counts as this head. Lifecycle and recovery consumers use one HeadRun classification boundary: it constructs
+that expected identity before a stop can persist `finishing` or `stopped_by`, a review launch can become `reviewing`,
+or a pane/workspace can be relocated or closed. A mismatch is an operator-facing degraded state, not evidence of a
+head to adopt or a process to signal: retention, launch recovery, watchdogs, stop paths and observer reconciliation
+leave the prior run un-attributed and never open a replacement beside it. The same guard is rechecked immediately
+before every destructive pane close, workspace stop and heartbeat signal. Raw command overrides write no heartbeat
+and receive no synthetic identity;
 they retain only the documented launch grace and pane-output fallbacks.
 
 ### Worker retention through validation and review

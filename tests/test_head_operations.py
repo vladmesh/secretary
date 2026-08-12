@@ -341,6 +341,29 @@ class HeadOperationTests(unittest.TestCase):
         self.assertEqual(written[0].run_id, run.run_id)
         self.assertEqual(timeline[0], "commit", timeline)
 
+    def test_an_identity_preflight_refusal_precedes_attribution_and_every_transport_call(self) -> None:
+        """A foreign heartbeat is not a stop attempt of the recorded run."""
+        run = self.bring_up().run
+        committed: list[HeadRun] = []
+        self.host.calls.clear()
+
+        def reject(candidate: HeadRun) -> None:
+            self.assertEqual(candidate, run)
+            raise RuntimeError("heartbeat identity mismatch")
+
+        with self.assertRaises(HeadStopFailed) as caught:
+            stop(
+                run,
+                StopInitiator(actor="operator"),
+                host=self.host,
+                commit=committed.append,
+                preflight=reject,
+            )
+
+        self.assertEqual(caught.exception.run, run)
+        self.assertEqual(committed, [])
+        self.assertEqual(self.host.calls, [])
+
     def test_a_retried_stop_keeps_the_run_and_the_actor_that_began_it(self) -> None:
         """The refused stop is retried by another path with another actor. The record is the first.
 

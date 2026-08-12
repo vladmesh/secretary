@@ -23,7 +23,7 @@ from pathlib import Path
 from collections.abc import Mapping
 from typing import Any, NamedTuple
 
-from secretary.dispatcher_heartbeat import HEARTBEAT_VERSION
+from secretary.dispatcher_heartbeat import HEARTBEAT_VERSION, run_heartbeat_identity
 from secretary.dispatcher_state import request_token
 
 # A missing pane is handled immediately. These ceilings remain deliberately generous for a head
@@ -194,6 +194,57 @@ HEARTBEAT_DEAD = "dead"
 HEARTBEAT_IDENTITY_MISMATCH = "identity-mismatch"
 HEARTBEAT_NOT_YET_WRITTEN = "not-yet-written"
 HEARTBEAT_UNREADABLE = "unreadable"
+
+
+class HeadRunIdentityMismatch(RuntimeError):
+    """A readable heartbeat names a live process other than the expected HeadRun."""
+
+
+def _run_payload(run: Any) -> Mapping[str, Any]:
+    """Accept a persisted HeadRun or the live operation value without importing head operations."""
+    if isinstance(run, Mapping):
+        return run
+    to_json = getattr(run, "to_json", None)
+    if callable(to_json):
+        payload = to_json()
+        if isinstance(payload, Mapping):
+            return payload
+    return {}
+
+
+def head_run_process_status(
+    pid_file: str,
+    *,
+    run: Any,
+    role: str,
+    task: str = "",
+    leaf: str = "",
+) -> dict[str, Any]:
+    """Classify one pid file against the durable HeadRun expected to own it.
+
+    This is the dispatcher boundary for every lifecycle and recovery consumer.  It builds the
+    expected identity from the recorded run rather than leaving each caller to combine a PID probe
+    with an unrelated liveness boolean.
+    """
+    return head_process_status(
+        pid_file,
+        expected=run_heartbeat_identity(_run_payload(run), role=role, task=task, leaf=leaf),
+    )
+
+
+def guard_head_run_identity(
+    pid_file: str,
+    *,
+    run: Any,
+    role: str,
+    task: str = "",
+    leaf: str = "",
+) -> dict[str, Any]:
+    """Return the common classification or fence a readable foreign live process."""
+    status = head_run_process_status(pid_file, run=run, role=role, task=task, leaf=leaf)
+    if heartbeat_is_mismatch(status):
+        raise HeadRunIdentityMismatch(pid_file)
+    return status
 
 
 def _proc_starttime_ticks(pid: int) -> str:

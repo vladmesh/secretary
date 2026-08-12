@@ -62,12 +62,11 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from secretary.dispatcher_heartbeat import run_heartbeat_identity
 from secretary.dispatcher_state import now_rfc3339, request_token
 from secretary.dispatcher_watchdog import (
     heartbeat_is_live_match,
     heartbeat_is_mismatch,
-    head_process_status,
+    head_run_process_status,
     initial_output_stall_seconds,
     pid_file_path,
 )
@@ -454,11 +453,12 @@ def observer_alive(record: ObserverRecord, *, now: float | None = None) -> dict[
     dispatcher already uses for a pane that has produced no output at all has passed.
     """
     now = time.time() if now is None else now
-    status = head_process_status(
+    status = head_run_process_status(
         record.pid_file or observer_pid_file(record.sprint),
-        expected=run_heartbeat_identity(
-            record.head_run, role="observer", task=f"sprint:{record.sprint}", leaf=record.leaf,
-        ),
+        run=record.head_run,
+        role="observer",
+        task=f"sprint:{record.sprint}",
+        leaf=record.leaf,
     )
     if heartbeat_is_mismatch(status):
         return {

@@ -6,7 +6,6 @@ import time
 from typing import Any
 
 from secretary.dispatcher_helpers import scrub_host_output
-from secretary.dispatcher_heartbeat import run_heartbeat_identity
 from secretary.dispatcher_launch import (
     REVIEW_ROLE,
     WORKER_ROLE,
@@ -39,7 +38,7 @@ from secretary.dispatcher_watchdog import (
     heartbeat_is_dead as _heartbeat_is_dead,
     heartbeat_is_live_match as _heartbeat_is_live_match,
     heartbeat_is_mismatch as _heartbeat_is_mismatch,
-    head_process_status as _head_process_status,
+    head_run_process_status as _head_run_process_status,
     initial_output_stall_seconds as _initial_output_stall_seconds,
     pid_file_path as _pid_file_path,
     review_infra_retry_attempts as _review_infra_retry_attempts,
@@ -200,9 +199,9 @@ def command_terminal_status(
             return {"known": True, "live": False, "reason": "disconnected"}
         run = record.review_head_run if kind == "review" else record.worker_head_run
         leaf = record.review_leaf if kind == "review" else record.worker_leaf
-        pid_status = _head_process_status(
+        pid_status = _head_run_process_status(
             _pid_file_path(kind, task["ref"]),
-            expected=run_heartbeat_identity(run, role=kind, task=f"card:{task['ref']}", leaf=leaf),
+            run=run, role=kind, task=f"card:{task['ref']}", leaf=leaf,
         )
         if _heartbeat_is_mismatch(pid_status):
             return {
@@ -258,9 +257,9 @@ def command_terminal_status(
     # the intent contour exists to prevent.
     run = record.review_head_run if kind == "review" else record.worker_head_run
     leaf = record.review_leaf if kind == "review" else record.worker_leaf
-    pid_status = _head_process_status(
+    pid_status = _head_run_process_status(
         _pid_file_path(kind, task["ref"]),
-        expected=run_heartbeat_identity(run, role=kind, task=f"card:{task['ref']}", leaf=leaf),
+        run=run, role=kind, task=f"card:{task['ref']}", leaf=leaf,
     )
     if _heartbeat_is_mismatch(pid_status):
         return {
@@ -322,7 +321,8 @@ def command_review_running(host: Any, task: dict[str, Any], record: DispatcherRe
     never persisted — a tick killed between the split and the state write, or a card adopted from a
     dispatcher that predates persisted reviewer handles. It cannot be the primary check: the
     reviewer head overwrites its terminal title with its own OSC sequence seconds after launch."""
-    return bool(command_terminal_status(host, task, record, kind="review").get("live"))
+    status = command_terminal_status(host, task, record, kind="review")
+    return bool(status.get("live") and not status.get("identity_mismatch"))
 
 
 def end_review_pane(
@@ -360,7 +360,7 @@ def recover_review_launch(
 ) -> dict[str, Any]:
     ref = task["ref"]
     try:
-        running = runtime.host.review_running(task, record)
+        status = runtime.host.review_status(task, record)
     except Exception as exc:
         # Inventory silence cannot prove the reviewer is absent. Preserve launch ambiguity and ask
         # the same liveness question next tick; never launch beside a possibly-live head.
@@ -370,7 +370,18 @@ def recover_review_launch(
             "action": "review-inventory-unavailable",
             "reason": scrub_host_output(str(exc)),
         }
-    if running:
+    if status.get("identity_mismatch"):
+        # A readable live heartbeat can still name a foreign process.  Do not adopt it into the
+        # review state or reset the launch episode; this record remains the un-attributed run.
+        return {
+            "status": "degraded",
+            "step": "review",
+            "pilot_ref": ref,
+            "attempt_id": record.attempt_id or attempt_id,
+            "action": "review-heartbeat-identity-mismatch",
+            "reason": "review heartbeat names a live process with a mismatching launch identity",
+        }
+    if status.get("live"):
         record.state = "reviewing"
         # A reviewer is on the checkout: whatever stuck launches came before belong to an episode
         # that is over, so the abort ceiling starts fresh for the next one (issue:aa9a8ae4), and so

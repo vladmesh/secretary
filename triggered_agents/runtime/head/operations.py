@@ -60,6 +60,9 @@ Confirm = Callable[[float], bool]
 # Somewhere durable to put a run before the operation acts on it, for a caller whose record has to
 # survive the operation dying half-way. Called with the run as it will be, never after the fact.
 Commit = Callable[["HeadRun"], None]
+# The product's launch-identity proof. It receives the exact run it would otherwise attribute to
+# the stop, and therefore runs before that attribution is made durable.
+Preflight = Callable[["HeadRun"], None]
 
 
 class HeadOperationError(RuntimeError):
@@ -293,7 +296,7 @@ def stop(
     host: SessionHost,
     transport: HeadTransport | None = None,
     commit: Commit | None = None,
-    preflight: Callable[[str], None] | None = None,
+    preflight: Preflight | None = None,
     confirm_gone: Callable[[str], None] | None = None,
 ) -> HeadOutcome:
     """End one head and record who ended it.
@@ -315,20 +318,19 @@ def stop(
     the session manager has since put there. A run with neither pane nor heartbeat cannot be
     promised gone, and says so.
     """
-    live = run.finishing(initiator)
-    if live.lifecycle == EXITED:
-        return HeadOutcome(live)
-    if commit is not None:
-        commit(live)
-    # The caller owns any product-specific proof needed before a pane is destructive to close.
-    # It runs after the durable ``finishing`` transition, but before pane relocation, close or a
-    # heartbeat signal.  A caller that cannot prove the current process is its HeadRun must leave
-    # every one of those addresses untouched.
+    if run.lifecycle == EXITED:
+        return HeadOutcome(run)
+    # A readable mismatch is not a stop attempt of this run.  In particular it must not create a
+    # durable ``finishing``/``stopped_by`` attribution before the product has proved the process
+    # behind the pid file is the expected HeadRun.
     if preflight is not None:
         try:
-            preflight(live.pid_file)
+            preflight(run)
         except Exception as exc:  # noqa: BLE001
-            raise HeadStopFailed(f"the head failed its stop identity fence: {exc}", run=live) from None
+            raise HeadStopFailed(f"the head failed its stop identity fence: {exc}", run=run) from None
+    live = run.finishing(initiator)
+    if commit is not None:
+        commit(live)
     transport = transport or HostTransport()
     handle = live.handle
     if live.leaf and live.workspace:

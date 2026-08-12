@@ -72,7 +72,10 @@ from triggered_agents.runtime.head import (
     wrap_role_command,
 )
 from secretary.dispatcher_production import _budget_event_type
-from secretary.dispatcher_review import start_review as start_reviewer
+from secretary.dispatcher_review import (
+    recover_review_launch,
+    start_review as start_reviewer,
+)
 from secretary.dispatcher_tui import (
     DELIVERY_CONFIRMED,
     TuiDeliveryError,
@@ -5332,8 +5335,10 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
 
     def test_review_recovery_restarts_a_reviewer_whose_terminal_died(self) -> None:
-        """`review_running` asks the host whether the reviewer terminal is live, not whether one
-        was ever launched. A dead terminal must be relaunched rather than waited on forever."""
+        """Recovery reads reviewer status, not whether one was ever launched.
+
+        A dead terminal must be relaunched rather than waited on forever.
+        """
         self.start_dispatcher()
         self._run_worker_to_validate()
         self.tick()  # gate green -> review started
@@ -12847,6 +12852,7 @@ class WorkerLifecycleTests(unittest.TestCase):
             leaf=record.worker_leaf,
             pid_file=str(pid_file),
         ).to_json()
+        stored_run = json.loads(json.dumps(record.worker_head_run))
         foreign = subprocess.Popen(["sleep", "5"])
         def reap_foreign() -> None:
             if foreign.poll() is None:
@@ -12866,9 +12872,11 @@ class WorkerLifecycleTests(unittest.TestCase):
             with self.assertRaisesRegex(HostError, "mismatching launch identity"):
                 host.stop_head(record, "worker", STOPPED_BY_OPERATOR)
 
+        self.assertNotIn("list", host.ops(), "the leaf is not looked up after a mismatch")
         self.assertNotIn("close", host.ops())
         signal_head.assert_not_called()
         self.assertIsNone(foreign.poll())
+        self.assertEqual(record.worker_head_run, stored_run, "a foreign process is never attributed")
 
     def test_the_run_identity_is_the_same_one_from_bring_up_to_stop(self) -> None:
         host = NudgingReviewHost(self.root, screen="working\n› ")
@@ -13064,6 +13072,7 @@ class ReviewerLifecycleTests(unittest.TestCase):
                 handle="term-review", leaf="leaf-review", pid_file=str(pid_file),
             ),
         )
+        stored_run = json.loads(json.dumps(record.review_head_run))
         foreign = subprocess.Popen(["sleep", "5"])
         def reap_foreign() -> None:
             if foreign.poll() is None:
@@ -13083,9 +13092,11 @@ class ReviewerLifecycleTests(unittest.TestCase):
             with self.assertRaisesRegex(HostError, "mismatching launch identity"):
                 host.stop_review(record, STOPPED_BY_WATCHDOG)
 
+        self.assertNotIn("list", host.ops(), "the leaf is not looked up after a mismatch")
         self.assertNotIn("close", host.ops())
         signal_head.assert_not_called()
         self.assertIsNone(foreign.poll())
+        self.assertEqual(record.review_head_run, stored_run, "a foreign process is never attributed")
 
     def test_stopping_the_reviewer_leaves_the_workers_checkout_alone(self) -> None:
         """The split-leaf semantics, which this card moves onto the operations without changing.
@@ -13500,6 +13511,41 @@ class ReviewLivenessTests(unittest.TestCase):
 
         self.assertFalse(status["live"])
         self.assertEqual(status["reason"], "process-exited")
+
+    def test_foreign_reviewer_heartbeat_cannot_adopt_a_review_launch(self) -> None:
+        """Recovery sees full status, so a live foreign PID is not a reviewing reviewer."""
+        record = self._record(review_handle="term-review", review_leaf="leaf-review")
+        record.state = "review_starting"
+        record.review_launch_aborts = 2
+        record.review_infra_failures = 3
+        record.review_infra_error = "previous launch failure"
+        foreign = self._live_pid()
+        self._write_heartbeat("review", foreign, record)
+        path = Path(pid_file_path("review", self.task["ref"]))
+        heartbeat = json.loads(path.read_text(encoding="utf-8"))
+        heartbeat["run_id"] = "foreign-reviewer-run"
+        path.write_text(json.dumps(heartbeat), encoding="utf-8")
+        host = self._host([
+            {"handle": "term-review", "leafId": "leaf-review", "connected": True},
+        ])
+        runtime = mock.Mock()
+        runtime.host = host
+
+        status = host.review_status(self.task, record)
+        outcome = recover_review_launch(
+            runtime, self.task, {self.task["ref"]: record}, record, "attempt-1", payload={},
+        )
+
+        self.assertTrue(status["live"])
+        self.assertTrue(status["identity_mismatch"])
+        self.assertFalse(host.review_running(self.task, record))
+        self.assertEqual(outcome["action"], "review-heartbeat-identity-mismatch")
+        self.assertEqual(record.state, "review_starting")
+        self.assertEqual(record.review_launch_aborts, 2)
+        self.assertEqual(record.review_infra_failures, 3)
+        self.assertEqual(record.review_infra_error, "previous launch failure")
+        os.kill(foreign, 0)
+        runtime.save_records.assert_not_called()
 
     def test_connected_pane_with_a_live_head_process_stays_live(self) -> None:
         self._write_heartbeat("worker", self._live_pid())
