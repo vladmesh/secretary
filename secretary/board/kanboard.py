@@ -19,7 +19,10 @@ from secretary.board.models import (
 from secretary.board.transitions import BoardProtocolError, transition
 from secretary.product_issues import ProductIssueStore
 from secretary.sprints import SprintReader
-from secretary.tasks import KanboardClient, TaskReader, _positive_int, _target_column_id, project_card_by_reference
+from secretary.tasks import (
+    KanboardClient, TaskReader, _positive_int, _target_column_id, all_project_cards,
+    project_card_by_reference,
+)
 
 
 class KanboardBoardHost:
@@ -105,20 +108,26 @@ class KanboardBoardHost:
                 return
             task_id = _positive_int(reply)
             if task_id is None:
+                # A false-ish reply is not enough to establish that the
+                # backend refused the write.  Keep the typed occurrence when
+                # either stable correlation key is already live; confirmation
+                # and recovery then own completion without a second create.
+                if self._raw_by_ref(entity.ref) is not None or self._raw_by_marker(request_id) is not None:
+                    return
                 raise BoardProtocolError("Kanboard refused the Product/Issue row")
 
-        def confirm() -> BoardEntity:
-            row = self._raw_by_ref(entity.ref)
+        def confirm() -> dict[str, Any]:
+            row = self._row_for_create(entity, request_id)
             if row is None:
                 raise BoardProtocolError("Product/Issue create is not proven on the Kanboard board")
-            return self._normalized_row(row, allow_incomplete=True)
+            return row
 
-        def finish(_created: BoardEntity) -> None:
-            row = self._raw_by_ref(entity.ref)
+        def finish(_created: dict[str, Any]) -> None:
+            row = self._row_for_create(entity, request_id)
             if row is None:
                 raise BoardProtocolError("created Product/Issue row was not found")
             task_id = self._row_id(row)
-            if row.get("description") != entity.description:
+            if row.get("reference") != entity.ref or row.get("description") != entity.description:
                 if not self.client.call("updateTask", id=task_id, reference=entity.ref, description=entity.description):
                     raise BoardProtocolError("Kanboard rejected Product/Issue details")
             if self.client.call("saveTaskMetadata", task_id=task_id, values=self._metadata_for(entity)) is not True:
@@ -140,13 +149,14 @@ class KanboardBoardHost:
         existing = self._existing(request_id, entity, operation.actor, operation.reason)
         if existing is not None and self.canon.committed(request_id) is not None:
             return MutationResult(self.read(EntityKind.ISSUE, entity.ref), existing)
-        current = self.read(EntityKind.ISSUE, entity.ref)
-        if not isinstance(current, Issue) or current.state is not IssueState.OPEN:
-            raise BoardProtocolError("cannot replace a closed Issue")
-        if (entity.title, entity.product_ref, entity.state, entity.issue_kind, entity.description) != (
-            current.title, current.product_ref, current.state, current.issue_kind, current.description,
-        ) or entity.priority not in {"P0", "P1", "P2", "P3"}:
-            raise BoardProtocolError("Issue replace only supports a non-empty priority change")
+        if existing is None:
+            current = self.read(EntityKind.ISSUE, entity.ref)
+            if not isinstance(current, Issue) or current.state is not IssueState.OPEN:
+                raise BoardProtocolError("cannot replace a closed Issue")
+            if (entity.title, entity.product_ref, entity.state, entity.issue_kind, entity.description) != (
+                current.title, current.product_ref, current.state, current.issue_kind, current.description,
+            ) or entity.priority not in {"P0", "P1", "P2", "P3"}:
+                raise BoardProtocolError("Issue replace only supports a non-empty priority change")
         event = existing or self._entity_event(EventKind.ENTITY_UPDATED, entity, operation.actor, operation.reason, related, request_id)
         content = f"[issue:priority]\n{operation.reason}\n[request-id:{request_id}]"
 
@@ -181,7 +191,8 @@ class KanboardBoardHost:
             if row is None or self.client.call("saveTaskMetadata", task_id=self._row_id(row), values={"issue_priority": entity.priority}) is not True:
                 raise BoardProtocolError("Kanboard rejected issue priority")
             row = self._raw_by_ref(entity.ref)
-            if row is None or self._normalized_row(row) != entity:
+            confirmed = self._normalized_row(row) if row is not None else None
+            if not isinstance(confirmed, Issue) or confirmed.priority != entity.priority:
                 raise BoardProtocolError("Issue priority remains incomplete")
 
         MutationEventTransaction(self.canon, request_id=request_id, event=event).execute(effect, confirm=confirm, finish=finish)
@@ -484,6 +495,20 @@ class KanboardBoardHost:
         board_id, _ = self._issues_board()
         row = self.client.call("getTaskByReference", project_id=board_id, reference=ref)
         return row if isinstance(row, dict) else None
+
+    def _raw_by_marker(self, request_id: str) -> dict[str, Any] | None:
+        board_id, _ = self._issues_board()
+        marker = self._create_marker(request_id)
+        matches = [
+            row for row in all_project_cards(self.client, board_id)
+            if isinstance(row, dict) and row.get("description") == marker
+        ]
+        if len(matches) > 1:
+            raise BoardProtocolError("Product/Issue create correlation is ambiguous")
+        return matches[0] if matches else None
+
+    def _row_for_create(self, entity: Product | Issue, request_id: str) -> dict[str, Any] | None:
+        return self._raw_by_ref(entity.ref) or self._raw_by_marker(request_id)
 
     @staticmethod
     def _row_id(row: dict[str, Any]) -> int:

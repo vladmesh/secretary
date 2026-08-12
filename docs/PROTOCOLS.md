@@ -337,12 +337,15 @@ python3 -P -m secretary product transaction discard --request-id REQUEST_ID
 python3 -P -m secretary product transaction adopt --path FILE
 ```
 
-`retry` finishes the staged operation exactly where it stopped and commits its one audit event; a request
-already committed is answered with its record. `discard` drops a transaction only after reading the board:
-a create whose row exists and a priority or close change whose board comment exists are refused as
-`live_write` and have to be retried instead. `adopt` files a transaction document that lives outside the
-journal back under its own request id, which is how a document carried out of the journal comes back into
-`retry` or `discard`. The commands cover Product and Issue writes alike; the journal is one.
+`transaction list` includes typed Product/Issue pending events as read-only entries with their request id,
+event kind and subject ref, as well as released transaction documents. `retry` finishes the staged operation
+exactly where it stopped and commits its one audit event; a request already committed is answered with its
+record. `discard` drops a released transaction only after reading the board: a create whose row exists and a
+priority or close change whose board comment exists are refused as `live_write` and have to be retried instead.
+It never discards a typed pending event, which is also refused as `live_write` and repaired by retry. `adopt`
+files a released transaction document that lives outside the journal back under its own request id, which is
+how a document carried out of the journal comes back into `retry` or `discard`. The commands cover Product
+and Issue writes alike; the journal is one.
 
 ## Sprints
 

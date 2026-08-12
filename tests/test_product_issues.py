@@ -145,6 +145,42 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
         self.assertEqual(store.audit.events(), [])
         self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
 
+    def test_nonpositive_create_reply_with_a_marker_is_repaired_without_a_second_create(self) -> None:
+        client = ProductBoard()
+        store = self._store(client)
+        original_call = client.call
+        rejected_metadata = False
+
+        def null_reply_after_marker(method: str, **params: object) -> object:
+            nonlocal rejected_metadata
+            result = original_call(method, **params)
+            if method == "createTask":
+                # Exercise marker correlation independently of the requested
+                # reference: a reply cannot prove that this row was refused.
+                client.tasks[-1]["reference"] = ""
+                return None
+            if method == "saveTaskMetadata" and not rejected_metadata:
+                rejected_metadata = True
+                return False
+            return result
+
+        client.call = null_reply_after_marker  # type: ignore[method-assign]
+        with self.assertRaises(TaskError) as raised:
+            store.create_product(
+                product_id="secretary", projects=["secretary"], title="Secretary", description="",
+                actor="po", request_id="null-marker",
+            )
+
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(store.list_transactions(), [{
+            "request_id": "null-marker", "kind": "entity.created", "ref": "product:secretary",
+            "progress": ["typed_event"],
+        }])
+        product = store.retry_transaction("null-marker")
+        self.assertEqual(product["id"], "secretary")
+        self.assertEqual(len([call for call in client.calls if call[0] == "createTask"]), 1)
+        self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
+
     def test_staged_transaction_without_a_backend_row_is_discarded_by_the_operator(self) -> None:
         client = LiveSwimlaneBoard()
         store = self._store(client)
@@ -508,6 +544,31 @@ class ProductIssueStoreTests(unittest.TestCase):
         self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
         self.assertEqual([event["kind"] for event in store.audit.events()], ["entity.created"])
 
+    def test_typed_pending_is_listed_with_its_repair_identity(self) -> None:
+        original_call = self.client.call
+        rejected = False
+
+        def reject_metadata_once(method: str, **params: object) -> object:
+            nonlocal rejected
+            if method == "saveTaskMetadata" and not rejected:
+                rejected = True
+                self.client.calls.append((method, params))
+                return False
+            return original_call(method, **params)
+
+        self.client.call = reject_metadata_once  # type: ignore[method-assign]
+        with self.assertRaises(TaskError):
+            self.store.create_product(
+                product_id="secretary", projects=["secretary"], title="Secretary", description="",
+                actor="po", request_id="listed-pending",
+            )
+
+        self.assertEqual(self.store.list_transactions(), [{
+            "request_id": "listed-pending", "kind": "entity.created", "ref": "product:secretary",
+            "progress": ["typed_event"],
+        }])
+        self.assertEqual(self.store.retry_transaction("listed-pending")["id"], "secretary")
+
     def test_rejected_issue_metadata_stays_pending_until_same_request_repairs_it(self) -> None:
         self.store.create_product(
             product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
@@ -672,6 +733,40 @@ class ProductIssueStoreTests(unittest.TestCase):
         with self.assertRaises(TaskError) as raised:
             self.store.close_issue(reference=issue["ref"], reason="invalid", actor="po", request_id="close")
         self.assertEqual(raised.exception.code, "validation")
+
+    def test_committed_priority_replay_survives_a_later_close(self) -> None:
+        self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
+        )
+        issue = self.store.create_issue(
+            product="secretary", issue_kind="bug", priority="P2", title="Crash", description="", actor="po",
+        )
+        self.store.update_priority(
+            reference=issue["ref"], priority="P0", reason="urgent", actor="po", request_id="priority",
+        )
+        self.store.close_issue(reference=issue["ref"], reason="resolved", actor="po", request_id="close")
+
+        replayed = self.store.update_priority(
+            reference=issue["ref"], priority="P0", reason="urgent", actor="po", request_id="priority",
+        )
+
+        self.assertTrue(replayed["closed"])
+        self.assertEqual(replayed["priority"], "P0")
+
+    def test_priority_update_on_a_closed_issue_preserves_closed_refusal(self) -> None:
+        self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
+        )
+        issue = self.store.create_issue(
+            product="secretary", issue_kind="bug", priority="P2", title="Crash", description="", actor="po",
+        )
+        self.store.close_issue(reference=issue["ref"], reason="resolved", actor="po")
+
+        with self.assertRaises(TaskError) as raised:
+            self.store.update_priority(reference=issue["ref"], priority="P0", reason="urgent", actor="po")
+
+        self.assertEqual(raised.exception.code, "closed")
+        self.assertEqual(raised.exception.exit_code, 3)
 
     def test_generic_reconcile_leaves_product_issue_transaction_for_its_owner(self) -> None:
         original_call = self.client.call

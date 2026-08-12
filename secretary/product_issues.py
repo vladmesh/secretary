@@ -787,10 +787,23 @@ class ProductIssueStore:
         return ""
 
     def list_transactions(self) -> list[dict[str, Any]]:
-        return sorted(
-            (self._transaction_view(document) for document in self.transactions.documents()),
-            key=lambda item: item["request_id"],
-        )
+        legacy = [self._transaction_view(document) for document in self.transactions.documents()]
+        typed = []
+        for event in self.audit.pending_events():
+            subject = event.get("subject")
+            if (
+                event.get("record_type") == "board.protocol_event"
+                and isinstance(subject, dict)
+                and subject.get("kind") in {PRODUCT_TYPE, ISSUE_TYPE}
+                and isinstance(event.get("request_id"), str)
+                and isinstance(event.get("kind"), str)
+                and isinstance(subject.get("ref"), str)
+            ):
+                typed.append({
+                    "request_id": event["request_id"], "kind": event["kind"],
+                    "ref": subject["ref"], "progress": ["typed_event"],
+                })
+        return sorted(legacy + typed, key=lambda item: item["request_id"])
 
     def adopt_transaction(self, path: str | Path) -> dict[str, Any]:
         return self._transaction_view(self.transactions.adopt(path))
@@ -944,12 +957,34 @@ class ProductIssueStore:
                 self._reject_other_pending_reference_operation(reference, request_id)
                 self._reject_other_pending_typed_operation(reference, request_id)
                 from secretary.board import Actor, EntityKind, Issue, Replace
-                current = self._host().read(EntityKind.ISSUE, reference)
+                host = self._host()
+                try:
+                    known = host.canon.event(request_id) if host.canon is not None else None
+                except ValueError as exc:
+                    raise TaskError("validation", str(exc), 2) from None
+                if known is not None:
+                    if (
+                        known.kind.value != "entity.updated"
+                        or known.entity_kind is not EntityKind.ISSUE
+                        or known.ref != reference
+                        or known.actor != Actor("po", actor)
+                        or known.reason != reason
+                        or known.data.get("priority") != priority
+                    ):
+                        raise TaskError("validation", "request id belongs to another operation or payload", 2)
+                    try:
+                        host.recover_product_issue(request_id)
+                    except Exception as exc:
+                        raise self._host_error(exc) from None
+                    return self.show_issue(reference)
+                current = host.read(EntityKind.ISSUE, reference)
                 if not isinstance(current, Issue):
                     raise TaskError("validation", "reference is not an Issue", 2)
+                if current.state.value == "closed":
+                    raise TaskError("closed", "cannot reprioritize a closed issue", 3)
                 desired = Issue(current.ref, current.title, current.product_ref, current.state, priority, current.issue_kind, current.description, current.close_reason)
                 try:
-                    self._host().replace(Replace(desired, Actor("po", actor), reason, request_id=request_id))
+                    host.replace(Replace(desired, Actor("po", actor), reason, request_id=request_id))
                 except Exception as exc:
                     raise self._host_error(exc) from None
                 return self.show_issue(reference)
