@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol, Sequence
 
-from secretary.board.models import Actor, BoardEntity, EntityKind, EntityRef, Event, RelatedRefs
+from secretary.board.models import Actor, BoardEntity, EntityKind, EntityRef, Event, EventKind, RelatedRefs
 from secretary.board.transitions import LifecycleState
 
 
@@ -73,6 +73,34 @@ class TransitionRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class MarkerComment:
+    """One control-plane comment expressed as a complete typed occurrence.
+
+    ``data`` is deliberately the complete marker payload, including the text
+    that will appear on the board.  The adapter renders it only after staging;
+    callers never hand it a separately composed comment body.
+    """
+
+    ref: EntityRef
+    kind: EventKind
+    actor: Actor
+    reason: str
+    data: dict[str, object]
+    related_refs: RelatedRefs = field(default_factory=RelatedRefs)
+    request_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.ref, str) or not self.ref.strip():
+            raise ValueError("marker Card ref must be a non-empty string")
+        if not isinstance(self.reason, str) or not self.reason.strip():
+            raise ValueError("marker reason must be a non-empty string")
+        if self.kind not in {EventKind.CARD_REPORTED, EventKind.CARD_VERDICTED, EventKind.CARD_DECIDED}:
+            raise ValueError("marker comment kind must be a declared control-plane event kind")
+        if not isinstance(self.data, dict):
+            raise ValueError("marker comment data must be an object")
+
+
+@dataclass(frozen=True, slots=True)
 class MutationResult:
     entity: BoardEntity
     event: Event
@@ -90,3 +118,5 @@ class BoardHost(Protocol):
     def replace(self, operation: Replace) -> MutationResult: ...
 
     def transition(self, operation: TransitionRequest) -> MutationResult: ...
+
+    def marker_comment(self, operation: MarkerComment) -> MutationResult: ...

@@ -17,6 +17,7 @@ from unittest import mock
 
 from secretary.cli import main
 from secretary.board.card_transitions import CARD_TRANSITIONS
+from secretary.board.kanboard import KanboardBoardHost
 from secretary.board.host import TransitionRequest
 from secretary.board.models import Actor, CardState, EntityKind, Event, RelatedRefs
 from secretary.board.transitions import TRANSITIONS, transition_for
@@ -2306,7 +2307,8 @@ class AssessmentStateTests(unittest.TestCase):
         self.assertEqual(comment["marker"], "decision:reslice")
         self.assertIn("the round converged", comment["body"])
         event = TaskAudit(Path(self.tmpdir.name)).events("secretary-468", kind="decided")[-1]
-        self.assertEqual(event["payload"]["decision"], "reslice")
+        self.assertEqual(event["kind"], "card.decided")
+        self.assertEqual(event["data"]["decision"], "reslice")
         self.assertEqual(event["actor"], {"role": "observer", "id": "observer"})
 
     def test_assessment_visit_accepts_one_canonical_decision_across_delivery_retries(self) -> None:
@@ -2320,7 +2322,7 @@ class AssessmentStateTests(unittest.TestCase):
         self.assertEqual(replay["event_id"], first["event_id"])
         decisions = TaskAudit(Path(self.tmpdir.name)).events("secretary-468", kind="decided")
         self.assertEqual(len(decisions), 1)
-        self.assertTrue(decisions[0]["payload"]["assessment_visit"])
+        self.assertTrue(decisions[0]["data"]["assessment_visit"])
         with self.assertRaisesRegex(TaskError, "already has a release decision") as raised:
             self._decide("rework", request_id="decision-conflicting-delivery")
         self.assertEqual(raised.exception.code, "decision_already_recorded")
@@ -2359,7 +2361,7 @@ class AssessmentStateTests(unittest.TestCase):
         failed = [False]
 
         def fail_once(request_id: str, event: dict) -> str:
-            if event.get("kind") == "decided" and not failed[0]:
+            if event.get("kind") == "card.decided" and not failed[0]:
                 failed[0] = True
                 raise OSError("lost audit append")
             return real_append(request_id, event)
@@ -2386,16 +2388,17 @@ class AssessmentStateTests(unittest.TestCase):
 
     def test_decision_staged_before_comment_fails_closed_until_original_retry(self) -> None:
         self._park()
-        real_stage = self.writer.audit.stage
+        real_claim = self.writer.audit.claim
         interrupted = [False]
 
-        def stage_then_crash(request_id: str, event: dict) -> None:
-            real_stage(request_id, event)
-            if event.get("kind") == "decided" and not interrupted[0]:
+        def claim_then_crash(request_id: str, event: dict, **kwargs: object) -> object:
+            claimed = real_claim(request_id, event, **kwargs)
+            if event.get("kind") == "card.decided" and not interrupted[0]:
                 interrupted[0] = True
                 raise KeyboardInterrupt("crash after stage")
+            return claimed
 
-        with mock.patch.object(self.writer.audit, "stage", side_effect=stage_then_crash):
+        with mock.patch.object(self.writer.audit, "claim", side_effect=claim_then_crash):
             with self.assertRaises(KeyboardInterrupt):
                 self._decide("release", request_id="staged-before-comment")
 
@@ -2412,16 +2415,12 @@ class AssessmentStateTests(unittest.TestCase):
                 reason="", request_id="must-not-act-on-commentless-decision",
             )
 
-        retry = self._decide("release", request_id="staged-before-comment")
-
-        self.assertTrue(retry["replayed"])
-        decisions = self.writer.audit.events("secretary-468", kind="decided")
-        self.assertEqual(len(decisions), 1)
-        comments = [
-            comment for comment in self.writer.reader.show("secretary-468")["comments"]
-            if comment.get("marker") == "decision:release"
-        ]
-        self.assertEqual(len(comments), 1)
+        # A staged occurrence is ambiguous evidence.  Retrying it must not
+        # issue a second comment write, because the first process could have
+        # reached Kanboard immediately before it died.
+        with self.assertRaisesRegex(TaskError, "audit repair"):
+            self._decide("release", request_id="staged-before-comment")
+        self.assertEqual(self.writer.audit.events("secretary-468", kind="decided"), [])
 
     def test_observer_wake_predicate_excludes_routine_and_self_card_events(self) -> None:
         refs = {"secretary-468"}
@@ -3121,7 +3120,8 @@ class BlockedContractTests(unittest.TestCase):
 
     def _events(self, kind: str) -> list[dict]:
         with open(self.writer.audit.events_path, encoding="utf-8") as events:
-            return [event for event in map(json.loads, events) if event["kind"] == kind]
+            typed = {"reported": "card.reported", "verdict": "card.verdict", "decided": "card.decided"}
+            return [event for event in map(json.loads, events) if event["kind"] in {kind, typed.get(kind)}]
 
     def _reserve(self) -> None:
         bind_observer(self, SPRINT)
@@ -3159,7 +3159,10 @@ class BlockedContractTests(unittest.TestCase):
                     request_id=f"blocked-{classification}",
                 )
                 self.assertEqual(result["action"], "reported")
-                payload = self._events("reported")[index]["payload"]
+                event = self._events("reported")[index]
+                self.assertEqual(event["record_type"], "board.protocol_event")
+                self.assertEqual(event["kind"], "card.reported")
+                payload = event["data"]
                 self.assertEqual(payload["marker"], "report:blocked")
                 self.assertEqual(payload["classification"], classification)
                 self.assertEqual(
@@ -3186,7 +3189,7 @@ class BlockedContractTests(unittest.TestCase):
             request_id="done-no-classification",
         )
         self.assertEqual(result["action"], "reported")
-        self.assertNotIn("classification", self._events("reported")[0]["payload"])
+        self.assertIsNone(self._events("reported")[0]["data"]["classification"])
         self.assertNotIn("classification:", self.client.comments[12][-1]["comment"])
         with self.assertRaisesRegex(TaskError, "no classification") as raised:
             self.writer.report(
@@ -3292,7 +3295,7 @@ class BlockedContractTests(unittest.TestCase):
         self.assertEqual(requeued["task"]["state"], "ready")
         self.assertNotIn("blocked_classification", requeued["task"])
         self.assertNotIn("blocked_classification", self.client.metadata[12])
-        self.assertEqual(self._events("reported")[0]["payload"]["classification"], "external_fact")
+        self.assertEqual(self._events("reported")[0]["data"]["classification"], "external_fact")
 
     def test_the_steward_requirement_is_untouched(self) -> None:
         self.client.tasks[0]["column_id"] = 3  # In progress
@@ -3391,7 +3394,7 @@ class RequestIdOwnershipTests(unittest.TestCase):
             self._report(kind="blocked", classification="external_fact")
 
         self.assertEqual(len(self._events("round-1")), 1)
-        self.assertEqual(self._events("round-1")[0]["payload"]["marker"], "report:done")
+        self.assertEqual(self._events("round-1")[0]["data"]["marker"], "report:done")
         self.assertEqual(len(self._comments()), 1)
 
     def test_a_reused_report_id_with_another_classification_is_refused(self) -> None:
@@ -3401,7 +3404,7 @@ class RequestIdOwnershipTests(unittest.TestCase):
             self._report(kind="blocked", body="stuck", classification="wrong_task_definition")
 
         self.assertEqual(
-            self._events("round-1")[0]["payload"]["classification"], "external_fact"
+            self._events("round-1")[0]["data"]["classification"], "external_fact"
         )
         self.assertEqual(len(self._comments()), 1)
 
@@ -3453,16 +3456,14 @@ class RequestIdOwnershipTests(unittest.TestCase):
         self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
         self.assertEqual(self._comments(), [])
 
-    def test_a_pending_report_still_commits_under_its_own_payload(self) -> None:
+    def test_a_generic_pending_report_cannot_be_replaced_by_a_typed_owner(self) -> None:
         staged = self._stage_pending_report("first round")
 
-        result = self._report()
+        with self.assertRaisesRegex(TaskError, "belongs to another operation"):
+            self._report()
 
-        self.assertEqual(result["event_id"], staged["event_id"])
-        self.assertIs(result["replayed"], True)
-        self.assertEqual(len(self._events("round-1")), 1)
-        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
-        # The crashed attempt already wrote the comment; recovery writes no second one.
+        self.assertEqual(self.writer.audit.pending_event("round-1"), staged)
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
         self.assertEqual(self._comments(), [])
 
     def test_a_reused_verdict_id_with_another_verdict_is_refused(self) -> None:
@@ -3477,7 +3478,7 @@ class RequestIdOwnershipTests(unittest.TestCase):
                 body="the gate is red", request_id="round-1",
             )
 
-        self.assertEqual(self._events("round-1")[0]["payload"]["marker"], "review:green")
+        self.assertEqual(self._events("round-1")[0]["data"]["marker"], "review:green")
         self.assertEqual(len(self._comments()), 1)
 
     def test_the_cli_refuses_a_reused_report_id_with_exit_code_two(self) -> None:
@@ -3500,6 +3501,92 @@ class RequestIdOwnershipTests(unittest.TestCase):
         self.assertIs(json.loads(output.getvalue().splitlines()[0])["replayed"], False)
         self.assertEqual(json.loads(errors.getvalue())["error"]["code"], "validation")
         self.assertEqual(len(self._comments()), 1)
+
+
+class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
+    """The three migrated marker families share one staged typed transaction."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.writer._guard_sprint_write = lambda **_kwargs: {}  # type: ignore[method-assign]
+        self.writer._sprint_holds_project = lambda _project: True  # type: ignore[method-assign]
+
+    def _write(self, family: str, request_id: str, body: str = "complete typed reason") -> dict:
+        if family == "report":
+            return self.writer.report(
+                role="worker", actor="worker", reference="secretary-468", kind="done",
+                body=body, request_id=request_id,
+            )
+        if family == "verdict":
+            return self.writer.verdict(
+                role="reviewer", actor="reviewer", reference="secretary-468", kind="green",
+                body=body, request_id=request_id,
+            )
+        self.client.tasks[0]["column_id"] = 7  # Assessment for observer decisions.
+        return self.writer.decide(
+            role="observer", actor="observer", reference="secretary-468", kind="release",
+            body=body, request_id=request_id,
+        )
+
+    def test_each_marker_is_rendered_from_a_complete_typed_event(self) -> None:
+        expected = {
+            "report": ("card.reported", "report:done"),
+            "verdict": ("card.verdict", "review:green"),
+            "decision": ("card.decided", "decision:release"),
+        }
+        for family, (kind, marker) in expected.items():
+            with self.subTest(family=family):
+                request_id = f"typed-{family}"
+                result = self._write(family, request_id)
+                event = self.writer.audit.committed_event(request_id)
+                assert event is not None
+                self.assertEqual(event["record_type"], "board.protocol_event")
+                self.assertEqual(event["kind"], kind)
+                self.assertEqual(event["subject"], {"kind": "card", "ref": "secretary-468"})
+                self.assertEqual(event["reason"], "complete typed reason")
+                self.assertEqual(event["data"]["marker"], marker)
+                self.assertEqual(event["data"]["body"], "complete typed reason")
+                self.assertEqual(self.client.comments[12][-1]["comment"], KanboardBoardHost.render_marker(Event.from_record(event)))
+                self.assertEqual(result["event_id"], event["event_id"])
+
+    def test_post_effect_append_failure_recovers_without_a_second_comment_for_each_marker(self) -> None:
+        for family in ("report", "verdict", "decision"):
+            with self.subTest(family=family):
+                request_id = f"pending-{family}"
+                real_append = self.writer.audit.append
+
+                def fail_marker_append(request: str, event: dict) -> str:
+                    if request == request_id and event.get("record_type") == "board.protocol_event":
+                        raise OSError("audit disk full")
+                    return real_append(request, event)
+
+                with mock.patch.object(self.writer.audit, "append", side_effect=fail_marker_append):
+                    with self.assertRaisesRegex(TaskError, "audit repair"):
+                        self._write(family, request_id, body=f"{family} pending reason")
+                self.assertIsNotNone(self.writer.audit.pending_event(request_id))
+                writes = len(self.client.comments[12])
+                self.assertEqual(self.writer.reconcile(), (1, 0))
+                self.assertEqual(len(self.client.comments[12]), writes)
+                self.assertIsNotNone(self.writer.audit.committed_event(request_id))
+
+    def test_backend_refusal_discards_each_typed_owner(self) -> None:
+        self.client.fail_comments = True
+        for family in ("report", "verdict", "decision"):
+            with self.subTest(family=family):
+                request_id = f"refused-{family}"
+                with self.assertRaises(TaskError):
+                    self._write(family, request_id)
+                self.assertIsNone(self.writer.audit.event(request_id))
+
+    def test_generic_pending_owner_cannot_be_replaced_by_any_typed_marker(self) -> None:
+        for family in ("report", "verdict", "decision"):
+            with self.subTest(family=family):
+                request_id = f"generic-{family}"
+                generic = {"event_id": request_id, "request_id": request_id, "kind": "commented", "payload": {}}
+                self.writer.audit.stage(request_id, generic)
+                with self.assertRaisesRegex(TaskError, "belongs to another operation"):
+                    self._write(family, request_id)
+                self.assertEqual(self.writer.audit.pending_event(request_id), generic)
 
     def test_every_write_has_to_declare_what_its_id_claims(self) -> None:
         """A new caller cannot inherit the blind replay by forgetting one keyword."""

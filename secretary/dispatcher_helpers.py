@@ -243,7 +243,8 @@ def _round_report_marker(audit: Any, reference: str, round_ids: set[str]) -> str
     for event in audit.events(reference, kind="reported"):
         if str(event.get("request_id") or "") not in round_ids:
             continue
-        candidate = (event.get("payload") or {}).get("marker")
+        payload = event.get("data") if event.get("record_type") == "board.protocol_event" else event.get("payload")
+        candidate = (payload or {}).get("marker") if isinstance(payload, dict) else None
         if candidate in WORKER_REPORT_MARKERS:
             marker = candidate
     return marker

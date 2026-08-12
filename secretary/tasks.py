@@ -20,8 +20,8 @@ from typing import Any, Callable
 
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
 from secretary.board.events import BoardEventPending
-from secretary.board.host import MutationResult, TransitionRequest
-from secretary.board.models import Actor, CardState, EntityKind, Event, RelatedRefs
+from secretary.board.host import MarkerComment, MutationResult, TransitionRequest
+from secretary.board.models import Actor, CardState, EntityKind, Event, EventKind, RelatedRefs
 from secretary.board.transitions import BoardProtocolError
 from secretary.board_transport import (
     BoardTransport, BoardTransportError, resolve, transport_path,
@@ -174,6 +174,26 @@ _SLUG_RE = re.compile(r"^[a-z0-9-]{1,30}$")
 # whatever column it currently sits in.
 _TYPED_RECORD_TYPES = {"issue", "product"}
 
+_MARKER_EVENT_ACTIONS = {
+    EventKind.CARD_REPORTED.value: "reported",
+    EventKind.CARD_VERDICTED.value: "verdict",
+    EventKind.CARD_DECIDED.value: "decided",
+}
+
+
+def _event_action(event: dict[str, Any]) -> str:
+    """The released control-plane action spelling for generic history readers."""
+    return _MARKER_EVENT_ACTIONS.get(str(event.get("kind") or ""), str(event.get("kind") or ""))
+
+
+def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
+    """Read a legacy payload or the typed marker data without rewriting history."""
+    if event.get("record_type") == TaskAudit._PROTOCOL_EVENT_RECORD_TYPE:
+        data = event.get("data")
+        return data if isinstance(data, dict) else {}
+    payload = event.get("payload")
+    return payload if isinstance(payload, dict) else {}
+
 
 def _check_execution_record(task: dict[str, Any]) -> None:
     """Reject a Product or an Issue on an execution-task path, before any write."""
@@ -217,7 +237,7 @@ def assessment_resolution(events: Iterable[dict[str, Any]]) -> tuple[str, dict[s
     ordered = list(events)
     latest_park = -1
     for index, event in enumerate(ordered):
-        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        payload = _event_payload(event)
         lifecycle = event.get("transition") if isinstance(event.get("transition"), dict) else {}
         if (
             event.get("kind") == "moved" and str(payload.get("to") or "") == "assessment"
@@ -230,8 +250,8 @@ def assessment_resolution(events: Iterable[dict[str, Any]]) -> tuple[str, dict[s
         return "", None
     visit = str(ordered[latest_park].get("event_id") or ordered[latest_park].get("request_id") or "")
     for event in ordered[latest_park + 1:]:
-        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-        if event.get("kind") != "decided" or not str(payload.get("decision") or ""):
+        payload = _event_payload(event)
+        if _event_action(event) != "decided" or not str(payload.get("decision") or ""):
             continue
         recorded_visit = str(payload.get("assessment_visit") or "")
         if not recorded_visit or recorded_visit == visit:
@@ -242,7 +262,7 @@ def assessment_resolution(events: Iterable[dict[str, Any]]) -> tuple[str, dict[s
 def standing_decision(events: Iterable[dict[str, Any]]) -> str:
     """The canonical decision for the current Assessment visit, or an empty string."""
     _visit, event = assessment_resolution(events)
-    payload = event.get("payload") if isinstance(event, dict) and isinstance(event.get("payload"), dict) else {}
+    payload = _event_payload(event) if isinstance(event, dict) else {}
     return str(payload.get("decision") or "")
 
 
@@ -842,7 +862,7 @@ class TaskAudit:
                         continue
                     if reference and event.get("ref") != reference:
                         continue
-                    if kind and event.get("kind") != kind:
+                    if kind and event.get("kind") != kind and _event_action(event) != kind:
                         continue
                     result.append(event)
         except FileNotFoundError:
@@ -1426,16 +1446,15 @@ class TaskWriter:
         the observer to infer which one it is costs an analysis the worker had already done.
         Two values and no free text, so repeated blocks from one head are countable.
 
-        It is durable in two places, both written by the single write this method already makes:
-        the `reported` audit payload, which is the authoritative machine-readable copy, and a
-        `classification:` line under the marker in the comment, which is what an observer reads
-        on the card. It is deliberately not card metadata: a second backend write can fail on its
-        own and leave a field that silently disagrees with the audit.
+        Its complete payload is staged as one typed Card occurrence, then that
+        occurrence renders the `classification:` line under the marker.  It is
+        deliberately not card metadata: a second backend write can fail on its
+        own and leave a field that silently disagrees with the event.
         """
         self._role(role, {"worker"})
         body = self._redact_for_board(body)
-        if kind not in {"done", "blocked"} or (kind == "blocked" and not body.strip()):
-            raise TaskError("validation", "blocked reports require a non-empty body", 2)
+        if kind not in {"done", "blocked"} or not body.strip():
+            raise TaskError("validation", "reports require a non-empty body", 2)
         classification = classification.strip()
         if kind == "blocked" and classification not in _BLOCK_CLASSIFICATIONS:
             raise TaskError(
@@ -1448,26 +1467,25 @@ class TaskWriter:
             if classification:
                 raise TaskError("validation", "a done report carries no classification", 2)
             self._require_committed_workspace()
-        marker = f"report:{kind}"
-        payload: dict[str, Any] = {"marker": marker, "body_sha256": _digest(body)}
-        content = f"[{marker}]\n{body}"
-        if classification:
-            payload["classification"] = classification
-            content = f"[{marker}]\nclassification: {classification}\n\n{body}"
-        # A done report carries no `classification` key at all, so the identity names it
-        # explicitly as absent: reusing a blocked report's id for a done one is a different
-        # operation even before the marker is compared.
-        identity = {**payload, "classification": classification or None}
-        return self._write("reported", role, actor, reference, request_id, payload, lambda task: self.client.call("createComment", task_id=_task_number(task), user_id=0, content=content), identity=identity)
+        return self._marker_write(
+            action="reported", event_kind=EventKind.CARD_REPORTED, role=role, actor=actor,
+            reference=reference, reason=body, request_id=request_id,
+            data={
+                "marker": f"report:{kind}", "status": kind, "body": body,
+                "body_sha256": _digest(body), "classification": classification or None,
+            },
+        )
 
     def verdict(self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None) -> dict[str, Any]:
         self._role(role, {"reviewer"})
         body = self._redact_for_board(body)
-        if kind not in {"green", "red"} or (kind == "red" and not body.strip()):
-            raise TaskError("validation", "red verdicts require a non-empty body", 2)
-        marker = f"review:{kind}"
-        payload = {"marker": marker, "body_sha256": _digest(body)}
-        return self._write("verdict", role, actor, reference, request_id, payload, lambda task: self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{marker}]\n{body}"), identity=payload)
+        if kind not in {"green", "red"} or not body.strip():
+            raise TaskError("validation", "verdicts require a non-empty body", 2)
+        return self._marker_write(
+            action="verdict", event_kind=EventKind.CARD_VERDICTED, role=role, actor=actor,
+            reference=reference, reason=body, request_id=request_id,
+            data={"marker": f"review:{kind}", "status": kind, "body": body, "body_sha256": _digest(body)},
+        )
 
     def decide(self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None) -> dict[str, Any]:
         """Record what to do with a parked card, apart from the move that does it.
@@ -1514,12 +1532,12 @@ class TaskWriter:
             committed_events = self.audit.events(reference)
             pending_decisions = [
                 event for event in self.audit.pending_events()
-                if str(event.get("ref") or "") == reference and str(event.get("kind") or "") == "decided"
+                if str(event.get("ref") or "") == reference and _event_action(event) == "decided"
             ]
             visit, existing = assessment_resolution([*committed_events, *pending_decisions])
             known_request = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
             if existing is not None and not known_request:
-                existing_payload = existing.get("payload") if isinstance(existing.get("payload"), dict) else {}
+                existing_payload = _event_payload(existing)
                 existing_kind = str(existing_payload.get("decision") or "")
                 existing_request = str(existing.get("request_id") or "")
                 if self.audit.pending_event(existing_request) is not None:
@@ -1531,17 +1549,14 @@ class TaskWriter:
                 if existing_kind != kind:
                     raise TaskError("decision_already_recorded", f"Assessment visit {visit} already has a {existing_kind} decision", 3)
                 return {"action": "decided", "task": current, "event_id": str(existing.get("event_id") or existing.get("request_id") or ""), "replayed": True}
-            marker = f"decision:{kind}"
-
-            def mutation(task: dict[str, Any]) -> Any:
-                if task["state"] != "assessment":
-                    raise TaskError("transition_forbidden", "a decision is only recorded on a card in Assessment", 3)
-                self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{marker}]\n{body}")
-
-            payload = {"marker": marker, "decision": kind, "body_sha256": _digest(body), "assessment_visit": visit or None}
-            return self._write(
-                "decided", role, actor, reference, request_id, payload, mutation,
-                identity=payload, retry_payload={"decision_body": body},
+            return self._marker_write(
+                action="decided", event_kind=EventKind.CARD_DECIDED, role=role, actor=actor,
+                reference=reference, reason=body, request_id=request_id,
+                data={
+                    "marker": f"decision:{kind}", "decision": kind, "body": body,
+                    "body_sha256": _digest(body), "assessment_visit": visit or None,
+                },
+                require_assessment=True,
             )
 
     def routing(
@@ -2311,6 +2326,57 @@ class TaskWriter:
             raise TaskError("not_found", "task was not found", 2)
         return _positive_int(raw.get("swimlane_id")) or 0
 
+    def _marker_write(
+        self,
+        *,
+        action: str,
+        event_kind: EventKind,
+        role: str,
+        actor: str,
+        reference: str,
+        reason: str,
+        request_id: str | None,
+        data: dict[str, Any],
+        require_assessment: bool = False,
+    ) -> dict[str, Any]:
+        """Send a control-plane marker through the typed host transaction.
+
+        The command supplies its semantic fields once.  The host stages them as
+        an immutable event and derives the board comment from that event, so a
+        retry never has a second command-composed representation to drift from.
+        """
+        request_id = request_id or str(uuid.uuid4())
+        try:
+            replayed = self.board_host.canon.event(request_id) is not None
+        except ValueError as exc:
+            message = str(exc)
+            if "released generic audit record" in message:
+                message = "request id belongs to another operation or payload"
+            raise TaskError("validation", message, 2) from None
+        if require_assessment:
+            current = self.reader.show(reference)
+            if current["state"] != "assessment":
+                raise TaskError("transition_forbidden", "a decision is only recorded on a card in Assessment", 3)
+        try:
+            result = self.board_host.marker_comment(MarkerComment(
+                reference, event_kind, Actor(role, actor), reason, data,
+                request_id=request_id,
+            ))
+        except BoardEventPending:
+            raise TaskError(
+                "audit_pending", "backend write committed; audit repair is required", 4,
+            ) from None
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
+        except BoardProtocolError as exc:
+            raise TaskError("backend_error", str(exc), 1) from None
+        return {
+            "action": action,
+            "task": self.reader.show(reference),
+            "event_id": result.event.event_id,
+            "replayed": replayed,
+        }
+
     def _write(
         self,
         kind: str,
@@ -2378,6 +2444,10 @@ class TaskWriter:
             try:
                 if event.get("record_type") == TaskAudit._PROTOCOL_EVENT_RECORD_TYPE:
                     subject = event.get("subject") if isinstance(event.get("subject"), dict) else {}
+                    if str(event.get("kind") or "") in _MARKER_EVENT_ACTIONS:
+                        self.board_host.recover_marker_comment(str(event["request_id"]))
+                        repaired += 1
+                        continue
                     if subject.get("kind") == "sprint":
                         self.board_host.recover_sprint(str(event["request_id"]))
                         repaired += 1

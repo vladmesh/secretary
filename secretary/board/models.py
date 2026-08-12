@@ -43,6 +43,12 @@ class EventKind(StrEnum):
     CARD_UNBLOCKED = "card.unblocked"
     CARD_RETURNED = "card.returned"
     CARD_MOVED = "card.moved"
+    # Control-plane marker occurrences are Card facts too.  Their Kanboard
+    # comments are a rendering of the data carried here, not a second source
+    # of the report, verdict, or observer decision.
+    CARD_REPORTED = "card.reported"
+    CARD_VERDICTED = "card.verdict"
+    CARD_DECIDED = "card.decided"
 
 
 class ProductState(StrEnum):
@@ -241,6 +247,7 @@ class Event:
             _non_empty(self.target_state or "", "event transition target")
         if not isinstance(self.data, dict):
             raise ValueError("event data must be an object")
+        _validate_control_marker_event(self.kind, self.entity_kind, self.reason, self.data)
         # The journal spelling is UTC.  Keep the value canonical too, so an
         # event read back from its own record compares equal to the value that
         # was written, even when its caller supplied another aware timezone.
@@ -342,6 +349,43 @@ def _optional_string_field(document: dict[str, Any], name: str) -> str | None:
     if not isinstance(value, str):
         raise ValueError(f"board event {name} must be a string")
     return value
+
+
+def _validate_control_marker_event(
+    kind: EventKind, entity_kind: EntityKind, reason: str, data: dict[str, Any],
+) -> None:
+    """Keep the three declared marker kinds complete at the typed boundary."""
+    marker_kinds = {
+        EventKind.CARD_REPORTED, EventKind.CARD_VERDICTED, EventKind.CARD_DECIDED,
+    }
+    if kind not in marker_kinds:
+        return
+    if entity_kind is not EntityKind.CARD:
+        raise ValueError("control-plane marker events require a Card subject")
+    marker = data.get("marker")
+    body = data.get("body")
+    if not isinstance(marker, str) or not marker or not isinstance(body, str) or not body.strip():
+        raise ValueError("control-plane marker events require a non-empty marker and body")
+    if reason != body:
+        raise ValueError("control-plane marker event reason must match its body")
+    if kind is EventKind.CARD_REPORTED:
+        status = data.get("status")
+        if status not in {"done", "blocked"} or marker != f"report:{status}":
+            raise ValueError("Card report event has an unsupported marker payload")
+        classification = data.get("classification")
+        if status == "blocked" and classification not in {"external_fact", "wrong_task_definition"}:
+            raise ValueError("blocked Card report requires a supported classification")
+        if status == "done" and classification is not None:
+            raise ValueError("done Card report carries no classification")
+        return
+    if kind is EventKind.CARD_VERDICTED:
+        status = data.get("status")
+        if status not in {"green", "red"} or marker != f"review:{status}":
+            raise ValueError("Card verdict event has an unsupported marker payload")
+        return
+    decision = data.get("decision")
+    if decision not in {"release", "rework", "reslice"} or marker != f"decision:{decision}":
+        raise ValueError("Card decision event has an unsupported marker payload")
 
 
 def _format_time(value: datetime) -> str:
