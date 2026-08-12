@@ -393,6 +393,7 @@ class ProductIssueTransaction:
 class ProductIssueStore:
     def __init__(self, client: KanboardClient, *, data_dir: str | Path, instance: str | Path) -> None:
         self.client = client
+        self.data_dir = Path(data_dir)
         self.audit = TaskAudit(data_dir)
         self.transactions = ProductIssueTransaction(data_dir, self.audit)
         self.instance = Path(instance)
@@ -714,6 +715,18 @@ class ProductIssueStore:
                 4,
             )
 
+    def _reject_other_pending_typed_operation(self, reference: str, request_id: str) -> None:
+        for event in self.audit.pending_events():
+            if (
+                event.get("record_type") == "board.protocol_event"
+                and event.get("request_id") != request_id and event.get("ref") == reference
+            ):
+                raise TaskError(
+                    "audit_pending",
+                    "Product/Issue operation is pending repair; retry it with its original request id first",
+                    4,
+                )
+
     def _finish_for(self, kind: str):
         if kind in {"product_created", "issue_created"}:
             return self._finish_create
@@ -774,16 +787,40 @@ class ProductIssueStore:
         return ""
 
     def list_transactions(self) -> list[dict[str, Any]]:
-        return sorted(
-            (self._transaction_view(document) for document in self.transactions.documents()),
-            key=lambda item: item["request_id"],
-        )
+        legacy = [self._transaction_view(document) for document in self.transactions.documents()]
+        typed = []
+        for event in self.audit.pending_events():
+            subject = event.get("subject")
+            if (
+                event.get("record_type") == "board.protocol_event"
+                and isinstance(subject, dict)
+                and subject.get("kind") in {PRODUCT_TYPE, ISSUE_TYPE}
+                and isinstance(event.get("request_id"), str)
+                and isinstance(event.get("kind"), str)
+                and isinstance(subject.get("ref"), str)
+            ):
+                typed.append({
+                    "request_id": event["request_id"], "kind": event["kind"],
+                    "ref": subject["ref"], "progress": ["typed_event"],
+                })
+        return sorted(legacy + typed, key=lambda item: item["request_id"])
 
     def adopt_transaction(self, path: str | Path) -> dict[str, Any]:
         return self._transaction_view(self.transactions.adopt(path))
 
     def retry_transaction(self, request_id: str) -> dict[str, Any]:
-        staged = self.transactions.load(request_id)
+        try:
+            staged = self.transactions.load(request_id)
+        except TaskError as exc:
+            if exc.code != "not_found":
+                raise
+            try:
+                result = self._host().recover_product_issue(request_id)
+            except Exception as recovery:
+                raise self._host_error(recovery) from None
+            if result.entity.kind.value == PRODUCT_TYPE:
+                return self.show_product(result.entity.ref.removeprefix("product:"))
+            return self.show_issue(result.entity.ref)
         kind = str(staged.get("kind") or "")
         finish = self._finish_for(kind)
         intent = staged["intent"]
@@ -803,7 +840,22 @@ class ProductIssueStore:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def discard_transaction(self, request_id: str) -> dict[str, Any]:
-        document = self.transactions.load(request_id)
+        try:
+            document = self.transactions.load(request_id)
+        except TaskError as exc:
+            if exc.code != "not_found":
+                raise
+            # New occurrences are owned by BoardEventCanon.  This released
+            # generic/legacy operator surface must never discard or otherwise
+            # alter that owner, even when the backend cannot be inspected.
+            pending = self.audit.pending_event(request_id)
+            if isinstance(pending, dict) and pending.get("record_type") == "board.protocol_event":
+                raise TaskError(
+                    "live_write",
+                    "a typed Product/Issue occurrence owns that request; retry it instead of discarding it",
+                    3,
+                ) from None
+            raise
         self._finish_for(str(document.get("kind") or ""))
         event = document.get("event") if isinstance(document.get("event"), dict) else {}
         with self.transactions.reference_lock(str(event.get("ref") or "")) as lock:
@@ -823,34 +875,50 @@ class ProductIssueStore:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
         return {"request_id": request_id, "discarded": True}
 
+    def _host(self):
+        # Deliberately local: the Kanboard adapter retains the compatibility
+        # reader above, while new writer calls enter it through BoardHost.
+        from secretary.board.kanboard import KanboardBoardHost
+        return KanboardBoardHost(self.client, data_dir=self.data_dir, instance=self.instance, audit=self.audit)
+
+    @staticmethod
+    def _host_error(exc: Exception) -> TaskError:
+        from secretary.board.events import BoardEventPending
+        from secretary.board.transitions import BoardProtocolError
+        if isinstance(exc, BoardEventPending):
+            return TaskError("audit_pending", "Product/Issue write is pending repair; retry with the same request id", 4)
+        if isinstance(exc, TaskError):
+            return exc
+        if isinstance(exc, BoardProtocolError) and (
+            "Kanboard refused" in str(exc) or "Kanboard rejected" in str(exc)
+        ):
+            return TaskError("backend_rejected", str(exc), 1)
+        return TaskError("validation", str(exc), 2)
+
     def create_product(self, *, product_id: str, projects: list[str], title: str, description: str, actor: str, request_id: str | None = None) -> dict[str, Any]:
         if not _ID.fullmatch(product_id) or not title.strip() or not projects or len(set(projects)) != len(projects):
             raise TaskError("validation", "product needs a valid id, title and non-empty unique project set", 2)
-        request_id = request_id or str(uuid.uuid4())
-        self.audit.require_pending_layout()
-        intent = {"record_type": PRODUCT_TYPE, "product_id": product_id, "product_projects": json.dumps(sorted(projects), separators=(",", ":")), "title": title, "description": description, "actor": actor}
         reference = f"product:{product_id}"
+        request_id = request_id or str(uuid.uuid4())
         with self.transactions.reference_lock(reference) as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
-                document, completed = self.transactions.existing(request_id, kind="product_created", intent=intent)
-                if completed is not None:
-                    return self.show_product(product_id)
-                if document is None:
-                    self._reject_other_pending_reference_operation(reference, request_id)
+                self._reject_other_pending_reference_operation(reference, request_id)
+                self._reject_other_pending_typed_operation(reference, request_id)
+                host = self._host()
+                try:
+                    claimed = host.canon.event(request_id) if host.canon is not None else None
+                except ValueError:
+                    claimed = True
+                if not claimed:
                     unknown = sorted(set(projects) - registered_projects(self.instance))
                     if unknown:
                         raise TaskError("validation", "unknown registered project(s): " + ", ".join(unknown), 2)
-                    board_id, _ = self._board()
-                    if self.client.call("getTaskByReference", project_id=board_id, reference=reference):
-                        raise TaskError("validation", f"product {product_id!r} already exists", 2)
-                    event = self._transaction_event(kind="product_created", actor=actor, reference=reference, request_id=request_id, intent=intent)
-                    document, completed = self._begin(request_id, kind="product_created", intent=intent, event=event)
-                    if completed is not None:
-                        return self.show_product(product_id)
-                    if document is None:
-                        raise TaskError("audit_pending", "Product/Issue transaction claim is unavailable", 4)
-                self._complete_transaction(document, self._finish_create)
+                from secretary.board import Actor, Create, Product
+                try:
+                    host.create(Create(Product(reference, title, projects=tuple(sorted(projects)), description=description), Actor("po", actor), "Product created", request_id=request_id))
+                except Exception as exc:
+                    raise self._host_error(exc) from None
                 return self.show_product(product_id)
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
@@ -859,50 +927,66 @@ class ProductIssueStore:
         if not product.strip() or issue_kind not in ISSUE_KINDS or priority not in ISSUE_PRIORITIES or not title.strip():
             raise TaskError("validation", "issue requires title, product, kind (bug|feature|question|improvement) and priority (P0-P3)", 2)
         request_id = request_id or str(uuid.uuid4())
-        self.audit.require_pending_layout()
         digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:20]
         reference = f"issue:{digest}"
-        intent = {"record_type": ISSUE_TYPE, "product": product, "issue_kind": issue_kind, "priority": priority, "title": title, "description": description, "actor": actor}
-        document, completed = self.transactions.existing(request_id, kind="issue_created", intent=intent)
-        if completed is not None:
-            return self.show_issue(str(completed["ref"]))
-        if document is None:
-            self.show_product(product)
-            self._board()
-            event = self._transaction_event(kind="issue_created", actor=actor, reference=reference, request_id=request_id, intent=intent)
-            document, completed = self._begin(request_id, kind="issue_created", intent=intent, event=event)
-            if completed is not None:
-                return self.show_issue(str(completed["ref"]))
-            if document is None:
-                raise TaskError("audit_pending", "Product/Issue transaction claim is unavailable", 4)
-        self._complete_transaction(document, self._finish_create)
-        return self.show_issue(str(document["event"]["ref"]))
+        with self.transactions.reference_lock(reference) as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                self._reject_other_pending_reference_operation(reference, request_id)
+                self._reject_other_pending_typed_operation(reference, request_id)
+                from secretary.board import Actor, Create, Issue
+                try:
+                    self._host().create(Create(
+                        Issue(reference, title, f"product:{product}", priority=priority,
+                              issue_kind=issue_kind, description=description),
+                        Actor("po", actor), "Issue created", request_id=request_id,
+                    ))
+                except Exception as exc:
+                    raise self._host_error(exc) from None
+                return self.show_issue(reference)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def update_priority(self, *, reference: str, priority: str, reason: str, actor: str, request_id: str | None = None) -> dict[str, Any]:
         if priority not in ISSUE_PRIORITIES or not reason.strip():
             raise TaskError("validation", "priority update requires P0-P3 and a non-empty reason", 2)
         request_id = request_id or str(uuid.uuid4())
-        self.audit.require_pending_layout()
-        intent = {"reference": reference, "priority": priority, "reason": reason, "actor": actor}
         with self.transactions.reference_lock(reference) as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
-                document, completed = self.transactions.existing(request_id, kind="issue_priority_changed", intent=intent)
-                if completed is not None:
+                self._reject_other_pending_reference_operation(reference, request_id)
+                self._reject_other_pending_typed_operation(reference, request_id)
+                from secretary.board import Actor, EntityKind, Issue, Replace
+                host = self._host()
+                try:
+                    known = host.canon.event(request_id) if host.canon is not None else None
+                except ValueError as exc:
+                    raise TaskError("validation", str(exc), 2) from None
+                if known is not None:
+                    if (
+                        known.kind.value != "entity.updated"
+                        or known.entity_kind is not EntityKind.ISSUE
+                        or known.ref != reference
+                        or known.actor != Actor("po", actor)
+                        or known.reason != reason
+                        or known.data.get("priority") != priority
+                    ):
+                        raise TaskError("validation", "request id belongs to another operation or payload", 2)
+                    try:
+                        host.recover_product_issue(request_id)
+                    except Exception as exc:
+                        raise self._host_error(exc) from None
                     return self.show_issue(reference)
-                if document is None:
-                    self._reject_other_pending_reference_operation(reference, request_id)
-                    card, metadata = self._find(reference, ISSUE_TYPE)
-                    if int(card.get("is_active", 1) or 0) == 0:
-                        raise TaskError("closed", "cannot reprioritize a closed issue", 3)
-                    event = self._transaction_event(kind="issue_priority_changed", actor=actor, reference=reference, request_id=request_id, intent=intent)
-                    event["payload"] = {"intent": intent, "from": metadata.get(META_ISSUE_PRIORITY, ""), "to": priority, "reason": reason}
-                    document, completed = self._begin(request_id, kind="issue_priority_changed", intent=intent, event=event)
-                    if completed is not None:
-                        return self.show_issue(reference)
-                    if document is None:
-                        raise TaskError("audit_pending", "Product/Issue transaction claim is unavailable", 4)
-                self._complete_transaction(document, self._finish_priority)
+                current = host.read(EntityKind.ISSUE, reference)
+                if not isinstance(current, Issue):
+                    raise TaskError("validation", "reference is not an Issue", 2)
+                if current.state.value == "closed":
+                    raise TaskError("closed", "cannot reprioritize a closed issue", 3)
+                desired = Issue(current.ref, current.title, current.product_ref, current.state, priority, current.issue_kind, current.description, current.close_reason)
+                try:
+                    host.replace(Replace(desired, Actor("po", actor), reason, request_id=request_id))
+                except Exception as exc:
+                    raise self._host_error(exc) from None
                 return self.show_issue(reference)
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
@@ -911,26 +995,24 @@ class ProductIssueStore:
         if reason not in ISSUE_CLOSE_REASONS:
             raise TaskError("validation", "close reason must be one of: resolved, invalid, duplicate, wont_do", 2)
         request_id = request_id or str(uuid.uuid4())
-        self.audit.require_pending_layout()
-        intent = {"reference": reference, "reason": reason, "actor": actor}
         with self.transactions.reference_lock(reference) as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
-                document, completed = self.transactions.existing(request_id, kind="issue_closed", intent=intent)
-                if completed is not None:
-                    return self.show_issue(reference)
-                if document is None:
-                    self._reject_other_pending_reference_operation(reference, request_id)
-                    card, _ = self._find(reference, ISSUE_TYPE)
-                    if int(card.get("is_active", 1) or 0) == 0:
+                self._reject_other_pending_reference_operation(reference, request_id)
+                self._reject_other_pending_typed_operation(reference, request_id)
+                from secretary.board import Actor, EntityKind, Issue, IssueState, TransitionRequest
+                current = self._host().read(EntityKind.ISSUE, reference)
+                if isinstance(current, Issue) and current.state is IssueState.CLOSED:
+                    try:
+                        existing = self._host().canon.event(request_id) if self._host().canon is not None else None
+                    except ValueError:
+                        existing = None
+                    if existing is None:
                         raise TaskError("closed", "issue is already closed", 3)
-                    event = self._transaction_event(kind="issue_closed", actor=actor, reference=reference, request_id=request_id, intent=intent)
-                    document, completed = self._begin(request_id, kind="issue_closed", intent=intent, event=event)
-                    if completed is not None:
-                        return self.show_issue(reference)
-                    if document is None:
-                        raise TaskError("audit_pending", "Product/Issue transaction claim is unavailable", 4)
-                self._complete_transaction(document, self._finish_close)
+                try:
+                    self._host().transition(TransitionRequest(EntityKind.ISSUE, reference, IssueState.CLOSED, Actor("po", actor), reason, request_id=request_id))
+                except Exception as exc:
+                    raise self._host_error(exc) from None
                 return self.show_issue(reference)
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)

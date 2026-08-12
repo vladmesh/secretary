@@ -947,8 +947,9 @@ minutes (two missed windows).
 ### A checkpoint blocked by a Product/Issue transaction
 
 The checkpoint gate and the board export both refuse to run while a Product or Issue write is staged and
-unfinished, naming the number of pending records. The staged writes are listed and repaired by their own
-commands, and no file under `board/product-issue-transactions/` is ever moved by hand:
+unfinished, naming the number of pending records. `transaction list` includes both released transaction
+documents and typed Product/Issue pending events, so its request id, kind and ref are the supported way to
+find a repair; no file under `board/product-issue-transactions/` or `board/pending-audit/` is ever moved by hand:
 
 ```bash
 secretary product transaction list --data-dir DATA_DIR
@@ -957,10 +958,11 @@ secretary product transaction discard --request-id REQUEST_ID --data-dir DATA_DI
 ```
 
 `retry` is the first move: it resumes the operation where it stopped and commits its audit event. `discard`
-is for a transaction the backend never accepted; it reads the board first and refuses with `live_write` when
-the row or the board comment of that request already exists. A document that is already outside the journal
-comes back with `secretary product transaction adopt --path FILE`, which files it under its own request id
-and removes the copy, after which `retry` and `discard` see it again.
+is for a released transaction the backend never accepted; it reads the board first and refuses with
+`live_write` when the row or the board comment of that request already exists. It is read-only for typed
+pending events and likewise refuses them as `live_write`; retry the listed request id instead. A document
+that is already outside the released journal comes back with `secretary product transaction adopt --path FILE`,
+which files it under its own request id and removes the copy, after which `retry` and `discard` see it again.
 
 ## Board column schema
 
