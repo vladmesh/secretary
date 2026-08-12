@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import urllib.error
 import urllib.request
 import uuid
@@ -617,6 +618,7 @@ class TaskAudit:
         self._committed_read = 0
         self._committed_ident: tuple[int, int] | None = None
         self._committed_anchor = b""
+        self._marker_lock_depth = threading.local()
 
     def _pending_path(self, request_id: str) -> str:
         """Keep untrusted request ids out of the installation filesystem layout."""
@@ -648,6 +650,66 @@ class TaskAudit:
                 yield
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    @contextlib.contextmanager
+    def marker_comment_lock(self, reference: str) -> Iterator[None]:
+        """Serialize all internal Card comment effects for one marker identity.
+
+        Generic restore replay re-enters this guard while finishing its own
+        pending record.  Keep the file lock process-wide while making that
+        same-thread contour re-entrant; a second process still blocks at the
+        flock until the outer effect completes.
+        """
+        from secretary.board.events import marker_comment_lock
+
+        held = getattr(self._marker_lock_depth, "held", None)
+        if held is None:
+            held = self._marker_lock_depth.held = {}
+        depth = held.get(reference, 0)
+        if depth:
+            held[reference] = depth + 1
+            try:
+                yield
+            finally:
+                held[reference] -= 1
+            return
+        with marker_comment_lock(Path(self.board_dir).parent, reference):
+            held[reference] = 1
+            try:
+                yield
+            finally:
+                del held[reference]
+
+    def pending_marker_owner(self, reference: str, content: str, *, request_id: str | None = None) -> str | None:
+        """Return a different pending typed owner of an indistinguishable marker.
+
+        This is the common ownership check for the normalized marker adapter
+        and every internal historical-comment writer.  It runs under the audit
+        lock while callers hold the per-Card marker lock, so no writer can put
+        a matching row on Kanboard between the reservation check and its own
+        effect.
+        """
+        from secretary.board.events import render_marker_comment
+
+        with self._locked_audit():
+            for record in self.pending_events():
+                if record.get("record_type") != self._PROTOCOL_EVENT_RECORD_TYPE:
+                    continue
+                candidate = str(record.get("request_id") or "")
+                if candidate == request_id:
+                    continue
+                try:
+                    event = Event.from_record(record)
+                    rendered = render_marker_comment(event)
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    event.entity_kind is EntityKind.CARD
+                    and event.ref == reference
+                    and rendered == content
+                ):
+                    return candidate
+        return None
 
     @classmethod
     def _is_protocol_event(cls, event: dict[str, Any]) -> bool:

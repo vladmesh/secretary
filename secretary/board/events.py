@@ -15,7 +15,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, TypeVar
 
-from secretary.board.models import Event
+from secretary.board.models import EntityKind, Event, EventKind
 
 if TYPE_CHECKING:
     from secretary.tasks import TaskAudit
@@ -41,6 +41,39 @@ def marker_comment_lock(data_dir: str | Path, ref: str) -> Iterator[None]:
             yield
         finally:
             fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
+def render_marker_comment(event: Event) -> str:
+    """Render the public Card marker grammar from its complete typed event."""
+    data = event.data
+    marker = data.get("marker")
+    body = data.get("body")
+    if not isinstance(marker, str) or not marker or not isinstance(body, str):
+        raise ValueError("Card marker event has incomplete marker data")
+    if event.reason != body or not body.strip():
+        raise ValueError("Card marker event reason does not match its marker body")
+    if event.kind is EventKind.CARD_REPORTED:
+        status = data.get("status")
+        if status not in {"done", "blocked"} or marker != f"report:{status}":
+            raise ValueError("Card report event has an unsupported marker payload")
+        classification = data.get("classification")
+        if status == "blocked":
+            if classification not in {"external_fact", "wrong_task_definition"}:
+                raise ValueError("blocked Card report has an unsupported classification")
+            return f"[{marker}]\nclassification: {classification}\n\n{body}"
+        if classification is not None:
+            raise ValueError("done Card report must not carry a classification")
+    elif event.kind is EventKind.CARD_VERDICTED:
+        status = data.get("status")
+        if status not in {"green", "red"} or marker != f"review:{status}":
+            raise ValueError("Card verdict event has an unsupported marker payload")
+    elif event.kind is EventKind.CARD_DECIDED:
+        decision = data.get("decision")
+        if decision not in {"release", "rework", "reslice"} or marker != f"decision:{decision}":
+            raise ValueError("Card decision event has an unsupported marker payload")
+    else:
+        raise ValueError("event is not a Card marker occurrence")
+    return f"[{marker}]\n{body}"
 
 
 class BoardEventPending(RuntimeError):

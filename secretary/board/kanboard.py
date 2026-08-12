@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
-from secretary.board.events import BoardEventCanon, BoardEventPending, MutationEventTransaction, marker_comment_lock
+from secretary.board.events import BoardEventCanon, BoardEventPending, MutationEventTransaction, render_marker_comment
 from secretary.board.host import Create, MarkerComment, MutationResult, Replace, SprintSupplement, TransitionRequest
 from secretary.board.models import (
     BoardEntity, Card, CardState, EntityKind, Event, EventKind, Issue, IssueState, Product,
@@ -306,7 +306,7 @@ class KanboardBoardHost:
         """
         if self.canon is None:
             raise BoardProtocolError("Card marker comments require a configured data directory")
-        with marker_comment_lock(self.data_dir, operation.ref):
+        with self.canon.audit.marker_comment_lock(operation.ref):
             request_id = self._request_id(operation.request_id, "card-marker")
             existing = self.canon.event(request_id)
             replayed = existing is not None
@@ -334,7 +334,12 @@ class KanboardBoardHost:
                 # write into a delivered new occurrence.
                 preview = self._marker_event(current, operation, related, request_id)
                 content = self.render_marker(preview)
-                self._require_no_pending_marker_owner(operation.ref, content)
+                owner = self.canon.audit.pending_marker_owner(operation.ref, content, request_id=request_id)
+                if owner is not None:
+                    raise BoardEventPending(
+                        "an earlier identical Card marker occurrence is pending; "
+                        f"reconcile request {owner} first"
+                    )
                 occurrence = self._marker_occurrences(operation.ref, content) + 1
                 event = self._marker_event(
                     current, operation, related, request_id, marker_occurrence=occurrence,
@@ -386,7 +391,7 @@ class KanboardBoardHost:
         event = self.canon.event(request_id)
         if event is None or event.entity_kind is not EntityKind.CARD:
             raise BoardProtocolError("pending event is not a recoverable Card marker occurrence")
-        with marker_comment_lock(self.data_dir, event.ref):
+        with self.canon.audit.marker_comment_lock(event.ref):
             event = self.canon.event(request_id)
             if event is None or event.entity_kind is not EntityKind.CARD:
                 raise BoardProtocolError("pending event is not a recoverable Card marker occurrence")
@@ -911,63 +916,13 @@ class KanboardBoardHost:
             if isinstance(comment, dict)
         )
 
-    def _require_no_pending_marker_owner(self, ref: str, content: str) -> None:
-        """Keep a pending marker's unmarked occurrence reserved for recovery."""
-        assert self.canon is not None
-        for record in self.canon.audit.pending_events():
-            if record.get("record_type") != Event.RECORD_TYPE:
-                continue
-            try:
-                pending = Event.from_record(record)
-            except (TypeError, ValueError):
-                continue
-            if (
-                pending.entity_kind is EntityKind.CARD
-                and pending.ref == ref
-                and pending.kind in {
-                    EventKind.CARD_REPORTED,
-                    EventKind.CARD_VERDICTED,
-                    EventKind.CARD_DECIDED,
-                }
-                and self.render_marker(pending) == content
-            ):
-                raise BoardEventPending(
-                    "an earlier identical Card marker occurrence is pending; "
-                    f"reconcile request {record.get('request_id')} first"
-                )
-
     @staticmethod
     def render_marker(event: Event) -> str:
         """Render the established marker grammar from complete typed data."""
-        data = event.data
-        marker = data.get("marker")
-        body = data.get("body")
-        if not isinstance(marker, str) or not marker or not isinstance(body, str):
-            raise BoardProtocolError("Card marker event has incomplete marker data")
-        if event.reason != body or not body.strip():
-            raise BoardProtocolError("Card marker event reason does not match its marker body")
-        if event.kind is EventKind.CARD_REPORTED:
-            status = data.get("status")
-            if status not in {"done", "blocked"} or marker != f"report:{status}":
-                raise BoardProtocolError("Card report event has an unsupported marker payload")
-            classification = data.get("classification")
-            if status == "blocked":
-                if classification not in {"external_fact", "wrong_task_definition"}:
-                    raise BoardProtocolError("blocked Card report has an unsupported classification")
-                return f"[{marker}]\nclassification: {classification}\n\n{body}"
-            if classification is not None:
-                raise BoardProtocolError("done Card report must not carry a classification")
-        elif event.kind is EventKind.CARD_VERDICTED:
-            status = data.get("status")
-            if status not in {"green", "red"} or marker != f"review:{status}":
-                raise BoardProtocolError("Card verdict event has an unsupported marker payload")
-        elif event.kind is EventKind.CARD_DECIDED:
-            decision = data.get("decision")
-            if decision not in {"release", "rework", "reslice"} or marker != f"decision:{decision}":
-                raise BoardProtocolError("Card decision event has an unsupported marker payload")
-        else:
-            raise BoardProtocolError("event is not a Card marker occurrence")
-        return f"[{marker}]\n{body}"
+        try:
+            return render_marker_comment(event)
+        except ValueError as exc:
+            raise BoardProtocolError(str(exc)) from None
 
     @classmethod
     def _marker_event(

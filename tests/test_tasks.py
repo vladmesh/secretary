@@ -3783,6 +3783,68 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
                 self._write(family, later, body)
                 self.assertEqual(len(self.client.comments[12]), writes + 2)
 
+    def test_pending_marker_owner_blocks_an_identical_restore_comment_for_every_family(self) -> None:
+        """A restore row cannot become proof for an unavailable typed occurrence."""
+        for family in ("report", "verdict", "decision"):
+            with self.subTest(family=family):
+                request_id = f"{family}-restore-pending"
+                original_call = self.client.call
+
+                def unavailable_before_delivery(method: str, **params: object) -> object:
+                    if method == "createComment":
+                        raise TaskError("backend_unavailable", "transport unavailable", 1)
+                    return original_call(method, **params)
+
+                with mock.patch.object(self.client, "call", side_effect=unavailable_before_delivery):
+                    with self.assertRaisesRegex(TaskError, "audit repair"):
+                        self._write(family, request_id, body=f"{family} restore collision")
+
+                pending = self.writer.audit.pending_event(request_id)
+                assert pending is not None
+                content = KanboardBoardHost.render_marker(Event.from_record(pending))
+                writes = len(self.client.comments[12])
+                with self.assertRaisesRegex(TaskError, "identical Card marker occurrence is pending") as blocked:
+                    self.writer.restore_comment(
+                        reference="secretary-468", body=content, occurrence=0,
+                        request_id=f"{family}-restore-collision",
+                    )
+                self.assertEqual(blocked.exception.code, "audit_pending")
+                self.assertIsNone(self.writer.audit.event(f"{family}-restore-collision"))
+                self.assertEqual(len(self.client.comments[12]), writes)
+                self.assertEqual(self.writer.reconcile(), (0, 1))
+                self.assertIsNone(self.writer.audit.committed_event(request_id))
+
+                original_call("createComment", task_id=12, user_id=0, content=content)
+                self.assertEqual(self.writer.reconcile(), (1, 0))
+                self.writer.restore_comment(
+                    reference="secretary-468", body=content, occurrence=1,
+                    request_id=f"{family}-restore-after-typed-owner",
+                )
+                self.assertEqual(len(self.client.comments[12]), writes + 2)
+
+    def test_nonmatching_restore_comment_remains_available_while_a_typed_marker_is_pending(self) -> None:
+        original_call = self.client.call
+
+        def unavailable_before_delivery(method: str, **params: object) -> object:
+            if method == "createComment":
+                raise TaskError("backend_unavailable", "transport unavailable", 1)
+            return original_call(method, **params)
+
+        with mock.patch.object(self.client, "call", side_effect=unavailable_before_delivery):
+            with self.assertRaisesRegex(TaskError, "audit repair"):
+                self._write("report", "pending-nonmatching-restore", "typed marker body")
+
+        self.writer.restore_comment(
+            reference="secretary-468", body="[historical]\nnonmatching restore body", occurrence=0,
+            request_id="nonmatching-restore",
+        )
+        self.assertEqual(
+            [comment["comment"] for comment in self.client.comments[12]],
+            ["[historical]\nnonmatching restore body"],
+        )
+        self.assertEqual(self.writer.reconcile(), (0, 1))
+        self.assertIsNone(self.writer.audit.committed_event("pending-nonmatching-restore"))
+
     def test_concurrent_identical_markers_receive_distinct_occurrence_witnesses(self) -> None:
         first_counted = threading.Event()
         second_counted = threading.Event()
