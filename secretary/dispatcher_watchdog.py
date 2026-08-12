@@ -353,25 +353,33 @@ def heartbeat_is_mismatch(status: Mapping[str, Any]) -> bool:
     return str(status.get("state") or "") == HEARTBEAT_IDENTITY_MISMATCH
 
 
-def bind_head_heartbeat(
-    pid_file: str, *, expected: Mapping[str, Any], leaf: str
-) -> bool:
-    """Atomically add the terminal leaf once the pane create call has returned.
+def _heartbeat_handoff_path(pid_file: str) -> Path:
+    """The launcher's durable leaf handoff beside its heartbeat.
 
-    The writer starts before Orca returns the leaf.  Re-reading and matching its original identity
-    prevents a late dispatcher from annotating a newer process that reused the pid path.
+    A terminal create may answer with its leaf before the shell running inside that terminal has
+    reached the heartbeat writer.  The handoff covers that ordering without asking a reader to
+    accept a record whose declared leaf disagrees with its HeadRun.
     """
-    status = head_process_status(pid_file, expected=expected)
-    if not heartbeat_is_live_match(status):
-        return False
-    record = dict(status["record"])
-    record["leaf"] = str(leaf or "")
-    path = Path(pid_file)
+    return Path(f"{pid_file}.leaf")
+
+
+def clear_head_heartbeat(pid_file: str) -> None:
+    """Forget both halves of a completed launch identity before a fresh launch reuses its path."""
+    for path in (Path(pid_file), _heartbeat_handoff_path(pid_file)):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _replace_json(path: Path, payload: Mapping[str, Any]) -> bool:
+    """Replace one small protocol record without exposing a partial JSON document."""
     temporary = ""
     try:
+        path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            json.dump(record, handle, sort_keys=True, separators=(",", ":"))
+            json.dump(dict(payload), handle, sort_keys=True, separators=(",", ":"))
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
@@ -383,6 +391,37 @@ def bind_head_heartbeat(
             pass
         return False
     return True
+
+
+def bind_head_heartbeat(
+    pid_file: str, *, expected: Mapping[str, Any], leaf: str
+) -> bool:
+    """Durably hand a pane leaf to the heartbeat writer and bind an existing record.
+
+    The shell and terminal-create reply have no ordering guarantee.  First write the handoff, so
+    a writer that has not reached its base record yet incorporates the leaf itself.  If its base
+    record already exists, re-read and match it before the guarded second replace.  The shell also
+    rechecks this handoff after its base replace, covering the narrow interleaving where it looked
+    before this caller wrote the handoff.
+    """
+    handoff = {
+        "version": HEARTBEAT_VERSION,
+        "expected": {
+            name: str(expected.get(name) or "")
+            for name in ("run_id", "role", "task")
+        },
+        "leaf": str(leaf or ""),
+    }
+    if not _replace_json(_heartbeat_handoff_path(pid_file), handoff):
+        return False
+    status = head_process_status(pid_file, expected=expected)
+    if not heartbeat_is_live_match(status):
+        # The handoff is the successful part in the writer-after-create ordering.  A missing or
+        # unreadable base heartbeat remains inconclusive to readers until that writer publishes it.
+        return True
+    record = dict(status["record"])
+    record["leaf"] = str(leaf or "")
+    return _replace_json(Path(pid_file), record)
 
 
 def wait_outcome(

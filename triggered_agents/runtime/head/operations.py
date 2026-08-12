@@ -293,6 +293,7 @@ def stop(
     host: SessionHost,
     transport: HeadTransport | None = None,
     commit: Commit | None = None,
+    preflight: Callable[[str], None] | None = None,
     confirm_gone: Callable[[str], None] | None = None,
 ) -> HeadOutcome:
     """End one head and record who ended it.
@@ -319,6 +320,15 @@ def stop(
         return HeadOutcome(live)
     if commit is not None:
         commit(live)
+    # The caller owns any product-specific proof needed before a pane is destructive to close.
+    # It runs after the durable ``finishing`` transition, but before pane relocation, close or a
+    # heartbeat signal.  A caller that cannot prove the current process is its HeadRun must leave
+    # every one of those addresses untouched.
+    if preflight is not None:
+        try:
+            preflight(live.pid_file)
+        except Exception as exc:  # noqa: BLE001
+            raise HeadStopFailed(f"the head failed its stop identity fence: {exc}", run=live) from None
     transport = transport or HostTransport()
     handle = live.handle
     if live.leaf and live.workspace:

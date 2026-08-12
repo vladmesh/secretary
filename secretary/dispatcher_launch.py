@@ -607,6 +607,27 @@ def _remember_launch_identity(
     else:
         record.handle = record.handle or handle
         record.worker_leaf = record.worker_leaf or leaf
+    stored_run = intent.get("head_run")
+    if not isinstance(stored_run, dict) or not stored_run.get("run_id"):
+        # An interrupted create can leave only the pre-launch intent and a heartbeat.  Rebuild the
+        # same HeadRun identity from that intent before routing it through a fenced stop; minting
+        # a new run here would turn our own live head into an apparent foreign process.
+        run_id = str(intent.get("run_id") or "")
+        task = str(intent.get("task") or "")
+        task_kind, separator, task_ref = task.partition(":")
+        if run_id and separator and task_kind == "card" and task_ref:
+            stored_run = head_ops.HeadRun(
+                run_id=run_id,
+                spec=head_ops.HeadSpec(
+                    profile_id=str(intent.get("head") or "unknown"), adapter="unknown"
+                ),
+                workspace=record.workspace,
+                task_ref=head_ops.TaskRef.card(task_ref),
+                handle=handle,
+                leaf=leaf,
+                pid_file=pid_file,
+            ).to_json()
+    _remember_head_run(record, role, stored_run if isinstance(stored_run, dict) else None)
 
 
 def _adopt_launch_intent(

@@ -12052,6 +12052,47 @@ class PidHeartbeatTests(unittest.TestCase):
             self.assertEqual(bound["state"], "live-match")
             self.assertEqual(bound["record"]["leaf"], "leaf-a")
 
+    def test_a_leaf_handoff_before_the_writer_binds_each_dispatcher_role(self) -> None:
+        """Terminal create may return before the shell reaches the heartbeat preamble.
+
+        Worker, reviewer and observer share the writer, but their HeadRun bindings differ.  The
+        handoff must make the first durable base record carry the returned leaf for all three.
+        """
+        roles = (
+            ("worker", "card:secretary-1424", "leaf-worker"),
+            ("reviewer", "card:secretary-1424", "leaf-reviewer"),
+            ("observer", "sprint:secretary-1424", "leaf-observer"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            for role, task, leaf in roles:
+                with self.subTest(role=role):
+                    pid_file = Path(tmp) / f"{role}.pid"
+                    identity = heartbeat_identity(
+                        run_id=f"{role}-race", role=role, task=task
+                    )
+                    # This is the create-return / writer-not-yet-observable ordering.  The bind
+                    # cannot see a base record, but leaves a durable handoff for the shell.
+                    self.assertTrue(bind_head_heartbeat(str(pid_file), expected=identity, leaf=leaf))
+                    wrapped = with_pid_heartbeat(
+                        "python3 -c 'import time; time.sleep(5)'", str(pid_file), identity=identity,
+                    )
+                    proc = subprocess.Popen(["/bin/sh", "-lc", wrapped])
+                    try:
+                        deadline = time.monotonic() + 2
+                        status: dict[str, object] = {}
+                        while time.monotonic() < deadline:
+                            status = head_process_status(
+                                str(pid_file), expected={**identity, "leaf": leaf}
+                            )
+                            if status.get("state") == "live-match":
+                                break
+                            time.sleep(0.01)
+                        self.assertEqual(status.get("state"), "live-match")
+                        self.assertEqual(status["record"]["leaf"], leaf)  # type: ignore[index]
+                    finally:
+                        proc.terminate()
+                        proc.wait(timeout=5)
+
     def test_a_pid_file_that_has_not_been_written_yet_is_not_known(self) -> None:
         """A fresh launch has not run its `echo $$` yet, and a raw
         `SECRETARY_DISPATCHER_*_COMMAND` override never will. Neither is evidence of death."""
@@ -12793,6 +12834,42 @@ class WorkerLifecycleTests(unittest.TestCase):
         self.assertEqual(record.worker_head_run["lifecycle"], "finishing")
         self.assertEqual(record.worker_head_run["stopped_by"]["actor"], STOPPED_BY_OPERATOR)
 
+    def test_a_live_foreign_worker_heartbeat_fences_the_pane_before_close_or_signal(self) -> None:
+        host = RecordingReviewHost(self.root)
+        pid_file = self.root / "foreign-worker.pid"
+        record = self._record(worker_leaf="leaf-worker", worker_pid_file=str(pid_file))
+        record.worker_head_run = head_ops.HeadRun(
+            run_id="worker-owned-run",
+            spec=head_ops.HeadSpec(profile_id="codex", adapter="codex"),
+            workspace=str(self.workspace),
+            task_ref=head_ops.TaskRef.card(self.task["ref"]),
+            handle=record.handle,
+            leaf=record.worker_leaf,
+            pid_file=str(pid_file),
+        ).to_json()
+        foreign = subprocess.Popen(["sleep", "5"])
+        def reap_foreign() -> None:
+            if foreign.poll() is None:
+                foreign.terminate()
+            foreign.wait()
+        self.addCleanup(reap_foreign)
+        PidHeartbeatTests.write_heartbeat(
+            pid_file,
+            foreign.pid,
+            identity=heartbeat_identity(
+                run_id="foreign-worker-run", role="worker",
+                task=f"card:{self.task['ref']}", leaf=record.worker_leaf,
+            ),
+        )
+
+        with mock.patch.object(host, "_signal_head") as signal_head:
+            with self.assertRaisesRegex(HostError, "mismatching launch identity"):
+                host.stop_head(record, "worker", STOPPED_BY_OPERATOR)
+
+        self.assertNotIn("close", host.ops())
+        signal_head.assert_not_called()
+        self.assertIsNone(foreign.poll())
+
     def test_the_run_identity_is_the_same_one_from_bring_up_to_stop(self) -> None:
         host = NudgingReviewHost(self.root, screen="working\n› ")
         record = self._record()
@@ -12975,6 +13052,40 @@ class ReviewerLifecycleTests(unittest.TestCase):
         self.assertEqual(record.review_head_run["run_id"], "run-reviewer-1")
         self.assertEqual(record.review_head_run["lifecycle"], "exited")
         self.assertEqual(record.review_head_run["stopped_by"]["actor"], STOPPED_BY_WATCHDOG)
+
+    def test_a_live_foreign_reviewer_heartbeat_fences_the_pane_before_close_or_signal(self) -> None:
+        host = RecordingReviewHost(self.root)
+        pid_file = self.root / "foreign-reviewer.pid"
+        record = self._record(
+            review_handle="term-review",
+            review_leaf="leaf-review",
+            review_pid_file=str(pid_file),
+            review_head_run=self._stored_run(
+                handle="term-review", leaf="leaf-review", pid_file=str(pid_file),
+            ),
+        )
+        foreign = subprocess.Popen(["sleep", "5"])
+        def reap_foreign() -> None:
+            if foreign.poll() is None:
+                foreign.terminate()
+            foreign.wait()
+        self.addCleanup(reap_foreign)
+        PidHeartbeatTests.write_heartbeat(
+            pid_file,
+            foreign.pid,
+            identity=heartbeat_identity(
+                run_id="foreign-reviewer-run", role="reviewer",
+                task=f"card:{self.task['ref']}", leaf=record.review_leaf,
+            ),
+        )
+
+        with mock.patch.object(host, "_signal_head") as signal_head:
+            with self.assertRaisesRegex(HostError, "mismatching launch identity"):
+                host.stop_review(record, STOPPED_BY_WATCHDOG)
+
+        self.assertNotIn("close", host.ops())
+        signal_head.assert_not_called()
+        self.assertIsNone(foreign.poll())
 
     def test_stopping_the_reviewer_leaves_the_workers_checkout_alone(self) -> None:
         """The split-leaf semantics, which this card moves onto the operations without changing.
@@ -14121,3 +14232,39 @@ class CommandHostStopWorkspaceTests(unittest.TestCase):
 
         with self.assertRaises(HostError):
             host.stop_workspace(self.record)
+
+    def test_a_live_foreign_heartbeat_fences_a_workspace_before_its_first_stop(self) -> None:
+        host = _SelectorNotFoundHost(self.root)
+        pid_file = self.root / "foreign-workspace.pid"
+        self.record.worker_pid_file = str(pid_file)
+        self.record.worker_leaf = "leaf-worker"
+        self.record.worker_head_run = head_ops.HeadRun(
+            run_id="workspace-owned-run",
+            spec=head_ops.HeadSpec(profile_id="head", adapter="unknown"),
+            workspace=self.record.workspace,
+            task_ref=head_ops.TaskRef.card("secretary-997"),
+            leaf=self.record.worker_leaf,
+            pid_file=str(pid_file),
+        ).to_json()
+        foreign = subprocess.Popen(["sleep", "5"])
+        def reap_foreign() -> None:
+            if foreign.poll() is None:
+                foreign.terminate()
+            foreign.wait()
+        self.addCleanup(reap_foreign)
+        PidHeartbeatTests.write_heartbeat(
+            pid_file,
+            foreign.pid,
+            identity=heartbeat_identity(
+                run_id="foreign-workspace-run", role="worker", task="card:secretary-997",
+                leaf=self.record.worker_leaf,
+            ),
+        )
+
+        with mock.patch.object(host, "_signal_head") as signal_head:
+            with self.assertRaisesRegex(HostError, "mismatching launch identity"):
+                host.stop_workspace(self.record)
+
+        self.assertFalse(host.calls, "the workspace stop is fenced before Orca is called")
+        signal_head.assert_not_called()
+        self.assertIsNone(foreign.poll())

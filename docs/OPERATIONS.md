@@ -1193,13 +1193,16 @@ it. Returning to the shell prompt updates the last-output timestamp once, so by 
 reads as "there was output, then silence" and would wait out the ordinary long ceiling. What separates these cases
 without reading session text is the launch identity the shell writes before exec: the launch command records its own
 pid and then `exec`s the head, replacing the process image without a fork, so the recorded pid stays the head's pid
-for its whole life. The atomically replaced JSON record carries a format version, pid, Linux boot id, process start
+for its whole life. The atomically replaced JSON record carries format version 1, pid, Linux boot id, process start
 ticks, HeadRun id, role, card or sprint binding and, once the pane is known, its leaf. On each waiting tick the
-dispatcher compares all of those facts before it probes or signals the process. A matching live record confirms
-liveness; a dead record takes the missing-pane path; missing and unreadable records retain the grace and output
-fallback; a live mismatch is degraded and never authorizes a signal, adoption or replacement. The file lives outside
-the workspace, like report and verdict bodies, under `SECRETARY_DISPATCHER_BODY_DIR` (default `/tmp`); respawn
-deletes it before a new launch so a dead predecessor's record is not read before the new head overwrites it.
+dispatcher compares all of those facts before it probes or signals the process. Terminal create can return before the
+shell reaches its writer, so the returned pane leaf is first handed off atomically beside the heartbeat; the writer
+uses that handoff in either ordering before readers require the leaf. A matching live record confirms liveness; a
+dead record takes the missing-pane path; missing and unreadable records retain the grace and output fallback; a live
+mismatch is degraded and never authorizes a pane close, workspace stop, signal, adoption or replacement. The file
+lives outside the workspace, like report and verdict bodies, under `SECRETARY_DISPATCHER_BODY_DIR` (default `/tmp`);
+respawn deletes it and its leaf handoff before a new launch so a dead predecessor's record is not read before the new
+head overwrites it.
 
 If the identity probe confirms the head's process is alive, that is a positive liveness signal rather than merely an
 absence of proof of death, and silence from it proves nothing. The short first-output window never applies to such a

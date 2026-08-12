@@ -117,6 +117,7 @@ from secretary.dispatcher_review import (
 )
 from secretary.dispatcher_watchdog import (
     bind_head_heartbeat as _bind_head_heartbeat,
+    clear_head_heartbeat as _clear_head_heartbeat,
     heartbeat_is_dead as _heartbeat_is_dead,
     heartbeat_is_live_match as _heartbeat_is_live_match,
     heartbeat_is_mismatch as _heartbeat_is_mismatch,
@@ -985,7 +986,7 @@ class CommandHostRuntime:
                 "head_run": lifecycle_run.to_json(),
             }
         # Drop a predecessor's pid before the new head can be read as this launch's liveness.
-        Path(pid_file).unlink(missing_ok=True)
+        _clear_head_heartbeat(pid_file)
         launch = self.catalog.head_launch(
             head,
             OBSERVER_PROMPT_FILE,
@@ -1022,7 +1023,11 @@ class CommandHostRuntime:
                 # sprint delivers a prompt too, and a sprint that lost it must be able to say so.
                 evidence = _delivery_evidence_json(exc, "observer-launch")
                 try:
-                    self._stop_observer_terminals(str(workspace))
+                    self._stop_observer_terminals(
+                        str(workspace),
+                        pid_file=pid_file,
+                        expected=self._run_heartbeat_identity(lifecycle_run, OBSERVER_ROLE),
+                    )
                 except Exception as stop_exc:
                     # The pane is still up. Its handle goes back with the failure, because this
                     # dict is the only pointer to it: reporting a plain bring-up failure would
@@ -1076,11 +1081,9 @@ class CommandHostRuntime:
             task=f"sprint:{getattr(record, 'sprint', '')}",
             leaf=str(getattr(record, "leaf", "") or ""),
         )
-        heartbeat = _head_process_status(
+        self._fence_head_heartbeat(
             str(getattr(record, "pid_file", "") or ""), expected=expected
         )
-        if _heartbeat_is_mismatch(heartbeat):
-            raise HostError("observer heartbeat has a mismatching launch identity")
         workspace = str(getattr(record, "workspace", "") or "")
         if not workspace:
             # A record written before the launch intent named a workspace: the handle is the only
@@ -1093,7 +1096,9 @@ class CommandHostRuntime:
                 str(getattr(record, "pid_file", "") or ""), expected=expected
             )
             return
-        self._stop_observer_terminals(workspace)
+        self._stop_observer_terminals(
+            workspace, pid_file=str(getattr(record, "pid_file", "") or ""), expected=expected
+        )
         # Heartbeat-wrapped heads have their own session, so terminal stop alone cannot prove the
         # observer died. Do not remove its worktree or forget its record until this confirms it.
         self._confirm_head_process_gone(
@@ -1206,7 +1211,9 @@ class CommandHostRuntime:
             failure.evidence = getattr(exc, "evidence", None)
             raise failure from None
 
-    def _stop_observer_terminals(self, workspace: str) -> None:
+    def _stop_observer_terminals(
+        self, workspace: str, *, pid_file: str = "", expected: dict[str, str] | None = None
+    ) -> None:
         """Stop every pane of an observer workspace.
 
         One verb for the whole workspace rather than a close per handle: `close_pane` answers
@@ -1217,6 +1224,7 @@ class CommandHostRuntime:
         pane-lifecycle command like any other, and the only difference from `stop_head` is what it
         addresses — a workspace nothing can name a head in, not a head.
         """
+        self._fence_head_heartbeat(pid_file, expected=expected)
         self.session.stop_workspace(workspace)
 
     def _close_observer_pane(self, handle: str) -> None:
@@ -1643,16 +1651,24 @@ class CommandHostRuntime:
         """
         if self.mode == "noop" or not record.workspace:
             return
-        try:
-            self.session.stop_workspace(record.workspace)
-        except HostError as exc:
-            if "selector_not_found" not in str(exc):
-                raise
+        heartbeats: list[tuple[str, dict[str, str]]] = []
         for kind in ("worker", "review"):
             field = "worker_head_run" if kind == "worker" else "review_head_run"
             pid_file = record.worker_pid_file if kind == "worker" else record.review_pid_file
             leaf = record.worker_leaf if kind == "worker" else record.review_leaf
             expected = run_heartbeat_identity(getattr(record, field, {}), role=kind, leaf=leaf)
+            heartbeats.append((pid_file, expected))
+        # A workspace stop kills every pane it contains.  Fence every recorded head before the
+        # first destructive call, not afterwards when an unrelated live process may already have
+        # lost its pane.
+        for pid_file, expected in heartbeats:
+            self._fence_head_heartbeat(pid_file, expected=expected)
+        try:
+            self.session.stop_workspace(record.workspace)
+        except HostError as exc:
+            if "selector_not_found" not in str(exc):
+                raise
+        for pid_file, expected in heartbeats:
             self._confirm_head_process_gone(pid_file, expected=expected)
 
     def stop_head(
@@ -1702,6 +1718,7 @@ class CommandHostRuntime:
                 host=self.session,
                 transport=self._head_transport(record.workspace, role="reviewer"),
                 commit=lambda finishing: self._commit_review_run(record, finishing),
+                preflight=lambda path: self._fence_head_heartbeat(path, expected=expected),
                 confirm_gone=lambda path: self._confirm_head_process_gone(path, expected=expected),
             )
         except head_ops.HeadStopFailed as exc:
@@ -1805,6 +1822,7 @@ class CommandHostRuntime:
                 host=self.session,
                 transport=self._head_transport(record.workspace, role="worker"),
                 commit=lambda finishing: self._commit_worker_run(record, finishing),
+                preflight=lambda path: self._fence_head_heartbeat(path, expected=expected),
                 confirm_gone=lambda path: self._confirm_head_process_gone(path, expected=expected),
             )
         except head_ops.HeadStopFailed as exc:
@@ -1901,7 +1919,7 @@ class CommandHostRuntime:
                 raise HostError(f"head heartbeat from {pid_file} has a mismatching launch identity")
             if not status.get("known") or not status.get("alive"):
                 if status.get("known"):
-                    Path(pid_file).unlink(missing_ok=True)
+                    _clear_head_heartbeat(pid_file)
                 return
             # SIGTERM and SIGHUP remain pending for a SIGSTOPed retained worker.  Wake its group
             # before the graceful signal so green handoff does not wait out the whole grace period
@@ -1916,7 +1934,24 @@ class CommandHostRuntime:
         if status.get("known") and status.get("alive"):
             raise HostError(f"head process from {pid_file} is still running after stop")
         if status.get("known"):
-            Path(pid_file).unlink(missing_ok=True)
+            _clear_head_heartbeat(pid_file)
+
+    @staticmethod
+    def _fence_head_heartbeat(
+        pid_file: str, *, expected: dict[str, str] | None = None
+    ) -> None:
+        """Reject a live heartbeat whose process is not the recorded HeadRun.
+
+        This is deliberately weaker than ``_confirm_head_process_gone``: missing and unreadable
+        files retain their existing conservative stop behavior.  Only a readable live mismatch
+        proves that the address now belongs to someone else and therefore fences a close,
+        workspace stop or signal before it starts.
+        """
+        if not pid_file:
+            return
+        status = _head_process_status(pid_file, expected=expected)
+        if _heartbeat_is_mismatch(status):
+            raise HostError(f"head heartbeat from {pid_file} has a mismatching launch identity")
 
     def _signal_head(
         self, pid_file: str, signal_number: int, *, expected: dict[str, str] | None = None
@@ -2158,7 +2193,7 @@ class CommandHostRuntime:
             # Drop any pid a previous launch in this same workspace left behind, so a respawn
             # cannot read a dead predecessor's pid as this launch's liveness signal before the new
             # head has had a chance to overwrite it (secretary-751).
-            Path(pid_file).unlink(missing_ok=True)
+            _clear_head_heartbeat(pid_file)
         command = os.environ.get(env_name)
         launch = HeadCommand(command) if command else None
         if command:
@@ -2338,6 +2373,7 @@ class CommandHostRuntime:
         and this product signals — which is why it stays here while the pane itself is closed
         through the host the operation handed in.
         """
+        self._fence_head_heartbeat(pid_file, expected=expected)
         try:
             host.close_pane(handle)
         except Exception as exc:  # noqa: BLE001 — any refusal, whatever the transport called it

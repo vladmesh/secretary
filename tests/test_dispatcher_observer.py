@@ -19,6 +19,7 @@ from secretary.dispatcher import (
     DispatcherRuntime,
     InstanceCatalog,
 )
+from secretary.dispatcher_heartbeat import heartbeat_identity
 from secretary.dispatcher_observer_fence import EVENT_CLEARED, EVENT_FENCED
 from triggered_agents.runtime.head import HeadCommand
 from secretary.dispatcher_tui import DeliveryEvidence, TuiDeliveryError
@@ -4098,6 +4099,44 @@ class RealHostStopObserverTests(unittest.TestCase):
 
         self.assertEqual(confirmed, ["/tmp/observer.pid"])
         self.assertEqual(self.calls[-1][1:3], ["worktree", "rm"])
+
+    def test_a_live_foreign_observer_heartbeat_fences_workspace_stop_and_worktree_removal(self) -> None:
+        pid_file = self.root / "foreign-observer.pid"
+        foreign = subprocess.Popen(["sleep", "5"])
+        def reap_foreign() -> None:
+            if foreign.poll() is None:
+                foreign.terminate()
+            foreign.wait()
+        self.addCleanup(reap_foreign)
+        stat = Path(f"/proc/{foreign.pid}/stat").read_text(encoding="utf-8")
+        heartbeat = heartbeat_identity(
+            run_id="foreign-observer-run", role="observer", task="sprint:sprint:1",
+            leaf="leaf-observer",
+        )
+        heartbeat.update({
+            "version": 1,
+            "pid": foreign.pid,
+            "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip(),
+            "proc_starttime_ticks": stat[stat.rfind(")") + 2:].split()[19],
+        })
+        pid_file.write_text(json.dumps(heartbeat), encoding="utf-8")
+        record = ObserverRecord(
+            sprint="sprint:1", head="observer", handle="term-1", leaf="leaf-observer",
+            workspace="/ws/observers/sprint-1", head_possible=True, pid_file=str(pid_file),
+            head_run={
+                "run_id": "observer-owned-run",
+                "task_ref": {"kind": "sprint", "ref": "sprint:1", "document": ""},
+                "leaf": "leaf-observer",
+            },
+        )
+
+        with mock.patch.object(self.host, "_signal_head") as signal_head:
+            with self.assertRaisesRegex(HostError, "mismatching launch identity"):
+                self.host.stop_observer(record)
+
+        self.assertFalse(self.calls, "no worktree query, terminal stop or worktree removal is allowed")
+        signal_head.assert_not_called()
+        self.assertIsNone(foreign.poll())
 
     def test_a_record_without_a_workspace_still_closes_its_pane(self) -> None:
         """Records written before the launch intent named a workspace: the handle is all there is."""

@@ -939,17 +939,21 @@ dispatcher's own line comes after every section they are rendered into.
 
 ### Head heartbeat identity
 
-Every dispatcher-launched worker, reviewer and observer writes one atomically replaced, versioned JSON heartbeat
+Every dispatcher-launched worker, reviewer and observer writes one atomically replaced, version-1 JSON heartbeat
 before its shell `exec`s the provider. It contains the pid, Linux boot id and process start ticks together with the
 durable `HeadRun` id, role, card or sprint binding and the pane leaf once that leaf is known. The writer begins with
-the run, role and task binding and performs a guarded second atomic replace after pane creation, so a late binder
-cannot annotate another process that has reused the pid-file path.
+the run, role and task binding. Terminal creation and the writer have no ordering guarantee, so pane creation first
+atomically writes a matching leaf handoff beside the heartbeat: a later writer incorporates it in its first record,
+while an already-written matching record receives a guarded second atomic replace. The writer checks the handoff
+again after its base replace, covering both orders without letting a late binder annotate another process that has
+reused the pid-file path.
 
 Readers classify a matching live record, a dead record, a live identity mismatch, a missing not-yet-written record,
 and an unreadable record separately. Boot, start ticks, run id, role, task and a known leaf all have to agree before
 a process counts as this head. A mismatch is an operator-facing degraded state, not evidence of a head to adopt or a
 process to signal: retention, launch recovery, watchdogs, stop paths and observer reconciliation leave it in place
-and never open a replacement beside it. Raw command overrides write no heartbeat and receive no synthetic identity;
+and never open a replacement beside it. Every destructive pane close, workspace stop and heartbeat signal checks this
+fence before its first destructive call. Raw command overrides write no heartbeat and receive no synthetic identity;
 they retain only the documented launch grace and pane-output fallbacks.
 
 ### Worker retention through validation and review
