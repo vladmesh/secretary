@@ -2407,6 +2407,17 @@ class TaskWriter:
                 if str(event.get("ref") or "").startswith("sprint:"):
                     from secretary.sprints import SprintWriter
 
+                    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                    if event.get("kind") == "budget_recorded" and payload.get("hard_limit_stop") is True:
+                        SprintWriter(self.client, data_dir=self.data_dir).record_budget(
+                            role=str(event.get("actor", {}).get("role") or ""),
+                            actor=str(event.get("actor", {}).get("id") or ""),
+                            reference=str(event["ref"]), event_type=str(payload.get("event_type") or ""),
+                            request_id=str(event["request_id"]),
+                            source_event_id=str(payload.get("source_event_id") or ""),
+                        )
+                        repaired += 1
+                        continue
                     SprintWriter(self.client, data_dir=self.data_dir)._pending(
                         str(event.get("kind") or "updated"), event
                     )

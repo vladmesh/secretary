@@ -727,14 +727,15 @@ class SprintWriter:
 
     def _transition_host(
         self, *, role: str, actor: str, reference: str, target: str, reason: str,
-        request_id: str, metadata: dict[str, str] | None = None,
+        request_id: str, observer: str | None = None, budget_by_type: tuple[tuple[str, int], ...] = (),
     ) -> None:
-        from secretary.board import Actor, EntityKind, RelatedRefs, SprintState, TransitionRequest
+        from secretary.board import Actor, EntityKind, RelatedRefs, SprintState, SprintSupplement, TransitionRequest
         try:
             host = self._host()
+            supplement = SprintSupplement(observer=observer, budget_by_type=budget_by_type)
             host.transition(TransitionRequest(
                 EntityKind.SPRINT, reference, SprintState(target), Actor(role, actor), reason,
-                RelatedRefs(), request_id, {"metadata": metadata or {}},
+                RelatedRefs(), request_id, supplement if (observer is not None or budget_by_type) else None,
             ))
         except Exception as exc:
             raise self._host_error(exc) from None
@@ -1291,9 +1292,41 @@ class SprintWriter:
         if event_type not in BUDGET_EVENT_TYPES:
             raise TaskError("validation", "unknown budget event type " + repr(event_type), 2)
         request_id = request_id or str(uuid.uuid4())
+        existing = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
+        if existing is not None:
+            if existing.get("record_type") == "board.protocol_event":
+                raise TaskError(
+                    "validation",
+                    "request id belongs to a typed Sprint lifecycle occurrence; retry its protocol recovery",
+                    2,
+                )
+            payload = existing.get("payload") if isinstance(existing.get("payload"), dict) else {}
+            if existing.get("kind") != "budget_recorded":
+                raise TaskError("validation", "request id belongs to another operation or payload", 2)
+            if bool(payload.get("hard_limit_stop")):
+                return self._finish_hard_budget(
+                    role=role, actor=actor, reference=reference, event_type=event_type,
+                    request_id=request_id, source_event_id=source_event_id, event=existing,
+                )
+            return self._committed("budget_recorded", existing) if self.audit.committed_event(request_id) else self._pending("budget_recorded", existing)
         before = self.reader.show(reference)
         before_budget = _budget(before.get("budget"), self.thresholds)
         hard_stop = before["status"] == "open" and before_budget["total"] + 1 >= self.thresholds["hard"]
+        if hard_stop:
+            budget = _budget({"by_type": dict(before_budget["by_type"]) | {event_type: before_budget["by_type"][event_type] + 1}}, self.thresholds)
+            event = self._event(
+                "budget_recorded", role, actor, reference, request_id,
+                {
+                    "event_type": event_type, "source_event_id": source_event_id or None,
+                    "hard_limit_stop": True, "budget": {"by_type": budget["by_type"]},
+                },
+                before,
+            )
+            self.audit.stage(request_id, event)
+            return self._finish_hard_budget(
+                role=role, actor=actor, reference=reference, event_type=event_type,
+                request_id=request_id, source_event_id=source_event_id, event=event,
+            )
         def mutation(sprint: dict[str, Any]) -> None:
             budget = _budget(sprint.get("budget"), self.thresholds)
             budget["by_type"][event_type] += 1
@@ -1309,17 +1342,54 @@ class SprintWriter:
             },
             mutation,
         )
-        recorded = self.audit.committed_event(request_id)
-        if recorded and recorded.get("payload", {}).get("hard_limit_stop"):
+        return result
+
+    def _finish_hard_budget(
+        self, *, role: str, actor: str, reference: str, event_type: str, request_id: str,
+        source_event_id: str, event: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Finish one hard charge and its stopped state as one host-owned effect.
+
+        The generic charge is the request owner and is staged first, but it may
+        not publish until the typed hard-stop occurrence has staged, atomically
+        persisted the computed budget plus stopped state, and committed.  A
+        retry always drives that typed owner before publishing its charge.
+        """
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        if (
+            event.get("kind") != "budget_recorded" or event.get("ref") != reference
+            or event.get("actor") != {"role": role, "id": actor}
+            or payload.get("event_type") != event_type
+            or payload.get("source_event_id") != (source_event_id or None)
+            or payload.get("hard_limit_stop") is not True
+        ):
+            raise TaskError("validation", "request id belongs to another operation or payload", 2)
+        stored_budget = payload.get("budget") if isinstance(payload.get("budget"), dict) else {}
+        by_type = stored_budget.get("by_type") if isinstance(stored_budget.get("by_type"), dict) else None
+        if by_type is None or set(by_type) != set(BUDGET_EVENT_TYPES):
+            raise TaskError("audit_pending", "hard-budget record lacks its normalized budget", 4)
+        counts = tuple(sorted((name, value) for name, value in by_type.items()))
+        if any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for _name, value in counts):
+            raise TaskError("audit_pending", "hard-budget record has an invalid normalized budget", 4)
+        try:
             self._transition_host(
                 role=role, actor=actor, reference=reference, target="stopped",
                 reason="budget hard limit reached", request_id=request_id + ":typed-hard-stop",
+                budget_by_type=counts,
             )
-            self._record_hard_stop(
-                role=role, actor=actor, reference=reference, request_id=request_id,
-                budget_event_id=str(recorded.get("event_id") or ""),
-                event_type=event_type, source_event_id=source_event_id,
-            )
+        except TaskError as exc:
+            if exc.code == "backend_error":
+                self.audit.discard(request_id, event)
+            raise
+        result = self._committed("budget_recorded", event) if self.audit.committed_event(request_id) else self._pending("budget_recorded", event)
+        self._record_hard_stop(
+            role=role, actor=actor, reference=reference, request_id=request_id,
+            budget_event_id=str(event.get("event_id") or ""), event_type=event_type,
+            source_event_id=source_event_id,
+        )
+        # The generic event is deliberately returned only after the typed host
+        # transition, so callers and dispatcher output observe the stopped row.
+        result["sprint"] = self.reader.show(reference)
         return result
 
     def _record_hard_stop(
@@ -1471,13 +1541,17 @@ class SprintWriter:
                 archived.append(task_ref)
                 self.transactions.save(document)
             sprint = self.reader.show(str(event["ref"]), include_cards=False)
-            if sprint["status"] != "closed":
+            typed_request_id = str(document["request_id"]) + ":typed-close"
+            typed_pending = self.audit.pending_event(typed_request_id)
+            if sprint["status"] != "closed" or (
+                typed_pending is not None and typed_pending.get("record_type") == "board.protocol_event"
+            ):
                 document.setdefault("progress", {})["status_started"] = True
                 self.transactions.save(document)
                 self._transition_host(
                     role=str(document["intent"]["role"]), actor=str(document["intent"]["actor"]),
                     reference=str(event["ref"]), target="closed", reason="Sprint closed",
-                    request_id=str(document["request_id"]) + ":typed-close",
+                    request_id=typed_request_id,
                 )
                 sprint = self.reader.show(str(event["ref"]), include_cards=False)
             document.setdefault("progress", {})["status_done"] = True
@@ -1609,7 +1683,7 @@ class SprintWriter:
                 role=str(document["intent"]["role"]), actor=str(document["intent"]["actor"]),
                 reference=reference, target="open", reason="Sprint reopened",
                 request_id=str(document["request_id"]) + ":typed-reopen",
-                metadata={OBSERVER_FIELD: encode_observer(document["intent"]["observer"])},
+                observer=encode_observer(document["intent"]["observer"]),
             )
             document.setdefault("progress", {})["observer_done"] = True
             document.setdefault("progress", {})["opened_done"] = True

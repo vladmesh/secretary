@@ -11,7 +11,7 @@ from typing import Any
 
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
 from secretary.board.events import BoardEventCanon, MutationEventTransaction
-from secretary.board.host import Create, MutationResult, Replace, TransitionRequest
+from secretary.board.host import Create, MutationResult, Replace, SprintSupplement, TransitionRequest
 from secretary.board.models import (
     BoardEntity, Card, CardState, EntityKind, Event, EventKind, Issue, IssueState, Product,
     ProductState, RelatedRefs, Sprint, SprintState,
@@ -299,15 +299,16 @@ class KanboardBoardHost:
     def _transition_sprint(self, operation: TransitionRequest) -> MutationResult:
         """Apply one checked Sprint status edge through the typed event canon.
 
-        ``data`` contains only normalized supplementary values.  Today the
-        command facade uses it for the observer selected for reopen and the
-        budget context that caused a hard stop.  The adapter remains the sole
-        owner of the Kanboard status mutation.
+        The explicit Sprint supplement is a small allow-list: an observer on a
+        reopen or a computed budget on a hard stop.  It is never a backend
+        metadata bag.  The adapter remains the sole owner of the Kanboard
+        status mutation and its storage spelling.
         """
         if self.canon is None:
             raise BoardProtocolError("Sprint transitions require a configured data directory")
         if not isinstance(operation.target, SprintState):
             raise BoardProtocolError("Sprint transitions require a SprintState target")
+        self._validate_sprint_supplement(operation)
         request_id = self._request_id(operation.request_id, "sprint-transition")
         current = self.read(EntityKind.SPRINT, operation.ref)
         if not isinstance(current, Sprint):
@@ -319,7 +320,7 @@ class KanboardBoardHost:
             if (
                 existing.entity_kind is not EntityKind.SPRINT or existing.ref != operation.ref
                 or existing.actor != operation.actor or existing.reason != operation.reason
-                or existing.target_state != operation.target.value or existing.data != operation.data
+                or existing.target_state != operation.target.value or existing.data != self._sprint_data(operation)
                 or existing.related_refs != related
                 or not self._declared_sprint_event(existing, current)
             ):
@@ -337,7 +338,7 @@ class KanboardBoardHost:
                 related = RelatedRefs(related.refs + required)
             event = self._sprint_event(
                 declaration.event_kind, successor, operation.actor, operation.reason, related, request_id,
-                source=current.state.value, target=operation.target.value, data=operation.data,
+                source=current.state.value, target=operation.target.value, data=self._sprint_data(operation),
             )
 
         def effect() -> None:
@@ -346,17 +347,25 @@ class KanboardBoardHost:
                 raise BoardProtocolError("Sprint transition resolved a non-Sprint entity")
             transition(live, operation.target)
             task_id = self._sprint_task_id(operation.ref)
-            metadata = self._sprint_metadata_values(operation.data)
+            supplement = operation.sprint
             # Reopen deliberately persists its observer while the row remains
             # closed.  If the following status write is refused, the command
             # facade can restore that recorded preimage; treating the two calls
             # as one would silently remove its released compensation boundary.
-            if metadata and self.client.call("saveTaskMetadata", task_id=task_id, values=metadata) is not True:
-                raise BoardProtocolError("Kanboard rejected Sprint transition")
-            try:
-                reply = self.client.call(
-                    "saveTaskMetadata", task_id=task_id, values={"sprint_status": operation.target.value},
+            if supplement is not None and supplement.observer is not None:
+                if self.client.call(
+                    "saveTaskMetadata", task_id=task_id, values={"sprint_observer": supplement.observer},
+                ) is not True:
+                    raise BoardProtocolError("Kanboard rejected Sprint transition")
+                if not self._sprint_metadata_matches(task_id, {"sprint_observer": supplement.observer}):
+                    raise BoardProtocolError("Sprint transition observer remains incomplete")
+            values = {"sprint_status": operation.target.value}
+            if supplement is not None and supplement.budget_by_type:
+                values["sprint_budget"] = json.dumps(
+                    {"by_type": dict(supplement.budget_by_type)}, separators=(",", ":"),
                 )
+            try:
+                reply = self.client.call("saveTaskMetadata", task_id=task_id, values=values)
             except Exception:
                 # A transport failure after issuing the state effect is not a
                 # refusal.  Confirmation decides whether the staged event can
@@ -521,15 +530,25 @@ class KanboardBoardHost:
         return MutationResult(self.read(EntityKind.ISSUE, operation.ref), event)
 
     @staticmethod
-    def _sprint_metadata_values(data: dict[str, Any]) -> dict[str, str]:
-        metadata = data.get("metadata", {})
-        if metadata:
-            if not isinstance(metadata, dict) or not all(
-                isinstance(key, str) and isinstance(value, str) for key, value in metadata.items()
-            ):
-                raise BoardProtocolError("Sprint transition metadata must be string values")
-            return dict(metadata)
-        return {}
+    def _sprint_data(operation: TransitionRequest) -> dict[str, object]:
+        return operation.sprint.event_data() if operation.sprint is not None else {}
+
+    @staticmethod
+    def _validate_sprint_supplement(operation: TransitionRequest) -> None:
+        supplement = operation.sprint
+        if supplement is None:
+            return
+        if not isinstance(supplement, SprintSupplement):
+            raise BoardProtocolError("Sprint transition supplement must be normalized")
+        if operation.target is SprintState.OPEN:
+            if supplement.budget_by_type:
+                raise BoardProtocolError("Sprint reopen cannot persist a budget")
+            return
+        if operation.target is SprintState.STOPPED:
+            if supplement.observer is not None or not supplement.budget_by_type:
+                raise BoardProtocolError("Sprint hard stop requires its computed budget only")
+            return
+        raise BoardProtocolError("Sprint close cannot persist supplementary values")
 
     def _sprint_task_id(self, ref: str) -> int:
         record = SprintReader(self.client, data_dir=self.data_dir).show(ref, include_cards=False)
@@ -537,6 +556,12 @@ class KanboardBoardHost:
         if task_id is None:
             raise BoardProtocolError("Kanboard returned an invalid Sprint")
         return task_id
+
+    def _sprint_metadata_matches(self, task_id: int, values: dict[str, str]) -> bool:
+        actual = self.client.call("getTaskMetadata", task_id=task_id)
+        if not isinstance(actual, dict):
+            raise BoardProtocolError("Kanboard returned invalid Sprint metadata")
+        return all(str(actual.get(key) or "") == value for key, value in values.items())
 
     @staticmethod
     def _declared_sprint_event(event: Event, entity: Sprint) -> bool:

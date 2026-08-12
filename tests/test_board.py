@@ -14,7 +14,7 @@ from unittest import mock
 from secretary.board import (
     Actor, BoardEventCanon, BoardEventPending, BoardProtocolError, Card, CardState,
     Create, EntityKind, Event, EventKind, FakeBoardHost, InvalidTransition, Issue, IssueState, Product,
-    KanboardBoardHost, MutationEventTransaction, RelatedRefs, Replace, Sprint, SprintState, TRANSITIONS,
+    KanboardBoardHost, MutationEventTransaction, RelatedRefs, Replace, Sprint, SprintState, SprintSupplement, TRANSITIONS,
     TransitionRequest,
 )
 from secretary.board.card_transitions import CARD_TRANSITIONS, CardTransitionForbidden, card_transition
@@ -56,7 +56,7 @@ class BoardHostContractTests(unittest.TestCase):
         host = FakeBoardHost([sprint])
         operation = TransitionRequest(
             EntityKind.SPRINT, sprint.ref, SprintState.CLOSED, self.actor, "Sprint closed",
-            RelatedRefs(("product:secretary", "issue:1")), "close-943", {"metadata": {}},
+            RelatedRefs(("product:secretary", "issue:1")), "close-943",
         )
 
         first = host.transition(operation)
@@ -68,8 +68,40 @@ class BoardHostContractTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             host.transition(TransitionRequest(
                 EntityKind.SPRINT, sprint.ref, SprintState.CLOSED, self.actor, "Sprint closed",
-                RelatedRefs(("product:secretary", "issue:1")), "close-943", {"metadata": {"other": "value"}},
+                RelatedRefs(("product:secretary", "issue:1")), "close-943", SprintSupplement(observer="different"),
             ))
+
+    def test_fake_host_commits_each_sprint_edge_and_recovers_a_pending_edge(self) -> None:
+        edges = (
+            (SprintState.OPEN, SprintState.CLOSED),
+            (SprintState.CLOSED, SprintState.OPEN),
+            (SprintState.OPEN, SprintState.STOPPED),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            for index, (source, target) in enumerate(edges):
+                sprint = Sprint(f"sprint:{index}", "Sprint", source)
+                host = FakeBoardHost([sprint], data_dir=tmpdir)
+                operation = TransitionRequest(
+                    EntityKind.SPRINT, sprint.ref, target, self.actor, "checked edge", request_id=f"edge-{index}",
+                )
+                if index == 0:
+                    with mock.patch.object(host.canon.audit, "append", side_effect=OSError("disk full")):
+                        with self.assertRaises(BoardEventPending):
+                            host.transition(operation)
+                    self.assertEqual(host.read(EntityKind.SPRINT, sprint.ref).state, target)
+                    self.assertEqual(host.transition(operation).entity.state, target)
+                else:
+                    self.assertEqual(host.transition(operation).entity.state, target)
+                self.assertEqual(host.canon.committed(f"edge-{index}").target_state, target.value)
+
+    def test_fake_sprint_refusal_precedes_event_staging(self) -> None:
+        host = FakeBoardHost([Sprint("sprint:refusal", "Sprint", SprintState.CLOSED)])
+        with self.assertRaises(InvalidTransition):
+            host.transition(TransitionRequest(
+                EntityKind.SPRINT, "sprint:refusal", SprintState.STOPPED, self.actor, "unsupported",
+                request_id="refused-sprint-edge",
+            ))
+        self.assertEqual(host.events, [])
 
     def test_replace_cannot_bypass_the_lifecycle_registry(self) -> None:
         self.host.create(Create(Card("secretary-1417", "Protocol seam", CardState.READY), self.actor, "create"))
@@ -738,6 +770,14 @@ class KanboardBoardHostTests(unittest.TestCase):
             TRANSITIONS[EntityKind.SPRINT][(SprintState.OPEN, SprintState.STOPPED)].event_kind,
             EventKind.SPRINT_STOPPED,
         )
+
+    def test_sprint_transition_rejects_a_raw_metadata_escape_before_any_backend_read(self) -> None:
+        host = KanboardBoardHost(mock.sentinel.client, data_dir="/data", instance="/instance")
+        with self.assertRaisesRegex(BoardProtocolError, "supplement must be normalized"):
+            host.transition(TransitionRequest(
+                EntityKind.SPRINT, "sprint:943", SprintState.STOPPED, Actor("po", "operator"), "hard stop",
+                request_id="raw-metadata", sprint={"sprint_status": "closed"},  # type: ignore[arg-type]
+            ))
 
     def test_sprint_product_ref_can_read_the_linked_product(self) -> None:
         sprint = {
