@@ -88,10 +88,19 @@ def restore_comment(
     # `restore_body` is dropped from the payload once the comment is known to be on the card, so
     # it is not part of what the id claims; the body digest and the occurrence are.
     identity = {"body_sha256": payload["body_sha256"], "restore_occurrence": occurrence}
-    return writer._write(
-        "restored_comment", "steward", "restore", reference, request_id, payload, mutation,
-        identity=identity,
-    )
+    with writer.audit.marker_comment_lock(reference):
+        owner = writer.audit.pending_marker_owner(reference, body, request_id=request_id)
+        if owner is not None:
+            raise TaskError(
+                "audit_pending",
+                "an earlier identical Card marker occurrence is pending; "
+                f"reconcile request {owner} first",
+                4,
+            )
+        return writer._write(
+            "restored_comment", "steward", "restore", reference, request_id, payload, mutation,
+            identity=identity,
+        )
 
 
 def finish_pending_restore(writer: Any, event: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -134,17 +143,26 @@ def finish_pending_restore_comment(writer: Any, event: dict[str, Any], payload: 
     occurrence = payload.get("restore_occurrence")
     if not ref or not isinstance(body, str) or not isinstance(occurrence, int) or occurrence < 0:
         raise TaskError("backend_error", "pending restore comment is invalid", 1)
-    digest = payload.get("body_sha256")
-    matches = sum(
-        _digest(str(comment.get("body") or "")) == digest
-        for comment in writer.reader.show(ref).get("comments", [])
-    )
-    if matches <= occurrence:
-        writer.client.call("createComment", task_id=_task_number(writer.reader.show(ref)), user_id=0, content=body)
-        matches += 1
-    if matches <= occurrence:
-        raise TaskError("backend_error", "pending restore comment remains incomplete", 1)
-    payload.pop("restore_body", None)
+    with writer.audit.marker_comment_lock(ref):
+        owner = writer.audit.pending_marker_owner(ref, body, request_id=str(event.get("request_id") or ""))
+        if owner is not None:
+            raise TaskError(
+                "audit_pending",
+                "an earlier identical Card marker occurrence is pending; "
+                f"reconcile request {owner} first",
+                4,
+            )
+        digest = payload.get("body_sha256")
+        matches = sum(
+            _digest(str(comment.get("body") or "")) == digest
+            for comment in writer.reader.show(ref).get("comments", [])
+        )
+        if matches <= occurrence:
+            writer.client.call("createComment", task_id=_task_number(writer.reader.show(ref)), user_id=0, content=body)
+            matches += 1
+        if matches <= occurrence:
+            raise TaskError("backend_error", "pending restore comment remains incomplete", 1)
+        payload.pop("restore_body", None)
 
 
 def _restore_placement(

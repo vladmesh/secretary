@@ -4351,7 +4351,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
             if event.get("record_type") == "board.protocol_event"
             and (event.get("transition") or {}).get("source") == "assessment"
         ]
-        self.assertEqual(decided["payload"]["decision"], "release")
+        self.assertEqual(decided["kind"], "card.decided")
+        self.assertEqual(decided["data"]["decision"], "release")
         self.assertEqual(len(moved), 1)
         self.assertEqual(moved[0]["transition"]["target"], "done")
 
