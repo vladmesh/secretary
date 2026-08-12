@@ -357,14 +357,23 @@ class WriteKanboard(FakeKanboard):
     fail_move = False
     fail_update = False
     fail_close = False
+    # Two faults that can only happen after a column move has already been applied: the transport
+    # dropping the very next round trip, and another writer moving the card onward before anyone
+    # reads it back.  Both are what a live JSON-RPC board does and the in-memory client cannot.
+    fail_read_after_move = False
+    race_column_after_move: int | None = None
 
     def __init__(self) -> None:
         super().__init__()
         self.comments: dict[int, list[dict[str, object]]] = {
             int(task["id"]): [] for task in self.tasks
         }
+        self._unavailable_next_call = False
 
     def call(self, method: str, **params: object) -> object:
+        if self._unavailable_next_call:
+            self._unavailable_next_call = False
+            raise TaskError("backend_unavailable", "Kanboard backend is unavailable", 1)
         if method == "getColumns":
             return [
                 {"id": 1, "title": "Issues"}, {"id": 2, "title": "Ready"},
@@ -435,6 +444,12 @@ class WriteKanboard(FakeKanboard):
                 candidate["position"] = index
             self.tasks.insert(task_index, task)
             task["date_modification"] = "1720000100"
+            # The move is applied and its reply is on the wire.  Whatever happens next happens
+            # to a card that has already changed column.
+            if self.race_column_after_move is not None:
+                task["column_id"] = self.race_column_after_move
+            if self.fail_read_after_move:
+                self._unavailable_next_call = True
             return True
         if method == "saveTaskMetadata":
             self.calls.append((method, params))
@@ -593,6 +608,73 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
         self.assertEqual(moves, len([call for call in self.client.calls if call[0] == "moveTaskPosition"]))
         self.assertIsNotNone(self.writer.audit.pending_event("vanished-ready"))
+
+    def test_a_transport_failure_after_the_move_keeps_the_typed_pending_record(self) -> None:
+        """A read that could not answer is not evidence the move did not happen.
+
+        One dropped JSON-RPC round trip after `moveTaskPosition` returned used to discard the
+        staged event, leaving a moved card with nothing at all in the journal and an audit that
+        reported itself clean. The confirming read is outside the discard window now, so the
+        occurrence stays recoverable.
+        """
+        self.client.tasks[0]["column_id"] = 3
+        self.client.fail_read_after_move = True
+
+        with self.assertRaisesRegex(TaskError, "audit repair") as raised:
+            self.writer.move(
+                role="dispatcher", actor="d", reference="secretary-468", target="validate",
+                reason="submit", request_id="lost-read-back",
+            )
+
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(raised.exception.exit_code, 4)
+        self.assertEqual(self.client.tasks[0]["column_id"], 4)
+        moves = len([call for call in self.client.calls if call[0] == "moveTaskPosition"])
+        self.assertEqual(moves, 1)
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+        pending = self.writer.audit.pending_event("lost-read-back")
+        self.assertEqual(pending["record_type"], "board.protocol_event")
+        self.assertEqual(pending["transition"], {"source": "in_progress", "target": "validate"})
+
+        self.client.fail_read_after_move = False
+        self.assertEqual(self.writer.reconcile(), (1, 0))
+
+        self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
+        self.assertEqual(moves, len([call for call in self.client.calls if call[0] == "moveTaskPosition"]))
+        self.assertEqual(
+            self.writer.audit.committed_event("lost-read-back")["event_id"], pending["event_id"],
+        )
+
+    def test_a_state_race_after_the_move_keeps_the_typed_pending_record(self) -> None:
+        """The other post-effect failure: the move landed, another writer moved it onward.
+
+        The read back finds the wrong column, which says nothing about whether this move was
+        applied. It is the same enforcement point, so the record survives and recovery decides.
+        """
+        self.client.tasks[0]["column_id"] = 3
+        self.client.race_column_after_move = 5  # Blocked, by somebody else, between the two calls
+
+        with self.assertRaisesRegex(TaskError, "audit repair") as raised:
+            self.writer.move(
+                role="dispatcher", actor="d", reference="secretary-468", target="validate",
+                reason="submit", request_id="raced-read-back",
+            )
+
+        self.assertEqual(raised.exception.code, "audit_pending")
+        moves = len([call for call in self.client.calls if call[0] == "moveTaskPosition"])
+        self.assertEqual(moves, 1)
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+        self.assertEqual(
+            self.writer.audit.pending_event("raced-read-back")["transition"],
+            {"source": "in_progress", "target": "validate"},
+        )
+
+        # The board still contradicts the recorded target, so recovery refuses it rather than
+        # publishing an occurrence it cannot prove - and it does not move the card back.
+        self.assertEqual(self.writer.reconcile(), (0, 1))
+        self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
+        self.assertEqual(moves, len([call for call in self.client.calls if call[0] == "moveTaskPosition"]))
+        self.assertEqual(self.client.tasks[0]["column_id"], 5)
 
     def test_a_refused_card_edge_stages_no_typed_event(self) -> None:
         with self.assertRaisesRegex(TaskError, "may not move") as raised:

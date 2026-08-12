@@ -252,7 +252,7 @@ class BoardMutationTransactionTests(unittest.TestCase):
         transaction = MutationEventTransaction(self.canon, request_id="failure-1", event=self.event)
 
         with self.assertRaisesRegex(RuntimeError, "backend failed"):
-            transaction.execute(lambda: (_ for _ in ()).throw(RuntimeError("backend failed")), replay=lambda: "never")
+            transaction.execute(lambda: (_ for _ in ()).throw(RuntimeError("backend failed")), confirm=lambda: "never")
 
         self.assertIsNone(self.canon.event("failure-1"))
         self.assertEqual(self.canon.audit.status(), {"ok": True, "pending": 0})
@@ -261,29 +261,85 @@ class BoardMutationTransactionTests(unittest.TestCase):
         transaction = MutationEventTransaction(self.canon, request_id="pending-1", event=self.event)
         with mock.patch.object(self.canon.audit, "append", side_effect=OSError("disk full")):
             with self.assertRaises(BoardEventPending):
-                transaction.execute(lambda: "backend result", replay=lambda: "replayed")
+                transaction.execute(lambda: "backend result", confirm=lambda: "replayed")
         self.assertEqual(self.canon.audit.status(), {"ok": False, "pending": 1})
 
         recovered = transaction.execute(
-            lambda: (_ for _ in ()).throw(AssertionError("effect repeated")), replay=lambda: "confirmed",
+            lambda: (_ for _ in ()).throw(AssertionError("effect repeated")), confirm=lambda: "confirmed",
         )
         self.assertEqual(recovered, "confirmed")
         self.assertEqual(self.canon.events(), (self.event,))
 
-    def test_follow_up_board_work_runs_between_the_effect_and_the_commit(self) -> None:
-        """`finish` is inside the transaction: after the proven effect, before the event."""
+    def test_the_transaction_runs_effect_confirm_finish_and_commit_in_that_order(self) -> None:
+        """The whole contract in one order: issue, confirm, finish, publish."""
         order: list[str] = []
         transaction = MutationEventTransaction(self.canon, request_id="finish-1", event=self.event)
         with mock.patch.object(
             self.canon.audit, "append", side_effect=lambda *a, **k: order.append("commit"),
         ):
-            transaction.execute(
-                lambda: order.append("effect") or "backend result",
-                replay=lambda: "never",
-                finish=lambda result: order.append(f"finish:{result}"),
+            result = transaction.execute(
+                lambda: order.append("effect"),
+                confirm=lambda: order.append("confirm") or "confirmed",
+                finish=lambda value: order.append(f"finish:{value}"),
             )
 
-        self.assertEqual(order, ["effect", "finish:backend result", "commit"])
+        self.assertEqual(order, ["effect", "confirm", "finish:confirmed", "commit"])
+        self.assertEqual(result, "confirmed")
+
+    def test_the_effect_call_is_the_only_window_in_which_a_record_is_discarded(self) -> None:
+        """One enforcement point, one discard window: the `effect` call and nothing else.
+
+        A read that fails after the write returned is not evidence that the write did not
+        happen, so every outcome after `effect` returns keeps the exact staged record.
+        """
+        for index, (label, kwargs) in enumerate((
+            ("confirm", {"confirm": lambda: (_ for _ in ()).throw(RuntimeError("read timed out"))}),
+            ("finish", {
+                "confirm": lambda: "confirmed",
+                "finish": lambda _r: (_ for _ in ()).throw(RuntimeError("cleanup failed")),
+            }),
+        )):
+            with self.subTest(label):
+                request_id = f"post-effect-{index}"
+                transaction = MutationEventTransaction(
+                    self.canon, request_id=request_id, event=self.event,
+                )
+
+                with self.assertRaises(BoardEventPending):
+                    transaction.execute(lambda: "issued", **kwargs)
+
+                self.assertEqual(self.canon.event(request_id), self.event)
+                self.assertEqual(self.canon.events(), ())
+                self.canon.audit.discard(request_id, self.event.to_record(request_id))
+
+        transaction = MutationEventTransaction(
+            self.canon, request_id="pre-effect", event=self.event,
+        )
+        with self.assertRaisesRegex(RuntimeError, "backend refused"):
+            transaction.execute(
+                lambda: (_ for _ in ()).throw(RuntimeError("backend refused")),
+                confirm=lambda: (_ for _ in ()).throw(AssertionError("confirmed a refused effect")),
+            )
+
+        self.assertIsNone(self.canon.event("pre-effect"))
+        self.assertEqual(self.canon.audit.status(), {"ok": True, "pending": 0})
+
+    def test_an_unconfirmed_pending_record_is_never_resolved_by_the_read_that_failed(self) -> None:
+        """A pending replay that cannot confirm keeps the record instead of publishing it."""
+        transaction = MutationEventTransaction(self.canon, request_id="unconfirmed", event=self.event)
+        with mock.patch.object(self.canon.audit, "append", side_effect=OSError("disk full")):
+            with self.assertRaises(BoardEventPending):
+                transaction.execute(lambda: "issued", confirm=lambda: "confirmed")
+
+        with self.assertRaises(BoardEventPending):
+            transaction.execute(
+                lambda: (_ for _ in ()).throw(AssertionError("effect repeated")),
+                confirm=lambda: (_ for _ in ()).throw(RuntimeError("read timed out")),
+            )
+
+        self.assertEqual(self.canon.event("unconfirmed"), self.event)
+        self.assertEqual(self.canon.events(), ())
+        self.assertEqual(self.canon.audit.status(), {"ok": False, "pending": 1})
 
     def test_incomplete_follow_up_work_keeps_the_exact_pending_event(self) -> None:
         """A follow-up that does not land publishes nothing and leaves the record to recover."""
@@ -291,7 +347,7 @@ class BoardMutationTransactionTests(unittest.TestCase):
 
         with self.assertRaises(BoardEventPending):
             transaction.execute(
-                lambda: "backend result", replay=lambda: "never",
+                lambda: "backend result", confirm=lambda: "never",
                 finish=lambda _result: (_ for _ in ()).throw(RuntimeError("cleanup failed")),
             )
 
@@ -302,7 +358,7 @@ class BoardMutationTransactionTests(unittest.TestCase):
         finished: list[str] = []
         recovered = transaction.execute(
             lambda: (_ for _ in ()).throw(AssertionError("effect repeated")),
-            replay=lambda: "confirmed", finish=finished.append,
+            confirm=lambda: "confirmed", finish=finished.append,
         )
 
         self.assertEqual(recovered, "confirmed")
@@ -312,11 +368,11 @@ class BoardMutationTransactionTests(unittest.TestCase):
     def test_a_committed_occurrence_owes_the_backend_no_further_follow_up(self) -> None:
         """The commit is proof the follow-up completed, so a replay does not repeat it."""
         transaction = MutationEventTransaction(self.canon, request_id="finish-3", event=self.event)
-        transaction.execute(lambda: "backend result", replay=lambda: "never", finish=lambda _r: None)
+        transaction.execute(lambda: "backend result", confirm=lambda: "never", finish=lambda _r: None)
 
         replayed = transaction.execute(
             lambda: (_ for _ in ()).throw(AssertionError("effect repeated")),
-            replay=lambda: "confirmed",
+            confirm=lambda: "confirmed",
             finish=lambda _r: (_ for _ in ()).throw(AssertionError("follow-up repeated")),
         )
 
@@ -347,13 +403,13 @@ class BoardMutationTransactionTests(unittest.TestCase):
         transaction = MutationEventTransaction(self.canon, request_id="reconcile-1", event=self.event)
         with mock.patch.object(self.canon.audit, "append", side_effect=OSError("disk full")):
             with self.assertRaises(BoardEventPending):
-                transaction.execute(lambda: "backend result", replay=lambda: "never")
+                transaction.execute(lambda: "backend result", confirm=lambda: "never")
 
         self.assertEqual(self.canon.audit.reconcile(), (0, 1))
         self.assertEqual(self.canon.event("reconcile-1"), self.event)
         self.assertEqual(self.canon.events(), ())
 
-        self.assertEqual(transaction.execute(lambda: "never", replay=lambda: "recovered"), "recovered")
+        self.assertEqual(transaction.execute(lambda: "never", confirm=lambda: "recovered"), "recovered")
         self.assertEqual(self.canon.events(), (self.event,))
         self.assertEqual(self.canon.audit.status(), {"ok": True, "pending": 0})
 
@@ -387,7 +443,7 @@ class BoardMutationTransactionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "generic audit record"):
             transaction.execute(
                 lambda: (_ for _ in ()).throw(AssertionError("foreign effect ran")),
-                replay=lambda: (_ for _ in ()).throw(AssertionError("foreign effect replayed")),
+                confirm=lambda: (_ for _ in ()).throw(AssertionError("foreign effect replayed")),
             )
 
         self.assertEqual(self.canon.audit.pending_event(request_id), generic)
@@ -403,7 +459,7 @@ class BoardMutationTransactionTests(unittest.TestCase):
             TaskAudit(self.tmpdir.name).append(request_id, generic)
         self.assertEqual(self.canon.event(request_id), self.event)
 
-        self.assertEqual(transaction.execute(lambda: "never", replay=lambda: "confirmed"), "confirmed")
+        self.assertEqual(transaction.execute(lambda: "never", confirm=lambda: "confirmed"), "confirmed")
         self.assertEqual(self.canon.committed(request_id), self.event)
         self.assertEqual(self.canon.audit.pending_event(request_id), None)
 
@@ -516,7 +572,7 @@ class BoardMutationTransactionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "another operation or payload"):
             transaction.execute(
                 lambda: (_ for _ in ()).throw(AssertionError("effect ran against a foreign event")),
-                replay=lambda: (_ for _ in ()).throw(AssertionError("replayed a foreign event")),
+                confirm=lambda: (_ for _ in ()).throw(AssertionError("replayed a foreign event")),
             )
 
         self.assertEqual(self.canon.event("shared-1"), self.event)
@@ -550,7 +606,7 @@ class BoardMutationTransactionTests(unittest.TestCase):
             lambda: self.canon.commit("route-commit", self.event),
             lambda: MutationEventTransaction(
                 self.canon, request_id="route-transaction", event=self.event,
-            ).execute(lambda: "effect", replay=lambda: "replay"),
+            ).execute(lambda: "effect", confirm=lambda: "replay"),
             lambda: host.create(Create(
                 Card("card:2", "Card", CardState.READY), actor, "accepted", request_id="route-create",
             )),
@@ -574,11 +630,13 @@ class BoardMutationTransactionTests(unittest.TestCase):
 
     def test_committed_request_id_replay_does_not_repeat_backend_effect(self) -> None:
         transaction = MutationEventTransaction(self.canon, request_id="replay-1", event=self.event)
-        self.assertEqual(transaction.execute(lambda: "first", replay=lambda: "read"), "first")
+        # The confirming read is the result, on a fresh occurrence as much as on a replay: what
+        # the effect call happened to return is not evidence of anything on the board.
+        self.assertEqual(transaction.execute(lambda: "first", confirm=lambda: "read"), "read")
         with mock.patch.object(self.canon.audit, "claim", wraps=self.canon.audit.claim) as claim:
             self.assertEqual(
                 transaction.execute(
-                    lambda: (_ for _ in ()).throw(AssertionError("effect repeated")), replay=lambda: "replayed",
+                    lambda: (_ for _ in ()).throw(AssertionError("effect repeated")), confirm=lambda: "replayed",
                 ),
                 "replayed",
             )

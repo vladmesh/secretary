@@ -82,8 +82,11 @@ class KanboardBoardHost:
 
         The order is the contract: validate the live Card and the caller's authority for its
         edge, stage the exact event this occurrence will publish, perform the single column
-        operation, then commit that event.  A failed effect owes the journal nothing; a failed
-        commit owes the caller a repair and keeps the pending event that names it.
+        operation, confirm it on the board, then commit that event.  Only a failure before the
+        column operation is issued owes the journal nothing; once it has returned, every later
+        failure - the confirming read, ``finish``, the commit - owes the caller a repair and
+        keeps the pending event that names it.  ``MutationEventTransaction`` is what enforces
+        that, for every path through this method.
 
         ``finish`` is the caller's own idempotent board work for this same edge - the card
         fields the state change resets or fills in.  The adapter still maps exactly one column
@@ -129,25 +132,29 @@ class KanboardBoardHost:
                 related = RelatedRefs(related.refs + (current.sprint_ref,))
             event = self._event(current, declaration.event_kind, operation, related, request_id)
 
-        def replay() -> Card:
+        def confirm() -> Card:
             entity = self.read(EntityKind.CARD, operation.ref)
             if not isinstance(entity, Card) or entity.state is not operation.target:
                 raise BoardProtocolError("Card transition is not proven on the Kanboard board")
             return entity
 
-        def effect() -> Card:
-            # Re-read at effect time.  Staging does not grant a stale caller
-            # permission to overwrite a newer Card state.
+        def effect() -> None:
+            # Everything here is before the column operation is issued, which is
+            # what makes a failure in it a discard rather than a recovery
+            # obligation.  The re-read is one of those: staging does not grant a
+            # stale caller permission to overwrite a newer Card state.  The
+            # confirming read back is deliberately *not* here - a read that
+            # fails after moveTaskPosition returned is not evidence the move did
+            # not happen, so the transaction runs it outside the discard window.
             entity = self.read(EntityKind.CARD, operation.ref)
             if not isinstance(entity, Card):
                 raise BoardProtocolError("Card transition resolved a non-Card entity")
             card_transition(operation.actor.role, entity.state, operation.target)
             self._move_card(entity, operation.target)
-            return replay()
 
         entity = MutationEventTransaction(
             self.canon, request_id=request_id, event=event,
-        ).execute(effect, replay=replay, finish=finish)
+        ).execute(effect, confirm=confirm, finish=finish)
         return MutationResult(entity, event)
 
     def recover_transition(self, request_id: str) -> MutationResult:

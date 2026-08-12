@@ -626,8 +626,17 @@ ordinary claim, report and review cycle gains no extra step. The PO may create, 
 explicit `--sprint-override` plus a non-empty `--sprint-override-reason-file`; the reason text is stored
 as its own field in the durable audit. Without the flag the PO gets `sprint_write_forbidden`, as do retro,
 steward and every other role. The refusal names the holding sprint and asks the caller to write through
-its entity. The refusal itself is audited as `sprint_guard_denied` and is not duplicated when the same
-request id is retried.
+its entity.
+
+Both answers the guard can give are audited, and neither is duplicated when the same request id is
+retried. A refusal is a `sprint_guard_denied` record; a granted override is a `sprint_guard_override`
+record carrying the project, the holding sprint, the override reason and the request id of the operation
+it authorized. Each is written under its own derived request id, so the operation keeps its own retry key,
+and the grant is written before that operation stages or effects anything: an override that could not be
+recorded does not happen. The grant is a control-plane record about authority, deliberately separate from
+the operation's own record — a migrated Card transition's typed event describes the lifecycle edge, not
+who was permitted to make it — which is what keeps the answer to "who overrode this sprint's reservation,
+and why" in one shape across `move`, `create` and `edit`.
 
 A write of role `observer` is authenticated against the sprint it names before any of that. The
 dispatcher launches a head for one sprint and binds `SECRETARY_OBSERVER_SPRINT` and
@@ -670,12 +679,20 @@ what tells them apart. A request id written before the migration also keeps the 
 retry of a released generic `move` or `claim` id replays that record and finishes its released cleanup,
 rather than being read as a typed request it never was.
 
-The board work a state edge owes beyond the column itself is inside the same transaction, not after it.
-The claim metadata a `claim` writes, the routing and retry fields a move into Ready or Done resets, the
-review head a move out of Validate clears and the move's reason comment all run once the column effect is
-proven and before the event commits. So a refused or failed column move leaves nothing behind at all -
-no claimed-but-Ready card, no event - and a follow-up that does not land keeps the exact pending typed
-record instead of reporting a clean journal over a half-written card.
+One staged occurrence has exactly one owner of its outcome, `MutationEventTransaction`, and one window in
+which its record may be discarded: the call that issues the single column operation, and nothing else.
+Everything before that call — reading the card, re-authorizing the edge against the live state — is inside
+the window, because none of it has touched the board. Everything after it is fail-closed. That includes
+the read that confirms the move: a read which times out, or which finds another writer's column, says
+nothing about whether this move was applied, so it keeps the exact pending typed record rather than
+reporting the card as never moved. The same holds for the follow-up board work and for the event commit.
+
+That board work is inside the same transaction, not after it. The claim metadata a `claim` writes, the
+routing and retry fields a move into Ready or Done resets, the review head a move out of Validate clears
+and the move's reason comment all run once the column effect is confirmed and before the event commits.
+So a refused or failed column move leaves nothing behind at all - no claimed-but-Ready card, no event -
+and a follow-up that does not land keeps the exact pending typed record instead of reporting a clean
+journal over a half-written card.
 
 Recovery is likewise split. A pending typed transition is repaired by re-reading the card and committing
 its exact event only when the requested target is live on the board. It never repeats a column move, and
@@ -687,8 +704,11 @@ than stranding claim metadata under a clean audit. A claim's own metadata is not
 id and the resolved heads are dispatcher decisions no reader of the card can reconstruct. Refusing there
 would make a proven start permanently unrecoverable, so recovery publishes the occurrence it proved and
 leaves the missing claim to the dispatcher's live claim check, which reports it as a controlled
-divergence instead of launching on it. The complete repair for that case is a retry of the same request
-id, which repeats no admission check and no column move and finishes the metadata before publishing.
+divergence instead of launching on it. Retrying the same request id is the repair that also restores the
+metadata, and only while the record is still pending: it repeats no admission check and no column move,
+finishes the metadata and then publishes. Once `reconcile-audit` has published the occurrence, that retry
+answers from the committed event and writes nothing further, so the claim gap is the dispatcher's to
+report from there on.
 
 A `--request-id` is an ownership claim over the operation it recorded, not only a de-duplication key for
 the append. A retry under an id the audit already holds, committed or still staged, is answered from that

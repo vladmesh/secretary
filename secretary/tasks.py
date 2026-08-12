@@ -89,6 +89,11 @@ def _sprint_guard_denial_request_id(request_id: str) -> str:
     return "sprint-guard-denied-" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()
 
 
+def _sprint_guard_override_request_id(request_id: str) -> str:
+    """Keep a granted override from consuming the operation's retry key."""
+    return "sprint-guard-override-" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+
+
 _STATE_BY_COLUMN = {
     "Issues": "issues",
     "Ready": "ready",
@@ -2094,6 +2099,10 @@ class TaskWriter:
                     role=role, actor=actor, project=project, sprint=sprint_ref,
                     request_id=request_id, reference=reference, exit_code=2,
                 )
+            self._grant_sprint_override(
+                role=role, actor=actor, project=project, sprint=sprint_ref,
+                reason=sprint_override_reason, request_id=request_id, reference=reference,
+            )
             return {"sprint_override_reason": sprint_override_reason}
         # The caller was already proven to be this card's sprint's observer above; what is left is
         # that the sprint holding the project is the one the card is linked to.
@@ -2149,6 +2158,46 @@ class TaskWriter:
                 role=role, actor=actor, project=project, sprint=declared,
                 request_id=request_id, reference=reference,
             )
+
+    def _grant_sprint_override(
+        self, *, role: str, actor: str, project: str, sprint: str, reason: str,
+        request_id: str, reference: str,
+    ) -> None:
+        """Record the granted single-writer override before the operation it authorizes runs.
+
+        The refusal has always been audited; a grant is the same question answered the other way,
+        and the audit has to answer "who overrode this sprint's reservation, and why" for both. It
+        is a generic control-plane record like the denial, not part of the Card's typed event: the
+        event describes the lifecycle edge, and this describes the authority the writer used to
+        make it. That also keeps the answer in one shape for every operation the guard admits -
+        `move`, `create` and `edit` alike - rather than only for the ones whose own payload
+        happens to have room for it.
+
+        It is written before the operation stages or effects anything, so an override that could
+        not be recorded does not happen. The derived request id keeps it off the operation's own
+        retry key, and a retry under the same id recognizes the grant it already made.
+        """
+        override_request_id = _sprint_guard_override_request_id(request_id)
+        if self.audit.committed_event(override_request_id) is not None:
+            return
+        event = {
+            "event_id": "evt_" + uuid.uuid4().hex, "schema_version": 1, "occurred_at": _now(),
+            "actor": {"role": role, "id": actor}, "kind": "sprint_guard_override",
+            "outcome": "granted", "task_id": "", "ref": reference,
+            "backend": {"kind": "kanboard", "task_id": None, "revision": "not_written"},
+            "request_id": override_request_id,
+            "payload": {
+                "project": project, "sprint": sprint, "sprint_override_reason": reason,
+                "operation_request_id": request_id,
+            },
+        }
+        self.audit.stage(override_request_id, event)
+        try:
+            self.audit.append(override_request_id, event)
+        except OSError:
+            raise TaskError(
+                "audit_pending", "sprint override was granted but audit repair is required", 4,
+            ) from None
 
     def _deny_sprint_write(
         self, *, code: str, message: str, role: str, actor: str, project: str,
@@ -2338,7 +2387,10 @@ class TaskWriter:
                     self.audit.append(str(event["request_id"]), event)
                     repaired += 1
                     continue
-                if event.get("kind") == "sprint_guard_denied":
+                if event.get("kind") in {"sprint_guard_denied", "sprint_guard_override"}:
+                    # A guard decision records itself, not a backend row: there is nothing to
+                    # re-read, and the decision it names was made whether or not the operation
+                    # it authorized went on to succeed.
                     self.audit.append(str(event["request_id"]), event)
                     repaired += 1
                     continue
