@@ -48,6 +48,12 @@ TRANSITIONS: dict[EntityKind, dict[TransitionKey, Transition]] = {
         (SprintState.OPEN, SprintState.CLOSED): Transition(
             SprintState.OPEN, SprintState.CLOSED, EventKind.SPRINT_CLOSED
         ),
+        # A hard-budget stop blocks ordinary sprint work, but it has always
+        # remained closeable.  Closing it retains its terminal status while
+        # completing the close facade's archival and reservation work.
+        (SprintState.STOPPED, SprintState.CLOSED): Transition(
+            SprintState.STOPPED, SprintState.CLOSED, EventKind.SPRINT_CLOSED
+        ),
         (SprintState.OPEN, SprintState.STOPPED): Transition(
             SprintState.OPEN, SprintState.STOPPED, EventKind.SPRINT_STOPPED
         ),

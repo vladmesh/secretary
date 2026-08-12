@@ -76,6 +76,7 @@ class BoardHostContractTests(unittest.TestCase):
             (SprintState.OPEN, SprintState.CLOSED),
             (SprintState.CLOSED, SprintState.OPEN),
             (SprintState.OPEN, SprintState.STOPPED),
+            (SprintState.STOPPED, SprintState.CLOSED),
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             for index, (source, target) in enumerate(edges):
@@ -769,6 +770,10 @@ class KanboardBoardHostTests(unittest.TestCase):
         self.assertEqual(
             TRANSITIONS[EntityKind.SPRINT][(SprintState.OPEN, SprintState.STOPPED)].event_kind,
             EventKind.SPRINT_STOPPED,
+        )
+        self.assertEqual(
+            TRANSITIONS[EntityKind.SPRINT][(SprintState.STOPPED, SprintState.CLOSED)].event_kind,
+            EventKind.SPRINT_CLOSED,
         )
 
     def test_sprint_transition_rejects_a_raw_metadata_escape_before_any_backend_read(self) -> None:

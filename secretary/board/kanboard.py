@@ -16,7 +16,7 @@ from secretary.board.models import (
     BoardEntity, Card, CardState, EntityKind, Event, EventKind, Issue, IssueState, Product,
     ProductState, RelatedRefs, Sprint, SprintState,
 )
-from secretary.board.transitions import BoardProtocolError, transition
+from secretary.board.transitions import BoardProtocolError, transition, transition_for
 from secretary.product_issues import ProductIssueStore
 from secretary.sprints import SprintReader
 from secretary.tasks import (
@@ -315,14 +315,11 @@ class KanboardBoardHost:
             raise BoardProtocolError("Sprint transition resolved a non-Sprint entity")
         existing = self.canon.event(request_id)
         if existing is not None:
-            required = tuple(ref for ref in (current.product_ref, *current.issue_refs, *current.card_refs) if ref)
-            related = RelatedRefs(operation.related_refs.refs + required)
             if (
                 existing.entity_kind is not EntityKind.SPRINT or existing.ref != operation.ref
                 or existing.actor != operation.actor or existing.reason != operation.reason
                 or existing.target_state != operation.target.value or existing.data != self._sprint_data(operation)
-                or existing.related_refs != related
-                or not self._declared_sprint_event(existing, current)
+                or not self._declared_sprint_event(existing)
             ):
                 raise ValueError("request id belongs to another operation or payload")
             if self.canon.committed(request_id) is not None:
@@ -401,7 +398,7 @@ class KanboardBoardHost:
         entity = self.read(EntityKind.SPRINT, event.ref)
         if not isinstance(entity, Sprint) or entity.state is not target:
             raise BoardProtocolError("pending Sprint transition is not proven on the Kanboard board")
-        if not self._declared_sprint_event(event, entity):
+        if not self._declared_sprint_event(event):
             raise BoardProtocolError("pending Sprint event has an unsupported lifecycle edge")
         self.canon.commit(request_id, event)
         return MutationResult(entity, event)
@@ -564,7 +561,7 @@ class KanboardBoardHost:
         return all(str(actual.get(key) or "") == value for key, value in values.items())
 
     @staticmethod
-    def _declared_sprint_event(event: Event, entity: Sprint) -> bool:
+    def _declared_sprint_event(event: Event) -> bool:
         if event.source_state is None or event.target_state is None:
             return False
         try:
@@ -573,9 +570,7 @@ class KanboardBoardHost:
         except ValueError:
             return False
         try:
-            _successor, declaration = transition(
-                Sprint(entity.ref, entity.goal, source, entity.product_ref, entity.issue_refs, entity.card_refs), target,
-            )
+            declaration = transition_for(EntityKind.SPRINT, source, target)
         except BoardProtocolError:
             return False
         return event.kind is declaration.event_kind

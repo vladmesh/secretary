@@ -1378,7 +1378,14 @@ class SprintWriter:
                 budget_by_type=counts,
             )
         except TaskError as exc:
-            if exc.code == "backend_error":
+            # A generic charge may wait only on the exact typed occurrence
+            # that owns the state effect.  If staging/effect admission failed
+            # before that occurrence survived, retain neither record: the
+            # released generic write discarded on every failed mutation, and
+            # otherwise this request can become stranded once the Sprint
+            # changes state through another command.
+            typed_request_id = request_id + ":typed-hard-stop"
+            if self.audit.event(typed_request_id) is None:
                 self.audit.discard(request_id, event)
             raise
         result = self._committed("budget_recorded", event) if self.audit.committed_event(request_id) else self._pending("budget_recorded", event)
