@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from secretary.dispatcher_helpers import scrub_host_output
+from secretary.dispatcher_heartbeat import run_heartbeat_identity
 from secretary.dispatcher_launch import (
     REVIEW_ROLE,
     WORKER_ROLE,
@@ -35,6 +36,9 @@ from secretary.dispatcher_types import (
     review_pane_label,
 )
 from secretary.dispatcher_watchdog import (
+    heartbeat_is_dead as _heartbeat_is_dead,
+    heartbeat_is_live_match as _heartbeat_is_live_match,
+    heartbeat_is_mismatch as _heartbeat_is_mismatch,
     head_process_status as _head_process_status,
     initial_output_stall_seconds as _initial_output_stall_seconds,
     pid_file_path as _pid_file_path,
@@ -194,8 +198,21 @@ def command_terminal_status(
             continue
         if not terminal.connected:
             return {"known": True, "live": False, "reason": "disconnected"}
-        pid_status = _head_process_status(_pid_file_path(kind, task["ref"]))
-        if pid_status.get("known") and not pid_status.get("alive"):
+        run = record.review_head_run if kind == "review" else record.worker_head_run
+        leaf = record.review_leaf if kind == "review" else record.worker_leaf
+        pid_status = _head_process_status(
+            _pid_file_path(kind, task["ref"]),
+            expected=run_heartbeat_identity(run, role=kind, task=f"card:{task['ref']}", leaf=leaf),
+        )
+        if _heartbeat_is_mismatch(pid_status):
+            return {
+                "known": True,
+                "live": True,
+                "reason": "heartbeat-identity-mismatch",
+                "identity_mismatch": True,
+                "pid_confirmed": False,
+            }
+        if _heartbeat_is_dead(pid_status):
             # The pane is connected and Orca kept its wrapping shell open, but the head process
             # itself is gone (secretary-751): a provider crash or a killed runtime, not silence.
             return {"known": True, "live": False, "reason": "process-exited"}
@@ -208,7 +225,7 @@ def command_terminal_status(
         )
         if supplemental:
             activity = max(activity or 0.0, float(supplemental))
-        pid_confirmed = bool(pid_status.get("known") and pid_status.get("alive"))
+        pid_confirmed = _heartbeat_is_live_match(pid_status)
         status = {
             "known": True, "live": True, "reason": "live", "last_activity": activity,
             # A pid-heartbeat that proves this exact process still runs; only this — not a
@@ -239,8 +256,21 @@ def command_terminal_status(
     # In both the pid heartbeat is the stronger evidence: it proves this exact process runs. A
     # pane we cannot name is not a dead head, and respawning over a live one is the second head
     # the intent contour exists to prevent.
-    pid_status = _head_process_status(_pid_file_path(kind, task["ref"]))
-    if pid_status.get("known") and pid_status.get("alive"):
+    run = record.review_head_run if kind == "review" else record.worker_head_run
+    leaf = record.review_leaf if kind == "review" else record.worker_leaf
+    pid_status = _head_process_status(
+        _pid_file_path(kind, task["ref"]),
+        expected=run_heartbeat_identity(run, role=kind, task=f"card:{task['ref']}", leaf=leaf),
+    )
+    if _heartbeat_is_mismatch(pid_status):
+        return {
+            "known": True,
+            "live": True,
+            "reason": "heartbeat-identity-mismatch",
+            "identity_mismatch": True,
+            "pid_confirmed": False,
+        }
+    if _heartbeat_is_live_match(pid_status):
         return {"known": True, "live": True, "reason": "pid", "pid_confirmed": True}
     if not pid_status.get("known"):
         # `pid_file_path`'s own contract: the dispatcher clears the pid file before every fresh

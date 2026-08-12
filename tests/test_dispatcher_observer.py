@@ -223,7 +223,14 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def kill_observer(self, reference: str = "sprint:1") -> None:
         record = self.observers()[reference]
-        Path(record.pid_file).write_text(str(DEAD_PID), encoding="utf-8")
+        path = Path(record.pid_file)
+        heartbeat = json.loads(path.read_text(encoding="utf-8"))
+        heartbeat.update({
+            "pid": DEAD_PID,
+            "boot_id": "dead-process",
+            "proc_starttime_ticks": "0",
+        })
+        path.write_text(json.dumps(heartbeat), encoding="utf-8")
 
     def acknowledge_delivery(
         self, entry: dict[str, str], *, request_id: str, reference: str = "sprint:1",
@@ -2628,9 +2635,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         seen: list = []
         real = self.host.prepare_observer
 
-        def spy(sprint, head, *, prompt, identity=None):
+        def spy(sprint, head, *, prompt, identity=None, **kwargs):
             seen.append(load_observers(self.runtime.production_state.load()).get("sprint:1"))
-            return real(sprint, head, prompt=prompt, identity=identity)
+            return real(sprint, head, prompt=prompt, identity=identity, **kwargs)
 
         with mock.patch.object(self.host, "prepare_observer", spy):
             self.runtime.production_tick()
@@ -2668,6 +2675,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         intent = self.observers()["sprint:1"]
         self.assertEqual((intent.state, intent.pending_launch, intent.handle), ("launching", 1, ""))
+        self.assertTrue(intent.head_run["run_id"], "the pre-launch record binds the future heartbeat")
         self.assertEqual(self.host.observers, ["sprint:1"])
 
         result = self.runtime.production_tick()
@@ -2678,6 +2686,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(record.state, "running")
         self.assertEqual(record.launches, 1)
         self.assertEqual(record.pending_launch, 0)
+        self.assertEqual(record.head_run["run_id"], intent.head_run["run_id"])
         self.assertEqual(
             [event["kind"] for event in self.audit.events("sprint:1")],
             [EVENT_FENCED, EVENT_LAUNCHED, EVENT_FENCED],
@@ -2687,6 +2696,28 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         self.assertEqual([action["action"] for action in self.actions(live)], ["observer-live"])
         self.assertEqual(self.host.observers, ["sprint:1"])
+
+    def test_a_live_foreign_observer_heartbeat_is_fenced_without_a_stop_or_relaunch(self) -> None:
+        self.open_sprint()
+        with self.failing_state_save(after=1):
+            with self.assertRaises(OSError):
+                self.runtime.production_tick()
+        record = self.observers()["sprint:1"]
+        path = Path(record.pid_file)
+        heartbeat = json.loads(path.read_text(encoding="utf-8"))
+        heartbeat["run_id"] = "foreign-run"
+        path.write_text(json.dumps(heartbeat), encoding="utf-8")
+        self.host.calls.clear()
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(
+            [action["action"] for action in self.actions(result)],
+            ["observer-heartbeat-identity-mismatch"],
+        )
+        self.assertEqual(self.host.observers, ["sprint:1"])
+        self.assertNotIn("stop_observer", self.host.calls)
+        self.assertNotIn("prepare_observer", self.host.calls)
 
     def test_an_observer_launch_persists_its_returned_leaf_before_outcome_commit(self) -> None:
         """A crash after `terminal create` retains the leaf that identifies its alias pane."""
@@ -4061,7 +4092,7 @@ class RealHostStopObserverTests(unittest.TestCase):
         with mock.patch.object(
             CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)
         ), mock.patch.object(
-            self.host, "_confirm_head_process_gone", lambda path: confirmed.append(path)
+            self.host, "_confirm_head_process_gone", lambda path, **kwargs: confirmed.append(path)
         ):
             self.host.stop_observer(record)
 

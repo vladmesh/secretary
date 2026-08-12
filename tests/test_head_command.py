@@ -262,10 +262,15 @@ class PidHeartbeatTests(unittest.TestCase):
         """`$$` then `exec env`: a real shell runs first so `$$` means something, and `env` keeps
         `exec` a single-word invocation despite the leading assignments a wrapped command starts
         with."""
-        self.assertEqual(
-            with_pid_heartbeat("PYTHONPATH=/x python3 -m thing", "/run/head.pid"),
-            'echo "$$" > /run/head.pid; exec env PYTHONPATH=/x python3 -m thing',
+        wrapped = with_pid_heartbeat(
+            "PYTHONPATH=/x python3 -m thing",
+            "/run/head.pid",
+            identity={"run_id": "run-1", "role": "worker", "task": "card:1"},
         )
+
+        self.assertIn("python3 -P -c", wrapped)
+        self.assertIn("os.replace", wrapped)
+        self.assertTrue(wrapped.endswith("; exec env PYTHONPATH=/x python3 -m thing"))
 
 
 class EveryCallerRendersThroughThisModuleTests(unittest.TestCase):

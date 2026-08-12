@@ -16,10 +16,14 @@ separate ticks that observe the same aged idle episode; the first is a degraded 
 
 from __future__ import annotations
 
+import json
 import os
+import tempfile
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, NamedTuple
 
+from secretary.dispatcher_heartbeat import HEARTBEAT_VERSION
 from secretary.dispatcher_state import request_token
 
 # A missing pane is handled immediately. These ceilings remain deliberately generous for a head
@@ -185,6 +189,32 @@ def pid_file_path(kind: str, reference: str) -> str:
     return f"{root}/secretary-{kind}-pid-{request_token(reference)}.pid"
 
 
+HEARTBEAT_LIVE_MATCH = "live-match"
+HEARTBEAT_DEAD = "dead"
+HEARTBEAT_IDENTITY_MISMATCH = "identity-mismatch"
+HEARTBEAT_NOT_YET_WRITTEN = "not-yet-written"
+HEARTBEAT_UNREADABLE = "unreadable"
+
+
+def _proc_starttime_ticks(pid: int) -> str:
+    """Linux's process-creation discriminator for a live PID.
+
+    ``comm`` may contain spaces and parentheses, so splitting the complete ``stat`` line on
+    whitespace is not safe.  The final closing parenthesis ends it; field 22 is then token 19 of
+    the remaining fields (which begin at field 3).
+    """
+    stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    close = stat.rfind(")")
+    fields = stat[close + 2:].split()
+    if close < 0 or len(fields) <= 19:
+        raise ValueError("/proc stat has no process start time")
+    return fields[19]
+
+
+def _boot_id() -> str:
+    return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+
+
 def _is_zombie(pid: int) -> bool:
     """A process the kernel has not reaped yet still answers `kill(pid, 0)`, so a check right at
     exit can read one tick stale as still alive. Reading its own `/proc` status closes that gap."""
@@ -210,37 +240,149 @@ def _is_stopped(pid: int) -> bool:
     return False
 
 
-def head_process_status(pid_file: str) -> dict[str, Any]:
-    """Whether the OS process named by a pid-heartbeat file is still alive.
+def _unreadable(reason: str) -> dict[str, Any]:
+    return {"known": False, "alive": False, "match": False, "state": HEARTBEAT_UNREADABLE,
+            "reason": reason}
 
-    `known: False` covers a file that does not exist yet (a fresh launch has not written its pid
-    yet) and one that never will (a raw `SECRETARY_DISPATCHER_*_COMMAND` override skips the
-    heartbeat wrapper entirely). Neither is evidence the head died, so callers must fall back to
-    the ordinary timing ceiling instead of reading `known: False` as "exited".
+
+def _record_matches_expected(record: Mapping[str, Any], expected: Mapping[str, Any] | None) -> bool:
+    if expected is None:
+        return True
+    # An empty expected run is deliberately not a wildcard.  A caller that has no durable HeadRun
+    # cannot prove a process belongs to it, even when its pid file happens to be well formed.
+    for name in ("run_id", "role", "task"):
+        value = str(expected.get(name) or "")
+        if not value or str(record.get(name) or "") != value:
+            return False
+    leaf = str(expected.get("leaf") or "")
+    return not leaf or str(record.get("leaf") or "") == leaf
+
+
+def _read_record(pid_file: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    try:
+        raw = Path(pid_file).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None, {"known": False, "alive": False, "match": False,
+                      "state": HEARTBEAT_NOT_YET_WRITTEN}
+    except OSError as exc:
+        return None, _unreadable(type(exc).__name__)
+    try:
+        record = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None, _unreadable("malformed-json")
+    if not isinstance(record, dict):
+        return None, _unreadable("record-is-not-an-object")
+    if record.get("version") != HEARTBEAT_VERSION:
+        return None, _unreadable("unknown-version")
+    try:
+        pid = int(record.get("pid"))
+    except (TypeError, ValueError):
+        return None, _unreadable("invalid-pid")
+    required = ("boot_id", "proc_starttime_ticks", "run_id", "role", "task")
+    if pid <= 0 or any(not str(record.get(name) or "") for name in required):
+        return None, _unreadable("missing-identity")
+    record["pid"] = pid
+    record["leaf"] = str(record.get("leaf") or "")
+    return record, None
+
+
+def head_process_status(
+    pid_file: str, *, expected: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    """Classify a launch-identity heartbeat without trusting PID reuse.
+
+    A readable record has one of ``live-match``, ``dead`` or ``identity-mismatch``.  Missing,
+    partially written, malformed and legacy PID-only files retain their distinct inconclusive
+    states.  In particular, a raw command override has no synthetic compatibility identity.
     """
-    try:
-        raw = Path(pid_file).read_text(encoding="utf-8").strip()
-    except OSError:
-        return {"known": False}
-    try:
-        pid = int(raw)
-    except ValueError:
-        return {"known": False}
-    if pid <= 0:
-        return {"known": False}
+    record, failure = _read_record(pid_file)
+    if failure is not None:
+        return failure
+    assert record is not None
+    pid = int(record["pid"])
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return {"known": True, "alive": False}
+        return {"known": True, "alive": False, "match": False, "state": HEARTBEAT_DEAD,
+                "pid": pid, "record": record}
     except PermissionError:
-        # Exists, owned by someone else. Cannot happen for a head this dispatcher launched itself,
-        # but existing beats dead here rather than guessing. `/proc` is still readable, so the
-        # suspended flag stays available to retention rather than silently reading as "running".
-        return {"known": True, "alive": True, "stopped": _is_stopped(pid)}
-    except OSError:
-        return {"known": False}
+        # A normal dispatcher head is owned by us.  Treat an uninspectable process as inconclusive:
+        # a weak permission answer cannot authorize a signal or a replacement.
+        return _unreadable("process-not-inspectable")
+    except OSError as exc:
+        return _unreadable(type(exc).__name__)
+    try:
+        boot_matches = str(record["boot_id"]) == _boot_id()
+        start_matches = str(record["proc_starttime_ticks"]) == _proc_starttime_ticks(pid)
+    except (OSError, ValueError) as exc:
+        return _unreadable(type(exc).__name__)
     alive = not _is_zombie(pid)
-    return {"known": True, "alive": alive, "stopped": alive and _is_stopped(pid)}
+    if not alive:
+        return {"known": True, "alive": False, "match": False, "state": HEARTBEAT_DEAD,
+                "pid": pid, "record": record}
+    if not boot_matches or not start_matches or not _record_matches_expected(record, expected):
+        return {
+            "known": True,
+            "alive": True,
+            "match": False,
+            "state": HEARTBEAT_IDENTITY_MISMATCH,
+            "pid": pid,
+            "record": record,
+            "stopped": _is_stopped(pid),
+        }
+    return {
+        "known": True,
+        "alive": True,
+        "match": True,
+        "state": HEARTBEAT_LIVE_MATCH,
+        "pid": pid,
+        "record": record,
+        "stopped": _is_stopped(pid),
+    }
+
+
+def heartbeat_is_live_match(status: Mapping[str, Any]) -> bool:
+    return str(status.get("state") or "") == HEARTBEAT_LIVE_MATCH
+
+
+def heartbeat_is_dead(status: Mapping[str, Any]) -> bool:
+    return str(status.get("state") or "") == HEARTBEAT_DEAD
+
+
+def heartbeat_is_mismatch(status: Mapping[str, Any]) -> bool:
+    return str(status.get("state") or "") == HEARTBEAT_IDENTITY_MISMATCH
+
+
+def bind_head_heartbeat(
+    pid_file: str, *, expected: Mapping[str, Any], leaf: str
+) -> bool:
+    """Atomically add the terminal leaf once the pane create call has returned.
+
+    The writer starts before Orca returns the leaf.  Re-reading and matching its original identity
+    prevents a late dispatcher from annotating a newer process that reused the pid path.
+    """
+    status = head_process_status(pid_file, expected=expected)
+    if not heartbeat_is_live_match(status):
+        return False
+    record = dict(status["record"])
+    record["leaf"] = str(leaf or "")
+    path = Path(pid_file)
+    temporary = ""
+    try:
+        descriptor, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(record, handle, sort_keys=True, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except OSError:
+        try:
+            if temporary:
+                Path(temporary).unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+    return True
 
 
 def wait_outcome(

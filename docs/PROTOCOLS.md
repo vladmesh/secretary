@@ -937,6 +937,21 @@ Descriptions and decisions are both arbitrary Markdown, so neither the delimiter
 be anything either of them may contain: an encoded field has no character that ends it, and the
 dispatcher's own line comes after every section they are rendered into.
 
+### Head heartbeat identity
+
+Every dispatcher-launched worker, reviewer and observer writes one atomically replaced, versioned JSON heartbeat
+before its shell `exec`s the provider. It contains the pid, Linux boot id and process start ticks together with the
+durable `HeadRun` id, role, card or sprint binding and the pane leaf once that leaf is known. The writer begins with
+the run, role and task binding and performs a guarded second atomic replace after pane creation, so a late binder
+cannot annotate another process that has reused the pid-file path.
+
+Readers classify a matching live record, a dead record, a live identity mismatch, a missing not-yet-written record,
+and an unreadable record separately. Boot, start ticks, run id, role, task and a known leaf all have to agree before
+a process counts as this head. A mismatch is an operator-facing degraded state, not evidence of a head to adopt or a
+process to signal: retention, launch recovery, watchdogs, stop paths and observer reconciliation leave it in place
+and never open a replacement beside it. Raw command overrides write no heartbeat and receive no synthetic identity;
+they retain only the documented launch grace and pane-output fallbacks.
+
 ### Worker retention through validation and review
 
 After a worker reports `done`, the dispatcher suspends its live, addressable worker session before

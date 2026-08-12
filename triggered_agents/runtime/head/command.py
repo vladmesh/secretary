@@ -227,8 +227,10 @@ def wrap_role_command(
     )
 
 
-def with_pid_heartbeat(command: str, pid_file: str) -> str:
-    """Prefix a head's launch command so its own pid lands in `pid_file` right before it execs.
+def with_pid_heartbeat(
+    command: str, pid_file: str, *, identity: Mapping[str, str] | None = None
+) -> str:
+    """Prefix a head command with an atomic versioned launch-identity heartbeat.
 
     `$$` inside a shell always names that shell's own pid, and the trailing `exec` replaces the
     shell's process image with the head instead of forking it as a child, so the pid written here
@@ -249,7 +251,35 @@ def with_pid_heartbeat(command: str, pid_file: str) -> str:
     # The terminal already puts its foreground head in a process group. Keeping that terminal
     # session matters for interactive heads: they need /dev/tty, resize signals and normal pane
     # teardown. The runtime signals that existing group when it is safe to do so.
-    return f'echo "$$" > {shlex.quote(pid_file)}; exec env {command}'
+    # This small stdlib-only writer runs while the shell still has the PID which ``exec`` will keep
+    # for the head.  It gets boot id and start ticks from that exact process and replaces the file
+    # atomically, so a reader never mistakes a half-written JSON record for an exited head.
+    writer = """import json
+import os
+import sys
+import tempfile
+path, pid, identity = sys.argv[1:]
+stat = open(f'/proc/{pid}/stat', encoding='utf-8').read()
+close = stat.rfind(')')
+fields = stat[close + 2:].split()
+if close < 0 or len(fields) <= 19:
+    raise RuntimeError('process stat has no start time')
+record = json.loads(identity)
+record.update({'version': 1, 'pid': int(pid),
+               'boot_id': open('/proc/sys/kernel/random/boot_id', encoding='utf-8').read().strip(),
+               'proc_starttime_ticks': fields[19]})
+directory = os.path.dirname(path) or '.'
+fd, temporary = tempfile.mkstemp(prefix='.secretary-heartbeat-', dir=directory)
+with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+    json.dump(record, handle, sort_keys=True, separators=(',', ':'))
+    handle.flush()
+    os.fsync(handle.fileno())
+os.replace(temporary, path)"""
+    encoded_identity = json.dumps(dict(identity or {}), sort_keys=True, separators=(",", ":"))
+    return (
+        f"python3 -P -c {shlex.quote(writer)} {shlex.quote(pid_file)} \"$$\" "
+        f"{shlex.quote(encoded_identity)}; exec env {command}"
+    )
 
 
 def _render_claude(
