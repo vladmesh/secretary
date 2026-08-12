@@ -120,6 +120,13 @@ class MutationEventTransaction:
     pending event whose backend effect already happened.  This is the reusable
     seam future KanboardBoardHost writers need: no caller can report the effect
     as successful after ``commit`` fails.
+
+    ``finish`` is the writer's remaining idempotent backend work for the same
+    occurrence: board fields a state edge resets or fills in, which are not the
+    state edge itself but must not survive it half-applied.  It runs after the
+    effect is proven and *before* the event commits, so an incomplete one leaves
+    the exact pending record the caller and :meth:`reconcile` need instead of a
+    clean journal over a half-written card.
     """
 
     def __init__(self, canon: BoardEventCanon, *, request_id: str, event: Event) -> None:
@@ -127,7 +134,13 @@ class MutationEventTransaction:
         self.request_id = request_id
         self.event = event
 
-    def execute(self, effect: Callable[[], T], *, replay: Callable[[], T]) -> T:
+    def execute(
+        self,
+        effect: Callable[[], T],
+        *,
+        replay: Callable[[], T],
+        finish: Callable[[T], None] | None = None,
+    ) -> T:
         committed = self.canon.committed(self.request_id)
         if committed is not None:
             self._require_same_event(committed)
@@ -135,6 +148,8 @@ class MutationEventTransaction:
             # already committed exact event, but keeps all transaction contours on the same
             # lock-protected protocol boundary.
             self._commit_or_raise()
+            # A committed event is proof that `finish` already ran to completion, so a replay
+            # owes the backend nothing further.
             return replay()
 
         pending = self.canon.event(self.request_id)
@@ -143,6 +158,7 @@ class MutationEventTransaction:
             # The pending record is evidence that the caller staged before the
             # backend write.  Never run the backend effect a second time.
             result = replay()
+            self._finish_or_raise(finish, result)
             self._commit_or_raise()
             return result
 
@@ -154,8 +170,19 @@ class MutationEventTransaction:
             # obligation.  TaskAudit's discard keeps its released semantics.
             self.canon.audit.discard(self.request_id, self.event.to_record(self.request_id))
             raise
+        self._finish_or_raise(finish, result)
         self._commit_or_raise()
         return result
+
+    def _finish_or_raise(self, finish: Callable[[T], None] | None, result: T) -> None:
+        if finish is None:
+            return
+        try:
+            finish(result)
+        except Exception as exc:
+            raise BoardEventPending(
+                "backend write committed; board cleanup and its protocol event repair are required"
+            ) from exc
 
     def _commit_or_raise(self) -> None:
         try:

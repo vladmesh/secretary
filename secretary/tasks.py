@@ -1589,8 +1589,7 @@ class TaskWriter:
         if cap < 1:
             raise TaskError("validation", "claim cap must be positive", 2)
         request_id = request_id or str(uuid.uuid4())
-        legacy = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
-        if legacy is not None and legacy.get("record_type") != TaskAudit._PROTOCOL_EVENT_RECORD_TYPE:
+        if self._legacy_record(request_id) is not None:
             # Claims written before Card transitions migrated remain generic audit
             # operations.  They retain their released replay/reconciliation path;
             # in particular, do not reinterpret a legacy pending record as a new
@@ -1610,28 +1609,20 @@ class TaskWriter:
                 identity=payload,
             )
         existing = self._typed_event(request_id)
-        # A typed pending/committed request is replayed by the adapter without
-        # rerunning the claim admission checks or the metadata write.
-        if existing is not None:
-            result = self._transition_card(
-                reference=reference, target=CardState.IN_PROGRESS, role=role, actor=actor,
-                reason=f"claimed by {worker}", request_id=request_id,
-            )
-            return {
-                "action": "claimed", "task": self.reader.show(reference),
-                "event_id": result.event.event_id, "replayed": True,
-            }
-
         task = self.reader.show(reference)
+        # Same guard as move: a product or an issue is not an execution task, so it never takes a
+        # claim even if someone dragged it into Ready by hand.  It runs on the replay too, because
+        # a card can have been retyped between the two attempts.
         _check_execution_record(task)
-        if task["state"] != "ready":
-            raise TaskError("claim_conflict", "claim requires a Ready task", 3)
-        # A prior failed column move can have committed claim metadata but no
-        # typed event.  The same claimant may retry its exact request; another
-        # claimant remains refused.
-        if task["claim"]["worker"] not in {None, worker}:
-            raise TaskError("claim_conflict", "task is already claimed", 3)
-        if task["claim"]["worker"] is None:
+        if existing is None:
+            # Admission is the fresh request's job alone, and every part of it binds: a claim is
+            # admitted only from Ready, only when nobody holds the card, and only inside the
+            # predecessor and capacity rules.  A retrying claimant does not get past them by
+            # having tried before, because a failed attempt leaves no claim behind to recognize.
+            if task["state"] != "ready":
+                raise TaskError("claim_conflict", "claim requires a Ready task", 3)
+            if task["claim"]["worker"] is not None:
+                raise TaskError("claim_conflict", "task is already claimed", 3)
             blocked_by = task.get("blocked_by")
             if blocked_by:
                 predecessor = self.reader.show(str(blocked_by))
@@ -1650,24 +1641,29 @@ class TaskWriter:
             if active_count >= cap:
                 raise TaskError("capacity_reached", "active task capacity is reached", 3)
 
-            values = {
-                "claim": worker,
-                "resolved_head": resolved_head or task["routing"]["head_override"] or "",
-            }
-            if resolved_review_head:
-                values["resolved_review_head"] = resolved_review_head
-            if slug:
-                values["slug"] = slug
-            if base_branch:
-                values["base_branch"] = base_branch
-            self.client.call("saveTaskMetadata", task_id=_task_number(task), values=values)
+        values = {
+            "claim": worker,
+            "resolved_head": resolved_head or task["routing"]["head_override"] or "",
+        }
+        if resolved_review_head:
+            values["resolved_review_head"] = resolved_review_head
+        if slug:
+            values["slug"] = slug
+        if base_branch:
+            values["base_branch"] = base_branch
+        # The claim metadata is written inside the transition, once the column effect is proven.
+        # A refused or failed move therefore leaves no claimed-but-Ready card behind, and a
+        # metadata write that does not land keeps the pending event instead of a clean journal.
         result = self._transition_card(
             reference=reference, target=CardState.IN_PROGRESS, role=role, actor=actor,
             reason=f"claimed by {worker}", request_id=request_id,
+            finish=lambda _card: self.client.call(
+                "saveTaskMetadata", task_id=_task_number(task), values=values,
+            ),
         )
         return {
             "action": "claimed", "task": self.reader.show(reference),
-            "event_id": result.event.event_id, "replayed": False,
+            "event_id": result.event.event_id, "replayed": existing is not None,
         }
 
     def move(
@@ -1680,6 +1676,15 @@ class TaskWriter:
         sprint_override_reason = self._redact_for_board(sprint_override_reason)
         request_id = request_id or str(uuid.uuid4())
         task = self.reader.show(reference)
+        if self._legacy_record(request_id) is not None:
+            # A move recorded before Card transitions migrated is a generic audit operation, and
+            # it stays one: its retry replays that record and its pending form is finished by the
+            # released cleanup, exactly as they were on the version that wrote it.
+            return self._legacy_move(
+                role=role, actor=actor, reference=reference, target=target, reason=reason,
+                decision=decision, sprint_override=sprint_override,
+                sprint_override_reason=sprint_override_reason, request_id=request_id, task=task,
+            )
         existing = self._typed_event(request_id)
         # The replay is answered before the sprint guard, not after it: this request id already
         # owns a typed event, and a denial would have to be written under the same id. A retry of
@@ -1691,28 +1696,20 @@ class TaskWriter:
                 raise TaskError(
                     "transition_forbidden", _forbidden_move_message(role, task["state"], target), 3,
                 ) from None
+            # A replay repeats no admission check and no backend move, but it does finish the
+            # idempotent board cleanup the first attempt may have lost. The comment is the one
+            # follow-up it never repeats: it is not idempotent, and the released reconciliation
+            # never recreated one either.
             result = self._transition_card(
                 reference=reference, target=target_state, role=role, actor=actor,
                 reason=_transition_reason(reason, target), request_id=request_id,
+                finish=self._transition_cleanup(
+                    task, source=str(existing.source_state or ""), target=target, reason="",
+                    role=role,
+                ),
             )
-            # A replay repeats no admission check and no backend move, but it does finish the
-            # idempotent board cleanup the first attempt may have lost. Retrying the original
-            # request is how the released path completed a half-written move too.
-            replayed = self.reader.show(reference)
-            if replayed["state"] == target:
-                try:
-                    self._reset_transition_metadata(
-                        replayed, source=str(existing.source_state or ""), target=target,
-                    )
-                except Exception:
-                    raise TaskError(
-                        "audit_pending",
-                        "Card transition committed; retry this request id to finish the board cleanup",
-                        4,
-                    ) from None
-                replayed = self.reader.show(reference)
             return {
-                "action": "moved", "task": replayed,
+                "action": "moved", "task": self.reader.show(reference),
                 "event_id": result.event.event_id, "replayed": True,
             }
         override_payload = self._guard_sprint_write(
@@ -1741,24 +1738,80 @@ class TaskWriter:
         result = self._transition_card(
             reference=reference, target=target_state, role=role, actor=actor,
             reason=_transition_reason(reason, target), request_id=request_id,
+            finish=self._transition_cleanup(
+                task, source=source, target=target, reason=reason, role=role,
+            ),
         )
-        try:
-            self._reset_transition_metadata(task, source=source, target=target)
-            if reason.strip():
-                self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{role}]\n{reason}")
-        except Exception:
-            # The state edge and its event are both durable at this point. The metadata reset is
-            # idempotent, so the same request id can finish it; the comment is not repeated by
-            # that replay, exactly as the released reconciliation never recreated one.
-            raise TaskError(
-                "audit_pending",
-                "Card transition committed; retry this request id to finish the board cleanup",
-                4,
-            ) from None
         return {
             "action": "moved", "task": self.reader.show(reference),
             "event_id": result.event.event_id, "replayed": False,
         }
+
+    def _legacy_move(
+        self, *, role: str, actor: str, reference: str, target: str, reason: str, decision: str,
+        sprint_override: bool, sprint_override_reason: str, request_id: str, task: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Replay a move this request id already recorded as a released generic operation.
+
+        Only reachable when that record exists, so the mutation below is never the writer of a
+        state change: `_write` replays a committed record and finishes a pending one through the
+        released `_finish_pending_cleanup`.  Mirrors the same branch in :meth:`claim`.
+        """
+        override_payload = self._guard_sprint_write(
+            role=role, actor=actor, project=task["project"], card_sprint=str(task.get("sprint") or ""),
+            linked_sprint=None, sprint_override=sprint_override,
+            sprint_override_reason=sprint_override_reason.strip(), request_id=request_id,
+            reference=reference,
+        )
+        return self._write(
+            "moved", role, actor, reference, request_id,
+            lambda task: {
+                "from": task["state"], "to": target,
+                "reason_sha256": _digest(reason) if reason else None,
+                **({"decision": decision} if decision else {}),
+                **override_payload,
+            },
+            lambda task: None,
+            # `from` is the column the move already left, so it is the one field a retry cannot
+            # recompute. Everything the caller asked for is compared.
+            identity={
+                "to": target,
+                "reason_sha256": _digest(reason) if reason else None,
+                "decision": decision or None,
+                "sprint_override_reason": override_payload.get("sprint_override_reason"),
+            },
+        )
+
+    def _legacy_record(self, request_id: str) -> dict[str, Any] | None:
+        """The released generic audit record this request id owns, if it owns one.
+
+        The two representations are told apart by the record's own discriminator, never by
+        guessing from a payload: a request id written before this migration keeps the released
+        operation it named, and a typed request id is handled by the typed path alone.
+        """
+        record = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
+        if record is None or record.get("record_type") == TaskAudit._PROTOCOL_EVENT_RECORD_TYPE:
+            return None
+        return record
+
+    def _transition_cleanup(
+        self, task: dict[str, Any], *, source: str, target: str, reason: str, role: str,
+    ) -> Callable[[Any], None]:
+        """The board work a migrated Card state edge still owes once its column effect lands.
+
+        Handed to the adapter so it runs inside the transition's transaction: it completes before
+        the event commits, and an incomplete one leaves the exact pending typed record that both
+        a retry of this request id and :meth:`reconcile` know how to finish.
+        """
+        def finish(_entity: Any) -> None:
+            self._reset_transition_metadata(task, source=source, target=target)
+            if reason.strip():
+                self.client.call(
+                    "createComment", task_id=_task_number(task), user_id=0,
+                    content=f"[{role}]\n{reason}",
+                )
+
+        return finish
 
     def _reset_transition_metadata(self, task: dict[str, Any], *, source: str, target: str) -> None:
         """Apply the board metadata a Card state edge resets.
@@ -1780,17 +1833,22 @@ class TaskWriter:
         actor: str,
         reason: str,
         request_id: str,
+        finish: Callable[[Any], None] | None = None,
     ) -> MutationResult:
         """Run one state edge through the typed adapter and its shared journal.
 
         The sprint the card belongs to is not passed here: the adapter reads the live card to
-        authorize the edge anyway, and relates the event to that card's own sprint.
+        authorize the edge anyway, and relates the event to that card's own sprint.  `finish`
+        carries this writer's remaining board work into the same transaction.
         """
         try:
-            return self.board_host.transition(TransitionRequest(
-                EntityKind.CARD, reference, target, Actor(role, actor), reason,
-                RelatedRefs(()), request_id,
-            ))
+            return self.board_host.transition(
+                TransitionRequest(
+                    EntityKind.CARD, reference, target, Actor(role, actor), reason,
+                    RelatedRefs(()), request_id,
+                ),
+                finish=finish,
+            )
         except BoardEventPending:
             raise TaskError(
                 "audit_pending", "backend write committed; audit repair is required", 4,
@@ -2315,14 +2373,26 @@ class TaskWriter:
         the transition it declares rather than guessed from a payload. The adapter proves the
         exact target on the board and never repeats a move; the metadata reset runs only once
         that target is live, so a transition whose effect was lost cannot strip a card's claim.
+        The reset is the same one the transition itself owed, and the event is published only
+        after it is complete, exactly as the released cleanup published a pending move.
         """
         transition = event.get("transition") if isinstance(event.get("transition"), dict) else {}
         target = str(transition.get("target") or "")
-        card = self.reader.show(str(event["ref"]))
+        ref = str(event["ref"])
+        card = self.reader.show(ref)
         if card["state"] == target:
             self._reset_transition_metadata(
                 card, source=str(transition.get("source") or ""), target=target,
             )
+            if target in {"ready", "done"}:
+                normalized = self.reader.show(ref)
+                if (
+                    normalized["claim"]["worker"] is not None
+                    or normalized["routing"]["resolved_worker_head"] is not None
+                    or normalized["routing"]["resolved_review_head"] is not None
+                    or normalized["retry"] != {"same": 0, "switched": 0, "heads": []}
+                ):
+                    raise TaskError("backend_error", "pending Ready cleanup remains incomplete", 1)
         self.board_host.recover_transition(str(event["request_id"]))
 
     def _finish_pending_cleanup(

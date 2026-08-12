@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -75,13 +75,22 @@ class KanboardBoardHost:
     def replace(self, operation: Replace) -> MutationResult:
         self._migration_pending("replace", operation.entity.kind)
 
-    def transition(self, operation: TransitionRequest) -> MutationResult:
+    def transition(
+        self, operation: TransitionRequest, *, finish: Callable[[Card], None] | None = None,
+    ) -> MutationResult:
         """Move one Card along a declared, role-authorized lifecycle edge.
 
         The order is the contract: validate the live Card and the caller's authority for its
         edge, stage the exact event this occurrence will publish, perform the single column
         operation, then commit that event.  A failed effect owes the journal nothing; a failed
         commit owes the caller a repair and keeps the pending event that names it.
+
+        ``finish`` is the caller's own idempotent board work for this same edge - the card
+        fields the state change resets or fills in.  The adapter still maps exactly one column
+        operation; it only guarantees that a caller's remaining writes are inside this
+        transaction, so an incomplete one keeps the pending event rather than reporting a clean
+        journal over a half-written card.  It runs once the target is proven, never on a replay
+        of an already committed occurrence, and never before the column effect.
         """
         if operation.kind is not EntityKind.CARD:
             self._migration_pending("transition", operation.kind)
@@ -138,7 +147,7 @@ class KanboardBoardHost:
 
         entity = MutationEventTransaction(
             self.canon, request_id=request_id, event=event,
-        ).execute(effect, replay=replay)
+        ).execute(effect, replay=replay, finish=finish)
         return MutationResult(entity, event)
 
     def recover_transition(self, request_id: str) -> MutationResult:

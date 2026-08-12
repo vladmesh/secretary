@@ -659,17 +659,36 @@ Every write command passes role guards and transition checks. A mutation first r
 pending audit event, is then checked against the live board, and only then counts as committed. An
 unresolved pending write blocks a consistent export and the recovery checkpoint until `reconcile-audit`.
 
-A Card state change is the one mutation that has moved to the board protocol. `move` and the column half
-of `claim` run through the board host, which records each occurrence as a typed protocol event in the same
+A Card state change is the one mutation that has moved to the board protocol. `move` and `claim` run
+through the board host, which records each occurrence as a typed protocol event in the same
 `events.ndjson`: `record_type` is `board.protocol_event`, the lifecycle edge is the object
 `transition: {source, target}`, and the reason is carried as text rather than as a digest. Released
 generic `moved` and `claimed` rows stay readable exactly as they were written, and every other operation
 (`report`, `verdict`, `decide`, `routing`, comments, create/edit/archive) keeps its generic record. A
 reader that cares about card transitions therefore has to handle both shapes explicitly; `record_type` is
-what tells them apart. Recovery is likewise split: a pending typed transition is repaired by re-reading
-the card and committing its exact event only when the requested target is live on the board. It never
-repeats a column move, and it refuses an effect that is unproven, contradicted or gone, leaving the
-pending record for an operator instead of publishing a transition that never happened.
+what tells them apart. A request id written before the migration also keeps the operation it named: a
+retry of a released generic `move` or `claim` id replays that record and finishes its released cleanup,
+rather than being read as a typed request it never was.
+
+The board work a state edge owes beyond the column itself is inside the same transaction, not after it.
+The claim metadata a `claim` writes, the routing and retry fields a move into Ready or Done resets, the
+review head a move out of Validate clears and the move's reason comment all run once the column effect is
+proven and before the event commits. So a refused or failed column move leaves nothing behind at all -
+no claimed-but-Ready card, no event - and a follow-up that does not land keeps the exact pending typed
+record instead of reporting a clean journal over a half-written card.
+
+Recovery is likewise split. A pending typed transition is repaired by re-reading the card and committing
+its exact event only when the requested target is live on the board. It never repeats a column move, and
+it refuses an effect that is unproven, contradicted or gone, leaving the pending record for an operator
+instead of publishing a transition that never happened. Where the outstanding board work is recomputable
+from the card - the Ready and Done reset - recovery finishes it first and refuses to close the record
+while it remains incomplete, so a transient backend fault resolves on the next `reconcile-audit` rather
+than stranding claim metadata under a clean audit. A claim's own metadata is not recomputable: the worker
+id and the resolved heads are dispatcher decisions no reader of the card can reconstruct. Refusing there
+would make a proven start permanently unrecoverable, so recovery publishes the occurrence it proved and
+leaves the missing claim to the dispatcher's live claim check, which reports it as a controlled
+divergence instead of launching on it. The complete repair for that case is a retry of the same request
+id, which repeats no admission check and no column move and finishes the metadata before publishing.
 
 A `--request-id` is an ownership claim over the operation it recorded, not only a de-duplication key for
 the append. A retry under an id the audit already holds, committed or still staged, is answered from that
