@@ -8963,7 +8963,7 @@ class ReportPromptDeliveryTests(unittest.TestCase):
     def test_a_suspended_head_is_refused(self) -> None:
         """Waking one is a lifecycle transition with its own durable boundary, and this is not it."""
         with mock.patch.object(
-            dispatcher_module, "_head_process_status",
+            dispatcher_module, "_head_run_process_status",
             lambda path, **kwargs: {
                 "known": True, "alive": True, "stopped": True, "state": "live-match"
             },
