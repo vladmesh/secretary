@@ -109,10 +109,18 @@ class KanboardBoardHost:
             task_id = _positive_int(reply)
             if task_id is None:
                 # A false-ish reply is not enough to establish that the
-                # backend refused the write.  Keep the typed occurrence when
-                # either stable correlation key is already live; confirmation
-                # and recovery then own completion without a second create.
-                if self._raw_by_ref(entity.ref) is not None or self._raw_by_marker(request_id) is not None:
+                # backend refused the write.  Both reads must complete and
+                # prove absence before this remains inside the transaction's
+                # discard window.  A transport, malformed-response, or
+                # ambiguous-marker failure is uncertain post-write evidence:
+                # confirmation then leaves the exact staged occurrence pending
+                # instead of authorizing a second create on retry.
+                try:
+                    reference_row = self._raw_by_ref(entity.ref)
+                    marker_row = self._raw_by_marker(request_id)
+                except Exception:
+                    return
+                if reference_row is not None or marker_row is not None:
                     return
                 raise BoardProtocolError("Kanboard refused the Product/Issue row")
 
