@@ -11,11 +11,13 @@ import tempfile
 import time
 import tomllib
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
 from secretary import dispatcher as dispatcher_module, role_env
 from secretary.board_transport import ensure as ensure_board_transport
+from secretary.board.models import Actor, EntityKind, Event, EventKind
 from secretary._fsutil import file_lock, try_file_lock
 from secretary.checkpoint import CheckpointPusher, CheckpointResult, CheckpointWriter
 from secretary.dispatcher import (
@@ -1806,33 +1808,13 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
     def append_committed_claim(self, attempt_id: str) -> str:
         request_id = _attempt_request_id(attempt_id, "claim", "secretary-510-pilot")
-        TaskAudit(self.data_dir).append(
-            request_id,
-            {
-                "event_id": f"evt_{attempt_id}",
-                "schema_version": 1,
-                "occurred_at": "2026-07-14T00:00:00Z",
-                "actor": {"role": "dispatcher", "id": "secretary-pilot"},
-                "kind": "claimed",
-                "outcome": "success",
-                "task_id": "task_kanboard_12",
-                "ref": "secretary-510-pilot",
-                "backend": {
-                    "kind": "kanboard",
-                    "task_id": 12,
-                    "revision": "updated_at:2026-07-14T00:00:00Z",
-                },
-                "request_id": request_id,
-                "payload": {
-                    "worker": "secretary-510-pilot-pilot",
-                    "resolved_head": "codex",
-                    "resolved_review_head": "codex-reviewer",
-                    "slug": "pilot",
-                    "base_branch": None,
-                    "cap": 3,
-                },
-            },
+        event = Event(
+            f"evt_{attempt_id}", EventKind.CARD_STARTED, EntityKind.CARD,
+            "secretary-510-pilot", Actor("dispatcher", "secretary-pilot"),
+            "claimed by secretary-510-pilot-pilot", datetime(2026, 7, 14, tzinfo=UTC),
+            source_state="ready", target_state="in_progress",
         )
+        TaskAudit(self.data_dir).append(request_id, event.to_record(request_id))
         return request_id
 
     def attempt_id(self) -> str:
@@ -2253,7 +2235,11 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertEqual(result["actions"][0]["action"], "waiting-worker-report")
         self.assertEqual(self.host.prepared, ["secretary-510-pilot"])
-        claim_events = [event for event in self.audit_events() if event["kind"] == "claimed"]
+        claim_events = [
+            event for event in self.audit_events()
+            if event.get("record_type") == "board.protocol_event"
+            and (event.get("transition") or {}).get("target") == "in_progress"
+        ]
         self.assertEqual(len(claim_events), 1)
 
     def test_production_requeue_after_failed_rework_requires_the_preserved_workspace(self) -> None:
@@ -3111,7 +3097,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         claim_requests = [
             event["request_id"]
             for event in self.audit_events()
-            if event["kind"] == "claimed"
+            if event.get("record_type") == "board.protocol_event"
+            and (event.get("transition") or {}).get("target") == "in_progress"
         ]
         self.assertIn(old_request, claim_requests)
         self.assertIn(_attempt_request_id(new_attempt, "claim", "secretary-510-pilot"), claim_requests)
@@ -3663,7 +3650,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
         stalls = [
             event["request_id"]
             for event in self.audit_events()
-            if event["kind"] == "moved" and "worker-wait-stall" in event["request_id"]
+            if event.get("record_type") == "board.protocol_event"
+            and event.get("transition", {}).get("target") == "blocked"
+            and "worker-wait-stall" in event["request_id"]
         ]
         self.assertEqual(len(set(stalls)), 2, f"escalations must be distinct requests: {stalls}")
         comments = self.reader.show("secretary-510-pilot")["comments"]
@@ -3718,7 +3707,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
         blocks = [
             event["request_id"]
             for event in self.audit_events()
-            if event["kind"] == "moved" and "worker-respawn-blocked" in event["request_id"]
+            if event.get("record_type") == "board.protocol_event"
+            and event.get("transition", {}).get("target") == "blocked"
+            and "worker-respawn-blocked" in event["request_id"]
         ]
         self.assertEqual(len(set(blocks)), 2, f"escalations must be distinct requests: {blocks}")
 
@@ -4356,12 +4347,13 @@ class DispatcherRuntimeTests(unittest.TestCase):
         audit = TaskAudit(self.data_dir)
         decided = audit.events("secretary-510-pilot", kind="decided")[-1]
         moved = [
-            event for event in audit.events("secretary-510-pilot", kind="moved")
-            if event["payload"]["from"] == "assessment"
+            event for event in audit.events("secretary-510-pilot")
+            if event.get("record_type") == "board.protocol_event"
+            and (event.get("transition") or {}).get("source") == "assessment"
         ]
         self.assertEqual(decided["payload"]["decision"], "release")
         self.assertEqual(len(moved), 1)
-        self.assertEqual((moved[0]["payload"]["to"], moved[0]["payload"]["decision"]), ("done", "release"))
+        self.assertEqual(moved[0]["transition"]["target"], "done")
 
     def test_a_checkout_that_moved_while_parked_blocks_the_release(self) -> None:
         """The reviewed commit is the only thing a release may land, and a park can last a while.
@@ -6101,10 +6093,12 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.host.torn_down, [])
         moves = [
             event for event in self.audit_events()
-            if event.get("kind") == "moved" and event.get("ref") == "secretary-510-pilot"
+            if event.get("record_type") == "board.protocol_event"
+            and event.get("ref") == "secretary-510-pilot"
+            and (event.get("transition") or {}).get("target") == "validate"
         ]
         self.assertEqual(
-            [str((event.get("payload") or {}).get("to")) for event in moves],
+            [str((event.get("transition") or {}).get("target")) for event in moves],
             ["validate"],
             "the card never went back through Ready and never reached Blocked",
         )

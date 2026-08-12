@@ -99,7 +99,7 @@ class FakeBoardHost:
         if self.canon is not None:
             result = MutationEventTransaction(
                 self.canon, request_id=request_id, event=event,
-            ).execute(effect, replay=lambda: self.read(entity.kind, entity.ref))
+            ).execute(effect, confirm=lambda: self.read(entity.kind, entity.ref))
         else:
             # Keep the lightweight test double deterministic while using the
             # same request-id ownership rule as its durable counterpart.

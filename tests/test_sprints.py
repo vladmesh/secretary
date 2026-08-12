@@ -2560,8 +2560,85 @@ class SprintSingleWriterGuardTests(unittest.TestCase):
         denial = next(event for event in events if event["kind"] == "sprint_guard_denied")
         self.assertEqual(denial["payload"]["operation_request_id"], "po-override-retry")
         success = next(event for event in events if event["request_id"] == "po-override-retry")
-        self.assertEqual(success["kind"], "moved")
-        self.assertEqual(success["payload"]["sprint_override_reason"], "production incident")
+        self.assertEqual(success["record_type"], "board.protocol_event")
+        self.assertEqual(success["transition"], {"source": "ready", "target": "blocked"})
+        # The typed event describes the lifecycle edge; the authority the PO used to make it is
+        # its own generic record, and the journal still answers who overrode the sprint and why.
+        grant = next(event for event in events if event["kind"] == "sprint_guard_override")
+        self.assertEqual(grant["payload"]["sprint_override_reason"], "production incident")
+        self.assertEqual(grant["payload"]["operation_request_id"], "po-override-retry")
+        self.assertEqual(grant["payload"]["sprint"], self.ref)
+
+    def test_every_move_path_through_the_sprint_guard_records_its_decision(self) -> None:
+        """Ordinary, refused and granted-override moves all pass through the one guard.
+
+        A first-attempt override never produces a denial, so before this it was the one decision
+        the guard made that left nothing behind at all.
+        """
+        card = self.tasks.create(
+            role="observer", actor="observer", project="secretary", task_type="code", title="owned",
+            sprint=self.ref,
+        )["task"]
+
+        ordinary = self.tasks.move(
+            role="dispatcher", actor="d", reference=card["ref"], target="in_progress", reason="",
+            request_id="guard-ordinary-move",
+        )
+        with self.assertRaisesRegex(TaskError, self.ref) as refused:
+            self.tasks.move(
+                role="po", actor="operator", reference=card["ref"], target="blocked", reason="",
+                request_id="guard-refused-move",
+            )
+        granted = self.tasks.move(
+            role="po", actor="operator", reference=card["ref"], target="blocked", reason="",
+            sprint_override=True, sprint_override_reason="production incident",
+            request_id="guard-granted-move",
+        )
+
+        self.assertEqual(ordinary["task"]["state"], "in_progress")
+        self.assertEqual(refused.exception.code, "sprint_write_forbidden")
+        self.assertEqual(granted["task"]["state"], "blocked")
+        decisions = {
+            str(event["payload"].get("operation_request_id")): event["kind"]
+            for event in TaskAudit(self.tmp.name).events()
+            if event["kind"] in {"sprint_guard_denied", "sprint_guard_override"}
+        }
+        self.assertEqual(decisions, {
+            "guard-refused-move": "sprint_guard_denied",
+            "guard-granted-move": "sprint_guard_override",
+        })
+
+    def test_a_granted_override_is_recorded_once_and_survives_reconcile(self) -> None:
+        """The grant is idempotent under retry and is a repairable pending record like the denial."""
+        card = self.tasks.create(
+            role="observer", actor="observer", project="secretary", task_type="code", title="owned",
+            sprint=self.ref,
+        )["task"]
+
+        def override_move() -> dict[str, object]:
+            return self.tasks.move(
+                role="po", actor="operator", reference=card["ref"], target="blocked", reason="",
+                sprint_override=True, sprint_override_reason="production incident",
+                request_id="override-recorded-once",
+            )
+
+        with mock.patch.object(self.tasks.audit, "append", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(TaskError, "audit repair") as pending:
+                override_move()
+        self.assertEqual(pending.exception.code, "audit_pending")
+        self.assertEqual(self.tasks.reader.show(card["ref"])["state"], "ready")
+
+        self.assertEqual(self.tasks.reconcile(), (1, 0))
+        first = override_move()
+        second = override_move()
+
+        self.assertEqual(first["event_id"], second["event_id"])
+        grants = [
+            event for event in TaskAudit(self.tmp.name).events()
+            if event["kind"] == "sprint_guard_override"
+        ]
+        self.assertEqual(len(grants), 1)
+        self.assertEqual(grants[0]["payload"]["sprint_override_reason"], "production incident")
 
     def test_denied_create_request_can_succeed_after_sprint_closes(self) -> None:
         with self.assertRaisesRegex(TaskError, self.ref) as denied:

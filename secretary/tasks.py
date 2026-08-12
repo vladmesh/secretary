@@ -19,6 +19,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
+from secretary.board.events import BoardEventPending
+from secretary.board.host import MutationResult, TransitionRequest
+from secretary.board.models import Actor, CardState, EntityKind, Event, RelatedRefs
+from secretary.board.transitions import BoardProtocolError
 from secretary.board_transport import (
     BoardTransport, BoardTransportError, resolve, transport_path,
 )
@@ -83,6 +87,11 @@ def workspace_dirt(workspace: str | os.PathLike[str]) -> list[str]:
 def _sprint_guard_denial_request_id(request_id: str) -> str:
     """Keep a denied guard check from consuming the operation's retry key."""
     return "sprint-guard-denied-" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+
+
+def _sprint_guard_override_request_id(request_id: str) -> str:
+    """Keep a granted override from consuming the operation's retry key."""
+    return "sprint-guard-override-" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()
 
 
 _STATE_BY_COLUMN = {
@@ -191,6 +200,15 @@ def _forbidden_move_message(role: str, source: str, target: str) -> str:
     return f"{role} may not move {source} to {target}"
 
 
+def _transition_reason(reason: str, target: str) -> str:
+    """The non-empty reason a typed Card transition event carries.
+
+    Not every released move required one, and the protocol event does. The substitute names the
+    edge rather than inventing a motive the caller never gave.
+    """
+    return reason if reason.strip() else f"Card transition to {target}"
+
+
 def assessment_resolution(events: Iterable[dict[str, Any]]) -> tuple[str, dict[str, Any] | None]:
     """The current Assessment visit and its one canonical decision.
 
@@ -200,7 +218,13 @@ def assessment_resolution(events: Iterable[dict[str, Any]]) -> tuple[str, dict[s
     latest_park = -1
     for index, event in enumerate(ordered):
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-        if event.get("kind") == "moved" and str(payload.get("to") or "") == "assessment":
+        lifecycle = event.get("transition") if isinstance(event.get("transition"), dict) else {}
+        if (
+            event.get("kind") == "moved" and str(payload.get("to") or "") == "assessment"
+        ) or (
+            event.get("record_type") == TaskAudit._PROTOCOL_EVENT_RECORD_TYPE
+            and str(lifecycle.get("target") or "") == "assessment"
+        ):
             latest_park = index
     if latest_park < 0:
         return "", None
@@ -233,16 +257,22 @@ def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -
     """
     if str(event.get("ref") or "") not in linked_refs:
         return False
-    if str(event.get("outcome") or "") != "success":
+    typed = event.get("record_type") == TaskAudit._PROTOCOL_EVENT_RECORD_TYPE
+    if not typed and str(event.get("outcome") or "") != "success":
         return False
     actor = event.get("actor") if isinstance(event.get("actor"), dict) else {}
     if str(actor.get("role") or "") == "observer":
         return False
-    if str(event.get("kind") or "") != "moved":
-        return False
-    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
-    source = str(payload.get("from") or "")
-    target = str(payload.get("to") or "")
+    if typed:
+        payload = event.get("transition") if isinstance(event.get("transition"), dict) else {}
+        source = str(payload.get("source") or "")
+        target = str(payload.get("target") or "")
+    else:
+        if str(event.get("kind") or "") != "moved":
+            return False
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        source = str(payload.get("from") or "")
+        target = str(payload.get("to") or "")
     # Assessment needs an observer decision; Blocked needs classification; Done is the semantic
     # post-release edge where the observer can choose the next cut or close the sprint.
     if target in {"assessment", "blocked", "done"}:
@@ -546,8 +576,10 @@ class TaskAudit:
     # Generic journal records intentionally have no discriminator.  This explicit value is
     # the only distinction the released audit substrate needs to make: a protocol pending
     # record may describe an effect that has already reached the backend, while a generic
-    # record retains its released same-writer restaging behaviour.
-    _PROTOCOL_EVENT_RECORD_TYPE = "board.protocol_event"
+    # record retains its released same-writer restaging behaviour.  It is taken from the
+    # typed record itself: recovery now routes on this discriminator, so the two spellings
+    # must not be able to drift apart.
+    _PROTOCOL_EVENT_RECORD_TYPE = Event.RECORD_TYPE
 
     def __init__(self, data_dir: str | os.PathLike[str]) -> None:
         self.board_dir = os.path.join(os.fspath(data_dir), "board")
@@ -993,6 +1025,14 @@ class TaskWriter:
         self.data_dir = Path(data_dir)
         self.instance_dir = Path(client.instance_dir).expanduser().resolve()
         self.audit = TaskAudit(data_dir)
+        # Importing the concrete adapter here keeps the protocol leaves usable
+        # by the legacy task reader while giving migrated writes the same audit
+        # owner as generic control-plane operations.
+        from secretary.board.kanboard import KanboardBoardHost
+
+        self.board_host = KanboardBoardHost(
+            client, data_dir=os.fspath(data_dir), audit=self.audit,
+        )
         self.workspace = Path(workspace) if workspace is not None else None
         self._redaction_cache: tuple[tuple[tuple[str, int, int, int], ...], tuple[str, ...]] | None = None
 
@@ -1553,14 +1593,37 @@ class TaskWriter:
             raise TaskError("validation", "claim requires a non-empty worker id", 2)
         if cap < 1:
             raise TaskError("validation", "claim cap must be positive", 2)
+        request_id = request_id or str(uuid.uuid4())
+        if self._legacy_record(request_id) is not None:
+            # Claims written before Card transitions migrated remain generic audit
+            # operations.  They retain their released replay/reconciliation path;
+            # in particular, do not reinterpret a legacy pending record as a new
+            # typed transition or let it move a record that has since become a
+            # Product or Issue.
+            _check_execution_record(self.reader.show(reference))
+            payload = {
+                "worker": worker,
+                "resolved_head": resolved_head or None,
+                "resolved_review_head": resolved_review_head or None,
+                "slug": slug or None,
+                "base_branch": base_branch or None,
+                "cap": cap,
+            }
+            return self._write(
+                "claimed", role, actor, reference, request_id, payload, lambda task: None,
+                identity=payload,
+            )
+        existing = self._typed_event(request_id)
+        task = self.reader.show(reference)
         # Same guard as move: a product or an issue is not an execution task, so it never takes a
-        # claim even if someone dragged it into Ready by hand. It runs before _write, not only in
-        # the mutation, because a retry with a pending or committed claim request id replays
-        # through _finish_pending_claim and never reaches the mutation at all.
-        _check_execution_record(self.reader.show(reference))
-
-        def mutation(task: dict[str, Any]) -> Any:
-            _check_execution_record(task)
+        # claim even if someone dragged it into Ready by hand.  It runs on the replay too, because
+        # a card can have been retyped between the two attempts.
+        _check_execution_record(task)
+        if existing is None:
+            # Admission is the fresh request's job alone, and every part of it binds: a claim is
+            # admitted only from Ready, only when nobody holds the card, and only inside the
+            # predecessor and capacity rules.  A retrying claimant does not get past them by
+            # having tried before, because a failed attempt leaves no claim behind to recognize.
             if task["state"] != "ready":
                 raise TaskError("claim_conflict", "claim requires a Ready task", 3)
             if task["claim"]["worker"] is not None:
@@ -1583,33 +1646,30 @@ class TaskWriter:
             if active_count >= cap:
                 raise TaskError("capacity_reached", "active task capacity is reached", 3)
 
-            values = {
-                "claim": worker,
-                "resolved_head": resolved_head or task["routing"]["head_override"] or "",
-            }
-            if resolved_review_head:
-                values["resolved_review_head"] = resolved_review_head
-            if slug:
-                values["slug"] = slug
-            if base_branch:
-                values["base_branch"] = base_branch
-            self.client.call("saveTaskMetadata", task_id=_task_number(task), values=values)
-            try:
-                self._move_raw(task, "in_progress", swimlane_id=self._current_swimlane_id(task))
-            except Exception as exc:
-                raise _CommittedWriteError() from exc
-
-        payload = {
-            "worker": worker,
-            "resolved_head": resolved_head or None,
-            "resolved_review_head": resolved_review_head or None,
-            "slug": slug or None,
-            "base_branch": base_branch or None,
-            "cap": cap,
+        values = {
+            "claim": worker,
+            "resolved_head": resolved_head or task["routing"]["head_override"] or "",
         }
-        return self._write(
-            "claimed", role, actor, reference, request_id, payload, mutation, identity=payload,
+        if resolved_review_head:
+            values["resolved_review_head"] = resolved_review_head
+        if slug:
+            values["slug"] = slug
+        if base_branch:
+            values["base_branch"] = base_branch
+        # The claim metadata is written inside the transition, once the column effect is proven.
+        # A refused or failed move therefore leaves no claimed-but-Ready card behind, and a
+        # metadata write that does not land keeps the pending event instead of a clean journal.
+        result = self._transition_card(
+            reference=reference, target=CardState.IN_PROGRESS, role=role, actor=actor,
+            reason=f"claimed by {worker}", request_id=request_id,
+            finish=lambda _card: self.client.call(
+                "saveTaskMetadata", task_id=_task_number(task), values=values,
+            ),
         )
+        return {
+            "action": "claimed", "task": self.reader.show(reference),
+            "event_id": result.event.event_id, "replayed": existing is not None,
+        }
 
     def move(
         self, *, role: str, actor: str, reference: str, target: str, reason: str,
@@ -1621,40 +1681,93 @@ class TaskWriter:
         sprint_override_reason = self._redact_for_board(sprint_override_reason)
         request_id = request_id or str(uuid.uuid4())
         task = self.reader.show(reference)
+        if self._legacy_record(request_id) is not None:
+            # A move recorded before Card transitions migrated is a generic audit operation, and
+            # it stays one: its retry replays that record and its pending form is finished by the
+            # released cleanup, exactly as they were on the version that wrote it.
+            return self._legacy_move(
+                role=role, actor=actor, reference=reference, target=target, reason=reason,
+                decision=decision, sprint_override=sprint_override,
+                sprint_override_reason=sprint_override_reason, request_id=request_id, task=task,
+            )
+        existing = self._typed_event(request_id)
+        # The replay is answered before the sprint guard, not after it: this request id already
+        # owns a typed event, and a denial would have to be written under the same id. A retry of
+        # a transition that already happened cannot be turned into a guard record.
+        if existing is not None:
+            try:
+                target_state = CardState(target)
+            except ValueError:
+                raise TaskError(
+                    "transition_forbidden", _forbidden_move_message(role, task["state"], target), 3,
+                ) from None
+            # A replay repeats no admission check and no backend move, but it does finish the
+            # idempotent board cleanup the first attempt may have lost. The comment is the one
+            # follow-up it never repeats: it is not idempotent, and the released reconciliation
+            # never recreated one either.
+            result = self._transition_card(
+                reference=reference, target=target_state, role=role, actor=actor,
+                reason=_transition_reason(reason, target), request_id=request_id,
+                finish=self._transition_cleanup(
+                    task, source=str(existing.source_state or ""), target=target, reason="",
+                    role=role,
+                ),
+            )
+            return {
+                "action": "moved", "task": self.reader.show(reference),
+                "event_id": result.event.event_id, "replayed": True,
+            }
         override_payload = self._guard_sprint_write(
             role=role, actor=actor, project=task["project"], card_sprint=str(task.get("sprint") or ""),
             linked_sprint=None, sprint_override=sprint_override,
             sprint_override_reason=sprint_override_reason.strip(), request_id=request_id, reference=reference,
         )
-        def mutation(task: dict[str, Any]) -> Any:
-            source = task["state"]
-            if task.get("record_type") in {"issue", "product"}:
-                raise TaskError("transition_forbidden", "Product issues and products cannot enter execution task columns", 3)
-            if role == "observer" and not override_payload and not self._sprint_holds_project(task["project"]):
-                raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
-            try:
-                card_transition(role, source, target)
-            except CardTransitionForbidden:
-                raise TaskError("transition_forbidden", _forbidden_move_message(role, source, target), 3)
-            if role == "steward" and (target == "blocked" or (source, target) == ("blocked", "done")) and not reason.strip():
-                raise TaskError("validation", "this steward transition requires a non-empty reason", 2)
-            # The observer's disposition of a Blocked card is the other half of the worker's
-            # classification: the card says why it stopped, and the move out says what was done
-            # about it. Without this a card leaves Blocked with nothing recorded, and a head that
-            # blocks without cause repeatedly is invisible.
-            if role == "observer" and source == "blocked" and not reason.strip():
-                raise TaskError("validation", "moving a card out of Blocked requires a non-empty reason", 2)
-            self._check_decision(task, source, target, decision, role)
-            self._move_raw(task, target, swimlane_id=self._current_swimlane_id(task))
-            try:
-                if target in {"ready", "done"}:
-                    self.client.call("saveTaskMetadata", task_id=_task_number(task), values=_READY_RESET_METADATA)
-                elif source == "validate":
-                    self.client.call("saveTaskMetadata", task_id=_task_number(task), values={"resolved_review_head": ""})
-                if reason.strip():
-                    self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{role}]\n{reason}")
-            except Exception as exc:
-                raise _CommittedWriteError() from exc
+        source = task["state"]
+        _check_execution_record(task)
+        if role == "observer" and not override_payload and not self._sprint_holds_project(task["project"]):
+            raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
+        try:
+            target_state = CardState(target)
+            card_transition(role, source, target_state)
+        except (ValueError, CardTransitionForbidden):
+            raise TaskError("transition_forbidden", _forbidden_move_message(role, source, target), 3) from None
+        if role == "steward" and (target == "blocked" or (source, target) == ("blocked", "done")) and not reason.strip():
+            raise TaskError("validation", "this steward transition requires a non-empty reason", 2)
+        # The observer's disposition of a Blocked card is the other half of the worker's
+        # classification: the card says why it stopped, and the move out says what was done
+        # about it. Without this a card leaves Blocked with nothing recorded, and a head that
+        # blocks without cause repeatedly is invisible.
+        if role == "observer" and source == "blocked" and not reason.strip():
+            raise TaskError("validation", "moving a card out of Blocked requires a non-empty reason", 2)
+        self._check_decision(task, source, target, decision, role)
+        result = self._transition_card(
+            reference=reference, target=target_state, role=role, actor=actor,
+            reason=_transition_reason(reason, target), request_id=request_id,
+            finish=self._transition_cleanup(
+                task, source=source, target=target, reason=reason, role=role,
+            ),
+        )
+        return {
+            "action": "moved", "task": self.reader.show(reference),
+            "event_id": result.event.event_id, "replayed": False,
+        }
+
+    def _legacy_move(
+        self, *, role: str, actor: str, reference: str, target: str, reason: str, decision: str,
+        sprint_override: bool, sprint_override_reason: str, request_id: str, task: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Replay a move this request id already recorded as a released generic operation.
+
+        Only reachable when that record exists, so the mutation below is never the writer of a
+        state change: `_write` replays a committed record and finishes a pending one through the
+        released `_finish_pending_cleanup`.  Mirrors the same branch in :meth:`claim`.
+        """
+        override_payload = self._guard_sprint_write(
+            role=role, actor=actor, project=task["project"], card_sprint=str(task.get("sprint") or ""),
+            linked_sprint=None, sprint_override=sprint_override,
+            sprint_override_reason=sprint_override_reason.strip(), request_id=request_id,
+            reference=reference,
+        )
         return self._write(
             "moved", role, actor, reference, request_id,
             lambda task: {
@@ -1663,7 +1776,7 @@ class TaskWriter:
                 **({"decision": decision} if decision else {}),
                 **override_payload,
             },
-            mutation,
+            lambda task: None,
             # `from` is the column the move already left, so it is the one field a retry cannot
             # recompute. Everything the caller asked for is compared.
             identity={
@@ -1673,6 +1786,92 @@ class TaskWriter:
                 "sprint_override_reason": override_payload.get("sprint_override_reason"),
             },
         )
+
+    def _legacy_record(self, request_id: str) -> dict[str, Any] | None:
+        """The released generic audit record this request id owns, if it owns one.
+
+        The two representations are told apart by the record's own discriminator, never by
+        guessing from a payload: a request id written before this migration keeps the released
+        operation it named, and a typed request id is handled by the typed path alone.
+        """
+        record = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
+        if record is None or record.get("record_type") == TaskAudit._PROTOCOL_EVENT_RECORD_TYPE:
+            return None
+        return record
+
+    def _transition_cleanup(
+        self, task: dict[str, Any], *, source: str, target: str, reason: str, role: str,
+    ) -> Callable[[Any], None]:
+        """The board work a migrated Card state edge still owes once its column effect lands.
+
+        Handed to the adapter so it runs inside the transition's transaction: it completes before
+        the event commits, and an incomplete one leaves the exact pending typed record that both
+        a retry of this request id and :meth:`reconcile` know how to finish.
+        """
+        def finish(_entity: Any) -> None:
+            self._reset_transition_metadata(task, source=source, target=target)
+            if reason.strip():
+                self.client.call(
+                    "createComment", task_id=_task_number(task), user_id=0,
+                    content=f"[{role}]\n{reason}",
+                )
+
+        return finish
+
+    def _reset_transition_metadata(self, task: dict[str, Any], *, source: str, target: str) -> None:
+        """Apply the board metadata a Card state edge resets.
+
+        Kept idempotent on purpose: this is the one part of a migrated move that a retry or
+        :meth:`reconcile` may repeat after the column effect and its typed event are durable.
+        """
+        if target in {"ready", "done"}:
+            self.client.call("saveTaskMetadata", task_id=_task_number(task), values=_READY_RESET_METADATA)
+        elif source == "validate":
+            self.client.call("saveTaskMetadata", task_id=_task_number(task), values={"resolved_review_head": ""})
+
+    def _transition_card(
+        self,
+        *,
+        reference: str,
+        target: CardState,
+        role: str,
+        actor: str,
+        reason: str,
+        request_id: str,
+        finish: Callable[[Any], None] | None = None,
+    ) -> MutationResult:
+        """Run one state edge through the typed adapter and its shared journal.
+
+        The sprint the card belongs to is not passed here: the adapter reads the live card to
+        authorize the edge anyway, and relates the event to that card's own sprint.  `finish`
+        carries this writer's remaining board work into the same transaction.
+        """
+        try:
+            return self.board_host.transition(
+                TransitionRequest(
+                    EntityKind.CARD, reference, target, Actor(role, actor), reason,
+                    RelatedRefs(()), request_id,
+                ),
+                finish=finish,
+            )
+        except BoardEventPending:
+            raise TaskError(
+                "audit_pending", "backend write committed; audit repair is required", 4,
+            ) from None
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
+        except CardTransitionForbidden as exc:
+            raise TaskError("transition_forbidden", str(exc), 3) from None
+        except BoardProtocolError as exc:
+            raise TaskError("backend_error", str(exc), 1) from None
+
+    def _typed_event(self, request_id: str) -> Any | None:
+        if self.board_host.canon is None:
+            return None
+        try:
+            return self.board_host.canon.event(request_id)
+        except ValueError as exc:
+            raise TaskError("validation", str(exc), 2) from None
 
     def _check_decision(
         self, task: dict[str, Any], source: str, target: str, decision: str, role: str,
@@ -1900,6 +2099,10 @@ class TaskWriter:
                     role=role, actor=actor, project=project, sprint=sprint_ref,
                     request_id=request_id, reference=reference, exit_code=2,
                 )
+            self._grant_sprint_override(
+                role=role, actor=actor, project=project, sprint=sprint_ref,
+                reason=sprint_override_reason, request_id=request_id, reference=reference,
+            )
             return {"sprint_override_reason": sprint_override_reason}
         # The caller was already proven to be this card's sprint's observer above; what is left is
         # that the sprint holding the project is the one the card is linked to.
@@ -1955,6 +2158,46 @@ class TaskWriter:
                 role=role, actor=actor, project=project, sprint=declared,
                 request_id=request_id, reference=reference,
             )
+
+    def _grant_sprint_override(
+        self, *, role: str, actor: str, project: str, sprint: str, reason: str,
+        request_id: str, reference: str,
+    ) -> None:
+        """Record the granted single-writer override before the operation it authorizes runs.
+
+        The refusal has always been audited; a grant is the same question answered the other way,
+        and the audit has to answer "who overrode this sprint's reservation, and why" for both. It
+        is a generic control-plane record like the denial, not part of the Card's typed event: the
+        event describes the lifecycle edge, and this describes the authority the writer used to
+        make it. That also keeps the answer in one shape for every operation the guard admits -
+        `move`, `create` and `edit` alike - rather than only for the ones whose own payload
+        happens to have room for it.
+
+        It is written before the operation stages or effects anything, so an override that could
+        not be recorded does not happen. The derived request id keeps it off the operation's own
+        retry key, and a retry under the same id recognizes the grant it already made.
+        """
+        override_request_id = _sprint_guard_override_request_id(request_id)
+        if self.audit.committed_event(override_request_id) is not None:
+            return
+        event = {
+            "event_id": "evt_" + uuid.uuid4().hex, "schema_version": 1, "occurred_at": _now(),
+            "actor": {"role": role, "id": actor}, "kind": "sprint_guard_override",
+            "outcome": "granted", "task_id": "", "ref": reference,
+            "backend": {"kind": "kanboard", "task_id": None, "revision": "not_written"},
+            "request_id": override_request_id,
+            "payload": {
+                "project": project, "sprint": sprint, "sprint_override_reason": reason,
+                "operation_request_id": request_id,
+            },
+        }
+        self.audit.stage(override_request_id, event)
+        try:
+            self.audit.append(override_request_id, event)
+        except OSError:
+            raise TaskError(
+                "audit_pending", "sprint override was granted but audit repair is required", 4,
+            ) from None
 
     def _deny_sprint_write(
         self, *, code: str, message: str, role: str, actor: str, project: str,
@@ -2133,6 +2376,10 @@ class TaskWriter:
         unresolved = 0
         for event in self.audit.pending_events():
             try:
+                if event.get("record_type") == TaskAudit._PROTOCOL_EVENT_RECORD_TYPE:
+                    self._finish_pending_transition(event)
+                    repaired += 1
+                    continue
                 if str(event.get("backend", {}).get("kind") or "") == "dispatcher":
                     # An observer lifecycle event describes a head, not a backend row: there is
                     # nothing to re-read and enrich, and it must repair even when the sprint it
@@ -2140,7 +2387,10 @@ class TaskWriter:
                     self.audit.append(str(event["request_id"]), event)
                     repaired += 1
                     continue
-                if event.get("kind") == "sprint_guard_denied":
+                if event.get("kind") in {"sprint_guard_denied", "sprint_guard_override"}:
+                    # A guard decision records itself, not a backend row: there is nothing to
+                    # re-read, and the decision it names was made whether or not the operation
+                    # it authorized went on to succeed.
                     self.audit.append(str(event["request_id"]), event)
                     repaired += 1
                     continue
@@ -2164,9 +2414,38 @@ class TaskWriter:
                 self.audit.stage(str(event["request_id"]), event)
                 self.audit.append(str(event["request_id"]), event)
                 repaired += 1
-            except (TaskError, OSError, KeyError, TypeError):
+            except (TaskError, BoardProtocolError, OSError, KeyError, TypeError, ValueError):
                 unresolved += 1
         return repaired, unresolved
+
+    def _finish_pending_transition(self, event: dict[str, Any]) -> None:
+        """Finish one typed pending Card transition: prove it, clean up, then commit it.
+
+        A typed pending record is a different obligation from a generic one, and it is read as
+        the transition it declares rather than guessed from a payload. The adapter proves the
+        exact target on the board and never repeats a move; the metadata reset runs only once
+        that target is live, so a transition whose effect was lost cannot strip a card's claim.
+        The reset is the same one the transition itself owed, and the event is published only
+        after it is complete, exactly as the released cleanup published a pending move.
+        """
+        transition = event.get("transition") if isinstance(event.get("transition"), dict) else {}
+        target = str(transition.get("target") or "")
+        ref = str(event["ref"])
+        card = self.reader.show(ref)
+        if card["state"] == target:
+            self._reset_transition_metadata(
+                card, source=str(transition.get("source") or ""), target=target,
+            )
+            if target in {"ready", "done"}:
+                normalized = self.reader.show(ref)
+                if (
+                    normalized["claim"]["worker"] is not None
+                    or normalized["routing"]["resolved_worker_head"] is not None
+                    or normalized["routing"]["resolved_review_head"] is not None
+                    or normalized["retry"] != {"same": 0, "switched": 0, "heads": []}
+                ):
+                    raise TaskError("backend_error", "pending Ready cleanup remains incomplete", 1)
+        self.board_host.recover_transition(str(event["request_id"]))
 
     def _finish_pending_cleanup(
         self,

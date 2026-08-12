@@ -115,11 +115,33 @@ class BoardEventCanon:
 class MutationEventTransaction:
     """Stage, effect, then commit one protocol mutation with fail-closed audit.
 
-    ``replay`` must read the confirmed backend result without repeating the
-    effect.  It is used for both a committed request-id replay and recovery of a
-    pending event whose backend effect already happened.  This is the reusable
-    seam future KanboardBoardHost writers need: no caller can report the effect
-    as successful after ``commit`` fails.
+    This is the single enforcement point for a staged occurrence: once the
+    record is staged, nothing outside this class decides whether it survives.
+    The window in which the staged record may be discarded is exactly the
+    ``effect`` call and nothing else.  Everything after it - the confirming
+    read, the caller's ``finish`` work and the commit - is fail-closed: it
+    raises :class:`BoardEventPending` and leaves the exact pending record for
+    recovery.  This is the reusable seam future KanboardBoardHost writers need:
+    no caller can report the effect as successful after ``commit`` fails, and
+    none can report a completed effect as if it had never happened.
+
+    ``effect`` issues the single backend effect and nothing else.  Its return
+    value is ignored, and its contract is the discard rule above: it may raise
+    only while no effect has been applied.  A verification read belongs in
+    ``confirm``, never inside ``effect``, because a read that fails after a
+    completed write is not evidence that the write did not happen.
+
+    ``confirm`` reads the confirmed backend result without repeating the
+    effect.  It answers a committed request-id replay, a pending record whose
+    backend effect already happened, and the confirmation of an effect this
+    call just issued.
+
+    ``finish`` is the writer's remaining idempotent backend work for the same
+    occurrence: board fields a state edge resets or fills in, which are not the
+    state edge itself but must not survive it half-applied.  It runs after the
+    effect is confirmed and *before* the event commits, so an incomplete one
+    leaves the exact pending record the caller and :meth:`reconcile` need
+    instead of a clean journal over a half-written card.
     """
 
     def __init__(self, canon: BoardEventCanon, *, request_id: str, event: Event) -> None:
@@ -127,7 +149,13 @@ class MutationEventTransaction:
         self.request_id = request_id
         self.event = event
 
-    def execute(self, effect: Callable[[], T], *, replay: Callable[[], T]) -> T:
+    def execute(
+        self,
+        effect: Callable[[], Any],
+        *,
+        confirm: Callable[[], T],
+        finish: Callable[[T], None] | None = None,
+    ) -> T:
         committed = self.canon.committed(self.request_id)
         if committed is not None:
             self._require_same_event(committed)
@@ -135,27 +163,56 @@ class MutationEventTransaction:
             # already committed exact event, but keeps all transaction contours on the same
             # lock-protected protocol boundary.
             self._commit_or_raise()
-            return replay()
+            # A committed event is proof that `finish` already ran to completion, so a replay
+            # owes the backend nothing further.
+            return confirm()
 
         pending = self.canon.event(self.request_id)
         if pending is not None:
             self._require_same_event(pending)
             # The pending record is evidence that the caller staged before the
-            # backend write.  Never run the backend effect a second time.
-            result = replay()
+            # backend write.  Never run the backend effect a second time, and
+            # never resolve the record on a read that could not confirm it.
+            result = self._confirm_or_raise(
+                confirm, "pending backend effect is unconfirmed; protocol event repair is required",
+            )
+            self._finish_or_raise(finish, result)
             self._commit_or_raise()
             return result
 
         self.canon.stage(self.request_id, self.event)
         try:
-            result = effect()
+            effect()
         except Exception:
-            # No effect completed, so its exact staged event is not a recovery
-            # obligation.  TaskAudit's discard keeps its released semantics.
+            # The only discard in this class, and the only place one is correct:
+            # `effect` raised, so by its contract no effect was applied and this
+            # staged event is not a recovery obligation.  TaskAudit's discard
+            # keeps its released semantics.
             self.canon.audit.discard(self.request_id, self.event.to_record(self.request_id))
             raise
+        # The effect completed.  From here the record survives every outcome.
+        result = self._confirm_or_raise(
+            confirm, "backend effect completed but is unconfirmed; protocol event repair is required",
+        )
+        self._finish_or_raise(finish, result)
         self._commit_or_raise()
         return result
+
+    def _confirm_or_raise(self, confirm: Callable[[], T], message: str) -> T:
+        try:
+            return confirm()
+        except Exception as exc:
+            raise BoardEventPending(message) from exc
+
+    def _finish_or_raise(self, finish: Callable[[T], None] | None, result: T) -> None:
+        if finish is None:
+            return
+        try:
+            finish(result)
+        except Exception as exc:
+            raise BoardEventPending(
+                "backend write committed; board cleanup and its protocol event repair are required"
+            ) from exc
 
     def _commit_or_raise(self) -> None:
         try:

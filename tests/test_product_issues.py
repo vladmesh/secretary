@@ -387,21 +387,33 @@ class ProductIssueStoreTests(unittest.TestCase):
                 self.assertFalse(Path(writer.audit.events_path).exists())
 
     def test_pending_claim_replay_and_reconcile_refuse_a_product_or_issue(self) -> None:
-        # The supported partial-write state of a generic claim: the claim metadata committed and
-        # the column move was lost. Neither the retry with the same request id nor reconcile may
-        # finish that move once the card is a Product or an Issue — both replay through
-        # _finish_pending_claim, which never reaches the claim mutation.
+        # The supported partial-write state of a pre-migration generic claim: the claim metadata
+        # committed and the column move was lost. New claims use a typed event and discard it on a
+        # failed move, so build the released generic pending row explicitly. Neither the retry
+        # nor reconcile may finish that old move once the card is a Product or an Issue.
         for record_type in ("product", "issue"):
             with self.subTest(record_type=record_type):
                 writer = TaskWriter(self.client, data_dir=self.root / f"data-{record_type}")
                 self.client.tasks[0]["column_id"] = 2
                 self.client.metadata[12] = {"project": "secretary", "task_type": "code", "claim": ""}
-                self.client.fail_move = True
                 request_id = f"pending-claim-{record_type}"
                 claim = dict(
                     role="dispatcher", actor="d", reference="secretary-468",
                     worker="replayed-worker", request_id=request_id,
                 )
+                writer.audit.stage(request_id, {
+                    "request_id": request_id,
+                    "event_id": f"legacy-{request_id}",
+                    "kind": "claimed",
+                    "ref": "secretary-468",
+                    "payload": {
+                        "worker": "replayed-worker", "resolved_head": None,
+                        "resolved_review_head": None, "slug": None, "base_branch": None,
+                        "cap": 3,
+                    },
+                })
+                self.client.metadata[12]["claim"] = "replayed-worker"
+                self.client.fail_move = True
                 with self.assertRaisesRegex(TaskError, "audit repair"):
                     writer.claim(**claim)
                 self.assertEqual(writer.audit.status(), {"ok": False, "pending": 1})
