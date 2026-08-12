@@ -8,9 +8,12 @@ their existing consumers can continue to read them as before.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import hashlib
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any, Iterator, TypeVar
 
 from secretary.board.models import Event
 
@@ -19,6 +22,25 @@ if TYPE_CHECKING:
 
 
 T = TypeVar("T")
+
+
+@contextlib.contextmanager
+def marker_comment_lock(data_dir: str | Path, ref: str) -> Iterator[None]:
+    """Serialize one Card marker occurrence from its witness through commit.
+
+    Marker prose intentionally has no request id.  The per-Card lock makes the
+    staged matching-row ordinal a real occurrence witness even when two writers
+    choose identical public marker text at the same time.
+    """
+    directory = Path(data_dir) / "board" / "marker-comments"
+    directory.mkdir(parents=True, exist_ok=True)
+    name = hashlib.sha256(ref.encode("utf-8")).hexdigest() + ".lock"
+    with (directory / name).open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 class BoardEventPending(RuntimeError):

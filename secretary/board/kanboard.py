@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
-from secretary.board.events import BoardEventCanon, MutationEventTransaction
+from secretary.board.events import BoardEventCanon, MutationEventTransaction, marker_comment_lock
 from secretary.board.host import Create, MarkerComment, MutationResult, Replace, SprintSupplement, TransitionRequest
 from secretary.board.models import (
     BoardEntity, Card, CardState, EntityKind, Event, EventKind, Issue, IssueState, Product,
@@ -306,73 +306,74 @@ class KanboardBoardHost:
         """
         if self.canon is None:
             raise BoardProtocolError("Card marker comments require a configured data directory")
-        request_id = self._request_id(operation.request_id, "card-marker")
-        existing = self.canon.event(request_id)
-        if existing is not None:
-            self._require_marker_operation(existing, operation)
-            current = self.read(EntityKind.CARD, operation.ref)
-            if not isinstance(current, Card):
-                raise BoardProtocolError("Card marker comment resolved a non-Card entity")
-            if self.canon.committed(request_id) is not None:
-                return MutationResult(current, existing)
-            event = existing
-        else:
-            current = self.read(EntityKind.CARD, operation.ref)
-            if not isinstance(current, Card):
-                raise BoardProtocolError("Card marker comment resolved a non-Card entity")
-            related = operation.related_refs
-            if current.sprint_ref and current.sprint_ref not in related.refs:
-                related = RelatedRefs(related.refs + (current.sprint_ref,))
-            # The public comment cannot carry a request marker without changing
-            # its established grammar.  Instead, the staged occurrence records
-            # which matching row it is entitled to prove.  An older identical
-            # comment therefore cannot turn a transport failure before the
-            # write into a delivered new occurrence.
-            preview = self._marker_event(current, operation, related, request_id)
-            content = self.render_marker(preview)
-            occurrence = self._marker_occurrences(operation.ref, content) + 1
-            event = self._marker_event(
-                current, operation, related, request_id, marker_occurrence=occurrence,
-            )
-
-        content = self.render_marker(event)
-
-        def effect() -> None:
-            # Re-read before issuing the effect: staging grants no authority to
-            # comment on a deleted or replaced Card.  A transport failure after
-            # createComment is uncertain, so confirmation owns that branch.
-            entity = self.read(EntityKind.CARD, operation.ref)
-            if not isinstance(entity, Card):
-                raise BoardProtocolError("Card marker comment resolved a non-Card entity")
-            try:
-                reply = self.client.call(
-                    "createComment", task_id=self._card_task_id(operation.ref), user_id=0, content=content,
+        with marker_comment_lock(self.data_dir, operation.ref):
+            request_id = self._request_id(operation.request_id, "card-marker")
+            existing = self.canon.event(request_id)
+            if existing is not None:
+                self._require_marker_operation(existing, operation)
+                current = self.read(EntityKind.CARD, operation.ref)
+                if not isinstance(current, Card):
+                    raise BoardProtocolError("Card marker comment resolved a non-Card entity")
+                if self.canon.committed(request_id) is not None:
+                    return MutationResult(current, existing)
+                event = existing
+            else:
+                current = self.read(EntityKind.CARD, operation.ref)
+                if not isinstance(current, Card):
+                    raise BoardProtocolError("Card marker comment resolved a non-Card entity")
+                related = operation.related_refs
+                if current.sprint_ref and current.sprint_ref not in related.refs:
+                    related = RelatedRefs(related.refs + (current.sprint_ref,))
+                # The public comment cannot carry a request marker without changing
+                # its established grammar.  Instead, the staged occurrence records
+                # which matching row it is entitled to prove.  An older identical
+                # comment therefore cannot turn a transport failure before the
+                # write into a delivered new occurrence.
+                preview = self._marker_event(current, operation, related, request_id)
+                content = self.render_marker(preview)
+                occurrence = self._marker_occurrences(operation.ref, content) + 1
+                event = self._marker_event(
+                    current, operation, related, request_id, marker_occurrence=occurrence,
                 )
-            except Exception as exc:
-                # TaskError is imported by this adapter's existing legacy
-                # reader seam.  Only an unavailable transport can have applied
-                # the effect after losing the reply; a backend refusal remains
-                # in MutationEventTransaction's discard window.
-                from secretary.tasks import TaskError
-                if isinstance(exc, TaskError) and exc.code == "backend_unavailable":
-                    return
-                raise
-            if not _comment_saved(reply):
-                raise BoardProtocolError("Kanboard rejected the Card marker comment")
 
-        def confirm() -> Card:
-            task = TaskReader(self.client).show(operation.ref)
-            if not self._marker_is_proven(event, task):
-                raise BoardProtocolError("Card marker comment is not proven on the Kanboard board")
-            entity = self.read(EntityKind.CARD, operation.ref)
-            if not isinstance(entity, Card):
-                raise BoardProtocolError("Card marker comment resolved a non-Card entity")
-            return entity
+            content = self.render_marker(event)
 
-        entity = MutationEventTransaction(
-            self.canon, request_id=request_id, event=event,
-        ).execute(effect, confirm=confirm)
-        return MutationResult(entity, event)
+            def effect() -> None:
+                # Re-read before issuing the effect: staging grants no authority to
+                # comment on a deleted or replaced Card.  A transport failure after
+                # createComment is uncertain, so confirmation owns that branch.
+                entity = self.read(EntityKind.CARD, operation.ref)
+                if not isinstance(entity, Card):
+                    raise BoardProtocolError("Card marker comment resolved a non-Card entity")
+                try:
+                    reply = self.client.call(
+                        "createComment", task_id=self._card_task_id(operation.ref), user_id=0, content=content,
+                    )
+                except Exception as exc:
+                    # TaskError is imported by this adapter's existing legacy
+                    # reader seam.  Only an unavailable transport can have applied
+                    # the effect after losing the reply; a backend refusal remains
+                    # in MutationEventTransaction's discard window.
+                    from secretary.tasks import TaskError
+                    if isinstance(exc, TaskError) and exc.code == "backend_unavailable":
+                        return
+                    raise
+                if not _comment_saved(reply):
+                    raise BoardProtocolError("Kanboard rejected the Card marker comment")
+
+            def confirm() -> Card:
+                task = TaskReader(self.client).show(operation.ref)
+                if not self._marker_is_proven(event, task):
+                    raise BoardProtocolError("Card marker comment is not proven on the Kanboard board")
+                entity = self.read(EntityKind.CARD, operation.ref)
+                if not isinstance(entity, Card):
+                    raise BoardProtocolError("Card marker comment resolved a non-Card entity")
+                return entity
+
+            entity = MutationEventTransaction(
+                self.canon, request_id=request_id, event=event,
+            ).execute(effect, confirm=confirm)
+            return MutationResult(entity, event)
 
     def recover_marker_comment(self, request_id: str) -> MutationResult:
         """Publish a pending marker only after its exact rendered comment exists."""
@@ -381,17 +382,21 @@ class KanboardBoardHost:
         event = self.canon.event(request_id)
         if event is None or event.entity_kind is not EntityKind.CARD:
             raise BoardProtocolError("pending event is not a recoverable Card marker occurrence")
-        if event.kind not in {EventKind.CARD_REPORTED, EventKind.CARD_VERDICTED, EventKind.CARD_DECIDED}:
-            raise BoardProtocolError("pending event is not a recoverable Card marker occurrence")
-        content = self.render_marker(event)
-        task = TaskReader(self.client).show(event.ref)
-        if not self._marker_is_proven(event, task):
-            raise BoardProtocolError("pending Card marker comment is not proven on the Kanboard board")
-        entity = self.read(EntityKind.CARD, event.ref)
-        if not isinstance(entity, Card):
-            raise BoardProtocolError("pending Card marker comment resolved a non-Card entity")
-        self.canon.commit(request_id, event)
-        return MutationResult(entity, event)
+        with marker_comment_lock(self.data_dir, event.ref):
+            event = self.canon.event(request_id)
+            if event is None or event.entity_kind is not EntityKind.CARD:
+                raise BoardProtocolError("pending event is not a recoverable Card marker occurrence")
+            if event.kind not in {EventKind.CARD_REPORTED, EventKind.CARD_VERDICTED, EventKind.CARD_DECIDED}:
+                raise BoardProtocolError("pending event is not a recoverable Card marker occurrence")
+            content = self.render_marker(event)
+            task = TaskReader(self.client).show(event.ref)
+            if not self._marker_is_proven(event, task):
+                raise BoardProtocolError("pending Card marker comment is not proven on the Kanboard board")
+            entity = self.read(EntityKind.CARD, event.ref)
+            if not isinstance(entity, Card):
+                raise BoardProtocolError("pending Card marker comment resolved a non-Card entity")
+            self.canon.commit(request_id, event)
+            return MutationResult(entity, event)
 
     def _transition_sprint(self, operation: TransitionRequest) -> MutationResult:
         """Apply one checked Sprint status edge through the typed event canon.

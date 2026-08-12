@@ -3646,6 +3646,70 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
         self.assertEqual(self.writer.reconcile(), (0, 1))
         self.assertIsNone(self.writer.audit.committed_event("historical-identical-report"))
 
+    def test_concurrent_identical_markers_receive_distinct_occurrence_witnesses(self) -> None:
+        first_counted = threading.Event()
+        second_counted = threading.Event()
+        release_first = threading.Event()
+        count_lock = threading.Lock()
+        count_calls = 0
+        original_count = self.writer.board_host._marker_occurrences
+        original_call = self.client.call
+        create_calls = 0
+
+        def count_occurrences(ref: str, content: str) -> int:
+            nonlocal count_calls
+            count = original_count(ref, content)
+            with count_lock:
+                count_calls += 1
+                ordinal = count_calls
+            if ordinal == 1:
+                first_counted.set()
+                self.assertTrue(release_first.wait(2))
+            else:
+                second_counted.set()
+            return count
+
+        def create_then_lose_second_reply(method: str, **params: object) -> object:
+            nonlocal create_calls
+            if method == "createComment":
+                with count_lock:
+                    create_calls += 1
+                    ordinal = create_calls
+                if ordinal == 2:
+                    raise TaskError("backend_unavailable", "transport unavailable", 1)
+            return original_call(method, **params)
+
+        outcomes: dict[str, object] = {}
+
+        def report(request_id: str) -> None:
+            try:
+                outcomes[request_id] = self._write(
+                    "report", request_id, body="same concurrent marker",
+                )
+            except TaskError as exc:
+                outcomes[request_id] = exc
+
+        with mock.patch.object(self.writer.board_host, "_marker_occurrences", side_effect=count_occurrences), \
+             mock.patch.object(self.client, "call", side_effect=create_then_lose_second_reply):
+            first = threading.Thread(target=report, args=("concurrent-first",))
+            second = threading.Thread(target=report, args=("concurrent-second",))
+            first.start()
+            self.assertTrue(first_counted.wait(2))
+            second.start()
+            self.assertFalse(second_counted.wait(0.1))
+            release_first.set()
+            first.join()
+            second.join()
+
+        self.assertIsInstance(outcomes["concurrent-first"], dict)
+        self.assertIsInstance(outcomes["concurrent-second"], TaskError)
+        self.assertEqual(outcomes["concurrent-second"].code, "audit_pending")  # type: ignore[union-attr]
+        pending = self.writer.audit.pending_event("concurrent-second")
+        assert pending is not None
+        self.assertEqual(pending["data"]["marker_occurrence"], 2)
+        self.assertEqual(len(self.client.comments[12]), 1)
+        self.assertEqual(self.writer.reconcile(), (0, 1))
+
     def test_generic_pending_owner_cannot_be_replaced_by_any_typed_marker(self) -> None:
         for family in ("report", "verdict", "decision"):
             with self.subTest(family=family):
