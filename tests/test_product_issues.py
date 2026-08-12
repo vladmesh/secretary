@@ -196,13 +196,14 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
         with self.assertRaises(TaskError) as refused:
             store.discard_transaction("half-written")
         self.assertEqual(refused.exception.code, "live_write")
-        self.assertEqual(store.transactions.status(), {"ok": False, "pending": 1})
+        self.assertEqual(store.transactions.status(), {"ok": True, "pending": 0})
+        self.assertEqual(store.audit.status(), {"ok": False, "pending": 1})
 
         product = store.retry_transaction("half-written")
 
         self.assertEqual(product["id"], "secretary")
         self.assertEqual(store.transactions.status(), {"ok": True, "pending": 0})
-        self.assertEqual([entry["kind"] for entry in store.audit.events()], ["product_created"])
+        self.assertEqual([entry["kind"] for entry in store.audit.events()], ["entity.created"])
 
     def test_quarantined_document_returns_through_adopt_and_retry(self) -> None:
         client = LiveSwimlaneBoard()
@@ -266,6 +267,28 @@ class ProductIssueStoreTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmpdir.cleanup()
 
+    def test_released_writes_publish_complete_typed_product_issue_events(self) -> None:
+        self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
+            request_id="typed-product",
+        )
+        issue = self.store.create_issue(
+            product="secretary", issue_kind="bug", priority="P2", title="Crash", description="", actor="po",
+            request_id="typed-issue",
+        )
+        self.store.update_priority(
+            reference=issue["ref"], priority="P0", reason="urgent", actor="po", request_id="typed-priority",
+        )
+        self.store.close_issue(
+            reference=issue["ref"], reason="resolved", actor="po", request_id="typed-close",
+        )
+        events = self.store.audit.events()
+        self.assertEqual([event["kind"] for event in events], ["entity.created", "entity.created", "entity.updated", "issue.closed"])
+        self.assertTrue(all(event["record_type"] == "board.protocol_event" for event in events))
+        self.assertEqual(events[1]["related_refs"], ["product:secretary"])
+        self.assertEqual(events[-1]["transition"], {"source": "open", "target": "closed"})
+        self.assertEqual(events[-1]["data"]["close_reason"], "resolved")
+
     def test_product_and_issue_lists_use_complete_set_and_show_audit_history(self) -> None:
         product = self.store.create_product(
             product_id="secretary", projects=["secretary"], title="Secretary", description="",
@@ -293,7 +316,7 @@ class ProductIssueStoreTests(unittest.TestCase):
         self.assertIn("[issue:priority]\nurgent\n[request-id:priority]", [entry["text"] for entry in shown["history"]["comments"]])
         self.assertEqual(
             [entry["kind"] for entry in shown["history"]["audit"]],
-            ["issue_created", "issue_priority_changed", "issue_closed"],
+            ["entity.created", "entity.updated", "issue.closed"],
         )
         status_ids = [params.get("status_id") for method, params in self.client.calls if method == "getAllTasks"]
         self.assertIn(1, status_ids)
@@ -334,7 +357,7 @@ class ProductIssueStoreTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "closed")
         shown = self.store.show_issue(issue["ref"])
         self.assertEqual(shown["close_reason"], "resolved")
-        self.assertEqual([event["kind"] for event in shown["history"]["audit"]], ["issue_created", "issue_closed"])
+        self.assertEqual([event["kind"] for event in shown["history"]["audit"]], ["entity.created", "issue.closed"])
 
     def test_issue_and_task_column_guards_are_fail_closed(self) -> None:
         self.store.create_product(
@@ -475,14 +498,15 @@ class ProductIssueStoreTests(unittest.TestCase):
             )
         self.assertEqual(raised.exception.code, "audit_pending")
         self.assertEqual(store.audit.events(), [])
-        self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
-        self.assertEqual(TaskWriter(store.client, data_dir=self.root / "data").reconcile(), (0, 0))
+        self.assertEqual(store.audit.status(), {"ok": False, "pending": 1})
+        # Generic reconciliation sees but cannot publish a typed owner.
+        self.assertEqual(TaskWriter(store.client, data_dir=self.root / "data").reconcile(), (0, 1))
         product = store.create_product(
             product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po", request_id="product",
         )
         self.assertEqual(product["id"], "secretary")
         self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
-        self.assertEqual([event["kind"] for event in store.audit.events()], ["product_created"])
+        self.assertEqual([event["kind"] for event in store.audit.events()], ["entity.created"])
 
     def test_rejected_issue_metadata_stays_pending_until_same_request_repairs_it(self) -> None:
         self.store.create_product(
@@ -505,7 +529,7 @@ class ProductIssueStoreTests(unittest.TestCase):
                 product="secretary", issue_kind="bug", priority="P2", title="Crash", description="", actor="po", request_id="issue",
             )
         self.assertEqual(raised.exception.code, "audit_pending")
-        self.assertEqual(self.store.audit.status(), {"ok": True, "pending": 0})
+        self.assertEqual(self.store.audit.status(), {"ok": False, "pending": 1})
         issue = self.store.create_issue(
             product="secretary", issue_kind="bug", priority="P2", title="Crash", description="", actor="po", request_id="issue",
         )
@@ -538,9 +562,9 @@ class ProductIssueStoreTests(unittest.TestCase):
         shown = self.store.show_issue(issue["ref"])
         self.assertFalse(shown["closed"])
         self.assertIsNone(shown["close_reason"])
-        self.assertEqual([event["kind"] for event in shown["history"]["audit"]], ["issue_created"])
+        self.assertEqual([event["kind"] for event in shown["history"]["audit"]], ["entity.created"])
 
-    def test_rejected_close_comment_is_repaired_by_same_request(self) -> None:
+    def test_refused_close_comment_leaves_no_typed_occurrence(self) -> None:
         self.store.create_product(
             product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
         )
@@ -561,7 +585,7 @@ class ProductIssueStoreTests(unittest.TestCase):
         self.client.call = reject_once  # type: ignore[method-assign]
         with self.assertRaises(TaskError) as raised:
             self.store.close_issue(reference=issue["ref"], reason="resolved", actor="po", request_id="close")
-        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(raised.exception.code, "backend_rejected")
         self.assertEqual(self.store.audit.status(), {"ok": True, "pending": 0})
         self.assertFalse(self.store.show_issue(issue["ref"])["closed"])
         closed = self.store.close_issue(reference=issue["ref"], reason="resolved", actor="po", request_id="close")
@@ -569,7 +593,7 @@ class ProductIssueStoreTests(unittest.TestCase):
         self.assertEqual(closed["close_reason"], "resolved")
         self.assertEqual(self.store.audit.status(), {"ok": True, "pending": 0})
 
-    def test_rejected_priority_comment_keeps_auditable_backend_change(self) -> None:
+    def test_refused_priority_comment_leaves_no_typed_occurrence(self) -> None:
         self.store.create_product(
             product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po",
         )
@@ -587,10 +611,10 @@ class ProductIssueStoreTests(unittest.TestCase):
         self.client.call = reject_comment  # type: ignore[method-assign]
         with self.assertRaises(TaskError) as raised:
             self.store.update_priority(reference=issue["ref"], priority="P0", reason="urgent", actor="po")
-        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(raised.exception.code, "backend_rejected")
         shown = self.store.show_issue(issue["ref"])
         self.assertEqual(shown["priority"], "P2")
-        self.assertEqual([event["kind"] for event in shown["history"]["audit"]], ["issue_created"])
+        self.assertEqual([event["kind"] for event in shown["history"]["audit"]], ["entity.created"])
 
     def test_all_operations_restart_without_duplicate_backend_writes(self) -> None:
         class LoseReplyOnce(ProductBoard):
@@ -617,8 +641,7 @@ class ProductIssueStoreTests(unittest.TestCase):
         issue = ProductIssueStore(client, data_dir=self.root / "data", instance=self.root).create_issue(
             product="secretary", issue_kind="bug", priority="P2", title="Crash", description="", actor="po", request_id="issue-restart"
         )
-        with self.assertRaises(TaskError):
-            store.update_priority(reference=issue["ref"], priority="P0", reason="urgent", actor="po", request_id="priority-restart")
+        store.update_priority(reference=issue["ref"], priority="P0", reason="urgent", actor="po", request_id="priority-restart")
         ProductIssueStore(client, data_dir=self.root / "data", instance=self.root).update_priority(
             reference=issue["ref"], priority="P0", reason="urgent", actor="po", request_id="priority-restart"
         )
@@ -630,7 +653,7 @@ class ProductIssueStoreTests(unittest.TestCase):
         self.assertTrue(closed["closed"])
         self.assertEqual(len([call for call in client.calls if call[0] == "createTask"]), 2)
         self.assertEqual(len(client.comments[int(next(task for task in client.tasks if task["reference"] == issue["ref"])["id"])]), 2)
-        self.assertEqual([event["kind"] for event in store.audit.events()], ["product_created", "issue_created", "issue_priority_changed", "issue_closed"])
+        self.assertEqual([event["kind"] for event in store.audit.events()], ["entity.created", "entity.created", "entity.updated", "issue.closed"])
 
     def test_request_id_conflicts_are_rejected_before_a_second_write(self) -> None:
         self.store.create_product(product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po", request_id="product")
@@ -664,9 +687,10 @@ class ProductIssueStoreTests(unittest.TestCase):
         self.client.call = fail_once  # type: ignore[method-assign]
         with self.assertRaises(TaskError):
             self.store.create_product(product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po", request_id="isolated")
-        self.assertEqual(TaskWriter(self.client, data_dir=self.root / "data").reconcile(), (0, 0))
+        self.assertEqual(TaskWriter(self.client, data_dir=self.root / "data").reconcile(), (0, 1))
         self.assertEqual(self.store.audit.events(), [])
-        self.assertEqual(len(list((self.root / "data" / "board" / "product-issue-transactions").glob("*.json"))), 1)
+        self.assertEqual(self.store.transactions.status(), {"ok": True, "pending": 0})
+        self.assertEqual(self.store.audit.status(), {"ok": False, "pending": 1})
 
     def test_existing_product_retry_uses_its_staged_projects_before_the_registry(self) -> None:
         original_call = self.client.call
@@ -688,23 +712,13 @@ class ProductIssueStoreTests(unittest.TestCase):
         )
         self.assertEqual(product["id"], "secretary")
 
-    def test_audit_cleanup_retry_does_not_repeat_the_completed_operation(self) -> None:
-        original_unlink = Path.unlink
-        failed = False
-
-        def fail_once(path: Path, *args: object, **kwargs: object) -> None:
-            nonlocal failed
-            if path.parent.name == "product-issue-transactions" and not failed:
-                failed = True
-                raise OSError("cleanup interrupted")
-            original_unlink(path, *args, **kwargs)
-
-        with mock.patch.object(Path, "unlink", fail_once), self.assertRaises(TaskError) as raised:
-            self.store.create_product(product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po", request_id="cleanup")
-        self.assertEqual(raised.exception.code, "audit_pending")
+    def test_committed_request_replay_does_not_repeat_the_completed_operation(self) -> None:
+        self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po", request_id="cleanup",
+        )
         self.store.create_product(product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po", request_id="cleanup")
         self.assertEqual(len([call for call in self.client.calls if call[0] == "createTask"]), 1)
-        self.assertEqual([event["kind"] for event in self.store.audit.events()], ["product_created"])
+        self.assertEqual([event["kind"] for event in self.store.audit.events()], ["entity.created"])
 
     def test_request_id_never_becomes_a_pending_filename_and_generic_upgrade_is_fail_closed(self) -> None:
         self.store.create_product(product_id="secretary", projects=["secretary"], title="Secretary", description="", actor="po", request_id="../../outside")
@@ -745,12 +759,12 @@ class ProductIssueStoreTests(unittest.TestCase):
             return result
 
         self.client.call = lose_create_reply  # type: ignore[method-assign]
-        with self.assertRaises(TaskError) as raised:
-            self.store.create_product(
-                product_id="secretary", projects=["secretary"], title="Secretary", description="",
-                actor="po", request_id="lost-create",
-            )
-        self.assertEqual(raised.exception.code, "audit_pending")
+        # The confirming read proves the uniquely referenced row, so a lost
+        # reply does not force a second invocation or a synthetic failure.
+        self.store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="",
+            actor="po", request_id="lost-create",
+        )
         product = ProductIssueStore(self.client, data_dir=self.root / "data", instance=self.root).create_product(
             product_id="secretary", projects=["secretary"], title="Secretary", description="",
             actor="po", request_id="lost-create",
@@ -768,15 +782,15 @@ class ProductIssueStoreTests(unittest.TestCase):
         original_call = self.client.call
         failed = False
 
-        def reject_priority_comment_once(method: str, **params: object) -> object:
+        def reject_priority_metadata_once(method: str, **params: object) -> object:
             nonlocal failed
-            if method == "createComment" and not failed:
+            if method == "saveTaskMetadata" and not failed:
                 failed = True
                 self.client.calls.append((method, params))
-                return 0
+                return False
             return original_call(method, **params)
 
-        self.client.call = reject_priority_comment_once  # type: ignore[method-assign]
+        self.client.call = reject_priority_metadata_once  # type: ignore[method-assign]
         with self.assertRaises(TaskError):
             self.store.update_priority(
                 reference=issue["ref"], priority="P0", reason="urgent", actor="po", request_id="priority",
@@ -792,7 +806,7 @@ class ProductIssueStoreTests(unittest.TestCase):
         self.assertEqual(closed["priority"], "P0")
         self.assertEqual(
             [event["kind"] for event in self.store.audit.events() if event.get("ref") == issue["ref"]],
-            ["issue_created", "issue_priority_changed", "issue_closed"],
+            ["entity.created", "entity.updated", "issue.closed"],
         )
 
     def test_reference_repair_after_create_reply_persists_the_backend_id_first(self) -> None:
@@ -860,15 +874,15 @@ class ProductIssueStoreTests(unittest.TestCase):
         original_call = self.client.call
         failed = False
 
-        def reject_comment_once(method: str, **params: object) -> object:
+        def reject_metadata_once(method: str, **params: object) -> object:
             nonlocal failed
-            if method == "createComment" and not failed:
+            if method == "saveTaskMetadata" and not failed:
                 failed = True
                 self.client.calls.append((method, params))
-                return 0
+                return False
             return original_call(method, **params)
 
-        self.client.call = reject_comment_once  # type: ignore[method-assign]
+        self.client.call = reject_metadata_once  # type: ignore[method-assign]
         with self.assertRaises(TaskError):
             self.store.update_priority(
                 reference=issue["ref"], priority="P0", reason="urgent", actor="po", request_id="first-priority",

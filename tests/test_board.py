@@ -13,7 +13,7 @@ from unittest import mock
 
 from secretary.board import (
     Actor, BoardEventCanon, BoardEventPending, BoardProtocolError, Card, CardState,
-    Create, EntityKind, Event, EventKind, FakeBoardHost, InvalidTransition,
+    Create, EntityKind, Event, EventKind, FakeBoardHost, InvalidTransition, Issue, IssueState, Product,
     KanboardBoardHost, MutationEventTransaction, RelatedRefs, Replace, SprintState, TRANSITIONS,
     TransitionRequest,
 )
@@ -152,6 +152,34 @@ class BoardHostContractTests(unittest.TestCase):
             self.assertEqual(events[0].kind, EventKind.ENTITY_CREATED)
             self.assertEqual(events[1].kind, EventKind.ENTITY_UPDATED)
             self.assertTrue(all(event.reason and event.occurred_at.tzinfo for event in events))
+
+    def test_fake_host_supports_the_product_issue_command_shapes(self) -> None:
+        """The protocol double exercises Product/Issue create, replace and close."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host = FakeBoardHost(data_dir=tmpdir)
+            product = host.create(Create(
+                Product("product:secretary", "Secretary", projects=("secretary",)),
+                Actor("po", "po"), "Product created", request_id="product",
+            ))
+            issue = host.create(Create(
+                Issue("issue:1", "Crash", product.entity.ref, priority="P2", issue_kind="bug"),
+                Actor("po", "po"), "Issue created", RelatedRefs((product.entity.ref,)), "issue",
+            ))
+            priority = host.replace(Replace(
+                Issue("issue:1", "Crash", product.entity.ref, priority="P0", issue_kind="bug"),
+                Actor("po", "po"), "urgent", RelatedRefs((product.entity.ref,)), "priority",
+            ))
+            closed = host.transition(TransitionRequest(
+                EntityKind.ISSUE, issue.entity.ref, IssueState.CLOSED, Actor("po", "po"),
+                "resolved", RelatedRefs((product.entity.ref,)), "close",
+            ))
+
+            self.assertEqual([event.kind for event in BoardEventCanon(tmpdir).events()], [
+                EventKind.ENTITY_CREATED, EventKind.ENTITY_CREATED,
+                EventKind.ENTITY_UPDATED, EventKind.ISSUE_CLOSED,
+            ])
+            self.assertEqual(priority.entity.priority, "P0")
+            self.assertEqual(closed.entity.state, IssueState.CLOSED)
 
     def test_every_registry_transition_persists_its_declared_event(self) -> None:
         # The concrete lifecycle values differ by entity type, but this test's

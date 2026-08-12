@@ -16,7 +16,7 @@ from secretary.board.models import (
     BoardEntity, Card, CardState, EntityKind, Event, EventKind, Issue, IssueState, Product,
     ProductState, RelatedRefs, Sprint, SprintState,
 )
-from secretary.board.transitions import BoardProtocolError
+from secretary.board.transitions import BoardProtocolError, transition
 from secretary.product_issues import ProductIssueStore
 from secretary.sprints import SprintReader
 from secretary.tasks import KanboardClient, TaskReader, _positive_int, _target_column_id, project_card_by_reference
@@ -25,11 +25,10 @@ from secretary.tasks import KanboardClient, TaskReader, _positive_int, _target_c
 class KanboardBoardHost:
     """Translate the current Kanboard-backed readers and Card state edges at the BoardHost seam.
 
-    Card ``transition`` is the migrated mutation: it is the one authority for a
-    Card state change and owns its typed event transaction.  The remaining
-    mutations stay unavailable until their own migration can preserve each
-    legacy writer's durable retry and audit semantics, so a caller cannot bypass
-    the contract accidentally.
+    Card transitions and the released Product/Issue writer are migrated: each
+    is the one authority for its backend mutation and owns a typed event
+    transaction.  Other mutations remain unavailable until their migration can
+    preserve the established writer's durable retry and audit semantics.
     """
 
     def __init__(
@@ -70,10 +69,123 @@ class KanboardBoardHost:
         raise BoardProtocolError(f"unknown entity kind {kind!r}")
 
     def create(self, operation: Create) -> MutationResult:
-        self._migration_pending("create", operation.entity.kind)
+        if operation.entity.kind not in {EntityKind.PRODUCT, EntityKind.ISSUE}:
+            self._migration_pending("create", operation.entity.kind)
+        self._require_product_issue_configuration()
+        entity = operation.entity
+        if not isinstance(entity, (Product, Issue)):
+            raise BoardProtocolError("Product/Issue create requires a normalized Product or Issue")
+        request_id = self._request_id(operation.request_id, f"{entity.kind.value}-create")
+        related = self._related(entity, operation.related_refs)
+        existing = self._existing(request_id, entity, operation.actor, operation.reason)
+        if existing is not None and self.canon.committed(request_id) is not None:
+            return MutationResult(self.read(entity.kind, entity.ref), existing)
+        # A pending occurrence is its own validated recovery evidence.  Do not
+        # make its repair depend on mutable inputs such as the project registry
+        # that may have changed after the original writer staged it.
+        if existing is None:
+            self._validate_create(entity)
+        event = existing or self._entity_event(EventKind.ENTITY_CREATED, entity, operation.actor, operation.reason, related, request_id)
+
+        def effect() -> None:
+            if self._raw_by_ref(entity.ref) is not None:
+                raise BoardProtocolError(f"{entity.kind.value} already exists")
+            board_id, column_id = self._issues_board()
+            try:
+                reply = self.client.call(
+                    "createTask", project_id=board_id, title=entity.title,
+                    description=self._create_marker(request_id), column_id=column_id,
+                    swimlane_id=self._issues_swimlane(board_id), reference=entity.ref,
+                )
+            except Exception:
+                # An exception after the RPC was issued is deliberately not a
+                # refusal.  The confirming read either proves this exact
+                # reference or leaves the staged event pending; a retry must
+                # never issue a second unproven create.
+                return
+            task_id = _positive_int(reply)
+            if task_id is None:
+                raise BoardProtocolError("Kanboard refused the Product/Issue row")
+
+        def confirm() -> BoardEntity:
+            row = self._raw_by_ref(entity.ref)
+            if row is None:
+                raise BoardProtocolError("Product/Issue create is not proven on the Kanboard board")
+            return self._normalized_row(row, allow_incomplete=True)
+
+        def finish(_created: BoardEntity) -> None:
+            row = self._raw_by_ref(entity.ref)
+            if row is None:
+                raise BoardProtocolError("created Product/Issue row was not found")
+            task_id = self._row_id(row)
+            if row.get("description") != entity.description:
+                if not self.client.call("updateTask", id=task_id, reference=entity.ref, description=entity.description):
+                    raise BoardProtocolError("Kanboard rejected Product/Issue details")
+            if self.client.call("saveTaskMetadata", task_id=task_id, values=self._metadata_for(entity)) is not True:
+                raise BoardProtocolError("Kanboard rejected Product/Issue metadata")
+            confirmed = self._raw_by_ref(entity.ref)
+            if confirmed is None or self._normalized_row(confirmed) != entity:
+                raise BoardProtocolError("Product/Issue create remains incomplete")
+
+        MutationEventTransaction(self.canon, request_id=request_id, event=event).execute(effect, confirm=confirm, finish=finish)
+        return MutationResult(self.read(entity.kind, entity.ref), event)
 
     def replace(self, operation: Replace) -> MutationResult:
-        self._migration_pending("replace", operation.entity.kind)
+        if not isinstance(operation.entity, Issue):
+            self._migration_pending("replace", operation.entity.kind)
+        self._require_product_issue_configuration()
+        entity = operation.entity
+        request_id = self._request_id(operation.request_id, "issue-replace")
+        related = self._related(entity, operation.related_refs)
+        existing = self._existing(request_id, entity, operation.actor, operation.reason)
+        if existing is not None and self.canon.committed(request_id) is not None:
+            return MutationResult(self.read(EntityKind.ISSUE, entity.ref), existing)
+        current = self.read(EntityKind.ISSUE, entity.ref)
+        if not isinstance(current, Issue) or current.state is not IssueState.OPEN:
+            raise BoardProtocolError("cannot replace a closed Issue")
+        if (entity.title, entity.product_ref, entity.state, entity.issue_kind, entity.description) != (
+            current.title, current.product_ref, current.state, current.issue_kind, current.description,
+        ) or entity.priority not in {"P0", "P1", "P2", "P3"}:
+            raise BoardProtocolError("Issue replace only supports a non-empty priority change")
+        event = existing or self._entity_event(EventKind.ENTITY_UPDATED, entity, operation.actor, operation.reason, related, request_id)
+        content = f"[issue:priority]\n{operation.reason}\n[request-id:{request_id}]"
+
+        def effect() -> None:
+            row = self._raw_by_ref(entity.ref)
+            if row is None:
+                raise BoardProtocolError("Issue was not found")
+            task_id = self._row_id(row)
+            comments = self.client.call("getAllComments", task_id=task_id) or []
+            if not any(isinstance(comment, dict) and comment.get("comment") == content for comment in comments):
+                try:
+                    saved = self.client.call("createComment", task_id=task_id, user_id=0, content=content)
+                except Exception:
+                    # As with creates, the reply is not a proof that the write
+                    # did not happen.  Confirmation decides whether this exact
+                    # pending occurrence is recoverable.
+                    return
+                if not _comment_saved(saved):
+                    raise BoardProtocolError("Kanboard rejected issue priority comment")
+
+        def confirm() -> BoardEntity:
+            row = self._raw_by_ref(entity.ref)
+            if row is None:
+                raise BoardProtocolError("Issue priority change is not proven")
+            comments = self.client.call("getAllComments", task_id=self._row_id(row)) or []
+            if not any(isinstance(comment, dict) and comment.get("comment") == content for comment in comments):
+                raise BoardProtocolError("Issue priority comment is not proven")
+            return self._normalized_row(row)
+
+        def finish(_confirmed: BoardEntity) -> None:
+            row = self._raw_by_ref(entity.ref)
+            if row is None or self.client.call("saveTaskMetadata", task_id=self._row_id(row), values={"issue_priority": entity.priority}) is not True:
+                raise BoardProtocolError("Kanboard rejected issue priority")
+            row = self._raw_by_ref(entity.ref)
+            if row is None or self._normalized_row(row) != entity:
+                raise BoardProtocolError("Issue priority remains incomplete")
+
+        MutationEventTransaction(self.canon, request_id=request_id, event=event).execute(effect, confirm=confirm, finish=finish)
+        return MutationResult(self.read(EntityKind.ISSUE, entity.ref), event)
 
     def transition(
         self, operation: TransitionRequest, *, finish: Callable[[Card], None] | None = None,
@@ -95,6 +207,8 @@ class KanboardBoardHost:
         journal over a half-written card.  It runs once the target is proven, never on a replay
         of an already committed occurrence, and never before the column effect.
         """
+        if operation.kind is EntityKind.ISSUE:
+            return self._transition_issue(operation)
         if operation.kind is not EntityKind.CARD:
             self._migration_pending("transition", operation.kind)
         if self.canon is None:
@@ -179,6 +293,236 @@ class KanboardBoardHost:
             raise BoardProtocolError("pending Card transition is not proven on the Kanboard board")
         self.canon.commit(request_id, event)
         return MutationResult(entity, event)
+
+    def recover_product_issue(self, request_id: str) -> MutationResult:
+        """Resume one typed Product/Issue occurrence without consulting legacy journals."""
+        self._require_product_issue_configuration()
+        assert self.canon is not None
+        event = self.canon.event(request_id)
+        if event is None or event.entity_kind not in {EntityKind.PRODUCT, EntityKind.ISSUE}:
+            raise BoardProtocolError("pending event is not a recoverable Product/Issue occurrence")
+        if event.entity_kind is EntityKind.PRODUCT:
+            entity = _product_from_payload(event.data)
+        else:
+            entity = _issue_from_payload(event.data)
+        if event.kind is EventKind.ENTITY_CREATED:
+            return self.create(Create(entity, event.actor, event.reason, event.related_refs, request_id))
+        if event.kind is EventKind.ENTITY_UPDATED and isinstance(entity, Issue):
+            return self.replace(Replace(entity, event.actor, event.reason, event.related_refs, request_id))
+        if event.kind is EventKind.ISSUE_CLOSED and isinstance(entity, Issue):
+            return self.transition(TransitionRequest(EntityKind.ISSUE, entity.ref, IssueState.CLOSED, event.actor, event.reason, event.related_refs, request_id))
+        raise BoardProtocolError("pending event is not a recoverable Product/Issue occurrence")
+
+    def _transition_issue(self, operation: TransitionRequest) -> MutationResult:
+        self._require_product_issue_configuration()
+        if not isinstance(operation.target, IssueState):
+            raise BoardProtocolError("Issue transitions require an IssueState target")
+        request_id = self._request_id(operation.request_id, "issue-transition")
+        known = self.canon.event(request_id) if self.canon is not None else None
+        if known is not None:
+            if (
+                known.entity_kind is not EntityKind.ISSUE or known.ref != operation.ref
+                or known.actor != operation.actor or known.reason != operation.reason
+                or known.target_state != operation.target.value
+            ):
+                raise ValueError("request id belongs to another operation or payload")
+            successor = _issue_from_payload(known.data)
+            current = self.read(EntityKind.ISSUE, operation.ref)
+            if not isinstance(current, Issue):
+                raise BoardProtocolError("Issue transition resolved a non-Issue entity")
+            declaration = None
+        else:
+            current = self.read(EntityKind.ISSUE, operation.ref)
+            if not isinstance(current, Issue):
+                raise BoardProtocolError("Issue transition resolved a non-Issue entity")
+            successor, declaration = transition(current, operation.target)
+            if not isinstance(successor, Issue):
+                raise BoardProtocolError("Issue transition resolved an invalid successor")
+            successor = Issue(
+                successor.ref, successor.title, successor.product_ref, successor.state, successor.priority,
+                successor.issue_kind, successor.description, operation.reason,
+            )
+        related = self._related(current, operation.related_refs)
+        existing = self._existing(request_id, successor, operation.actor, operation.reason, target=operation.target.value)
+        if existing is not None and self.canon.committed(request_id) is not None:
+            return MutationResult(self.read(EntityKind.ISSUE, operation.ref), existing)
+        event = existing or self._entity_event(
+            EventKind.ISSUE_CLOSED, successor, operation.actor, operation.reason, related, request_id,
+            source=current.state.value, target=operation.target.value,
+        )
+        content = f"[issue:closed]\n{operation.reason}\n[request-id:{request_id}]"
+
+        def effect() -> None:
+            row = self._raw_by_ref(current.ref)
+            if row is None:
+                raise BoardProtocolError("Issue was not found")
+            task_id = self._row_id(row)
+            comments = self.client.call("getAllComments", task_id=task_id) or []
+            if not any(isinstance(comment, dict) and comment.get("comment") == content for comment in comments):
+                try:
+                    saved = self.client.call("createComment", task_id=task_id, user_id=0, content=content)
+                except Exception:
+                    return
+                if not _comment_saved(saved):
+                    raise BoardProtocolError("Kanboard rejected issue close comment")
+
+        def confirm() -> BoardEntity:
+            row = self._raw_by_ref(current.ref)
+            if row is None:
+                raise BoardProtocolError("Issue close is not proven")
+            comments = self.client.call("getAllComments", task_id=self._row_id(row)) or []
+            if not any(isinstance(comment, dict) and comment.get("comment") == content for comment in comments):
+                raise BoardProtocolError("Issue close comment is not proven")
+            return self._normalized_row(row)
+
+        def finish(_confirmed: BoardEntity) -> None:
+            row = self._raw_by_ref(current.ref)
+            if row is None:
+                raise BoardProtocolError("Issue was not found")
+            task_id = self._row_id(row)
+            if self.client.call("saveTaskMetadata", task_id=task_id, values={"issue_closed_reason": operation.reason}) is not True:
+                raise BoardProtocolError("Kanboard rejected issue close reason")
+            row = self._raw_by_ref(current.ref)
+            if row is None:
+                raise BoardProtocolError("Issue was not found")
+            if int(row.get("is_active", 1) or 0) != 0 and not self.client.call("closeTask", task_id=task_id):
+                raise BoardProtocolError("Kanboard rejected issue closure")
+            row = self._raw_by_ref(current.ref)
+            if row is None or self._normalized_row(row) != successor:
+                raise BoardProtocolError("Issue closure remains incomplete")
+
+        MutationEventTransaction(self.canon, request_id=request_id, event=event).execute(effect, confirm=confirm, finish=finish)
+        return MutationResult(self.read(EntityKind.ISSUE, operation.ref), event)
+
+    def _require_product_issue_configuration(self) -> None:
+        if self.canon is None or self.data_dir is None or self.instance is None:
+            raise BoardProtocolError("Product/Issue mutations require configured data and instance directories")
+
+    @staticmethod
+    def _request_id(request_id: str | None, prefix: str) -> str:
+        result = request_id or f"{prefix}-{uuid.uuid4().hex}"
+        if not isinstance(result, str) or not result.strip():
+            raise ValueError("request id must not be empty")
+        return result
+
+    def _existing(
+        self, request_id: str, entity: Product | Issue, actor, reason: str, *, target: str | None = None,
+    ) -> Event | None:
+        assert self.canon is not None
+        event = self.canon.event(request_id)
+        if event is None:
+            return None
+        if (
+            event.entity_kind is not entity.kind or event.ref != entity.ref or event.actor != actor
+            or event.reason != reason or event.target_state != target
+            or event.data != _entity_payload(entity)
+        ):
+            raise ValueError("request id belongs to another operation or payload")
+        return event
+
+    @staticmethod
+    def _related(entity: Product | Issue, related: RelatedRefs) -> RelatedRefs:
+        if isinstance(entity, Issue) and entity.product_ref not in related.refs:
+            return RelatedRefs(related.refs + (entity.product_ref,))
+        return related
+
+    def _validate_create(self, entity: Product | Issue) -> None:
+        if isinstance(entity, Product):
+            if (
+                entity.state is not ProductState.ACTIVE or not entity.projects
+                or not entity.ref.startswith("product:") or not entity.ref.removeprefix("product:").strip()
+            ):
+                raise BoardProtocolError("Product create requires an active Product with projects")
+            from secretary.product_issues import registered_projects
+            unknown = sorted(set(entity.projects) - registered_projects(self.instance or ""))
+            if unknown:
+                raise BoardProtocolError("Product has unknown registered project(s): " + ", ".join(unknown))
+            return
+        if (
+            entity.state is not IssueState.OPEN or not entity.ref.startswith("issue:")
+            or entity.issue_kind not in {"bug", "feature", "question", "improvement"}
+            or entity.priority not in {"P0", "P1", "P2", "P3"}
+        ):
+            raise BoardProtocolError("Issue create requires an open Issue with a valid kind and priority")
+        product = self.read(EntityKind.PRODUCT, entity.product_ref)
+        if not isinstance(product, Product) or product.state is not ProductState.ACTIVE:
+            raise BoardProtocolError("Issue create requires an active Product")
+
+    def _entity_event(
+        self, kind: EventKind, entity: Product | Issue, actor, reason: str, related: RelatedRefs,
+        request_id: str, *, source: str | None = None, target: str | None = None,
+    ) -> Event:
+        payload = json.dumps({
+            "request_id": request_id, "kind": kind.value, "entity": _entity_payload(entity),
+            "actor": [actor.role, actor.id, actor.head_run_ref], "reason": reason,
+            "related_refs": list(related.refs), "source": source, "target": target,
+        }, sort_keys=True, separators=(",", ":"))
+        return Event(
+            "board-event-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32], kind,
+            entity.kind, entity.ref, actor, reason, datetime.now(UTC), related, source, target,
+            _entity_payload(entity),
+        )
+
+    def _issues_board(self) -> tuple[int, int]:
+        board = self.client.call("getProjectByName", name="Pipeline")
+        if not isinstance(board, dict) or not isinstance(board.get("id"), int):
+            raise BoardProtocolError("Pipeline board is unavailable")
+        columns = self.client.call("getColumns", project_id=board["id"]) or []
+        first = columns[0] if isinstance(columns, list) and columns else None
+        if not isinstance(first, dict) or first.get("title") != "Issues" or not isinstance(first.get("id"), int):
+            raise BoardProtocolError("Pipeline first column is not Issues")
+        return board["id"], first["id"]
+
+    def _issues_swimlane(self, board_id: int) -> int:
+        lanes = self.client.call("getActiveSwimlanes", project_id=board_id) or []
+        if not isinstance(lanes, list):
+            raise BoardProtocolError("Kanboard returned invalid swimlanes")
+        candidates = [(_nonnegative(lane.get("position")), identifier) for lane in lanes if isinstance(lane, dict) and (identifier := _positive_int(lane.get("id"))) is not None]
+        return min(candidates)[1] if candidates else 0
+
+    def _raw_by_ref(self, ref: str) -> dict[str, Any] | None:
+        board_id, _ = self._issues_board()
+        row = self.client.call("getTaskByReference", project_id=board_id, reference=ref)
+        return row if isinstance(row, dict) else None
+
+    @staticmethod
+    def _row_id(row: dict[str, Any]) -> int:
+        task_id = _positive_int(row.get("id"))
+        if task_id is None:
+            raise BoardProtocolError("Kanboard returned an invalid Product/Issue row")
+        return task_id
+
+    def _normalized_row(self, row: dict[str, Any], *, allow_incomplete: bool = False) -> Product | Issue:
+        task_id = self._row_id(row)
+        metadata = self.client.call("getTaskMetadata", task_id=task_id) or {}
+        if not isinstance(metadata, dict):
+            raise BoardProtocolError("Kanboard returned invalid Product/Issue metadata")
+        record_type = metadata.get("record_type")
+        if record_type == "product":
+            projects = json.loads(str(metadata.get("product_projects") or "[]"))
+            if not allow_incomplete and (not isinstance(projects, list) or not projects):
+                raise BoardProtocolError("Product metadata remains incomplete")
+            return Product(str(row.get("reference") or ""), str(row.get("title") or ""), ProductState.ACTIVE, tuple(str(value) for value in projects), str(row.get("description") or ""))
+        if record_type == "issue":
+            return Issue(str(row.get("reference") or ""), str(row.get("title") or ""), f"product:{metadata.get('issue_product') or ''}", IssueState.CLOSED if int(row.get("is_active", 1) or 0) == 0 else IssueState.OPEN, str(metadata.get("issue_priority") or ""), str(metadata.get("issue_kind") or ""), str(row.get("description") or ""), str(metadata.get("issue_closed_reason") or "") or None)
+        if allow_incomplete:
+            # A staged create has not set metadata yet.  It is still sufficient evidence that
+            # the uniquely referenced backend effect happened; finish supplies the typed shape.
+            ref = str(row.get("reference") or "")
+            if ref.startswith("product:"):
+                return Product(ref, str(row.get("title") or ""), projects=("pending",), description=str(row.get("description") or ""))
+            return Issue(ref, str(row.get("title") or ""), "product:pending", priority="pending", issue_kind="pending", description=str(row.get("description") or ""))
+        raise BoardProtocolError("row is not a Product or Issue")
+
+    @staticmethod
+    def _metadata_for(entity: Product | Issue) -> dict[str, str]:
+        if isinstance(entity, Product):
+            return {"record_type": "product", "product_id": entity.ref.removeprefix("product:"), "product_projects": json.dumps(list(entity.projects), separators=(",", ":"))}
+        return {"record_type": "issue", "issue_product": entity.product_ref.removeprefix("product:"), "issue_kind": entity.issue_kind, "issue_priority": entity.priority}
+
+    @staticmethod
+    def _create_marker(request_id: str) -> str:
+        return "[secretary-product-issue-transaction:" + hashlib.sha256(request_id.encode("utf-8")).hexdigest() + "]"
 
     def _move_card(self, card: Card, target: CardState) -> None:
         reader = TaskReader(self.client)
@@ -286,3 +630,41 @@ def _card(record: dict[str, Any]) -> Card:
         sprint_ref=str(record["sprint"]) if record.get("sprint") else None,
         description=str(record.get("description") or ""),
     )
+
+
+def _comment_saved(result: Any) -> bool:
+    return result is True or (isinstance(result, int) and not isinstance(result, bool) and result > 0)
+
+
+def _nonnegative(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _entity_payload(entity: Product | Issue) -> dict[str, Any]:
+    if isinstance(entity, Product):
+        return {"ref": entity.ref, "title": entity.title, "state": entity.state.value, "projects": list(entity.projects), "description": entity.description}
+    return {"ref": entity.ref, "title": entity.title, "product_ref": entity.product_ref, "state": entity.state.value, "priority": entity.priority, "issue_kind": entity.issue_kind, "description": entity.description, "close_reason": entity.close_reason}
+
+
+def _issue_from_payload(data: dict[str, Any]) -> Issue:
+    try:
+        return Issue(
+            str(data["ref"]), str(data["title"]), str(data["product_ref"]), IssueState(str(data["state"])),
+            str(data["priority"]), str(data["issue_kind"]), str(data.get("description") or ""),
+            str(data.get("close_reason") or "") or None,
+        )
+    except (KeyError, ValueError) as exc:
+        raise BoardProtocolError("pending Issue event has invalid normalized evidence") from exc
+
+
+def _product_from_payload(data: dict[str, Any]) -> Product:
+    try:
+        projects = data["projects"]
+        if not isinstance(projects, list):
+            raise ValueError("projects")
+        return Product(
+            str(data["ref"]), str(data["title"]), ProductState(str(data["state"])),
+            tuple(str(project) for project in projects), str(data.get("description") or ""),
+        )
+    except (KeyError, ValueError) as exc:
+        raise BoardProtocolError("pending Product event has invalid normalized evidence") from exc

@@ -214,6 +214,10 @@ class Event:
     # kind such as ``card.moved``.
     source_state: str | None = None
     target_state: str | None = None
+    # Additive operation evidence.  Product/Issue creates have follow-up
+    # metadata writes, so recovery needs the normalized intended value rather
+    # than a second, private journal to complete or prove the occurrence.
+    data: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _non_empty(self.event_id, "event id")
@@ -234,6 +238,8 @@ class Event:
         if self.source_state is not None:
             _non_empty(self.source_state, "event transition source")
             _non_empty(self.target_state or "", "event transition target")
+        if not isinstance(self.data, dict):
+            raise ValueError("event data must be an object")
         # The journal spelling is UTC.  Keep the value canonical too, so an
         # event read back from its own record compares equal to the value that
         # was written, even when its caller supplied another aware timezone.
@@ -259,6 +265,7 @@ class Event:
             "actor": actor,
             "reason": self.reason,
             "related_refs": list(self.related_refs.refs),
+            "data": self.data,
         }
         if self.source_state is not None:
             record["transition"] = {"source": self.source_state, "target": self.target_state}
@@ -277,6 +284,7 @@ class Event:
         actor = record.get("actor")
         related = record.get("related_refs")
         lifecycle = record.get("transition")
+        data = record.get("data", {})
         if not isinstance(subject, dict):
             raise ValueError("board event subject must be an object")
         if not isinstance(actor, dict):
@@ -285,6 +293,8 @@ class Event:
             raise ValueError("board event related_refs must be a string list")
         if len(set(related)) != len(related):
             raise ValueError("board event related_refs must be deduplicated")
+        if not isinstance(data, dict):
+            raise ValueError("board event data must be an object")
         if lifecycle is not None and (
             not isinstance(lifecycle, dict)
             or not isinstance(lifecycle.get("source"), str)
@@ -306,6 +316,7 @@ class Event:
                 related_refs=RelatedRefs(tuple(related)),
                 source_state=lifecycle.get("source") if isinstance(lifecycle, dict) else None,
                 target_state=lifecycle.get("target") if isinstance(lifecycle, dict) else None,
+                data=data,
             )
         except (TypeError, ValueError) as exc:
             raise ValueError(f"invalid board event record: {exc}") from None
