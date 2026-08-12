@@ -10,6 +10,8 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.cli import main
+from secretary.board.kanboard import KanboardBoardHost
+from secretary.board.transitions import BoardProtocolError
 from secretary.product_issues import ProductIssueStore
 from secretary.tasks import TaskAudit, TaskError, TaskWriter
 from tests.test_tasks import WriteKanboard
@@ -256,6 +258,69 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
                         client.comments.pop(duplicate_id, None)
                     repaired = store.retry_transaction(request_id)
                     self.assertEqual(repaired["ref"], reference)
+                    self.assertEqual(len([call for call in client.calls if call[0] == "createTask"]), before + 1)
+                    self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
+
+    def test_failing_swimlane_lookup_discards_product_and_issue_create(self) -> None:
+        """A pre-create lane lookup failure has no uncertain backend write to retain."""
+        for entity_kind in ("product", "issue"):
+            for failure in ("transport", "json_rpc", "malformed_list", "semantic"):
+                with self.subTest(entity_kind=entity_kind, failure=failure), tempfile.TemporaryDirectory() as tmpdir:
+                    root = Path(tmpdir)
+                    (root / "projects").mkdir()
+                    (root / "projects" / "secretary.yaml").write_text("id: secretary\n", encoding="utf-8")
+                    client = ProductBoard()
+                    store = ProductIssueStore(client, data_dir=root / "data", instance=root)
+                    if entity_kind == "issue":
+                        store.create_product(
+                            product_id="secretary", projects=["secretary"], title="Secretary",
+                            description="", actor="po", request_id=f"seed-lane-{failure}",
+                        )
+                    original_call = client.call
+                    fault_active = True
+
+                    def fail_swimlane(method: str, **params: object) -> object:
+                        if fault_active and method == "getActiveSwimlanes":
+                            if failure == "transport":
+                                raise TaskError("backend_unavailable", "swimlane transport lost", 1)
+                            if failure == "json_rpc":
+                                raise TaskError("backend_error", "swimlane RPC failed", 1)
+                            if failure == "malformed_list":
+                                return {"not": "a swimlane list"}
+                        return original_call(method, **params)
+
+                    client.call = fail_swimlane  # type: ignore[method-assign]
+                    request_id = f"swimlane-{entity_kind}-{failure}"
+                    reference = (
+                        "product:secretary" if entity_kind == "product"
+                        else "issue:" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:20]
+                    )
+
+                    def create() -> dict:
+                        if entity_kind == "product":
+                            return store.create_product(
+                                product_id="secretary", projects=["secretary"], title="Secretary",
+                                description="", actor="po", request_id=request_id,
+                            )
+                        return store.create_issue(
+                            product="secretary", issue_kind="bug", priority="P2", title="Crash",
+                            description="", actor="po", request_id=request_id,
+                        )
+
+                    semantic_failure = mock.patch.object(
+                        KanboardBoardHost, "_issues_swimlane",
+                        side_effect=BoardProtocolError("Pipeline swimlane lookup is invalid"),
+                    ) if failure == "semantic" else contextlib.nullcontext()
+                    before = len([call for call in client.calls if call[0] == "createTask"])
+                    with semantic_failure, self.assertRaises(TaskError):
+                        create()
+                    self.assertEqual(len([call for call in client.calls if call[0] == "createTask"]), before)
+                    self.assertEqual(store.list_transactions(), [])
+                    self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
+
+                    fault_active = False
+                    created = create()
+                    self.assertEqual(created["ref"], reference)
                     self.assertEqual(len([call for call in client.calls if call[0] == "createTask"]), before + 1)
                     self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
 

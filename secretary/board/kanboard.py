@@ -94,11 +94,15 @@ class KanboardBoardHost:
             if self._raw_by_ref(entity.ref) is not None:
                 raise BoardProtocolError(f"{entity.kind.value} already exists")
             board_id, column_id = self._issues_board()
+            # This is preparatory evidence, not part of the uncertain write
+            # window.  A failure here proves that createTask was never issued,
+            # so MutationEventTransaction must discard the staged occurrence.
+            swimlane_id = self._issues_swimlane(board_id)
             try:
                 reply = self.client.call(
                     "createTask", project_id=board_id, title=entity.title,
                     description=self._create_marker(request_id), column_id=column_id,
-                    swimlane_id=self._issues_swimlane(board_id), reference=entity.ref,
+                    swimlane_id=swimlane_id, reference=entity.ref,
                 )
             except Exception:
                 # An exception after the RPC was issued is deliberately not a
