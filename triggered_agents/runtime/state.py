@@ -30,6 +30,16 @@ STATE_ROOT = Path(
 # in the gate's error branch and fail the unit, never masquerade as a quiet skip (triggered-agents-276).
 PRECHECK_SKIP = 100
 
+# The one precheck failure that is not the precheck's own fault: the board refused the connection
+# for the whole retry window (runtime/kanboard.py KanboardUnreachable), so the agent could not even
+# find out whether it has work. The gate (scripts/secretary-agent-gate.sh) waits and re-runs a
+# precheck that answers this, a bounded number of times, which keeps the run alive instead of
+# spending it on a board that is seconds away from listening. A timer with `Persistent=true`
+# catches its missed run up at boot — the moment the board is least likely to be listening — and a
+# daily unit that crashes there loses the whole day, since the timer does not re-fire
+# (secretary-964). Distinct from PRECHECK_SKIP, which claims the tick was answered and clean.
+PRECHECK_BOARD_UNREACHABLE = 101
+
 
 class AgentState:
     """Per-agent watermark + lock under STATE_ROOT/<agent>/."""

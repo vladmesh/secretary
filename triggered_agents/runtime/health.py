@@ -1,11 +1,13 @@
 """Health check for every registered triggered-agent.
 
 One line per agent: is the systemd timer active, and how fresh is the last *healthy* tick in
-runs.jsonl (any non-error event counts — precheck-nothing-to-do still proves the timer fires and
-the runtime runs). An event with result "error" does NOT count on its own: precheck logs one of
-those every tick a broken Kanboard/env keeps failing, so if freshness went by the raw last event
-a permanently down board would look perpetually alive (fresh error every 3 minutes) instead of
-red. Last `advance` is informational: it can legitimately be days old when nothing changed
+runs.jsonl (a tick that answered counts — precheck-nothing-to-do still proves the timer fires and
+the runtime runs). A result of "error" or "board-unreachable" does NOT count on its own: precheck
+logs one of those every tick a broken Kanboard/env keeps failing, so if freshness went by the raw
+last event a permanently down board would look perpetually alive (fresh error every 3 minutes)
+instead of red. "board-unreachable" is the deferred-run record (secretary-964): it is not the
+agent's own failure, but it is not an answered tick either, and a board that never comes back must
+still go red here. Last `advance` is informational: it can legitimately be days old when nothing changed
 upstream. Exit non-zero if any agent is red.
 
 Both sources here are the live data plane, not a checkout (secretary-833):
@@ -102,15 +104,21 @@ def _stale(ts: str, agent: str) -> str | None:
     return None
 
 
+#: Results that record a tick which never got an answer: the agent broke ("error"), or the board
+#: refused the connection for every attempt the gate made ("board-unreachable"). Neither proves the
+#: agent is alive, so neither may set the freshness clock.
+_UNANSWERED_RESULTS = {"error", "board-unreachable"}
+
+
 def _runs_status(agent: str) -> tuple[list[str], str]:
     """(problems, informational detail) from the agent's own runs.jsonl."""
     runs = _runs(agent)
     if not runs:
         return ["no runs.jsonl yet"], ""
     problems = []
-    healthy = [r for r in runs if r.get("result") != "error"]
+    healthy = [r for r in runs if r.get("result") not in _UNANSWERED_RESULTS]
     if not healthy:
-        problems.append("only error events so far — board/env never came up")
+        problems.append("no answered tick yet — board/env never came up")
         last_tick = runs[-1]
     else:
         last_tick = healthy[-1]
