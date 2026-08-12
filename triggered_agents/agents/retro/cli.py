@@ -29,7 +29,8 @@ import json
 import sys
 from pathlib import Path
 
-from ...runtime.state import PRECHECK_SKIP, AgentState
+from ...runtime.kanboard import KanboardUnreachable
+from ...runtime.state import PRECHECK_BOARD_UNREACHABLE, PRECHECK_SKIP, AgentState
 from ..curator import discover, harvest
 from ..pipeline import ops as pipeline_ops
 from . import search_log
@@ -95,10 +96,19 @@ def cmd_advance() -> int:
 
 def cmd_precheck() -> int:
     """Exit 0 if there are new turns to review, PRECHECK_SKIP (100) to skip a clean run when nothing
-    is new. Any other code means precheck crashed. An uncaught exception exits 1, which the systemd
-    gate treats as an error, not a skip. See runtime/state.py PRECHECK_SKIP and deploy/ta-gate.sh."""
-    _cleanup_done()
-    batch = harvest.harvest(STATE)
+    is new, PRECHECK_BOARD_UNREACHABLE (101) when the board never answered, so the gate re-attempts
+    the run instead of spending it. Any other code means precheck crashed. An uncaught exception
+    exits 1, which the systemd gate treats as an error, not a skip. See runtime/state.py
+    PRECHECK_SKIP and scripts/secretary-agent-gate.sh."""
+    try:
+        _cleanup_done()
+        batch = harvest.harvest(STATE)
+    except KanboardUnreachable as e:
+        # Not retro's failure and not a clean tick: the day's run has not happened yet. Logged so
+        # the loss is visible in runs.jsonl instead of only as a stale "last healthy tick".
+        STATE.log_run("precheck", result="board-unreachable", error=str(e))
+        print(f"retro: board unreachable, run deferred: {e}", file=sys.stderr)
+        return PRECHECK_BOARD_UNREACHABLE
     if batch["sessions"]:
         STATE.log_run("precheck", result="change")
         return 0

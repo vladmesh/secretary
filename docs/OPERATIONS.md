@@ -1336,8 +1336,9 @@ The sources are the live data plane, not a checkout:
 
 - curator, steward and retro write a run log through their shared agent state, that is, under `$TA_STATE/<agent>/`
   or, when that variable is unset (as it is in the packaged units), under the data directory. Healthy means the last
-  event without an error result: the precheck writes an error every tick until the board and environment come up, so
-  by the raw last event a dead role would look forever fresh.
+  event that answered, that is, one whose result is neither `error` nor `board-unreachable` (the record of a tick the
+  gate deferred because the board never accepted a connection): the precheck writes one of those every tick until the
+  board and environment come up, so by the raw last event a dead role would look forever fresh.
 - the `pipeline` line is built from the production dispatcher's tick telemetry in its production state file. The
   dispatcher writes it at the end of every terminal tick: time, healthy or degraded, and diagnostics (step, reason,
   error codes). A tick that ended degraded colours the line by itself; the previous healthy tick does not vouch for

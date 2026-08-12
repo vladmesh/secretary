@@ -31,8 +31,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ...runtime.kanboard import KanboardUnreachable
 from ...runtime.redact import scrub_secrets
-from ...runtime.state import PRECHECK_SKIP
+from ...runtime.state import PRECHECK_BOARD_UNREACHABLE, PRECHECK_SKIP
 from . import signals
 
 STATE = signals.STATE
@@ -81,13 +82,21 @@ def cmd_advance() -> int:
 
 
 def cmd_precheck() -> int:
-    """Exit 0 if any anomaly signal is present, PRECHECK_SKIP (100) to skip a clean run, 2 when
-    precheck itself broke (Kanboard unreachable, bad env, any other exception). Both the caught error
-    (2) and any uncaught crash (Python exits 1) fall in the gate's "anything but 0/100" error branch,
-    so a dead precheck fails the unit instead of reading as a quiet hour. This removes the old
-    1-means-skip masking. See runtime/state.py PRECHECK_SKIP and deploy/ta-gate.sh."""
+    """Exit 0 if any anomaly signal is present, PRECHECK_SKIP (100) to skip a clean run,
+    PRECHECK_BOARD_UNREACHABLE (101) when the board refused the connection for the whole retry
+    window, 2 when precheck itself broke (bad env, any other exception). Both the caught error (2)
+    and any uncaught crash (Python exits 1) fall in the gate's error branch, so a dead precheck fails
+    the unit instead of reading as a quiet hour. This removes the old 1-means-skip masking. 101 is
+    its own branch because a board that is not listening yet says nothing about this agent's health:
+    the tick is deferred, not answered and not broken (secretary-964). See runtime/state.py
+    PRECHECK_SKIP and scripts/secretary-agent-gate.sh."""
     try:
         batch = signals.scan()
+    except KanboardUnreachable as e:
+        scrubbed = scrub_secrets(str(e))
+        STATE.log_run("precheck", result="board-unreachable", error=scrubbed)
+        print(f"steward: board unreachable, tick deferred: {scrubbed}", file=sys.stderr)
+        return PRECHECK_BOARD_UNREACHABLE
     except Exception as e:  # noqa: BLE001 — any precheck failure must be logged, not just KanboardError
         scrubbed = scrub_secrets(str(e))
         STATE.log_run("precheck", result="error", error_class=type(e).__name__, error=scrubbed)

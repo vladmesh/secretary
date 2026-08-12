@@ -4,7 +4,9 @@ App-level access is HTTP Basic against the endpoint in the installation's
 ``board-transport.env`` (`.../jsonrpc.php`).
 
 `call(method, **params)` returns the JSON-RPC `result` or raises KanboardError on a
-transport failure or an RPC-level error. `call_batch` sends several calls in one request
+transport failure or an RPC-level error. A refused connection is retried for a bounded
+window and then raised as KanboardUnreachable, the one failure a caller may treat as
+"not yet" rather than "broken". `call_batch` sends several calls in one request
 for read paths that would otherwise be one round trip per task. Higher-level board
 operations live in agents/pipeline/ops.py.
 """
@@ -12,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 
@@ -19,9 +22,40 @@ from .board_transport import BoardTransportError, resolve_for_environ
 
 _BATCH_CHUNK = 200
 
+# How long a call keeps retrying a refused connection before it gives up (seconds), and how long it
+# waits between attempts. The board is docker-hosted and the agent units are timer-driven with
+# `Persistent=true`, so the first board call of the day routinely lands in the seconds right after a
+# reboot, when the port is not listening yet (secretary-964: two prechecks died at 07:30:26 and
+# 07:30:32 against a board that answered fine at 07:31:34). A refused connection means nothing was
+# read or written, so retrying it is safe for every method, read or write.
+_CONNECT_RETRY_WINDOW_S = float(os.environ.get("TA_BOARD_CONNECT_RETRY_S", "45"))
+_CONNECT_RETRY_SLEEP_S = float(os.environ.get("TA_BOARD_CONNECT_RETRY_SLEEP_S", "3"))
+
 
 class KanboardError(RuntimeError):
     """A JSON-RPC call failed at the transport or protocol level."""
+
+
+class KanboardUnreachable(KanboardError):
+    """The board never answered: the connection was refused, so nothing was sent.
+
+    Kept apart from a plain KanboardError because the two deserve different outcomes upstream. An
+    RPC error, a malformed response or a bad configuration means the caller is broken and has to be
+    looked at; a refused connection usually means the board is not listening *yet*, which a precheck
+    reports as a retryable outcome rather than as its own failure (runtime/state.py
+    PRECHECK_BOARD_UNREACHABLE).
+    """
+
+
+def _connection_refused(exc: urllib.error.URLError) -> bool:
+    """Was the TCP connection refused outright (nothing listening on the port)?
+
+    Deliberately narrow. An HTTPError is an answer from something that *is* listening, and a read
+    timeout or a reset may mean the request was already delivered; neither is retried here.
+    """
+    if isinstance(exc, urllib.error.HTTPError):
+        return False
+    return isinstance(exc.reason, ConnectionRefusedError)
 
 
 def _creds():
@@ -41,11 +75,22 @@ def _post(payload, label: str):
         headers={"Content-Type": "application/json", "Authorization": transport.authorization_header()},
         method="POST",
     )
+    deadline = time.monotonic() + _CONNECT_RETRY_WINDOW_S
+    while True:
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                raw = resp.read().decode("utf-8")
+            break
+        except urllib.error.URLError as e:
+            if not _connection_refused(e):
+                raise KanboardError(f"{label}: transport error: {e}") from e
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise KanboardUnreachable(
+                    f"{label}: board unreachable after {_CONNECT_RETRY_WINDOW_S:g}s: {e}") from e
+            time.sleep(min(_CONNECT_RETRY_SLEEP_S, remaining))
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.URLError as e:
-        raise KanboardError(f"{label}: transport error: {e}") from e
+        return json.loads(raw)
     except json.JSONDecodeError as e:
         raise KanboardError(f"{label}: non-JSON response") from e
 
