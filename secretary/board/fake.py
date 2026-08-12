@@ -220,5 +220,9 @@ class FakeBoardHost:
 
 def _supplement_data(operation: Create | Replace | TransitionRequest) -> dict[str, object]:
     if isinstance(operation, TransitionRequest) and operation.sprint is not None:
-        return operation.sprint.event_data()
-    return {}
+        data = operation.sprint.event_data()
+    else:
+        data = {}
+    if isinstance(operation, TransitionRequest) and operation.kind is EntityKind.SPRINT:
+        data["request_related_refs"] = list(operation.related_refs.refs)
+    return data

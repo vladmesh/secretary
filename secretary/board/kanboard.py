@@ -318,7 +318,7 @@ class KanboardBoardHost:
             if (
                 existing.entity_kind is not EntityKind.SPRINT or existing.ref != operation.ref
                 or existing.actor != operation.actor or existing.reason != operation.reason
-                or existing.target_state != operation.target.value or existing.data != self._sprint_data(operation)
+                or existing.target_state != operation.target.value or existing.data != self._sprint_event_data(operation)
                 or not self._declared_sprint_event(existing)
             ):
                 raise ValueError("request id belongs to another operation or payload")
@@ -335,7 +335,7 @@ class KanboardBoardHost:
                 related = RelatedRefs(related.refs + required)
             event = self._sprint_event(
                 declaration.event_kind, successor, operation.actor, operation.reason, related, request_id,
-                source=current.state.value, target=operation.target.value, data=self._sprint_data(operation),
+                source=current.state.value, target=operation.target.value, data=self._sprint_event_data(operation),
             )
 
         def effect() -> None:
@@ -529,6 +529,20 @@ class KanboardBoardHost:
     @staticmethod
     def _sprint_data(operation: TransitionRequest) -> dict[str, object]:
         return operation.sprint.event_data() if operation.sprint is not None else {}
+
+    @classmethod
+    def _sprint_event_data(cls, operation: TransitionRequest) -> dict[str, object]:
+        """Keep the caller's immutable link payload with the occurrence.
+
+        ``related_refs`` also contains links the adapter adds from the Sprint at
+        staging time.  Those links are useful event evidence, but they cannot
+        identify the caller's request on replay because the live card set can
+        change afterwards.  Store the supplied portion in the typed occurrence
+        itself, rather than deriving it again during recovery.
+        """
+        data = cls._sprint_data(operation)
+        data["request_related_refs"] = list(operation.related_refs.refs)
+        return data
 
     @staticmethod
     def _validate_sprint_supplement(operation: TransitionRequest) -> None:

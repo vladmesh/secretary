@@ -12,6 +12,7 @@ from typing import Any
 from unittest import mock
 
 from secretary.cli import main
+from secretary.board import Actor, BoardEventPending, EntityKind, RelatedRefs, SprintState, TransitionRequest
 from secretary.config import load_config
 from secretary.data import normalize_sprint_entity
 from secretary.sprint_observer import OBSERVER_FIELD, encode_observer, head_choice, none_choice
@@ -2091,8 +2092,44 @@ class SprintTests(SprintFixture):
         self.assertEqual(events["sprint.reopened"]["transition"], {"source": "closed", "target": "open"})
         self.assertEqual(
             events["sprint.reopened"]["data"],
-            {"observer": encode_observer(head_choice("codex-observer"))},
+            {
+                "observer": encode_observer(head_choice("codex-observer")),
+                "request_related_refs": [],
+            },
         )
+
+    def test_host_sprint_replay_rejects_changed_related_refs_when_committed_or_pending(self) -> None:
+        actor = Actor("po", "operator")
+
+        committed_ref = self._create(goal="committed related refs")["sprint"]["ref"]
+        host = self.writer._host()
+        committed = TransitionRequest(
+            EntityKind.SPRINT, committed_ref, SprintState.CLOSED, actor, "Sprint closed",
+            RelatedRefs(("head-run:first",)), "committed-related-refs",
+        )
+        host.transition(committed)
+        with self.assertRaises(ValueError):
+            host.transition(TransitionRequest(
+                EntityKind.SPRINT, committed_ref, SprintState.CLOSED, actor, "Sprint closed",
+                RelatedRefs(("head-run:changed",)), "committed-related-refs",
+            ))
+
+        pending_ref = self._create(
+            goal="pending related refs", reference="sprint:pending-related-refs",
+        )["sprint"]["ref"]
+        pending = TransitionRequest(
+            EntityKind.SPRINT, pending_ref, SprintState.CLOSED, actor, "Sprint closed",
+            RelatedRefs(("head-run:first",)), "pending-related-refs",
+        )
+        with mock.patch.object(host.canon.audit, "append", side_effect=OSError("disk full")):
+            with self.assertRaises(BoardEventPending):
+                host.transition(pending)
+        with self.assertRaises(ValueError):
+            host.transition(TransitionRequest(
+                EntityKind.SPRINT, pending_ref, SprintState.CLOSED, actor, "Sprint closed",
+                RelatedRefs(("head-run:changed",)), "pending-related-refs",
+            ))
+        self.assertEqual(host.transition(pending).entity.state, SprintState.CLOSED)
 
     def test_pending_typed_close_recovers_without_repeating_the_status_write(self) -> None:
         ref = self._create(goal="recover typed close", reference="sprint:recover-typed-close")["sprint"]["ref"]

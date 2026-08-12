@@ -70,6 +70,30 @@ class BoardHostContractTests(unittest.TestCase):
                 EntityKind.SPRINT, sprint.ref, SprintState.CLOSED, self.actor, "Sprint closed",
                 RelatedRefs(("product:secretary", "issue:1")), "close-943", SprintSupplement(observer="different"),
             ))
+        with self.assertRaises(ValueError):
+            host.transition(TransitionRequest(
+                EntityKind.SPRINT, sprint.ref, SprintState.CLOSED, self.actor, "Sprint closed",
+                RelatedRefs(("product:secretary", "head-run:changed")), "close-943",
+            ))
+
+    def test_fake_sprint_pending_replay_rejects_changed_related_refs(self) -> None:
+        sprint = Sprint("sprint:pending", "Host lifecycle", SprintState.OPEN)
+        operation = TransitionRequest(
+            EntityKind.SPRINT, sprint.ref, SprintState.CLOSED, self.actor, "Sprint closed",
+            RelatedRefs(("head-run:first",)), "pending-close",
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            host = FakeBoardHost([sprint], data_dir=tmpdir)
+            with mock.patch.object(host.canon.audit, "append", side_effect=OSError("disk full")):
+                with self.assertRaises(BoardEventPending):
+                    host.transition(operation)
+
+            with self.assertRaises(ValueError):
+                host.transition(TransitionRequest(
+                    EntityKind.SPRINT, sprint.ref, SprintState.CLOSED, self.actor, "Sprint closed",
+                    RelatedRefs(("head-run:changed",)), "pending-close",
+                ))
+            self.assertEqual(host.transition(operation).entity.state, SprintState.CLOSED)
 
     def test_fake_host_commits_each_sprint_edge_and_recovers_a_pending_edge(self) -> None:
         edges = (
