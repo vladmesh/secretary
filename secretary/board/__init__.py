@@ -5,7 +5,7 @@ command paths retain their current writers until their dedicated migration cards
 """
 
 from secretary.board.fake import FakeBoardHost
-from secretary.board.host import BoardHost, Create, MutationResult, Replace, TransitionRequest
+from secretary.board.host import BoardHost, Create, MutationResult, Replace, SprintSupplement, TransitionRequest
 from secretary.board.models import (
     Actor, BoardEntity, Card, CardState, EntityKind, Event, EventKind, Issue, IssueState,
     Product, ProductState, RelatedRefs, Sprint, SprintState,
@@ -26,5 +26,5 @@ __all__ = [
     "Actor", "BoardEntity", "BoardEventCanon", "BoardEventPending", "BoardHost", "BoardProtocolError", "CARD_TRANSITIONS", "Card", "CardState",
     "CardTransitionForbidden", "Create", "EntityKind", "Event", "EventKind", "FakeBoardHost", "InvalidTransition",
     "Issue", "IssueState", "KanboardBoardHost", "MutationEventTransaction", "MutationResult", "Product", "ProductState", "RelatedRefs",
-    "Replace", "Sprint", "SprintState", "TRANSITIONS", "TransitionRequest", "card_transition", "transition",
+    "Replace", "Sprint", "SprintState", "SprintSupplement", "TRANSITIONS", "TransitionRequest", "card_transition", "transition",
 ]

@@ -48,8 +48,20 @@ TRANSITIONS: dict[EntityKind, dict[TransitionKey, Transition]] = {
         (SprintState.OPEN, SprintState.CLOSED): Transition(
             SprintState.OPEN, SprintState.CLOSED, EventKind.SPRINT_CLOSED
         ),
+        # A hard-budget stop blocks ordinary sprint work, but it has always
+        # remained closeable.  Closing it retains its terminal status while
+        # completing the close facade's archival and reservation work.
+        (SprintState.STOPPED, SprintState.CLOSED): Transition(
+            SprintState.STOPPED, SprintState.CLOSED, EventKind.SPRINT_CLOSED
+        ),
         (SprintState.OPEN, SprintState.STOPPED): Transition(
             SprintState.OPEN, SprintState.STOPPED, EventKind.SPRINT_STOPPED
+        ),
+        # A live close may be reopened after the command facade rechecks the
+        # same admission rules as create.  It is an explicit released edge,
+        # not an implicit exception to the registry.
+        (SprintState.CLOSED, SprintState.OPEN): Transition(
+            SprintState.CLOSED, SprintState.OPEN, EventKind.SPRINT_REOPENED
         ),
         (SprintState.STOPPED, SprintState.OPEN): Transition(
             SprintState.STOPPED, SprintState.OPEN, EventKind.SPRINT_REOPENED

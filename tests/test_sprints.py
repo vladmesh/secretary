@@ -12,9 +12,10 @@ from typing import Any
 from unittest import mock
 
 from secretary.cli import main
+from secretary.board import Actor, BoardEventPending, EntityKind, RelatedRefs, SprintState, TransitionRequest
 from secretary.config import load_config
 from secretary.data import normalize_sprint_entity
-from secretary.sprint_observer import OBSERVER_FIELD, head_choice, none_choice
+from secretary.sprint_observer import OBSERVER_FIELD, encode_observer, head_choice, none_choice
 from secretary.sprints import (
     BUDGET_EVENT_TYPES,
     SprintReader,
@@ -750,7 +751,7 @@ class SprintOwnershipTests(SprintFixture):
         self.assertEqual(raised.exception.code, "validation")
         self.assertFalse(any(method == "saveTaskMetadata" for method, _params in self.client.calls))
         self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "closed")  # type: ignore[arg-type]
-        self.assertEqual([event["kind"] for event in self._events()], ["created", "closed"])
+        self.assertEqual([event["kind"] for event in self._events()], ["created", "sprint.closed", "closed"])
 
     def test_a_refused_reopen_stays_repairable_and_reports_no_transition(self) -> None:
         ref = self._create(goal="refused reopen", reference="sprint:refused")["sprint"]["ref"]
@@ -762,7 +763,7 @@ class SprintOwnershipTests(SprintFixture):
 
         self.assertEqual(pending.exception.code, "audit_pending")
         self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "closed")  # type: ignore[arg-type]
-        self.assertEqual([event["kind"] for event in self._events()], ["created", "closed"])
+        self.assertEqual([event["kind"] for event in self._events()], ["created", "sprint.closed", "closed"])
 
         repaired = self.writer.reopen(observer=head_choice("codex-observer"), role="po", actor="operator", reference=ref, request_id="reopen-repair")
         replay = self.writer.reopen(observer=head_choice("codex-observer"), role="po", actor="operator", reference=ref, request_id="reopen-repair")
@@ -770,7 +771,10 @@ class SprintOwnershipTests(SprintFixture):
         self.assertEqual(repaired["action"], "reopened")
         self.assertEqual(repaired["sprint"]["status"], "open")
         self.assertEqual(repaired["event_id"], replay["event_id"])
-        self.assertEqual([event["kind"] for event in self._events()], ["created", "closed", "reopened"])
+        self.assertEqual(
+            [event["kind"] for event in self._events()],
+            ["created", "sprint.closed", "closed", "sprint.reopened", "reopened"],
+        )
 
     def test_a_staged_reopen_is_resumed_before_any_live_check(self) -> None:
         """`reopen` settles its request id first for the same reason `create` does."""
@@ -786,7 +790,10 @@ class SprintOwnershipTests(SprintFixture):
         repaired = self.writer.reopen(observer=head_choice("codex-observer"), role="po", actor="operator", reference=ref, request_id="reopen-resumed")
 
         self.assertEqual(repaired["sprint"]["status"], "open")
-        self.assertEqual([event["kind"] for event in self._events()], ["created", "closed", "reopened"])
+        self.assertEqual(
+            [event["kind"] for event in self._events()],
+            ["created", "sprint.closed", "closed", "sprint.reopened", "reopened"],
+        )
 
     def test_a_staged_reopen_that_lost_the_slot_publishes_nothing(self) -> None:
         ref = self._create(goal="reopen loser", reference="sprint:reopen-loser")["sprint"]["ref"]
@@ -1759,6 +1766,25 @@ class SprintTests(SprintFixture):
         self.assertEqual(sprint["budget"]["by_type"], {event: 0 for event in BUDGET_EVENT_TYPES})
         self.assertIsNone(sprint["current_task"])
 
+    def test_metadata_less_sprint_still_closes_through_the_host(self) -> None:
+        sprint_board = ensure_sprint_board(self.client)  # type: ignore[arg-type]
+        self.client.tasks.append({
+            "id": 13, "project_id": sprint_board, "reference": "sprint:legacy-close", "title": "legacy",
+            "description": "", "column_id": sprint_board * 10, "position": 1, "swimlane_id": 0,
+            "date_creation": "1720000000", "date_modification": "1720000000",
+        })
+        self.client.metadata[13] = {}
+        self.client.comments[13] = []
+
+        closed = self.writer.close(
+            role="po", actor="operator", reference="sprint:legacy-close", request_id="legacy-close",
+        )
+
+        self.assertEqual(closed["sprint"]["status"], "closed")
+        typed = self.writer.audit.committed_event("legacy-close:typed-close")
+        assert typed is not None
+        self.assertEqual(typed["transition"], {"source": "open", "target": "closed"})
+
     def test_export_reads_records_without_the_board_or_the_linked_cards(self) -> None:
         reader = SprintReader(self.client)  # type: ignore[arg-type]
         self.assertEqual(reader.export(), [])
@@ -1833,9 +1859,320 @@ class SprintTests(SprintFixture):
         )
 
         events = TaskAudit(self.tmp.name).events(reference=ref)
-        self.assertEqual([event["kind"] for event in events], ["created", "budget_recorded", "budget_hard_stopped"])
+        self.assertEqual(
+            [event["kind"] for event in events],
+            ["created", "sprint.stopped", "budget_recorded", "budget_hard_stopped"],
+        )
         self.assertEqual(events[-1]["payload"]["reason"], "budget_hard_limit")
         self.assertEqual(events[-1]["payload"]["source_event_id"], "evt-card-blocked")
+
+    def test_hard_stop_stages_typed_then_persists_budget_and_state_together(self) -> None:
+        writer = SprintWriter(  # type: ignore[arg-type]
+            self.client, data_dir=self.tmp.name, instance=self.instance,
+            thresholds={"signal": 1, "hard": 1},
+        )
+        ref = writer.create(
+            role="po", actor="operator", goal="atomic hard stop", product="secretary", issues=["issue:open"],
+            projects=["secretary"], observer=head_choice("codex-observer"),
+        )["sprint"]["ref"]
+        self.client.calls.clear()
+        staged: list[dict | None] = []
+        original = self.client.call
+
+        def call(method: str, **params: object) -> object:
+            if method == "saveTaskMetadata" and "sprint_status" in params.get("values", {}):
+                staged.append(writer.audit.pending_event("atomic-hard:typed-hard-stop"))
+            return original(method, **params)
+
+        with mock.patch.object(self.client, "call", side_effect=call):
+            result = writer.record_budget(
+                role="dispatcher", actor="dispatcher", reference=ref, event_type="blocked", request_id="atomic-hard",
+            )
+
+        self.assertEqual(result["sprint"]["status"], "stopped")
+        self.assertEqual(len(staged), 1)
+        assert staged[0] is not None
+        self.assertEqual(staged[0]["transition"], {"source": "open", "target": "stopped"})
+        status_writes = [
+            params["values"] for method, params in self.client.calls
+            if method == "saveTaskMetadata" and "sprint_status" in params["values"]
+        ]
+        self.assertEqual(len(status_writes), 1)
+        self.assertEqual(set(status_writes[0]), {"sprint_budget", "sprint_status"})
+        self.assertEqual([event["kind"] for event in self._events()], [
+            "created", "sprint.stopped", "budget_recorded", "budget_hard_stopped",
+        ])
+
+    def test_hard_stop_post_effect_failure_retries_its_typed_owner_before_charge(self) -> None:
+        writer = SprintWriter(  # type: ignore[arg-type]
+            self.client, data_dir=self.tmp.name, instance=self.instance,
+            thresholds={"signal": 1, "hard": 1},
+        )
+        ref = writer.create(
+            role="po", actor="operator", goal="recover hard stop", product="secretary", issues=["issue:open"],
+            projects=["secretary"], observer=head_choice("codex-observer"),
+        )["sprint"]["ref"]
+        original_append = writer.audit.append
+
+        def fail_typed(request_id: str, event: dict) -> str:
+            if request_id == "recover-hard:typed-hard-stop":
+                raise OSError("disk full")
+            return original_append(request_id, event)
+
+        with mock.patch.object(writer.audit, "append", side_effect=fail_typed):
+            with self.assertRaisesRegex(TaskError, "pending repair") as raised:
+                writer.record_budget(
+                    role="dispatcher", actor="dispatcher", reference=ref, event_type="blocked", request_id="recover-hard",
+                )
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(SprintReader(self.client).show(ref)["status"], "stopped")  # type: ignore[arg-type]
+        self.assertIsNotNone(writer.audit.pending_event("recover-hard:typed-hard-stop"))
+        self.assertIsNotNone(writer.audit.pending_event("recover-hard"))
+        writes = len([method for method, _params in self.client.calls if method == "saveTaskMetadata"])
+
+        result = writer.record_budget(
+            role="dispatcher", actor="dispatcher", reference=ref, event_type="blocked", request_id="recover-hard",
+        )
+
+        self.assertEqual(result["sprint"]["status"], "stopped")
+        self.assertIsNone(writer.audit.pending_event("recover-hard:typed-hard-stop"))
+        self.assertIsNone(writer.audit.pending_event("recover-hard"))
+        self.assertEqual(writes, len([method for method, _params in self.client.calls if method == "saveTaskMetadata"]))
+
+    def test_hard_stop_pre_effect_failure_discards_its_generic_charge(self) -> None:
+        writer = SprintWriter(  # type: ignore[arg-type]
+            self.client, data_dir=self.tmp.name, instance=self.instance,
+            thresholds={"signal": 1, "hard": 1},
+        )
+        ref = writer.create(
+            role="po", actor="operator", goal="failed hard stop", product="secretary", issues=["issue:open"],
+            projects=["secretary"], observer=head_choice("codex-observer"),
+        )["sprint"]["ref"]
+        original_read = writer._host().read
+
+        def fail_sprint_read(kind: object, reference: str) -> object:
+            if reference == ref:
+                raise RuntimeError("Kanboard connection reset")
+            return original_read(kind, reference)
+
+        with mock.patch("secretary.board.kanboard.KanboardBoardHost.read", side_effect=fail_sprint_read):
+            with self.assertRaisesRegex(TaskError, "Kanboard connection reset") as raised:
+                writer.record_budget(
+                    role="dispatcher", actor="dispatcher", reference=ref, event_type="blocked", request_id="failed-hard",
+                )
+
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertIsNone(writer.audit.pending_event("failed-hard"))
+        self.assertIsNone(writer.audit.pending_event("failed-hard:typed-hard-stop"))
+        self.assertEqual(SprintReader(self.client).show(ref)["status"], "open")  # type: ignore[arg-type]
+        writer.close(role="po", actor="operator", reference=ref, request_id="close-after-failed-hard")
+        self.assertEqual(TaskWriter(self.client, data_dir=self.tmp.name).reconcile(), (0, 0))  # type: ignore[arg-type]
+
+    def test_hard_stop_replay_keeps_its_stored_related_refs_after_card_archive(self) -> None:
+        writer = SprintWriter(  # type: ignore[arg-type]
+            self.client, data_dir=self.tmp.name, instance=self.instance,
+            thresholds={"signal": 1, "hard": 1},
+        )
+        ref = writer.create(
+            role="po", actor="operator", goal="stable hard replay", product="secretary", issues=["issue:open"],
+            projects=["secretary"], observer=head_choice("codex-observer"),
+        )["sprint"]["ref"]
+        bind_observer(self, ref)
+        card = TaskWriter(self.client, data_dir=self.tmp.name).create(  # type: ignore[arg-type]
+            role="observer", actor="observer", project="secretary", task_type="code", title="linked",
+            target="ready", sprint=ref, request_id="replay-linked-card",
+        )["task"]
+        first = writer.record_budget(
+            role="dispatcher", actor="dispatcher", reference=ref, event_type="blocked", request_id="stable-hard",
+        )
+        TaskWriter(self.client, data_dir=self.tmp.name).archive(  # type: ignore[arg-type]
+            role="po", actor="operator", reference=card["ref"], reason="ordinary archive", request_id="archive-linked-card",
+        )
+
+        replay = writer.record_budget(
+            role="dispatcher", actor="dispatcher", reference=ref, event_type="blocked", request_id="stable-hard",
+        )
+
+        self.assertEqual(replay["event_id"], first["event_id"])
+        self.assertEqual(replay["sprint"]["status"], "stopped")
+
+    def test_close_of_a_stopped_sprint_uses_the_host_lifecycle_edge(self) -> None:
+        writer = SprintWriter(  # type: ignore[arg-type]
+            self.client, data_dir=self.tmp.name, instance=self.instance,
+            thresholds={"signal": 1, "hard": 1},
+        )
+        ref = writer.create(
+            role="po", actor="operator", goal="close stopped", product="secretary", issues=["issue:open"],
+            projects=["secretary"], observer=head_choice("codex-observer"),
+        )["sprint"]["ref"]
+        writer.record_budget(
+            role="dispatcher", actor="dispatcher", reference=ref, event_type="blocked", request_id="stop-before-close",
+        )
+
+        first = writer.close(role="po", actor="operator", reference=ref, request_id="close-stopped")
+        replay = writer.close(role="po", actor="operator", reference=ref, request_id="close-stopped")
+
+        self.assertEqual(first["event_id"], replay["event_id"])
+        self.assertEqual(first["sprint"]["status"], "closed")
+        typed = writer.audit.committed_event("close-stopped:typed-close")
+        assert typed is not None
+        self.assertEqual(typed["transition"], {"source": "stopped", "target": "closed"})
+
+    def test_reconcile_never_publishes_a_pending_hard_charge_before_its_typed_stop(self) -> None:
+        writer = SprintWriter(  # type: ignore[arg-type]
+            self.client, data_dir=self.tmp.name, instance=self.instance,
+            thresholds={"signal": 1, "hard": 1},
+        )
+        ref = writer.create(
+            role="po", actor="operator", goal="reconcile hard stop", product="secretary", issues=["issue:open"],
+            projects=["secretary"], observer=head_choice("codex-observer"),
+        )["sprint"]["ref"]
+        original_append = writer.audit.append
+
+        def fail_typed(request_id: str, event: dict) -> str:
+            if request_id == "reconcile-hard:typed-hard-stop":
+                raise OSError("disk full")
+            return original_append(request_id, event)
+
+        with mock.patch.object(writer.audit, "append", side_effect=fail_typed):
+            with self.assertRaises(TaskError):
+                writer.record_budget(
+                    role="dispatcher", actor="dispatcher", reference=ref, event_type="blocked", request_id="reconcile-hard",
+                )
+
+        self.assertEqual(TaskWriter(self.client, data_dir=self.tmp.name).reconcile(), (2, 0))  # type: ignore[arg-type]
+        kinds = [event["kind"] for event in TaskAudit(self.tmp.name).events(reference=ref)]
+        self.assertLess(kinds.index("sprint.stopped"), kinds.index("budget_recorded"))
+        self.assertEqual(SprintReader(self.client).show(ref)["status"], "stopped")  # type: ignore[arg-type]
+
+    def test_reopen_refuses_to_open_when_observer_read_back_is_not_proven(self) -> None:
+        ref = self._create(goal="observer read back", reference="sprint:observer-readback")["sprint"]["ref"]
+        self.writer.close(role="po", actor="operator", reference=ref)
+        original = self.client.call
+        stale = [False]
+
+        def readback_failure(method: str, **params: object) -> object:
+            if method == "saveTaskMetadata" and OBSERVER_FIELD in params.get("values", {}):
+                stale[0] = True
+                return original(method, **params)
+            if method == "getTaskMetadata" and stale[0]:
+                stale[0] = False
+                return {OBSERVER_FIELD: ""}
+            return original(method, **params)
+
+        with mock.patch.object(self.client, "call", side_effect=readback_failure):
+            with self.assertRaisesRegex(TaskError, "pending repair") as raised:
+                self.writer.reopen(
+                    role="po", actor="operator", reference=ref, observer=head_choice("codex-observer"),
+                    request_id="observer-readback",
+                )
+
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "closed")  # type: ignore[arg-type]
+        self.assertIsNone(self.writer.audit.event("observer-readback:typed-reopen"))
+
+    def test_lifecycle_events_carry_the_checked_edge_and_available_links(self) -> None:
+        ref = self._create(goal="typed lifecycle", reference="sprint:typed-lifecycle")["sprint"]["ref"]
+        self.writer.close(role="po", actor="operator", reference=ref, request_id="typed-close")
+        self.writer.reopen(
+            role="po", actor="operator", reference=ref, observer=head_choice("codex-observer"),
+            request_id="typed-reopen",
+        )
+
+        events = {
+            event["kind"]: event
+            for event in TaskAudit(self.tmp.name).events(reference=ref)
+            if event.get("record_type") == "board.protocol_event"
+        }
+        self.assertEqual(events["sprint.closed"]["subject"], {"kind": "sprint", "ref": ref})
+        self.assertEqual(events["sprint.closed"]["actor"], {"role": "po", "id": "operator"})
+        self.assertEqual(events["sprint.closed"]["reason"], "Sprint closed")
+        self.assertEqual(events["sprint.closed"]["transition"], {"source": "open", "target": "closed"})
+        self.assertEqual(events["sprint.closed"]["related_refs"], ["product:secretary", "issue:open"])
+        self.assertEqual(events["sprint.reopened"]["transition"], {"source": "closed", "target": "open"})
+        self.assertEqual(
+            events["sprint.reopened"]["data"],
+            {
+                "observer": encode_observer(head_choice("codex-observer")),
+                "request_related_refs": [],
+            },
+        )
+
+    def test_host_sprint_replay_rejects_changed_related_refs_when_committed_or_pending(self) -> None:
+        actor = Actor("po", "operator")
+
+        committed_ref = self._create(goal="committed related refs")["sprint"]["ref"]
+        host = self.writer._host()
+        committed = TransitionRequest(
+            EntityKind.SPRINT, committed_ref, SprintState.CLOSED, actor, "Sprint closed",
+            RelatedRefs(("head-run:first",)), "committed-related-refs",
+        )
+        host.transition(committed)
+        with self.assertRaises(ValueError):
+            host.transition(TransitionRequest(
+                EntityKind.SPRINT, committed_ref, SprintState.CLOSED, actor, "Sprint closed",
+                RelatedRefs(("head-run:changed",)), "committed-related-refs",
+            ))
+
+        pending_ref = self._create(
+            goal="pending related refs", reference="sprint:pending-related-refs",
+        )["sprint"]["ref"]
+        pending = TransitionRequest(
+            EntityKind.SPRINT, pending_ref, SprintState.CLOSED, actor, "Sprint closed",
+            RelatedRefs(("head-run:first",)), "pending-related-refs",
+        )
+        with mock.patch.object(host.canon.audit, "append", side_effect=OSError("disk full")):
+            with self.assertRaises(BoardEventPending):
+                host.transition(pending)
+        with self.assertRaises(ValueError):
+            host.transition(TransitionRequest(
+                EntityKind.SPRINT, pending_ref, SprintState.CLOSED, actor, "Sprint closed",
+                RelatedRefs(("head-run:changed",)), "pending-related-refs",
+            ))
+        self.assertEqual(host.transition(pending).entity.state, SprintState.CLOSED)
+
+    def test_pending_typed_close_recovers_without_repeating_the_status_write(self) -> None:
+        ref = self._create(goal="recover typed close", reference="sprint:recover-typed-close")["sprint"]["ref"]
+        with mock.patch.object(self.writer.audit, "append", side_effect=OSError("disk full")):
+            with self.assertRaisesRegex(TaskError, "pending repair") as raised:
+                self.writer.close(role="po", actor="operator", reference=ref, request_id="recover-typed-close")
+
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "closed")  # type: ignore[arg-type]
+        pending = self.writer.audit.pending_event("recover-typed-close:typed-close")
+        assert pending is not None
+        self.assertEqual(pending["transition"], {"source": "open", "target": "closed"})
+        writes = sum(
+            values == {"sprint_status": "closed"}
+            for method, params in self.client.calls
+            if method == "saveTaskMetadata"
+            for values in [params["values"]]
+        )
+        with self.assertRaisesRegex(TaskError, "typed Sprint lifecycle occurrence") as refused:
+            self.writer.record_budget(
+                role="po", actor="operator", reference=ref, event_type="blocked",
+                request_id="recover-typed-close:typed-close",
+            )
+        self.assertEqual(refused.exception.code, "validation")
+        self.assertEqual(self.writer.audit.pending_event("recover-typed-close:typed-close"), pending)
+
+        self.writer.close(role="po", actor="operator", reference=ref, request_id="recover-typed-close")
+
+        self.assertEqual(self.writer.audit.pending_event("recover-typed-close:typed-close"), None)
+        self.assertEqual(
+            writes,
+            sum(
+                values == {"sprint_status": "closed"}
+                for method, params in self.client.calls
+                if method == "saveTaskMetadata"
+                for values in [params["values"]]
+            ),
+        )
+        self.writer.reopen(
+            role="po", actor="operator", reference=ref, observer=head_choice("codex-observer"),
+            request_id="recover-typed-close-reopen",
+        )
+        self.assertEqual(TaskWriter(self.client, data_dir=self.tmp.name).reconcile(), (0, 0))  # type: ignore[arg-type]
 
     def test_budget_thresholds_reject_hard_limit_below_signal(self) -> None:
         with self.assertRaisesRegex(TaskError, "hard threshold"):

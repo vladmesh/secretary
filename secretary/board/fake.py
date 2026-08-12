@@ -76,6 +76,21 @@ class FakeBoardHost:
 
     def transition(self, operation: TransitionRequest) -> MutationResult:
         entity = self.read(operation.kind, operation.ref)
+        if operation.request_id:
+            existing = self.canon.event(operation.request_id) if self.canon is not None else self._requests.get(operation.request_id)
+            if existing is not None:
+                self._require_same_operation(existing, entity, existing.kind, operation)
+                if self.canon is None:
+                    return MutationResult(entity, existing)
+                result = MutationEventTransaction(
+                    self.canon, request_id=operation.request_id, event=existing,
+                ).execute(
+                    lambda: (_ for _ in ()).throw(BoardProtocolError("pending fake transition must not repeat its effect")),
+                    confirm=lambda: self._confirm_transition(operation),
+                )
+                if existing not in self.events:
+                    self.events.append(existing)
+                return MutationResult(result, existing)
         successor, declaration = transition(entity, operation.target)
 
         def effect() -> BoardEntity:
@@ -138,11 +153,14 @@ class FakeBoardHost:
             self._event_id(request_id, entity, kind, operation), kind, entity.kind, entity.ref,
             operation.actor, operation.reason, datetime.now(UTC).replace(microsecond=0),
             operation.related_refs,
+            self.read(operation.kind, operation.ref).state.value if isinstance(operation, TransitionRequest) else None,
+            operation.target.value if isinstance(operation, TransitionRequest) else None,
+            _supplement_data(operation),
         )
         return event, request_id
 
-    @staticmethod
     def _event_id(
+        self,
         request_id: str,
         entity: BoardEntity,
         kind: EventKind,
@@ -164,6 +182,9 @@ class FakeBoardHost:
                 "actor": [operation.actor.role, operation.actor.id, operation.actor.head_run_ref],
                 "reason": operation.reason,
                 "related_refs": list(operation.related_refs.refs),
+                "source": self.read(operation.kind, operation.ref).state.value if isinstance(operation, TransitionRequest) else None,
+                "target": operation.target.value if isinstance(operation, TransitionRequest) else None,
+                "data": _supplement_data(operation),
             },
             sort_keys=True, separators=(",", ":"),
         )
@@ -183,5 +204,25 @@ class FakeBoardHost:
             or existing.actor != operation.actor
             or existing.reason != operation.reason
             or existing.related_refs != operation.related_refs
+            or (
+                isinstance(operation, TransitionRequest)
+                and (existing.target_state != operation.target.value or existing.data != _supplement_data(operation))
+            )
         ):
             raise ValueError("request id belongs to another operation or payload")
+
+    def _confirm_transition(self, operation: TransitionRequest) -> BoardEntity:
+        entity = self.read(operation.kind, operation.ref)
+        if entity.state is not operation.target:
+            raise BoardProtocolError("fake transition is not proven")
+        return entity
+
+
+def _supplement_data(operation: Create | Replace | TransitionRequest) -> dict[str, object]:
+    if isinstance(operation, TransitionRequest) and operation.sprint is not None:
+        data = operation.sprint.event_data()
+    else:
+        data = {}
+    if isinstance(operation, TransitionRequest) and operation.kind is EntityKind.SPRINT:
+        data["request_related_refs"] = list(operation.related_refs.refs)
+    return data

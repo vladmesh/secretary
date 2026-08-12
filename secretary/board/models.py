@@ -125,7 +125,8 @@ class Sprint:
 
     def __post_init__(self) -> None:
         _non_empty(self.ref, "sprint ref")
-        _non_empty(self.goal, "sprint goal")
+        if not isinstance(self.goal, str):
+            raise ValueError("sprint goal must be a string")
 
     @property
     def kind(self) -> EntityKind:
