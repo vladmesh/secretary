@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
-from secretary.board.events import BoardEventCanon, MutationEventTransaction, marker_comment_lock
+from secretary.board.events import BoardEventCanon, BoardEventPending, MutationEventTransaction, marker_comment_lock
 from secretary.board.host import Create, MarkerComment, MutationResult, Replace, SprintSupplement, TransitionRequest
 from secretary.board.models import (
     BoardEntity, Card, CardState, EntityKind, Event, EventKind, Issue, IssueState, Product,
@@ -309,15 +309,18 @@ class KanboardBoardHost:
         with marker_comment_lock(self.data_dir, operation.ref):
             request_id = self._request_id(operation.request_id, "card-marker")
             existing = self.canon.event(request_id)
+            replayed = existing is not None
             if existing is not None:
                 self._require_marker_operation(existing, operation)
                 current = self.read(EntityKind.CARD, operation.ref)
                 if not isinstance(current, Card):
                     raise BoardProtocolError("Card marker comment resolved a non-Card entity")
                 if self.canon.committed(request_id) is not None:
-                    return MutationResult(current, existing)
+                    return MutationResult(current, existing, replayed=True)
                 event = existing
             else:
+                if operation.fresh_admission is not None:
+                    operation.fresh_admission()
                 current = self.read(EntityKind.CARD, operation.ref)
                 if not isinstance(current, Card):
                     raise BoardProtocolError("Card marker comment resolved a non-Card entity")
@@ -331,6 +334,7 @@ class KanboardBoardHost:
                 # write into a delivered new occurrence.
                 preview = self._marker_event(current, operation, related, request_id)
                 content = self.render_marker(preview)
+                self._require_no_pending_marker_owner(operation.ref, content)
                 occurrence = self._marker_occurrences(operation.ref, content) + 1
                 event = self._marker_event(
                     current, operation, related, request_id, marker_occurrence=occurrence,
@@ -373,7 +377,7 @@ class KanboardBoardHost:
             entity = MutationEventTransaction(
                 self.canon, request_id=request_id, event=event,
             ).execute(effect, confirm=confirm)
-            return MutationResult(entity, event)
+            return MutationResult(entity, event, replayed=replayed)
 
     def recover_marker_comment(self, request_id: str) -> MutationResult:
         """Publish a pending marker only after its exact rendered comment exists."""
@@ -907,6 +911,31 @@ class KanboardBoardHost:
             if isinstance(comment, dict)
         )
 
+    def _require_no_pending_marker_owner(self, ref: str, content: str) -> None:
+        """Keep a pending marker's unmarked occurrence reserved for recovery."""
+        assert self.canon is not None
+        for record in self.canon.audit.pending_events():
+            if record.get("record_type") != Event.RECORD_TYPE:
+                continue
+            try:
+                pending = Event.from_record(record)
+            except (TypeError, ValueError):
+                continue
+            if (
+                pending.entity_kind is EntityKind.CARD
+                and pending.ref == ref
+                and pending.kind in {
+                    EventKind.CARD_REPORTED,
+                    EventKind.CARD_VERDICTED,
+                    EventKind.CARD_DECIDED,
+                }
+                and self.render_marker(pending) == content
+            ):
+                raise BoardEventPending(
+                    "an earlier identical Card marker occurrence is pending; "
+                    f"reconcile request {record.get('request_id')} first"
+                )
+
     @staticmethod
     def render_marker(event: Event) -> str:
         """Render the established marker grammar from complete typed data."""
@@ -976,11 +1005,18 @@ class KanboardBoardHost:
             or existing.ref != operation.ref
             or existing.actor != operation.actor
             or existing.reason != operation.reason
-            or {
+        ):
+            raise ValueError("request id belongs to another operation or payload")
+        expected_data = {
                 key: value for key, value in existing.data.items()
                 if key not in {"request_related_refs", "marker_occurrence"}
-            } != data
-        ):
+            }
+        # Assessment visit is a mutable admission fact, not caller input.  An
+        # existing decision owner is checked against the caller's stable
+        # marker semantics before any later Assessment visit is consulted.
+        if existing.kind is EventKind.CARD_DECIDED and "assessment_visit" not in data:
+            expected_data.pop("assessment_visit", None)
+        if expected_data != data:
             raise ValueError("request id belongs to another operation or payload")
         KanboardBoardHost.render_marker(existing)
 

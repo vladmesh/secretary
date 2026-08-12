@@ -1466,7 +1466,6 @@ class TaskWriter:
         if kind == "done":
             if classification:
                 raise TaskError("validation", "a done report carries no classification", 2)
-            self._require_committed_workspace()
         return self._marker_write(
             action="reported", event_kind=EventKind.CARD_REPORTED, role=role, actor=actor,
             reference=reference, reason=body, request_id=request_id,
@@ -1474,6 +1473,7 @@ class TaskWriter:
                 "marker": f"report:{kind}", "status": kind, "body": body,
                 "body_sha256": _digest(body), "classification": classification or None,
             },
+            fresh_admission=self._require_committed_workspace if kind == "done" else None,
         )
 
     def verdict(self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None) -> dict[str, Any]:
@@ -1514,42 +1514,52 @@ class TaskWriter:
         if not body.strip():
             raise TaskError("validation", "a decision requires a non-empty reason", 2)
         request_id = request_id or str(uuid.uuid4())
-        current = self.reader.show(reference)
-        # Authorization before anything about the card: which sprint holds the project is the
-        # question of whether this observer may write here at all.
-        self._guard_sprint_write(
-            role=role, actor=actor, project=current["project"],
-            card_sprint=str(current.get("sprint") or ""), linked_sprint=None,
-            sprint_override=False, sprint_override_reason="", request_id=request_id,
-            reference=reference,
-        )
-        if not self._sprint_holds_project(current["project"]):
-            raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
         with assessment_decision_lock(self.data_dir, reference):
+            # Resolve immutable request ownership while holding the complete
+            # decision lock, before inspecting a mutable Assessment visit or
+            # admitting another decision.  A concurrent same-id mismatch must
+            # therefore reach the host comparison rather than borrow the
+            # current visit's canonical-decision shortcut.
+            try:
+                owned = self.board_host.canon.event(request_id)
+            except ValueError as exc:
+                message = str(exc)
+                if "released generic audit record" in message:
+                    message = "request id belongs to another operation or payload"
+                raise TaskError("validation", message, 2) from None
+            if owned is not None:
+                return self._marker_write(
+                    action="decided", event_kind=EventKind.CARD_DECIDED, role=role, actor=actor,
+                    reference=reference, reason=body, request_id=request_id,
+                    data={
+                        "marker": f"decision:{kind}", "decision": kind, "body": body,
+                        "body_sha256": _digest(body),
+                    },
+                )
             current = self.reader.show(reference)
+            # Authorization before anything about the card: which sprint holds the project is the
+            # question of whether this observer may write here at all.
+            self._guard_sprint_write(
+                role=role, actor=actor, project=current["project"],
+                card_sprint=str(current.get("sprint") or ""), linked_sprint=None,
+                sprint_override=False, sprint_override_reason="", request_id=request_id,
+                reference=reference,
+            )
+            if not self._sprint_holds_project(current["project"]):
+                raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
             committed_events = self.audit.events(reference)
             pending_decisions = [
                 event for event in self.audit.pending_events()
                 if str(event.get("ref") or "") == reference and _event_action(event) == "decided"
             ]
             visit, existing = assessment_resolution([*committed_events, *pending_decisions])
-            known_request = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
             marker_data = {
                 "marker": f"decision:{kind}", "decision": kind, "body": body,
                 "body_sha256": _digest(body), "assessment_visit": visit or None,
             }
-            # Retrying a request that already owns a typed occurrence is a
-            # replay, not a new decision admission.  The host compares the
-            # complete semantic payload before it returns that occurrence.
-            if known_request:
-                return self._marker_write(
-                    action="decided", event_kind=EventKind.CARD_DECIDED, role=role, actor=actor,
-                    reference=reference, reason=body, request_id=request_id,
-                    data=marker_data,
-                )
             if current["state"] != "assessment":
                 raise TaskError("transition_forbidden", "a decision is only recorded on a card in Assessment", 3)
-            if existing is not None and not known_request:
+            if existing is not None:
                 existing_payload = _event_payload(existing)
                 existing_kind = str(existing_payload.get("decision") or "")
                 existing_request = str(existing.get("request_id") or "")
@@ -2348,6 +2358,7 @@ class TaskWriter:
         request_id: str | None,
         data: dict[str, Any],
         require_assessment: bool = False,
+        fresh_admission: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """Send a control-plane marker through the typed host transaction.
 
@@ -2356,13 +2367,6 @@ class TaskWriter:
         retry never has a second command-composed representation to drift from.
         """
         request_id = request_id or str(uuid.uuid4())
-        try:
-            replayed = self.board_host.canon.event(request_id) is not None
-        except ValueError as exc:
-            message = str(exc)
-            if "released generic audit record" in message:
-                message = "request id belongs to another operation or payload"
-            raise TaskError("validation", message, 2) from None
         if require_assessment:
             current = self.reader.show(reference)
             if current["state"] != "assessment":
@@ -2370,21 +2374,24 @@ class TaskWriter:
         try:
             result = self.board_host.marker_comment(MarkerComment(
                 reference, event_kind, Actor(role, actor), reason, data,
-                request_id=request_id,
+                request_id=request_id, fresh_admission=fresh_admission,
             ))
         except BoardEventPending:
             raise TaskError(
                 "audit_pending", "backend write committed; audit repair is required", 4,
             ) from None
         except ValueError as exc:
-            raise TaskError("validation", str(exc), 2) from None
+            message = str(exc)
+            if "released generic audit record" in message:
+                message = "request id belongs to another operation or payload"
+            raise TaskError("validation", message, 2) from None
         except BoardProtocolError as exc:
             raise TaskError("backend_error", str(exc), 1) from None
         return {
             "action": action,
             "task": self.reader.show(reference),
             "event_id": result.event.event_id,
-            "replayed": replayed,
+            "replayed": result.replayed,
         }
 
     def _write(

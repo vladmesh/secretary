@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from collections.abc import Callable
 from typing import Protocol, Sequence
 
 from secretary.board.models import Actor, BoardEntity, EntityKind, EntityRef, Event, EventKind, RelatedRefs
@@ -88,6 +89,10 @@ class MarkerComment:
     data: dict[str, object]
     related_refs: RelatedRefs = field(default_factory=RelatedRefs)
     request_id: str | None = None
+    # A command-level admission that is only relevant to a fresh occurrence.
+    # The host calls it after resolving request ownership and before staging or
+    # issuing the one Kanboard effect, so exact replay never re-runs it.
+    fresh_admission: Callable[[], None] | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.ref, str) or not self.ref.strip():
@@ -104,6 +109,7 @@ class MarkerComment:
 class MutationResult:
     entity: BoardEntity
     event: Event
+    replayed: bool = False
 
 
 class BoardHost(Protocol):
