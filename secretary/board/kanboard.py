@@ -1,4 +1,4 @@
-"""Kanboard implementation of normalized BoardHost reads and Card transitions."""
+"""Kanboard implementation of normalized BoardHost reads and lifecycle transitions."""
 
 from __future__ import annotations
 
@@ -26,9 +26,9 @@ from secretary.tasks import (
 
 
 class KanboardBoardHost:
-    """Translate the current Kanboard-backed readers and Card state edges at the BoardHost seam.
+    """Translate current Kanboard readers and migrated lifecycle edges at the host seam.
 
-    Card transitions and the released Product/Issue writer are migrated: each
+    Card, Sprint and the released Product/Issue writer are migrated: each
     is the one authority for its backend mutation and owns a typed event
     transaction.  Other mutations remain unavailable until their migration can
     preserve the established writer's durable retry and audit semantics.
@@ -230,6 +230,8 @@ class KanboardBoardHost:
         journal over a half-written card.  It runs once the target is proven, never on a replay
         of an already committed occurrence, and never before the column effect.
         """
+        if operation.kind is EntityKind.SPRINT:
+            return self._transition_sprint(operation)
         if operation.kind is EntityKind.ISSUE:
             return self._transition_issue(operation)
         if operation.kind is not EntityKind.CARD:
@@ -292,6 +294,107 @@ class KanboardBoardHost:
         entity = MutationEventTransaction(
             self.canon, request_id=request_id, event=event,
         ).execute(effect, confirm=confirm, finish=finish)
+        return MutationResult(entity, event)
+
+    def _transition_sprint(self, operation: TransitionRequest) -> MutationResult:
+        """Apply one checked Sprint status edge through the typed event canon.
+
+        ``data`` contains only normalized supplementary values.  Today the
+        command facade uses it for the observer selected for reopen and the
+        budget context that caused a hard stop.  The adapter remains the sole
+        owner of the Kanboard status mutation.
+        """
+        if self.canon is None:
+            raise BoardProtocolError("Sprint transitions require a configured data directory")
+        if not isinstance(operation.target, SprintState):
+            raise BoardProtocolError("Sprint transitions require a SprintState target")
+        request_id = self._request_id(operation.request_id, "sprint-transition")
+        current = self.read(EntityKind.SPRINT, operation.ref)
+        if not isinstance(current, Sprint):
+            raise BoardProtocolError("Sprint transition resolved a non-Sprint entity")
+        existing = self.canon.event(request_id)
+        if existing is not None:
+            required = tuple(ref for ref in (current.product_ref, *current.issue_refs, *current.card_refs) if ref)
+            related = RelatedRefs(operation.related_refs.refs + required)
+            if (
+                existing.entity_kind is not EntityKind.SPRINT or existing.ref != operation.ref
+                or existing.actor != operation.actor or existing.reason != operation.reason
+                or existing.target_state != operation.target.value or existing.data != operation.data
+                or existing.related_refs != related
+                or not self._declared_sprint_event(existing, current)
+            ):
+                raise ValueError("request id belongs to another operation or payload")
+            if self.canon.committed(request_id) is not None:
+                return MutationResult(current, existing)
+            event = existing
+        else:
+            successor, declaration = transition(current, operation.target)
+            if not isinstance(successor, Sprint):
+                raise BoardProtocolError("Sprint transition resolved an invalid successor")
+            related = operation.related_refs
+            required = tuple(ref for ref in (current.product_ref, *current.issue_refs, *current.card_refs) if ref)
+            if any(ref not in related.refs for ref in required):
+                related = RelatedRefs(related.refs + required)
+            event = self._sprint_event(
+                declaration.event_kind, successor, operation.actor, operation.reason, related, request_id,
+                source=current.state.value, target=operation.target.value, data=operation.data,
+            )
+
+        def effect() -> None:
+            live = self.read(EntityKind.SPRINT, operation.ref)
+            if not isinstance(live, Sprint):
+                raise BoardProtocolError("Sprint transition resolved a non-Sprint entity")
+            transition(live, operation.target)
+            task_id = self._sprint_task_id(operation.ref)
+            metadata = self._sprint_metadata_values(operation.data)
+            # Reopen deliberately persists its observer while the row remains
+            # closed.  If the following status write is refused, the command
+            # facade can restore that recorded preimage; treating the two calls
+            # as one would silently remove its released compensation boundary.
+            if metadata and self.client.call("saveTaskMetadata", task_id=task_id, values=metadata) is not True:
+                raise BoardProtocolError("Kanboard rejected Sprint transition")
+            try:
+                reply = self.client.call(
+                    "saveTaskMetadata", task_id=task_id, values={"sprint_status": operation.target.value},
+                )
+            except Exception:
+                # A transport failure after issuing the state effect is not a
+                # refusal.  Confirmation decides whether the staged event can
+                # commit, and otherwise leaves it for recovery.
+                return
+            if reply is not True:
+                raise BoardProtocolError("Kanboard rejected Sprint transition")
+
+        def confirm() -> Sprint:
+            entity = self.read(EntityKind.SPRINT, operation.ref)
+            if not isinstance(entity, Sprint) or entity.state is not operation.target:
+                raise BoardProtocolError("Sprint transition is not proven on the Kanboard board")
+            return entity
+
+        entity = MutationEventTransaction(self.canon, request_id=request_id, event=event).execute(
+            effect, confirm=confirm,
+        )
+        return MutationResult(entity, event)
+
+    def recover_sprint(self, request_id: str) -> MutationResult:
+        """Commit a pending Sprint occurrence only after its exact state is live."""
+        if self.canon is None:
+            raise BoardProtocolError("Sprint recovery requires a configured data directory")
+        event = self.canon.event(request_id)
+        if event is None or event.entity_kind is not EntityKind.SPRINT:
+            raise BoardProtocolError("pending event is not a recoverable Sprint occurrence")
+        if event.target_state is None:
+            raise BoardProtocolError("pending Sprint event has no target state")
+        try:
+            target = SprintState(event.target_state)
+        except ValueError as exc:
+            raise BoardProtocolError("pending Sprint event has an invalid target") from exc
+        entity = self.read(EntityKind.SPRINT, event.ref)
+        if not isinstance(entity, Sprint) or entity.state is not target:
+            raise BoardProtocolError("pending Sprint transition is not proven on the Kanboard board")
+        if not self._declared_sprint_event(event, entity):
+            raise BoardProtocolError("pending Sprint event has an unsupported lifecycle edge")
+        self.canon.commit(request_id, event)
         return MutationResult(entity, event)
 
     def recover_transition(self, request_id: str) -> MutationResult:
@@ -416,6 +519,58 @@ class KanboardBoardHost:
 
         MutationEventTransaction(self.canon, request_id=request_id, event=event).execute(effect, confirm=confirm, finish=finish)
         return MutationResult(self.read(EntityKind.ISSUE, operation.ref), event)
+
+    @staticmethod
+    def _sprint_metadata_values(data: dict[str, Any]) -> dict[str, str]:
+        metadata = data.get("metadata", {})
+        if metadata:
+            if not isinstance(metadata, dict) or not all(
+                isinstance(key, str) and isinstance(value, str) for key, value in metadata.items()
+            ):
+                raise BoardProtocolError("Sprint transition metadata must be string values")
+            return dict(metadata)
+        return {}
+
+    def _sprint_task_id(self, ref: str) -> int:
+        record = SprintReader(self.client, data_dir=self.data_dir).show(ref, include_cards=False)
+        task_id = _positive_int(str(record.get("id") or "").removeprefix("sprint_kanboard_"))
+        if task_id is None:
+            raise BoardProtocolError("Kanboard returned an invalid Sprint")
+        return task_id
+
+    @staticmethod
+    def _declared_sprint_event(event: Event, entity: Sprint) -> bool:
+        if event.source_state is None or event.target_state is None:
+            return False
+        try:
+            source = SprintState(event.source_state)
+            target = SprintState(event.target_state)
+        except ValueError:
+            return False
+        try:
+            _successor, declaration = transition(
+                Sprint(entity.ref, entity.goal, source, entity.product_ref, entity.issue_refs, entity.card_refs), target,
+            )
+        except BoardProtocolError:
+            return False
+        return event.kind is declaration.event_kind
+
+    @staticmethod
+    def _sprint_event(
+        kind: EventKind, entity: Sprint, actor, reason: str, related: RelatedRefs, request_id: str,
+        *, source: str | None = None, target: str | None = None, data: dict[str, Any] | None = None,
+    ) -> Event:
+        payload = json.dumps({
+            "request_id": request_id, "kind": kind.value,
+            "entity": [entity.ref, entity.goal, entity.state.value, entity.product_ref, entity.issue_refs, entity.card_refs],
+            "actor": [actor.role, actor.id, actor.head_run_ref], "reason": reason,
+            "related_refs": list(related.refs), "source": source, "target": target, "data": data or {},
+        }, sort_keys=True, separators=(",", ":"))
+        return Event(
+            "board-event-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32], kind,
+            EntityKind.SPRINT, entity.ref, actor, reason, datetime.now(UTC), related, source, target,
+            data or {},
+        )
 
     def _require_product_issue_configuration(self) -> None:
         if self.canon is None or self.data_dir is None or self.instance is None:

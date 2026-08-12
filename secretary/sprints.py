@@ -705,6 +705,40 @@ class SprintWriter:
         self.data_dir = Path(data_dir)
         self.instance = Path(instance) if instance is not None else None
 
+    def _host(self):
+        """Construct the normalized host lazily to keep reader imports acyclic."""
+        from secretary.board.kanboard import KanboardBoardHost
+        return KanboardBoardHost(
+            self.client, data_dir=str(self.data_dir), instance=str(self.instance) if self.instance else None,
+            audit=self.audit,
+        )
+
+    @staticmethod
+    def _host_error(exc: Exception) -> TaskError:
+        from secretary.board.events import BoardEventPending
+        from secretary.board.transitions import BoardProtocolError
+        if isinstance(exc, BoardEventPending):
+            return TaskError("audit_pending", "Sprint lifecycle write is pending repair; retry with the same request id", 4)
+        if isinstance(exc, BoardProtocolError) and ("rejected" in str(exc) or "refused" in str(exc)):
+            return TaskError("backend_error", str(exc), 1)
+        if isinstance(exc, TaskError):
+            return exc
+        return TaskError("validation", str(exc), 2)
+
+    def _transition_host(
+        self, *, role: str, actor: str, reference: str, target: str, reason: str,
+        request_id: str, metadata: dict[str, str] | None = None,
+    ) -> None:
+        from secretary.board import Actor, EntityKind, RelatedRefs, SprintState, TransitionRequest
+        try:
+            host = self._host()
+            host.transition(TransitionRequest(
+                EntityKind.SPRINT, reference, SprintState(target), Actor(role, actor), reason,
+                RelatedRefs(), request_id, {"metadata": metadata or {}},
+            ))
+        except Exception as exc:
+            raise self._host_error(exc) from None
+
     def create(
         self, *, role: str, actor: str, goal: str, definition_of_done: str = "",
         repositories: list[str] | None = None, product: str = "", issues: list[str] | None = None,
@@ -1265,8 +1299,6 @@ class SprintWriter:
             budget["by_type"][event_type] += 1
             budget = _budget({"by_type": budget["by_type"]}, self.thresholds)
             values = {"sprint_budget": json.dumps(budget, separators=(",", ":"))}
-            if budget["hard_reached"] and sprint["status"] == "open":
-                values["sprint_status"] = "stopped"
             self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values=values)
         result = self._write(
             "budget_recorded", role, actor, reference, request_id,
@@ -1279,6 +1311,10 @@ class SprintWriter:
         )
         recorded = self.audit.committed_event(request_id)
         if recorded and recorded.get("payload", {}).get("hard_limit_stop"):
+            self._transition_host(
+                role=role, actor=actor, reference=reference, target="stopped",
+                reason="budget hard limit reached", request_id=request_id + ":typed-hard-stop",
+            )
             self._record_hard_stop(
                 role=role, actor=actor, reference=reference, request_id=request_id,
                 budget_event_id=str(recorded.get("event_id") or ""),
@@ -1438,15 +1474,12 @@ class SprintWriter:
             if sprint["status"] != "closed":
                 document.setdefault("progress", {})["status_started"] = True
                 self.transactions.save(document)
-                if self.client.call(
-                    "saveTaskMetadata",
-                    task_id=_sprint_number(sprint),
-                    values={"sprint_status": "closed"},
-                ) is not True:
-                    raise TaskError("backend_error", "Kanboard rejected sprint closure", 1)
+                self._transition_host(
+                    role=str(document["intent"]["role"]), actor=str(document["intent"]["actor"]),
+                    reference=str(event["ref"]), target="closed", reason="Sprint closed",
+                    request_id=str(document["request_id"]) + ":typed-close",
+                )
                 sprint = self.reader.show(str(event["ref"]), include_cards=False)
-                if sprint["status"] != "closed":
-                    raise TaskError("backend_error", "sprint closure remains incomplete", 1)
             document.setdefault("progress", {})["status_done"] = True
             self.transactions.save(document)
             self.transactions.complete(document)
@@ -1570,15 +1603,17 @@ class SprintWriter:
             # Observer first, status second, and each step is recorded durably: a reopen that
             # dies between them leaves a still-closed row already carrying its fresh choice,
             # and the repeat finds that step done rather than writing it twice.
-            self._ensure_metadata(
-                document,
-                _sprint_number(sprint),
-                {OBSERVER_FIELD: encode_observer(document["intent"]["observer"])},
-                step="observer",
+            document.setdefault("progress", {})["observer_started"] = True
+            self.transactions.save(document)
+            self._transition_host(
+                role=str(document["intent"]["role"]), actor=str(document["intent"]["actor"]),
+                reference=reference, target="open", reason="Sprint reopened",
+                request_id=str(document["request_id"]) + ":typed-reopen",
+                metadata={OBSERVER_FIELD: encode_observer(document["intent"]["observer"])},
             )
-            self._ensure_metadata(
-                document, _sprint_number(sprint), {"sprint_status": "open"}, step="opened",
-            )
+            document.setdefault("progress", {})["observer_done"] = True
+            document.setdefault("progress", {})["opened_done"] = True
+            self.transactions.save(document)
             sprint = self.reader.show(reference)
             event = document["event"]
             event["task_id"] = sprint["id"]
@@ -1743,6 +1778,12 @@ class SprintWriter:
             return self._committed(kind, committed)
         pending = self.audit.pending_event(request_id)
         if pending is not None:
+            if pending.get("record_type") == "board.protocol_event":
+                raise TaskError(
+                    "validation",
+                    "request id belongs to a typed Sprint lifecycle occurrence; retry its protocol recovery",
+                    2,
+                )
             return self._pending(kind, pending)
         sprint = self.reader.show(reference)
         if sprint["status"] in {"closed", "stopped"} and kind in {"commented", "current_task_set", "resume_recorded"}:

@@ -14,7 +14,7 @@ from unittest import mock
 from secretary.board import (
     Actor, BoardEventCanon, BoardEventPending, BoardProtocolError, Card, CardState,
     Create, EntityKind, Event, EventKind, FakeBoardHost, InvalidTransition, Issue, IssueState, Product,
-    KanboardBoardHost, MutationEventTransaction, RelatedRefs, Replace, SprintState, TRANSITIONS,
+    KanboardBoardHost, MutationEventTransaction, RelatedRefs, Replace, Sprint, SprintState, TRANSITIONS,
     TransitionRequest,
 )
 from secretary.board.card_transitions import CARD_TRANSITIONS, CardTransitionForbidden, card_transition
@@ -49,6 +49,26 @@ class BoardHostContractTests(unittest.TestCase):
         with self.assertRaises(InvalidTransition):
             self.host.transition(TransitionRequest(
                 EntityKind.CARD, "secretary-1417", CardState.READY, self.actor, "no lifecycle change",
+            ))
+
+    def test_fake_sprint_replay_preserves_lifecycle_evidence(self) -> None:
+        sprint = Sprint("sprint:943", "Host lifecycle", SprintState.OPEN, "product:secretary", ("issue:1",))
+        host = FakeBoardHost([sprint])
+        operation = TransitionRequest(
+            EntityKind.SPRINT, sprint.ref, SprintState.CLOSED, self.actor, "Sprint closed",
+            RelatedRefs(("product:secretary", "issue:1")), "close-943", {"metadata": {}},
+        )
+
+        first = host.transition(operation)
+        replay = host.transition(operation)
+
+        self.assertEqual(first.event, replay.event)
+        self.assertEqual(first.event.source_state, "open")
+        self.assertEqual(first.event.target_state, "closed")
+        with self.assertRaises(ValueError):
+            host.transition(TransitionRequest(
+                EntityKind.SPRINT, sprint.ref, SprintState.CLOSED, self.actor, "Sprint closed",
+                RelatedRefs(("product:secretary", "issue:1")), "close-943", {"metadata": {"other": "value"}},
             ))
 
     def test_replace_cannot_bypass_the_lifecycle_registry(self) -> None:
@@ -697,8 +717,8 @@ class KanboardBoardHostTests(unittest.TestCase):
             with self.assertRaises(BoardProtocolError):
                 host.read(EntityKind.CARD, "issue:1417")
 
-    def test_only_card_transitions_are_migrated_off_the_established_writers(self) -> None:
-        """Card state edges are this slice; every other mutation still names its own migration."""
+    def test_sprint_lifecycle_edges_are_declared_for_host_migration(self) -> None:
+        """Sprint close, reopen and hard-stop have explicit typed declarations."""
         host = KanboardBoardHost(mock.sentinel.client, data_dir="/data", instance="/instance")
         card = Card("secretary-1420", "Card host transitions", CardState.READY)
 
@@ -706,11 +726,18 @@ class KanboardBoardHostTests(unittest.TestCase):
             host.create(Create(card, Actor("po", "operator"), "accepted"))
         with self.assertRaisesRegex(BoardProtocolError, "replace for card is not migrated"):
             host.replace(Replace(card, Actor("po", "operator"), "edited"))
-        with self.assertRaisesRegex(BoardProtocolError, "transition for sprint is not migrated"):
-            host.transition(TransitionRequest(
-                EntityKind.SPRINT, "sprint:943", SprintState.CLOSED, Actor("po", "operator"),
-                "closing the sprint",
-            ))
+        self.assertEqual(
+            TRANSITIONS[EntityKind.SPRINT][(SprintState.OPEN, SprintState.CLOSED)].event_kind,
+            EventKind.SPRINT_CLOSED,
+        )
+        self.assertEqual(
+            TRANSITIONS[EntityKind.SPRINT][(SprintState.CLOSED, SprintState.OPEN)].event_kind,
+            EventKind.SPRINT_REOPENED,
+        )
+        self.assertEqual(
+            TRANSITIONS[EntityKind.SPRINT][(SprintState.OPEN, SprintState.STOPPED)].event_kind,
+            EventKind.SPRINT_STOPPED,
+        )
 
     def test_sprint_product_ref_can_read_the_linked_product(self) -> None:
         sprint = {

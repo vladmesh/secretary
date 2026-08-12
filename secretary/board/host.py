@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, Sequence
+from typing import Any, Protocol, Sequence
 
 from secretary.board.models import Actor, BoardEntity, EntityKind, EntityRef, Event, RelatedRefs
 from secretary.board.transitions import LifecycleState
@@ -36,6 +36,9 @@ class TransitionRequest:
     reason: str
     related_refs: RelatedRefs = field(default_factory=RelatedRefs)
     request_id: str | None = None
+    # Operation-local, normalized evidence required to finish a lifecycle
+    # effect.  Adapters must not accept backend rows here.
+    data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)

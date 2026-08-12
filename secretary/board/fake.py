@@ -76,6 +76,11 @@ class FakeBoardHost:
 
     def transition(self, operation: TransitionRequest) -> MutationResult:
         entity = self.read(operation.kind, operation.ref)
+        if operation.request_id:
+            existing = self.canon.event(operation.request_id) if self.canon is not None else self._requests.get(operation.request_id)
+            if existing is not None:
+                self._require_same_operation(existing, entity, existing.kind, operation)
+                return MutationResult(entity, existing)
         successor, declaration = transition(entity, operation.target)
 
         def effect() -> BoardEntity:
@@ -138,11 +143,14 @@ class FakeBoardHost:
             self._event_id(request_id, entity, kind, operation), kind, entity.kind, entity.ref,
             operation.actor, operation.reason, datetime.now(UTC).replace(microsecond=0),
             operation.related_refs,
+            self.read(operation.kind, operation.ref).state.value if isinstance(operation, TransitionRequest) else None,
+            operation.target.value if isinstance(operation, TransitionRequest) else None,
+            operation.data if isinstance(operation, TransitionRequest) else {},
         )
         return event, request_id
 
-    @staticmethod
     def _event_id(
+        self,
         request_id: str,
         entity: BoardEntity,
         kind: EventKind,
@@ -164,6 +172,9 @@ class FakeBoardHost:
                 "actor": [operation.actor.role, operation.actor.id, operation.actor.head_run_ref],
                 "reason": operation.reason,
                 "related_refs": list(operation.related_refs.refs),
+                "source": self.read(operation.kind, operation.ref).state.value if isinstance(operation, TransitionRequest) else None,
+                "target": operation.target.value if isinstance(operation, TransitionRequest) else None,
+                "data": operation.data if isinstance(operation, TransitionRequest) else {},
             },
             sort_keys=True, separators=(",", ":"),
         )
@@ -183,5 +194,9 @@ class FakeBoardHost:
             or existing.actor != operation.actor
             or existing.reason != operation.reason
             or existing.related_refs != operation.related_refs
+            or (
+                isinstance(operation, TransitionRequest)
+                and (existing.target_state != operation.target.value or existing.data != operation.data)
+            )
         ):
             raise ValueError("request id belongs to another operation or payload")

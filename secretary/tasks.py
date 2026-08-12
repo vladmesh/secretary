@@ -2377,6 +2377,11 @@ class TaskWriter:
         for event in self.audit.pending_events():
             try:
                 if event.get("record_type") == TaskAudit._PROTOCOL_EVENT_RECORD_TYPE:
+                    subject = event.get("subject") if isinstance(event.get("subject"), dict) else {}
+                    if subject.get("kind") == "sprint":
+                        self.board_host.recover_sprint(str(event["request_id"]))
+                        repaired += 1
+                        continue
                     self._finish_pending_transition(event)
                     repaired += 1
                     continue
