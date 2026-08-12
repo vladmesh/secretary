@@ -323,7 +323,17 @@ class KanboardBoardHost:
             related = operation.related_refs
             if current.sprint_ref and current.sprint_ref not in related.refs:
                 related = RelatedRefs(related.refs + (current.sprint_ref,))
-            event = self._marker_event(current, operation, related, request_id)
+            # The public comment cannot carry a request marker without changing
+            # its established grammar.  Instead, the staged occurrence records
+            # which matching row it is entitled to prove.  An older identical
+            # comment therefore cannot turn a transport failure before the
+            # write into a delivered new occurrence.
+            preview = self._marker_event(current, operation, related, request_id)
+            content = self.render_marker(preview)
+            occurrence = self._marker_occurrences(operation.ref, content) + 1
+            event = self._marker_event(
+                current, operation, related, request_id, marker_occurrence=occurrence,
+            )
 
         content = self.render_marker(event)
 
@@ -352,7 +362,7 @@ class KanboardBoardHost:
 
         def confirm() -> Card:
             task = TaskReader(self.client).show(operation.ref)
-            if not any(str(comment.get("body") or "") == content for comment in task.get("comments", [])):
+            if not self._marker_is_proven(event, task):
                 raise BoardProtocolError("Card marker comment is not proven on the Kanboard board")
             entity = self.read(EntityKind.CARD, operation.ref)
             if not isinstance(entity, Card):
@@ -375,7 +385,7 @@ class KanboardBoardHost:
             raise BoardProtocolError("pending event is not a recoverable Card marker occurrence")
         content = self.render_marker(event)
         task = TaskReader(self.client).show(event.ref)
-        if not any(str(comment.get("body") or "") == content for comment in task.get("comments", [])):
+        if not self._marker_is_proven(event, task):
             raise BoardProtocolError("pending Card marker comment is not proven on the Kanboard board")
         entity = self.read(EntityKind.CARD, event.ref)
         if not isinstance(entity, Card):
@@ -864,6 +874,35 @@ class KanboardBoardHost:
         return task_id
 
     @staticmethod
+    def _marker_is_proven(event: Event, task: dict[str, Any]) -> bool:
+        """Whether the board has the precise marker occurrence event staged.
+
+        Earlier protocol events did not retain an occurrence witness.  Keep
+        them readable and recoverable as historical records, while every new
+        occurrence requires its staged matching-row ordinal.
+        """
+        content = KanboardBoardHost.render_marker(event)
+        matching = sum(
+            str(comment.get("body") or "") == content
+            for comment in task.get("comments", [])
+            if isinstance(comment, dict)
+        )
+        occurrence = event.data.get("marker_occurrence")
+        if occurrence is None:
+            return matching > 0
+        if not isinstance(occurrence, int) or isinstance(occurrence, bool) or occurrence < 1:
+            raise BoardProtocolError("Card marker event has an invalid occurrence witness")
+        return matching >= occurrence
+
+    def _marker_occurrences(self, ref: str, content: str) -> int:
+        task = TaskReader(self.client).show(ref)
+        return sum(
+            str(comment.get("body") or "") == content
+            for comment in task.get("comments", [])
+            if isinstance(comment, dict)
+        )
+
+    @staticmethod
     def render_marker(event: Event) -> str:
         """Render the established marker grammar from complete typed data."""
         data = event.data
@@ -899,9 +938,12 @@ class KanboardBoardHost:
     @classmethod
     def _marker_event(
         cls, card: Card, operation: MarkerComment, related: RelatedRefs, request_id: str,
+        *, marker_occurrence: int | None = None,
     ) -> Event:
         data = dict(operation.data)
         data["request_related_refs"] = list(operation.related_refs.refs)
+        if marker_occurrence is not None:
+            data["marker_occurrence"] = marker_occurrence
         payload = json.dumps({
             "request_id": request_id, "kind": operation.kind.value, "ref": card.ref,
             "actor": [operation.actor.role, operation.actor.id, operation.actor.head_run_ref],
@@ -929,7 +971,10 @@ class KanboardBoardHost:
             or existing.ref != operation.ref
             or existing.actor != operation.actor
             or existing.reason != operation.reason
-            or {key: value for key, value in existing.data.items() if key != "request_related_refs"} != data
+            or {
+                key: value for key, value in existing.data.items()
+                if key not in {"request_related_refs", "marker_occurrence"}
+            } != data
         ):
             raise ValueError("request id belongs to another operation or payload")
         KanboardBoardHost.render_marker(existing)

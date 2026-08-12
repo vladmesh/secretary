@@ -1527,8 +1527,6 @@ class TaskWriter:
             raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
         with assessment_decision_lock(self.data_dir, reference):
             current = self.reader.show(reference)
-            if current["state"] != "assessment":
-                raise TaskError("transition_forbidden", "a decision is only recorded on a card in Assessment", 3)
             committed_events = self.audit.events(reference)
             pending_decisions = [
                 event for event in self.audit.pending_events()
@@ -1536,6 +1534,21 @@ class TaskWriter:
             ]
             visit, existing = assessment_resolution([*committed_events, *pending_decisions])
             known_request = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
+            marker_data = {
+                "marker": f"decision:{kind}", "decision": kind, "body": body,
+                "body_sha256": _digest(body), "assessment_visit": visit or None,
+            }
+            # Retrying a request that already owns a typed occurrence is a
+            # replay, not a new decision admission.  The host compares the
+            # complete semantic payload before it returns that occurrence.
+            if known_request:
+                return self._marker_write(
+                    action="decided", event_kind=EventKind.CARD_DECIDED, role=role, actor=actor,
+                    reference=reference, reason=body, request_id=request_id,
+                    data=marker_data,
+                )
+            if current["state"] != "assessment":
+                raise TaskError("transition_forbidden", "a decision is only recorded on a card in Assessment", 3)
             if existing is not None and not known_request:
                 existing_payload = _event_payload(existing)
                 existing_kind = str(existing_payload.get("decision") or "")
@@ -1552,10 +1565,7 @@ class TaskWriter:
             return self._marker_write(
                 action="decided", event_kind=EventKind.CARD_DECIDED, role=role, actor=actor,
                 reference=reference, reason=body, request_id=request_id,
-                data={
-                    "marker": f"decision:{kind}", "decision": kind, "body": body,
-                    "body_sha256": _digest(body), "assessment_visit": visit or None,
-                },
+                data=marker_data,
                 require_assessment=True,
             )
 
