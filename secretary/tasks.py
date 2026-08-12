@@ -681,32 +681,46 @@ class TaskAudit:
                 del held[reference]
 
     def pending_marker_owner(self, reference: str, content: str, *, request_id: str | None = None) -> str | None:
-        """Return a different pending typed owner of an indistinguishable marker.
+        """Return a different pending owner of an indistinguishable marker.
 
         This is the common ownership check for the normalized marker adapter
-        and every internal historical-comment writer.  It runs under the audit
-        lock while callers hold the per-Card marker lock, so no writer can put
-        a matching row on Kanboard between the reservation check and its own
-        effect.
+        and every internal historical-comment writer.  A generic
+        ``restored_comment`` retains its exact body until its effect is proven,
+        so it is the same kind of unresolved marker occurrence as a typed
+        event for this reservation.  It runs under the audit lock while callers
+        hold the per-Card marker lock, so no writer can put a matching row on
+        Kanboard between the reservation check and its own effect.
         """
         from secretary.board.events import render_marker_comment
 
         with self._locked_audit():
             for record in self.pending_events():
-                if record.get("record_type") != self._PROTOCOL_EVENT_RECORD_TYPE:
-                    continue
                 candidate = str(record.get("request_id") or "")
                 if candidate == request_id:
                     continue
-                try:
-                    event = Event.from_record(record)
-                    rendered = render_marker_comment(event)
-                except (TypeError, ValueError):
+                if record.get("record_type") == self._PROTOCOL_EVENT_RECORD_TYPE:
+                    try:
+                        event = Event.from_record(record)
+                        rendered = render_marker_comment(event)
+                    except (TypeError, ValueError):
+                        continue
+                    if (
+                        event.entity_kind is EntityKind.CARD
+                        and event.ref == reference
+                        and rendered == content
+                    ):
+                        return candidate
                     continue
+                # Restore comment records are generic by design, but their
+                # pending payload keeps the unreconciled body.  Treat that body
+                # as the rendered marker identity until this exact owner either
+                # proves and commits it or is safely discarded before effect.
+                payload = record.get("payload")
                 if (
-                    event.entity_kind is EntityKind.CARD
-                    and event.ref == reference
-                    and rendered == content
+                    record.get("kind") == "restored_comment"
+                    and record.get("ref") == reference
+                    and isinstance(payload, dict)
+                    and payload.get("restore_body") == content
                 ):
                     return candidate
         return None

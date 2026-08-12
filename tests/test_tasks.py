@@ -3822,6 +3822,57 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
                 )
                 self.assertEqual(len(self.client.comments[12]), writes + 2)
 
+    def test_pending_restore_comment_blocks_an_identical_typed_marker_for_every_family(self) -> None:
+        """A typed marker cannot become proof for an unavailable restore occurrence."""
+        for family in ("report", "verdict", "decision"):
+            with self.subTest(family=family):
+                request_id = f"{family}-restore-first"
+                typed_request_id = f"{family}-typed-after-restore"
+                body = f"{family} restore-first collision"
+                marker = {
+                    "report": "report:done",
+                    "verdict": "review:green",
+                    "decision": "decision:release",
+                }[family]
+                content = f"[{marker}]\n{body}"
+                original_call = self.client.call
+                writes = len(self.client.comments[12])
+
+                def unavailable_before_delivery(method: str, **params: object) -> object:
+                    if method == "createComment":
+                        raise TaskError("backend_unavailable", "transport unavailable", 1)
+                    return original_call(method, **params)
+
+                with mock.patch.object(self.client, "call", side_effect=unavailable_before_delivery):
+                    with self.assertRaisesRegex(TaskError, "audit repair"):
+                        self.writer.restore_comment(
+                            reference="secretary-468", body=content, occurrence=0,
+                            request_id=request_id,
+                        )
+
+                pending = self.writer.audit.pending_event(request_id)
+                assert pending is not None
+                self.assertEqual(pending["payload"]["restore_body"], content)
+                with self.assertRaisesRegex(TaskError, "audit repair") as blocked:
+                    self._write(family, typed_request_id, body)
+                self.assertEqual(blocked.exception.code, "audit_pending")
+                self.assertIsNone(self.writer.audit.event(typed_request_id))
+                self.assertEqual(len(self.client.comments[12]), writes)
+
+                # The delayed restore delivery belongs only to its generic
+                # owner.  Reconciliation proves that owner, then the typed
+                # request may create the next identical occurrence.
+                original_call("createComment", task_id=12, user_id=0, content=content)
+                self.assertEqual(self.writer.reconcile(), (1, 0))
+                restored = self.writer.audit.committed_event(request_id)
+                assert restored is not None
+                self.assertNotIn("restore_body", restored["payload"])
+                self._write(family, typed_request_id, body)
+                self.assertEqual(len(self.client.comments[12]), writes + 2)
+                typed = self.writer.audit.committed_event(typed_request_id)
+                assert typed is not None
+                self.assertEqual(typed["data"]["marker_occurrence"], 2)
+
     def test_nonmatching_restore_comment_remains_available_while_a_typed_marker_is_pending(self) -> None:
         original_call = self.client.call
 
