@@ -4393,13 +4393,18 @@ class DispatcherRuntimeTests(unittest.TestCase):
             "head_run_id": run_id, "head_run_fingerprint": fingerprint,
         }
 
-    def _install_legacy_unbound_v1_worker_source(self) -> None:
+    def _install_legacy_unbound_v1_worker_source(
+        self, source_patch: dict[str, Any] | None = None,
+    ) -> None:
         """Make the retained worker's probe use the real Codex v1 source classifier."""
         payload = self.runtime.production_state.load()
         stored = payload["records"]["secretary-510-pilot"]
-        stored["worker_head_run"] = _legacy_unbound_v1_run(
+        worker_head_run = _legacy_unbound_v1_run(
             stored["worker_head_run"], root=self.data_dir / "codex-sessions",
         )
+        if source_patch:
+            worker_head_run["fanout_policy"]["provider_source"].update(source_patch)
+        stored["worker_head_run"] = worker_head_run
         self.runtime.production_state.save(payload)
 
         def progress(_task, record, _kind) -> dict[str, str]:
@@ -4570,6 +4575,26 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertEqual(retried["action"], "rework-started")
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
+
+    def test_malformed_legacy_unbound_v1_source_blocks_without_signalling_worker(self) -> None:
+        """Relative paths are malformed evidence, not permission to replace a retained worker."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self._review_red()
+        self._install_legacy_unbound_v1_worker_source({
+            "root": "relative-session-root",
+            "baseline": ["relative-old-session.jsonl"],
+        })
+
+        outcome = self._park_and_decide("rework")
+
+        self.assertEqual(outcome["action"], "review-red-continuation-liveness-unavailable")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertNotIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("restart_worker", self.host.calls)
+        self.assertNotIn("resume_worker", self.host.calls)
 
     def test_unavailable_provider_transport_still_blocks_without_replacement(self) -> None:
         self.host.fail_resume_worker_reason = ""

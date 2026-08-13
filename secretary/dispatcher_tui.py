@@ -546,12 +546,22 @@ def _legacy_unbound_v1_codex_source(source: dict[str, Any], run: HeadRun) -> boo
         and source.get("version") == 1
         and source.get("kind") == "codex_session_event_jsonl"
         and source.get("state") == "unbound"
-        and isinstance(source.get("root"), str)
-        and bool(source.get("root"))
+        and _is_canonical_absolute_path(source.get("root"))
         and isinstance(source.get("baseline"), list)
-        and all(isinstance(path, str) for path in source["baseline"])
+        and all(_is_canonical_absolute_path(path) for path in source["baseline"])
         and not _source_matches_run(source, run)
     )
+
+
+def _is_canonical_absolute_path(value: Any) -> bool:
+    """Whether a persisted preflight path has the exact spelling its constructor writes."""
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        path = Path(value)
+        return path.is_absolute() and str(path.resolve(strict=False)) == value
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _unavailable(

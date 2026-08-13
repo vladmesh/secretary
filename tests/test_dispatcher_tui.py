@@ -166,6 +166,18 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 **policy,
                 "provider_source": {**source, "baseline": [1]},
             }))
+            relative_root = provider_progress_for_run(run.with_fanout_policy({
+                **policy,
+                "provider_source": {**source, "root": "relative-session-root"},
+            }))
+            relative_baseline = provider_progress_for_run(run.with_fanout_policy({
+                **policy,
+                "provider_source": {**source, "baseline": ["relative-old-session.jsonl"]},
+            }))
+            noncanonical_root = provider_progress_for_run(run.with_fanout_policy({
+                **policy,
+                "provider_source": {**source, "root": str(Path(tmp) / "sessions" / ".." / "sessions")},
+            }))
 
         self.assertEqual(legacy["state"], "unavailable")
         self.assertEqual(
@@ -174,6 +186,9 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
         )
         self.assertNotIn("continuation_condition", foreign)
         self.assertNotIn("continuation_condition", malformed)
+        self.assertNotIn("continuation_condition", relative_root)
+        self.assertNotIn("continuation_condition", relative_baseline)
+        self.assertNotIn("continuation_condition", noncanonical_root)
 
     def test_out_of_band_delivery_rejects_confirm_before_touching_terminal(self) -> None:
         terminal_calls: list[list[str]] = []
