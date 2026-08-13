@@ -13471,6 +13471,37 @@ class ReviewLivenessTests(unittest.TestCase):
 
         self.assertFalse(host.review_running(self.task, self._record(review_handle="term-review")))
 
+    def test_disconnected_pane_preserves_a_foreign_heartbeat_fence_for_both_roles(self) -> None:
+        """The shared status seam reads identity before an inventory result can authorize a
+        replacement. A disconnected pane must not hide a live process from another HeadRun."""
+        for kind, status_name, record_fields, terminal in (
+            (
+                "worker",
+                "worker_status",
+                {"worker_leaf": "leaf-worker"},
+                {"handle": "term-worker", "leafId": "leaf-worker", "connected": False},
+            ),
+            (
+                "review",
+                "review_status",
+                {"review_handle": "term-review", "review_leaf": "leaf-review"},
+                {"handle": "term-review", "leafId": "leaf-review", "connected": False},
+            ),
+        ):
+            with self.subTest(kind=kind):
+                record = self._record(**record_fields)
+                self._write_heartbeat(kind, self._live_pid(), record)
+                path = Path(pid_file_path(kind, self.task["ref"]))
+                heartbeat = json.loads(path.read_text(encoding="utf-8"))
+                heartbeat["run_id"] = f"foreign-{kind}-run"
+                path.write_text(json.dumps(heartbeat), encoding="utf-8")
+
+                status = getattr(self._host([terminal]), status_name)(self.task, record)
+
+                self.assertTrue(status["live"])
+                self.assertTrue(status["identity_mismatch"])
+                self.assertEqual(status["reason"], "heartbeat-identity-mismatch")
+
     def test_worker_pane_is_never_mistaken_for_the_reviewer(self) -> None:
         host = self._host([
             {"handle": "term-worker", "leafId": "leaf-worker", "title": "codex", "connected": True},
@@ -13545,6 +13576,37 @@ class ReviewLivenessTests(unittest.TestCase):
         self.assertEqual(record.review_infra_failures, 3)
         self.assertEqual(record.review_infra_error, "previous launch failure")
         os.kill(foreign, 0)
+        runtime.save_records.assert_not_called()
+
+    def test_disconnected_foreign_reviewer_heartbeat_cannot_adopt_a_review_launch(self) -> None:
+        """A disconnected pane still preserves a live foreign PID's no-replacement fence."""
+        record = self._record(review_handle="term-review", review_leaf="leaf-review")
+        record.state = "review_starting"
+        foreign = self._live_pid()
+        self._write_heartbeat("review", foreign, record)
+        path = Path(pid_file_path("review", self.task["ref"]))
+        heartbeat = json.loads(path.read_text(encoding="utf-8"))
+        heartbeat["run_id"] = "foreign-reviewer-run"
+        path.write_text(json.dumps(heartbeat), encoding="utf-8")
+        host = self._host([
+            {"handle": "term-review", "leafId": "leaf-review", "connected": False},
+        ])
+        runtime = mock.Mock()
+        runtime.host = host
+
+        status = host.review_status(self.task, record)
+        with mock.patch("secretary.dispatcher_review.start_review") as start_review:
+            outcome = recover_review_launch(
+                runtime, self.task, {self.task["ref"]: record}, record, "attempt-1", payload={},
+            )
+
+        self.assertTrue(status["live"])
+        self.assertTrue(status["identity_mismatch"])
+        self.assertEqual(outcome["action"], "review-heartbeat-identity-mismatch")
+        self.assertEqual(record.state, "review_starting")
+        os.kill(foreign, 0)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["run_id"], "foreign-reviewer-run")
+        start_review.assert_not_called()
         runtime.save_records.assert_not_called()
 
     def test_connected_pane_with_a_live_head_process_stays_live(self) -> None:

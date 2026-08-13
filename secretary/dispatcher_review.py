@@ -195,14 +195,15 @@ def command_terminal_status(
     for terminal in terminals:
         if not matches(terminal):
             continue
-        if not terminal.connected:
-            return {"known": True, "live": False, "reason": "disconnected"}
         run = record.review_head_run if kind == "review" else record.worker_head_run
         leaf = record.review_leaf if kind == "review" else record.worker_leaf
         pid_status = _head_run_process_status(
             _pid_file_path(kind, task["ref"]),
             run=run, role=kind, task=f"card:{task['ref']}", leaf=leaf,
         )
+        # A disconnected pane is otherwise terminal evidence for a relaunch.  Classify the
+        # expected HeadRun first: its old heartbeat path can now name a live foreign process,
+        # which has to remain fenced even when Orca no longer considers the pane connected.
         if _heartbeat_is_mismatch(pid_status):
             return {
                 "known": True,
@@ -211,6 +212,8 @@ def command_terminal_status(
                 "identity_mismatch": True,
                 "pid_confirmed": False,
             }
+        if not terminal.connected:
+            return {"known": True, "live": False, "reason": "disconnected"}
         if _heartbeat_is_dead(pid_status):
             # The pane is connected and Orca kept its wrapping shell open, but the head process
             # itself is gone (secretary-751): a provider crash or a killed runtime, not silence.
