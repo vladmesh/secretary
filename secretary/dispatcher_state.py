@@ -89,6 +89,16 @@ class DispatcherRecord:
     # Both reset the moment any answer — green, red or pending — comes back.
     gate_transport_failures: int = 0
     gate_transport_error: str = ""
+    # The pull request this card's github gate wrote, and the digest of the exact title and body
+    # it wrote there (secretary-1439): `{"number": int, "digest": str}`, empty at rest. This is the
+    # gate's whole authorship test on the refresh path, and it lives here — outside the pull
+    # request — because a pull request's text is supplied by whoever edited it last and can never
+    # establish who wrote it. Two earlier attempts to read authorship out of the body (a marker the
+    # gate looked for, then a digest the gate stamped into the body and read back) each overwrote a
+    # person's writing. Losing this record — a restore, a fresh installation, a card claimed before
+    # it existed, a record re-adopted from the board — means the gate stops refreshing that pull
+    # request, never that it assumes the text is its own.
+    gate_pr_authorship: dict[str, Any] = field(default_factory=dict)
     # Last checkout rejected by a mechanical gate or red review in this attempt. A worker that
     # reports done again at this exact SHA has not produced a new result, so the dispatcher can
     # return it to rework once and then escalate instead of looping forever.
@@ -253,6 +263,7 @@ class DispatcherRecord:
             "gate_attestation": dict(self.gate_attestation),
             "gate_transport_failures": self.gate_transport_failures,
             "gate_transport_error": self.gate_transport_error,
+            "gate_pr_authorship": dict(self.gate_pr_authorship),
             "handle": self.handle,
             "head": self.head,
             "preferred_head": self.preferred_head,
@@ -367,6 +378,7 @@ class DispatcherRecord:
             gate_attestation=_run_snapshot(payload.get("gate_attestation")),
             gate_transport_failures=int(payload.get("gate_transport_failures") or 0),
             gate_transport_error=str(payload.get("gate_transport_error") or ""),
+            gate_pr_authorship=_run_snapshot(payload.get("gate_pr_authorship")),
             rejected_sha=str(payload.get("rejected_sha") or ""),
             rejected_done_reports=int(payload.get("rejected_done_reports") or 0),
             review_handle=str(payload.get("review_handle") or ""),

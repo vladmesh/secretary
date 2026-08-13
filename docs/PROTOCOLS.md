@@ -179,13 +179,26 @@ into, quotes the card's statement, and carries the worker's own account of the r
 `report:done` comment; each source is bounded, redacted like any other board excerpt, and simply
 omitted when the gate runs before it exists. The gate re-runs on every later tick and once more
 before the merge, and each run brings an already-open pull request up to the better description it
-can now build. Two rules bound that: the gate rewrites only text it can prove is exactly what it
-last wrote — the hidden marker it stamps carries a digest over that title and body, and any edit a
-person makes to either breaks it, after which the pull request is theirs and automation leaves it
-alone — and text that already matches is not re-sent, so a repeat tick on unchanged data makes no
-call at all. That digest is unkeyed: it recognises an unedited gate write, not a genuine one, and
-anyone who can edit the pull request can stamp their own text to look like the gate's. Distinguishing
-that would need an authenticated provenance boundary rather than anything readable in the body.
+can now build.
+
+What bounds that is the dispatcher's own record, never the pull request's text. When the gate
+opens or edits a pull request and the backend accepts the write, it records on the card's
+dispatcher record which pull request it wrote and a digest of the exact title and body it sent.
+A later tick may rewrite that pull request only while that record exists, names that pull request,
+and still describes what GitHub returns. Everything else is somebody's writing and is left alone
+for good: a pull request a person opened (an empty description is the ordinary case of this — a
+body is optional on GitHub, and emptiness is not evidence of authorship), one whose body or title
+was edited after the gate wrote it, one opened before this record existed, and every pull request
+belonging to a card whose record was lost to a restore, a reinstallation or a re-adoption from the
+board. A lost record costs a description that stops being refreshed; the opposite default would
+cost somebody their words. Text that already matches the record is not re-sent, so a repeat tick
+on unchanged data makes no call at all.
+
+Authorship is deliberately not readable out of the pull request: a body is supplied by whoever
+edited it last, so no marker, digest or phrasing inside it can say who wrote the text around it.
+The boundary this does not defend is a forgery by someone who can already write to the
+installation's own state — anyone who can edit the dispatcher's production state can claim any
+pull request. Write access to the repository does not confer that.
 The description is not a condition on the code:
 a backend that refuses the update leaves the pull request as it is and the gate's verdict unchanged,
 while a pull request that cannot be opened at all is still a gate failure, because without it the
