@@ -72,6 +72,7 @@ from secretary.dispatcher_types import (
     HostError,
 )
 from secretary.dispatcher_watchdog import (
+    bind_head_heartbeat,
     bring_up_defer_attempts,
     head_process_status,
     initial_output_stall_seconds,
@@ -671,9 +672,22 @@ def launch_intent_liveness(intent: dict[str, Any], *, now: float | None = None) 
     that has produced no output at all has passed.
     """
     now = time.time() if now is None else now
-    status = head_process_status(
-        str(intent.get("pid_file") or ""), expected=intent_heartbeat_identity(intent)
-    )
+    pid_file = str(intent.get("pid_file") or "")
+    expected = intent_heartbeat_identity(intent)
+    status = head_process_status(pid_file, expected=expected)
+    # A prompt-after-start launch can return ``pane busy`` after Orca created the pane but before
+    # the caller reaches its ordinary post-spawn leaf bind.  The heartbeat writer has already
+    # published the exact run/role/task/PID identity in that ordering, with an empty leaf.  Heal
+    # only that one incomplete shape through the existing compare-and-preserve handoff; a
+    # non-empty foreign leaf remains an identity mismatch and is never overwritten.
+    record = status.get("record") if isinstance(status.get("record"), dict) else {}
+    leaf = str(expected.get("leaf") or "")
+    if status.get("state") == "identity-mismatch" and leaf and not str(record.get("leaf") or ""):
+        base_expected = {
+            name: str(expected.get(name) or "") for name in ("run_id", "role", "task")
+        }
+        bind_head_heartbeat(pid_file, expected=base_expected, leaf=leaf)
+        status = head_process_status(pid_file, expected=expected)
     if status.get("state") == "identity-mismatch":
         return {"alive": False, "pid_known": True, "identity_mismatch": True}
     if status.get("known"):
