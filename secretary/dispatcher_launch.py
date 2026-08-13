@@ -165,6 +165,7 @@ def write_launch_intent(
     action: str,
     head: str,
     workspace: str,
+    document: str = "",
     round_number: int | None = None,
 ) -> str | None:
     """Fix one bring-up on disk before the host is called. Returns the failure, or None.
@@ -189,12 +190,13 @@ def write_launch_intent(
     attest = getattr(getattr(runtime, "host", None), "preflight_codex_run", None)
     if callable(attest):
         document_name = "REVIEW.md" if role == REVIEW_ROLE else "TASK.md"
+        task_document = document or str(Path(workspace) / document_name)
         try:
             candidate = attest(
                 head,
                 role="reviewer" if role == REVIEW_ROLE else role,
                 workspace=workspace,
-                task_ref=head_ops.TaskRef.card(ref, document=str(Path(workspace) / document_name)),
+                task_ref=head_ops.TaskRef.card(ref, document=task_document),
                 pid_file=launch_pid_file(role, ref),
                 run_id=run_id,
             )
