@@ -6,7 +6,9 @@ A project declares where its gate runs through its adapter's `validation.ci`:
   local  — run `validation.command` in the worker workspace; exit 0 is green, non-zero is red.
   github — publish the worker branch, ensure an open PR into the project's base branch (so the
            typical `on: [push:main, pull_request]` workflow actually fires — a bare feature-branch
-           push triggers nothing), then poll GitHub CI for the branch head sha; SUCCESS is green,
+           push triggers nothing), described from the card and the worker's own done report and
+           kept up to date on every later tick (secretary-1439), then poll GitHub CI for the
+           branch head sha; SUCCESS is green,
            FAILURE is red, PENDING/NONE is pending (a check still running, or none posted yet —
            "CI did not start", deliberately not confused with "CI is red"). `validation
            .required_checks` narrows the rollup to those check names; without it every check on
@@ -38,7 +40,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from secretary.candidate_history import Commit, ai_attributions, parse_shas, repair_message
-from secretary.dispatcher_helpers import _legacy_worker_branch, _tail, safe_one_line
+from secretary.dispatcher_helpers import (
+    _last_marker_body,
+    _legacy_worker_branch,
+    _tail,
+    safe_one_line,
+    scrub_host_output,
+)
 from secretary.dispatcher_gate_receipt import is_exact_sha, mint_gate_receipt
 from secretary.dispatcher_types import GateTransportError, HostError
 
@@ -56,6 +64,44 @@ GATE_LOG_FRAGMENT_LINES = int(os.environ.get("SECRETARY_GATE_LOG_FRAGMENT_LINES"
 # (secretary-1164). A blip costs the card a tick, not a round; a backend that is genuinely gone
 # still reaches a human instead of leaving the card in Validate forever.
 GATE_TRANSPORT_MAX_ATTEMPTS = max(1, int(os.environ.get("SECRETARY_GATE_TRANSPORT_MAX_ATTEMPTS", "5")))
+
+# How much of one board source (the card statement, the worker's done report) reaches the PR body
+# (secretary-1439). The PR describes the change and points at the card; it is not a second copy of
+# the board, and a card that carries a whole design document must not push the body towards
+# GitHub's own size ceiling.
+PR_BODY_SECTION_CHARS = int(os.environ.get("SECRETARY_PR_BODY_SECTION_CHARS", "4000"))
+
+# Hidden first line of every PR body this gate writes, carrying a digest over the exact title and
+# body it sent (secretary-1439). It is the whole authorship test on the refresh path: the gate may
+# replace text it can prove is byte-for-byte its own last write, and nothing else. A bare marker
+# would not do — a person who edits a gate-written body normally keeps the surrounding Markdown,
+# hidden comment included, and a containment test would read their prose as the gate's own and
+# overwrite it. Any edit to either the title or the body breaks the digest, and the gate then
+# treats the PR as a person's and leaves it alone forever.
+#
+# The digest is unkeyed, so it proves "unedited since the gate wrote it", not "written by the
+# gate": anyone able to edit the PR can compute a matching digest over text of their own and hand
+# the gate permission to overwrite it. Establishing genuine authorship would need an authenticated
+# provenance boundary (the PR's edit history or a signing secret GitHub cannot see), which no
+# amount of reading the body text can supply. The threat this closes is the ordinary human edit,
+# not a deliberate spoof.
+_PR_MARKER_PREFIX = "<!-- secretary-gate-pr sha256:"
+_PR_MARKER_RE = re.compile(r"^<!-- secretary-gate-pr sha256:([0-9a-f]{32}) -->\n?")
+# The fixed stub every gate before secretary-1439 wrote, as a format over the branch and the ref.
+# It predates the marker, and it is unmistakably machine text — 26 of the last 30 merged PRs
+# carried exactly it — so a PR still holding exactly it is upgraded rather than frozen behind the
+# manual-body rule. Exactly it: a prefix test would also swallow a body a person began by quoting
+# the stub and then wrote under.
+_PR_LEGACY_STUB = (
+    "Automatic PR for worker branch `{branch}` of task {ref}. "
+    "Opened by the CI gate so that the pull_request CI runs."
+)
+# Closing line of every gate-written body: says who opened the PR and why, so a reader who lands
+# on it from the merge commit knows the PR is the pipeline's and not a human's proposal.
+_PR_BODY_FOOTER = (
+    "Opened by the secretary CI gate so that the `pull_request` workflow runs. "
+    "Title and body are built from the card and the worker's done report."
+)
 
 _FAIL_CONCLUSIONS = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE"}
 _RUN_URL_RE = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/actions/runs/(\d+)")
@@ -469,18 +515,202 @@ def _name_with_owner(host, workspace: str) -> str:
     return name
 
 
-def _ensure_pr(host, workspace: str, task: dict, branch: str, base: str) -> None:
-    """Ensure an open PR from the worker branch into `base` exists so the project's
-    `pull_request` CI runs (a bare feature-branch push fires nothing on the typical
-    `on: [push:main, pull_request]` workflow). Idempotent: an already-open PR is reused, and a
-    concurrent tick or gh refusing to duplicate a PR is tolerated as long as one is open."""
-    if _open_pr_number(host, workspace, branch) is not None:
+def _pr_title(task: dict, branch: str) -> str:
+    """`<ref>: <card title>` — the one line a reader of `main`'s history gets.
+
+    The branch name is not in it: it used to be, as `<ref>: pipeline/<ref>`, which spent the whole
+    line repeating the reference and never said what the card was (secretary-1439). A card whose
+    title the board could not answer falls back to the reference alone rather than to the branch.
+    """
+    ref = safe_one_line(task.get("ref") or "", limit=80) or branch
+    title = safe_one_line(task.get("title") or "", limit=180)
+    # GitHub refuses a title longer than 256 characters, and a card title is free text.
+    return (f"{ref}: {title}" if title else ref)[:240].rstrip()
+
+
+def _pr_section(text: object) -> str:
+    """One board-sourced block on its way into a PR body: scrubbed and bounded, or empty.
+
+    The board text is not the gate's own, and the PR is published to a remote the card is not, so
+    the same redaction every other host/board excerpt goes through applies here. Newlines survive
+    (unlike `safe_one_line`): a done report is prose with structure, and flattening it would make
+    the body less readable than the stub it replaces.
+    """
+    cleaned = scrub_host_output(str(text or "")).replace("\r\n", "\n").strip()
+    if len(cleaned) <= PR_BODY_SECTION_CHARS:
+        return cleaned
+    return cleaned[:PR_BODY_SECTION_CHARS].rstrip() + "\n\n… (truncated; the full text is on the card)"
+
+
+def _canonical_text(text: object) -> str:
+    """PR text as a reader sees it, free of what a round trip through GitHub changes.
+
+    GitHub hands a body back with CRLF line endings and its own idea of trailing whitespace, so a
+    byte comparison against the text the gate just sent would differ every time: it would turn
+    "nothing changed" into an edit call per tick, and — since the same canonical form is what the
+    ownership digest is taken over — it would make the gate disown its own writing the moment it
+    read it back. Any difference that survives this is a real difference in what a reader sees.
+    """
+    lines = str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    return "\n".join(line.rstrip() for line in lines).strip()
+
+
+def _pr_digest(title: str, body: str) -> str:
+    """Ownership digest over the exact pair the gate sends to `gh pr edit`/`gh pr create`.
+
+    Both, not just the body: the gate writes the title too, and a person who retitles a PR has
+    written something automation must not throw away either. Taken over the canonical form so the
+    gate still recognises its own text after GitHub has handed it back.
+    """
+    payload = f"{_canonical_text(title)}\n\n{_canonical_text(body)}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+def _pr_stamp(title: str, content: str) -> str:
+    """`content` with the marker line that lets a later tick recognise it as untouched gate text."""
+    canonical = _canonical_text(content)
+    return f"{_PR_MARKER_PREFIX}{_pr_digest(title, canonical)} -->\n{canonical}\n"
+
+
+def _pr_body(task: dict, branch: str, base: str, title: str) -> str:
+    """The PR description, built deterministically from the card and the worker's own report.
+
+    Every source is optional and a missing one is simply omitted: the gate also runs before the
+    first report exists (and again before the merge), and a description is never a reason to fail
+    a candidate whose code is fine. No model is asked anything here — the same card and the same
+    report always render the same body, which is what makes the refresh in `_refresh_pr` able to
+    compare its way to a no-op.
+
+    `title` is not rendered into the text; it goes into the marker's digest, so the stamp covers
+    everything this gate is about to write.
+    """
+    ref = safe_one_line(task.get("ref") or "", limit=80) or branch
+    card_title = safe_one_line(task.get("title") or "", limit=180)
+    heading = f"**Card:** `{ref}`" + (f" — {card_title}" if card_title else "")
+    parts = [heading, f"**Branch:** `{branch}` → `{base}`"]
+    statement = _pr_section(task.get("description"))
+    if statement:
+        parts += ["", "## What the card asks for", "", statement]
+    report = _pr_section(_last_marker_body(task, "report:done") or "")
+    if report:
+        parts += ["", "## What the worker reports", "", report]
+    parts += ["", "---", "", _PR_BODY_FOOTER]
+    return _pr_stamp(title, "\n".join(parts))
+
+
+def _gate_authored(title: str, body: str, legacy_stub: str) -> bool:
+    """May the gate replace this PR's title and body?
+
+    Only text it can prove is exactly what it last wrote: the marker's digest is recomputed over
+    the title and the remaining body, and anything that fails to reproduce it — a paragraph a
+    reviewer added under a kept marker, a retitled PR, a marker pasted into prose — is a person's
+    writing and is never overwritten (secretary-1439). Two other bodies count as the gate's: the
+    pre-1439 stub, exactly and only exactly, which predates the marker and which a still-open PR
+    may be carrying; and nothing at all, since an empty body is nobody's text.
+
+    What this cannot do is prove authorship against someone who wants to fool it: the digest is
+    unkeyed, so a body deliberately stamped with a correct digest over its own text reads as the
+    gate's. That distinction is not available from PR body text at all — it would need the PR's
+    edit history or a secret GitHub never sees. This test is aimed at the honest edit, which it
+    catches completely.
+    """
+    text = _canonical_text(body)
+    if not text:
+        return True
+    if text == _canonical_text(legacy_stub):
+        return True
+    marker = _PR_MARKER_RE.match(text)
+    if marker is None:
+        return False
+    return marker.group(1) == _pr_digest(title, text[marker.end():])
+
+
+def _same_text(current: str, wanted: str) -> bool:
+    """Is the PR already carrying this text, up to what a round trip through GitHub changes?"""
+    return _canonical_text(current) == _canonical_text(wanted)
+
+
+def _pr_view(host, workspace: str, number: int) -> dict | None:
+    """Current title and body of PR `number`, or None when the backend would not say.
+
+    None is deliberately not distinguished from "unreadable": the only caller uses this to decide
+    whether an update is needed, and a PR whose current text the gate cannot read is one it leaves
+    alone.
+    """
+    try:
+        completed = _backend_call(
+            host,
+            ["gh", "pr", "view", str(number), "--json", "title,body"],
+            "gate pr view",
+            cwd=Path(workspace),
+        )
+    except GateTransportError:
+        return None
+    if completed.returncode != 0:
+        return None
+    try:
+        data = json.loads((completed.stdout or "").strip() or "{}")
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _refresh_pr(host, workspace: str, number: int, title: str, body: str, legacy_stub: str) -> None:
+    """Bring an already-open PR's title and body up to what the card can describe now.
+
+    `_ensure_pr` used to return the moment a PR was open, and nothing else in the dispatcher ever
+    called `gh pr edit`, so the description the gate could build on the *first* tick was the one
+    the PR kept forever — including the tick before the worker had reported anything at all
+    (secretary-1439). The gate runs again on every later tick and once more before the merge, so
+    the same call site now carries the better text over.
+
+    Two rules bound it. Text that is not exactly what the gate last wrote is not touched at all
+    (`_gate_authored` — the marker's digest over the current title and body), and text that
+    already matches is not re-sent: `_pr_body` is a pure function of the card, so a repeat tick on
+    unchanged data reaches the comparison and makes no backend call.
+
+    Every failure here is swallowed: the description is not a condition on the code, and a card
+    whose CI is green must not be bounced, retried or blocked because GitHub would not accept an
+    edit to its prose. The create path keeps its old behaviour — a PR that never opens means the
+    `pull_request` CI never runs, which is a real gate failure.
+    """
+    current = _pr_view(host, workspace, number)
+    if current is None:
         return
-    title = f"{task['ref']}: {branch}"
-    body = (
-        f"Automatic PR for worker branch `{branch}` of task {task['ref']}. "
-        f"Opened by the CI gate so that the pull_request CI runs."
-    )
+    current_body = str(current.get("body") or "")
+    current_title = str(current.get("title") or "")
+    if not _gate_authored(current_title, current_body, legacy_stub):
+        return
+    if _same_text(current_title, title) and _same_text(current_body, body):
+        return
+    try:
+        _backend_call(
+            host,
+            ["gh", "pr", "edit", str(number), "--title", title, "--body", body],
+            "gate pr edit",
+            cwd=Path(workspace),
+        )
+    except GateTransportError:
+        return
+
+
+def _ensure_pr(host, workspace: str, task: dict, branch: str, base: str) -> None:
+    """Ensure an open PR from the worker branch into `base` exists, and that it describes the task.
+
+    The PR exists so the project's `pull_request` CI runs (a bare feature-branch push fires nothing
+    on the typical `on: [push:main, pull_request]` workflow), and its title is what lands in the
+    merge commit, so it is also the only thing a later reader of `main` sees about the card.
+
+    Idempotent: an already-open PR is reused and refreshed in place, and a concurrent tick or gh
+    refusing to duplicate a PR is tolerated as long as one is open.
+    """
+    title = _pr_title(task, branch)
+    body = _pr_body(task, branch, base, title)
+    number = _open_pr_number(host, workspace, branch)
+    if number is not None:
+        legacy = _PR_LEGACY_STUB.format(branch=branch, ref=task.get("ref") or "")
+        _refresh_pr(host, workspace, number, title, body, legacy)
+        return
     created = _backend_call(
         host,
         ["gh", "pr", "create", "--base", base, "--head", branch, "--title", title, "--body", body],

@@ -46,8 +46,10 @@ from secretary.dispatcher import (
 )
 from secretary.dispatcher_gate import (
     GATE_TRANSPORT_MAX_ATTEMPTS,
+    PR_BODY_SECTION_CHARS,
     GateResult,
     _backend_call,
+    _pr_stamp,
 )
 from secretary.dispatcher_helpers import (
     RED_REVIEW_CEILING,
@@ -11461,9 +11463,16 @@ class GithubGateHost(CommandHostRuntime):
         run_log_error: bool = False,
         api_error: str = "",
         gh_errors: dict | None = None,
+        pr_title: str = "old title",
+        pr_body: str | None = None,
     ) -> None:
         super().__init__(GateCatalog(adapter), root, mode="real")  # type: ignore[arg-type]
         self._pr_open = pr_open
+        # What `gh pr view` answers for the open PR, and what `gh pr edit` rewrites. The default
+        # is an earlier, stale body the gate itself wrote: stamped with a digest over exactly that
+        # title and that text, which is what makes it the gate's to replace.
+        self.pr_title = pr_title
+        self.pr_body = _pr_stamp(pr_title, "old body") if pr_body is None else pr_body
         self._check_runs = check_runs
         self._statuses = statuses or []
         self._run_log = run_log
@@ -11490,6 +11499,14 @@ class GithubGateHost(CommandHostRuntime):
             return done("42\n" if self._pr_open else "\n")
         if args[1:3] == ["pr", "create"]:
             self._pr_open = True
+            self.pr_title = args[args.index("--title") + 1]
+            self.pr_body = args[args.index("--body") + 1]
+            return done("https://github.com/example-org/sample/pull/42\n")
+        if args[1:3] == ["pr", "view"]:
+            return done(json.dumps({"title": self.pr_title, "body": self.pr_body}))
+        if args[1:3] == ["pr", "edit"]:
+            self.pr_title = args[args.index("--title") + 1]
+            self.pr_body = args[args.index("--body") + 1]
             return done("https://github.com/example-org/sample/pull/42\n")
         if args[1:3] == ["run", "view"]:
             if self._run_log_error:
@@ -11938,6 +11955,249 @@ class DispatcherGateTests(unittest.TestCase):
         self.assertEqual(result.status, "green")
         self.assertEqual(self._pr_calls(host, "create"), [], "an open PR must not be duplicated")
 
+    # --- secretary-1439: the PR carries the task, not a fixed stub ---
+
+    def _described_task(self, *, report: bool = True) -> dict:
+        """A card the way the gate sees it after a done report: title, statement, and the worker's
+        own account of the round in a `report:done` comment."""
+        task = dict(self._task())
+        task["title"] = "МР открывается с фиксированной заглушкой вместо описания задачи"
+        task["description"] = "Пул-реквест должен нести описание задачи, а не литерал.\n\nSecond line."
+        comments = [
+            {"marker": "dispatcher", "body": "[dispatcher]\nmoved to validate"},
+        ]
+        if report:
+            comments.append({
+                "marker": "report:done",
+                "body": "[report:done]\nПереписал `_ensure_pr`: тело собирается из карточки.\n"
+                        "Тесты: pytest tests/test_dispatcher.py.",
+            })
+        task["comments"] = comments
+        return task
+
+    def _pr_argument(self, call: list, flag: str) -> str:
+        return call[call.index(flag) + 1]
+
+    def test_pr_title_names_the_card_and_the_ref_once(self) -> None:
+        """The old title was `<ref>: pipeline/<ref>` — the reference twice and the card never."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=False, check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            )
+            host.gate_check(self._described_task(), self._record(ws))
+        title = self._pr_argument(self._pr_calls(host, "create")[0], "--title")
+        self.assertEqual(
+            title, "secretary-633: МР открывается с фиксированной заглушкой вместо описания задачи"
+        )
+        self.assertNotIn("pipeline/", title)
+        self.assertEqual(title.count("secretary-633"), 1)
+
+    def test_pr_body_is_built_from_card_and_worker_report(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=False, check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            )
+            host.gate_check(self._described_task(), self._record(ws))
+        body = self._pr_argument(self._pr_calls(host, "create")[0], "--body")
+        self.assertIn("secretary-633", body)
+        self.assertIn("МР открывается с фиксированной заглушкой", body)
+        self.assertIn("`pipeline/secretary-633` → `main`", body)
+        self.assertIn("Пул-реквест должен нести описание задачи, а не литерал.", body)
+        self.assertIn("Second line.", body)
+        self.assertIn("Переписал `_ensure_pr`", body)
+        self.assertNotIn("[report:done]", body, "the marker line is not part of the story")
+        self.assertNotIn("Automatic PR for worker branch", body)
+
+    def test_pr_body_omits_sources_that_do_not_exist_yet(self) -> None:
+        """The gate also runs before any report exists, and a bare card is not a gate failure."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=False, check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            )
+            result = host.gate_check(self._described_task(report=False), self._record(ws))
+            bare = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=False, check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            )
+            bare_result = bare.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "green")
+        body = self._pr_argument(self._pr_calls(host, "create")[0], "--body")
+        self.assertIn("What the card asks for", body)
+        self.assertNotIn("What the worker reports", body)
+        self.assertEqual(bare_result.status, "green", "a card with no title or statement still gates")
+        bare_body = self._pr_argument(self._pr_calls(bare, "create")[0], "--body")
+        self.assertNotIn("What the card asks for", bare_body)
+        self.assertNotIn("What the worker reports", bare_body)
+        self.assertEqual(
+            self._pr_argument(self._pr_calls(bare, "create")[0], "--title"), "secretary-633"
+        )
+
+    def test_an_open_pr_is_updated_with_the_better_description(self) -> None:
+        """The stub used to be permanent: `_ensure_pr` returned on the first open PR and nothing
+        ever called `gh pr edit`, so the description built before the worker reported was final."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=True, check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+                pr_title="secretary-633: pipeline/secretary-633",
+                pr_body="Automatic PR for worker branch `pipeline/secretary-633` of task "
+                        "secretary-633. Opened by the CI gate so that the pull_request CI runs.",
+            )
+            result = host.gate_check(self._described_task(), self._record(ws))
+        self.assertEqual(result.status, "green")
+        edits = self._pr_calls(host, "edit")
+        self.assertEqual(len(edits), 1)
+        self.assertEqual(self._pr_argument(edits[0], "--title"), host.pr_title)
+        self.assertIn("Переписал `_ensure_pr`", host.pr_body)
+        self.assertEqual(self._pr_calls(host, "create"), [], "an open PR is edited, not duplicated")
+
+    def test_a_repeat_tick_on_the_same_data_makes_no_edit_call(self) -> None:
+        """Idempotence: the body is a pure function of the card, so an unchanged card reaches the
+        comparison and stops there."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=True, check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            )
+            task = self._described_task()
+            host.gate_check(task, self._record(ws))
+            self.assertEqual(len(self._pr_calls(host, "edit")), 1, "the first tick writes it")
+            host.gate_check(task, self._record(ws))
+            self.assertEqual(len(self._pr_calls(host, "edit")), 1, "the second tick must not")
+            # What GitHub actually hands back: the same text with CRLF line endings. A byte
+            # comparison would call that a change and edit the PR on every tick forever.
+            host.pr_body = host.pr_body.replace("\n", "\r\n")
+            host.gate_check(task, self._record(ws))
+            self.assertEqual(len(self._pr_calls(host, "edit")), 1, "a CRLF round trip is not a change")
+
+    def test_a_hand_written_pr_body_is_never_overwritten(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=True, check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+                pr_title="A title a person chose",
+                pr_body="I opened this by hand and wrote why it matters.",
+            )
+            result = host.gate_check(self._described_task(), self._record(ws))
+        self.assertEqual(result.status, "green")
+        self.assertEqual(self._pr_calls(host, "edit"), [])
+        self.assertEqual(host.pr_body, "I opened this by hand and wrote why it matters.")
+        self.assertEqual(host.pr_title, "A title a person chose")
+
+    def test_an_edit_to_a_gate_written_body_makes_it_the_person_s(self) -> None:
+        """A reviewer who adds a note to a gate-written body keeps the hidden marker around it —
+        editing Markdown does not delete an HTML comment. A marker the gate merely *finds* in the
+        text is therefore no evidence the rest of it is the gate's, and treating it as evidence
+        would replace the note on the next tick."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            written = _pr_stamp("secretary-633: a card", "**Card:** `secretary-633`")
+            edited = written.replace(
+                "**Card:** `secretary-633`",
+                "**Card:** `secretary-633`\n\n> Deploy note: hold until the migration lands.",
+            )
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=True, check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+                pr_title="secretary-633: a card", pr_body=edited,
+            )
+            result = host.gate_check(self._described_task(), self._record(ws))
+        self.assertEqual(result.status, "green")
+        self.assertEqual(self._pr_calls(host, "edit"), [])
+        self.assertEqual(host.pr_body, edited, "the reviewer's note is still there")
+
+    def test_a_retitled_pr_is_left_alone(self) -> None:
+        """The gate writes the title too, so a person who retitles a PR has written something the
+        gate must not throw away: the marker's digest covers the title and no longer matches."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=True, check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+                pr_title="old title", pr_body=_pr_stamp("old title", "old body"),
+            )
+            host.pr_title = "WIP — do not merge, see thread"
+            result = host.gate_check(self._described_task(), self._record(ws))
+        self.assertEqual(result.status, "green")
+        self.assertEqual(self._pr_calls(host, "edit"), [])
+        self.assertEqual(host.pr_title, "WIP — do not merge, see thread")
+
+    def test_prose_written_under_the_legacy_stub_is_not_the_gate_s(self) -> None:
+        """The pre-marker stub is recognised exactly, not by its opening words: a person who kept
+        the stub and wrote their own explanation under it wrote the body."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            body = (
+                "Automatic PR for worker branch `pipeline/secretary-633` of task secretary-633. "
+                "Opened by the CI gate so that the pull_request CI runs.\n\n"
+                "Reviewer: this also unblocks the 1402 rollback; merge it first."
+            )
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=True, check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+                pr_body=body,
+            )
+            result = host.gate_check(self._described_task(), self._record(ws))
+        self.assertEqual(result.status, "green")
+        self.assertEqual(self._pr_calls(host, "edit"), [])
+        self.assertEqual(host.pr_body, body)
+
+    def test_a_backend_refusal_on_pr_edit_does_not_colour_the_gate(self) -> None:
+        """The description is not a condition on the code: neither an answered refusal nor a call
+        that never got through may bounce, retry or block a card whose CI is green."""
+        for failure in ("gh: Validation Failed (HTTP 422)", self.GH_NO_ANSWER):
+            with self.subTest(failure=failure[:30]):
+                with tempfile.TemporaryDirectory() as tmp:
+                    ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+                    host = GithubGateHost(
+                        Path(tmp), self._github_adapter(),
+                        pr_open=True, check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+                        gh_errors={"pr edit": failure},
+                    )
+                    result = host.gate_check(self._described_task(), self._record(ws))
+                self.assertEqual(result.status, "green")
+                self.assertEqual(len(self._pr_calls(host, "edit")), 1, "it was attempted once")
+
+    def test_an_unreadable_pr_view_leaves_the_pr_alone(self) -> None:
+        for failure in ("gh: Not Found (HTTP 404)", self.GH_NO_ANSWER):
+            with self.subTest(failure=failure[:30]):
+                with tempfile.TemporaryDirectory() as tmp:
+                    ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+                    host = GithubGateHost(
+                        Path(tmp), self._github_adapter(),
+                        pr_open=True, check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+                        gh_errors={"pr view": failure},
+                    )
+                    result = host.gate_check(self._described_task(), self._record(ws))
+                self.assertEqual(result.status, "green")
+                self.assertEqual(self._pr_calls(host, "edit"), [])
+
+    def test_a_long_card_and_report_are_bounded_in_the_body(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            task = self._described_task()
+            # Ordinary prose, not one long token: `scrub_host_output` redacts a 40-character run
+            # of blob-shaped characters, so a `"x" * N` filler would test the redactor instead.
+            task["description"] = "a line of the statement\n" * (PR_BODY_SECTION_CHARS // 10)
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=False, check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            )
+            host.gate_check(task, self._record(ws))
+        body = self._pr_argument(self._pr_calls(host, "create")[0], "--body")
+        self.assertIn("truncated", body)
+        self.assertLess(len(body), 2 * PR_BODY_SECTION_CHARS)
+        self.assertIn("What the worker reports", body, "a long statement must not eat the report")
+
     def test_github_gate_red_on_failed_pr_ci(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
@@ -12009,7 +12269,8 @@ class DispatcherGateTests(unittest.TestCase):
     )
 
     GH_BACKEND_LABELS = {
-        "gate repo view", "gate pr list", "gate pr create", "gate gh api", "gate failed log",
+        "gate repo view", "gate pr list", "gate pr create", "gate pr view", "gate pr edit",
+        "gate gh api", "gate failed log",
     }
 
     def _spy_backend_calls(self):
