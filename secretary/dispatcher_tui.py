@@ -22,7 +22,10 @@ from triggered_agents.runtime.claude_sessions import (
     claude_session_paths,
 )
 from triggered_agents.runtime.head import HeadRun
-from secretary.dispatcher_worker_lifecycle import head_run_binding
+from secretary.dispatcher_worker_lifecycle import (
+    ContinuationProviderCondition,
+    head_run_binding,
+)
 from triggered_agents.runtime.pane_host import OrcaSessionHost, PaneHost
 from triggered_agents.runtime.tui_delivery import (
     COMPOSER_EMPTY,
@@ -405,7 +408,17 @@ def _codex_provider_progress_for_run(run: HeadRun, run_id: str, fingerprint: str
     from secretary.codex_provider_events import _initial_range_matches, _read_source
 
     source = run.fanout_policy.get("provider_source")
-    if not isinstance(source, dict) or source.get("state") != "bound":
+    if not isinstance(source, dict):
+        return _unavailable("Codex provider source has no bound v1 baseline", "codex-session")
+    if source.get("state") == "unbound":
+        if _legacy_unbound_v1_codex_source(source, run):
+            return _unavailable(
+                "Codex provider source has no bound v1 baseline",
+                "codex-session",
+                continuation_condition=ContinuationProviderCondition.LEGACY_UNBOUND_V1,
+            )
+        return _unavailable("Codex provider source has no bound v1 baseline", "codex-session")
+    if source.get("state") != "bound":
         return _unavailable("Codex provider source has no bound v1 baseline", "codex-session")
     reason = _source_matches_run(source, run)
     if reason:
@@ -520,12 +533,42 @@ def _observed(
     }
 
 
-def _unavailable(reason: str, source: str, *, identity: bool = False) -> dict[str, str]:
-    return {
+def _legacy_unbound_v1_codex_source(source: dict[str, Any], run: HeadRun) -> bool:
+    """Whether ``source`` is the exact v1 preflight descriptor left unbound on a legacy run.
+
+    This deliberately checks structure and the HeadRun fence rather than a diagnostic string.  An
+    unbound descriptor whose baseline is malformed, or whose immutable fields belong to another
+    run, remains ordinary unavailable/identity evidence and cannot start a replacement.
+    """
+    return (
+        run.spec.adapter == "codex"
+        and run.fanout_policy.get("provider_source_required") is True
+        and source.get("version") == 1
+        and source.get("kind") == "codex_session_event_jsonl"
+        and source.get("state") == "unbound"
+        and isinstance(source.get("root"), str)
+        and bool(source.get("root"))
+        and isinstance(source.get("baseline"), list)
+        and all(isinstance(path, str) for path in source["baseline"])
+        and not _source_matches_run(source, run)
+    )
+
+
+def _unavailable(
+    reason: str,
+    source: str,
+    *,
+    identity: bool = False,
+    continuation_condition: ContinuationProviderCondition | None = None,
+) -> dict[str, str]:
+    result = {
         "state": "identity_mismatch" if identity else "unavailable",
         "source": source,
         "reason": reason,
     }
+    if continuation_condition is not None:
+        result["continuation_condition"] = continuation_condition.value
+    return result
 
 
 def _claude_session_paths_for(workspace: str):

@@ -31,6 +31,8 @@ from secretary.dispatcher_tui import (
     terminal_turn_started,
     turn_started_confirm,
 )
+from secretary.dispatcher_worker_lifecycle import ContinuationProviderCondition
+from triggered_agents.runtime.codex_preflight import codex_provider_source_descriptor
 from tests.test_dispatcher_observer import (
     BLOCKED_PANE_WAIT_BODY,
     STALE_HANDLE_WAIT_FAILURE,
@@ -118,6 +120,60 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             ))
         self.assertEqual(unavailable["state"], "unavailable")
         self.assertNotEqual(unavailable["state"], READINESS_BUSY)
+
+    def test_provider_progress_types_only_a_complete_legacy_unbound_codex_v1_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            run = HeadRun(
+                run_id="codex-unbound",
+                spec=HeadSpec(profile_id="codex", adapter="codex", model="gpt-5.6-terra"),
+                workspace=str(workspace),
+                task_ref=TaskRef.card("secretary-1435"),
+                role="worker",
+            )
+            source = {
+                "version": 1,
+                "kind": "codex_session_event_jsonl",
+                "state": "unbound",
+                **codex_provider_source_descriptor(run),
+                "root": str((Path(tmp) / "sessions").resolve()),
+                "baseline": [],
+            }
+            policy = {
+                "version": 1,
+                "state": "allowed",
+                "terminal_state": "clean",
+                "run_id": run.run_id,
+                "role": run.role,
+                "model": run.spec.model or "",
+                "binary_path": "/test/codex",
+                "binary_digest": "0" * 64,
+                "cli_version": "test-codex",
+                "tool_schema_digest": "0" * 64,
+                "provider_schema_verdict": "no_callable_child_spawn_surface",
+                "events": [],
+                "provider_source_required": True,
+                "provider_source": source,
+            }
+
+            legacy = provider_progress_for_run(run.with_fanout_policy(policy))
+            foreign = provider_progress_for_run(run.with_fanout_policy({
+                **policy,
+                "provider_source": {**source, "workspace": "/foreign"},
+            }))
+            malformed = provider_progress_for_run(run.with_fanout_policy({
+                **policy,
+                "provider_source": {**source, "baseline": [1]},
+            }))
+
+        self.assertEqual(legacy["state"], "unavailable")
+        self.assertEqual(
+            legacy["continuation_condition"],
+            ContinuationProviderCondition.LEGACY_UNBOUND_V1.value,
+        )
+        self.assertNotIn("continuation_condition", foreign)
+        self.assertNotIn("continuation_condition", malformed)
 
     def test_out_of_band_delivery_rejects_confirm_before_touching_terminal(self) -> None:
         terminal_calls: list[list[str]] = []

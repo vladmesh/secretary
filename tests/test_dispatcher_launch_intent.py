@@ -31,7 +31,7 @@ from secretary.dispatcher import (
 from triggered_agents.runtime.head import HeadCommand
 from triggered_agents.runtime.head import operations as head_ops
 from triggered_agents.runtime.prompt_document import NUDGE_FILE_MODE, NUDGE_MAX_BYTES
-from secretary.dispatcher_tui import TuiDeliveryError, claude_project_dir_name
+from secretary.dispatcher_tui import TuiDeliveryError, claude_project_dir_name, provider_progress_for_run
 from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_identity
 from secretary.dispatcher_launch import launch_intent_liveness
@@ -52,6 +52,8 @@ from tests.test_dispatcher import (
     FakeHost,
     FakeKanboard,
     FakeSprints,
+    _configure_production_shaped_codex_relaunch,
+    _legacy_unbound_v1_run,
 )
 
 REF = "secretary-510-pilot"
@@ -550,6 +552,37 @@ class LaunchIntentTests(unittest.TestCase):
         assert record is not None
         self.assertEqual(record.state, "claimed")
 
+    def test_legacy_unbound_v1_rework_intent_recovers_one_exact_replacement(self) -> None:
+        """The typed source path keeps its preflight run durable across a dead launch tick."""
+        self.host.fail_resume_worker_reason = ""
+        self.rework_after_red_review()
+        self.install_legacy_unbound_v1_worker_source()
+        old_run_id = self.record().worker_head_run["run_id"]  # type: ignore[union-attr]
+        _configure_production_shaped_codex_relaunch(
+            self.host, root=self.data_dir / "replacement-sessions",
+        )
+
+        with self.state_dies_after("restart_worker"):
+            with self.assertRaises(OSError):
+                self.tick()
+
+        intent = self.stored_intent()
+        self.assertEqual(intent["action"], "review-red-rework")
+        self.assertNotEqual(intent["head_run"]["run_id"], old_run_id)
+        source = intent["head_run"]["fanout_policy"]["provider_source"]
+        self.assertEqual(source["state"], "unbound")
+        self.assertEqual(source["baseline"], [])
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertEqual(self.host.resumed_continuations, [])
+
+        recovered = self.tick()
+
+        self.assertEqual(recovered["action"], "worker-launch-adopted")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.worker_head_run["run_id"], intent["head_run"]["run_id"])
+
     def test_a_gate_red_rework_writes_its_intent_before_the_relaunch(self) -> None:
         self.run_to_validate()
         self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
@@ -658,6 +691,17 @@ class LaunchIntentTests(unittest.TestCase):
         self.verdict("red", "needs work", "verdict-red")
         self.tick()  # the verdict parks the card in Assessment
         self.decide("rework")
+
+    def install_legacy_unbound_v1_worker_source(self) -> None:
+        payload = self.runtime.production_state.load()
+        stored = payload["records"][REF]
+        stored["worker_head_run"] = _legacy_unbound_v1_run(
+            stored["worker_head_run"], root=self.data_dir / "codex-sessions",
+        )
+        self.runtime.production_state.save(payload)
+        self.host.provider_progress = lambda _task, record, _kind: provider_progress_for_run(
+            head_ops.HeadRun.from_json(record.worker_head_run)
+        )
 
     def test_an_uninterrupted_review_red_rework_opens_the_next_round(self) -> None:
         """The baseline the interrupted rework below has to end up matching."""
