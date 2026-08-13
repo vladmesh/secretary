@@ -136,6 +136,7 @@ from secretary.dispatcher_worker_lifecycle import (
 from secretary.task_commands import _read_body
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 from tests.dispatcher_fixtures import ensure_attempt
+from tests.fanout_fixtures import accepted_transport_run
 from tests.observer_identity import bind_observer
 
 
@@ -782,6 +783,10 @@ class FakeHost:
         self.prepare_requires_existing: list[bool] = []
         # Every launch this fake performs gets its own head run identity, numbered in order.
         self.head_runs = 0
+        # The production runtime installs this exact-run ingress immediately after a Codex launch
+        # intent is durable.  Most dispatcher fixtures use non-source HeadRuns, so the double
+        # records the hand-off without inventing a provider journal event.
+        self.codex_provider_ingresses: list[str] = []
         self.reviews: list[str] = []
         self.stopped: list[str] = []
         self.torn_down: list[str] = []
@@ -995,6 +1000,12 @@ class FakeHost:
 
     def observer_workspace(self, reference: str) -> str:
         return str(self.root / "observers" / reference.replace(":", "-"))
+
+    def configure_codex_provider_ingress(self, run, *, persist, stop, block) -> None:
+        self.codex_provider_ingresses.append(run.run_id)
+
+    def poll_codex_provider_ingress(self, run) -> None:
+        return None
 
     def observer_pid_file(self, reference: str) -> str:
         return str(self.root / "observers" / f"{reference.replace(':', '-')}.pid")
@@ -12216,6 +12227,7 @@ class RecordingReviewHost(CommandHostRuntime):
         split_pane_key: str = "",
     ) -> None:
         super().__init__(catalog or ReviewCatalog(), root, mode="real")  # type: ignore[arg-type]
+        self.preflight_codex_run = self._transport_preflight  # type: ignore[method-assign]
         self.calls: list[list[str]] = []
         self.fail_ops = fail_ops or set()
         self.split_pane_key = split_pane_key
@@ -12225,6 +12237,41 @@ class RecordingReviewHost(CommandHostRuntime):
         # What Orca answers a `tui-idle` probe with. The default is a satisfied wait, which is a
         # pane ready for input.
         self.wait_answer: dict = {}
+
+    def _transport_preflight(
+        self,
+        head: str,
+        *,
+        role: str,
+        workspace: str,
+        task_ref: head_ops.TaskRef,
+        pid_file: str,
+        run_id: str,
+    ) -> head_ops.HeadRun:
+        """Cross only the Codex policy seam for transport tests.
+
+        `NudgingReviewHost` also exercises a Claude worker.  Its normal HeadRun remains the real
+        non-Codex one; fabricating a Codex attestation for it would be an identity mismatch, not a
+        meaningful provider-policy fixture.
+        """
+        if self.catalog.head_profile(head).get("adapter") != "codex":
+            return CommandHostRuntime.preflight_codex_run(
+                self,
+                head,
+                role=role,
+                workspace=workspace,
+                task_ref=task_ref,
+                pid_file=pid_file,
+                run_id=run_id,
+            )
+        return accepted_transport_run(
+            head,
+            role=role,
+            workspace=workspace,
+            task_ref=task_ref,
+            pid_file=pid_file,
+            run_id=run_id,
+        )
 
     def _run_json(self, args: list[str]) -> dict:
         self.calls.append(args)
@@ -13331,6 +13378,7 @@ class ScriptedWaitHost(CommandHostRuntime):
 
     def __init__(self, root: Path, *, waits: list) -> None:
         super().__init__(PromptAfterStartCatalog(), root, mode="real")  # type: ignore[arg-type]
+        self.preflight_codex_run = accepted_transport_run  # type: ignore[method-assign]
         self.waits = list(waits)
         self.ops: list[str] = []
         self.closed: list[str] = []

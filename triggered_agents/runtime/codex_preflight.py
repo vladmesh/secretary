@@ -19,17 +19,55 @@ roles or sessions — a caller passes a head profile and the workspace it will r
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
+import shutil
 import stat
+import subprocess
 import tempfile
 import tomllib
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping
+
+if TYPE_CHECKING:  # importing head.command imports this module, so keep the edge type-only
+    from .head.run import HeadRun
 
 CODEX_HOME_DEFAULT = str(Path.home() / ".config" / "orca" / "codex-runtime-home" / "home")
 # The file codex itself reads trust from, inside whatever CODEX_HOME the head runs with.
 CODEX_CONFIG_FILE = "config.toml"
+
+# The schema attestation is intentionally a protocol version rather than a Codex version.  A
+# Codex upgrade can be safe only when a newly captured provider schema says so; a policy reader
+# never turns a newer CLI or a familiar model name into that evidence by itself.
+FANOUT_ATTESTATION_VERSION = 1
+FANOUT_SCHEMA_ABSENT = "schema_absent"
+FANOUT_SCHEMA_UNKNOWN = "schema_unknown"
+FANOUT_SCHEMA_ALLOWED = "no_callable_child_spawn_surface"
+FANOUT_TERMINAL_CLEAN = "clean"
+FANOUT_TERMINAL_UNKNOWN = "unknown"
+FANOUT_TERMINAL_VIOLATION = "violation"
+
+EVENT_COLLABORATION_CALL = "collaboration_call"
+EVENT_CHILD_THREAD_EDGE = "child_thread_edge"
+EVENT_UNKNOWN_THREAD_EDGE = "unknown_thread_edge"
+EVENT_UNPARSEABLE_PROVIDER_EVENT = "unparseable_provider_event"
+PROVIDER_EVENT_TYPES = (
+    EVENT_COLLABORATION_CALL,
+    EVENT_CHILD_THREAD_EDGE,
+    EVENT_UNKNOWN_THREAD_EDGE,
+    EVENT_UNPARSEABLE_PROVIDER_EVENT,
+)
+
+# These are classifiers, never allow evidence.  A schema may call a collaboration tool something
+# new tomorrow; that is why a tool not in this set is treated as unknown when an event calls it.
+KNOWN_COLLABORATION_TOOLS = frozenset({
+    "spawn_agent", "create_agent", "create_child_thread", "fork_thread", "delegate",
+    "collaboration", "collaboration_call", "wait", "wait_agent",
+})
 
 
 class CodexPreflightError(RuntimeError):
@@ -38,6 +76,39 @@ class CodexPreflightError(RuntimeError):
     Raised only before a pane exists, so a caller that sees it knows nothing was launched and no
     head has been asked to do anything.
     """
+
+
+class CodexFanoutPolicyError(CodexPreflightError):
+    """The exact Codex run has no independently acceptable no-fan-out attestation."""
+
+    def __init__(self, message: str, *, run: "HeadRun") -> None:
+        super().__init__(message)
+        self.run = run
+
+
+class CodexFanoutRecordingError(CodexPreflightError):
+    """A provider-edge result could not be durably written before a consequential action."""
+
+    def __init__(self, message: str, *, run: "HeadRun", event: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.run = run
+        self.event = dict(event)
+
+
+@dataclass(frozen=True)
+class ProviderEventOutcome:
+    """One typed provider event and the run state written before its caller acts."""
+
+    run: "HeadRun"
+    event: dict[str, Any]
+
+    @property
+    def terminal_state(self) -> str:
+        return str(self.run.fanout_policy.get("terminal_state") or FANOUT_TERMINAL_UNKNOWN)
+
+    @property
+    def blocked(self) -> bool:
+        return self.terminal_state != FANOUT_TERMINAL_CLEAN
 
 
 def codex_home(profile: Mapping[str, Any]) -> str:
@@ -118,6 +189,261 @@ def ensure_codex_workspace_trusted(
     for target in additions:
         body += f"\n[projects.{json.dumps(target)}]\ntrust_level = \"trusted\"\n"
     _save_codex_config(config_path, body)
+
+
+def preflight_codex_launch(
+    profile: Mapping[str, Any],
+    workspace: str,
+    run: "HeadRun",
+    *,
+    schema_attestation: Mapping[str, Any] | None = None,
+    binary_path: str | None = None,
+    config: Path | None = None,
+) -> "HeadRun":
+    """Attest one exact Codex ``HeadRun`` before a pane can be opened.
+
+    The workspace trust write remains part of the preflight, but is not its allow result.  The
+    returned run carries the only allow result this product recognises: an independently captured
+    provider tool schema for this binary/version/model/role whose explicit verdict proves no
+    callable child-spawn surface.  Current Codex evidence contains no such row, so ordinary
+    profiles fail here before their terminal exists.
+    """
+    attested = attest_codex_fanout(
+        profile, run, schema_attestation=schema_attestation, binary_path=binary_path,
+    )
+    policy = attested.fanout_policy
+    if policy.get("state") != "allowed" or policy.get("terminal_state") != FANOUT_TERMINAL_CLEAN:
+        raise CodexFanoutPolicyError(
+            f"Codex provider fan-out preflight refused {policy.get('state')}: "
+            f"{policy.get('reason') or 'no independently acceptable schema attestation'}",
+            run=attested,
+        )
+    # The source is bound only after the newly created pane has made its own Codex session.  Its
+    # pre-pane baseline is nevertheless durable now: a session file that already existed before
+    # this run is never attributed to it merely because it shares a workspace.
+    try:
+        attested = _with_unbound_provider_source(profile, attested)
+    except OSError as exc:
+        refused = _unknown_run(attested, f"cannot establish Codex provider event source baseline: {exc}")
+        raise CodexFanoutPolicyError(str(refused.fanout_policy["reason"]), run=refused) from None
+    # Refused fan-out evidence must be side-effect free: a schema-absent launch is not entitled
+    # to amend a shared Codex trust config merely because it reached the host.  Trust is still
+    # established for the only path that can actually open a pane.
+    try:
+        ensure_codex_workspace_trusted(profile, workspace, config)
+    except CodexPreflightError as exc:
+        refused = _unknown_run(attested, f"workspace trust preflight failed: {exc}")
+        raise CodexFanoutPolicyError(str(exc), run=refused) from None
+    return attested
+
+
+def ensure_codex_launch_allowed(
+    profile: Mapping[str, Any], workspace: str, run: "HeadRun", **kwargs: Any
+) -> "HeadRun":
+    """Named alias for callers which read this as an allow gate rather than a preparation step."""
+    return preflight_codex_launch(profile, workspace, run, **kwargs)
+
+
+def attest_codex_fanout(
+    profile: Mapping[str, Any],
+    run: "HeadRun",
+    *,
+    schema_attestation: Mapping[str, Any] | None = None,
+    binary_path: str | None = None,
+) -> "HeadRun":
+    """Build a conservative, run-bound provider-schema attestation without opening a pane.
+
+    ``schema_attestation`` is expected to be a provider-schema capture, not a configuration knob.
+    It carries a canonical ``tools`` list and its digest, the observed binary digest and CLI
+    version, model and role.  The preflight re-reads the binary and version at launch time.  A
+    mapping that merely says a model did not spawn, hides metadata, or mentions a disabled flag is
+    not this shape and is recorded as schema-unknown.
+    """
+    # A head profile is launch configuration, not provider evidence.  In particular, a static
+    # profile field must not promote a flag, inventory or a pasted claim into the provider's
+    # submitted tool schema.  The caller may supply only a separately captured schema object;
+    # normal production launches intentionally supply none until Codex exposes one.
+    raw = schema_attestation
+    if raw is None:
+        return _policy_run(
+            run,
+            state=FANOUT_SCHEMA_ABSENT,
+            terminal_state=FANOUT_TERMINAL_UNKNOWN,
+            reason="no provider-schema attestation is attached to this Codex launch",
+        )
+    if not isinstance(raw, Mapping):
+        return _unknown_run(run, "provider-schema attestation is not an object")
+    schema = dict(raw)
+    if schema.get("version") != FANOUT_ATTESTATION_VERSION:
+        return _unknown_run(run, "provider-schema attestation has an unsupported version")
+    if not str(run.role).strip():
+        return _unknown_run(run, "HeadRun has no role to bind provider evidence to")
+    if str(schema.get("role") or "") != run.role:
+        return _unknown_run(run, "provider-schema attestation role does not match HeadRun")
+    model = run.spec.model or ""
+    if str(schema.get("model") or "") != model:
+        return _unknown_run(run, "provider-schema attestation model does not match HeadRun")
+    tools = schema.get("tools")
+    if not isinstance(tools, list) or not all(isinstance(tool, Mapping) for tool in tools):
+        return _unknown_run(run, "provider-schema attestation has no canonical tool schema")
+    try:
+        tool_digest = _json_digest(tools)
+    except ValueError as exc:
+        return _unknown_run(run, str(exc))
+    if not _same_digest(schema.get("tool_schema_digest"), tool_digest):
+        return _unknown_run(run, "provider-schema tool digest does not match its schema")
+    try:
+        observed_path, observed_digest, observed_version = _codex_cli_identity(binary_path)
+    except OSError as exc:
+        return _unknown_run(run, f"cannot attest Codex binary identity: {exc}")
+    if not _same_digest(schema.get("binary_digest"), observed_digest):
+        return _unknown_run(run, "provider-schema binary digest does not match launched Codex")
+    if str(schema.get("cli_version") or "") != observed_version:
+        return _unknown_run(run, "provider-schema CLI version does not match launched Codex")
+    tool_names = {
+        str(tool.get("name") or "").strip().lower()
+        for tool in tools
+        if str(tool.get("name") or "").strip()
+    }
+    verdict = str(schema.get("provider_schema_verdict") or "")
+    if verdict != FANOUT_SCHEMA_ALLOWED:
+        return _policy_run(
+            run,
+            state=FANOUT_SCHEMA_UNKNOWN,
+            terminal_state=FANOUT_TERMINAL_UNKNOWN,
+            reason="provider schema does not explicitly prove no callable child-spawn surface",
+            binary_path=observed_path,
+            binary_digest=observed_digest,
+            cli_version=observed_version,
+            tool_schema_digest=tool_digest,
+            provider_schema_verdict=verdict,
+        )
+    if _has_child_spawn_surface(tool_names):
+        return _policy_run(
+            run,
+            state=FANOUT_SCHEMA_UNKNOWN,
+            terminal_state=FANOUT_TERMINAL_UNKNOWN,
+            reason="provider schema exposes a callable child-spawn surface",
+            binary_path=observed_path,
+            binary_digest=observed_digest,
+            cli_version=observed_version,
+            tool_schema_digest=tool_digest,
+            provider_schema_verdict=verdict,
+        )
+    return _policy_run(
+        run,
+        state="allowed",
+        terminal_state=FANOUT_TERMINAL_CLEAN,
+        reason="provider schema proves no callable child-spawn surface",
+        binary_path=observed_path,
+        binary_digest=observed_digest,
+        cli_version=observed_version,
+        tool_schema_digest=tool_digest,
+        provider_schema_verdict=verdict,
+    )
+
+
+class CodexProviderEventRecorder:
+    """Durably append provider-edge evidence to one exact HeadRun before its caller acts.
+
+    The recorder owns no pane and has no screen/transcript fallback.  Its owner supplies the
+    same identity-fenced lifecycle commit used for the run and, on a non-clean outcome, uses the
+    existing stop path.  That separation lets the recorder prove write-before-act without gaining
+    permission to signal a process itself.
+    """
+
+    def __init__(
+        self,
+        run: "HeadRun",
+        persist: Callable[["HeadRun"], None],
+        *,
+        expected_parent_thread_id: str = "",
+    ) -> None:
+        self.run = run
+        self.persist = persist
+        self.expected_parent_thread_id = str(expected_parent_thread_id or "")
+
+    def record(
+        self,
+        raw_event: Any,
+        *,
+        source_sequence: int | str | None,
+        source_location: str,
+        captured_at: str | None = None,
+    ) -> ProviderEventOutcome:
+        event = _typed_provider_event(
+            raw_event,
+            expected_parent_thread_id=self.expected_parent_thread_id,
+            source_sequence=source_sequence,
+            source_location=source_location,
+            captured_at=captured_at,
+        )
+        policy = dict(self.run.fanout_policy)
+        events = list(policy.get("events") or [])
+        events.append(event)
+        policy["events"] = events
+        policy["terminal_state"] = (
+            FANOUT_TERMINAL_VIOLATION
+            if event["policy_outcome"] == FANOUT_TERMINAL_VIOLATION
+            else FANOUT_TERMINAL_UNKNOWN
+        )
+        policy["reason"] = f"provider event {event['type']}: {event['reason']}"
+        updated = self.run.with_fanout_policy(policy)
+        try:
+            self.persist(updated)
+        except Exception as exc:  # a declined durable write is itself unknown and must block
+            failed_policy = dict(updated.fanout_policy)
+            failed_policy["terminal_state"] = FANOUT_TERMINAL_UNKNOWN
+            failed_policy["reason"] = f"provider event could not be durably recorded: {type(exc).__name__}: {exc}"
+            failed = updated.with_fanout_policy(failed_policy)
+            self.run = failed
+            raise CodexFanoutRecordingError(str(failed_policy["reason"]), run=failed, event=event) from None
+        self.run = updated
+        return ProviderEventOutcome(run=updated, event=event)
+
+
+def enforce_provider_event(
+    recorder: CodexProviderEventRecorder,
+    raw_event: Any,
+    *,
+    source_sequence: int | str | None,
+    source_location: str,
+    stop: Callable[["HeadRun", str], None],
+    block: Callable[[dict[str, Any]], None],
+    captured_at: str | None = None,
+) -> ProviderEventOutcome:
+    """Record, then use caller-owned fenced stop and block paths for a provider-edge result."""
+    try:
+        outcome = recorder.record(
+            raw_event,
+            source_sequence=source_sequence,
+            source_location=source_location,
+            captured_at=captured_at,
+        )
+    except CodexFanoutRecordingError as exc:
+        evidence = {"kind": "codex_provider_fanout", "event": exc.event, "state": "unknown"}
+        # The run identity is still the one this recorder was given.  ``stop`` must prove that
+        # identity before touching a pane or pid, so a storage error never authorises a foreign
+        # process signal.
+        try:
+            stop(exc.run, "provider fan-out event could not be durably recorded")
+        finally:
+            # A refused identity-fenced stop is not permission to continue, nor a reason to lose
+            # the typed card/sprint block.  The stop callback itself decides whether a signal was
+            # safe; this boundary still records the policy consequence either way.
+            block(evidence)
+        raise
+    if outcome.blocked:
+        evidence = {
+            "kind": "codex_provider_fanout",
+            "event": dict(outcome.event),
+            "state": outcome.terminal_state,
+        }
+        try:
+            stop(outcome.run, f"provider fan-out policy {outcome.terminal_state}")
+        finally:
+            block(evidence)
+    return outcome
 
 
 def reject_symlinked_config(config: Path, kind: str) -> None:
@@ -245,3 +571,226 @@ def _codex_repository_trust_root(workspace_path: Path) -> Path | None:
     except ValueError:
         return None
     return common_dir.parent.resolve(strict=False)
+
+
+def _policy_run(
+    run: "HeadRun",
+    *,
+    state: str,
+    terminal_state: str,
+    reason: str,
+    binary_path: str = "",
+    binary_digest: str = "",
+    cli_version: str = "",
+    tool_schema_digest: str = "",
+    provider_schema_verdict: str = "",
+) -> "HeadRun":
+    return run.with_fanout_policy({
+        "version": FANOUT_ATTESTATION_VERSION,
+        "state": state,
+        "terminal_state": terminal_state,
+        "reason": reason,
+        "run_id": run.run_id,
+        "role": run.role,
+        "model": run.spec.model or "",
+        "binary_path": binary_path,
+        "binary_digest": binary_digest,
+        "cli_version": cli_version,
+        "tool_schema_digest": tool_schema_digest,
+        "provider_schema_verdict": provider_schema_verdict,
+        "events": [],
+    })
+
+
+def _with_unbound_provider_source(profile: Mapping[str, Any], run: "HeadRun") -> "HeadRun":
+    """Attach the pre-pane source baseline used to bind the new Codex event journal.
+
+    Session JSONL has a provider session id and parent thread id, but no Secretary run id.  The
+    baseline is therefore part of the attestation: a future lifecycle can select exactly one
+    *new* provider journal, never re-label an older same-workspace session as this run.
+    """
+    root = Path(codex_home(profile)) / "sessions"
+    if root.exists() and not root.is_dir():
+        raise OSError(f"Codex session root {root} is not a directory")
+    baseline: list[str] = []
+    if root.is_dir():
+        try:
+            baseline = sorted(
+                str(path.resolve(strict=False))
+                for path in root.rglob("*.jsonl")
+                if path.is_file()
+            )
+        except OSError as exc:
+            raise OSError(f"cannot enumerate Codex session root {root}: {exc}") from None
+    policy = dict(run.fanout_policy)
+    policy["provider_source_required"] = True
+    policy["provider_source"] = {
+        "version": 1,
+        "kind": "codex_session_event_jsonl",
+        "state": "unbound",
+        "root": str(root.resolve(strict=False)),
+        "baseline": baseline,
+    }
+    return run.with_fanout_policy(policy)
+
+
+def _unknown_run(run: "HeadRun", reason: str) -> "HeadRun":
+    return _policy_run(
+        run,
+        state=FANOUT_SCHEMA_UNKNOWN,
+        terminal_state=FANOUT_TERMINAL_UNKNOWN,
+        reason=reason,
+    )
+
+
+def _codex_cli_identity(binary_path: str | None = None) -> tuple[str, str, str]:
+    """Hash and query the binary that an ordinary ``codex`` launch resolves to.
+
+    The command renderer invokes ``codex`` by name, so accepting a different configured path
+    here would bind an attestation to a binary the pane does not execute.  ``binary_path`` exists
+    only for a hermetic test or an explicit caller whose launch command uses that same absolute
+    path.
+    """
+    candidate = binary_path or shutil.which("codex")
+    if not candidate:
+        raise OSError("codex executable is not on PATH")
+    path = Path(candidate).resolve(strict=True)
+    if not path.is_file():
+        raise OSError(f"codex executable {path} is not a regular file")
+    digest = _file_digest(path)
+    try:
+        result = subprocess.run(
+            [str(path), "--version"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OSError(f"cannot read Codex CLI version: {exc}") from None
+    if result.returncode != 0:
+        raise OSError(f"Codex CLI version command failed with {result.returncode}")
+    version = (result.stdout or result.stderr or "").strip()
+    if not version:
+        raise OSError("Codex CLI version command returned no version")
+    # Keep the exact string the binary reported.  An attester signs/captures precisely this value;
+    # parsing off a prefix would turn an unrecognised future form into a familiar old version.
+    return str(path), digest, version
+
+
+def _file_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _json_digest(value: Any) -> str:
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"provider schema is not canonical JSON: {exc}") from None
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _same_digest(supplied: Any, observed: str) -> bool:
+    value = str(supplied or "").lower()
+    return value == observed.lower() and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+
+
+def _has_child_spawn_surface(tool_names: set[str]) -> bool:
+    for name in tool_names:
+        compact = name.replace("-", "_")
+        if name in KNOWN_COLLABORATION_TOOLS:
+            return True
+        if any(fragment in compact for fragment in ("spawn", "child_thread", "childagent", "subagent", "delegate")):
+            return True
+    return False
+
+
+def _typed_provider_event(
+    raw_event: Any,
+    *,
+    expected_parent_thread_id: str,
+    source_sequence: int | str | None,
+    source_location: str,
+    captured_at: str | None,
+) -> dict[str, Any]:
+    """Reduce untrusted provider input to the four durable event kinds.
+
+    All original bytes are represented only by a canonical digest.  A malformed object is still an
+    event: accepting it as an empty result would be a transcript reconstruction path in disguise.
+    """
+    captured = captured_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    supplied_digest = (
+        str(raw_event.get("_secretary_raw_event_digest") or "")
+        if isinstance(raw_event, Mapping) else ""
+    )
+    raw_digest = supplied_digest if re.fullmatch(r"[0-9a-f]{64}", supplied_digest) else _raw_event_digest(raw_event)
+    base = {
+        "raw_event_digest": raw_digest,
+        "source_sequence": source_sequence,
+        "source_location": str(source_location or ""),
+        "captured_at": captured,
+        "parent_thread_id": "",
+        "child_thread_id": "",
+        "tool_name": "",
+    }
+    if source_sequence is None or not str(source_location or ""):
+        return dict(base, type=EVENT_UNPARSEABLE_PROVIDER_EVENT, policy_outcome=FANOUT_TERMINAL_UNKNOWN,
+                    reason="provider event has no source sequence or location")
+    if not isinstance(raw_event, Mapping):
+        return dict(base, type=EVENT_UNPARSEABLE_PROVIDER_EVENT, policy_outcome=FANOUT_TERMINAL_UNKNOWN,
+                    reason="provider event is not an object")
+    raw = dict(raw_event)
+    parent = str(raw.get("parent_thread_id") or raw.get("parentThreadId") or "")
+    child = str(raw.get("child_thread_id") or raw.get("childThreadId") or "")
+    children = raw.get("child_thread_ids") or raw.get("childThreadIds")
+    if isinstance(children, list):
+        nonempty = [str(value) for value in children if str(value)]
+        if len(nonempty) == 1:
+            child = nonempty[0]
+        elif nonempty:
+            child = ",".join(nonempty)
+    tool = str(raw.get("tool_name") or raw.get("tool") or raw.get("name") or "")
+    event_type = str(raw.get("type") or raw.get("event_type") or "")
+    base.update(parent_thread_id=parent, child_thread_id=child, tool_name=tool)
+    if event_type in PROVIDER_EVENT_TYPES:
+        declared = event_type
+    elif tool or child:
+        declared = EVENT_COLLABORATION_CALL if tool else EVENT_CHILD_THREAD_EDGE
+    else:
+        return dict(base, type=EVENT_UNPARSEABLE_PROVIDER_EVENT, policy_outcome=FANOUT_TERMINAL_UNKNOWN,
+                    reason="provider event has no recognised collaboration shape")
+    if declared == EVENT_UNPARSEABLE_PROVIDER_EVENT:
+        return dict(base, type=declared, policy_outcome=FANOUT_TERMINAL_UNKNOWN,
+                    reason="provider emitted an unparseable collaboration event")
+    if not expected_parent_thread_id or not parent or parent != expected_parent_thread_id:
+        return dict(base, type=EVENT_UNKNOWN_THREAD_EDGE, policy_outcome=FANOUT_TERMINAL_UNKNOWN,
+                    reason="provider event parent identity is absent or does not match this HeadRun")
+    if declared == EVENT_UNKNOWN_THREAD_EDGE:
+        return dict(base, type=declared, policy_outcome=FANOUT_TERMINAL_UNKNOWN,
+                    reason="provider reported an unknown parent or child thread relation")
+    if declared == EVENT_COLLABORATION_CALL:
+        if not tool or tool.lower() not in KNOWN_COLLABORATION_TOOLS:
+            return dict(base, type=EVENT_COLLABORATION_CALL, policy_outcome=FANOUT_TERMINAL_UNKNOWN,
+                        reason="provider called an unknown collaboration tool")
+        return dict(base, type=EVENT_COLLABORATION_CALL, policy_outcome=FANOUT_TERMINAL_VIOLATION,
+                    reason="provider collaboration call observed")
+    # A declared child-edge result with a relation is a violation even if the child identity is
+    # redacted by the provider.  An empty relation cannot be clean: it is unknown.
+    if not child:
+        return dict(base, type=EVENT_UNKNOWN_THREAD_EDGE, policy_outcome=FANOUT_TERMINAL_UNKNOWN,
+                    reason="provider child-thread edge has no child identity")
+    return dict(base, type=EVENT_CHILD_THREAD_EDGE, policy_outcome=FANOUT_TERMINAL_VIOLATION,
+                reason="provider child-thread edge observed")
+
+
+def _raw_event_digest(raw_event: Any) -> str:
+    try:
+        return _json_digest(raw_event)
+    except ValueError:
+        # Do not retain a possibly secret ``repr``.  Its type still distinguishes the malformed
+        # provider payload and the fixed literal makes the digest deterministic.
+        return _json_digest({"unserialisable_type": type(raw_event).__name__})

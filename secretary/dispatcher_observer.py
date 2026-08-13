@@ -72,6 +72,7 @@ from secretary.dispatcher_watchdog import (
     pid_file_path,
 )
 from secretary.dispatcher_types import HostError
+from secretary.codex_provider_events import CodexProviderSourceError
 from secretary.role_env import observer_binding
 from secretary.role_skills import skill_delivery
 from secretary.sprint_observer import (
@@ -82,6 +83,8 @@ from secretary.sprint_observer import (
     executable_observer,
 )
 from secretary.tasks import TaskError, is_significant_observer_event
+from triggered_agents.runtime import head as head_ops
+from triggered_agents.runtime.codex_preflight import CodexFanoutRecordingError
 
 OBSERVER_ROLE = "observer"
 OBSERVER_PID_KIND = "observer"
@@ -118,6 +121,7 @@ EVENT_LAUNCHED = "observer_launched"
 EVENT_RELAUNCHED = "observer_relaunched"
 EVENT_STOPPED = "observer_stopped"
 EVENT_DEFERRED = "observer_launch_deferred"
+EVENT_PROVIDER_FANOUT_BLOCKED = "observer_codex_provider_fanout_blocked"
 
 # A stop that the host refused. The head may still be running, so the record survives with its
 # handle and the tick keeps retrying until the terminal is gone.
@@ -644,6 +648,26 @@ def _reconcile_open_sprint(
             "action": "observer-none",
             "reason": "sprint declares no observer",
         }
+    if record is not None and record.state == "blocked":
+        # A provider-policy refusal has no retry condition inside the dispatcher.  Keep this
+        # sprint-visible record and typed evidence until an independently attested launch replaces
+        # it; treating it as a normal deferred launch would quietly keep probing forbidden panes.
+        return {
+            "status": "blocked",
+            "step": "observer-reconcile",
+            "sprint": ref,
+            "action": "codex-fanout-policy-blocked",
+            "head": record.head,
+            "policy_evidence": {"kind": "codex_provider_fanout", "state": "unknown"},
+            "reason": record.deferred_reason,
+        }
+    if record is not None and _head_may_be_running(record):
+        # Recovery has to re-install the exact launch binding before it looks at any new provider
+        # event.  The source verifier rejects a missing/mismatched cursor rather than attributing
+        # a same-workspace journal to this observer.
+        failure = _poll_codex_provider_ingress(runtime, payload, observers, ref, record)
+        if failure is not None:
+            return failure
     # A record still in `launching` is a bring-up whose tick did not live to record the outcome.
     # It is resolved before anything else, because until it is, neither "a head is running here"
     # nor "this sprint is headless" is known.
@@ -1872,6 +1896,7 @@ def _launch_observer(
             runtime, payload, observers, ref, record, head=head,
             reason=f"observer launch intent could not be persisted: {intent}",
         )
+    _bind_codex_provider_ingress(runtime, payload, observers, ref, record)
     try:
         launched = runtime.host.prepare_observer(
             sprint,
@@ -2001,6 +2026,100 @@ def _launch_observer(
     return _with_audit(outcome, commit_event(runtime, event))
 
 
+def _bind_codex_provider_ingress(
+    runtime: Any,
+    payload: dict[str, Any],
+    observers: dict[str, ObserverRecord],
+    ref: str,
+    record: ObserverRecord,
+) -> None:
+    """Bind the observer's persisted HeadRun to the only provider-event ingress.
+
+    The callbacks mutate this exact record and flush the observer state before a cursor can move
+    or an identity-fenced stop can act.  There is no workspace-level fallback after recovery.
+    """
+    stored = record.head_run if isinstance(record.head_run, dict) else {}
+    if not stored.get("run_id"):
+        return
+    try:
+        run = head_ops.HeadRun.from_json(stored)
+    except (head_ops.HeadRunError, head_ops.TaskRefError):
+        return
+    if run.spec.adapter != "codex" or not isinstance(run.fanout_policy.get("provider_source"), dict):
+        return
+
+    def persist(updated: head_ops.HeadRun) -> None:
+        if not updated.same_run(run):
+            raise HostError("observer provider event writer was handed another HeadRun")
+        record.head_run = updated.to_json()
+        record.workspace = updated.workspace or record.workspace
+        record.handle = updated.handle or record.handle
+        record.leaf = updated.leaf or record.leaf
+        record.pid_file = updated.pid_file or record.pid_file
+        observers[ref] = record
+        if not _persist_quietly(runtime, payload, observers):
+            raise OSError("observer provider event state could not be durably saved")
+
+    def stop(updated: head_ops.HeadRun, reason: str) -> None:
+        # ``stop_observer_head`` asks the host to identity-fence the run before it signals or
+        # removes the worktree.  A foreign heartbeat is kept on the record and never signalled.
+        stop_observer_head(runtime, record)
+
+    def block(evidence: dict[str, Any]) -> None:
+        record.state = "blocked"
+        record.deferred_reason = (
+            "Codex provider fan-out policy blocked observer: "
+            f"{evidence.get('state') or 'unknown'}; {evidence.get('reason') or 'provider event observed'}"
+        )
+        record.last_action = "codex-provider-fanout-blocked"
+        record.last_action_at = time.time()
+        observers[ref] = record
+        _persist_quietly(runtime, payload, observers)
+        record_event(
+            runtime,
+            EVENT_PROVIDER_FANOUT_BLOCKED,
+            ref,
+            observer_request_id("codex-provider-event-blocked", ref, record.generation, record.launches),
+            {"policy_evidence": dict(evidence), "head": record.head},
+        )
+
+    runtime.host.configure_codex_provider_ingress(run, persist=persist, stop=stop, block=block)
+
+
+def _poll_codex_provider_ingress(
+    runtime: Any,
+    payload: dict[str, Any],
+    observers: dict[str, ObserverRecord],
+    ref: str,
+    record: ObserverRecord,
+) -> dict[str, Any] | None:
+    _bind_codex_provider_ingress(runtime, payload, observers, ref, record)
+    if not isinstance(record.head_run, dict) or not record.head_run.get("run_id"):
+        # A record from before runtime HeadRuns cannot be identified as Codex from this field.
+        # It is not promoted to an allowed policy state, but it remains on its established
+        # non-provider lifecycle path rather than being misclassified as a Codex source failure.
+        return None
+    try:
+        run = head_ops.HeadRun.from_json(record.head_run)
+    except (head_ops.HeadRunError, head_ops.TaskRefError):
+        # Older launch intents had a run id before the full HeadRun was returned by the host.
+        # They cannot be identified as an attested Codex source, so leave their existing launch
+        # recovery path intact.  Current Codex preflight records a complete source-bearing run.
+        return None
+    if run.spec.adapter != "codex" or not isinstance(run.fanout_policy.get("provider_source"), dict):
+        return None
+    try:
+        runtime.host.poll_codex_provider_ingress(run)
+    except (CodexProviderSourceError, CodexFanoutRecordingError) as exc:
+        return {
+            "status": "blocked", "step": "observer-reconcile", "sprint": ref,
+            "action": "codex-provider-fanout-blocked",
+            "policy_evidence": {"kind": "codex_provider_fanout", "state": "unknown"},
+            "reason": str(exc),
+        }
+    return None
+
+
 def _write_launch_intent(
     runtime: Any,
     payload: dict[str, Any],
@@ -2030,10 +2149,26 @@ def _write_launch_intent(
         # Without the workspace the head could not be found again, and without the pid file its
         # liveness could not be read: an intent that names neither is not worth launching against.
         return f"{type(exc).__name__}: {exc}"
+    run_id = uuid.uuid4().hex
+    preflight_run: dict[str, Any] | None = None
+    attest = getattr(runtime.host, "preflight_codex_run", None)
+    if callable(attest):
+        try:
+            candidate = attest(
+                head,
+                role=OBSERVER_ROLE,
+                workspace=workspace,
+                task_ref=head_ops.TaskRef.sprint(ref),
+                pid_file=pid_file,
+                run_id=run_id,
+            )
+        except Exception as exc:
+            return f"codex-fanout-policy: {type(exc).__name__}: {exc}"
+        preflight_run = candidate.to_json()
     record.head = head
     record.workspace = workspace
     record.pid_file = pid_file
-    record.head_run = {"run_id": uuid.uuid4().hex}
+    record.head_run = preflight_run or {"run_id": run_id}
     record.pending_launch = attempt
     record.head_possible = True
     record.workspace_live = True
@@ -2091,8 +2226,13 @@ def _defer(
     a deliberate drain is retried when the drain ends rather than on that deadline.
     """
     record = record or ObserverRecord(sprint=ref)
+    policy_refusal = reason.startswith("codex-fanout-policy:")
     record.head = record.head or head
-    if not keep_state:
+    if policy_refusal:
+        record.state = "blocked"
+        retry = False
+        action = "codex-fanout-policy-blocked"
+    elif not keep_state:
         record.state = "deferred"
     if retry:
         record.launch_attempts += 1
@@ -2117,13 +2257,15 @@ def _defer(
         {"head": record.head, "reason": record.deferred_reason, "launches": record.launches},
     )
     outcome = {
-        "status": "skipped",
+        "status": "blocked" if policy_refusal else "skipped",
         "step": "observer-reconcile",
         "sprint": ref,
         "action": action,
         "head": record.head,
         "reason": record.deferred_reason,
     }
+    if policy_refusal:
+        outcome["policy_evidence"] = {"kind": "codex_provider_fanout", "state": "unknown"}
     if readiness is not None:
         outcome["readiness"] = readiness
     _persist_quietly(runtime, payload, observers)

@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 from triggered_agents.runtime import dispatch
+from triggered_agents.runtime import codex_preflight
 from triggered_agents.runtime import state as runtime_state
 from triggered_agents.runtime import tui_delivery
 from triggered_agents.runtime.agent_prompt_transport import BRACKETED_PASTE_END, BRACKETED_PASTE_START
@@ -520,7 +521,7 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
         self.workspace = str(self.root / "workspace")
         Path(self.workspace).mkdir()
         self.codex_home = self.root / "codex-home"
-        self.profile = {"resource": "openai-sub", "adapter": "codex",
+        self.profile = {"resource": "openai-sub", "adapter": "codex", "model": "gpt-5.6-terra",
                         "codex_home": str(self.codex_home), "fallback": []}
         self.command = dispatch.DispatchCommand(
             "/retro", "codex", "codex", None, prompt_after_start=True, head_profile=self.profile
@@ -529,6 +530,24 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
     def _trusted(self) -> dict:
         import tomllib
         return tomllib.loads((self.codex_home / "config.toml").read_text(encoding="utf-8"))
+
+    @staticmethod
+    def _allowed_attestation(_profile, run, **_kwargs):
+        """An independently accepted provider-schema result for shared-boundary tests."""
+        return run.with_fanout_policy({
+            "version": 1,
+            "state": "allowed",
+            "terminal_state": "clean",
+            "run_id": run.run_id,
+            "role": run.role,
+            "model": run.spec.model or "",
+            "binary_path": "/test/codex",
+            "binary_digest": "0" * 64,
+            "cli_version": "test-codex",
+            "tool_schema_digest": "0" * 64,
+            "provider_schema_verdict": "no_callable_child_spawn_surface",
+            "events": [],
+        })
 
     def test_a_fresh_codex_service_workspace_is_trusted_before_its_pane_exists(self) -> None:
         order: list[str] = []
@@ -540,14 +559,22 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
             order.append("trusted" if (self.codex_home / "config.toml").is_file() else "untrusted")
             return "term-codex"
 
+        shared_preflight = dispatch.preflight_codex_launch
+
+        def recording_preflight(*args, **kwargs):
+            order.append("preflight")
+            return shared_preflight(*args, **kwargs)
+
         with mock.patch.object(dispatch, "_dispatch_command", return_value=self.command), \
              mock.patch.object(dispatch, "_create_terminal", side_effect=create), \
+             mock.patch.object(codex_preflight, "attest_codex_fanout", side_effect=self._allowed_attestation), \
+             mock.patch.object(dispatch, "preflight_codex_launch", side_effect=recording_preflight), \
              mock.patch.object(dispatch, "_deliver_interactive_skill",
                                side_effect=lambda *a, **kw: order.append("deliver")):
             dispatch._spawn_fresh_terminal("retro", None, self.workspace, mock.Mock(), "dispatch",
                                            host=FakeSessionHost())
 
-        self.assertEqual(order, ["create", "trusted", "deliver"])
+        self.assertEqual(order, ["preflight", "create", "trusted", "deliver"])
         trusted = self._trusted()
         self.assertEqual(
             trusted["projects"][str(Path(self.workspace).resolve())]["trust_level"], "trusted"
@@ -566,14 +593,8 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
         claude_ready.assert_called_once_with(self.workspace)
         self.assertFalse(self.codex_home.exists())
 
-    def test_a_workspace_that_cannot_be_prepared_creates_no_pane_at_all(self) -> None:
-        """A path somebody kept untrusted is a decision, not something to launch on top of."""
-        self.codex_home.mkdir()
-        (self.codex_home / "config.toml").write_text(
-            f'[projects.{json.dumps(str(Path(self.workspace).resolve()))}]\n'
-            'trust_level = "untrusted"\n',
-            encoding="utf-8",
-        )
+    def test_a_refused_service_preflight_creates_no_pane_or_codex_config(self) -> None:
+        """The current schema-absent refusal is side-effect free before its pane exists."""
         state = mock.Mock()
 
         with mock.patch.object(dispatch, "_dispatch_command", return_value=self.command), \
@@ -586,6 +607,30 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
         create.assert_not_called()
         deliver.assert_not_called()
         state.save_active_report.assert_not_called()
+        self.assertFalse((self.codex_home / "config.toml").exists())
+
+    def test_an_untrusted_workspace_rejects_an_otherwise_allowed_service_preflight(self) -> None:
+        """Trust is still a hard pre-pane check, but only after the provider allow result."""
+        self.codex_home.mkdir()
+        config = self.codex_home / "config.toml"
+        config.write_text(
+            f'[projects.{json.dumps(str(Path(self.workspace).resolve()))}]\n'
+            'trust_level = "untrusted"\n',
+            encoding="utf-8",
+        )
+        state = mock.Mock()
+
+        with mock.patch.object(dispatch, "_dispatch_command", return_value=self.command), \
+             mock.patch.object(codex_preflight, "attest_codex_fanout", side_effect=self._allowed_attestation), \
+             mock.patch.object(dispatch, "_create_terminal") as create, \
+             mock.patch.object(dispatch, "_deliver_interactive_skill") as deliver:
+            with self.assertRaises(dispatch.CodexPreflightError):
+                dispatch._spawn_fresh_terminal("retro", None, self.workspace, state, "dispatch",
+                                               host=FakeSessionHost())
+
+        create.assert_not_called()
+        deliver.assert_not_called()
+        self.assertIn('trust_level = "untrusted"', config.read_text(encoding="utf-8"))
 
     def test_a_failed_preflight_escalates_the_steward_card_instead_of_closing_it(self) -> None:
         """No head was started, so no sweep happened: the card must not be recorded as one.
@@ -618,7 +663,7 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
         create.assert_not_called()
         self.assertEqual(moved[0][0], ("steward", "secretary-817", "Blocked"))
         self.assertIn("no head was started", moved[0][1]["reason"])
-        self.assertIn("trust_level", moved[0][1]["reason"])
+        self.assertIn("fan-out", moved[0][1]["reason"])
         self.assertNotIn("Done", [call[0][2] for call in moved])
         state.clear_active_report.assert_called_once_with("secretary-817")
 
@@ -631,9 +676,8 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
     def test_the_service_launcher_and_the_dispatcher_run_one_preflight(self) -> None:
         """Not two implementations that agree today: the same function object."""
         from secretary import dispatcher_launcher
-        from triggered_agents.runtime import codex_preflight
 
-        self.assertIs(dispatch.ensure_codex_workspace_trusted,
-                      codex_preflight.ensure_codex_workspace_trusted)
+        self.assertIs(dispatch.preflight_codex_launch,
+                      codex_preflight.preflight_codex_launch)
         self.assertIs(dispatcher_launcher._preflight_codex_workspace,
                       codex_preflight.ensure_codex_workspace_trusted)

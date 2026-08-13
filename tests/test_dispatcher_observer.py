@@ -61,8 +61,10 @@ from secretary.role_env import (
 from secretary.status import _observers as status_observers
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter, _now
 from triggered_agents.runtime.agent_prompt_transport import BRACKETED_PASTE_END, BRACKETED_PASTE_START
+from triggered_agents.runtime.codex_preflight import ensure_codex_workspace_trusted
 
 from tests.observer_identity import as_observer, bind_observer
+from tests.fanout_fixtures import accepted_transport_run
 from tests.test_dispatcher import (
     FakeCatalog,
     FakeHost,
@@ -4309,6 +4311,7 @@ class RealHostObserverWorkspaceTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         self.host = CommandHostRuntime(_ObserverCatalog(), self.root / "data", mode="real")  # type: ignore[arg-type]
+        self.host.preflight_codex_run = accepted_transport_run  # type: ignore[method-assign]
         self.calls: list[list[str]] = []
         self.shell: list[list[str]] = []
         self.registered = False
@@ -4473,6 +4476,7 @@ class RealHostObserverTeardownTests(unittest.TestCase):
         self.board = FakeKanboard()
         self.catalog = _ObserverCatalog(instance_dir=self.data_dir)
         self.host = CommandHostRuntime(self.catalog, self.data_dir / "host", mode="real")  # type: ignore[arg-type]
+        self.host.preflight_codex_run = accepted_transport_run  # type: ignore[method-assign]
         self.audit = TaskAudit(self.data_dir)
         self.runtime = DispatcherRuntime(
             TaskReader(self.board),  # type: ignore[arg-type]
@@ -4655,6 +4659,7 @@ class RealHostTuiObserverLaunchTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         self.host = CommandHostRuntime(_TuiCatalog(), self.root / "data", mode="real")  # type: ignore[arg-type]
+        self.host.preflight_codex_run = accepted_transport_run  # type: ignore[method-assign]
         self.stops: list[str] = []
         self.stop_refused = False
         delivery = mock.patch.object(
@@ -4750,6 +4755,9 @@ class ObserverCodexTrustTests(unittest.TestCase):
         catalog = object.__new__(InstanceCatalog)
         catalog._heads = canonical_heads(Path(__file__).resolve().parents[1])  # type: ignore[attr-defined]
         self.host = CommandHostRuntime(catalog, self.root / "data", mode="real")  # type: ignore[arg-type]
+        # This suite's subject is the shared trust write after an independently captured allow;
+        # it supplies that boundary explicitly rather than letting profile data imply it.
+        self.host.preflight_codex_run = self._trust_attested_run  # type: ignore[method-assign]
         self.commands: list[str] = []
         self.registered = False
         delivery = mock.patch.object(dispatcher_module, "_deliver_tui_prompt", mock.Mock())
@@ -4760,6 +4768,26 @@ class ObserverCodexTrustTests(unittest.TestCase):
         )
         run_json.start()
         self.addCleanup(run_json.stop)
+
+    def _trust_attested_run(
+        self,
+        head: str,
+        *,
+        role: str,
+        workspace: str,
+        task_ref: head_ops.TaskRef,
+        pid_file: str,
+        run_id: str,
+    ) -> head_ops.HeadRun:
+        ensure_codex_workspace_trusted(self.host.catalog.head_profile(head), workspace)
+        return accepted_transport_run(
+            head,
+            role=role,
+            workspace=workspace,
+            task_ref=task_ref,
+            pid_file=pid_file,
+            run_id=run_id,
+        )
 
     def _run_json(self, args: list[str]) -> dict[str, object]:
         step = args[1:3]

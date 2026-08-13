@@ -38,6 +38,7 @@ from secretary.dispatcher_launch import launch_intent_liveness
 from secretary._fsutil import file_lock
 from secretary.dispatcher_state import DispatcherRecord
 from tests.dispatcher_fixtures import ensure_attempt
+from tests.fanout_fixtures import accepted_transport_run
 from secretary.dispatcher_types import HeadLaunchAborted, HeadPaneNotReady, HostError
 from secretary.dispatcher_watchdog import initial_output_stall_seconds, pid_file_path
 from secretary.dispatcher_worker_lifecycle import WorkerContinuation, WorkerContinuationStage
@@ -56,6 +57,31 @@ from tests.test_dispatcher import (
 REF = "secretary-510-pilot"
 # Above the default pid_max, so `kill(pid, 0)` raises and the heartbeat reads as a head that died.
 DEAD_PID = 999999
+
+
+def _transport_only_preflight(
+    head: str,
+    *,
+    role: str,
+    workspace: str,
+    task_ref: head_ops.TaskRef,
+    pid_file: str,
+    run_id: str,
+) -> head_ops.HeadRun:
+    """A captured allow fixture for tests whose subject starts after the policy boundary.
+
+    These contract tests exercise pane/delivery and fenced-stop transport.  The provider policy
+    has its own fixtures, so this explicit test double represents the separately attested run the
+    transport receives rather than making an absent schema look allowed.
+    """
+    return accepted_transport_run(
+        head,
+        role=role,
+        workspace=workspace,
+        task_ref=task_ref,
+        pid_file=pid_file,
+        run_id=run_id,
+    )
 
 
 def _document_report_id(workspace: str) -> str:
@@ -2616,6 +2642,7 @@ class HostLaunchContourTests(unittest.TestCase):
         self.addCleanup(self.tmpdir.cleanup)
         self.data_dir = Path(self.tmpdir.name)
         self.host = CommandHostRuntime(FakeCatalog(), self.data_dir, mode="real")  # type: ignore[arg-type]
+        self.host.preflight_codex_run = _transport_only_preflight  # type: ignore[method-assign]
         self.json_calls: list[list[str]] = []
 
     def run_json(self, answers: dict[str, Any]):
@@ -2770,6 +2797,9 @@ class HostLaunchContourTests(unittest.TestCase):
         launch = HeadCommand("run-worker", prompt_after_start=True)
 
         class Catalog:
+            def head_profile(self, _head: str) -> dict[str, str]:
+                return {"adapter": "codex", "model": "gpt-5.6-terra"}
+
             def head_launch(self, *args: Any, **kwargs: Any) -> HeadCommand:
                 return launch
 
@@ -3315,6 +3345,7 @@ class WorkerPathReachesOnlyTheSessionHostTests(unittest.TestCase):
         self.session = self.WorkingPane()
         self.runner = self.NoRunner()
         self.host = CommandHostRuntime(self.Catalog(), self.data_dir, mode="real")  # type: ignore[arg-type]
+        self.host.preflight_codex_run = _transport_only_preflight  # type: ignore[method-assign]
         # Both halves of the runtime's own access to Orca: the JSON runner every `orca terminal`
         # call goes through, and the process runner underneath it.
         self.addCleanup(mock.patch.object(self.host, "_run_json", self.runner).stop)

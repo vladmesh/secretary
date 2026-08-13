@@ -60,6 +60,7 @@ from secretary.tasks import KanboardClient
 from secretary.board_transport import ensure as ensure_board_transport
 
 from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard
+from tests.fanout_fixtures import accepted_transport_run
 
 # Modules that reach through a runtime into the host/catalog collaborators.
 _RUNTIME_MODULES = (
@@ -230,6 +231,9 @@ class HostBehaviourContractTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         self.real = CommandHostRuntime(FakeCatalog(), self.root / "data", mode="noop")  # type: ignore[arg-type]
+        # These calls assert host return-shape parity after the pre-pane boundary.  The explicit
+        # accepted run keeps the test from claiming a missing provider schema is launchable.
+        self.real.preflight_codex_run = accepted_transport_run  # type: ignore[method-assign]
         self.fake = FakeHost(self.root / "fake")
         (self.root / "fake").mkdir(parents=True, exist_ok=True)
 
@@ -1043,8 +1047,8 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
 
         self.assertIs(dispatcher_launcher._preflight_codex_workspace,
                       codex_preflight.ensure_codex_workspace_trusted)
-        self.assertIs(ta_dispatch.ensure_codex_workspace_trusted,
-                      codex_preflight.ensure_codex_workspace_trusted)
+        self.assertIs(ta_dispatch.preflight_codex_launch,
+                      codex_preflight.preflight_codex_launch)
         source = Path(codex_preflight.__file__).read_text(encoding="utf-8")
         self.assertNotIn("import secretary", source)
         self.assertNotIn("from secretary", source)

@@ -110,14 +110,50 @@ evidence](evidence/codex-provider-fanout-2026-08-13.md). In particular, do not p
 an isolation check. The evidence includes the global v2 wait-disabled candidate and per-row typed
 strict-config and ignored-role state; a rejected or ignored configuration is not a capability result.
 
+The runtime's attestation protocol is v1. An allowed `HeadRun` records the exact CLI path and
+SHA-256 digest, CLI version, model, role, canonical tool-schema digest and explicit
+`no_callable_child_spawn_surface` verdict. `schema_absent`, `schema_unknown`, malformed,
+unsupported and historical records are non-clean and cannot open a pane. The current 0.147.0
+evidence has no allowed result, so this is an intentional pre-pane refusal, not a reason to select
+another provider.
+
+Provider events are durable run data, not screen observations. The collector records only
+`collaboration_call`, `child_thread_edge`, `unknown_thread_edge` and
+`unparseable_provider_event`, each with available parent/child identities, tool name, raw-event
+digest, source sequence/location and capture time. It writes the event and terminal state before
+the existing identity-fenced stop path can act. Collaboration calls and child edges are violations;
+unknown tools/relations, missing parent identity, malformed input and an event-write failure are
+unknown and block the affected card or sprint. A clean event does not repair absent attestation.
+
+For an allowed future canary, the recorder attaches to Codex's structured session-event JSONL at
+launch. It reads the journal's `session_meta` and `event_msg` envelopes, not pane text. The v1
+HeadRun first records an unbound source root and pre-launch path baseline, then the one new matching
+journal's path, provider session id, parent thread id and line/digest cursor before its first
+prompt. The retained TUI collaboration item is `event_msg.payload.item.type = CollabAgentToolCall`;
+its `tool`, `sender_thread_id` and `receiver_thread_ids` are normalized with the documented
+`collab_tool_call` form. Any other collaboration-shaped item is unknown, not a clean record. Once
+the binding is durable, it records first/root/last anchors and a digest of the complete initially
+observed range, then starts the shared scanner at an anchored zero cursor. The scanner classifies the
+complete initially observed selected source from its first raw record through the root and all existing
+tail records before prompt delivery, then every later line before lifecycle work. Selecting a journal by
+valid session/root identity never exempts its pre-root data. Ordinary records may move the cursor only
+through a durable write. A malformed, collaboration-shaped, child-edge, unknown-relation or
+cursor-write failure is fenced and blocked before delivery; it cannot be skipped or rendered as a clean
+cursor. This is not the tolerant workspace rollout-activity scan. The canary therefore requires the
+provider journal to expose its root `thread.started` identity before task delivery; without it the
+launch is unknown and fenced rather than prompt-delivered. Recovery verifies the same source's complete
+initial range and cursor before consuming a later line; a missing, unreadable, changed or ambiguous
+source is unknown, blocks the affected card or sprint with typed evidence and uses only the
+identity-fenced stop path.
+
 Rerun the matrix only when a new approved disposable-auth probe is warranted, such as an installed
 Codex binary/model change or a candidate provider control. Use the committed
 `scripts/codex_capability_matrix.py` harness with a freshly isolated empty git worktree and
 `CODEX_HOME`; never direct it at a production home. The harness accepts an explicitly approved auth
 source, does not parse or log it, copies it only into the temporary home and deletes the copy before
 the next matrix row. Its JSON result has only raw-stream digests and typed event summaries. A live
-canary must use the preflight/`HeadRun` telemetry contract in the evidence, rather than promoting a
-fresh model response into policy.
+canary starts only after the exact v1 attestation is allowed and the run-bound recorder is durably
+available; it must not promote a fresh model response into policy.
 
 ## System requirements
 
