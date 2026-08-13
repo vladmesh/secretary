@@ -74,7 +74,10 @@ proof.
 The capability evidence and the implementation-ready fail-closed contract are in
 [Codex provider-internal fan-out capability evidence](evidence/codex-provider-fanout-2026-08-13.md).
 For the installed 0.147.0 CLI it records no provable native boundary: `--disable multi_agent` still
-produced a real collaboration call. Consequently no worker, reviewer or observer launch may be
+produced a real collaboration call, while the globally configured v2 wait-disabled row had no
+collaboration call but no schema evidence. The artifact records strict-config rejection and
+ignored-role state as typed evidence, so neither a rejected candidate nor a silently ignored role
+can pass as isolation. Consequently no worker, reviewer or observer launch may be
 treated as isolated merely because that flag or `hide_spawn_agent_metadata` is present. A future
 attestation must be checked in the shared Codex preflight before a pane exists, bind the provider
 identity to the durable `HeadRun`, and fail closed on every collaboration record or unknown

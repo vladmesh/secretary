@@ -107,7 +107,8 @@ roles. The current capability matrix, binary digest, strictly parsed candidate c
 typed rollout evidence are recorded in [Codex provider-internal fan-out capability
 evidence](evidence/codex-provider-fanout-2026-08-13.md). In particular, do not present
 `--disable multi_agent`, `hide_spawn_agent_metadata`, an instruction or a non-spawning response as
-an isolation check.
+an isolation check. The evidence includes the global v2 wait-disabled candidate and per-row typed
+strict-config and ignored-role state; a rejected or ignored configuration is not a capability result.
 
 Rerun the matrix only when a new approved disposable-auth probe is warranted, such as an installed
 Codex binary/model change or a candidate provider control. Use the committed

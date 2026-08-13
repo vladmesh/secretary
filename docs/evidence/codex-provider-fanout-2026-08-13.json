@@ -1,5 +1,5 @@
 {
-  "captured_at_utc": "2026-08-13T03:40:14.452327+00:00",
+  "captured_at_utc": "2026-08-13T04:04:02.654128+00:00",
   "codex_executable": "/home/dev/.local/lib/node_modules/@openai/codex/bin/codex.js",
   "codex_version": "codex-cli 0.147.0",
   "evidence_format": 1,
@@ -13,7 +13,7 @@
         "PARENT_OK"
       ],
       "all_observed_thread_or_session_ids": [
-        "019ff933-a21a-7ad2-b938-90f2f069b0d2"
+        "019ff949-7092-7df2-8019-1968b9c83437"
       ],
       "child_thread_edges": [],
       "collaboration_tool_records": [
@@ -21,7 +21,7 @@
           "event": "item.started",
           "item_id": "item_0",
           "receiver_thread_ids": [],
-          "sender_thread_id": "019ff933-a21a-7ad2-b938-90f2f069b0d2",
+          "sender_thread_id": "019ff949-7092-7df2-8019-1968b9c83437",
           "sequence": 2,
           "status": "in_progress",
           "tool": "wait"
@@ -30,7 +30,7 @@
           "event": "item.completed",
           "item_id": "item_0",
           "receiver_thread_ids": [],
-          "sender_thread_id": "019ff933-a21a-7ad2-b938-90f2f069b0d2",
+          "sender_thread_id": "019ff949-7092-7df2-8019-1968b9c83437",
           "sequence": 3,
           "status": "completed",
           "tool": "wait"
@@ -51,17 +51,23 @@
         "read-only",
         "<bounded-forced-fan-out-prompt>"
       ],
+      "configuration_evidence": {
+        "agent_role_status": "not_requested",
+        "ignored_role_definitions": [],
+        "strict_config_rejections": [],
+        "strict_config_status": "no_rejection_observed"
+      },
       "exit_status": 0,
       "forced_spawn_requested": true,
       "json_event_count": 6,
       "malformed_jsonl_lines": 0,
       "model_spawn_compliance": "model_did_not_issue_spawn_tool_call",
       "parent_thread_ids": [
-        "019ff933-a21a-7ad2-b938-90f2f069b0d2"
+        "019ff949-7092-7df2-8019-1968b9c83437"
       ],
       "policy_result": "collaboration_call_observed_without_child_edge: reject_as_native_boundary",
-      "raw_stderr_sha256": "1da91ae934ba3fb3ce747c84b45298202a06a054e3f06e4d69b08e9069f6b47e",
-      "raw_stdout_sha256": "8bd61b304ab17744d5588d55d928c7629393c5f3549c1b4ff7e68e78192f6556",
+      "raw_stderr_sha256": "06ec4acd6b0a27f1f57320aaed363d36cfda2d78cd95c1b7e4f49e648590a43a",
+      "raw_stdout_sha256": "901f6a5d5bb36a0998c0834f5b4daa009de1be58a25e5502a2bea6eec2421adc",
       "spawn_attempt_observed": false,
       "spawn_schema_availability": "unknown",
       "strict_config_flags": [],
@@ -74,7 +80,7 @@
         "PARENT_OK"
       ],
       "all_observed_thread_or_session_ids": [
-        "019ff933-e0ba-73d2-8060-7c3eabff667a"
+        "019ff949-a214-7db1-a765-4dd4a31aa7c1"
       ],
       "child_thread_edges": [],
       "collaboration_tool_records": [
@@ -82,7 +88,7 @@
           "event": "item.started",
           "item_id": "item_0",
           "receiver_thread_ids": [],
-          "sender_thread_id": "019ff933-e0ba-73d2-8060-7c3eabff667a",
+          "sender_thread_id": "019ff949-a214-7db1-a765-4dd4a31aa7c1",
           "sequence": 2,
           "status": "in_progress",
           "tool": "wait"
@@ -91,7 +97,7 @@
           "event": "item.completed",
           "item_id": "item_0",
           "receiver_thread_ids": [],
-          "sender_thread_id": "019ff933-e0ba-73d2-8060-7c3eabff667a",
+          "sender_thread_id": "019ff949-a214-7db1-a765-4dd4a31aa7c1",
           "sequence": 3,
           "status": "completed",
           "tool": "wait"
@@ -114,17 +120,23 @@
         "read-only",
         "<bounded-forced-fan-out-prompt>"
       ],
+      "configuration_evidence": {
+        "agent_role_status": "not_requested",
+        "ignored_role_definitions": [],
+        "strict_config_rejections": [],
+        "strict_config_status": "no_rejection_observed"
+      },
       "exit_status": 0,
       "forced_spawn_requested": true,
       "json_event_count": 6,
       "malformed_jsonl_lines": 0,
       "model_spawn_compliance": "model_did_not_issue_spawn_tool_call",
       "parent_thread_ids": [
-        "019ff933-e0ba-73d2-8060-7c3eabff667a"
+        "019ff949-a214-7db1-a765-4dd4a31aa7c1"
       ],
       "policy_result": "collaboration_call_observed_without_child_edge: reject_as_native_boundary",
-      "raw_stderr_sha256": "fa10b1bbb1fde06f983a7f156d0550a66171535273fc0692947352cf8f6f742b",
-      "raw_stdout_sha256": "3449a408b929a919d9c1fe88564dc5f0b2e7d03935322e408f163529b80c53d3",
+      "raw_stderr_sha256": "dc8108973251bec9938832fdd71cce87ff95154b5824b16efca02628f25ffc52",
+      "raw_stdout_sha256": "c96a125f21ab7e911cab64a6c4124542e75d3ed03f805d217f56cc3a680b16d7",
       "spawn_attempt_observed": false,
       "spawn_schema_availability": "unknown",
       "strict_config_flags": [
@@ -140,7 +152,64 @@
         "PARENT_OK"
       ],
       "all_observed_thread_or_session_ids": [
-        "019ff934-0784-7eb1-84b7-d3fe01ac387a"
+        "019ff949-cdba-72d3-be64-3a0ff7acaee5"
+      ],
+      "child_thread_edges": [],
+      "collaboration_tool_records": [],
+      "command_shape": [
+        "codex",
+        "--strict-config",
+        "--enable",
+        "multi_agent_v2",
+        "-c",
+        "features.multi_agent_v2.wait_agent_enabled=false",
+        "exec",
+        "--ephemeral",
+        "--json",
+        "--skip-git-repo-check",
+        "-C",
+        "<disposable-empty-git-worktree>",
+        "-m",
+        "gpt-5.6-terra",
+        "-s",
+        "read-only",
+        "<bounded-forced-fan-out-prompt>"
+      ],
+      "configuration_evidence": {
+        "agent_role_status": "not_requested",
+        "ignored_role_definitions": [],
+        "strict_config_rejections": [],
+        "strict_config_status": "no_rejection_observed"
+      },
+      "exit_status": 0,
+      "forced_spawn_requested": true,
+      "json_event_count": 4,
+      "malformed_jsonl_lines": 0,
+      "model_spawn_compliance": "model_did_not_issue_spawn_tool_call",
+      "parent_thread_ids": [
+        "019ff949-cdba-72d3-be64-3a0ff7acaee5"
+      ],
+      "policy_result": "no_collaboration_call_observed: schema_unavailable_not_proof_of_absence",
+      "raw_stderr_sha256": "85479a95b058f8d95231055c8c4344196c2c894108e50fb2223178e3390ca75f",
+      "raw_stdout_sha256": "d5c585e268fa95c37bbc5a285df93c67f17c998aa14cffb34e92a5a27593cf2a",
+      "spawn_attempt_observed": false,
+      "spawn_schema_availability": "unknown",
+      "strict_config_flags": [
+        "--enable",
+        "multi_agent_v2",
+        "-c",
+        "features.multi_agent_v2.wait_agent_enabled=false"
+      ],
+      "tool_schema_availability": "not_emitted_by_codex_exec_json",
+      "variant": "v2_feature_wait_disabled"
+    },
+    {
+      "actual_child_edge_observed": false,
+      "agent_messages": [
+        "PARENT_OK"
+      ],
+      "all_observed_thread_or_session_ids": [
+        "019ff949-f463-7242-b09f-3897fcd3652e"
       ],
       "child_thread_edges": [],
       "collaboration_tool_records": [
@@ -148,7 +217,7 @@
           "event": "item.started",
           "item_id": "item_0",
           "receiver_thread_ids": [],
-          "sender_thread_id": "019ff934-0784-7eb1-84b7-d3fe01ac387a",
+          "sender_thread_id": "019ff949-f463-7242-b09f-3897fcd3652e",
           "sequence": 2,
           "status": "in_progress",
           "tool": "wait"
@@ -157,7 +226,7 @@
           "event": "item.completed",
           "item_id": "item_0",
           "receiver_thread_ids": [],
-          "sender_thread_id": "019ff934-0784-7eb1-84b7-d3fe01ac387a",
+          "sender_thread_id": "019ff949-f463-7242-b09f-3897fcd3652e",
           "sequence": 3,
           "status": "completed",
           "tool": "wait"
@@ -182,17 +251,23 @@
         "read-only",
         "<bounded-forced-fan-out-prompt>"
       ],
+      "configuration_evidence": {
+        "agent_role_status": "not_requested",
+        "ignored_role_definitions": [],
+        "strict_config_rejections": [],
+        "strict_config_status": "no_rejection_observed"
+      },
       "exit_status": 0,
       "forced_spawn_requested": true,
       "json_event_count": 6,
       "malformed_jsonl_lines": 0,
       "model_spawn_compliance": "model_did_not_issue_spawn_tool_call",
       "parent_thread_ids": [
-        "019ff934-0784-7eb1-84b7-d3fe01ac387a"
+        "019ff949-f463-7242-b09f-3897fcd3652e"
       ],
       "policy_result": "collaboration_call_observed_without_child_edge: reject_as_native_boundary",
-      "raw_stderr_sha256": "620894fd2f009305352bc28d639cc7718ffed03bf1d783bb734102aa9c0150f0",
-      "raw_stdout_sha256": "b2d4c1df6bac4043f89f3ebfeeeb2d1f76c816970aff1388449588da20f56e36",
+      "raw_stderr_sha256": "58f0b54d3820e32c2f6bf93b0018bbc8cc77bed42c0a5bd5d3c01c0f9ce13085",
+      "raw_stdout_sha256": "55073a19e4914acee33d6db119e2a4bebdf0388adb4252c9050f2b586a8b3543",
       "spawn_attempt_observed": false,
       "spawn_schema_availability": "unknown",
       "strict_config_flags": [
@@ -210,25 +285,25 @@
         "PARENT_OK"
       ],
       "all_observed_thread_or_session_ids": [
-        "019ff934-30cf-7283-8fef-251bee84a13e"
+        "019ff94a-1dd4-7b62-8ad1-a0716051292d"
       ],
       "child_thread_edges": [],
       "collaboration_tool_records": [
         {
           "event": "item.started",
-          "item_id": "item_2",
+          "item_id": "item_0",
           "receiver_thread_ids": [],
-          "sender_thread_id": "019ff934-30cf-7283-8fef-251bee84a13e",
-          "sequence": 4,
+          "sender_thread_id": "019ff94a-1dd4-7b62-8ad1-a0716051292d",
+          "sequence": 2,
           "status": "in_progress",
           "tool": "wait"
         },
         {
           "event": "item.completed",
-          "item_id": "item_2",
+          "item_id": "item_0",
           "receiver_thread_ids": [],
-          "sender_thread_id": "019ff934-30cf-7283-8fef-251bee84a13e",
-          "sequence": 5,
+          "sender_thread_id": "019ff94a-1dd4-7b62-8ad1-a0716051292d",
+          "sequence": 3,
           "status": "completed",
           "tool": "wait"
         }
@@ -238,6 +313,8 @@
         "--strict-config",
         "--enable",
         "multi_agent_v2",
+        "-c",
+        "agents.default.description=\"Secretary capability matrix role\"",
         "-c",
         "agents.default.hide_spawn_agent_metadata=true",
         "exec",
@@ -252,22 +329,30 @@
         "read-only",
         "<bounded-forced-fan-out-prompt>"
       ],
+      "configuration_evidence": {
+        "agent_role_status": "description_supplied_no_ignored_role_warning",
+        "ignored_role_definitions": [],
+        "strict_config_rejections": [],
+        "strict_config_status": "no_rejection_observed"
+      },
       "exit_status": 0,
       "forced_spawn_requested": true,
-      "json_event_count": 8,
+      "json_event_count": 6,
       "malformed_jsonl_lines": 0,
       "model_spawn_compliance": "model_did_not_issue_spawn_tool_call",
       "parent_thread_ids": [
-        "019ff934-30cf-7283-8fef-251bee84a13e"
+        "019ff94a-1dd4-7b62-8ad1-a0716051292d"
       ],
       "policy_result": "collaboration_call_observed_without_child_edge: reject_as_native_boundary",
-      "raw_stderr_sha256": "eecd0ee076cd5c31394a518d4695bc07ae0f9cb0c100cece4ce9d728c4015484",
-      "raw_stdout_sha256": "bbe98b373ee665aa25e58490e01b58903c4e5c6d2ede2937cd34195199037172",
+      "raw_stderr_sha256": "41a573be1a5abd5fc9cd008086bed1aa10f5c92115805a54e57053267d7eacf6",
+      "raw_stdout_sha256": "1c9d6b7643cb59300a4620e51ba7e624e90c8556461494361b82484d5060f646",
       "spawn_attempt_observed": false,
       "spawn_schema_availability": "unknown",
       "strict_config_flags": [
         "--enable",
         "multi_agent_v2",
+        "-c",
+        "agents.default.description=\"Secretary capability matrix role\"",
         "-c",
         "agents.default.hide_spawn_agent_metadata=true"
       ],
@@ -280,25 +365,25 @@
         "PARENT_OK"
       ],
       "all_observed_thread_or_session_ids": [
-        "019ff934-612d-72b0-b9ee-cdb0964e9f3e"
+        "019ff94a-46ba-7540-a73f-2b6766840aa6"
       ],
       "child_thread_edges": [],
       "collaboration_tool_records": [
         {
           "event": "item.started",
-          "item_id": "item_2",
+          "item_id": "item_0",
           "receiver_thread_ids": [],
-          "sender_thread_id": "019ff934-612d-72b0-b9ee-cdb0964e9f3e",
-          "sequence": 4,
+          "sender_thread_id": "019ff94a-46ba-7540-a73f-2b6766840aa6",
+          "sequence": 2,
           "status": "in_progress",
           "tool": "wait"
         },
         {
           "event": "item.completed",
-          "item_id": "item_2",
+          "item_id": "item_0",
           "receiver_thread_ids": [],
-          "sender_thread_id": "019ff934-612d-72b0-b9ee-cdb0964e9f3e",
-          "sequence": 5,
+          "sender_thread_id": "019ff94a-46ba-7540-a73f-2b6766840aa6",
+          "sequence": 3,
           "status": "completed",
           "tool": "wait"
         }
@@ -308,6 +393,8 @@
         "--strict-config",
         "--enable",
         "multi_agent_v2",
+        "-c",
+        "agents.default.description=\"Secretary capability matrix role\"",
         "-c",
         "agents.default.wait_agent_enabled=false",
         "exec",
@@ -322,22 +409,30 @@
         "read-only",
         "<bounded-forced-fan-out-prompt>"
       ],
+      "configuration_evidence": {
+        "agent_role_status": "description_supplied_no_ignored_role_warning",
+        "ignored_role_definitions": [],
+        "strict_config_rejections": [],
+        "strict_config_status": "no_rejection_observed"
+      },
       "exit_status": 0,
       "forced_spawn_requested": true,
-      "json_event_count": 8,
+      "json_event_count": 6,
       "malformed_jsonl_lines": 0,
       "model_spawn_compliance": "model_did_not_issue_spawn_tool_call",
       "parent_thread_ids": [
-        "019ff934-612d-72b0-b9ee-cdb0964e9f3e"
+        "019ff94a-46ba-7540-a73f-2b6766840aa6"
       ],
       "policy_result": "collaboration_call_observed_without_child_edge: reject_as_native_boundary",
-      "raw_stderr_sha256": "ee243a74add26478a5a5d6635a820d2bd67e201c761b806b3117cacb860a13dd",
-      "raw_stdout_sha256": "e9ebed1121c348264ea362004ce96602d89a14a2f73ad597ae8a037e65e81c6a",
+      "raw_stderr_sha256": "bbe36b04aab80eb63ec48f44eef768889381f7e4a373c1d7694cdbed1a650d65",
+      "raw_stdout_sha256": "135933b9990638ef275e9ecdf736461d78a7c30c64bded5c5b7c9503e16ef8e4",
       "spawn_attempt_observed": false,
       "spawn_schema_availability": "unknown",
       "strict_config_flags": [
         "--enable",
         "multi_agent_v2",
+        "-c",
+        "agents.default.description=\"Secretary capability matrix role\"",
         "-c",
         "agents.default.wait_agent_enabled=false"
       ],
@@ -350,25 +445,25 @@
         "PARENT_OK"
       ],
       "all_observed_thread_or_session_ids": [
-        "019ff934-9211-7443-b2d6-84a8dc441653"
+        "019ff94a-711f-7f41-853d-47ef4664b7c1"
       ],
       "child_thread_edges": [],
       "collaboration_tool_records": [
         {
           "event": "item.started",
-          "item_id": "item_2",
+          "item_id": "item_0",
           "receiver_thread_ids": [],
-          "sender_thread_id": "019ff934-9211-7443-b2d6-84a8dc441653",
-          "sequence": 4,
+          "sender_thread_id": "019ff94a-711f-7f41-853d-47ef4664b7c1",
+          "sequence": 2,
           "status": "in_progress",
           "tool": "wait"
         },
         {
           "event": "item.completed",
-          "item_id": "item_2",
+          "item_id": "item_0",
           "receiver_thread_ids": [],
-          "sender_thread_id": "019ff934-9211-7443-b2d6-84a8dc441653",
-          "sequence": 5,
+          "sender_thread_id": "019ff94a-711f-7f41-853d-47ef4664b7c1",
+          "sequence": 3,
           "status": "completed",
           "tool": "wait"
         }
@@ -378,6 +473,8 @@
         "--strict-config",
         "--enable",
         "multi_agent_v2",
+        "-c",
+        "agents.default.description=\"Secretary capability matrix role\"",
         "-c",
         "agents.default.tool_namespace=\"direct_only\"",
         "exec",
@@ -392,22 +489,30 @@
         "read-only",
         "<bounded-forced-fan-out-prompt>"
       ],
+      "configuration_evidence": {
+        "agent_role_status": "description_supplied_no_ignored_role_warning",
+        "ignored_role_definitions": [],
+        "strict_config_rejections": [],
+        "strict_config_status": "no_rejection_observed"
+      },
       "exit_status": 0,
       "forced_spawn_requested": true,
-      "json_event_count": 8,
+      "json_event_count": 6,
       "malformed_jsonl_lines": 0,
       "model_spawn_compliance": "model_did_not_issue_spawn_tool_call",
       "parent_thread_ids": [
-        "019ff934-9211-7443-b2d6-84a8dc441653"
+        "019ff94a-711f-7f41-853d-47ef4664b7c1"
       ],
       "policy_result": "collaboration_call_observed_without_child_edge: reject_as_native_boundary",
-      "raw_stderr_sha256": "40f98658ce6b5058d9455a72e2fa4cbd1481589493814189ab3828e1b8d641ec",
-      "raw_stdout_sha256": "c33a52abc17f72936e663e952891a3c2143509bf807bd06d8287cb44d96d97b1",
+      "raw_stderr_sha256": "2fbbfd571dc7112f18bc3faa49d8e7051b7baf47b48fe1a298e48b16110d9221",
+      "raw_stdout_sha256": "3b5a8657281cd60a42f099b68f9b3cf43fc47a22c18ec1c8620197bd87d2b97d",
       "spawn_attempt_observed": false,
       "spawn_schema_availability": "unknown",
       "strict_config_flags": [
         "--enable",
         "multi_agent_v2",
+        "-c",
+        "agents.default.description=\"Secretary capability matrix role\"",
         "-c",
         "agents.default.tool_namespace=\"direct_only\""
       ],

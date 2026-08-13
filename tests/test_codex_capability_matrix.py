@@ -7,6 +7,8 @@ import unittest
 
 
 _SCRIPT = Path(__file__).parents[1] / "scripts" / "codex_capability_matrix.py"
+_EVIDENCE = Path(__file__).parents[1] / "docs" / "evidence" / "codex-provider-fanout-2026-08-13.json"
+_REPORT = Path(__file__).parents[1] / "docs" / "evidence" / "codex-provider-fanout-2026-08-13.md"
 _SPEC = importlib.util.spec_from_file_location("codex_capability_matrix", _SCRIPT)
 assert _SPEC is not None and _SPEC.loader is not None
 probe = importlib.util.module_from_spec(_SPEC)
@@ -83,4 +85,76 @@ class RolloutSummaryTests(unittest.TestCase):
         self.assertEqual(result["spawn_schema_availability"], "unknown")
         self.assertEqual(
             result["policy_result"], "no_collaboration_call_observed: schema_unavailable_not_proof_of_absence"
+        )
+
+    def test_config_rejection_is_not_reported_as_missing_collaboration(self) -> None:
+        result = probe.summarize_rollout(
+            b"",
+            b"Error loading config.toml: unknown configuration field `not_a_field`\n",
+            exit_status=1,
+            strict_config_flags=("-c", "not_a_field=true"),
+        )
+
+        self.assertEqual(result["configuration_evidence"]["strict_config_status"], "rejected")
+        self.assertEqual(
+            result["configuration_evidence"]["strict_config_rejections"],
+            ["unknown configuration field `not_a_field`"],
+        )
+        self.assertEqual(result["policy_result"], "configuration_rejected: native_boundary_not_evaluated")
+
+    def test_ignored_role_is_not_reported_as_a_configured_candidate(self) -> None:
+        result = probe.summarize_rollout(
+            b"",
+            b"Ignoring malformed agent role definition: agent role default must define a description\n",
+            exit_status=0,
+            strict_config_flags=("-c", "agents.default.wait_agent_enabled=false"),
+        )
+
+        self.assertEqual(
+            result["configuration_evidence"]["agent_role_status"], "ignored_role_definition"
+        )
+        self.assertEqual(
+            result["configuration_evidence"]["ignored_role_definitions"],
+            ["agent role default must define a description"],
+        )
+        self.assertEqual(
+            result["policy_result"], "role_configuration_not_applied: native_boundary_not_evaluated")
+
+
+class CandidateInventoryTests(unittest.TestCase):
+    def test_v2_global_wait_candidate_and_valid_role_tables_are_required(self) -> None:
+        variants = dict(probe.VARIANTS)
+        self.assertIn("v2_feature_wait_disabled", variants)
+        self.assertIn(
+            "features.multi_agent_v2.wait_agent_enabled=false",
+            variants["v2_feature_wait_disabled"],
+        )
+        for name, flags in variants.items():
+            if name.startswith("v2_role_"):
+                self.assertIn(probe.ROLE_DESCRIPTION, flags)
+
+    def test_committed_evidence_records_every_candidate_configuration_state(self) -> None:
+        payload = json.loads(_EVIDENCE.read_text(encoding="utf-8"))
+        rows = {row["variant"]: row for row in payload["variants"]}
+        self.assertEqual(set(rows), {name for name, _flags in probe.VARIANTS})
+        report = _REPORT.read_text(encoding="utf-8")
+        self.assertIn("v2_feature_wait_disabled", report)
+        self.assertIn("no collaboration call", report)
+        for name, flags in probe.VARIANTS:
+            row = rows[name]
+            self.assertEqual(row["strict_config_flags"], list(flags))
+            config = row["configuration_evidence"]
+            self.assertEqual(config["strict_config_status"], "no_rejection_observed")
+            self.assertEqual(config["strict_config_rejections"], [])
+            if name.startswith("v2_role_"):
+                self.assertEqual(
+                    config["agent_role_status"], "description_supplied_no_ignored_role_warning"
+                )
+            else:
+                self.assertEqual(config["agent_role_status"], "not_requested")
+            self.assertEqual(config["ignored_role_definitions"], [])
+        self.assertEqual(rows["v2_feature_wait_disabled"]["collaboration_tool_records"], [])
+        self.assertEqual(
+            rows["v2_feature_wait_disabled"]["policy_result"],
+            "no_collaboration_call_observed: schema_unavailable_not_proof_of_absence",
         )
