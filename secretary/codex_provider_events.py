@@ -89,9 +89,9 @@ class CodexProviderEventIngress:
 
         Binding is not a permission to skip what the provider wrote while the pane was coming
         up.  The durable parent cursor is the only point at which a source belongs to this run;
-        once it is committed, ``poll`` is the one classifier for both the pre-existing tail and
-        every later lifecycle poll.  A policy result raises after its fenced stop/block callbacks,
-        so it cannot fall through to prompt delivery.
+        once it is committed, ``poll`` is the one classifier for the complete initially observed
+        source and every later lifecycle poll.  A policy result raises after its fenced
+        stop/block callbacks, so it cannot fall through to prompt delivery.
         """
         source = self.source
         if str(source.get("state") or "") == "bound":
@@ -145,10 +145,10 @@ class CodexProviderEventIngress:
         path, identity, lines = candidates[0]
         parent_line = next(
             line for line in lines
-            if isinstance(line.event, dict)
-            and line.event.get("type") == "thread.started"
-            and line.event.get("thread_id") == identity["parent_thread_id"]
+            if _is_parent_started(_event_view(line.event))
+            and str(_event_view(line.event).get("thread_id") or "") == identity["parent_thread_id"]
         )
+        first_line = lines[0]
         bound = {
             "version": SOURCE_VERSION,
             "kind": SOURCE_KIND,
@@ -157,13 +157,23 @@ class CodexProviderEventIngress:
             "path": str(path.resolve(strict=False)),
             "session_id": identity["session_id"],
             "parent_thread_id": identity["parent_thread_id"],
-            "cursor": {"line": parent_line.number, "digest": parent_line.digest},
+            # This is not a clean root cursor.  It anchors the exact range selected by the
+            # session/root identity before the shared scanner has classified even its preamble.
+            # A crash after this persistence resumes at cursor zero and scans the same first raw
+            # record, while any later recovery can prove that neither range endpoint changed.
+            "initial_range": {
+                "first": {"line": first_line.number, "digest": first_line.digest},
+                "root": {"line": parent_line.number, "digest": parent_line.digest},
+                "last": {"line": lines[-1].number, "digest": lines[-1].digest},
+                "digest": _range_digest(lines),
+            },
+            "cursor": {"line": 0, "digest": first_line.digest},
             "bound_at": _now(),
         }
         self._replace_source(bound)
-        # Do not merely advance the initial cursor.  Lines that appeared after the parent before
-        # this callback are already provider evidence for this exact source and must take this
-        # same durable recorder/identity-fenced stop path before the caller can type a prompt.
+        # Selection by session/root identity does not exempt the source preamble.  The shared
+        # scanner starts at its first raw line, crosses the root, and consumes the pre-existing
+        # tail before the caller can type a prompt.
         self.poll()
 
     def poll(self) -> None:
@@ -182,14 +192,19 @@ class CodexProviderEventIngress:
             return
         cursor_line = cursor.get("line")
         cursor_digest = str(cursor.get("digest") or "")
-        if not isinstance(cursor_line, int) or cursor_line < 1 or not cursor_digest:
+        if not isinstance(cursor_line, int) or cursor_line < 0 or not cursor_digest:
             self._unknown("Codex provider source cursor is malformed")
             return
-        prior = next((line for line in lines if line.number == cursor_line), None)
-        if prior is None or prior.digest != cursor_digest:
-            self._unknown("Codex provider source cursor no longer matches the bound event journal")
-            return
-        fresh = [line for line in lines if line.number > cursor_line]
+        if cursor_line == 0:
+            # ``_verify_binding`` has already proved this digest belongs to the first selected
+            # source record.  Line zero is deliberately a scanner sentinel, not a journal line.
+            fresh = lines
+        else:
+            prior = next((line for line in lines if line.number == cursor_line), None)
+            if prior is None or prior.digest != cursor_digest:
+                self._unknown("Codex provider source cursor no longer matches the bound event journal")
+                return
+            fresh = [line for line in lines if line.number > cursor_line]
         for line in fresh:
             events = list(
                 _provider_events(
@@ -257,6 +272,9 @@ class CodexProviderEventIngress:
             or _parent_thread(lines) != str(source.get("parent_thread_id") or "")
         ):
             self._unknown("Codex provider source identity no longer matches this HeadRun")
+            return None
+        if not _initial_range_matches(source, lines):
+            self._unknown("Codex provider source initial range no longer matches this HeadRun")
             return None
         return meta, lines
 
@@ -357,6 +375,64 @@ def _parent_thread(lines: Iterable[SourceLine]) -> str:
     # are not allowed to rewrite that identity: ``_provider_events`` records them as unknown
     # relations during polling instead of making recovery attribute a child as the parent.
     return parents[0] if parents else ""
+
+
+def _initial_range_matches(source: Mapping[str, Any], lines: list[SourceLine]) -> bool:
+    """Verify the initial selected-source span persisted before its first scan.
+
+    The session and root identify which journal may belong to this HeadRun.  They do not make
+    earlier physical records irrelevant.  Keeping both anchors durable lets a restarted scanner
+    either resume its persisted cursor or fence the run when that exact initial range changed.
+    """
+    initial = source.get("initial_range")
+    if not isinstance(initial, Mapping) or not lines:
+        return False
+    first = initial.get("first")
+    root = initial.get("root")
+    last = initial.get("last")
+    expected_digest = str(initial.get("digest") or "")
+    if not isinstance(first, Mapping) or not isinstance(root, Mapping) or not isinstance(last, Mapping):
+        return False
+    first_line = lines[0]
+    if (
+        first.get("line") != first_line.number
+        or str(first.get("digest") or "") != first_line.digest
+    ):
+        return False
+    root_line = root.get("line")
+    root_digest = str(root.get("digest") or "")
+    if not isinstance(root_line, int) or root_line < first_line.number or not root_digest:
+        return False
+    root_record = next((line for line in lines if line.number == root_line), None)
+    if root_record is None or root_record.digest != root_digest:
+        return False
+    root_event = _event_view(root_record.event)
+    if not (
+        _is_parent_started(root_event)
+        and str(root_event.get("thread_id") or "") == str(source.get("parent_thread_id") or "")
+    ):
+        return False
+    last_line = last.get("line")
+    if not isinstance(last_line, int) or last_line < root_line or not expected_digest:
+        return False
+    initial_lines = [line for line in lines if line.number <= last_line]
+    return (
+        len(initial_lines) == last_line
+        and bool(initial_lines)
+        and initial_lines[-1].digest == str(last.get("digest") or "")
+        and _range_digest(initial_lines) == expected_digest
+    )
+
+
+def _range_digest(lines: Iterable[SourceLine]) -> str:
+    """Digest an ordered journal range without persisting provider event content."""
+    digest = hashlib.sha256()
+    for line in lines:
+        digest.update(str(line.number).encode("ascii"))
+        digest.update(b":")
+        digest.update(line.digest.encode("ascii"))
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 
 def _provider_events(

@@ -243,6 +243,32 @@ class CodexFanoutPolicyTests(unittest.TestCase):
         self.assertTrue(malformed.fanout_policy["provider_source_required"])
         self.assertEqual(malformed.fanout_policy["provider_source"], {})
 
+    def test_bound_source_without_a_full_range_anchor_remains_unknown_on_recovery(self) -> None:
+        allowed = self._allowed_run()
+        incomplete = HeadRun.from_json({
+            **allowed.to_json(),
+            "fanout_policy": {
+                **allowed.fanout_policy,
+                "provider_source_required": True,
+                "provider_source": {
+                    "version": 1,
+                    "kind": "codex_session_event_jsonl",
+                    "state": "bound",
+                    "root": "/sessions",
+                    "path": "/sessions/run.jsonl",
+                    "session_id": "session-1",
+                    "parent_thread_id": "parent-1",
+                    "cursor": {"line": 2, "digest": "0" * 64},
+                    "bound_at": "2026-08-13T00:00:00Z",
+                },
+            },
+        })
+
+        self.assertFalse(incomplete.fanout_clean)
+        self.assertEqual(incomplete.fanout_policy_state, "unknown")
+        self.assertTrue(incomplete.fanout_policy["provider_source_required"])
+        self.assertEqual(incomplete.fanout_policy["provider_source"], {})
+
     def test_missing_required_provider_source_remains_an_ingress_fenced_unknown(self) -> None:
         allowed = self._allowed_run()
         missing = HeadRun.from_json({

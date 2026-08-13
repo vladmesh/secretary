@@ -372,6 +372,10 @@ def _fanout_policy_json(payload: Any) -> dict[str, Any]:
                 )
         elif source_state == "bound":
             cursor = source.get("cursor")
+            initial_range = source.get("initial_range")
+            first = initial_range.get("first") if isinstance(initial_range, dict) else None
+            root = initial_range.get("root") if isinstance(initial_range, dict) else None
+            last = initial_range.get("last") if isinstance(initial_range, dict) else None
             if (
                 not str(source.get("root") or "")
                 or not str(source.get("path") or "")
@@ -379,8 +383,20 @@ def _fanout_policy_json(payload: Any) -> dict[str, Any]:
                 or not str(source.get("parent_thread_id") or "")
                 or not isinstance(cursor, dict)
                 or not isinstance(cursor.get("line"), int)
-                or cursor.get("line") < 1
+                or cursor.get("line") < 0
                 or not _digest(cursor.get("digest"))
+                or not isinstance(first, dict)
+                or first.get("line") != 1
+                or not _digest(first.get("digest"))
+                or not isinstance(root, dict)
+                or not isinstance(root.get("line"), int)
+                or root.get("line") < first.get("line")
+                or not _digest(root.get("digest"))
+                or not isinstance(last, dict)
+                or not isinstance(last.get("line"), int)
+                or last.get("line") < root.get("line")
+                or not _digest(last.get("digest"))
+                or not _digest(initial_range.get("digest"))
                 or not str(source.get("bound_at") or "")
             ):
                 return _unknown_fanout_policy(

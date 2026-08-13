@@ -132,14 +132,17 @@ journal's path, provider session id, parent thread id and line/digest cursor bef
 prompt. The retained TUI collaboration item is `event_msg.payload.item.type = CollabAgentToolCall`;
 its `tool`, `sender_thread_id` and `receiver_thread_ids` are normalized with the documented
 `collab_tool_call` form. Any other collaboration-shaped item is unknown, not a clean record. Once
-the binding and parent cursor are durable, the same scanner classifies every post-parent line already
-present before prompt delivery and every later line before lifecycle work. Ordinary records may move
-the cursor only through a durable write. A malformed, collaboration-shaped, child-edge,
-unknown-relation or cursor-write failure is fenced and blocked before delivery; it cannot be skipped
-or rendered as a clean cursor. This is not the tolerant workspace rollout-activity scan. The canary
-therefore requires the provider journal to expose its root `thread.started` identity before task
-delivery; without it the launch is unknown and fenced rather than prompt-delivered. Recovery verifies
-the same source and cursor before consuming a later line; a missing, unreadable, changed or ambiguous
+the binding is durable, it records first/root/last anchors and a digest of the complete initially
+observed range, then starts the shared scanner at an anchored zero cursor. The scanner classifies the
+complete initially observed selected source from its first raw record through the root and all existing
+tail records before prompt delivery, then every later line before lifecycle work. Selecting a journal by
+valid session/root identity never exempts its pre-root data. Ordinary records may move the cursor only
+through a durable write. A malformed, collaboration-shaped, child-edge, unknown-relation or
+cursor-write failure is fenced and blocked before delivery; it cannot be skipped or rendered as a clean
+cursor. This is not the tolerant workspace rollout-activity scan. The canary therefore requires the
+provider journal to expose its root `thread.started` identity before task delivery; without it the
+launch is unknown and fenced rather than prompt-delivered. Recovery verifies the same source's complete
+initial range and cursor before consuming a later line; a missing, unreadable, changed or ambiguous
 source is unknown, blocks the affected card or sprint with typed evidence and uses only the
 identity-fenced stop path.
 

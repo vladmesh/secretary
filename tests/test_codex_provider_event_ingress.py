@@ -74,8 +74,20 @@ class CodexProviderEventIngressTests(unittest.TestCase):
             {"type": "thread.started", "thread_id": "parent-1"},
             *events,
         ]
+        self._write_records(*records)
+
+    def _write_records(self, *records: object) -> None:
         self.source.write_text(
             "\n".join(
+                value if isinstance(value, str) else json.dumps(value) for value in records
+            ) + "\n",
+            encoding="utf-8",
+        )
+
+    def _append_records(self, *records: object) -> None:
+        body = self.source.read_text(encoding="utf-8")
+        self.source.write_text(
+            body + "\n".join(
                 value if isinstance(value, str) else json.dumps(value) for value in records
             ) + "\n",
             encoding="utf-8",
@@ -100,6 +112,10 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self.assertEqual(source["state"], "bound")
         self.assertEqual(source["session_id"], "session-1")
         self.assertEqual(source["parent_thread_id"], "parent-1")
+        self.assertEqual(self.written[0].fanout_policy["provider_source"]["cursor"]["line"], 0)
+        self.assertEqual(source["initial_range"]["first"]["line"], 1)
+        self.assertEqual(source["initial_range"]["root"]["line"], 2)
+        self.assertEqual(source["initial_range"]["last"]["line"], 2)
         self.assertEqual(source["cursor"]["line"], 2)
         self.assertEqual(self.stops, [])
 
@@ -215,21 +231,21 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self.assertEqual(self.stops, [])
         self.assertEqual(self.blocks, [])
 
-    def test_malformed_prebind_line_is_recorded_then_stopped_and_blocked(self) -> None:
+    def test_malformed_post_root_prebind_line_is_recorded_then_stopped_and_blocked(self) -> None:
         self._write_source("{not-json")
         ingress = self._ingress()
 
         with self.assertRaises(CodexProviderSourceError):
             ingress.bind_before_delivery()
 
-        self.assertEqual(self.written[0].fanout_policy["provider_source"]["cursor"]["line"], 2)
+        self.assertEqual(self.written[0].fanout_policy["provider_source"]["cursor"]["line"], 0)
         event = self.written[-1].fanout_policy["events"][-1]
         self.assertEqual(event["type"], "unparseable_provider_event")
         self.assertEqual(event["source_sequence"], 3)
         self.assertEqual(self.stops[0][0], "run-1")
         self.assertEqual(self.blocks[-1]["state"], "unknown")
 
-    def test_tui_policy_event_in_prebind_tail_blocks_before_delivery(self) -> None:
+    def test_tui_policy_event_in_post_root_prebind_tail_blocks_before_delivery(self) -> None:
         self._write_source({
             "type": "event_msg",
             "payload": {
@@ -248,7 +264,7 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         with self.assertRaises(CodexProviderSourceError):
             ingress.bind_before_delivery()
 
-        self.assertEqual(self.written[0].fanout_policy["provider_source"]["cursor"]["line"], 2)
+        self.assertEqual(self.written[0].fanout_policy["provider_source"]["cursor"]["line"], 0)
         event = self.written[-1].fanout_policy["events"][-1]
         self.assertEqual(event["type"], "child_thread_edge")
         self.assertEqual(event["child_thread_id"], "child-1")
@@ -270,6 +286,125 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self.assertEqual(self.written[-1].fanout_policy["events"][-1]["type"], "unknown_thread_edge")
         self.assertEqual(self.written[-1].fanout_policy["terminal_state"], "unknown")
 
+    def test_malformed_pre_root_line_is_recorded_from_the_selected_source_range(self) -> None:
+        self._write_records(
+            {"type": "session_meta", "payload": {"session_id": "session-1", "cwd": str(self.workspace)}},
+            "{partially-written",
+            {"type": "thread.started", "thread_id": "parent-1"},
+        )
+        ingress = self._ingress()
+
+        with self.assertRaises(CodexProviderSourceError):
+            ingress.bind_before_delivery()
+
+        selected = self.written[0].fanout_policy["provider_source"]
+        self.assertEqual(selected["cursor"]["line"], 0)
+        self.assertEqual(selected["initial_range"]["first"]["line"], 1)
+        self.assertEqual(selected["initial_range"]["root"]["line"], 3)
+        self.assertEqual(selected["initial_range"]["last"]["line"], 3)
+        event = self.written[-1].fanout_policy["events"][-1]
+        self.assertEqual(event["type"], "unparseable_provider_event")
+        self.assertEqual(event["source_sequence"], 2)
+        self.assertEqual(self.stops[0][0], "run-1")
+        self.assertEqual(self.blocks[-1]["state"], "unknown")
+
+    def test_clean_recognised_pre_root_records_cross_the_root_in_one_scanner(self) -> None:
+        self._write_records(
+            {"type": "session_meta", "payload": {"session_id": "session-1", "cwd": str(self.workspace)}},
+            {"type": "event_msg", "payload": {"type": "agent_message"}},
+            {"type": "thread.started", "thread_id": "parent-1"},
+            {"type": "turn.completed", "thread_id": "parent-1"},
+        )
+        ingress = self._ingress()
+
+        ingress.bind_before_delivery()
+
+        self.assertEqual(
+            [run.fanout_policy["provider_source"]["cursor"]["line"] for run in self.written],
+            [0, 1, 2, 3, 4],
+        )
+        self.assertEqual(self.written[-1].fanout_policy["events"], [])
+        self.assertEqual(self.stops, [])
+        self.assertEqual(self.blocks, [])
+
+    def test_policy_pre_root_record_is_fenced_after_source_selection(self) -> None:
+        self._write_records(
+            {"type": "session_meta", "payload": {"session_id": "session-1", "cwd": str(self.workspace)}},
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "item": {
+                        "type": "CollabAgentToolCall",
+                        "tool": "spawn_agent",
+                        "sender_thread_id": "parent-1",
+                        "receiver_thread_ids": ["child-1"],
+                    },
+                },
+            },
+            {"type": "thread.started", "thread_id": "parent-1"},
+        )
+        ingress = self._ingress()
+
+        with self.assertRaises(CodexProviderSourceError):
+            ingress.bind_before_delivery()
+
+        selected = self.written[0].fanout_policy["provider_source"]
+        self.assertEqual(selected["initial_range"]["root"]["line"], 3)
+        event = self.written[-1].fanout_policy["events"][-1]
+        self.assertEqual(event["type"], "child_thread_edge")
+        self.assertEqual(event["source_sequence"], 2)
+        self.assertEqual(event["child_thread_id"], "child-1")
+        self.assertEqual(self.blocks[-1]["state"], "violation")
+
+    def test_recovery_reuses_the_persisted_full_range_before_later_events(self) -> None:
+        self._write_records(
+            {"type": "session_meta", "payload": {"session_id": "session-1", "cwd": str(self.workspace)}},
+            {"type": "event_msg", "payload": {"type": "agent_message"}},
+            {"type": "thread.started", "thread_id": "parent-1"},
+            {"type": "turn.completed", "thread_id": "parent-1"},
+        )
+        ingress = self._ingress()
+        ingress.bind_before_delivery()
+        persisted = HeadRun.from_json(self.written[-1].to_json())
+        writes_after_bind = len(self.written)
+        recovered = self._ingress(persisted)
+
+        recovered.poll()
+
+        self.assertEqual(len(self.written), writes_after_bind)
+        self._append_records("{not-json")
+        with self.assertRaises(CodexProviderSourceError):
+            recovered.poll()
+
+        event = self.written[-1].fanout_policy["events"][-1]
+        self.assertEqual(event["type"], "unparseable_provider_event")
+        self.assertEqual(event["source_sequence"], 5)
+        self.assertEqual(self.stops[-1][0], "run-1")
+
+    def test_recovery_fences_a_changed_record_inside_the_persisted_initial_range(self) -> None:
+        self._write_records(
+            {"type": "session_meta", "payload": {"session_id": "session-1", "cwd": str(self.workspace)}},
+            {"type": "event_msg", "payload": {"type": "agent_message"}},
+            {"type": "thread.started", "thread_id": "parent-1"},
+            {"type": "turn.completed", "thread_id": "parent-1"},
+        )
+        ingress = self._ingress()
+        ingress.bind_before_delivery()
+        persisted = HeadRun.from_json(self.written[-1].to_json())
+        self._write_records(
+            {"type": "session_meta", "payload": {"session_id": "session-1", "cwd": str(self.workspace)}},
+            {"type": "event_msg", "payload": {"type": "agent_message_rewritten"}},
+            {"type": "thread.started", "thread_id": "parent-1"},
+            {"type": "turn.completed", "thread_id": "parent-1"},
+        )
+
+        with self.assertRaises(CodexProviderSourceError):
+            self._ingress(persisted).poll()
+
+        self.assertEqual(self.stops[-1][0], "run-1")
+        self.assertEqual(self.blocks[-1]["state"], "unknown")
+
     def test_prebind_cursor_persistence_failure_blocks_without_delivery(self) -> None:
         self._write_source({"type": "turn.completed", "thread_id": "parent-1"})
 
@@ -289,6 +424,7 @@ class CodexProviderEventIngressTests(unittest.TestCase):
             ingress.bind_before_delivery()
 
         self.assertEqual(self.written[0].fanout_policy["provider_source"]["state"], "bound")
+        self.assertEqual(self.written[0].fanout_policy["provider_source"]["cursor"]["line"], 0)
         self.assertEqual(self.stops[0][0], "run-1")
         self.assertEqual(self.blocks[-1]["state"], "unknown")
 

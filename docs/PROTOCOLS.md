@@ -112,16 +112,18 @@ root and the set of journal paths that existed before the pane. The collector re
 `receiver_thread_ids`; the documented `collab_tool_call` shape is also normalized. An unfamiliar
 collaboration-shaped item is `unknown`, never ordinary output. Before the first prompt, exactly one
 newly created journal for that workspace must supply one session identity and parent
-`thread.started` identity; that path, identity and line/digest cursor are written onto the same
-`HeadRun`. Once that parent cursor is durable, the one scanner classifies every later already-present
-line before delivery and every later line before lifecycle work. Ordinary records may durably advance
-the cursor. A malformed, collaboration, child-edge, unknown-relation or cursor-write failure first
-becomes durable typed policy evidence where writable, then enters the identity-fenced stop/block
-path; it cannot fall through to a prompt. The canary precondition is therefore that Codex exposes
-its root-thread identity before task delivery. Recovery reopens only that path and verifies its root,
-session id, workspace, parent identity and prior cursor before reading a later line. Missing,
-unreadable, changed or ambiguous source evidence is `unknown`: it is fenced and blocked without
-signalling a possibly foreign head.
+`thread.started` identity; that path and identity, plus durable first/root/last record anchors and a
+digest of the initially observed range, are written onto the same `HeadRun` with a zero cursor anchored
+to the first raw record. The one scanner then classifies the complete selected source range from that
+first record, through the selected root, and through every already-present tail line before delivery.
+Source selection does not exempt a session preamble or any pre-root record. Ordinary records may
+durably advance the cursor. A malformed, collaboration, child-edge, unknown-relation or cursor-write
+failure first becomes durable typed policy evidence where writable, then enters the identity-fenced
+stop/block path; it cannot fall through to a prompt. The canary precondition is therefore that Codex
+exposes its root-thread identity before task delivery. Recovery reopens only that path and verifies its
+complete initial range, session id, workspace, parent identity and prior cursor before reading a later
+line. Missing, unreadable, changed or ambiguous source evidence is `unknown`: it is fenced and blocked
+without signalling a possibly foreign head.
 
 ## SHA-bound mechanical gate evidence
 
