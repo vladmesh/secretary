@@ -2665,6 +2665,12 @@ class CommandHostRuntime:
                 commit=ingress.commit_run if ingress is not None else None,
             )
         except head_ops.HeadOperationError as exc:
+            failed_run = getattr(exc, "run", None)
+            if pid_file and failed_run is not None and failed_run.leaf:
+                # Delivery can refuse with a live pane before ``spawn`` returns normally.  Bind
+                # that pane to the already-written exact heartbeat before persisting the failed
+                # launch intent, so recovery does not mistake our own head for a foreign one.
+                _bind_head_heartbeat(pid_file, expected=heartbeat, leaf=failed_run.leaf)
             raise self._launch_failure(exc, workspace, pid_file, subject) from None
         if pid_file:
             # Pane create gives us the leaf after the head has written its base identity.  A best

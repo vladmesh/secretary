@@ -29,6 +29,7 @@ from secretary.dispatcher import (
     LaunchedHead,
 )
 from triggered_agents.runtime.head import HeadCommand
+from triggered_agents.runtime.head.command import with_pid_heartbeat
 from triggered_agents.runtime.head import operations as head_ops
 from triggered_agents.runtime.prompt_document import NUDGE_FILE_MODE, NUDGE_MAX_BYTES
 from secretary.dispatcher_tui import TuiDeliveryError, claude_project_dir_name, provider_progress_for_run
@@ -2451,6 +2452,54 @@ class LaunchIntentTests(unittest.TestCase):
 
         self.assertEqual((inside["alive"], inside["pid_known"]), (True, False))
         self.assertEqual((outside["alive"], outside["pid_known"]), (False, False))
+
+    def test_recovery_binds_an_empty_leaf_from_the_exact_launch_intent(self) -> None:
+        pid_file = self.data_dir / "busy-review.pid"
+        identity = heartbeat_identity(
+            run_id="review-run", role="reviewer", task=f"card:{REF}"
+        )
+        wrapped = with_pid_heartbeat(
+            "python3 -c 'import time; time.sleep(5)'", str(pid_file), identity=identity,
+        )
+        proc = subprocess.Popen(["/bin/sh", "-lc", wrapped])
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.terminate)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not pid_file.exists():
+            time.sleep(0.01)
+        intent = {
+            "pid_file": str(pid_file), "at": time.time(), "run_id": "review-run",
+            "role": "reviewer", "task": f"card:{REF}", "leaf": "leaf-review",
+        }
+
+        liveness = launch_intent_liveness(intent)
+
+        self.assertEqual(liveness, {"alive": True, "pid_known": True})
+        self.assertEqual(json.loads(pid_file.read_text(encoding="utf-8"))["leaf"], "leaf-review")
+
+    def test_recovery_does_not_overwrite_a_foreign_nonempty_leaf(self) -> None:
+        pid_file = self.data_dir / "foreign-review.pid"
+        identity = heartbeat_identity(
+            run_id="review-run", role="reviewer", task=f"card:{REF}", leaf="foreign-leaf"
+        )
+        wrapped = with_pid_heartbeat(
+            "python3 -c 'import time; time.sleep(5)'", str(pid_file), identity=identity,
+        )
+        proc = subprocess.Popen(["/bin/sh", "-lc", wrapped])
+        self.addCleanup(proc.wait)
+        self.addCleanup(proc.terminate)
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not pid_file.exists():
+            time.sleep(0.01)
+        intent = {
+            "pid_file": str(pid_file), "at": time.time(), "run_id": "review-run",
+            "role": "reviewer", "task": f"card:{REF}", "leaf": "expected-leaf",
+        }
+
+        liveness = launch_intent_liveness(intent)
+
+        self.assertEqual(liveness, {"alive": False, "pid_known": True, "identity_mismatch": True})
+        self.assertEqual(json.loads(pid_file.read_text(encoding="utf-8"))["leaf"], "foreign-leaf")
 
 
 class WorkerWorkspaceBindingTests(unittest.TestCase):
