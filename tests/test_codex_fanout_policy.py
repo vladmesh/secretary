@@ -119,6 +119,23 @@ class CodexFanoutPolicyTests(unittest.TestCase):
 
         self.assertFalse(config.exists())
 
+    def test_allowed_preflight_writes_trust_only_after_schema_attestation(self) -> None:
+        run = self._run()
+        config = self.root / "codex.toml"
+
+        allowed = codex_preflight.preflight_codex_launch(
+            {},
+            str(self.workspace),
+            run,
+            schema_attestation=self._schema(run),
+            binary_path=str(self.binary),
+            config=config,
+        )
+
+        self.assertTrue(allowed.fanout_clean)
+        trusted = config.read_text(encoding="utf-8")
+        self.assertIn("trust_level = \"trusted\"", trusted)
+
     def test_a_non_spawning_model_response_is_not_schema_evidence(self) -> None:
         written: list[HeadRun] = []
         recorder = codex_preflight.CodexProviderEventRecorder(

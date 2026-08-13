@@ -127,7 +127,6 @@ from . import claude_env, finalizer, orca_rpc
 from .claude_sessions import claude_session_paths
 from .codex_preflight import (
     CodexPreflightError,
-    ensure_codex_workspace_trusted,
     preflight_codex_launch,
 )
 from .head import HeadRun, HeadSpec, RUNTIME_ROLE_ENV, TaskRef, new_run_id, render_head_command
@@ -621,10 +620,10 @@ def _ensure_head_ready(ws: str, cmd: DispatchCommand, *, role: str = "service") 
     is created.
     """
     if cmd.prompt_after_start and str((cmd.head_profile or {}).get("adapter") or "") == "codex":
-        ensure_codex_workspace_trusted(cmd.head_profile, ws)
         # This service path does not own a dispatcher record, but it still crosses the shared
-        # pre-pane policy boundary.  The role is explicit rather than inferred from the profile so
-        # a future durable service lifecycle can bind the same attestation unchanged.
+        # pre-pane policy boundary.  The boundary owns both the provider decision and, only after
+        # an allow result, its Codex trust write.  Calling the trust helper here would let a
+        # rejected no-attestation launch mutate CODEX_HOME before it failed closed.
         spec = HeadSpec.from_profile(str(cmd.profile or role), cmd.head_profile)
         preflight_codex_launch(
             cmd.head_profile,
