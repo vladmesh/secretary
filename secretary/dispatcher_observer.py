@@ -382,6 +382,9 @@ class ObserverRecord:
     # Exact-HeadRun provider progress for an event delivery held by this observer.  A missing or
     # malformed value is historical/unknown, never permission to bind today's workspace journal.
     wake_liveness: ObserverWakeLiveness = field(default_factory=ObserverWakeLiveness)
+    # The terminal episode of the immediately retired HeadRun.  This is audit-only: all decisions
+    # use ``wake_liveness``, which is always bound to the current HeadRun after a replacement.
+    retired_wake_liveness: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -413,6 +416,7 @@ class ObserverRecord:
             "run": dict(self.run),
             "head_run": dict(self.head_run),
             "wake_liveness": self.wake_liveness.to_json(),
+            "retired_wake_liveness": dict(self.retired_wake_liveness),
         }
 
     @classmethod
@@ -456,6 +460,10 @@ class ObserverRecord:
             run=dict(run) if isinstance(run, dict) else {},
             head_run=(dict(payload["head_run"]) if isinstance(payload.get("head_run"), dict) else {}),
             wake_liveness=ObserverWakeLiveness.from_json(payload.get("wake_liveness")),
+            retired_wake_liveness=(
+                dict(payload["retired_wake_liveness"])
+                if isinstance(payload.get("retired_wake_liveness"), dict) else {}
+            ),
         )
 
 
@@ -2109,6 +2117,20 @@ def _launch_observer(
             runtime, payload, observers, ref, record, head=head,
             reason=f"observer role skill is not available to this head: {delivery['reason']}",
         )
+    if pending_event is not None and record.wake_liveness.bound and not record.wake_liveness.terminal:
+        # Every replacement closes the old exact-run episode before the old process is touched.
+        # The launch intent below will move this terminal value to audit-only storage and open a
+        # fresh episode for the replacement HeadRun in the same durable write as that new binding.
+        record.wake_liveness.terminalize(
+            "replacement", "observer HeadRun was replaced while its event delivery was pending"
+        )
+        observers[ref] = record
+        if not _persist_quietly(runtime, payload, observers):
+            return {
+                "status": "degraded", "step": "observer-reconcile", "sprint": ref,
+                "action": "observer-wake-liveness-persist-failed", "head": record.head,
+                "reason": "retiring observer wake-liveness outcome could not be persisted",
+            }
     if _head_may_be_running(record):
         # The pid is dead but the pane it ran in can still be there, the shell left behind that
         # `with_pid_heartbeat` exists to tell apart from a live head. Close it before opening the
@@ -2248,6 +2270,11 @@ def _launch_observer(
     record.head_run = (
         dict(launched["head_run"]) if isinstance(launched.get("head_run"), dict) else record.head_run
     )
+    if delivery_event_id and not record.wake_liveness.bound:
+        # Non-Codex/fake hosts may only return the complete immutable HeadRun after launch.  Bind
+        # the pending delivery now, before this result can be persisted or any next-tick probe can
+        # run. Production Codex normally did this in the preflight launch intent above.
+        record.wake_liveness = ObserverWakeLiveness.begin(record.head_run)
     # The host has answered, so the create-time pane identity belongs on the durable launch intent
     # before the ordinary state commit below.  A crash in the rest of this branch then adopts this
     # exact pane rather than falling back to the create-time handle or another inventory lookup.
@@ -2458,6 +2485,12 @@ def _write_launch_intent(
     record.workspace = workspace
     record.pid_file = pid_file
     record.head_run = preflight_run or {"run_id": run_id}
+    if record.delivery.stage != DeliveryStage.IDLE and record.wake_liveness.terminal:
+        # The old episode remains readable as evidence, but never participates in decisions for
+        # the replacement.  Opening the new episode in this launch-intent write means a crash
+        # cannot expose the new HeadRun with the retired run's baseline or recovery ladder.
+        record.retired_wake_liveness = record.wake_liveness.to_json()
+        record.wake_liveness = ObserverWakeLiveness.begin(record.head_run)
     record.pending_launch = attempt
     record.head_possible = True
     record.workspace_live = True
@@ -2479,6 +2512,8 @@ def _write_launch_intent(
         for name, value in previous.items():
             if name == "delivery":
                 record.delivery = ObserverDelivery.from_json(value)
+            elif name == "wake_liveness":
+                record.wake_liveness = ObserverWakeLiveness.from_json(value)
             else:
                 setattr(record, name, value)
         return f"{type(exc).__name__}: {exc}"

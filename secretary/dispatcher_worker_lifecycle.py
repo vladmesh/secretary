@@ -96,6 +96,9 @@ class WorkerContinuationLiveness:
     reason: str = "missing"
     head_run_id: str = ""
     head_run_fingerprint: str = ""
+    # The first probe of this exact HeadRun episode.  It is distinct from busy timing and is
+    # written for progressing, idle and unavailable evidence alike.
+    first_observed_at: float = 0.0
     first_busy_at: float = 0.0
     last_provider_progress_at: float = 0.0
     last_provider_observed_at: float = 0.0
@@ -180,6 +183,8 @@ class WorkerContinuationLiveness:
         ):
             self._reject_as_unknown("continuation liveness episode is not bound to the retained HeadRun")
             return "unknown"
+        if not self.first_observed_at:
+            self.first_observed_at = now
         if not isinstance(evidence, dict):
             self.state = ContinuationLivenessState.UNAVAILABLE
             self.reason = "provider-progress transport returned an invalid shape"
@@ -295,6 +300,7 @@ class WorkerContinuationLiveness:
             "reason": self.reason,
             "head_run_id": self.head_run_id,
             "head_run_fingerprint": self.head_run_fingerprint,
+            "first_observed_at": self.first_observed_at,
             "first_busy_at": self.first_busy_at,
             "last_provider_progress_at": self.last_provider_progress_at,
             "last_provider_observed_at": self.last_provider_observed_at,
@@ -332,7 +338,7 @@ class WorkerContinuationLiveness:
             numeric = {
                 name: float(value.get(name) or 0.0)
                 for name in (
-                    "first_busy_at", "last_provider_progress_at", "last_provider_observed_at",
+                    "first_observed_at", "first_busy_at", "last_provider_progress_at", "last_provider_observed_at",
                     "recovery_attempted_at", "recovery_response_deadline",
                 )
             }
@@ -434,6 +440,7 @@ class WorkerContinuationLiveness:
                 reason=str(value.get("reason") or "")[:240],
                 head_run_id=run_id,
                 head_run_fingerprint=fingerprint,
+                first_observed_at=numeric["first_observed_at"],
                 first_busy_at=numeric["first_busy_at"],
                 last_provider_progress_at=numeric["last_provider_progress_at"],
                 last_provider_observed_at=numeric["last_provider_observed_at"],
@@ -475,6 +482,7 @@ class WorkerContinuationLiveness:
             reason=str(value.get("reason") or "")[:240],
             head_run_id=run_id,
             head_run_fingerprint=fingerprint,
+            first_observed_at=numeric["first_observed_at"],
             first_busy_at=numeric["first_busy_at"],
             last_provider_progress_at=numeric["last_provider_progress_at"],
             last_provider_observed_at=numeric["last_provider_observed_at"],

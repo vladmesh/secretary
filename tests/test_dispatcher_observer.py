@@ -1808,14 +1808,26 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.host.codex_provider_ingresses, [])
         record = self.observers()["sprint:1"]
         self.assertEqual(record.delivery.through_event, event_id)
-        self.assertEqual(record.wake_liveness.head_run_id, old.head_run["run_id"])
-        self.assertEqual(record.wake_liveness.state.value, "unavailable")
-        self.assertEqual(record.wake_liveness.terminal_outcome, "replacement")
+        self.assertEqual(record.wake_liveness.head_run_id, record.head_run["run_id"])
+        self.assertNotEqual(record.wake_liveness.head_run_id, old.head_run["run_id"])
+        self.assertEqual(record.wake_liveness.state.value, "baseline_pending")
+        self.assertEqual(record.wake_liveness.terminal_outcome, "")
+        retired = record.retired_wake_liveness
+        self.assertEqual(retired["head_run_id"], old.head_run["run_id"])
+        self.assertEqual(retired["terminal_outcome"], "replacement")
 
-        # Reload proves the old terminal outcome survives while the replacement carries the same
-        # acknowledgement marker. Its own resume is the only acknowledgement authority.
+        # A normal delayed resume must survive another tick and reload. The current episode is
+        # exact-new-run evidence; the old terminal outcome remains audit-only.
         restored = self.observers()["sprint:1"]
-        self.assertEqual(restored.wake_liveness.terminal_outcome, "replacement")
+        self.assertEqual(restored.wake_liveness.head_run_id, restored.head_run["run_id"])
+        self.assertEqual(restored.retired_wake_liveness["terminal_outcome"], "replacement")
+        waiting = self.runtime.production_tick()
+        self.assertNotEqual(
+            [row["action"] for row in self.actions(waiting)],
+            ["observer-wake-liveness-unavailable"],
+        )
+        restored = self.observers()["sprint:1"]
+        self.assertEqual(restored.wake_liveness.head_run_id, restored.head_run["run_id"])
         entry = {
             "selected_step": "read board", "selected_why": "rollout complete",
             "rejected_alternatives": "wait", "current_task": "secretary-510-pilot",
@@ -1859,9 +1871,14 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual([row["action"] for row in self.actions(terminal)], ["observer-relaunched"])
         self.assertNotIn("nudge_observer", self.host.calls)
         self.assertEqual(self.host.calls.count("stop_observer"), 1)
-        liveness = self.observers()["sprint:1"].wake_liveness
-        self.assertEqual(liveness.terminal_outcome, "replacement")
-        self.assertEqual(liveness.no_progress_evidence, "completed_turn_residual_composer")
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.wake_liveness.head_run_id, record.head_run["run_id"])
+        self.assertEqual(record.wake_liveness.terminal_outcome, "")
+        self.assertEqual(record.retired_wake_liveness["terminal_outcome"], "replacement")
+        self.assertEqual(
+            record.retired_wake_liveness["no_progress_evidence"],
+            "completed_turn_residual_composer",
+        )
 
     def test_unadmitted_observer_progress_never_refreshes_a_current_episode(self) -> None:
         self.open_sprint()
@@ -1909,6 +1926,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(before_reload.state.value, "unavailable")
         self.assertTrue(before_reload.bound)
         self.assertGreater(before_reload.last_provider_observed_at, 0.0)
+        self.assertGreater(before_reload.first_observed_at, 0.0)
         self.assertFalse(before_reload.baseline_established)
 
         # `load_observers` reconstructs the durable state as a restarted dispatcher would.  The
@@ -1918,6 +1936,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(reloaded.head_run_id, before_reload.head_run_id)
         self.assertEqual(reloaded.head_run_fingerprint, before_reload.head_run_fingerprint)
         self.assertEqual(reloaded.last_provider_observed_at, before_reload.last_provider_observed_at)
+        self.assertEqual(reloaded.first_observed_at, before_reload.first_observed_at)
         self.host.observer_provider_progress = lambda record: self.observer_progress(  # type: ignore[method-assign]
             record, "cursor:must-not-baseline-after-reload",
         )
