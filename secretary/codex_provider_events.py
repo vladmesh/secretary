@@ -85,10 +85,17 @@ class CodexProviderEventIngress:
         self.run = run
 
     def bind_before_delivery(self) -> None:
-        """Bind a newly created Codex session before the first prompt is sent."""
+        """Bind and scan a Codex session before any prompt is sent.
+
+        Binding is not a permission to skip what the provider wrote while the pane was coming
+        up.  The durable parent cursor is the only point at which a source belongs to this run;
+        once it is committed, ``poll`` is the one classifier for both the pre-existing tail and
+        every later lifecycle poll.  A policy result raises after its fenced stop/block callbacks,
+        so it cannot fall through to prompt delivery.
+        """
         source = self.source
         if str(source.get("state") or "") == "bound":
-            self._verify_binding(source)
+            self.poll()
             return
         if str(source.get("state") or "") != "unbound":
             self._unknown("Codex provider source binding is missing or malformed")
@@ -154,6 +161,10 @@ class CodexProviderEventIngress:
             "bound_at": _now(),
         }
         self._replace_source(bound)
+        # Do not merely advance the initial cursor.  Lines that appeared after the parent before
+        # this callback are already provider evidence for this exact source and must take this
+        # same durable recorder/identity-fenced stop path before the caller can type a prompt.
+        self.poll()
 
     def poll(self) -> None:
         """Consume all new provider events, verifying binding and cursor before each action."""
@@ -210,7 +221,9 @@ class CodexProviderEventIngress:
                 self.run = outcome.run
                 # Any non-clean event already went through the fenced stop and block callbacks.
                 if outcome.blocked:
-                    return
+                    raise CodexProviderSourceError(
+                        "Codex provider fan-out policy blocked this HeadRun", run=outcome.run
+                    )
             # A source line which resulted in events was persisted by the recorder at its cursor.
 
     def _verify_binding(self, source: Mapping[str, Any]) -> tuple[dict[str, Any], list[SourceLine]] | None:
@@ -378,11 +391,34 @@ def _provider_events(
             }
         return
     item = view.get("item")
-    if not isinstance(item, dict) or item.get("type") != "collab_tool_call":
+    if not isinstance(item, Mapping):
+        return
+    item_type = str(item.get("type") or "")
+    # The retained Codex TUI journal uses ``CollabAgentToolCall`` inside
+    # ``event_msg.payload.item``.  Keep the documented exec spelling too.  These are decoder
+    # shapes only, never an allow-list for collaboration capability.
+    if item_type not in {"collab_tool_call", "CollabAgentToolCall"}:
+        if _collaboration_shaped(item_type):
+            yield {
+                "type": EVENT_UNKNOWN_THREAD_EDGE,
+                "parent_thread_id": str(item.get("sender_thread_id") or view.get("thread_id") or ""),
+                "tool": str(item.get("tool") or ""),
+                "provider_event": event,
+                **source,
+            }
         return
     parent = str(item.get("sender_thread_id") or view.get("thread_id") or "")
     tool = str(item.get("tool") or "")
     receivers = item.get("receiver_thread_ids")
+    if receivers is not None and not isinstance(receivers, list):
+        yield {
+            "type": EVENT_UNKNOWN_THREAD_EDGE,
+            "parent_thread_id": parent,
+            "tool": tool,
+            "provider_event": event,
+            **source,
+        }
+        return
     children = [str(child) for child in receivers if str(child)] if isinstance(receivers, list) else []
     if children:
         for child in children:
@@ -424,6 +460,11 @@ def _event_view(event: Any) -> Mapping[str, Any]:
 
 def _is_parent_started(event: Mapping[str, Any]) -> bool:
     return str(event.get("type") or "") in {"thread.started", "thread_started"}
+
+
+def _collaboration_shaped(item_type: str) -> bool:
+    """Whether an unrecognised item must be fenced rather than treated as ordinary output."""
+    return "collab" in item_type.lower() or "agenttoolcall" in item_type.lower()
 
 
 def _now() -> str:

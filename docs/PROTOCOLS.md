@@ -107,13 +107,21 @@ be durable before the canary acts on any provider event.
 The concrete Codex source is its structured session-event JSONL, not a pane read and not the
 tolerant workspace-level session liveness lookup. The pre-pane attestation stores the v1 source
 root and the set of journal paths that existed before the pane. The collector reads the journal's
-`session_meta` and `event_msg` envelopes, never pane text. Before the first prompt, exactly one
+`session_meta` and `event_msg` envelopes, never pane text. The retained TUI collaboration shape is
+`event_msg.payload.item.type = CollabAgentToolCall`, with `tool`, `sender_thread_id` and
+`receiver_thread_ids`; the documented `collab_tool_call` shape is also normalized. An unfamiliar
+collaboration-shaped item is `unknown`, never ordinary output. Before the first prompt, exactly one
 newly created journal for that workspace must supply one session identity and parent
 `thread.started` identity; that path, identity and line/digest cursor are written onto the same
-`HeadRun`. The canary precondition is therefore that Codex exposes its root-thread identity before
-task delivery. Recovery reopens only that path and verifies its root, session id, workspace, parent
-identity and prior cursor before reading a later line. Missing, unreadable, changed or ambiguous
-source evidence is `unknown`: it is fenced and blocked without signalling a possibly foreign head.
+`HeadRun`. Once that parent cursor is durable, the one scanner classifies every later already-present
+line before delivery and every later line before lifecycle work. Ordinary records may durably advance
+the cursor. A malformed, collaboration, child-edge, unknown-relation or cursor-write failure first
+becomes durable typed policy evidence where writable, then enters the identity-fenced stop/block
+path; it cannot fall through to a prompt. The canary precondition is therefore that Codex exposes
+its root-thread identity before task delivery. Recovery reopens only that path and verifies its root,
+session id, workspace, parent identity and prior cursor before reading a later line. Missing,
+unreadable, changed or ambiguous source evidence is `unknown`: it is fenced and blocked without
+signalling a possibly foreign head.
 
 ## SHA-bound mechanical gate evidence
 

@@ -129,11 +129,19 @@ For an allowed future canary, the recorder attaches to Codex's structured sessio
 launch. It reads the journal's `session_meta` and `event_msg` envelopes, not pane text. The v1
 HeadRun first records an unbound source root and pre-launch path baseline, then the one new matching
 journal's path, provider session id, parent thread id and line/digest cursor before its first
-prompt. This is not the tolerant workspace rollout-activity scan. The canary therefore requires
-the provider journal to expose its root `thread.started` identity before task delivery; without it
-the launch is unknown and fenced rather than prompt-delivered. Recovery verifies the same source and
-cursor before consuming a later line; a missing, unreadable, changed or ambiguous source is unknown,
-blocks the affected card or sprint with typed evidence and uses only the identity-fenced stop path.
+prompt. The retained TUI collaboration item is `event_msg.payload.item.type = CollabAgentToolCall`;
+its `tool`, `sender_thread_id` and `receiver_thread_ids` are normalized with the documented
+`collab_tool_call` form. Any other collaboration-shaped item is unknown, not a clean record. Once
+the binding and parent cursor are durable, the same scanner classifies every post-parent line already
+present before prompt delivery and every later line before lifecycle work. Ordinary records may move
+the cursor only through a durable write. A malformed, collaboration-shaped, child-edge,
+unknown-relation or cursor-write failure is fenced and blocked before delivery; it cannot be skipped
+or rendered as a clean cursor. This is not the tolerant workspace rollout-activity scan. The canary
+therefore requires the provider journal to expose its root `thread.started` identity before task
+delivery; without it the launch is unknown and fenced rather than prompt-delivered. Recovery verifies
+the same source and cursor before consuming a later line; a missing, unreadable, changed or ambiguous
+source is unknown, blocks the affected card or sprint with typed evidence and uses only the
+identity-fenced stop path.
 
 Rerun the matrix only when a new approved disposable-auth probe is warranted, such as an installed
 Codex binary/model change or a candidate provider control. Use the committed

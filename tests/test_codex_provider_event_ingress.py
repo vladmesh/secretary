@@ -112,7 +112,8 @@ class CodexProviderEventIngressTests(unittest.TestCase):
             "item": {"type": "collab_tool_call", "tool": "spawn_agent", "sender_thread_id": "parent-1"},
         })
 
-        ingress.poll()
+        with self.assertRaises(CodexProviderSourceError):
+            ingress.poll()
 
         recorded = self.written[-1]
         event = recorded.fanout_policy["events"][-1]
@@ -123,7 +124,7 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self.assertEqual(self.stops[0][0], "run-1")
         self.assertEqual(self.blocks[-1]["state"], "violation")
 
-    def test_codex_session_event_msg_envelope_reaches_the_same_recorder(self) -> None:
+    def test_retained_tui_tool_only_envelope_reaches_the_same_recorder(self) -> None:
         self._write_source()
         ingress = self._ingress()
         ingress.bind_before_delivery()
@@ -132,21 +133,32 @@ class CodexProviderEventIngressTests(unittest.TestCase):
             "payload": {
                 "type": "item_completed",
                 "thread_id": "parent-1",
-                "item": {"type": "collab_tool_call", "tool": "spawn_agent"},
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "wait",
+                    "sender_thread_id": "parent-1",
+                    "receiver_thread_ids": [],
+                },
             },
         })
 
-        ingress.poll()
+        with self.assertRaises(CodexProviderSourceError):
+            ingress.poll()
 
-        self.assertEqual(self.written[-1].fanout_policy["events"][-1]["type"], "collaboration_call")
+        event = self.written[-1].fanout_policy["events"][-1]
+        self.assertEqual(event["type"], "collaboration_call")
+        self.assertEqual(event["parent_thread_id"], "parent-1")
+        self.assertEqual(event["tool_name"], "wait")
         self.assertEqual(self.stops[0][0], "run-1")
 
     def test_child_edge_unknown_thread_and_malformed_line_are_typed(self) -> None:
         cases = (
             (
-                {"type": "item.completed", "item": {
-                    "type": "collab_tool_call", "tool": "spawn_agent", "sender_thread_id": "parent-1",
-                    "receiver_thread_ids": ["child-1"],
+                {"type": "event_msg", "payload": {
+                    "type": "item_completed", "thread_id": "parent-1", "item": {
+                        "type": "CollabAgentToolCall", "tool": "spawn_agent",
+                        "sender_thread_id": "parent-1", "receiver_thread_ids": ["child-1"],
+                    },
                 }},
                 "child_thread_edge", "violation",
             ),
@@ -163,7 +175,8 @@ class CodexProviderEventIngressTests(unittest.TestCase):
                 ingress.bind_before_delivery()
                 self._write_source(event)
 
-                ingress.poll()
+                with self.assertRaises(CodexProviderSourceError):
+                    ingress.poll()
 
                 self.assertEqual(self.written[-1].fanout_policy["events"][-1]["type"], expected_type)
                 self.assertEqual(self.written[-1].fanout_policy["terminal_state"], expected_state)
@@ -185,6 +198,98 @@ class CodexProviderEventIngressTests(unittest.TestCase):
             ingress.poll()
 
         self.assertEqual(self.stops, [("run-1", "Codex provider source identity no longer matches this HeadRun")])
+        self.assertEqual(self.blocks[-1]["state"], "unknown")
+
+    def test_clean_ordinary_prebind_lines_are_durably_advanced_before_delivery(self) -> None:
+        self._write_source(
+            {"type": "event_msg", "payload": {"type": "agent_message", "thread_id": "parent-1"}},
+            {"type": "turn.completed", "thread_id": "parent-1"},
+        )
+        ingress = self._ingress()
+
+        ingress.bind_before_delivery()
+
+        source = self.written[-1].fanout_policy["provider_source"]
+        self.assertEqual(source["cursor"]["line"], 4)
+        self.assertEqual(self.written[-1].fanout_policy["events"], [])
+        self.assertEqual(self.stops, [])
+        self.assertEqual(self.blocks, [])
+
+    def test_malformed_prebind_line_is_recorded_then_stopped_and_blocked(self) -> None:
+        self._write_source("{not-json")
+        ingress = self._ingress()
+
+        with self.assertRaises(CodexProviderSourceError):
+            ingress.bind_before_delivery()
+
+        self.assertEqual(self.written[0].fanout_policy["provider_source"]["cursor"]["line"], 2)
+        event = self.written[-1].fanout_policy["events"][-1]
+        self.assertEqual(event["type"], "unparseable_provider_event")
+        self.assertEqual(event["source_sequence"], 3)
+        self.assertEqual(self.stops[0][0], "run-1")
+        self.assertEqual(self.blocks[-1]["state"], "unknown")
+
+    def test_tui_policy_event_in_prebind_tail_blocks_before_delivery(self) -> None:
+        self._write_source({
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": "parent-1",
+                "item": {
+                    "type": "CollabAgentToolCall",
+                    "tool": "spawn_agent",
+                    "sender_thread_id": "parent-1",
+                    "receiver_thread_ids": ["child-1"],
+                },
+            },
+        })
+        ingress = self._ingress()
+
+        with self.assertRaises(CodexProviderSourceError):
+            ingress.bind_before_delivery()
+
+        self.assertEqual(self.written[0].fanout_policy["provider_source"]["cursor"]["line"], 2)
+        event = self.written[-1].fanout_policy["events"][-1]
+        self.assertEqual(event["type"], "child_thread_edge")
+        self.assertEqual(event["child_thread_id"], "child-1")
+        self.assertEqual(self.blocks[-1]["state"], "violation")
+
+    def test_unrecognised_collaboration_shape_is_unknown_not_a_clean_cursor_advance(self) -> None:
+        self._write_source({
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed", "thread_id": "parent-1",
+                "item": {"type": "CollabAgentStatus", "sender_thread_id": "parent-1"},
+            },
+        })
+        ingress = self._ingress()
+
+        with self.assertRaises(CodexProviderSourceError):
+            ingress.bind_before_delivery()
+
+        self.assertEqual(self.written[-1].fanout_policy["events"][-1]["type"], "unknown_thread_edge")
+        self.assertEqual(self.written[-1].fanout_policy["terminal_state"], "unknown")
+
+    def test_prebind_cursor_persistence_failure_blocks_without_delivery(self) -> None:
+        self._write_source({"type": "turn.completed", "thread_id": "parent-1"})
+
+        def fail_after_binding(run: HeadRun) -> None:
+            self.written.append(run)
+            if len(self.written) > 1:
+                raise OSError("disk full")
+
+        ingress = CodexProviderEventIngress(
+            self._run(),
+            fail_after_binding,
+            stop=lambda current, reason: self.stops.append((current.run_id, reason)),
+            block=self.blocks.append,
+        )
+
+        with self.assertRaises(codex_preflight.CodexFanoutRecordingError):
+            ingress.bind_before_delivery()
+
+        self.assertEqual(self.written[0].fanout_policy["provider_source"]["state"], "bound")
+        self.assertEqual(self.stops[0][0], "run-1")
         self.assertEqual(self.blocks[-1]["state"], "unknown")
 
     def test_failed_durable_event_write_blocks_and_never_silently_drops_the_event(self) -> None:
