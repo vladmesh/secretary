@@ -175,6 +175,7 @@ from secretary.dispatcher_worker_lifecycle import (
     BUSY_RETRY_INITIAL_SECONDS,
     CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS,
     ContinuationLivenessState,
+    ContinuationProviderCondition,
     ContinuationRecoveryRung,
     WorkerContinuationLiveness,
 )
@@ -6081,12 +6082,24 @@ class DispatcherRuntime:
     ) -> dict[str, Any] | None:
         """Take the explicit safe outcome when the liveness trust boundary is unprovable.
 
-        The board move is deliberately the terminal policy here.  It preserves the retained
-        HeadRun and its claim for the existing identity fence, and does not signal, resume,
-        replace, nudge or spend a safe-recovery rung on an unbound, foreign or malformed source.
+        A structurally complete Codex v1 descriptor that remains unbound is the one exception:
+        its exact retained HeadRun still goes through the ordinary confirmed-stop identity fence,
+        then the existing durable rework launch intent.  Every other unadmitted source retains the
+        terminal board policy and never signals, resumes, replaces, nudges or spends a recovery
+        rung.
         """
         if observation in {"baseline", "stalled", "progressed"} and record.worker_continuation_liveness.admitted:
             return None
+        if observation == ContinuationProviderCondition.LEGACY_UNBOUND_V1.value:
+            return self._restart_red_worker(
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                continuation_reason="Codex provider source remained legacy-unbound for v1 progress",
+                phase=phase,
+            )
         ref = task["ref"]
         reason = record.worker_continuation_liveness.reason or "provider source was not admitted"
         self.writer.move(

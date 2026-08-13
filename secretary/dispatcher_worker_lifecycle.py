@@ -37,6 +37,17 @@ class ContinuationLivenessState(StrEnum):
     PROGRESSED = "progressed"
 
 
+class ContinuationProviderCondition(StrEnum):
+    """Narrow provider-source conditions a retained-continuation policy may act on.
+
+    These are protocol classifications, not host error text.  In particular, an unavailable
+    transport, malformed evidence, or a source that fails the HeadRun fence must not acquire this
+    condition merely because its diagnostic happens to resemble an unbound source.
+    """
+
+    LEGACY_UNBOUND_V1 = "legacy_unbound_v1"
+
+
 class ContinuationRecoveryRung(StrEnum):
     """The durable, single-use no-progress ladder for one retained HeadRun."""
 
@@ -190,6 +201,20 @@ class WorkerContinuationLiveness:
             self.reason = "provider-progress transport returned an invalid shape"
             self.last_provider_observed_at = now
             return "unavailable"
+        if (
+            str(evidence.get("state") or "") == "unavailable"
+            and str(evidence.get("source") or "") == "codex-session"
+            and str(evidence.get("continuation_condition") or "")
+            == ContinuationProviderCondition.LEGACY_UNBOUND_V1.value
+        ):
+            # The producer emits this only for a complete v1 preflight descriptor that still says
+            # `unbound` for this exact run.  It is not a source admission and therefore cannot be
+            # re-baselined here, but the dispatcher may safely take its already-fenced replacement
+            # route instead of parking the card for an observer to move back to Ready.
+            self.state = ContinuationLivenessState.UNAVAILABLE
+            self.reason = "Codex provider source remains legacy-unbound for v1 progress"
+            self.last_provider_observed_at = now
+            return ContinuationProviderCondition.LEGACY_UNBOUND_V1.value
         if (
             str(evidence.get("state") or "") != "observed"
             or str(evidence.get("admission") or "") != "accepted"
