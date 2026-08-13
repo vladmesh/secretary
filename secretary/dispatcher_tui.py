@@ -540,15 +540,21 @@ def _legacy_unbound_v1_codex_source(source: dict[str, Any], run: HeadRun) -> boo
     unbound descriptor whose baseline is malformed, or whose immutable fields belong to another
     run, remains ordinary unavailable/identity evidence and cannot start a replacement.
     """
+    root = source.get("root")
+    baseline = source.get("baseline")
     return (
         run.spec.adapter == "codex"
         and run.fanout_policy.get("provider_source_required") is True
         and source.get("version") == 1
         and source.get("kind") == "codex_session_event_jsonl"
         and source.get("state") == "unbound"
-        and _is_canonical_absolute_path(source.get("root"))
-        and isinstance(source.get("baseline"), list)
-        and all(_is_canonical_absolute_path(path) for path in source["baseline"])
+        and _is_canonical_absolute_path(root)
+        and isinstance(baseline, list)
+        and all(
+            _is_canonical_absolute_path(path)
+            and Path(path).is_relative_to(Path(root))
+            for path in baseline
+        )
         and not _source_matches_run(source, run)
     )
 

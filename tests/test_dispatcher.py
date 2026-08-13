@@ -4596,6 +4596,25 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertNotIn("restart_worker", self.host.calls)
         self.assertNotIn("resume_worker", self.host.calls)
 
+    def test_outside_root_legacy_unbound_v1_source_blocks_without_signalling_worker(self) -> None:
+        """A canonical baseline outside its root is not producer-shaped replacement evidence."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self._review_red()
+        self._install_legacy_unbound_v1_worker_source({
+            "baseline": [str((self.data_dir / "outside-root.jsonl").resolve())],
+        })
+
+        outcome = self._park_and_decide("rework")
+
+        self.assertEqual(outcome["action"], "review-red-continuation-liveness-unavailable")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertNotIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("restart_worker", self.host.calls)
+        self.assertNotIn("resume_worker", self.host.calls)
+
     def test_unavailable_provider_transport_still_blocks_without_replacement(self) -> None:
         self.host.fail_resume_worker_reason = ""
         self.start_dispatcher()
