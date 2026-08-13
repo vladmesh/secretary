@@ -1076,6 +1076,7 @@ class FakeHost:
         # Keep that operation independently scriptable: it is neither another split nor a worker
         # freeze, and tests use the call log to prove the ordering.
         self.fail_review_delivery_retry_error: Exception | None = None
+        self.review_delivery_retry_evidence: dict | None = None
         self.review_delivery_retries: list[str] = []
         # A production reviewer can receive its prompt before a later freeze fails.  Tests that
         # exercise that boundary give the fake the same completed metadata-only receipt.
@@ -1461,7 +1462,7 @@ class FakeHost:
             "handle": str(intent.get("handle") or run.handle),
             "leaf": str(intent.get("leaf") or run.leaf),
             "head_run": run.to_json(),
-            "delivery_evidence": {
+            "delivery_evidence": self.review_delivery_retry_evidence or {
                 "subject": "reviewer-launch",
                 "handle": str(intent.get("handle") or run.handle),
                 "stage": "acknowledged",
