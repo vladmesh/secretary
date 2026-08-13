@@ -128,8 +128,11 @@ from secretary.dispatcher_watchdog import (
     wait_outcome,
 )
 from secretary.dispatcher_worker_lifecycle import (
+    ContinuationLivenessState,
+    ContinuationRecoveryRung,
     ReportNudgeStage,
     WorkerContinuation,
+    WorkerContinuationLiveness,
     WorkerContinuationStage,
     WorkerReportNudge,
 )
@@ -198,6 +201,54 @@ class LegacyDispatcherRecordTests(unittest.TestCase):
 
 
 class WorkerContinuationStateTests(unittest.TestCase):
+    def test_liveness_is_versioned_bound_and_historical_state_is_typed_unknown(self) -> None:
+        run = head_ops.HeadRun(
+            run_id="retained-run",
+            spec=head_ops.HeadSpec(profile_id="codex-extra", adapter="codex"),
+            workspace="/tmp/continuation",
+            task_ref=head_ops.TaskRef.card("secretary-1429"),
+            role="worker",
+        ).to_json()
+        liveness = WorkerContinuationLiveness.unknown()
+        self.assertTrue(liveness.bind(run, legacy_busy_attempts=2))
+        self.assertEqual(liveness.busy_attempts, 2)
+        self.assertFalse(liveness.observe_provider(
+            {"state": "observed", "source": "codex-rollout", "cursor": "mtime:1"},
+            10.0, head_run=run,
+        ))
+        self.assertTrue(liveness.observe_provider(
+            {"state": "observed", "source": "codex-rollout", "cursor": "mtime:2"},
+            20.0, head_run=run,
+        ))
+        restored = WorkerContinuationLiveness.from_json(liveness.to_json())
+        self.assertEqual(restored.head_run_id, "retained-run")
+        self.assertEqual(restored.last_provider_progress_at, 20.0)
+        self.assertEqual(restored.state, ContinuationLivenessState.PROGRESSED)
+        self.assertEqual(
+            WorkerContinuationLiveness.from_json(None).state,
+            ContinuationLivenessState.UNKNOWN,
+        )
+        malformed = WorkerContinuationLiveness.from_json({"version": 999})
+        self.assertEqual(malformed.state, ContinuationLivenessState.UNKNOWN)
+        self.assertEqual(malformed.reason, "unsupported version")
+
+    def test_liveness_rejects_a_different_headrun_without_resetting_the_episode(self) -> None:
+        first = head_ops.HeadRun(
+            run_id="first", spec=head_ops.HeadSpec(profile_id="codex", adapter="codex"),
+            workspace="/tmp/one", task_ref=head_ops.TaskRef.card("secretary-1429"), role="worker",
+        ).to_json()
+        second = head_ops.HeadRun(
+            run_id="second", spec=head_ops.HeadSpec(profile_id="codex", adapter="codex"),
+            workspace="/tmp/two", task_ref=head_ops.TaskRef.card("secretary-1429"), role="worker",
+        ).to_json()
+        liveness = WorkerContinuationLiveness.unknown()
+        liveness.bind(first)
+        liveness.note_busy(1.0)
+        self.assertFalse(liveness.bind(second))
+        self.assertEqual(liveness.busy_attempts, 1)
+        self.assertEqual(liveness.recovery_rung, ContinuationRecoveryRung.TERMINAL)
+        self.assertEqual(liveness.terminal_outcome, "identity_fenced")
+
     def test_a_park_outlives_the_session_it_was_opened_over(self) -> None:
         """A dropped session ends a plain retention. It does not end a park: the card is still
         waiting for a decision, and a rework decision on it is owed a replacement worker."""
@@ -4290,6 +4341,155 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertNotIn("restart_worker", self.host.calls)
         after_delivery = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
         self.assertEqual(after_delivery["worker_continuation"], {})
+
+    def test_provider_progress_outranks_busy_for_the_exact_retained_worker(self) -> None:
+        """A long Codex rollout is progress, even while tui-idle keeps refusing readiness."""
+        self.start_dispatcher()
+        self.host.fail_resume_worker_reason = ""
+        self._run_worker_to_validate()
+        before = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
+        identity = (before["handle"], before["worker_head_run"], before["workspace"])
+        self.assertEqual(self.tick()["action"], "review-started")
+        self._review_red()
+        busy = HostError("retained worker continuation was not delivered: tui-idle timeout")
+        busy.evidence = {"readiness_state": "busy", "reason": "readiness-busy"}
+        cursors = iter(("mtime:10", "mtime:11", "mtime:11"))
+        self.host.provider_progress = lambda *_args: {
+            "state": "observed", "source": "codex-rollout", "cursor": next(cursors),
+        }
+
+        with mock.patch.object(self.host, "resume_worker", side_effect=busy):
+            first = self._park_and_decide("rework")
+            payload = self.runtime.production_state.load()
+            payload["records"]["secretary-510-pilot"]["worker_continuation"]["busy_next_at"] = time.time() - 1
+            self.runtime.production_state.save(payload)
+            progressed = self.tick()
+
+        self.assertEqual(first["action"], "review-red-worker-busy")
+        self.assertEqual(progressed["action"], "review-red-worker-busy")
+        after = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual((after["handle"], after["worker_head_run"], after["workspace"]), identity)
+        self.assertEqual(after["worker_continuation_liveness"]["state"], "progressed")
+        self.assertEqual(after["worker_continuation_liveness"]["busy_attempts"], 0)
+        self.assertNotIn("restart_worker", self.host.calls)
+        self.assertNotIn("stop_head:worker", self.host.calls)
+
+    def test_stalled_busy_continuation_uses_no_interrupt_and_replaces_once(self) -> None:
+        """P1: stale composer/rollout evidence reaches the durable bounded outcome unaided."""
+        self.start_dispatcher()
+        self.host.fail_resume_worker_reason = ""
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self._review_red()
+        busy = HostError("retained worker continuation was not delivered: tui-idle timeout")
+        busy.evidence = {
+            "readiness_state": "busy",
+            "composer_before": "digest:stale-composer",
+            "composer_after": "digest:stale-composer",
+            "cursor_before": "cursor:report-done",
+            "cursor_after": "cursor:report-done",
+            "reason": "readiness-busy",
+        }
+        self.host.provider_progress = lambda *_args: {
+            "state": "observed", "source": "codex-rollout", "cursor": "mtime:stalled",
+        }
+        recovery_calls: list[dict] = []
+        self.host.safe_recover_worker_continuation = lambda *_args: (
+            recovery_calls.append({"called": True})
+            or {"state": "unavailable", "reason": "no safe provider capability"}
+        )
+        self.host.raw_interrupt = mock.Mock()
+
+        with mock.patch.object(self.host, "resume_worker", side_effect=busy):
+            self.assertEqual(self._park_and_decide("rework")["action"], "review-red-worker-busy")
+            payload = self.runtime.production_state.load()
+            payload["records"]["secretary-510-pilot"]["worker_continuation"]["busy_next_at"] = time.time() - 1
+            self.runtime.production_state.save(payload)
+            self.assertEqual(self.tick()["action"], "review-red-worker-busy")
+            payload = self.runtime.production_state.load()
+            payload["records"]["secretary-510-pilot"]["worker_continuation"]["busy_next_at"] = time.time() - 1
+            self.runtime.production_state.save(payload)
+            terminal = self.tick()
+
+        self.assertEqual(terminal["action"], "rework-started")
+        self.assertEqual(len(recovery_calls), 1)
+        self.host.raw_interrupt.assert_not_called()
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
+        liveness = self.runtime.production_state.load()["records"]["secretary-510-pilot"][
+            "worker_continuation_liveness"
+        ]
+        self.assertEqual(liveness["terminal_outcome"], "replacement")
+        self.assertEqual(liveness["recovery_rung"], "terminal")
+        self.assertEqual(liveness["no_progress_evidence"], "completed_turn_residual_composer")
+
+    def test_confirmed_safe_recovery_waits_then_resumes_the_retained_run_once(self) -> None:
+        self.start_dispatcher()
+        self.host.fail_resume_worker_reason = ""
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self._review_red()
+        busy = HostError("retained worker continuation was not delivered: tui-idle timeout")
+        busy.evidence = {"readiness_state": "busy", "reason": "readiness-busy"}
+        cursor = ["mtime:before"]
+        self.host.provider_progress = lambda *_args: {
+            "state": "observed", "source": "claude-transcript", "cursor": cursor[0],
+        }
+        self.host.safe_recover_worker_continuation = lambda _task, _record, liveness: {
+            "state": "recovered", "safe": True, "head_run_id": liveness["head_run_id"],
+        }
+        real_resume = self.host.resume_worker
+        calls = [0]
+
+        def busy_three_then_resume(task, record) -> None:
+            calls[0] += 1
+            if calls[0] <= 3:
+                raise busy
+            real_resume(task, record)
+
+        with mock.patch.object(self.host, "resume_worker", side_effect=busy_three_then_resume):
+            self.assertEqual(self._park_and_decide("rework")["action"], "review-red-worker-busy")
+            for _ in range(2):
+                payload = self.runtime.production_state.load()
+                payload["records"]["secretary-510-pilot"]["worker_continuation"]["busy_next_at"] = time.time() - 1
+                self.runtime.production_state.save(payload)
+                outcome = self.tick()
+            self.assertEqual(outcome["action"], "review-red-worker-recovery-window")
+            payload = self.runtime.production_state.load()
+            record = payload["records"]["secretary-510-pilot"]
+            record["worker_continuation"]["busy_next_at"] = time.time() - 1
+            record["worker_continuation_liveness"]["recovery_response_deadline"] = time.time() - 1
+            self.runtime.production_state.save(payload)
+            cursor[0] = "mtime:after"
+            resumed = self.tick()
+
+        self.assertEqual(resumed["action"], "review-red-reused-worker")
+        self.assertEqual(calls[0], 4)
+        self.assertNotIn("restart_worker", self.host.calls)
+        liveness = self.runtime.production_state.load()["records"]["secretary-510-pilot"][
+            "worker_continuation_liveness"
+        ]
+        self.assertEqual(liveness["terminal_outcome"], "reused")
+
+    def test_identity_mismatched_progress_probe_uses_the_existing_stop_fence(self) -> None:
+        self.start_dispatcher()
+        self.host.fail_resume_worker_reason = ""
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self._review_red()
+        self.host.provider_progress = lambda *_args: {
+            "state": "identity_mismatch", "reason": "different retained HeadRun",
+        }
+
+        outcome = self._park_and_decide("rework")
+
+        self.assertEqual(outcome["action"], "rework-started")
+        self.assertNotIn("resume_worker", self.host.calls)
+        self.assertLess(self.host.calls.index("stop_head:worker"), self.host.calls.index("restart_worker"))
+        liveness = self.runtime.production_state.load()["records"]["secretary-510-pilot"][
+            "worker_continuation_liveness"
+        ]
+        self.assertEqual(liveness["terminal_outcome"], "identity_fenced")
 
     def test_a_red_review_retries_an_unconfirmed_stop_before_a_replacement(self) -> None:
         """A stop the host will not confirm never earns a replacement, only the next tick."""

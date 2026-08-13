@@ -24,6 +24,7 @@ from secretary.dispatcher_tui import (
     deliver_interactive_prompt,
     delivery_readiness_state,
     latest_claude_user_turn_for,
+    provider_progress_for,
     terminal_readiness,
     terminal_turn_started,
     turn_started_confirm,
@@ -37,6 +38,40 @@ from tests.fanout_fixtures import accepted_transport_run
 
 
 class DispatcherTuiLaunchTests(unittest.TestCase):
+    def test_provider_progress_uses_text_free_codex_and_claude_cursors(self) -> None:
+        """Both provider shapes yield only an opaque source cursor, never session content."""
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            workspace.mkdir()
+            claude_root = Path(tmp) / "claude-projects"
+            transcript = claude_root / claude_project_dir_name(str(workspace)) / "session.jsonl"
+            transcript.parent.mkdir(parents=True)
+            transcript.write_text('{"type":"assistant","message":"secret"}\n', encoding="utf-8")
+            with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(claude_root)}):
+                claude = provider_progress_for(str(workspace), "claude")
+            self.assertEqual(claude["state"], "observed")
+            self.assertEqual(claude["source"], "claude-transcript")
+            self.assertTrue(claude["cursor"].startswith("mtime:"))
+            self.assertNotIn("secret", str(claude))
+
+            with mock.patch(
+                "triggered_agents.agents.pipeline.codex_sessions.latest_activity_for",
+                return_value=123.125,
+            ):
+                codex = provider_progress_for(str(workspace), "codex")
+            self.assertEqual(codex, {
+                "state": "observed",
+                "source": "codex-rollout",
+                "cursor": "mtime:123.125000000",
+                "observed_at": "123.125",
+            })
+
+    def test_provider_progress_keeps_an_unavailable_source_distinct_from_busy(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            unavailable = provider_progress_for(str(Path(tmp) / "workspace"), "claude")
+        self.assertEqual(unavailable["state"], "unavailable")
+        self.assertNotEqual(unavailable["state"], READINESS_BUSY)
+
     def test_out_of_band_delivery_rejects_confirm_before_touching_terminal(self) -> None:
         terminal_calls: list[list[str]] = []
         callback_calls = [0]

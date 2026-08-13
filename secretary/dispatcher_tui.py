@@ -77,6 +77,7 @@ __all__ = [
     "delivery_readiness_state",
     "deliver_tui_prompt",
     "latest_claude_user_turn_for",
+    "provider_progress_for",
     "latest_user_turn_for",
     "output_cursor",
     "read_terminal_text",
@@ -290,6 +291,63 @@ def latest_claude_user_turn_for(workspace: str, since: float) -> float | None:
         except OSError:
             continue
     return latest
+
+
+def provider_progress_for(
+    workspace: str,
+    adapter: str,
+    *,
+    session_root: Path | None = None,
+) -> dict[str, str]:
+    """Return one opaque provider cursor for an interactive workspace, or typed unavailable.
+
+    This is deliberately a liveness signal, not a delivery acknowledgement.  Codex rollout JSONL
+    and Claude's transcript JSONL are provider-owned files; their newest mtime says the provider
+    has progressed without retaining a line of provider, composer or prompt text.  The caller
+    compares the opaque cursor with the value durably recorded for its exact HeadRun.
+    """
+    if not workspace:
+        return {"state": "unavailable", "reason": "workspace is unavailable"}
+    if adapter == "codex":
+        try:
+            from triggered_agents.agents.pipeline.codex_sessions import latest_activity_for
+            activity = latest_activity_for(workspace)
+        except Exception:
+            activity = None
+        if activity is None:
+            return {
+                "state": "unavailable",
+                "source": "codex-rollout",
+                "reason": "Codex rollout cursor is unavailable",
+            }
+        return {
+            "state": "observed",
+            "source": "codex-rollout",
+            "cursor": f"mtime:{float(activity):.9f}",
+            "observed_at": str(float(activity)),
+        }
+    if adapter == "claude":
+        latest: float | None = None
+        for path in _claude_session_paths_for(workspace):
+            try:
+                stamp = path.stat().st_mtime
+            except OSError:
+                continue
+            if latest is None or stamp > latest:
+                latest = stamp
+        if latest is None:
+            return {
+                "state": "unavailable",
+                "source": "claude-transcript",
+                "reason": "Claude transcript cursor is unavailable",
+            }
+        return {
+            "state": "observed",
+            "source": "claude-transcript",
+            "cursor": f"mtime:{latest:.9f}",
+            "observed_at": str(latest),
+        }
+    return {"state": "unavailable", "reason": "provider adapter has no progress cursor"}
 
 
 def _claude_session_paths_for(workspace: str):

@@ -10,11 +10,297 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+import hashlib
+import json
 from typing import Any
 
 
 BUSY_RETRY_INITIAL_SECONDS = 30
 BUSY_RETRY_MAX_SECONDS = 5 * 60
+# A readiness refusal deliberately is not a failure on its own.  It is nevertheless not allowed
+# to keep one red continuation in the same backoff forever: after this many *unchanged provider*
+# observations the dispatcher takes the one safe-recovery rung it knows about, or goes to the
+# already identity-fenced replacement path.  This count is kept on the liveness record, not in a
+# process-local retry loop, so a restart does not buy another episode.
+CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS = 3
+CONTINUATION_LIVENESS_VERSION = 1
+
+
+class ContinuationLivenessState(StrEnum):
+    """What the provider evidence says, never an inference from screen text."""
+
+    UNKNOWN = "unknown"
+    UNAVAILABLE = "unavailable"
+    STALLED = "stalled"
+    PROGRESSED = "progressed"
+
+
+class ContinuationRecoveryRung(StrEnum):
+    """The durable, single-use no-progress ladder for one retained HeadRun."""
+
+    NONE = "none"
+    SAFE_RECOVERY_PENDING = "safe_recovery_pending"
+    SAFE_RECOVERY_RESPONSE_WINDOW = "safe_recovery_response_window"
+    SAFE_RECOVERY_RESUME_ONCE = "safe_recovery_resume_once"
+    SAFE_RECOVERY_UNAVAILABLE = "safe_recovery_unavailable"
+    TERMINAL = "terminal"
+
+
+def _head_run_binding(value: Any) -> tuple[str, str]:
+    """Return the stable identity of a HeadRun without retaining provider or pane contents.
+
+    `run_id` is the authoritative identity.  The digest binds the continuation to the run's
+    immutable launch facts as a second fence: a corrupted record cannot turn a same-workspace
+    session into this continuation simply because it copied a convenient run id.
+    """
+    if not isinstance(value, dict):
+        return "", ""
+    run_id = value.get("run_id")
+    workspace = value.get("workspace")
+    task_ref = value.get("task_ref")
+    spec = value.get("spec")
+    if not isinstance(run_id, str) or not run_id or not isinstance(workspace, str) or not workspace:
+        return "", ""
+    if not isinstance(task_ref, dict) or not isinstance(spec, dict):
+        return "", ""
+    stable = {
+        "run_id": run_id,
+        "workspace": workspace,
+        "task_ref": task_ref,
+        "role": str(value.get("role") or ""),
+        "spec": spec,
+    }
+    encoded = json.dumps(stable, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return run_id, hashlib.sha256(encoded.encode("ascii")).hexdigest()[:32]
+
+
+@dataclass
+class WorkerContinuationLiveness:
+    """Versioned provider-progress evidence for a retained red continuation.
+
+    This is intentionally separate from the delivery receipt.  The receipt says whether the
+    continuation prompt reached the pane; this record answers the later and narrower question of
+    whether the *same provider run* has made progress while readiness keeps saying busy.  It keeps
+    only opaque provider cursors/fingerprints and classifications, never composer or prompt text.
+
+    A record missing this value is not silently upgraded to an empty episode.  It becomes typed
+    unknown and inherits the legacy busy count when first rebound, so recovery cannot spend a
+    fresh set of retries merely because the dispatcher restarted or was upgraded.
+    """
+
+    version: int = CONTINUATION_LIVENESS_VERSION
+    state: ContinuationLivenessState = ContinuationLivenessState.UNKNOWN
+    reason: str = "missing"
+    head_run_id: str = ""
+    head_run_fingerprint: str = ""
+    first_busy_at: float = 0.0
+    last_provider_progress_at: float = 0.0
+    last_provider_observed_at: float = 0.0
+    provider_cursor: str = ""
+    provider_source: str = ""
+    # A text-free explanation of why unchanged progress is not treated as a completed turn.
+    # `residual_composer` requires equal composer and output fingerprints; everything else stays
+    # active-or-unknown rather than guessing from a screen snapshot.
+    no_progress_evidence: str = ""
+    busy_attempts: int = 0
+    recovery_rung: ContinuationRecoveryRung = ContinuationRecoveryRung.NONE
+    recovery_attempted_at: float = 0.0
+    recovery_response_deadline: float = 0.0
+    recovery_attempts: int = 0
+    recovery_resume_used: bool = False
+    terminal_outcome: str = ""
+
+    @classmethod
+    def unknown(cls, reason: str = "missing") -> "WorkerContinuationLiveness":
+        return cls(reason=reason[:240])
+
+    @property
+    def bound(self) -> bool:
+        return bool(self.head_run_id and self.head_run_fingerprint)
+
+    @property
+    def terminal(self) -> bool:
+        return bool(self.terminal_outcome) or self.recovery_rung == ContinuationRecoveryRung.TERMINAL
+
+    def bind(self, head_run: Any, *, legacy_busy_attempts: int = 0) -> bool:
+        """Bind a fresh episode to the exact retained run, refusing malformed identities."""
+        run_id, fingerprint = _head_run_binding(head_run)
+        if not run_id:
+            self.state = ContinuationLivenessState.UNKNOWN
+            self.reason = "retained HeadRun is unavailable or malformed"
+            return False
+        if self.bound and (self.head_run_id != run_id or self.head_run_fingerprint != fingerprint):
+            self.state = ContinuationLivenessState.UNKNOWN
+            self.reason = "retained HeadRun does not match continuation liveness binding"
+            self.recovery_rung = ContinuationRecoveryRung.TERMINAL
+            self.terminal_outcome = "identity_fenced"
+            return False
+        self.version = CONTINUATION_LIVENESS_VERSION
+        self.head_run_id = run_id
+        self.head_run_fingerprint = fingerprint
+        if self.reason == "missing" or self.state == ContinuationLivenessState.UNKNOWN:
+            self.reason = ""
+        self.busy_attempts = max(self.busy_attempts, int(legacy_busy_attempts or 0))
+        return True
+
+    def observe_provider(
+        self, evidence: Any, now: float, *, head_run: Any, legacy_busy_attempts: int = 0,
+    ) -> bool:
+        """Record one provider probe and return whether its cursor freshly progressed."""
+        if not self.bind(head_run, legacy_busy_attempts=legacy_busy_attempts):
+            return False
+        if not isinstance(evidence, dict):
+            self.state = ContinuationLivenessState.UNAVAILABLE
+            self.reason = "provider-progress transport returned an invalid shape"
+            self.last_provider_observed_at = now
+            return False
+        state = str(evidence.get("state") or "unavailable")
+        source = str(evidence.get("source") or "")[:80]
+        cursor = str(evidence.get("cursor") or "")[:240]
+        if state == "identity_mismatch":
+            self.state = ContinuationLivenessState.UNKNOWN
+            self.reason = "provider-progress identity does not match retained HeadRun"
+            self.recovery_rung = ContinuationRecoveryRung.TERMINAL
+            self.terminal_outcome = "identity_fenced"
+            self.last_provider_observed_at = now
+            return False
+        if state != "observed" or not cursor:
+            self.state = ContinuationLivenessState.UNAVAILABLE
+            self.reason = str(evidence.get("reason") or "provider progress is unavailable")[:240]
+            self.provider_source = source
+            self.last_provider_observed_at = now
+            return False
+        fresh = bool(self.provider_cursor and self.provider_cursor != cursor)
+        self.provider_source = source
+        self.provider_cursor = cursor
+        self.last_provider_observed_at = now
+        if fresh:
+            response_window = (
+                self.recovery_rung == ContinuationRecoveryRung.SAFE_RECOVERY_RESPONSE_WINDOW
+            )
+            self.state = ContinuationLivenessState.PROGRESSED
+            self.reason = ""
+            self.last_provider_progress_at = now
+            # Only the no-progress ladder resets.  The HeadRun, workspace, claim and delivery
+            # intent live outside this value and are deliberately untouched.
+            self.busy_attempts = 0
+            self.recovery_rung = (
+                ContinuationRecoveryRung.SAFE_RECOVERY_RESPONSE_WINDOW
+                if response_window else ContinuationRecoveryRung.NONE
+            )
+            self.recovery_attempted_at = 0.0
+            self.recovery_response_deadline = 0.0
+            self.recovery_attempts = 0
+            self.recovery_resume_used = False
+            self.terminal_outcome = ""
+            self.no_progress_evidence = ""
+            return True
+        self.state = ContinuationLivenessState.STALLED
+        self.reason = "provider cursor has not advanced"
+        return False
+
+    def note_busy(self, now: float) -> int:
+        if not self.first_busy_at:
+            self.first_busy_at = now
+        self.busy_attempts += 1
+        return self.busy_attempts
+
+    def begin_safe_recovery(self, now: float) -> None:
+        self.recovery_rung = ContinuationRecoveryRung.SAFE_RECOVERY_PENDING
+        self.recovery_attempted_at = now
+        self.recovery_attempts += 1
+
+    def safe_recovery_response_window(self, now: float, seconds: float) -> None:
+        self.recovery_rung = ContinuationRecoveryRung.SAFE_RECOVERY_RESPONSE_WINDOW
+        self.recovery_response_deadline = now + max(0.0, seconds)
+
+    def allow_safe_recovery_resume_once(self) -> bool:
+        if self.recovery_rung != ContinuationRecoveryRung.SAFE_RECOVERY_RESUME_ONCE:
+            return False
+        if self.recovery_resume_used:
+            return False
+        self.recovery_resume_used = True
+        return True
+
+    def terminalize(self, outcome: str, reason: str) -> None:
+        self.recovery_rung = ContinuationRecoveryRung.TERMINAL
+        self.terminal_outcome = outcome
+        self.reason = reason[:240]
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "version": CONTINUATION_LIVENESS_VERSION,
+            "state": self.state.value,
+            "reason": self.reason,
+            "head_run_id": self.head_run_id,
+            "head_run_fingerprint": self.head_run_fingerprint,
+            "first_busy_at": self.first_busy_at,
+            "last_provider_progress_at": self.last_provider_progress_at,
+            "last_provider_observed_at": self.last_provider_observed_at,
+            "provider_cursor": self.provider_cursor,
+            "provider_source": self.provider_source,
+            "no_progress_evidence": self.no_progress_evidence,
+            "busy_attempts": self.busy_attempts,
+            "recovery_rung": self.recovery_rung.value,
+            "recovery_attempted_at": self.recovery_attempted_at,
+            "recovery_response_deadline": self.recovery_response_deadline,
+            "recovery_attempts": self.recovery_attempts,
+            "recovery_resume_used": self.recovery_resume_used,
+            "terminal_outcome": self.terminal_outcome,
+        }
+
+    @classmethod
+    def from_json(cls, value: Any) -> "WorkerContinuationLiveness":
+        if value is None:
+            return cls.unknown("missing")
+        if not isinstance(value, dict):
+            return cls.unknown("malformed")
+        try:
+            if int(value.get("version")) != CONTINUATION_LIVENESS_VERSION:
+                return cls.unknown("unsupported version")
+            state = ContinuationLivenessState(str(value.get("state") or ""))
+            rung = ContinuationRecoveryRung(str(value.get("recovery_rung") or ""))
+            run_id = value.get("head_run_id")
+            fingerprint = value.get("head_run_fingerprint")
+            if not isinstance(run_id, str) or not isinstance(fingerprint, str):
+                return cls.unknown("malformed HeadRun binding")
+            if (bool(run_id) != bool(fingerprint)) or (fingerprint and len(fingerprint) != 32):
+                return cls.unknown("malformed HeadRun binding")
+            numeric = {
+                name: float(value.get(name) or 0.0)
+                for name in (
+                    "first_busy_at", "last_provider_progress_at", "last_provider_observed_at",
+                    "recovery_attempted_at", "recovery_response_deadline",
+                )
+            }
+            if any(number < 0 for number in numeric.values()):
+                return cls.unknown("malformed liveness timestamp")
+            busy_attempts = int(value.get("busy_attempts") or 0)
+            recovery_attempts = int(value.get("recovery_attempts") or 0)
+            if busy_attempts < 0 or recovery_attempts < 0:
+                return cls.unknown("malformed liveness attempts")
+        except (TypeError, ValueError):
+            return cls.unknown("malformed")
+        return cls(
+            version=CONTINUATION_LIVENESS_VERSION,
+            state=state,
+            reason=str(value.get("reason") or "")[:240],
+            head_run_id=run_id,
+            head_run_fingerprint=fingerprint,
+            first_busy_at=numeric["first_busy_at"],
+            last_provider_progress_at=numeric["last_provider_progress_at"],
+            last_provider_observed_at=numeric["last_provider_observed_at"],
+            provider_cursor=str(value.get("provider_cursor") or "")[:240],
+            provider_source=str(value.get("provider_source") or "")[:80],
+            no_progress_evidence=str(value.get("no_progress_evidence") or "")[:80],
+            busy_attempts=busy_attempts,
+            recovery_rung=rung,
+            recovery_attempted_at=numeric["recovery_attempted_at"],
+            recovery_response_deadline=numeric["recovery_response_deadline"],
+            recovery_attempts=recovery_attempts,
+            recovery_resume_used=bool(value.get("recovery_resume_used", False)),
+            terminal_outcome=str(value.get("terminal_outcome") or "")[:80],
+        )
 
 
 class ReportNudgeStage(StrEnum):

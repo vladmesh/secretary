@@ -1100,6 +1100,36 @@ starts that one replacement. Retention
 and stop signal the head's private process group, so its helpers are frozen too. An unconfirmed
 stop never permits a second writer in the workspace.
 
+#### Retained-continuation provider liveness
+
+`worker_continuation_liveness` is version 1 state bound to the exact retained `HeadRun`: its run id
+and a digest of immutable launch facts, first busy observation, last provider observation and last
+fresh provider progress, opaque provider cursor/source, busy count, recovery rung and terminal
+outcome. It contains no prompt, composer or provider text. Missing, malformed, unsupported or
+HeadRun-mismatched values are durably `unknown`; a historical continuation inherits its recorded
+busy count when a new v1 binding is established, so restart or upgrade never silently buys another
+busy episode.
+
+Before every retained-continuation retry, the dispatcher samples the provider cursor. Codex uses its
+rollout JSONL and Claude its transcript JSONL, both as an opaque mtime cursor. A changed cursor is
+fresh provider progress. It preserves the same run, workspace, claim, continuation intent and retry
+owner, resets only the no-progress ladder, and makes a `tui-idle` busy result non-destructive. The
+worker/reviewer watchdog carries the same typed source result: provider-unavailable, stale handle,
+identity mismatch, confirmed dead and busy are not aliases, and only observed progress renews
+liveness.
+
+An unchanged cursor records either `completed_turn_residual_composer`, when equal non-empty composer
+and output fingerprints prove the old composer is residual, or `active_or_unknown_turn`; screen text
+is never read as the distinction. After three unchanged busy observations, the dispatcher persists a
+single `safe_recovery_pending` rung before asking for an explicit provider/terminal-safe capability.
+There is no raw interrupt, generic key chord or screen-derived recovery action. The current host has
+no such capability and records its typed absence, then takes the existing confirmed-stop/HeadRun
+fence to one replacement. A future capability must return a safe receipt bound to that same run;
+its recorded response window is rechecked for provider progress and can return to normal delivery
+exactly once. No progress after that window, an unavailable/refused capability, or an identity fence
+ends in the recorded replacement path. A stop that cannot yet be confirmed remains identity-fenced,
+never opens a second worker.
+
 Retention is scoped to one round: the report that opened it, the gate and the review that judge it,
 the park the verdict opens, and the decision that hands that round back. Nothing else keeps a worker
 session. A preempt or requeue back to Ready, a `report:blocked`, a move to Blocked and a

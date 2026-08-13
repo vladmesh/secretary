@@ -225,17 +225,33 @@ def command_terminal_status(
         # session manager that named no clock at all — which is not the same as "printed at the
         # epoch" and must stay `None` here, where the watchdog reads it as "no activity known".
         activity = terminal.last_output_at or None
-        supplemental = getattr(host, "codex_tui_activity", lambda _task, _record, _kind: None)(
-            task, record, kind
-        )
-        if supplemental:
-            activity = max(activity or 0.0, float(supplemental))
+        # Provider progress is independent from `tui-idle`.  In particular, a long Codex tool
+        # call can advance rollout JSONL while the pane has no new terminal output.  Keep the
+        # typed source result for watchdog callers, but only an observed cursor may refresh
+        # liveness; unavailable transport, stale handles and identity mismatches remain separate
+        # from both activity and a busy pane.
+        try:
+            provider_progress = getattr(
+                host, "provider_progress", lambda _task, _record, _kind: {"state": "unavailable"}
+            )(task, record, kind)
+        except Exception:
+            provider_progress = {"state": "unavailable", "reason": "provider-progress probe failed"}
+        if not isinstance(provider_progress, dict):
+            provider_progress = {"state": "unavailable", "reason": "invalid provider-progress shape"}
+        if str(provider_progress.get("state") or "") == "observed":
+            try:
+                observed_at = float(provider_progress.get("observed_at") or 0.0)
+            except (TypeError, ValueError):
+                observed_at = 0.0
+            if observed_at:
+                activity = max(activity or 0.0, observed_at)
         pid_confirmed = _heartbeat_is_live_match(pid_status)
         status = {
             "known": True, "live": True, "reason": "live", "last_activity": activity,
             # A pid-heartbeat that proves this exact process still runs; only this — not a
             # silent pane — should let a wait watchdog trust liveness past the timing ceilings.
             "pid_confirmed": pid_confirmed,
+            "provider_progress": dict(provider_progress),
         }
         if pid_confirmed:
             # Whether the head is working or waiting at its prompt. Only asked of a process the
