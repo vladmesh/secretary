@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import hashlib
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -20,6 +21,8 @@ from triggered_agents.runtime.claude_sessions import (
     claude_project_dir_name,
     claude_session_paths,
 )
+from triggered_agents.runtime.head import HeadRun
+from secretary.dispatcher_worker_lifecycle import head_run_binding
 from triggered_agents.runtime.pane_host import OrcaSessionHost, PaneHost
 from triggered_agents.runtime.tui_delivery import (
     COMPOSER_EMPTY,
@@ -77,6 +80,9 @@ __all__ = [
     "delivery_readiness_state",
     "deliver_tui_prompt",
     "latest_claude_user_turn_for",
+    "bind_claude_provider_progress_source",
+    "prepare_claude_provider_progress_source",
+    "provider_progress_for_run",
     "latest_user_turn_for",
     "output_cursor",
     "read_terminal_text",
@@ -290,6 +296,236 @@ def latest_claude_user_turn_for(workspace: str, since: float) -> float | None:
         except OSError:
             continue
     return latest
+
+
+def prepare_claude_provider_progress_source(run: HeadRun) -> HeadRun:
+    """Persist the pre-pane Claude baseline for this exact HeadRun.
+
+    The provider journal does not carry a Secretary run id.  Selecting a transcript therefore has
+    to start with the files that existed before this run's pane was opened.  A missing root is
+    still a durable unavailable source, rather than permission to inspect the workspace later.
+    """
+    if run.spec.adapter != "claude":
+        return run
+    run_id, run_fingerprint = head_run_binding(run.to_json())
+    root = _claude_projects_root()
+    baseline: list[str] = []
+    if root.is_dir():
+        try:
+            baseline = sorted(
+                str(path.resolve(strict=False))
+                for path in claude_session_paths(run.workspace, root=root)
+                if path.is_file()
+            )
+        except OSError:
+            baseline = []
+    policy = dict(run.fanout_policy)
+    policy["provider_progress_source"] = {
+        "version": 1,
+        "kind": "claude_session_jsonl",
+        # Claude may create its projects root only when the pane first starts.  The empty
+        # pre-pane baseline is still a real launch baseline; later binding accepts exactly one
+        # new transcript beneath this recorded root and never scans another location.
+        "state": "unbound",
+        "reason": "",
+        "run_id": run_id,
+        "head_run_fingerprint": run_fingerprint,
+        "workspace": str(Path(run.workspace).resolve(strict=False)),
+        "role": run.role,
+        "task_ref": run.task_ref.to_json(),
+        "root": str(root.resolve(strict=False)),
+        "baseline": baseline,
+    }
+    return run.with_fanout_policy(policy)
+
+
+def bind_claude_provider_progress_source(run: HeadRun) -> HeadRun:
+    """Bind one newly-created Claude transcript without choosing a same-workspace fallback."""
+    source = _progress_source(run)
+    if source.get("kind") != "claude_session_jsonl" or source.get("state") != "unbound":
+        return run
+    reason = _source_matches_run(source, run)
+    if reason:
+        return _replace_progress_source(run, {**source, "state": "unavailable", "reason": reason})
+    root = Path(str(source.get("root") or ""))
+    baseline = source.get("baseline")
+    if not root.is_dir() or not isinstance(baseline, list) or not all(isinstance(path, str) for path in baseline):
+        return _replace_progress_source(run, {
+            **source, "state": "unavailable", "reason": "Claude source baseline is unavailable or malformed",
+        })
+    try:
+        root_resolved = root.resolve(strict=True)
+        candidates = [
+            path.resolve(strict=True)
+            for path in claude_session_paths(run.workspace, root=root)
+            if str(path.resolve(strict=False)) not in set(baseline)
+        ]
+        candidates = [path for path in candidates if path.is_relative_to(root_resolved)]
+    except (OSError, ValueError):
+        return _replace_progress_source(run, {
+            **source, "state": "unavailable", "reason": "Claude source cannot be enumerated",
+        })
+    if len(candidates) != 1:
+        return _replace_progress_source(run, {
+            **source,
+            "state": "unavailable",
+            "reason": "Claude source is ambiguous or absent after launch",
+        })
+    try:
+        stat = candidates[0].stat()
+    except OSError:
+        return _replace_progress_source(run, {
+            **source, "state": "unavailable", "reason": "Claude source cannot be inspected",
+        })
+    return _replace_progress_source(run, {
+        **source,
+        "state": "bound",
+        "path": str(candidates[0]),
+        "device": int(stat.st_dev),
+        "inode": int(stat.st_ino),
+        "initial_size": int(stat.st_size),
+        "initial_mtime_ns": int(stat.st_mtime_ns),
+    })
+
+
+def provider_progress_for_run(run: HeadRun) -> dict[str, str]:
+    """Resolve one exact run-bound provider source, never a workspace activity maximum."""
+    run_json = run.to_json()
+    run_id, fingerprint = head_run_binding(run_json)
+    if not run_id:
+        return {"state": "unavailable", "reason": "persisted HeadRun is malformed"}
+    if run.spec.adapter == "codex":
+        return _codex_provider_progress_for_run(run, run_id, fingerprint)
+    if run.spec.adapter == "claude":
+        return _claude_provider_progress_for_run(run, run_id, fingerprint)
+    return {"state": "unavailable", "reason": "provider adapter has no progress source contract"}
+
+
+def _codex_provider_progress_for_run(run: HeadRun, run_id: str, fingerprint: str) -> dict[str, str]:
+    from secretary.codex_provider_events import _initial_range_matches, _read_source
+
+    source = run.fanout_policy.get("provider_source")
+    if not isinstance(source, dict) or source.get("state") != "bound":
+        return _unavailable("Codex provider source has no bound v1 baseline", "codex-session")
+    reason = _source_matches_run(source, run)
+    if reason:
+        return _unavailable(reason, "codex-session", identity=True)
+    root = Path(str(source.get("root") or ""))
+    path = Path(str(source.get("path") or ""))
+    try:
+        root_resolved = root.resolve(strict=True)
+        path_resolved = path.resolve(strict=True)
+        if not path_resolved.is_relative_to(root_resolved) or path_resolved.suffix != ".jsonl":
+            raise OSError
+        parsed = _read_source(path_resolved)
+        if parsed is None or not _initial_range_matches(source, parsed[1]):
+            raise OSError
+        stat = path_resolved.stat()
+    except (OSError, ValueError):
+        return _unavailable("Codex bound provider source cannot be verified", "codex-session")
+    meta, lines = parsed
+    if (
+        str(meta.get("session_id") or "") != str(source.get("session_id") or "")
+        or not lines
+    ):
+        return _unavailable("Codex bound provider source identity changed", "codex-session", identity=True)
+    cursor = f"{lines[-1].number}:{lines[-1].digest}"
+    return _observed(
+        "codex-session", _source_fingerprint(source), cursor, stat.st_mtime,
+        run_id, fingerprint,
+    )
+
+
+def _claude_provider_progress_for_run(run: HeadRun, run_id: str, fingerprint: str) -> dict[str, str]:
+    source = _progress_source(run)
+    if source.get("kind") != "claude_session_jsonl" or source.get("state") != "bound":
+        return _unavailable("Claude provider source has no bound v1 baseline", "claude-session")
+    reason = _source_matches_run(source, run)
+    if reason:
+        return _unavailable(reason, "claude-session", identity=True)
+    root = Path(str(source.get("root") or ""))
+    path = Path(str(source.get("path") or ""))
+    try:
+        root_resolved = root.resolve(strict=True)
+        path_resolved = path.resolve(strict=True)
+        stat = path_resolved.stat()
+        allowed = {candidate.resolve(strict=True) for candidate in claude_session_paths(run.workspace, root=root)}
+        if (
+            not path_resolved.is_relative_to(root_resolved)
+            or path_resolved not in allowed
+            or int(source.get("device")) != int(stat.st_dev)
+            or int(source.get("inode")) != int(stat.st_ino)
+            or int(source.get("initial_size")) > int(stat.st_size)
+        ):
+            raise OSError
+    except (OSError, TypeError, ValueError):
+        return _unavailable("Claude bound provider source cannot be verified", "claude-session")
+    cursor = f"{int(stat.st_size)}:{int(stat.st_mtime_ns)}"
+    return _observed(
+        "claude-session", _source_fingerprint(source), cursor, stat.st_mtime,
+        run_id, fingerprint,
+    )
+
+
+def _progress_source(run: HeadRun) -> dict[str, Any]:
+    source = run.fanout_policy.get("provider_progress_source")
+    return dict(source) if isinstance(source, dict) else {}
+
+
+def _replace_progress_source(run: HeadRun, source: dict[str, Any]) -> HeadRun:
+    policy = dict(run.fanout_policy)
+    policy["provider_progress_source"] = source
+    return run.with_fanout_policy(policy)
+
+
+def _source_matches_run(source: dict[str, Any], run: HeadRun) -> str:
+    run_id, fingerprint = head_run_binding(run.to_json())
+    if (
+        source.get("version") != 1
+        or str(source.get("run_id") or "") != run_id
+        or str(source.get("head_run_fingerprint") or "") != fingerprint
+        or str(source.get("workspace") or "") != str(Path(run.workspace).resolve(strict=False))
+        or str(source.get("role") or "") != run.role
+        or source.get("task_ref") != run.task_ref.to_json()
+    ):
+        return "provider source binding does not match this HeadRun"
+    return ""
+
+
+def _source_fingerprint(source: dict[str, Any]) -> str:
+    stable = {
+        key: source.get(key) for key in (
+            "version", "kind", "run_id", "head_run_fingerprint", "workspace", "role",
+            "task_ref", "root", "path", "session_id", "parent_thread_id", "initial_range",
+            "device", "inode", "initial_size", "initial_mtime_ns",
+        )
+    }
+    raw = json.dumps(stable, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(raw.encode("ascii")).hexdigest()[:32]
+
+
+def _observed(
+    source: str, source_fingerprint: str, cursor: str, observed_at: float,
+    run_id: str, run_fingerprint: str,
+) -> dict[str, str]:
+    return {
+        "state": "observed",
+        "admission": "accepted",
+        "source": source,
+        "source_fingerprint": source_fingerprint,
+        "cursor": cursor,
+        "observed_at": str(float(observed_at)),
+        "head_run_id": run_id,
+        "head_run_fingerprint": run_fingerprint,
+    }
+
+
+def _unavailable(reason: str, source: str, *, identity: bool = False) -> dict[str, str]:
+    return {
+        "state": "identity_mismatch" if identity else "unavailable",
+        "source": source,
+        "reason": reason,
+    }
 
 
 def _claude_session_paths_for(workspace: str):

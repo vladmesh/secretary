@@ -65,44 +65,37 @@ steward's stale threshold is reported like any other stuck card.
 
 ## Codex provider-internal fan-out policy
 
-Codex roles are not trusted to self-limit provider-internal fan-out. A provider control is an
-enforcement boundary only when the exact CLI binary/version, model and role have a captured provider
-tool schema proving no callable child-spawn surface. An instruction, a hidden metadata field, a
-feature inventory, a model declining a forced tool call or a screen/transcript match is not that
-proof.
+Codex fan-out is a best-effort operational preference, not a lifecycle or security boundary. Every
+worker, reviewer and observer launch uses the strongest validated low-fan-out CLI configuration and
+receives an explicit instruction to perform its turn in the current head without spawning or
+delegating to children. A rare provider-internal child is acceptable product behaviour.
 
-The capability evidence and the implementation-ready fail-closed contract are in
+The capability evidence is in
 [Codex provider-internal fan-out capability evidence](evidence/codex-provider-fanout-2026-08-13.md).
 For the installed 0.147.0 CLI it records no provable native boundary: `--disable multi_agent` still
 produced a real collaboration call, while the globally configured v2 wait-disabled row had no
 collaboration call but no schema evidence. The artifact records strict-config rejection and
 ignored-role state as typed evidence, so neither a rejected candidate nor a silently ignored role
-can pass as isolation. Consequently no worker, reviewer or observer launch may be treated as
-isolated merely because that flag or `hide_spawn_agent_metadata` is present.
+can pass as isolation. Consequently the product describes its launch policy as practical
+suppression, never as capability isolation.
 
-`triggered_agents.runtime.codex_preflight` is the one pre-pane boundary. Its v1 attestation is
-persisted on the intended `HeadRun` before terminal creation and binds `run_id`, role, model,
-resolved CLI path, SHA-256 binary digest, exact CLI version, canonical provider-tool-schema digest
-and the explicit `no_callable_child_spawn_surface` verdict. A no-op, a non-spawning model response
-or an inventory is not a substitute for any of those fields. The v1 states are `allowed`,
-`schema_absent`, `schema_unknown`, `unknown` and `violation`; only `allowed` with terminal state
-`clean` permits a Codex pane. Historical/missing, malformed and unsupported records normalise only
-to non-clean `unknown`. Recovery does not fill them from today's profile or a transcript. Current
-0.147.0 evidence has no allowable schema capture, so all new Codex worker, reviewer and observer
-launches fail before pane creation.
+`triggered_agents.runtime.codex_preflight` remains the one pre-pane preparation boundary. Its v1
+record preserves `schema_absent`, `schema_unknown`, `allowed`, `unknown` and `violation` as honest
+diagnostics, but none of those fan-out states permits or refuses a pane. Workspace trust is the hard
+pre-pane requirement. Current 0.147.0 launches proceed with `schema_absent`, an unbound structured
+journal source where available, and the explicit low-fan-out launch configuration.
 
-Provider-edge collection is bound to that same run. Before any consequential action it appends one
+Provider-edge collection is bound to that same run. It appends one
 of `collaboration_call`, `child_thread_edge`, `unknown_thread_edge` or
 `unparseable_provider_event`, with parent and child thread identities when present, tool name when
 known, SHA-256 raw-event digest, source sequence/location and capture time. A collaboration call or
 non-empty child edge is a violation. An unknown tool or relation, missing expected parent,
-malformed event or failed event write is unknown. The event and terminal policy state are durably
-written first; only then does the caller use the existing identity-fenced stop path and block the
-card or sprint with typed evidence. A clean event never upgrades a missing attestation.
+malformed event or failed event write is unknown. These states are telemetry only: they never stop
+or replace the HeadRun, block a card or sprint, refuse prompt delivery, or affect continuation
+liveness. Telemetry loss is also non-fatal.
 
-The live fan-out canary has a hard precondition: an independently captured v1 provider schema for
-the exact binary/version/model/role must already permit the pane, and its run-bound recorder must
-be durable before the canary acts on any provider event.
+The live canary measures practical suppression. The configured run should normally produce no child
+edge, but an observed edge is recorded and the run continues.
 
 The concrete Codex source is its structured session-event JSONL, not a pane read and not the
 tolerant workspace-level session liveness lookup. The pre-pane attestation stores the v1 source
@@ -118,12 +111,28 @@ to the first raw record. The one scanner then classifies the complete selected s
 first record, through the selected root, and through every already-present tail line before delivery.
 Source selection does not exempt a session preamble or any pre-root record. Ordinary records may
 durably advance the cursor. A malformed, collaboration, child-edge, unknown-relation or cursor-write
-failure first becomes durable typed policy evidence where writable, then enters the identity-fenced
-stop/block path; it cannot fall through to a prompt. The canary precondition is therefore that Codex
-exposes its root-thread identity before task delivery. Recovery reopens only that path and verifies its
+failure becomes typed diagnostic evidence where writable and never gates a prompt. Recovery reopens
+the same path where available and verifies its
 complete initial range, session id, workspace, parent identity and prior cursor before reading a later
-line. Missing, unreadable, changed or ambiguous source evidence is `unknown`: it is fenced and blocked
-without signalling a possibly foreign head.
+line. Missing, unreadable, changed or ambiguous source evidence is non-fatal `unknown` telemetry.
+
+### Post-delivery HeadRun handoff
+
+There is one authoritative `HeadRun` after a launch delivery. The writer order is fixed: construct
+and validate the exact run; persist its handleless preflight identity in the role launch intent;
+create and bind the pane; persist the rebound handle and leaf; bind and persist the Codex source
+when applicable; capture that post-delivery run; then write routing, role state and clear the
+intent. `head_ops.spawn` returns the captured run, and worker, reviewer and observer launchers,
+intent confirmation and adoption consume that value rather than a pre-delivery local copy.
+
+The provider callback owns source facts. A later launcher or lifecycle writer may add only the pane
+address it proved and its own forward lifecycle evidence. It cannot remove a bound source, move a
+cursor backwards, replace a bound session/range, or replace run id, spec, workspace, task, role or
+pid identity. A conflicting, stale, malformed or foreign candidate is an identity fence: it is not
+adopted, resumed, signalled, stopped, replaced or attributed. The same merge is used by worker,
+reviewer and observer recovery, so a retained continuation and an observer watchdog read the exact
+source delivery committed. Source binding is observational for lifecycle purposes and never grants
+fan-out telemetry the authority to change that lifecycle.
 
 ## SHA-bound mechanical gate evidence
 
@@ -1099,6 +1108,57 @@ the state plane refuses leaves the red transition on the record, and the next ti
 starts that one replacement. Retention
 and stop signal the head's private process group, so its helpers are frozen too. An unconfirmed
 stop never permits a second writer in the workspace.
+
+#### Retained-continuation provider liveness
+
+`worker_continuation_liveness` is version 1 state bound to the exact retained `HeadRun`: its run id
+and a digest of immutable launch facts, first busy observation, last provider observation and last
+fresh provider progress, opaque provider cursor/source fingerprint, persisted source baseline, busy
+count, recovery rung and terminal outcome. It contains no prompt, composer or provider text. A new
+record is created only when that retained delivery boundary is written. Missing, malformed,
+unsupported or HeadRun-mismatched values are durably `unknown`; the sole unbound serialised shape
+is explicit `unknown`. Historical busy counts remain audit data and cannot bind a later run, reset
+the ladder or spend a recovery rung.
+
+Before every retained-continuation retry, one central admission step validates the durable episode
+and exact `HeadRun`, resolves its launch-bound provider source, and persists/uses the v1 baseline
+for that same source. Codex reads only the bound session journal selected from its pre-pane baseline;
+Claude reads only the exactly-one transcript selected from its pre-pane baseline. Neither path uses
+a workspace-wide newest-file mtime. A later changed opaque cursor is fresh provider progress. It
+preserves the same run, workspace, claim, continuation intent and retry owner, resets only the
+no-progress ladder, and makes a `tui-idle` busy result non-destructive. Source absence, ambiguity,
+a foreign source, malformed source or historical episode without a baseline are typed unavailable or
+unknown. Fan-out telemetry and recorder failures never enter that liveness decision. A foreign or
+incomplete retained-liveness source cannot become progress, reset or advance the ladder, or authorise
+recovery or replacement. The worker/reviewer watchdog carries the same typed source result:
+provider-unavailable, stale handle, identity mismatch, confirmed dead and busy are not aliases, and
+only admitted observed progress renews liveness.
+
+Once an exact episode rejects a foreign or changing source, it is sealed as `unknown`: the original
+HeadRun binding, source baseline, cursor and no-progress ladder remain audit-only and cannot be
+re-admitted by a later reply. The shared worker/reviewer status seam independently checks every
+apparently accepted provider observation against the persisted HeadRun before it can renew the
+watchdog clock.
+
+Codex preflight writes its immutable run descriptor: run id, HeadRun fingerprint, resolved
+workspace, role and task reference. Binding selects exactly one journal and retains that descriptor
+verbatim, adding only verified journal identity, range, cursor and bind time. The ingress and the
+shared worker/reviewer provider reader both validate the same descriptor before admitting a cursor.
+A missing, overwritten or foreign field is unavailable or identity mismatch, never evidence for a
+different retained run.
+
+An unchanged cursor records either `completed_turn_residual_composer`, when equal non-empty composer
+and output fingerprints prove the old composer is residual, or `active_or_unknown_turn`; screen text
+is never read as the distinction. Only after three unchanged admitted busy observations does the
+dispatcher persist a single `safe_recovery_pending` rung before asking for an explicit
+provider/terminal-safe capability. There is no raw interrupt, generic key chord or screen-derived
+recovery action. The current host has no such capability and records its typed absence, then takes
+the existing confirmed-stop/HeadRun fence to one replacement. A future capability must return a safe
+receipt bound to that same run; its recorded response window is rechecked for admitted provider
+progress and can return to normal delivery exactly once. No admitted progress after that window or
+an unavailable/refused capability ends in the recorded replacement path. A source identity failure
+remains a typed blocked outcome, not a reason to touch a potentially foreign pane. A stop that cannot
+yet be confirmed remains identity-fenced, never opens a second worker.
 
 Retention is scoped to one round: the report that opened it, the gate and the review that judge it,
 the park the verdict opens, and the decision that hands that round back. Nothing else keeps a worker
