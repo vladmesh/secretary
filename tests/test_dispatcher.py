@@ -12,8 +12,10 @@ import tempfile
 import time
 import tomllib
 import unittest
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from secretary import dispatcher as dispatcher_module, role_env
@@ -79,6 +81,7 @@ from secretary.dispatcher_review import (
 from secretary.dispatcher_tui import (
     DELIVERY_CONFIRMED,
     TuiDeliveryError,
+    provider_progress_for_run,
 )
 from triggered_agents.runtime.agent_prompt_transport import (
     BRACKETED_PASTE_END,
@@ -129,6 +132,7 @@ from secretary.dispatcher_watchdog import (
 )
 from secretary.dispatcher_worker_lifecycle import (
     ContinuationLivenessState,
+    ContinuationProviderCondition,
     ContinuationRecoveryRung,
     ReportNudgeStage,
     WorkerContinuation,
@@ -142,6 +146,86 @@ from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 from tests.dispatcher_fixtures import ensure_attempt
 from tests.fanout_fixtures import accepted_transport_run
 from tests.observer_identity import bind_observer
+
+
+def _legacy_unbound_v1_run(run_json: dict[str, Any], *, root: Path) -> dict[str, Any]:
+    """Give a production-shaped Codex HeadRun its exact, still-unbound v1 descriptor."""
+    run = head_ops.HeadRun.from_json(run_json)
+    # CommandHostRuntime preflights Codex with the profile's resolved model before it writes this
+    # source.  The fixture's generic head run omits a model, which cannot be a clean fan-out
+    # attestation, so give this isolated production-shaped source the real profile fact.
+    run = replace(
+        run,
+        role="worker",
+        spec=replace(run.spec, model="gpt-5.6-terra"),
+    )
+    run_id, fingerprint = head_run_binding(run.to_json())
+    source = {
+        "version": 1,
+        "kind": "codex_session_event_jsonl",
+        "state": "unbound",
+        "run_id": run_id,
+        "head_run_fingerprint": fingerprint,
+        "workspace": str(Path(run.workspace).resolve(strict=False)),
+        "role": run.role,
+        "task_ref": run.task_ref.to_json(),
+        "root": str(root.resolve(strict=False)),
+        "baseline": [],
+    }
+    return run.with_fanout_policy({
+        "version": 1,
+        "state": "allowed",
+        "terminal_state": "clean",
+        "run_id": run.run_id,
+        "role": run.role,
+        "model": run.spec.model or "",
+        "binary_path": "/test/codex",
+        "binary_digest": "0" * 64,
+        "cli_version": "test-codex",
+        "tool_schema_digest": "0" * 64,
+        "provider_schema_verdict": "no_callable_child_spawn_surface",
+        "events": [],
+        "provider_source_required": True,
+        "provider_source": source,
+    }).to_json()
+
+
+def _configure_production_shaped_codex_relaunch(host: Any, *, root: Path) -> None:
+    """Make the fake's next Codex rework retain the real preflight/launch HeadRun handoff."""
+    def preflight(
+        head: str,
+        *,
+        role: str,
+        workspace: str,
+        task_ref: head_ops.TaskRef,
+        pid_file: str,
+        run_id: str,
+    ) -> head_ops.HeadRun:
+        run = head_ops.HeadRun(
+            run_id=run_id,
+            spec=head_ops.HeadSpec(
+                profile_id=head, adapter="codex", model="gpt-5.6-terra",
+            ),
+            workspace=workspace,
+            task_ref=task_ref,
+            role=role,
+            pid_file=pid_file,
+        )
+        return head_ops.HeadRun.from_json(_legacy_unbound_v1_run(
+            run.to_json(), root=root / run_id,
+        ))
+
+    real_restart = host.restart_worker
+
+    def restart(task: dict, record, *, heartbeat_run_id: str = "") -> LaunchedHead:
+        launched = real_restart(task, record, heartbeat_run_id=heartbeat_run_id)
+        preflight_run = head_ops.HeadRun.from_json(record.launch_intent["head_run"])
+        reported = preflight_run.rebound(launched.handle, leaf=launched.leaf).working()
+        host._write_head_pid("worker", task["ref"], head_run=reported.to_json(), leaf=launched.leaf)
+        return replace(launched, head_run=reported.to_json())
+
+    host.preflight_codex_run = preflight
+    host.restart_worker = restart
 
 
 class LegacyDispatcherRecordTests(unittest.TestCase):
@@ -202,6 +286,30 @@ class LegacyDispatcherRecordTests(unittest.TestCase):
 
 
 class WorkerContinuationStateTests(unittest.TestCase):
+    def test_legacy_unbound_v1_condition_survives_the_fenced_stop_retry(self) -> None:
+        run = head_ops.HeadRun(
+            run_id="retained-run",
+            spec=head_ops.HeadSpec(profile_id="codex-extra", adapter="codex"),
+            workspace="/tmp/continuation",
+            task_ref=head_ops.TaskRef.card("secretary-1435"),
+            role="worker",
+        ).to_json()
+        liveness = WorkerContinuationLiveness.begin(run)
+
+        observation = liveness.observe_provider({
+            "state": "unavailable",
+            "source": "codex-session",
+            "continuation_condition": ContinuationProviderCondition.LEGACY_UNBOUND_V1.value,
+        }, 10.0, head_run=run)
+        liveness.terminalize("replacement", "fenced stop was unconfirmed")
+
+        restored = WorkerContinuationLiveness.from_json(liveness.to_json())
+
+        self.assertEqual(observation, ContinuationProviderCondition.LEGACY_UNBOUND_V1.value)
+        self.assertTrue(restored.bound)
+        self.assertTrue(restored.terminal)
+        self.assertEqual(restored.state, ContinuationLivenessState.UNAVAILABLE)
+
     def test_liveness_is_versioned_bound_and_historical_state_is_typed_unknown(self) -> None:
         run = head_ops.HeadRun(
             run_id="retained-run",
@@ -4285,6 +4393,25 @@ class DispatcherRuntimeTests(unittest.TestCase):
             "head_run_id": run_id, "head_run_fingerprint": fingerprint,
         }
 
+    def _install_legacy_unbound_v1_worker_source(
+        self, source_patch: dict[str, Any] | None = None,
+    ) -> None:
+        """Make the retained worker's probe use the real Codex v1 source classifier."""
+        payload = self.runtime.production_state.load()
+        stored = payload["records"]["secretary-510-pilot"]
+        worker_head_run = _legacy_unbound_v1_run(
+            stored["worker_head_run"], root=self.data_dir / "codex-sessions",
+        )
+        if source_patch:
+            worker_head_run["fanout_policy"]["provider_source"].update(source_patch)
+        stored["worker_head_run"] = worker_head_run
+        self.runtime.production_state.save(payload)
+
+        def progress(_task, record, _kind) -> dict[str, str]:
+            return provider_progress_for_run(head_ops.HeadRun.from_json(record.worker_head_run))
+
+        self.host.provider_progress = progress
+
     def test_red_review_reuses_the_retained_worker_conversation(self) -> None:
         """The round that wrote the code gets its verdict: same session, same round of work."""
         self.host.fail_resume_worker_reason = ""
@@ -4378,6 +4505,133 @@ class DispatcherRuntimeTests(unittest.TestCase):
             "review red continuation: replacement",
             self.reader.show("secretary-510-pilot")["comments"][-1]["body"],
         )
+
+    def test_legacy_unbound_v1_review_rework_replaces_the_retained_worker_without_requeue(self) -> None:
+        """A valid old Codex descriptor restarts one fenced round without a second observer move."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self._review_red()
+        self._install_legacy_unbound_v1_worker_source()
+        _configure_production_shaped_codex_relaunch(self.host, root=self.data_dir / "replacement-sessions")
+        before = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
+
+        reworked = self._park_and_decide("rework")
+
+        after = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(reworked["action"], "rework-started")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
+        self.assertLess(self.host.calls.index("stop_head:worker"), self.host.calls.index("restart_worker"))
+        self.assertNotIn("resume_worker", self.host.calls)
+        self.assertNotEqual(after["worker_head_run"]["run_id"], before["worker_head_run"]["run_id"])
+        self.assertEqual(after["attempt_round"], before["attempt_round"] + 1)
+        self.assertEqual(
+            after["worker_continuation_liveness"]["terminal_outcome"], "replacement"
+        )
+        self.assertIn(
+            "review red continuation: replacement",
+            self.reader.show("secretary-510-pilot")["comments"][-1]["body"],
+        )
+
+    def test_legacy_unbound_v1_gate_rework_uses_the_same_fenced_replacement(self) -> None:
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self._install_legacy_unbound_v1_worker_source()
+        _configure_production_shaped_codex_relaunch(self.host, root=self.data_dir / "replacement-sessions")
+        self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
+
+        reworked = self.tick()
+
+        self.assertEqual(reworked["action"], "gate-red-rework")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
+        self.assertNotIn("resume_worker", self.host.calls)
+
+    def test_legacy_unbound_v1_rework_waits_when_the_confirmed_stop_refuses(self) -> None:
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self._review_red()
+        self._install_legacy_unbound_v1_worker_source()
+        _configure_production_shaped_codex_relaunch(self.host, root=self.data_dir / "replacement-sessions")
+        self.host.fail_stop_head_reason = "Orca cannot confirm terminal stop"
+
+        refused = self._park_and_decide("rework")
+
+        self.assertEqual(refused["action"], "worker-stop-unconfirmed")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        self.assertEqual(self.host.calls.count("restart_worker"), 0)
+        self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
+        self.assertNotIn("resume_worker", self.host.calls)
+
+        self.host.fail_stop_head_reason = ""
+        retried = self.tick()
+
+        self.assertEqual(retried["action"], "rework-started")
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+
+    def test_malformed_legacy_unbound_v1_source_blocks_without_signalling_worker(self) -> None:
+        """Relative paths are malformed evidence, not permission to replace a retained worker."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self._review_red()
+        self._install_legacy_unbound_v1_worker_source({
+            "root": "relative-session-root",
+            "baseline": ["relative-old-session.jsonl"],
+        })
+
+        outcome = self._park_and_decide("rework")
+
+        self.assertEqual(outcome["action"], "review-red-continuation-liveness-unavailable")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertNotIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("restart_worker", self.host.calls)
+        self.assertNotIn("resume_worker", self.host.calls)
+
+    def test_outside_root_legacy_unbound_v1_source_blocks_without_signalling_worker(self) -> None:
+        """A canonical baseline outside its root is not producer-shaped replacement evidence."""
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self._review_red()
+        self._install_legacy_unbound_v1_worker_source({
+            "baseline": [str((self.data_dir / "outside-root.jsonl").resolve())],
+        })
+
+        outcome = self._park_and_decide("rework")
+
+        self.assertEqual(outcome["action"], "review-red-continuation-liveness-unavailable")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertNotIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("restart_worker", self.host.calls)
+        self.assertNotIn("resume_worker", self.host.calls)
+
+    def test_unavailable_provider_transport_still_blocks_without_replacement(self) -> None:
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self._review_red()
+        self.host.provider_progress = lambda *_args: {
+            "state": "unavailable", "source": "codex-session", "reason": "provider transport unavailable",
+        }
+
+        outcome = self._park_and_decide("rework")
+
+        self.assertEqual(outcome["action"], "review-red-continuation-liveness-unavailable")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertNotIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("restart_worker", self.host.calls)
+        self.assertNotIn("resume_worker", self.host.calls)
 
     def test_a_busy_retained_continuation_preserves_the_exact_worker_and_retries_later(self) -> None:
         """A readiness timeout is not a failed delivery or permission to replace its worker."""
