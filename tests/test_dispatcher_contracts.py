@@ -1047,8 +1047,8 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
 
         self.assertIs(dispatcher_launcher._preflight_codex_workspace,
                       codex_preflight.ensure_codex_workspace_trusted)
-        self.assertIs(ta_dispatch.ensure_codex_workspace_trusted,
-                      codex_preflight.ensure_codex_workspace_trusted)
+        self.assertIs(ta_dispatch.preflight_codex_launch,
+                      codex_preflight.preflight_codex_launch)
         source = Path(codex_preflight.__file__).read_text(encoding="utf-8")
         self.assertNotIn("import secretary", source)
         self.assertNotIn("from secretary", source)
