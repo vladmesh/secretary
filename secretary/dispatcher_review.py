@@ -24,6 +24,7 @@ from secretary.dispatcher_launch import (
     write_launch_intent,
 )
 from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _attempt_request_id
+from secretary.dispatcher_worker_lifecycle import head_run_binding
 from secretary.dispatcher_tui import (
     READINESS_BLOCKED,
     READINESS_BUSY,
@@ -225,17 +226,38 @@ def command_terminal_status(
         # session manager that named no clock at all — which is not the same as "printed at the
         # epoch" and must stay `None` here, where the watchdog reads it as "no activity known".
         activity = terminal.last_output_at or None
-        supplemental = getattr(host, "codex_tui_activity", lambda _task, _record, _kind: None)(
-            task, record, kind
+        # Provider progress is independent from `tui-idle`.  In particular, a long Codex tool
+        # call can advance rollout JSONL while the pane has no new terminal output.  Keep the
+        # typed source result for watchdog callers, but only an observed cursor may refresh
+        # liveness; unavailable transport, stale handles and identity mismatches remain separate
+        # from both activity and a busy pane.
+        try:
+            provider_progress = getattr(
+                host, "provider_progress", lambda _task, _record, _kind: {"state": "unavailable"}
+            )(task, record, kind)
+        except Exception:
+            provider_progress = {"state": "unavailable", "reason": "provider-progress probe failed"}
+        provider_progress = _admitted_provider_progress_for_status(
+            provider_progress,
+            record.review_head_run if kind == "review" else record.worker_head_run,
         )
-        if supplemental:
-            activity = max(activity or 0.0, float(supplemental))
+        if (
+            str(provider_progress.get("state") or "") == "observed"
+            and str(provider_progress.get("admission") or "") == "accepted"
+        ):
+            try:
+                observed_at = float(provider_progress.get("observed_at") or 0.0)
+            except (TypeError, ValueError):
+                observed_at = 0.0
+            if observed_at:
+                activity = max(activity or 0.0, observed_at)
         pid_confirmed = _heartbeat_is_live_match(pid_status)
         status = {
             "known": True, "live": True, "reason": "live", "last_activity": activity,
             # A pid-heartbeat that proves this exact process still runs; only this — not a
             # silent pane — should let a wait watchdog trust liveness past the timing ceilings.
             "pid_confirmed": pid_confirmed,
+            "provider_progress": dict(provider_progress),
         }
         if pid_confirmed:
             # Whether the head is working or waiting at its prompt. Only asked of a process the
@@ -290,6 +312,63 @@ def command_terminal_status(
         if started_at and time.time() - started_at <= _initial_output_stall_seconds():
             return {"known": True, "live": True, "reason": "pid-not-written-yet", "pid_confirmed": False}
     return {"known": True, "live": False, "reason": "missing-terminal"}
+
+
+def _admitted_provider_progress_for_status(value: Any, run: Any) -> dict[str, Any]:
+    """Keep shared worker/reviewer liveness inside the same exact-HeadRun admission fence.
+
+    ``CommandHostRuntime.provider_progress`` proves a provider source descriptor before it emits
+    an observation.  The generic status seam still receives a host response as data, though, so
+    it must verify the response's run binding before it lets an opaque cursor renew either role's
+    watchdog.  That prevents a test double, transport regression or foreign same-workspace
+    response from making a reviewer look live longer than its retained run warrants.
+    """
+    if not isinstance(value, dict):
+        return {"state": "unavailable", "reason": "invalid provider-progress shape"}
+    result: dict[str, Any] = {
+        "state": str(value.get("state") or "unavailable")[:40],
+        "reason": scrub_host_output(str(value.get("reason") or ""))[:240],
+    }
+    for name, limit in (
+        ("admission", 40),
+        ("source", 80),
+        ("source_fingerprint", 64),
+        ("cursor", 240),
+        ("head_run_id", 120),
+        ("head_run_fingerprint", 64),
+    ):
+        if name in value:
+            result[name] = str(value.get(name) or "")[:limit]
+    if "observed_at" in value:
+        result["observed_at"] = str(value.get("observed_at") or "")[:64]
+    if result["state"] != "observed" or result.get("admission") != "accepted":
+        return result
+    run_id, fingerprint = head_run_binding(run)
+    if not run_id:
+        return {
+            "state": "unavailable",
+            "reason": "persisted HeadRun is unavailable for provider-progress admission",
+        }
+    if (
+        result.get("head_run_id") != run_id
+        or result.get("head_run_fingerprint") != fingerprint
+    ):
+        return {
+            "state": "identity_mismatch",
+            "reason": "provider-progress observation does not name the persisted HeadRun",
+        }
+    source_fingerprint = str(result.get("source_fingerprint") or "")
+    if (
+        not result.get("source")
+        or not result.get("cursor")
+        or len(source_fingerprint) != 32
+        or any(character not in "0123456789abcdef" for character in source_fingerprint.lower())
+    ):
+        return {
+            "state": "unavailable",
+            "reason": "provider-progress source admission is incomplete",
+        }
+    return result
 
 
 def _pane_work_state(host: Any, handle: str) -> str:
@@ -712,6 +791,14 @@ def start_review(
     # split, because the record does not learn the reviewer's handle until this function returns
     # and the caller saves: a tick that dies in between would otherwise leave a live reviewer that
     # the next tick cannot see, and would launch a second one beside.
+    intent_kwargs: dict[str, Any] = {}
+    prompt_document_path = getattr(runtime.host, "_prompt_document_path", None)
+    if callable(prompt_document_path):
+        # The real host writes the review packet outside the checkout. Its preflight descriptor
+        # must carry that same pointer, not the historical in-worktree placeholder.
+        intent_kwargs["document"] = str(
+            prompt_document_path(REVIEW_ROLE, ref, record.review_baseline)
+        )
     failure = write_launch_intent(
         runtime,
         payload,
@@ -722,6 +809,7 @@ def start_review(
         action=action,
         head=record.review_head,
         workspace=record.workspace,
+        **intent_kwargs,
     )
     if failure is not None:
         if failure.startswith("codex-fanout-policy:"):

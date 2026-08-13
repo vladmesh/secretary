@@ -125,6 +125,24 @@ complete initial range, session id, workspace, parent identity and prior cursor 
 line. Missing, unreadable, changed or ambiguous source evidence is `unknown`: it is fenced and blocked
 without signalling a possibly foreign head.
 
+### Post-delivery HeadRun handoff
+
+There is one authoritative `HeadRun` after a launch delivery. The writer order is fixed: construct
+and validate the exact run; persist its handleless preflight identity in the role launch intent;
+create and bind the pane; persist the rebound handle and leaf; bind and persist the Codex source
+when applicable; capture that post-delivery run; then write routing, role state and clear the
+intent. `head_ops.spawn` returns the captured run, and worker, reviewer and observer launchers,
+intent confirmation and adoption consume that value rather than a pre-delivery local copy.
+
+The provider callback owns source facts. A later launcher or lifecycle writer may add only the pane
+address it proved and its own forward lifecycle evidence. It cannot remove a bound source, move a
+cursor backwards, replace a bound session/range, or replace run id, spec, workspace, task, role or
+pid identity. A conflicting, stale, malformed or foreign candidate is an identity fence: it is not
+adopted, resumed, signalled, stopped, replaced or attributed. The same merge is used by worker,
+reviewer and observer recovery, so a retained continuation and an observer watchdog read the exact
+source delivery committed. Source binding is observational for lifecycle purposes; only the owner's
+separate advisory fan-out policy may request its existing identity-fenced policy handling.
+
 ## SHA-bound mechanical gate evidence
 
 Every real mechanical gate result materializes a reusable receipt bound to one checkout:
@@ -1099,6 +1117,56 @@ the state plane refuses leaves the red transition on the record, and the next ti
 starts that one replacement. Retention
 and stop signal the head's private process group, so its helpers are frozen too. An unconfirmed
 stop never permits a second writer in the workspace.
+
+#### Retained-continuation provider liveness
+
+`worker_continuation_liveness` is version 1 state bound to the exact retained `HeadRun`: its run id
+and a digest of immutable launch facts, first busy observation, last provider observation and last
+fresh provider progress, opaque provider cursor/source fingerprint, persisted source baseline, busy
+count, recovery rung and terminal outcome. It contains no prompt, composer or provider text. A new
+record is created only when that retained delivery boundary is written. Missing, malformed,
+unsupported or HeadRun-mismatched values are durably `unknown`; the sole unbound serialised shape
+is explicit `unknown`. Historical busy counts remain audit data and cannot bind a later run, reset
+the ladder or spend a recovery rung.
+
+Before every retained-continuation retry, one central admission step validates the durable episode
+and exact `HeadRun`, resolves its launch-bound provider source, and persists/uses the v1 baseline
+for that same source. Codex reads only the bound session journal selected from its pre-pane baseline;
+Claude reads only the exactly-one transcript selected from its pre-pane baseline. Neither path uses
+a workspace-wide newest-file mtime. A later changed opaque cursor is fresh provider progress. It
+preserves the same run, workspace, claim, continuation intent and retry owner, resets only the
+no-progress ladder, and makes a `tui-idle` busy result non-destructive. Source absence, ambiguity,
+a foreign source, malformed source or historical episode without a baseline are typed unavailable or
+unknown. They block the card conservatively while preserving the retained head; they cannot reset or
+advance the ladder, authorise recovery or replacement, or become progress. The worker/reviewer
+watchdog carries the same typed source result: provider-unavailable, stale handle, identity mismatch,
+confirmed dead and busy are not aliases, and only admitted observed progress renews liveness.
+
+Once an exact episode rejects a foreign or changing source, it is sealed as `unknown`: the original
+HeadRun binding, source baseline, cursor and no-progress ladder remain audit-only and cannot be
+re-admitted by a later reply. The shared worker/reviewer status seam independently checks every
+apparently accepted provider observation against the persisted HeadRun before it can renew the
+watchdog clock.
+
+Codex preflight writes its immutable run descriptor: run id, HeadRun fingerprint, resolved
+workspace, role and task reference. Binding selects exactly one journal and retains that descriptor
+verbatim, adding only verified journal identity, range, cursor and bind time. The ingress and the
+shared worker/reviewer provider reader both validate the same descriptor before admitting a cursor.
+A missing, overwritten or foreign field is unavailable or identity mismatch, never evidence for a
+different retained run.
+
+An unchanged cursor records either `completed_turn_residual_composer`, when equal non-empty composer
+and output fingerprints prove the old composer is residual, or `active_or_unknown_turn`; screen text
+is never read as the distinction. Only after three unchanged admitted busy observations does the
+dispatcher persist a single `safe_recovery_pending` rung before asking for an explicit
+provider/terminal-safe capability. There is no raw interrupt, generic key chord or screen-derived
+recovery action. The current host has no such capability and records its typed absence, then takes
+the existing confirmed-stop/HeadRun fence to one replacement. A future capability must return a safe
+receipt bound to that same run; its recorded response window is rechecked for admitted provider
+progress and can return to normal delivery exactly once. No admitted progress after that window or
+an unavailable/refused capability ends in the recorded replacement path. A source identity failure
+remains a typed blocked outcome, not a reason to touch a potentially foreign pane. A stop that cannot
+yet be confirmed remains identity-fenced, never opens a second worker.
 
 Retention is scoped to one round: the report that opened it, the gate and the review that judge it,
 the park the verdict opens, and the decision that hands that round back. Nothing else keeps a worker

@@ -38,6 +38,8 @@ from triggered_agents.runtime.head import (
     SPAWNED,
     WORKING,
     HeadRun,
+    HeadDelivery,
+    HeadNudgeFailed,
     HeadSpawnAborted,
     HeadSpawnFailed,
     HeadSpec,
@@ -46,6 +48,7 @@ from triggered_agents.runtime.head import (
     StopInitiator,
     TaskRef,
     nudge,
+    post_delivery_run,
     spawn,
     stop,
 )
@@ -214,6 +217,56 @@ class HeadOperationTests(unittest.TestCase):
         self.assertEqual(outcome.run.lifecycle, WORKING)
         self.assertIn(self.task.document, self.host.sent[0][1])
         self.assertEqual(outcome.delivery.evidence.delivery_mode, "nudge-file")
+
+    def test_spawn_returns_the_post_delivery_run_without_losing_its_bound_source(self) -> None:
+        """A delivery writer, not the stale local launch copy, owns the returned HeadRun."""
+        class BindingTransport(head_operations.HostTransport):
+            def deliver(self, run, pointer, *, host, subject):
+                receipt = super().deliver(run, pointer, host=host, subject=subject)
+                bound = run.with_fanout_policy({
+                    "version": 1,
+                    "state": "unknown",
+                    "terminal_state": "unknown",
+                    "events": [],
+                    "provider_source_required": True,
+                    "provider_source": {
+                        "version": 1,
+                        "kind": "codex_session_event_jsonl",
+                        "state": "bound",
+                        "root": "/sessions",
+                        "path": "/sessions/session.jsonl",
+                        "session_id": "session-1",
+                        "parent_thread_id": "parent-1",
+                        "cursor": {"line": 2, "digest": "a" * 64},
+                        "initial_range": {
+                            "first": {"line": 1, "digest": "b" * 64},
+                            "root": {"line": 2, "digest": "c" * 64},
+                            "last": {"line": 2, "digest": "c" * 64},
+                            "digest": "d" * 64,
+                        },
+                        "bound_at": "2026-08-13T00:00:00+00:00",
+                    },
+                })
+                return HeadDelivery(bound, receipt.outcome)
+
+        outcome = self.bring_up(
+            pointer=NudgePointer.at_document(self.task.document),
+            run=HeadRun("run-bound", CODEX, WORKSPACE, self.task, role="worker"),
+            transport=BindingTransport(confirm=confirmed),
+        )
+
+        self.assertEqual(outcome.run.run_id, "run-bound")
+        self.assertEqual(outcome.run.fanout_policy["provider_source"]["state"], "bound")
+        self.assertEqual(outcome.run.handle, "term:1")
+        self.assertEqual(outcome.run.leaf, "leaf:1")
+        self.assertEqual(outcome.run.lifecycle, WORKING)
+
+    def test_post_delivery_run_refuses_a_foreign_identity(self) -> None:
+        before = HeadRun("run-local", CODEX, WORKSPACE, self.task, role="worker")
+        foreign = HeadRun("run-foreign", CODEX, WORKSPACE, self.task, role="worker")
+
+        with self.assertRaisesRegex(HeadNudgeFailed, "does not match"):
+            post_delivery_run(before, foreign)
 
     def test_a_head_given_its_task_on_the_command_line_is_not_nudged(self) -> None:
         """No pointer, no delivery: the prompt shape is the caller's to decide, not the spec's."""

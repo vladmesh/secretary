@@ -834,6 +834,44 @@ evidence. Neither historical evidence that lacks this typed field nor either of 
 is treated as busy. They retain their existing conservative recovery paths, including the normal
 liveness, launch-intent and confirmed-stop fences.
 
+### Retained continuation liveness canary
+
+Before the final live Terra canary, verify that the candidate has the version-1
+`worker_continuation_liveness` record and that it is bound to the worker's current `HeadRun`. The
+record must show the first busy time, last provider cursor observation, last fresh progress (when
+one occurred), opaque cursor, source fingerprint, baseline status, busy attempts, recovery rung
+and terminal outcome. It never contains terminal, composer, prompt or provider text. A missing,
+malformed, unsupported or mismatched record is typed `unknown`, not a clean or busy result. The
+only unbound shape is that explicit unknown record; a legacy busy count is audit data and cannot
+start a v1 ladder.
+
+The canary's retained post-`report:done` worker must exercise both precedence branches without an
+operator action: advancing evidence from the one launch-bound Codex journal or Claude transcript
+keeps the exact run while `tui-idle` is busy; unchanged evidence after that persisted v1 baseline
+reaches the three-observation bounded ladder. Workspace-wide newest-file mtimes are not evidence.
+An absent, ambiguous, foreign or malformed source blocks the card with a typed reason and preserves
+the retained head, rather than spending a recovery rung. The only recovery extension point is a
+provider/terminal-safe capability whose receipt names the retained run. Do not use `Ctrl-C`, Escape,
+a generic chord, or screen inspection to clear a composer. If the source was admitted and that
+capability is unavailable, the recorded terminal path is the existing identity-fenced confirmed
+stop followed by exactly one replacement. An unconfirmed stop or identity mismatch is a fence, not
+permission to target another pane or launch beside the old run.
+
+A source rejection seals the persisted episode rather than clearing its baseline or no-progress
+ladder. A later provider reply cannot re-admit that episode. The shared worker and reviewer status
+reads also verify the response's run id and HeadRun fingerprint before its opaque timestamp may
+renew the watchdog clock.
+
+For Codex, inspect the bound source after a real preflight-to-bind handoff. It must retain the
+preflight run descriptor exactly: run id, HeadRun fingerprint, resolved workspace, role and task
+reference. Journal selection may add its verified identity, range, cursor and bind time, but may not
+replace those facts. The worker and reviewer provider reads must both reject a source whose
+descriptor is incomplete or foreign. The same check applies to an observer launch and its recovered
+watchdog record. Before the final Terra canary, verify that the post-delivery HeadRun returned by the
+worker, reviewer and observer launch paths is the one in the durable intent/record, with the same
+bound source and cursor. A stale local launch copy, conflicting source or mismatched run is a canary
+failure: do not nudge, stop, replace, clean up or attribute that head.
+
 The head profile comes from the sprint's own `sprint_observer` field: one concrete profile, or `none` for
 a sprint that runs without an observer (see [Protocols](PROTOCOLS.md#the-declared-observer)). It is never
 read from `role_defaults.observer` — a sprint that declares a profile the registry does not have is fenced,
@@ -963,6 +1001,14 @@ is reported the same aborted way. By then the intent holds the launch configurat
 the routing journal with its own profile rather than whatever the registry holds now. A journal that fails at
 that write gives an adopt-deferred outcome (degraded): the head stays adopted, the intent stays on disk, and the
 next tick appends the journal entry.
+
+The launch result is the authoritative post-delivery `HeadRun`, not the pre-pane/pre-send value. Pane creation
+may add its verified handle and leaf, and the delivery boundary may bind the Codex source. Intent confirmation,
+routing and role records merge those facts only after their identities agree. A later write cannot turn a bound
+source back into `unbound`, rewind its cursor or substitute its session/range; it may add only its own verified
+pane or forward lifecycle evidence. A mismatch leaves the intent and prior run in place and permits no adoption,
+signal, stop, resume or replacement. This ordering applies equally to worker, reviewer and observer launch and
+recovery, while the generic non-Codex launch path keeps its existing behavior.
 
 A head adopted that way usually has no handle, because the tick that launched it did not survive to record one.
 Its liveness is read from the launch-identity heartbeat and reported as such in terminal status. It is also

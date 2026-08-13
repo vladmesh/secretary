@@ -128,8 +128,12 @@ from secretary.dispatcher_watchdog import (
     wait_outcome,
 )
 from secretary.dispatcher_worker_lifecycle import (
+    ContinuationLivenessState,
+    ContinuationRecoveryRung,
     ReportNudgeStage,
     WorkerContinuation,
+    WorkerContinuationLiveness,
+    head_run_binding,
     WorkerContinuationStage,
     WorkerReportNudge,
 )
@@ -198,6 +202,130 @@ class LegacyDispatcherRecordTests(unittest.TestCase):
 
 
 class WorkerContinuationStateTests(unittest.TestCase):
+    def test_liveness_is_versioned_bound_and_historical_state_is_typed_unknown(self) -> None:
+        run = head_ops.HeadRun(
+            run_id="retained-run",
+            spec=head_ops.HeadSpec(profile_id="codex-extra", adapter="codex"),
+            workspace="/tmp/continuation",
+            task_ref=head_ops.TaskRef.card("secretary-1429"),
+            role="worker",
+        ).to_json()
+        liveness = WorkerContinuationLiveness.begin(run)
+        _, fingerprint = head_run_binding(run)
+        baseline = {
+            "state": "observed", "admission": "accepted", "head_run_id": "retained-run",
+            "head_run_fingerprint": fingerprint, "source": "codex-session",
+            "source_fingerprint": "a" * 32, "cursor": "2:one",
+        }
+        self.assertEqual(liveness.observe_provider(baseline, 10.0, head_run=run), "baseline")
+        self.assertEqual(liveness.busy_attempts, 0)
+        self.assertEqual(liveness.observe_provider(
+            {**baseline, "cursor": "3:two"}, 20.0, head_run=run,
+        ), "progressed")
+        restored = WorkerContinuationLiveness.from_json(liveness.to_json())
+        self.assertEqual(restored.head_run_id, "retained-run")
+        self.assertEqual(restored.last_provider_progress_at, 20.0)
+        self.assertEqual(restored.state, ContinuationLivenessState.PROGRESSED)
+        self.assertEqual(
+            WorkerContinuationLiveness.from_json(None).state,
+            ContinuationLivenessState.UNKNOWN,
+        )
+        malformed = WorkerContinuationLiveness.from_json({"version": 999})
+        self.assertEqual(malformed.state, ContinuationLivenessState.UNKNOWN)
+        self.assertEqual(malformed.reason, "unsupported version")
+        legacy = WorkerContinuationLiveness.from_json(None)
+        legacy.legacy_busy_attempts = 11
+        self.assertEqual(
+            legacy.observe_provider(baseline, 30.0, head_run=run), "unknown",
+        )
+        self.assertEqual(legacy.busy_attempts, 0)
+        self.assertEqual(legacy.legacy_busy_attempts, 11)
+
+    def test_liveness_rejects_a_different_headrun_without_resetting_the_episode(self) -> None:
+        first = head_ops.HeadRun(
+            run_id="first", spec=head_ops.HeadSpec(profile_id="codex", adapter="codex"),
+            workspace="/tmp/one", task_ref=head_ops.TaskRef.card("secretary-1429"), role="worker",
+        ).to_json()
+        second = head_ops.HeadRun(
+            run_id="second", spec=head_ops.HeadSpec(profile_id="codex", adapter="codex"),
+            workspace="/tmp/two", task_ref=head_ops.TaskRef.card("secretary-1429"), role="worker",
+        ).to_json()
+        liveness = WorkerContinuationLiveness.begin(first)
+        _, fingerprint = head_run_binding(first)
+        evidence = {
+            "state": "observed", "admission": "accepted", "head_run_id": "first",
+            "head_run_fingerprint": fingerprint, "source": "codex-session",
+            "source_fingerprint": "b" * 32, "cursor": "2:one",
+        }
+        self.assertEqual(liveness.observe_provider(evidence, 1.0, head_run=first), "baseline")
+        self.assertEqual(liveness.observe_provider(evidence, 2.0, head_run=second), "unknown")
+        self.assertFalse(liveness.admitted)
+        self.assertEqual(liveness.busy_attempts, 0)
+
+    def test_rejected_source_preserves_and_seals_the_existing_ladder(self) -> None:
+        """A foreign cursor cannot turn an exhausted episode into a fresh baseline."""
+        run = head_ops.HeadRun(
+            run_id="retained-run",
+            spec=head_ops.HeadSpec(profile_id="codex", adapter="codex"),
+            workspace="/tmp/continuation",
+            task_ref=head_ops.TaskRef.card("secretary-1432"),
+            role="worker",
+        ).to_json()
+        _, fingerprint = head_run_binding(run)
+        evidence = {
+            "state": "observed", "admission": "accepted", "head_run_id": "retained-run",
+            "head_run_fingerprint": fingerprint, "source": "codex-session",
+            "source_fingerprint": "a" * 32, "cursor": "2:one",
+        }
+        liveness = WorkerContinuationLiveness.begin(run)
+        self.assertEqual(liveness.observe_provider(evidence, 1.0, head_run=run), "baseline")
+        self.assertEqual(liveness.observe_provider(evidence, 2.0, head_run=run), "stalled")
+        liveness.note_busy(2.0)
+        liveness.begin_safe_recovery(2.0)
+
+        self.assertEqual(liveness.observe_provider(
+            {**evidence, "source_fingerprint": "b" * 32, "cursor": "3:foreign"},
+            3.0,
+            head_run=run,
+        ), "unknown")
+        self.assertTrue(liveness.source_rejected)
+        self.assertEqual(liveness.provider_cursor, "2:one")
+        self.assertEqual(liveness.busy_attempts, 1)
+        self.assertEqual(liveness.recovery_rung, ContinuationRecoveryRung.SAFE_RECOVERY_PENDING)
+        self.assertEqual(liveness.last_provider_observed_at, 2.0)
+        self.assertEqual(liveness.observe_provider(evidence, 4.0, head_run=run), "unknown")
+
+        restored = WorkerContinuationLiveness.from_json(liveness.to_json())
+        self.assertTrue(restored.source_rejected)
+        self.assertFalse(restored.admitted)
+        self.assertEqual(restored.busy_attempts, 1)
+        self.assertEqual(restored.recovery_rung, ContinuationRecoveryRung.SAFE_RECOVERY_PENDING)
+        self.assertEqual(restored.observe_provider(evidence, 5.0, head_run=run), "unknown")
+
+    def test_liveness_decoder_refuses_unbound_stalled_and_invalid_fingerprints(self) -> None:
+        for malformed in (
+            {
+                "version": 1, "state": "stalled", "head_run_id": "", "head_run_fingerprint": "",
+                "busy_attempts": 11, "recovery_rung": "none",
+            },
+            {
+                "version": 1, "state": "stalled", "head_run_id": "run",
+                "head_run_fingerprint": "z" * 32, "baseline_established": True,
+                "provider_source": "codex-session", "provider_source_fingerprint": "a" * 32,
+                "provider_cursor": "2:one", "recovery_rung": "none",
+            },
+            {
+                "version": 1, "state": "baselined", "head_run_id": "run",
+                "head_run_fingerprint": "a" * 32, "baseline_established": True,
+                "provider_source": "codex-session", "provider_source_fingerprint": "b" * 32,
+                "provider_cursor": "2:one", "recovery_rung": "terminal",
+            },
+        ):
+            with self.subTest(malformed=malformed):
+                restored = WorkerContinuationLiveness.from_json(malformed)
+                self.assertEqual(restored.state, ContinuationLivenessState.UNKNOWN)
+                self.assertFalse(restored.bound)
+
     def test_a_park_outlives_the_session_it_was_opened_over(self) -> None:
         """A dropped session ends a plain retention. It does not end a park: the card is still
         waiting for a decision, and a rework decision on it is owed a replacement worker."""
@@ -1006,6 +1134,18 @@ class FakeHost:
 
     def poll_codex_provider_ingress(self, run) -> None:
         return None
+
+    def provider_progress(self, _task, record, kind) -> dict[str, str]:
+        """A fake provider's opaque cursor is still explicitly bound to its HeadRun."""
+        run = record.review_head_run if kind == "review" else record.worker_head_run
+        run_id, fingerprint = head_run_binding(run)
+        if not run_id:
+            return {"state": "unavailable", "reason": "fake has no persisted HeadRun"}
+        return {
+            "state": "observed", "admission": "accepted", "source": "fake-bound-session",
+            "source_fingerprint": "f" * 32, "cursor": "fake:unchanged",
+            "head_run_id": run_id, "head_run_fingerprint": fingerprint,
+        }
 
     def observer_pid_file(self, reference: str) -> str:
         return str(self.root / "observers" / f"{reference.replace(':', '-')}.pid")
@@ -4136,6 +4276,15 @@ class DispatcherRuntimeTests(unittest.TestCase):
             body=body, request_id=request_id,
         )
 
+    @staticmethod
+    def _bound_provider_progress(record, cursor: str, *, source: str = "fake-bound-session") -> dict[str, str]:
+        run_id, fingerprint = head_run_binding(record.worker_head_run)
+        return {
+            "state": "observed", "admission": "accepted", "source": source,
+            "source_fingerprint": "e" * 32, "cursor": cursor,
+            "head_run_id": run_id, "head_run_fingerprint": fingerprint,
+        }
+
     def test_red_review_reuses_the_retained_worker_conversation(self) -> None:
         """The round that wrote the code gets its verdict: same session, same round of work."""
         self.host.fail_resume_worker_reason = ""
@@ -4271,7 +4420,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         continuation = record["worker_continuation"]
         self.assertEqual(continuation["stage"], "delivery_pending")
         self.assertTrue(continuation["session_held"])
-        self.assertEqual(continuation["busy_attempts"], 1)
+        self.assertEqual(continuation["busy_attempts"], 0)
         self.assertGreater(continuation["busy_next_at"], time.time())
         self.assertEqual(record["worker_delivery_failures"], 0)
         self.assertEqual(record["worker_delivery_evidence"]["readiness_state"], "busy")
@@ -4290,6 +4439,154 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertNotIn("restart_worker", self.host.calls)
         after_delivery = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
         self.assertEqual(after_delivery["worker_continuation"], {})
+
+    def test_provider_progress_outranks_busy_for_the_exact_retained_worker(self) -> None:
+        """A long Codex rollout is progress, even while tui-idle keeps refusing readiness."""
+        self.start_dispatcher()
+        self.host.fail_resume_worker_reason = ""
+        self._run_worker_to_validate()
+        before = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
+        identity = (before["handle"], before["worker_head_run"], before["workspace"])
+        self.assertEqual(self.tick()["action"], "review-started")
+        self._review_red()
+        busy = HostError("retained worker continuation was not delivered: tui-idle timeout")
+        busy.evidence = {"readiness_state": "busy", "reason": "readiness-busy"}
+        cursors = iter(("mtime:10", "mtime:11", "mtime:11"))
+        self.host.provider_progress = lambda _task, record, _kind: self._bound_provider_progress(
+            record, next(cursors), source="codex-session",
+        )
+
+        with mock.patch.object(self.host, "resume_worker", side_effect=busy):
+            first = self._park_and_decide("rework")
+            payload = self.runtime.production_state.load()
+            payload["records"]["secretary-510-pilot"]["worker_continuation"]["busy_next_at"] = time.time() - 1
+            self.runtime.production_state.save(payload)
+            progressed = self.tick()
+
+        self.assertEqual(first["action"], "review-red-worker-busy")
+        self.assertEqual(progressed["action"], "review-red-worker-busy")
+        after = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual((after["handle"], after["worker_head_run"], after["workspace"]), identity)
+        self.assertEqual(after["worker_continuation_liveness"]["state"], "progressed")
+        self.assertEqual(after["worker_continuation_liveness"]["busy_attempts"], 0)
+        self.assertNotIn("restart_worker", self.host.calls)
+        self.assertNotIn("stop_head:worker", self.host.calls)
+
+    def test_stalled_busy_continuation_uses_no_interrupt_and_replaces_once(self) -> None:
+        """P1: stale composer/rollout evidence reaches the durable bounded outcome unaided."""
+        self.start_dispatcher()
+        self.host.fail_resume_worker_reason = ""
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self._review_red()
+        busy = HostError("retained worker continuation was not delivered: tui-idle timeout")
+        busy.evidence = {
+            "readiness_state": "busy",
+            "composer_before": "digest:stale-composer",
+            "composer_after": "digest:stale-composer",
+            "cursor_before": "cursor:report-done",
+            "cursor_after": "cursor:report-done",
+            "reason": "readiness-busy",
+        }
+        self.host.provider_progress = lambda _task, record, _kind: self._bound_provider_progress(
+            record, "cursor:stalled", source="codex-session",
+        )
+        recovery_calls: list[dict] = []
+        self.host.safe_recover_worker_continuation = lambda *_args: (
+            recovery_calls.append({"called": True})
+            or {"state": "unavailable", "reason": "no safe provider capability"}
+        )
+        self.host.raw_interrupt = mock.Mock()
+
+        with mock.patch.object(self.host, "resume_worker", side_effect=busy):
+            self.assertEqual(self._park_and_decide("rework")["action"], "review-red-worker-busy")
+            for _ in range(3):
+                payload = self.runtime.production_state.load()
+                payload["records"]["secretary-510-pilot"]["worker_continuation"]["busy_next_at"] = time.time() - 1
+                self.runtime.production_state.save(payload)
+                terminal = self.tick()
+
+        self.assertEqual(terminal["action"], "rework-started")
+        self.assertEqual(len(recovery_calls), 1)
+        self.host.raw_interrupt.assert_not_called()
+        self.assertEqual(self.host.calls.count("restart_worker"), 1)
+        self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
+        liveness = self.runtime.production_state.load()["records"]["secretary-510-pilot"][
+            "worker_continuation_liveness"
+        ]
+        self.assertEqual(liveness["terminal_outcome"], "replacement")
+        self.assertEqual(liveness["recovery_rung"], "terminal")
+        self.assertEqual(liveness["no_progress_evidence"], "completed_turn_residual_composer")
+
+    def test_confirmed_safe_recovery_waits_then_resumes_the_retained_run_once(self) -> None:
+        self.start_dispatcher()
+        self.host.fail_resume_worker_reason = ""
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self._review_red()
+        busy = HostError("retained worker continuation was not delivered: tui-idle timeout")
+        busy.evidence = {"readiness_state": "busy", "reason": "readiness-busy"}
+        cursor = ["mtime:before"]
+        self.host.provider_progress = lambda _task, record, _kind: self._bound_provider_progress(
+            record, cursor[0], source="claude-session",
+        )
+        self.host.safe_recover_worker_continuation = lambda _task, _record, liveness: {
+            "state": "recovered", "safe": True, "head_run_id": liveness["head_run_id"],
+        }
+        real_resume = self.host.resume_worker
+        calls = [0]
+
+        def busy_three_then_resume(task, record) -> None:
+            calls[0] += 1
+            if calls[0] <= 4:
+                raise busy
+            real_resume(task, record)
+
+        with mock.patch.object(self.host, "resume_worker", side_effect=busy_three_then_resume):
+            self.assertEqual(self._park_and_decide("rework")["action"], "review-red-worker-busy")
+            for _ in range(3):
+                payload = self.runtime.production_state.load()
+                payload["records"]["secretary-510-pilot"]["worker_continuation"]["busy_next_at"] = time.time() - 1
+                self.runtime.production_state.save(payload)
+                outcome = self.tick()
+            self.assertEqual(outcome["action"], "review-red-worker-recovery-window")
+            payload = self.runtime.production_state.load()
+            record = payload["records"]["secretary-510-pilot"]
+            record["worker_continuation"]["busy_next_at"] = time.time() - 1
+            record["worker_continuation_liveness"]["recovery_attempted_at"] = time.time() - 31
+            record["worker_continuation_liveness"]["recovery_response_deadline"] = time.time() - 1
+            self.runtime.production_state.save(payload)
+            cursor[0] = "mtime:after"
+            resumed = self.tick()
+
+        self.assertEqual(resumed["action"], "review-red-reused-worker")
+        self.assertEqual(calls[0], 5)
+        self.assertNotIn("restart_worker", self.host.calls)
+        liveness = self.runtime.production_state.load()["records"]["secretary-510-pilot"][
+            "worker_continuation_liveness"
+        ]
+        self.assertEqual(liveness["terminal_outcome"], "reused")
+
+    def test_identity_mismatched_progress_probe_blocks_without_touching_the_retained_head(self) -> None:
+        self.start_dispatcher()
+        self.host.fail_resume_worker_reason = ""
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self._review_red()
+        self.host.provider_progress = lambda *_args: {
+            "state": "identity_mismatch", "reason": "different retained HeadRun",
+        }
+
+        outcome = self._park_and_decide("rework")
+
+        self.assertEqual(outcome["action"], "review-red-continuation-liveness-unavailable")
+        self.assertNotIn("resume_worker", self.host.calls)
+        self.assertNotIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("restart_worker", self.host.calls)
+        liveness = self.runtime.production_state.load()["records"]["secretary-510-pilot"][
+            "worker_continuation_liveness"
+        ]
+        self.assertEqual(liveness["state"], "unknown")
 
     def test_a_red_review_retries_an_unconfirmed_stop_before_a_replacement(self) -> None:
         """A stop the host will not confirm never earns a replacement, only the next tick."""
@@ -13673,15 +13970,62 @@ class ReviewLivenessTests(unittest.TestCase):
                 status = self._host([terminal]).worker_status(self.task, self._record())
                 self.assertIsNone(status["last_activity"])
 
-    def test_tui_supplement_newer_than_last_output_at_wins(self) -> None:
+    def test_admitted_provider_progress_newer_than_last_output_at_wins(self) -> None:
         host = self._host([
             {"handle": "term-worker", "leafId": "leaf-worker", "connected": True, "lastOutputAt": 1_753_456_789_123},
         ])
-        host.codex_tui_activity = lambda _task, _record, _kind: 1_753_456_800.0  # type: ignore[method-assign]
+        host.provider_progress = lambda _task, record, _kind: {
+            "state": "observed", "admission": "accepted", "source": "codex-session",
+            "source_fingerprint": "a" * 32, "cursor": "3:cursor",
+            "head_run_id": record.worker_head_run["run_id"],
+            "head_run_fingerprint": head_run_binding(record.worker_head_run)[1],
+            "observed_at": "1753456800.0",
+        }  # type: ignore[method-assign]
 
         status = host.worker_status(self.task, self._record())
 
         self.assertEqual(status["last_activity"], 1_753_456_800.0)
+
+    def test_foreign_or_incomplete_provider_evidence_does_not_renew_either_role(self) -> None:
+        """The shared status seam has the same exact-HeadRun admission as continuation liveness."""
+        cases = (
+            (
+                "worker",
+                {},
+                {"handle": "term-worker", "leafId": "leaf-worker", "connected": True,
+                 "lastOutputAt": 1_753_456_789_123},
+                "identity_mismatch",
+            ),
+            (
+                "review",
+                {"review_handle": "term-review", "review_leaf": "leaf-review"},
+                {"handle": "term-review", "leafId": "leaf-review", "connected": True,
+                 "lastOutputAt": 1_753_456_789_123},
+                "unavailable",
+            ),
+        )
+        for kind, fields, terminal, expected_state in cases:
+            with self.subTest(kind=kind):
+                record = self._record(**fields)
+                run = record.review_head_run if kind == "review" else record.worker_head_run
+                _, fingerprint = head_run_binding(run)
+                host = self._host([terminal])
+                provider = {
+                    "state": "observed", "admission": "accepted", "source": "codex-session",
+                    "source_fingerprint": "a" * 32, "cursor": "3:cursor",
+                    "head_run_id": run["run_id"], "head_run_fingerprint": fingerprint,
+                    "observed_at": "1753456800.0",
+                }
+                if kind == "worker":
+                    provider["head_run_id"] = "foreign-worker-run"
+                else:
+                    provider["cursor"] = ""
+                host.provider_progress = lambda _task, _record, _kind, value=provider: value  # type: ignore[method-assign]
+
+                status = getattr(host, f"{kind}_status")(self.task, record)
+
+                self.assertEqual(status["provider_progress"]["state"], expected_state)
+                self.assertEqual(status["last_activity"], 1_753_456_789.123)
 
     def test_disconnected_reviewer_pane_is_not_running(self) -> None:
         host = self._host([

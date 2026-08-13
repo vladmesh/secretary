@@ -9,7 +9,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from secretary.dispatcher_types import DispatcherError
-from secretary.dispatcher_worker_lifecycle import WorkerContinuation, WorkerReportNudge
+from secretary.dispatcher_worker_lifecycle import (
+    WorkerContinuation,
+    WorkerContinuationLiveness,
+    WorkerReportNudge,
+)
 
 
 # Every way a claim can answer "not this card". A claim-skip is about the card in front of the
@@ -144,6 +148,12 @@ class DispatcherRecord:
     # Durable worker ownership while validation has the checkout. This is deliberately one typed
     # state value rather than four optional fields whose combinations callers would have to infer.
     worker_continuation: WorkerContinuation = field(default_factory=WorkerContinuation)
+    # Provider progress during a retained red continuation.  This stays beside the continuation
+    # rather than inside its transient delivery stage so the terminal outcome remains auditable
+    # after a confirmed stop hands the card to its one replacement head.
+    worker_continuation_liveness: WorkerContinuationLiveness = field(
+        default_factory=WorkerContinuationLiveness
+    )
     review_waiting_since: float = 0.0
     review_respawns: int = 0
     review_started_at: float = 0.0
@@ -278,6 +288,7 @@ class DispatcherRecord:
             "worker_report_nudge": self.worker_report_nudge.to_json(),
             "worker_progress_at": self.worker_progress_at,
             "worker_continuation": self.worker_continuation.to_json(),
+            "worker_continuation_liveness": self.worker_continuation_liveness.to_json(),
             "worker_respawns": self.worker_respawns,
             "worker_started_at": self.worker_started_at,
             "worker_head_run": dict(self.worker_head_run),
@@ -394,6 +405,9 @@ class DispatcherRecord:
             worker_report_nudge=WorkerReportNudge.from_json(payload.get("worker_report_nudge")),
             worker_continuation=WorkerContinuation.from_json(
                 payload.get("worker_continuation")
+            ),
+            worker_continuation_liveness=WorkerContinuationLiveness.from_json(
+                payload.get("worker_continuation_liveness")
             ),
             review_waiting_since=float(payload.get("review_waiting_since") or 0.0),
             review_respawns=int(payload.get("review_respawns") or 0),
