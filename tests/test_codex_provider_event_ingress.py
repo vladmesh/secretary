@@ -196,9 +196,15 @@ class CodexProviderEventIngressTests(unittest.TestCase):
                 self.assertEqual(source["parent_thread_id"], "session-1")
                 self.assertEqual(source["initial_range"]["root"]["line"], 1)
                 self.assertEqual(source["cursor"]["line"], 3)
-                recovered = self._ingress(self.written[-1])
+                persisted = HeadRun.from_json(self.written[-1].to_json())
+                writes_after_bind = len(self.written)
+                recovered = self._ingress(persisted)
                 recovered.poll()
-                self.assertEqual(recovered.run.fanout_policy["provider_source"]["state"], "bound")
+                self.assertEqual(len(self.written), writes_after_bind)
+                self.assertEqual(
+                    recovered.run.fanout_policy["provider_source"],
+                    persisted.fanout_policy["provider_source"],
+                )
 
     def test_preflight_descriptor_survives_real_bind_and_admits_new_progress(self) -> None:
         """The launch source reaches liveness through binding without losing its HeadRun fence."""
