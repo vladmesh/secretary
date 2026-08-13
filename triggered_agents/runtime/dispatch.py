@@ -621,9 +621,8 @@ def _ensure_head_ready(ws: str, cmd: DispatchCommand, *, role: str = "service") 
     """
     if cmd.prompt_after_start and str((cmd.head_profile or {}).get("adapter") or "") == "codex":
         # This service path does not own a dispatcher record, but it still crosses the shared
-        # pre-pane policy boundary.  The boundary owns both the provider decision and, only after
-        # an allow result, its Codex trust write.  Calling the trust helper here would let a
-        # rejected no-attestation launch mutate CODEX_HOME before it failed closed.
+        # pre-pane boundary.  It attaches the same advisory provider telemetry as a pipeline
+        # head while keeping the Codex trust write as the only hard preparation requirement.
         spec = HeadSpec.from_profile(str(cmd.profile or role), cmd.head_profile)
         preflight_codex_launch(
             cmd.head_profile,
