@@ -128,6 +128,8 @@ launch. It reads the journal's `session_meta` and `event_msg` envelopes, not pan
 HeadRun first records an unbound source root and pre-launch path baseline, then the one new matching
 journal's path, provider session id, parent thread id and line/digest cursor before its first
 prompt. The retained TUI collaboration item is `event_msg.payload.item.type = CollabAgentToolCall`;
+an explicit `thread.started` anchors the parent when present, while Codex 0.147's
+`session_meta`-plus-`task_started`/`task_complete` journal uses its selected session id as that root.
 its `tool`, `sender_thread_id` and `receiver_thread_ids` are normalized with the documented
 `collab_tool_call` form. Any other collaboration-shaped item is unknown, not a clean record. Once
 the binding is durable, it records first/root/last anchors and a digest of the complete initially
@@ -808,6 +810,9 @@ relaunch. `payload-left-in-composer` is bounded evidence of a completed/quiescen
 unchanged admitted progress. It never authorizes Ctrl-C, Escape, a generic key chord or a raw terminal input.
 The old `SECRETARY_OBSERVER_TURN_CEILING_SECONDS` applies only to observer records with no attested
 provider-progress source, retained for compatibility with non-Codex and historical records.
+Replacement retains the terminal old-run episode as audit-only state and durably opens a new
+episode for the replacement HeadRun before its first provider probe; neither source baseline nor
+recovery rung crosses that identity boundary.
 
 Idleness on this path is the pane-readiness signal from the session manager, plus a last-output
 timestamp that can be read at all. That is the whole test: the tick that sees a ready pane holding an

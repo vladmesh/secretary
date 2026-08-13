@@ -104,8 +104,9 @@ root and the set of journal paths that existed before the pane. The collector re
 `event_msg.payload.item.type = CollabAgentToolCall`, with `tool`, `sender_thread_id` and
 `receiver_thread_ids`; the documented `collab_tool_call` shape is also normalized. An unfamiliar
 collaboration-shaped item is `unknown`, never ordinary output. Before the first prompt, exactly one
-newly created journal for that workspace must supply one session identity and parent
-`thread.started` identity; that path and identity, plus durable first/root/last record anchors and a
+newly created journal for that workspace must supply one session identity. An explicit parent
+`thread.started` is preferred; Codex 0.147 journals which omit it use the same selected
+`session_meta` id as the parent/root identity. That path and identity, plus durable first/root/last record anchors and a
 digest of the initially observed range, are written onto the same `HeadRun` with a zero cursor anchored
 to the first raw record. The one scanner then classifies the complete selected source range from that
 first record, through the selected root, and through every already-present tail line before delivery.
@@ -145,6 +146,9 @@ rebind an episode. A bound unavailable episode retains its binding and observati
 reload; without an admitted baseline, a later cursor cannot create one for that same batch. This is
 provider-progress liveness only. Fan-out events remain telemetry and
 have no stop, delivery, replacement, cleanup or blocking authority.
+At an identity-fenced observer replacement, the old episode is first terminalized and retained as
+audit evidence; the replacement launch intent then opens a fresh episode bound only to the new
+HeadRun while carrying the unchanged delivery id and event high-water mark.
 
 ## SHA-bound mechanical gate evidence
 
