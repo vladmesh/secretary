@@ -1,4 +1,4 @@
-"""Focused contract tests for the fail-closed Codex provider fan-out boundary."""
+"""Focused contract tests for advisory Codex provider fan-out telemetry."""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import unittest
 from pathlib import Path
 
 from secretary.dispatcher import CommandHostRuntime
-from secretary.dispatcher_types import HostError
 from triggered_agents.runtime import codex_preflight
 from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef, spawn
 from triggered_agents.runtime.pane_host import Pane
@@ -109,17 +108,18 @@ class CodexFanoutPolicyTests(unittest.TestCase):
         self.assertEqual(attested.fanout_policy["state"], codex_preflight.FANOUT_SCHEMA_ABSENT)
         self.assertFalse(attested.fanout_clean)
 
-    def test_refused_preflight_never_touches_the_codex_trust_config(self) -> None:
+    def test_schema_absent_preflight_launches_with_telemetry_and_trust(self) -> None:
         config = self.root / "codex.toml"
 
-        with self.assertRaises(codex_preflight.CodexFanoutPolicyError):
-            codex_preflight.preflight_codex_launch(
-                {}, str(self.workspace), self._run(), binary_path=str(self.binary), config=config
-            )
+        prepared = codex_preflight.preflight_codex_launch(
+            {}, str(self.workspace), self._run(), binary_path=str(self.binary), config=config
+        )
 
-        self.assertFalse(config.exists())
+        self.assertEqual(prepared.fanout_policy["state"], codex_preflight.FANOUT_SCHEMA_ABSENT)
+        self.assertEqual(prepared.fanout_policy["provider_source"]["state"], "unbound")
+        self.assertIn("trust_level = \"trusted\"", config.read_text(encoding="utf-8"))
 
-    def test_allowed_preflight_writes_trust_only_after_schema_attestation(self) -> None:
+    def test_schema_attestation_enriches_telemetry_without_changing_trust_preflight(self) -> None:
         run = self._run()
         config = self.root / "codex.toml"
 
@@ -177,7 +177,7 @@ class CodexFanoutPolicyTests(unittest.TestCase):
                 self.assertEqual(outcome.event["type"], expected)
                 self.assertEqual(written[-1].fanout_policy["events"][-1], outcome.event)
 
-    def test_spawn_and_unknown_edges_fail_closed(self) -> None:
+    def test_spawn_and_unknown_edges_remain_typed_advisory_telemetry(self) -> None:
         recorder = codex_preflight.CodexProviderEventRecorder(
             self._allowed_run(), lambda _run: None, expected_parent_thread_id="parent"
         )
@@ -194,7 +194,7 @@ class CodexFanoutPolicyTests(unittest.TestCase):
         self.assertEqual(spawned.terminal_state, codex_preflight.FANOUT_TERMINAL_VIOLATION)
         self.assertEqual(unknown.terminal_state, codex_preflight.FANOUT_TERMINAL_UNKNOWN)
 
-    def test_recorder_failure_blocks_after_attempting_the_durable_write(self) -> None:
+    def test_recorder_failure_is_non_fatal_telemetry_loss(self) -> None:
         order: list[str] = []
 
         def persist(_run: HeadRun) -> None:
@@ -204,16 +204,16 @@ class CodexFanoutPolicyTests(unittest.TestCase):
         recorder = codex_preflight.CodexProviderEventRecorder(
             self._allowed_run(), persist, expected_parent_thread_id="parent"
         )
-        with self.assertRaises(codex_preflight.CodexFanoutRecordingError):
-            codex_preflight.enforce_provider_event(
-                recorder,
-                {"type": "collaboration_call", "parent_thread_id": "parent", "tool": "spawn_agent"},
-                source_sequence=5,
-                source_location="stream:5",
-                stop=lambda _run, _reason: order.append("stop"),
-                block=lambda _evidence: order.append("block"),
-            )
-        self.assertEqual(order, ["persist", "stop", "block"])
+        outcome = codex_preflight.enforce_provider_event(
+            recorder,
+            {"type": "collaboration_call", "parent_thread_id": "parent", "tool": "spawn_agent"},
+            source_sequence=5,
+            source_location="stream:5",
+            stop=lambda _run, _reason: order.append("stop"),
+            block=lambda _evidence: order.append("block"),
+        )
+        self.assertEqual(order, ["persist"])
+        self.assertEqual(outcome.run.fanout_policy["events"], [])
 
     def test_head_run_round_trip_and_historical_record_remain_non_clean(self) -> None:
         allowed = self._allowed_run()
@@ -280,30 +280,36 @@ class CodexFanoutPolicyTests(unittest.TestCase):
         self.assertEqual(missing.fanout_policy_state, "unknown")
         self.assertEqual(missing.fanout_policy["provider_source"], {})
 
-    def test_worker_reviewer_and_observer_preflight_refuse_before_pane_creation(self) -> None:
+    def test_worker_reviewer_and_observer_preflight_allow_without_schema(self) -> None:
         for role in ("worker", "reviewer", "observer"):
             with self.subTest(role=role):
                 host = _Host()
                 run = self._run(role)
-                with self.assertRaises(codex_preflight.CodexFanoutPolicyError):
-                    spawn(
-                        run.spec,
-                        run.workspace,
-                        run.task_ref,
-                        host=host,
-                        command="codex",
-                        title=f"{role} head",
-                        run=run,
-                        role=role,
-                        preflight=lambda candidate: codex_preflight.preflight_codex_launch(
-                            {}, candidate.workspace, candidate, binary_path=str(self.binary)
-                        ),
-                    )
-                self.assertEqual(host.opened, 0)
+                launched = spawn(
+                    run.spec,
+                    run.workspace,
+                    run.task_ref,
+                    host=host,
+                    command="codex",
+                    title=f"{role} head",
+                    run=run,
+                    role=role,
+                    preflight=lambda candidate: codex_preflight.preflight_codex_launch(
+                        {}, candidate.workspace, candidate, binary_path=str(self.binary),
+                        config=self.root / f"{role}.toml",
+                    ),
+                )
+                self.assertEqual(host.opened, 1)
+                self.assertEqual(
+                    launched.run.fanout_policy["state"], codex_preflight.FANOUT_SCHEMA_ABSENT
+                )
 
-    def test_dispatcher_worker_reviewer_and_observer_refuse_before_a_pane(self) -> None:
+    def test_dispatcher_worker_reviewer_and_observer_allow_without_schema(self) -> None:
         class Catalog:
-            profile = {"adapter": "codex", "model": "gpt-5.6-terra", "codex_mode": "tui"}
+            profile = {
+                "adapter": "codex", "model": "gpt-5.6-terra", "codex_mode": "tui",
+                "codex_home": str(self.root / "codex-home"),
+            }
 
             def head_profile(self, _head: str) -> dict:
                 return dict(self.profile)
@@ -321,15 +327,13 @@ class CodexFanoutPolicyTests(unittest.TestCase):
         task = {"ref": "secretary-1428", "project": "secretary"}
         for role in ("worker", "reviewer"):
             with self.subTest(role=role):
-                with self.assertRaises(HostError):
-                    runtime._launch(
-                        str(self.workspace), f"{role} title", "codex-extra", "TASK.md",
-                        role=role, env_name="SECRETARY_UNSET_COMMAND", task=task,
-                    )
-        # The observer creates its worktree/prompt before it asks for a terminal.  It still fails
-        # at the same shared policy boundary, with no call to the terminal constructor.
-        with self.assertRaises(HostError):
-            runtime.prepare_observer({"ref": "sprint:1428"}, "codex-extra", prompt="# Sprint")
+                launched = runtime._launch(
+                    str(self.workspace), f"{role} title", "codex-extra", "TASK.md",
+                    role=role, env_name="SECRETARY_UNSET_COMMAND", task=task,
+                )
+                self.assertEqual(launched.head_run["fanout_policy"]["state"], "schema_absent")
+        observer = runtime.prepare_observer({"ref": "sprint:1428"}, "codex-extra", prompt="# Sprint")
+        self.assertEqual(observer["head_run"]["fanout_policy"]["state"], "schema_absent")
         self.assertEqual(opens, [])
 
 

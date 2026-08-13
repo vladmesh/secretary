@@ -102,30 +102,28 @@ and config and never decrypts the store.
 
 ## Codex provider-internal fan-out policy
 
-The installed Codex CLI has no accepted provider-native child-agent isolation boundary for Secretary
-roles. The current capability matrix, binary digest, strictly parsed candidate controls and exact
-typed rollout evidence are recorded in [Codex provider-internal fan-out capability
-evidence](evidence/codex-provider-fanout-2026-08-13.md). In particular, do not present
-`--disable multi_agent`, `hide_spawn_agent_metadata`, an instruction or a non-spawning response as
-an isolation check. The evidence includes the global v2 wait-disabled candidate and per-row typed
-strict-config and ignored-role state; a rejected or ignored configuration is not a capability result.
+Secretary does not require provider-native child-agent isolation. Codex launches use the validated
+best-effort v2 low-fan-out configuration and every worker, reviewer and observer prompt explicitly
+forbids spawning or delegating to subagents. Do not describe that as proof that the tool surface is
+absent; the historical capability evidence remains in [Codex provider-internal fan-out capability
+evidence](evidence/codex-provider-fanout-2026-08-13.md).
 
-The runtime's attestation protocol is v1. An allowed `HeadRun` records the exact CLI path and
+The runtime keeps the v1 diagnostic protocol. An attested `HeadRun` may record the exact CLI path and
 SHA-256 digest, CLI version, model, role, canonical tool-schema digest and explicit
 `no_callable_child_spawn_surface` verdict. `schema_absent`, `schema_unknown`, malformed,
-unsupported and historical records are non-clean and cannot open a pane. The current 0.147.0
-evidence has no allowed result, so this is an intentional pre-pane refusal, not a reason to select
-another provider.
+unsupported and historical records remain non-clean diagnostics, but they do not prevent a pane
+from opening. Workspace trust failures still refuse launch.
 
 Provider events are durable run data, not screen observations. The collector records only
 `collaboration_call`, `child_thread_edge`, `unknown_thread_edge` and
 `unparseable_provider_event`, each with available parent/child identities, tool name, raw-event
-digest, source sequence/location and capture time. It writes the event and terminal state before
-the existing identity-fenced stop path can act. Collaboration calls and child edges are violations;
+digest, source sequence/location and capture time. Collaboration calls and child edges are violations;
 unknown tools/relations, missing parent identity, malformed input and an event-write failure are
-unknown and block the affected card or sprint. A clean event does not repair absent attestation.
+unknown. All such observations are telemetry only: do not stop or replace the head, block work,
+refuse delivery, or change continuation liveness because of a collaboration event, child edge,
+ambiguous source, or telemetry-write failure.
 
-For an allowed future canary, the recorder attaches to Codex's structured session-event JSONL at
+Where available, the recorder attaches to Codex's structured session-event JSONL at
 launch. It reads the journal's `session_meta` and `event_msg` envelopes, not pane text. The v1
 HeadRun first records an unbound source root and pre-launch path baseline, then the one new matching
 journal's path, provider session id, parent thread id and line/digest cursor before its first
@@ -138,13 +136,10 @@ complete initially observed selected source from its first raw record through th
 tail records before prompt delivery, then every later line before lifecycle work. Selecting a journal by
 valid session/root identity never exempts its pre-root data. Ordinary records may move the cursor only
 through a durable write. A malformed, collaboration-shaped, child-edge, unknown-relation or
-cursor-write failure is fenced and blocked before delivery; it cannot be skipped or rendered as a clean
-cursor. This is not the tolerant workspace rollout-activity scan. The canary therefore requires the
-provider journal to expose its root `thread.started` identity before task delivery; without it the
-launch is unknown and fenced rather than prompt-delivered. Recovery verifies the same source's complete
+cursor-write failure is retained as diagnostic state where possible. None gates delivery. This is
+not the tolerant workspace rollout-activity scan. Recovery verifies the same source's complete
 initial range and cursor before consuming a later line; a missing, unreadable, changed or ambiguous
-source is unknown, blocks the affected card or sprint with typed evidence and uses only the
-identity-fenced stop path.
+source is non-fatal unknown telemetry.
 
 Rerun the matrix only when a new approved disposable-auth probe is warranted, such as an installed
 Codex binary/model change or a candidate provider control. Use the committed
@@ -152,8 +147,8 @@ Codex binary/model change or a candidate provider control. Use the committed
 `CODEX_HOME`; never direct it at a production home. The harness accepts an explicitly approved auth
 source, does not parse or log it, copies it only into the temporary home and deletes the copy before
 the next matrix row. Its JSON result has only raw-stream digests and typed event summaries. A live
-canary starts only after the exact v1 attestation is allowed and the run-bound recorder is durably
-available; it must not promote a fresh model response into policy.
+canary measures the practical child-edge rate under the configured suppression and prompt rule. It
+does not require an allowed schema attestation and never stops a run for an observed edge.
 
 ## System requirements
 
@@ -849,8 +844,10 @@ The canary's retained post-`report:done` worker must exercise both precedence br
 operator action: advancing evidence from the one launch-bound Codex journal or Claude transcript
 keeps the exact run while `tui-idle` is busy; unchanged evidence after that persisted v1 baseline
 reaches the three-observation bounded ladder. Workspace-wide newest-file mtimes are not evidence.
-An absent, ambiguous, foreign or malformed source blocks the card with a typed reason and preserves
-the retained head, rather than spending a recovery rung. The only recovery extension point is a
+Fan-out observations, source-enumeration ambiguity and recorder failures do not enter this liveness
+decision. A foreign or incomplete source presented to the exact retained-liveness reader is not
+admitted as progress: it keeps the retained head and its existing unavailable or identity-mismatch
+fence, rather than spending a recovery rung. The only recovery extension point is a
 provider/terminal-safe capability whose receipt names the retained run. Do not use `Ctrl-C`, Escape,
 a generic chord, or screen inspection to clear a composer. If the source was admitted and that
 capability is unavailable, the recorded terminal path is the existing identity-fenced confirmed

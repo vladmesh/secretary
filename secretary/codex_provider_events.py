@@ -1,10 +1,10 @@
-"""Strict, launch-bound ingestion of Codex's structured session event journal.
+"""Best-effort, launch-bound ingestion of Codex's structured session event journal.
 
 This is intentionally separate from the inexpensive workspace activity lookup used by the
-watchdog.  Activity can tolerate a stale or malformed session file; a provider-policy decision
-cannot.  A source is accepted only after it is bound to the exact, already-attested ``HeadRun``
-and its cursor is durably written.  Every later read re-proves that binding before consuming a
-new line.
+watchdog.  A source is accepted only after it is bound to the exact ``HeadRun`` and its cursor is
+durably written.  Every later read re-proves that binding before consuming a new line.  Missing,
+malformed, ambiguous, or unwritable fan-out telemetry never controls launch, delivery, stop,
+replacement, board state, or continuation liveness.
 """
 
 from __future__ import annotations
@@ -19,7 +19,6 @@ from typing import Any, Callable, Iterable, Mapping
 
 from triggered_agents.runtime.codex_preflight import (
     CodexFanoutPolicyError,
-    CodexFanoutRecordingError,
     CodexProviderEventRecorder,
     EVENT_CHILD_THREAD_EDGE,
     EVENT_COLLABORATION_CALL,
@@ -51,11 +50,11 @@ class SourceLine:
 
 
 class CodexProviderEventIngress:
-    """One durable Codex event source, its exact ``HeadRun`` and its fenced consequences.
+    """One best-effort Codex event source and its exact ``HeadRun``.
 
-    ``persist`` is the same lifecycle writer used for the role's HeadRun.  ``stop`` must identity
-    fence before touching a pane or pid; this class deliberately has no backend capability of its
-    own.  ``block`` is the card/sprint transition's typed-evidence path.
+    ``persist`` is the same lifecycle writer used for the role's HeadRun.  ``stop`` and ``block``
+    are retained callback parameters for the installed launch-owner shape, but this observer has
+    no lifecycle authority: source and event diagnostics never invoke them.
     """
 
     def __init__(
@@ -91,8 +90,8 @@ class CodexProviderEventIngress:
         Binding is not a permission to skip what the provider wrote while the pane was coming
         up.  The durable parent cursor is the only point at which a source belongs to this run;
         once it is committed, ``poll`` is the one classifier for the complete initially observed
-        source and every later lifecycle poll.  A policy result raises after its fenced
-        stop/block callbacks, so it cannot fall through to prompt delivery.
+        source and every later lifecycle poll.  Source selection and event classification are
+        advisory telemetry, so an unavailable or ambiguous recorder cannot prevent delivery.
         """
         source = self.source
         if str(source.get("state") or "") == "bound":
@@ -100,25 +99,25 @@ class CodexProviderEventIngress:
             return self.run
         if str(source.get("state") or "") != "unbound":
             self._unknown("Codex provider source binding is missing or malformed")
-            return
+            return self.run
         if not _source_descriptor_matches_run(source, self.run):
             self._unknown("Codex provider source descriptor does not match this HeadRun")
-            return
+            return self.run
         root = Path(str(source.get("root") or ""))
         if not root.is_dir():
             self._unknown("Codex provider session source root is unavailable")
-            return
+            return self.run
         baseline = source.get("baseline")
         if not isinstance(baseline, list) or not all(isinstance(path, str) for path in baseline):
             self._unknown("Codex provider source baseline is malformed")
-            return
+            return self.run
         candidates: list[tuple[Path, dict[str, Any], list[SourceLine]]] = []
         try:
             paths = list(root.rglob("*.jsonl"))
             root_resolved = root.resolve(strict=True)
         except OSError:
             self._unknown("Codex provider session source cannot be enumerated")
-            return
+            return self.run
         baseline_paths = set(baseline)
         for path in paths:
             try:
@@ -145,7 +144,7 @@ class CodexProviderEventIngress:
             self._unknown(
                 "Codex provider source is unbound: expected exactly one new session with a parent thread"
             )
-            return
+            return self.run
         path, identity, lines = candidates[0]
         parent_line = next(
             line for line in lines
@@ -223,29 +222,25 @@ class CodexProviderEventIngress:
                 self._advance_cursor(source, line)
                 continue
             for raw_event in events:
+                durable_run = self.run
                 run = self._run_at_cursor(source, line)
                 recorder = CodexProviderEventRecorder(
                     run, self._persist, expected_parent_thread_id=str(source.get("parent_thread_id") or ""),
                 )
-                try:
-                    outcome = enforce_provider_event(
-                        recorder,
-                        raw_event,
-                        source_sequence=line.number,
-                        source_location=f"{source.get('path')}:{line.number}",
-                        stop=self.stop,
-                        block=self.block,
-                    )
-                except CodexFanoutRecordingError:
-                    self.run = recorder.run
-                    raise
-                self.run = outcome.run
-                # Any non-clean event already went through the fenced stop and block callbacks.
-                if outcome.blocked:
-                    raise CodexProviderSourceError(
-                        "Codex provider fan-out policy blocked this HeadRun", run=outcome.run
-                    )
-            # A source line which resulted in events was persisted by the recorder at its cursor.
+                outcome = enforce_provider_event(
+                    recorder,
+                    raw_event,
+                    source_sequence=line.number,
+                    source_location=f"{source.get('path')}:{line.number}",
+                    stop=self.stop,
+                    block=self.block,
+                )
+                # The event recorder is the only writer for this line.  If it cannot save, the
+                # cursor-bearing candidate was not durable either, so retain the preceding run
+                # rather than leaking an in-memory telemetry state into the delivery handoff.
+                self.run = outcome.run if outcome.event else durable_run
+            # A source line which resulted in events was persisted by the recorder at its cursor
+            # when possible.  A failed telemetry write leaves the preceding durable run in force.
 
     def _verify_binding(self, source: Mapping[str, Any]) -> tuple[dict[str, Any], list[SourceLine]] | None:
         if not _source_descriptor_matches_run(source, self.run):
@@ -303,8 +298,9 @@ class CodexProviderEventIngress:
         updated = self.run.with_fanout_policy(policy)
         try:
             self.persist(updated)
-        except Exception as exc:  # durable source binding/cursor loss is itself an unknown edge
-            self._recording_failure(updated, {}, exc)
+        except Exception:
+            # Cursor telemetry is best effort.  Do not manufacture a non-durable source state or
+            # turn a writer failure into a signal, block, replacement, or liveness input.
             return
         self.run = updated
 
@@ -319,34 +315,11 @@ class CodexProviderEventIngress:
         updated = self.run.with_fanout_policy(policy)
         try:
             self.persist(updated)
-        except Exception as exc:
-            self._recording_failure(updated, {}, exc)
+        except Exception:
+            # The prior durable run stays authoritative when diagnostic telemetry cannot be
+            # written.  In particular, do not invoke lifecycle callbacks or raise into delivery.
             return
         self.run = updated
-        evidence = {"kind": "codex_provider_fanout", "state": "unknown", "reason": reason}
-        try:
-            self.stop(updated, reason)
-        finally:
-            self.block(evidence)
-        raise CodexProviderSourceError(reason, run=updated)
-
-    def _recording_failure(self, run: HeadRun, event: dict[str, Any], exc: Exception) -> None:
-        failed = run.with_fanout_policy({
-            **dict(run.fanout_policy),
-            "state": "unknown",
-            "terminal_state": FANOUT_TERMINAL_UNKNOWN,
-            "reason": f"provider source could not be durably recorded: {type(exc).__name__}: {exc}",
-        })
-        self.run = failed
-        evidence = {
-            "kind": "codex_provider_fanout", "state": "unknown", "event": dict(event),
-            "reason": failed.fanout_policy["reason"],
-        }
-        try:
-            self.stop(failed, "provider source could not be durably recorded")
-        finally:
-            self.block(evidence)
-        raise CodexFanoutRecordingError(failed.fanout_policy["reason"], run=failed, event=event)
 
 
 def _source_descriptor_matches_run(source: Mapping[str, Any], run: HeadRun) -> bool:

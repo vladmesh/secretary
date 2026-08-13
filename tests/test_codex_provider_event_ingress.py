@@ -16,7 +16,6 @@ from unittest import mock
 from secretary import dispatcher_launch, dispatcher_observer, dispatcher_review
 from secretary.codex_provider_events import (
     CodexProviderEventIngress,
-    CodexProviderSourceError,
 )
 from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime
 from secretary.dispatcher_launch import (
@@ -386,7 +385,7 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self.assertEqual(record.handle, "term-observer")
         self.assertEqual(observers["sprint:1"].head_run, record.head_run)
 
-    def test_collaboration_call_is_persisted_then_fenced_and_blocked(self) -> None:
+    def test_collaboration_call_is_persisted_as_advisory_telemetry(self) -> None:
         self._write_source()
         ingress = self._ingress()
         ingress.bind_before_delivery()
@@ -395,8 +394,7 @@ class CodexProviderEventIngressTests(unittest.TestCase):
             "item": {"type": "collab_tool_call", "tool": "spawn_agent", "sender_thread_id": "parent-1"},
         })
 
-        with self.assertRaises(CodexProviderSourceError):
-            ingress.poll()
+        ingress.poll()
 
         recorded = self.written[-1]
         event = recorded.fanout_policy["events"][-1]
@@ -404,8 +402,8 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         raw_line = self.source.read_text(encoding="utf-8").splitlines()[-1]
         self.assertEqual(event["raw_event_digest"], hashlib.sha256(raw_line.encode("utf-8")).hexdigest())
         self.assertEqual(recorded.fanout_policy["terminal_state"], "violation")
-        self.assertEqual(self.stops[0][0], "run-1")
-        self.assertEqual(self.blocks[-1]["state"], "violation")
+        self.assertEqual(self.stops, [])
+        self.assertEqual(self.blocks, [])
 
     def test_retained_tui_tool_only_envelope_reaches_the_same_recorder(self) -> None:
         self._write_source()
@@ -425,14 +423,14 @@ class CodexProviderEventIngressTests(unittest.TestCase):
             },
         })
 
-        with self.assertRaises(CodexProviderSourceError):
-            ingress.poll()
+        ingress.poll()
 
         event = self.written[-1].fanout_policy["events"][-1]
         self.assertEqual(event["type"], "collaboration_call")
         self.assertEqual(event["parent_thread_id"], "parent-1")
         self.assertEqual(event["tool_name"], "wait")
-        self.assertEqual(self.stops[0][0], "run-1")
+        self.assertEqual(self.stops, [])
+        self.assertEqual(self.blocks, [])
 
     def test_child_edge_unknown_thread_and_malformed_line_are_typed(self) -> None:
         cases = (
@@ -458,30 +456,30 @@ class CodexProviderEventIngressTests(unittest.TestCase):
                 ingress.bind_before_delivery()
                 self._write_source(event)
 
-                with self.assertRaises(CodexProviderSourceError):
-                    ingress.poll()
+                ingress.poll()
 
                 self.assertEqual(self.written[-1].fanout_policy["events"][-1]["type"], expected_type)
                 self.assertEqual(self.written[-1].fanout_policy["terminal_state"], expected_state)
-                self.assertEqual(self.stops[0][0], "run-1")
+                self.assertEqual(self.stops, [])
+                self.assertEqual(self.blocks, [])
 
-    def test_recovery_cursor_mismatch_blocks_without_attributing_another_run(self) -> None:
+    def test_recovery_cursor_mismatch_is_non_fatal_diagnostic(self) -> None:
         self._write_source()
         ingress = self._ingress()
         ingress.bind_before_delivery()
         # The durable parent cursor no longer names the same raw line.  It is not a reason to
-        # redirect the stop to some later session or regenerate an identity.
+        # redirect the record to some later session or regenerate an identity.
         self.source.write_text(
             json.dumps({"type": "session_meta", "payload": {"session_id": "session-1", "cwd": str(self.workspace)}})
             + "\n" + json.dumps({"type": "thread.started", "thread_id": "changed-parent"}) + "\n",
             encoding="utf-8",
         )
 
-        with self.assertRaises(CodexProviderSourceError):
-            ingress.poll()
+        ingress.poll()
 
-        self.assertEqual(self.stops, [("run-1", "Codex provider source identity no longer matches this HeadRun")])
-        self.assertEqual(self.blocks[-1]["state"], "unknown")
+        self.assertEqual(self.stops, [])
+        self.assertEqual(self.blocks, [])
+        self.assertEqual(ingress.run.fanout_policy["terminal_state"], "unknown")
 
     def test_clean_ordinary_prebind_lines_are_durably_advanced_before_delivery(self) -> None:
         self._write_source(
@@ -498,21 +496,20 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self.assertEqual(self.stops, [])
         self.assertEqual(self.blocks, [])
 
-    def test_malformed_post_root_prebind_line_is_recorded_then_stopped_and_blocked(self) -> None:
+    def test_malformed_post_root_prebind_line_is_advisory_telemetry(self) -> None:
         self._write_source("{not-json")
         ingress = self._ingress()
 
-        with self.assertRaises(CodexProviderSourceError):
-            ingress.bind_before_delivery()
+        ingress.bind_before_delivery()
 
         self.assertEqual(self.written[0].fanout_policy["provider_source"]["cursor"]["line"], 0)
         event = self.written[-1].fanout_policy["events"][-1]
         self.assertEqual(event["type"], "unparseable_provider_event")
         self.assertEqual(event["source_sequence"], 3)
-        self.assertEqual(self.stops[0][0], "run-1")
-        self.assertEqual(self.blocks[-1]["state"], "unknown")
+        self.assertEqual(self.stops, [])
+        self.assertEqual(self.blocks, [])
 
-    def test_tui_policy_event_in_post_root_prebind_tail_blocks_before_delivery(self) -> None:
+    def test_tui_policy_event_in_post_root_prebind_tail_is_advisory(self) -> None:
         self._write_source({
             "type": "event_msg",
             "payload": {
@@ -528,14 +525,14 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         })
         ingress = self._ingress()
 
-        with self.assertRaises(CodexProviderSourceError):
-            ingress.bind_before_delivery()
+        ingress.bind_before_delivery()
 
         self.assertEqual(self.written[0].fanout_policy["provider_source"]["cursor"]["line"], 0)
         event = self.written[-1].fanout_policy["events"][-1]
         self.assertEqual(event["type"], "child_thread_edge")
         self.assertEqual(event["child_thread_id"], "child-1")
-        self.assertEqual(self.blocks[-1]["state"], "violation")
+        self.assertEqual(self.stops, [])
+        self.assertEqual(self.blocks, [])
 
     def test_unrecognised_collaboration_shape_is_unknown_not_a_clean_cursor_advance(self) -> None:
         self._write_source({
@@ -547,8 +544,7 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         })
         ingress = self._ingress()
 
-        with self.assertRaises(CodexProviderSourceError):
-            ingress.bind_before_delivery()
+        ingress.bind_before_delivery()
 
         self.assertEqual(self.written[-1].fanout_policy["events"][-1]["type"], "unknown_thread_edge")
         self.assertEqual(self.written[-1].fanout_policy["terminal_state"], "unknown")
@@ -561,8 +557,7 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         )
         ingress = self._ingress()
 
-        with self.assertRaises(CodexProviderSourceError):
-            ingress.bind_before_delivery()
+        ingress.bind_before_delivery()
 
         selected = self.written[0].fanout_policy["provider_source"]
         self.assertEqual(selected["cursor"]["line"], 0)
@@ -572,8 +567,8 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         event = self.written[-1].fanout_policy["events"][-1]
         self.assertEqual(event["type"], "unparseable_provider_event")
         self.assertEqual(event["source_sequence"], 2)
-        self.assertEqual(self.stops[0][0], "run-1")
-        self.assertEqual(self.blocks[-1]["state"], "unknown")
+        self.assertEqual(self.stops, [])
+        self.assertEqual(self.blocks, [])
 
     def test_clean_recognised_pre_root_records_cross_the_root_in_one_scanner(self) -> None:
         self._write_records(
@@ -594,7 +589,7 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self.assertEqual(self.stops, [])
         self.assertEqual(self.blocks, [])
 
-    def test_policy_pre_root_record_is_fenced_after_source_selection(self) -> None:
+    def test_policy_pre_root_record_is_telemetry_after_source_selection(self) -> None:
         self._write_records(
             {"type": "session_meta", "payload": {"session_id": "session-1", "cwd": str(self.workspace)}},
             {
@@ -613,8 +608,7 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         )
         ingress = self._ingress()
 
-        with self.assertRaises(CodexProviderSourceError):
-            ingress.bind_before_delivery()
+        ingress.bind_before_delivery()
 
         selected = self.written[0].fanout_policy["provider_source"]
         self.assertEqual(selected["initial_range"]["root"]["line"], 3)
@@ -622,7 +616,8 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self.assertEqual(event["type"], "child_thread_edge")
         self.assertEqual(event["source_sequence"], 2)
         self.assertEqual(event["child_thread_id"], "child-1")
-        self.assertEqual(self.blocks[-1]["state"], "violation")
+        self.assertEqual(self.stops, [])
+        self.assertEqual(self.blocks, [])
 
     def test_recovery_reuses_the_persisted_full_range_before_later_events(self) -> None:
         self._write_records(
@@ -641,13 +636,13 @@ class CodexProviderEventIngressTests(unittest.TestCase):
 
         self.assertEqual(len(self.written), writes_after_bind)
         self._append_records("{not-json")
-        with self.assertRaises(CodexProviderSourceError):
-            recovered.poll()
+        recovered.poll()
 
         event = self.written[-1].fanout_policy["events"][-1]
         self.assertEqual(event["type"], "unparseable_provider_event")
         self.assertEqual(event["source_sequence"], 5)
-        self.assertEqual(self.stops[-1][0], "run-1")
+        self.assertEqual(self.stops, [])
+        self.assertEqual(self.blocks, [])
 
     def test_recovery_fences_a_changed_record_inside_the_persisted_initial_range(self) -> None:
         self._write_records(
@@ -666,13 +661,14 @@ class CodexProviderEventIngressTests(unittest.TestCase):
             {"type": "turn.completed", "thread_id": "parent-1"},
         )
 
-        with self.assertRaises(CodexProviderSourceError):
-            self._ingress(persisted).poll()
+        recovered = self._ingress(persisted)
+        recovered.poll()
 
-        self.assertEqual(self.stops[-1][0], "run-1")
-        self.assertEqual(self.blocks[-1]["state"], "unknown")
+        self.assertEqual(self.stops, [])
+        self.assertEqual(self.blocks, [])
+        self.assertEqual(recovered.run.fanout_policy["terminal_state"], "unknown")
 
-    def test_prebind_cursor_persistence_failure_blocks_without_delivery(self) -> None:
+    def test_prebind_cursor_persistence_failure_is_non_fatal(self) -> None:
         self._write_source({"type": "turn.completed", "thread_id": "parent-1"})
 
         def fail_after_binding(run: HeadRun) -> None:
@@ -687,15 +683,14 @@ class CodexProviderEventIngressTests(unittest.TestCase):
             block=self.blocks.append,
         )
 
-        with self.assertRaises(codex_preflight.CodexFanoutRecordingError):
-            ingress.bind_before_delivery()
+        ingress.bind_before_delivery()
 
         self.assertEqual(self.written[0].fanout_policy["provider_source"]["state"], "bound")
         self.assertEqual(self.written[0].fanout_policy["provider_source"]["cursor"]["line"], 0)
-        self.assertEqual(self.stops[0][0], "run-1")
-        self.assertEqual(self.blocks[-1]["state"], "unknown")
+        self.assertEqual(self.stops, [])
+        self.assertEqual(self.blocks, [])
 
-    def test_failed_durable_event_write_blocks_and_never_silently_drops_the_event(self) -> None:
+    def test_failed_durable_event_write_is_non_fatal(self) -> None:
         self._write_source()
         ingress = self._ingress()
         ingress.bind_before_delivery()
@@ -708,11 +703,11 @@ class CodexProviderEventIngressTests(unittest.TestCase):
             raise OSError("disk full")
 
         ingress.persist = fail
-        with self.assertRaises(codex_preflight.CodexFanoutRecordingError):
-            ingress.poll()
+        ingress.poll()
 
-        self.assertEqual(self.stops[0][0], "run-1")
-        self.assertEqual(self.blocks[-1]["state"], "unknown")
+        self.assertEqual(self.stops, [])
+        self.assertEqual(self.blocks, [])
+        self.assertEqual(ingress.run.fanout_policy["events"], [])
 
 
 class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
@@ -782,6 +777,7 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         self.snapshots: list[dict[str, dict]] = []
         self.moves: list[dict] = []
         self.source_emitted = False
+        self.source_events: list[object] = []
         self.session = self.WorkingSession(self._emit_source)
         self.host = CommandHostRuntime(self.Catalog(self), self.root / "data", mode="real")  # type: ignore[arg-type]
         self.host.preflight_codex_run = self._real_preflight  # type: ignore[method-assign]
@@ -840,22 +836,12 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
             role=role,
             pid_file=pid_file,
         )
-        tools: list[dict] = []
-        attestation = {
-            "version": codex_preflight.FANOUT_ATTESTATION_VERSION,
-            "role": role,
-            "model": run.spec.model,
-            "binary_digest": codex_preflight._file_digest(self.binary),
-            "cli_version": "codex 9.9.9",
-            "tools": tools,
-            "tool_schema_digest": codex_preflight._json_digest(tools),
-            "provider_schema_verdict": codex_preflight.FANOUT_SCHEMA_ALLOWED,
-        }
+        # The production path has no independently captured provider schema.  Advisory fan-out
+        # telemetry must therefore carry ``schema_absent`` through all three real launch routes.
         return codex_preflight.preflight_codex_launch(
             {"codex_home": str(self.root)},
             workspace,
             run,
-            schema_attestation=attestation,
             binary_path=str(self.binary),
             config=self.root / "config.toml",
         )
@@ -867,7 +853,28 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         self._write_records(
             {"type": "session_meta", "payload": {"session_id": "session-1", "cwd": self.source_workspace}},
             {"type": "thread.started", "thread_id": "parent-1"},
+            *self.source_events,
         )
+
+    @staticmethod
+    def _fail_recorder(recorder: codex_preflight.CodexProviderEventRecorder, *_args, **_kwargs):
+        raise codex_preflight.CodexFanoutRecordingError(
+            "recorder storage unavailable", run=recorder.run, event={},
+        )
+
+    def _add_recording_failure_event(self) -> None:
+        self.source_events = [{
+            "type": "event_msg",
+            "payload": {
+                "type": "collab_tool_call",
+                "item": {
+                    "type": "collab_tool_call",
+                    "tool": "spawn_agent",
+                    "sender_thread_id": "parent-1",
+                    "receiver_thread_ids": [],
+                },
+            },
+        }]
 
     def _write_records(self, *records: object) -> None:
         self.source.write_text(
@@ -926,6 +933,7 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         )
 
     def _assert_bound(self, run: dict, *, role: str) -> None:
+        self.assertEqual(run["fanout_policy"]["state"], codex_preflight.FANOUT_SCHEMA_ABSENT)
         source = run["fanout_policy"]["provider_source"]
         self.assertEqual(source["state"], "bound")
         self.assertEqual(source["session_id"], "session-1")
@@ -941,19 +949,24 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         records = {task["ref"]: record}
         payload: dict = {}
         self._arm_source(record.workspace)
+        self._add_recording_failure_event()
 
         self.assertIsNone(write_launch_intent(
             runtime, payload, records, task["ref"], record,
             role=WORKER_ROLE, action="rework", head=record.head, workspace=record.workspace,
         ))
-        launched, failure = runtime._bring_up_worker_head(
-            task, record, records, payload, record.attempt_id,
-            step="advance", blocked_reason="contract", blocked_request_id="contract-worker",
-        )
+        with mock.patch.object(
+            codex_preflight.CodexProviderEventRecorder, "record", new=self._fail_recorder,
+        ):
+            launched, failure = runtime._bring_up_worker_head(
+                task, record, records, payload, record.attempt_id,
+                step="advance", blocked_reason="contract", blocked_request_id="contract-worker",
+            )
 
         self.assertIsNone(failure)
         assert launched is not None
         self._assert_bound(record.worker_head_run, role="worker")
+        self.assertEqual(record.worker_head_run["fanout_policy"]["events"], [])
         self.assertEqual(record.worker_head_run, record.launch_intent["head_run"])
         callback_snapshot = next(
             snapshot[task["ref"]]
@@ -1023,6 +1036,7 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         records = {task["ref"]: record}
         payload: dict = {}
         self._arm_source(record.workspace)
+        self._add_recording_failure_event()
         calls = [0]
 
         def crash_after_confirm(*_args) -> None:
@@ -1031,13 +1045,17 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
                 raise OSError("dispatcher crashed after reviewer confirmation")
 
         runtime.record_review_routing = crash_after_confirm
-        with self.assertRaisesRegex(OSError, "crashed after reviewer confirmation"):
-            dispatcher_review.start_review(
-                runtime, task, records, record, record.attempt_id,
-                action="review-started", payload=payload,
-            )
+        with mock.patch.object(
+            codex_preflight.CodexProviderEventRecorder, "record", new=self._fail_recorder,
+        ):
+            with self.assertRaisesRegex(OSError, "crashed after reviewer confirmation"):
+                dispatcher_review.start_review(
+                    runtime, task, records, record, record.attempt_id,
+                    action="review-started", payload=payload,
+                )
 
         self._assert_bound(record.review_head_run, role="reviewer")
+        self.assertEqual(record.review_head_run["fanout_policy"]["events"], [])
         self.assertEqual(record.review_head_run, record.launch_intent["head_run"])
         self.assertEqual(
             record.review_head_run["task_ref"]["document"],
@@ -1063,14 +1081,19 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
             runtime, payload, observers, record.sprint, record, "codex-contract", 1,
         ))
         self._arm_source(record.workspace)
+        self._add_recording_failure_event()
         _bind_codex_provider_ingress(runtime, payload, observers, record.sprint, record)
-        launched = self.host.prepare_observer(
-            {"ref": record.sprint}, "codex-contract", prompt="# Sprint\n",
-            heartbeat_run_id=str(record.head_run["run_id"]),
-        )
+        with mock.patch.object(
+            codex_preflight.CodexProviderEventRecorder, "record", new=self._fail_recorder,
+        ):
+            launched = self.host.prepare_observer(
+                {"ref": record.sprint}, "codex-contract", prompt="# Sprint\n",
+                heartbeat_run_id=str(record.head_run["run_id"]),
+            )
 
         self.assertEqual(record.head_run, launched["head_run"])
         self._assert_bound(record.head_run, role=OBSERVER_ROLE)
+        self.assertEqual(record.head_run["fanout_policy"]["events"], [])
         self.assertEqual(record.pending_launch, 1, "the watchdog sees the crash-era intent")
         with mock.patch.object(
             dispatcher_observer, "observer_alive", return_value={"alive": True, "pid_known": True},

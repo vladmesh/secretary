@@ -65,44 +65,37 @@ steward's stale threshold is reported like any other stuck card.
 
 ## Codex provider-internal fan-out policy
 
-Codex roles are not trusted to self-limit provider-internal fan-out. A provider control is an
-enforcement boundary only when the exact CLI binary/version, model and role have a captured provider
-tool schema proving no callable child-spawn surface. An instruction, a hidden metadata field, a
-feature inventory, a model declining a forced tool call or a screen/transcript match is not that
-proof.
+Codex fan-out is a best-effort operational preference, not a lifecycle or security boundary. Every
+worker, reviewer and observer launch uses the strongest validated low-fan-out CLI configuration and
+receives an explicit instruction to perform its turn in the current head without spawning or
+delegating to children. A rare provider-internal child is acceptable product behaviour.
 
-The capability evidence and the implementation-ready fail-closed contract are in
+The capability evidence is in
 [Codex provider-internal fan-out capability evidence](evidence/codex-provider-fanout-2026-08-13.md).
 For the installed 0.147.0 CLI it records no provable native boundary: `--disable multi_agent` still
 produced a real collaboration call, while the globally configured v2 wait-disabled row had no
 collaboration call but no schema evidence. The artifact records strict-config rejection and
 ignored-role state as typed evidence, so neither a rejected candidate nor a silently ignored role
-can pass as isolation. Consequently no worker, reviewer or observer launch may be treated as
-isolated merely because that flag or `hide_spawn_agent_metadata` is present.
+can pass as isolation. Consequently the product describes its launch policy as practical
+suppression, never as capability isolation.
 
-`triggered_agents.runtime.codex_preflight` is the one pre-pane boundary. Its v1 attestation is
-persisted on the intended `HeadRun` before terminal creation and binds `run_id`, role, model,
-resolved CLI path, SHA-256 binary digest, exact CLI version, canonical provider-tool-schema digest
-and the explicit `no_callable_child_spawn_surface` verdict. A no-op, a non-spawning model response
-or an inventory is not a substitute for any of those fields. The v1 states are `allowed`,
-`schema_absent`, `schema_unknown`, `unknown` and `violation`; only `allowed` with terminal state
-`clean` permits a Codex pane. Historical/missing, malformed and unsupported records normalise only
-to non-clean `unknown`. Recovery does not fill them from today's profile or a transcript. Current
-0.147.0 evidence has no allowable schema capture, so all new Codex worker, reviewer and observer
-launches fail before pane creation.
+`triggered_agents.runtime.codex_preflight` remains the one pre-pane preparation boundary. Its v1
+record preserves `schema_absent`, `schema_unknown`, `allowed`, `unknown` and `violation` as honest
+diagnostics, but none of those fan-out states permits or refuses a pane. Workspace trust is the hard
+pre-pane requirement. Current 0.147.0 launches proceed with `schema_absent`, an unbound structured
+journal source where available, and the explicit low-fan-out launch configuration.
 
-Provider-edge collection is bound to that same run. Before any consequential action it appends one
+Provider-edge collection is bound to that same run. It appends one
 of `collaboration_call`, `child_thread_edge`, `unknown_thread_edge` or
 `unparseable_provider_event`, with parent and child thread identities when present, tool name when
 known, SHA-256 raw-event digest, source sequence/location and capture time. A collaboration call or
 non-empty child edge is a violation. An unknown tool or relation, missing expected parent,
-malformed event or failed event write is unknown. The event and terminal policy state are durably
-written first; only then does the caller use the existing identity-fenced stop path and block the
-card or sprint with typed evidence. A clean event never upgrades a missing attestation.
+malformed event or failed event write is unknown. These states are telemetry only: they never stop
+or replace the HeadRun, block a card or sprint, refuse prompt delivery, or affect continuation
+liveness. Telemetry loss is also non-fatal.
 
-The live fan-out canary has a hard precondition: an independently captured v1 provider schema for
-the exact binary/version/model/role must already permit the pane, and its run-bound recorder must
-be durable before the canary acts on any provider event.
+The live canary measures practical suppression. The configured run should normally produce no child
+edge, but an observed edge is recorded and the run continues.
 
 The concrete Codex source is its structured session-event JSONL, not a pane read and not the
 tolerant workspace-level session liveness lookup. The pre-pane attestation stores the v1 source
@@ -118,12 +111,10 @@ to the first raw record. The one scanner then classifies the complete selected s
 first record, through the selected root, and through every already-present tail line before delivery.
 Source selection does not exempt a session preamble or any pre-root record. Ordinary records may
 durably advance the cursor. A malformed, collaboration, child-edge, unknown-relation or cursor-write
-failure first becomes durable typed policy evidence where writable, then enters the identity-fenced
-stop/block path; it cannot fall through to a prompt. The canary precondition is therefore that Codex
-exposes its root-thread identity before task delivery. Recovery reopens only that path and verifies its
+failure becomes typed diagnostic evidence where writable and never gates a prompt. Recovery reopens
+the same path where available and verifies its
 complete initial range, session id, workspace, parent identity and prior cursor before reading a later
-line. Missing, unreadable, changed or ambiguous source evidence is `unknown`: it is fenced and blocked
-without signalling a possibly foreign head.
+line. Missing, unreadable, changed or ambiguous source evidence is non-fatal `unknown` telemetry.
 
 ### Post-delivery HeadRun handoff
 
@@ -140,8 +131,8 @@ cursor backwards, replace a bound session/range, or replace run id, spec, worksp
 pid identity. A conflicting, stale, malformed or foreign candidate is an identity fence: it is not
 adopted, resumed, signalled, stopped, replaced or attributed. The same merge is used by worker,
 reviewer and observer recovery, so a retained continuation and an observer watchdog read the exact
-source delivery committed. Source binding is observational for lifecycle purposes; only the owner's
-separate advisory fan-out policy may request its existing identity-fenced policy handling.
+source delivery committed. Source binding is observational for lifecycle purposes and never grants
+fan-out telemetry the authority to change that lifecycle.
 
 ## SHA-bound mechanical gate evidence
 
@@ -1137,10 +1128,11 @@ a workspace-wide newest-file mtime. A later changed opaque cursor is fresh provi
 preserves the same run, workspace, claim, continuation intent and retry owner, resets only the
 no-progress ladder, and makes a `tui-idle` busy result non-destructive. Source absence, ambiguity,
 a foreign source, malformed source or historical episode without a baseline are typed unavailable or
-unknown. They block the card conservatively while preserving the retained head; they cannot reset or
-advance the ladder, authorise recovery or replacement, or become progress. The worker/reviewer
-watchdog carries the same typed source result: provider-unavailable, stale handle, identity mismatch,
-confirmed dead and busy are not aliases, and only admitted observed progress renews liveness.
+unknown. Fan-out telemetry and recorder failures never enter that liveness decision. A foreign or
+incomplete retained-liveness source cannot become progress, reset or advance the ladder, or authorise
+recovery or replacement. The worker/reviewer watchdog carries the same typed source result:
+provider-unavailable, stale handle, identity mismatch, confirmed dead and busy are not aliases, and
+only admitted observed progress renews liveness.
 
 Once an exact episode rejects a foreign or changing source, it is sealed as `unknown`: the original
 HeadRun binding, source baseline, cursor and no-progress ladder remain audit-only and cannot be

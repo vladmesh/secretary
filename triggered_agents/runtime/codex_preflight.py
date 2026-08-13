@@ -200,35 +200,28 @@ def preflight_codex_launch(
     binary_path: str | None = None,
     config: Path | None = None,
 ) -> "HeadRun":
-    """Attest one exact Codex ``HeadRun`` before a pane can be opened.
+    """Prepare one exact Codex ``HeadRun`` and attach advisory fan-out telemetry.
 
-    The workspace trust write remains part of the preflight, but is not its allow result.  The
-    returned run carries the only allow result this product recognises: an independently captured
-    provider tool schema for this binary/version/model/role whose explicit verdict proves no
-    callable child-spawn surface.  Current Codex evidence contains no such row, so ordinary
-    profiles fail here before their terminal exists.
+    Provider-schema evidence stays attached when available, but it is not a launch requirement:
+    the current CLI has no accepted isolation proof and the product's low-fan-out policy is an
+    operational preference, not lifecycle authority.  Workspace trust remains the sole hard
+    pre-pane requirement.  The source descriptor is still written whenever its baseline can be
+    enumerated, because it fences later provider progress to this exact HeadRun.
     """
     attested = attest_codex_fanout(
         profile, run, schema_attestation=schema_attestation, binary_path=binary_path,
     )
-    policy = attested.fanout_policy
-    if policy.get("state") != "allowed" or policy.get("terminal_state") != FANOUT_TERMINAL_CLEAN:
-        raise CodexFanoutPolicyError(
-            f"Codex provider fan-out preflight refused {policy.get('state')}: "
-            f"{policy.get('reason') or 'no independently acceptable schema attestation'}",
-            run=attested,
-        )
     # The source is bound only after the newly created pane has made its own Codex session.  Its
     # pre-pane baseline is nevertheless durable now: a session file that already existed before
     # this run is never attributed to it merely because it shares a workspace.
     try:
         attested = _with_unbound_provider_source(profile, attested)
     except OSError as exc:
-        refused = _unknown_run(attested, f"cannot establish Codex provider event source baseline: {exc}")
-        raise CodexFanoutPolicyError(str(refused.fanout_policy["reason"]), run=refused) from None
-    # Refused fan-out evidence must be side-effect free: a schema-absent launch is not entitled
-    # to amend a shared Codex trust config merely because it reached the host.  Trust is still
-    # established for the only path that can actually open a pane.
+        # A source baseline is telemetry plumbing.  Keep the typed diagnostic, but never turn
+        # recorder availability into an authority over terminal creation or prompt delivery.
+        attested = _unknown_run(
+            attested, f"cannot establish Codex provider event source baseline: {exc}"
+        )
     try:
         ensure_codex_workspace_trusted(profile, workspace, config)
     except CodexPreflightError as exc:
@@ -240,7 +233,7 @@ def preflight_codex_launch(
 def ensure_codex_launch_allowed(
     profile: Mapping[str, Any], workspace: str, run: "HeadRun", **kwargs: Any
 ) -> "HeadRun":
-    """Named alias for callers which read this as an allow gate rather than a preparation step."""
+    """Compatibility alias; fan-out evidence is advisory and trust is the hard allow gate."""
     return preflight_codex_launch(profile, workspace, run, **kwargs)
 
 
@@ -344,12 +337,11 @@ def attest_codex_fanout(
 
 
 class CodexProviderEventRecorder:
-    """Durably append provider-edge evidence to one exact HeadRun before its caller acts.
+    """Durably append advisory provider-edge evidence to one exact HeadRun.
 
-    The recorder owns no pane and has no screen/transcript fallback.  Its owner supplies the
-    same identity-fenced lifecycle commit used for the run and, on a non-clean outcome, uses the
-    existing stop path.  That separation lets the recorder prove write-before-act without gaining
-    permission to signal a process itself.
+    The recorder owns no pane and has no screen/transcript fallback.  Its classifications are
+    diagnostics only: an observed edge or a telemetry-write failure never controls a head's
+    lifecycle, delivery, replacement, or continuation liveness.
     """
 
     def __init__(
@@ -391,7 +383,7 @@ class CodexProviderEventRecorder:
         updated = self.run.with_fanout_policy(policy)
         try:
             self.persist(updated)
-        except Exception as exc:  # a declined durable write is itself unknown and must block
+        except Exception as exc:
             failed_policy = dict(updated.fanout_policy)
             failed_policy["terminal_state"] = FANOUT_TERMINAL_UNKNOWN
             failed_policy["reason"] = f"provider event could not be durably recorded: {type(exc).__name__}: {exc}"
@@ -412,7 +404,14 @@ def enforce_provider_event(
     block: Callable[[dict[str, Any]], None],
     captured_at: str | None = None,
 ) -> ProviderEventOutcome:
-    """Record, then use caller-owned fenced stop and block paths for a provider-edge result."""
+    """Record provider-edge telemetry without changing the run or board lifecycle.
+
+    ``stop`` and ``block`` remain part of the installed callback shape, but fan-out is advisory:
+    neither observed provider edges nor a telemetry write failure may stop, block, replace, or
+    otherwise control the HeadRun.
+    """
+    del stop, block
+    prior_run = recorder.run
     try:
         outcome = recorder.record(
             raw_event,
@@ -420,29 +419,11 @@ def enforce_provider_event(
             source_location=source_location,
             captured_at=captured_at,
         )
-    except CodexFanoutRecordingError as exc:
-        evidence = {"kind": "codex_provider_fanout", "event": exc.event, "state": "unknown"}
-        # The run identity is still the one this recorder was given.  ``stop`` must prove that
-        # identity before touching a pane or pid, so a storage error never authorises a foreign
-        # process signal.
-        try:
-            stop(exc.run, "provider fan-out event could not be durably recorded")
-        finally:
-            # A refused identity-fenced stop is not permission to continue, nor a reason to lose
-            # the typed card/sprint block.  The stop callback itself decides whether a signal was
-            # safe; this boundary still records the policy consequence either way.
-            block(evidence)
-        raise
-    if outcome.blocked:
-        evidence = {
-            "kind": "codex_provider_fanout",
-            "event": dict(outcome.event),
-            "state": outcome.terminal_state,
-        }
-        try:
-            stop(outcome.run, f"provider fan-out policy {outcome.terminal_state}")
-        finally:
-            block(evidence)
+    except CodexFanoutRecordingError:
+        # No source writer succeeded, so keep the prior durable HeadRun authoritative.  Returning
+        # the classified event lets an immediate caller describe the loss if it needs to, without
+        # letting that non-durable telemetry leak into a later post-delivery handoff.
+        return ProviderEventOutcome(run=prior_run, event={})
     return outcome
 
 

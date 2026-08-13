@@ -757,13 +757,11 @@ class CommandHostRuntime:
         )
 
     def poll_codex_provider_ingress(self, run: head_ops.HeadRun) -> None:
-        """Read new provider events only through the run-bound ingress installed at launch."""
+        """Best-effort read new provider events through the run-bound launch ingress."""
         ingress = self._codex_provider_ingresses.get(run.run_id)
         if ingress is None:
-            if isinstance(run.fanout_policy.get("provider_source"), dict):
-                raise CodexProviderSourceError(
-                    "Codex HeadRun has no launch-bound provider event ingress", run=run
-                )
+            # The collector is process-local.  A dispatcher recovery without it must not turn
+            # missing fan-out telemetry into a lifecycle decision about an otherwise valid head.
             return
         ingress.commit_run(run)
         ingress.poll()
@@ -772,10 +770,6 @@ class CommandHostRuntime:
         ingress = self._codex_provider_ingresses.get(run.run_id)
         if ingress is not None:
             return ingress
-        if isinstance(run.fanout_policy.get("provider_source"), dict):
-            raise CodexProviderSourceError(
-                "Codex HeadRun has no launch-bound provider event ingress", run=run
-            )
         return None
 
     @contextlib.contextmanager
@@ -808,7 +802,8 @@ class CommandHostRuntime:
         Callers persist the returned value in their launch intent before they call a host method.
         Re-running the method immediately before ``spawn`` is intentional: it catches a binary
         replacement in the gap, while the first copy is the crash-safe pre-pane record recovery
-        reads.  Neither path derives an allow from a registry profile without schema evidence.
+        reads.  Provider-schema evidence remains telemetry rather than a pane admission rule;
+        workspace trust is the only hard pre-pane requirement.
         """
         profile = self.catalog.head_profile(head)
         spec = self._head_spec(head, str(profile.get("adapter") or "unknown"))
@@ -3755,8 +3750,9 @@ class DispatcherRuntime:
 
         This is called both immediately after a launch intent is saved and when a dispatcher
         recovers an existing run.  The callbacks close over the record, not a workspace lookup,
-        and every persistence call saves that record before a source cursor advances or a stop can
-        touch the pane.
+        and every persistence call saves that record before a source cursor advances.  The
+        installed callback shape is retained for compatibility, but fan-out observation has no
+        stop or board-transition authority.
         """
         stored = (
             record.worker_head_run if role == WORKER_ROLE else record.review_head_run
@@ -3839,7 +3835,7 @@ class DispatcherRuntime:
         *,
         reference: str,
     ) -> dict[str, Any] | None:
-        """Fence a recovered worker/reviewer before it receives lifecycle work this tick."""
+        """Refresh advisory fan-out telemetry for recovered worker/reviewer runs."""
         for role, stored in (
             (WORKER_ROLE, record.worker_head_run),
             (REVIEW_ROLE, record.review_head_run),
