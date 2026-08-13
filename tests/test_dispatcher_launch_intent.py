@@ -41,7 +41,11 @@ from secretary.dispatcher_state import DispatcherRecord
 from tests.dispatcher_fixtures import ensure_attempt
 from tests.fanout_fixtures import accepted_transport_run
 from secretary.dispatcher_types import HeadLaunchAborted, HeadPaneNotReady, HostError
-from secretary.dispatcher_watchdog import initial_output_stall_seconds, pid_file_path
+from secretary.dispatcher_watchdog import (
+    head_process_status,
+    initial_output_stall_seconds,
+    pid_file_path,
+)
 from secretary.dispatcher_worker_lifecycle import WorkerContinuation, WorkerContinuationStage
 from secretary.routing_journal import attempts as routing_attempts
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
@@ -2994,6 +2998,54 @@ class HostLaunchContourTests(unittest.TestCase):
                 self.launch_worker()
 
         self.assertNotIsInstance(caught.exception, HeadLaunchAborted)
+
+    def test_busy_spawn_binds_its_live_heartbeat_leaf_before_translation(self) -> None:
+        """A busy delivery returns its live pane in ``run`` before the host translates it."""
+        run_id = "host-test-run"
+        leaf = "leaf:busy"
+        with mock.patch.dict(os.environ, {
+            "SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir),
+            "SECRETARY_UNSET_COMMAND": "run-worker",
+        }):
+            pid_file = Path(pid_file_path("worker", REF))
+
+            def busy_spawn(*_args: Any, **kwargs: Any):
+                run = kwargs["run"].rebound("term:busy", leaf=leaf)
+                self.assertTrue(run.running)
+                self._write_test_heartbeat(pid_file, os.getpid())
+                base = head_process_status(
+                    str(pid_file),
+                    expected=heartbeat_identity(
+                        run_id=run_id, role="worker", task=f"card:{REF}",
+                    ),
+                )
+                self.assertEqual((base["state"], base["record"]["leaf"]), ("live-match", ""))
+                error = head_ops.HeadPaneBusy(
+                    "the pane stayed busy", readiness="busy", pane="term:busy",
+                )
+                error.run = run
+                raise error
+
+            with mock.patch.object(
+                self.host.catalog, "prepare_head_workspace", lambda *_args, **_kwargs: None,
+                create=True,
+            ):
+                with mock.patch.object(secretary_dispatcher.head_ops, "spawn", side_effect=busy_spawn):
+                    with self.assertRaises(HeadPaneNotReady) as caught:
+                        self.host._launch(
+                            str(self.data_dir), "title", "codex", "TASK.md",
+                            role="worker", env_name="SECRETARY_UNSET_COMMAND",
+                            task={"ref": REF, "project": "secretary"}, heartbeat_run_id=run_id,
+                        )
+
+        self.assertEqual(caught.exception.readiness, "busy")
+        bound = head_process_status(
+            str(pid_file),
+            expected=heartbeat_identity(
+                run_id=run_id, role="worker", task=f"card:{REF}", leaf=leaf,
+            ),
+        )
+        self.assertEqual((bound["state"], bound["record"]["leaf"]), ("live-match", leaf))
 
     # a split whose label will not stick -------------------------------------
 
