@@ -1,0 +1,418 @@
+{
+  "captured_at_utc": "2026-08-13T03:40:14.452327+00:00",
+  "codex_executable": "/home/dev/.local/lib/node_modules/@openai/codex/bin/codex.js",
+  "codex_version": "codex-cli 0.147.0",
+  "evidence_format": 1,
+  "model": "gpt-5.6-terra",
+  "raw_rollout_evidence": "sha256 digests only; temporary homes and worktrees removed",
+  "raw_rollouts_retained": false,
+  "variants": [
+    {
+      "actual_child_edge_observed": false,
+      "agent_messages": [
+        "PARENT_OK"
+      ],
+      "all_observed_thread_or_session_ids": [
+        "019ff933-a21a-7ad2-b938-90f2f069b0d2"
+      ],
+      "child_thread_edges": [],
+      "collaboration_tool_records": [
+        {
+          "event": "item.started",
+          "item_id": "item_0",
+          "receiver_thread_ids": [],
+          "sender_thread_id": "019ff933-a21a-7ad2-b938-90f2f069b0d2",
+          "sequence": 2,
+          "status": "in_progress",
+          "tool": "wait"
+        },
+        {
+          "event": "item.completed",
+          "item_id": "item_0",
+          "receiver_thread_ids": [],
+          "sender_thread_id": "019ff933-a21a-7ad2-b938-90f2f069b0d2",
+          "sequence": 3,
+          "status": "completed",
+          "tool": "wait"
+        }
+      ],
+      "command_shape": [
+        "codex",
+        "--strict-config",
+        "exec",
+        "--ephemeral",
+        "--json",
+        "--skip-git-repo-check",
+        "-C",
+        "<disposable-empty-git-worktree>",
+        "-m",
+        "gpt-5.6-terra",
+        "-s",
+        "read-only",
+        "<bounded-forced-fan-out-prompt>"
+      ],
+      "exit_status": 0,
+      "forced_spawn_requested": true,
+      "json_event_count": 6,
+      "malformed_jsonl_lines": 0,
+      "model_spawn_compliance": "model_did_not_issue_spawn_tool_call",
+      "parent_thread_ids": [
+        "019ff933-a21a-7ad2-b938-90f2f069b0d2"
+      ],
+      "policy_result": "collaboration_call_observed_without_child_edge: reject_as_native_boundary",
+      "raw_stderr_sha256": "1da91ae934ba3fb3ce747c84b45298202a06a054e3f06e4d69b08e9069f6b47e",
+      "raw_stdout_sha256": "8bd61b304ab17744d5588d55d928c7629393c5f3549c1b4ff7e68e78192f6556",
+      "spawn_attempt_observed": false,
+      "spawn_schema_availability": "unknown",
+      "strict_config_flags": [],
+      "tool_schema_availability": "not_emitted_by_codex_exec_json",
+      "variant": "default"
+    },
+    {
+      "actual_child_edge_observed": false,
+      "agent_messages": [
+        "PARENT_OK"
+      ],
+      "all_observed_thread_or_session_ids": [
+        "019ff933-e0ba-73d2-8060-7c3eabff667a"
+      ],
+      "child_thread_edges": [],
+      "collaboration_tool_records": [
+        {
+          "event": "item.started",
+          "item_id": "item_0",
+          "receiver_thread_ids": [],
+          "sender_thread_id": "019ff933-e0ba-73d2-8060-7c3eabff667a",
+          "sequence": 2,
+          "status": "in_progress",
+          "tool": "wait"
+        },
+        {
+          "event": "item.completed",
+          "item_id": "item_0",
+          "receiver_thread_ids": [],
+          "sender_thread_id": "019ff933-e0ba-73d2-8060-7c3eabff667a",
+          "sequence": 3,
+          "status": "completed",
+          "tool": "wait"
+        }
+      ],
+      "command_shape": [
+        "codex",
+        "--strict-config",
+        "--disable",
+        "multi_agent",
+        "exec",
+        "--ephemeral",
+        "--json",
+        "--skip-git-repo-check",
+        "-C",
+        "<disposable-empty-git-worktree>",
+        "-m",
+        "gpt-5.6-terra",
+        "-s",
+        "read-only",
+        "<bounded-forced-fan-out-prompt>"
+      ],
+      "exit_status": 0,
+      "forced_spawn_requested": true,
+      "json_event_count": 6,
+      "malformed_jsonl_lines": 0,
+      "model_spawn_compliance": "model_did_not_issue_spawn_tool_call",
+      "parent_thread_ids": [
+        "019ff933-e0ba-73d2-8060-7c3eabff667a"
+      ],
+      "policy_result": "collaboration_call_observed_without_child_edge: reject_as_native_boundary",
+      "raw_stderr_sha256": "fa10b1bbb1fde06f983a7f156d0550a66171535273fc0692947352cf8f6f742b",
+      "raw_stdout_sha256": "3449a408b929a919d9c1fe88564dc5f0b2e7d03935322e408f163529b80c53d3",
+      "spawn_attempt_observed": false,
+      "spawn_schema_availability": "unknown",
+      "strict_config_flags": [
+        "--disable",
+        "multi_agent"
+      ],
+      "tool_schema_availability": "not_emitted_by_codex_exec_json",
+      "variant": "disable_multi_agent"
+    },
+    {
+      "actual_child_edge_observed": false,
+      "agent_messages": [
+        "PARENT_OK"
+      ],
+      "all_observed_thread_or_session_ids": [
+        "019ff934-0784-7eb1-84b7-d3fe01ac387a"
+      ],
+      "child_thread_edges": [],
+      "collaboration_tool_records": [
+        {
+          "event": "item.started",
+          "item_id": "item_0",
+          "receiver_thread_ids": [],
+          "sender_thread_id": "019ff934-0784-7eb1-84b7-d3fe01ac387a",
+          "sequence": 2,
+          "status": "in_progress",
+          "tool": "wait"
+        },
+        {
+          "event": "item.completed",
+          "item_id": "item_0",
+          "receiver_thread_ids": [],
+          "sender_thread_id": "019ff934-0784-7eb1-84b7-d3fe01ac387a",
+          "sequence": 3,
+          "status": "completed",
+          "tool": "wait"
+        }
+      ],
+      "command_shape": [
+        "codex",
+        "--strict-config",
+        "--enable",
+        "multi_agent_v2",
+        "-c",
+        "features.multi_agent_v2.hide_spawn_agent_metadata=true",
+        "exec",
+        "--ephemeral",
+        "--json",
+        "--skip-git-repo-check",
+        "-C",
+        "<disposable-empty-git-worktree>",
+        "-m",
+        "gpt-5.6-terra",
+        "-s",
+        "read-only",
+        "<bounded-forced-fan-out-prompt>"
+      ],
+      "exit_status": 0,
+      "forced_spawn_requested": true,
+      "json_event_count": 6,
+      "malformed_jsonl_lines": 0,
+      "model_spawn_compliance": "model_did_not_issue_spawn_tool_call",
+      "parent_thread_ids": [
+        "019ff934-0784-7eb1-84b7-d3fe01ac387a"
+      ],
+      "policy_result": "collaboration_call_observed_without_child_edge: reject_as_native_boundary",
+      "raw_stderr_sha256": "620894fd2f009305352bc28d639cc7718ffed03bf1d783bb734102aa9c0150f0",
+      "raw_stdout_sha256": "b2d4c1df6bac4043f89f3ebfeeeb2d1f76c816970aff1388449588da20f56e36",
+      "spawn_attempt_observed": false,
+      "spawn_schema_availability": "unknown",
+      "strict_config_flags": [
+        "--enable",
+        "multi_agent_v2",
+        "-c",
+        "features.multi_agent_v2.hide_spawn_agent_metadata=true"
+      ],
+      "tool_schema_availability": "not_emitted_by_codex_exec_json",
+      "variant": "v2_feature_hide_spawn_metadata"
+    },
+    {
+      "actual_child_edge_observed": false,
+      "agent_messages": [
+        "PARENT_OK"
+      ],
+      "all_observed_thread_or_session_ids": [
+        "019ff934-30cf-7283-8fef-251bee84a13e"
+      ],
+      "child_thread_edges": [],
+      "collaboration_tool_records": [
+        {
+          "event": "item.started",
+          "item_id": "item_2",
+          "receiver_thread_ids": [],
+          "sender_thread_id": "019ff934-30cf-7283-8fef-251bee84a13e",
+          "sequence": 4,
+          "status": "in_progress",
+          "tool": "wait"
+        },
+        {
+          "event": "item.completed",
+          "item_id": "item_2",
+          "receiver_thread_ids": [],
+          "sender_thread_id": "019ff934-30cf-7283-8fef-251bee84a13e",
+          "sequence": 5,
+          "status": "completed",
+          "tool": "wait"
+        }
+      ],
+      "command_shape": [
+        "codex",
+        "--strict-config",
+        "--enable",
+        "multi_agent_v2",
+        "-c",
+        "agents.default.hide_spawn_agent_metadata=true",
+        "exec",
+        "--ephemeral",
+        "--json",
+        "--skip-git-repo-check",
+        "-C",
+        "<disposable-empty-git-worktree>",
+        "-m",
+        "gpt-5.6-terra",
+        "-s",
+        "read-only",
+        "<bounded-forced-fan-out-prompt>"
+      ],
+      "exit_status": 0,
+      "forced_spawn_requested": true,
+      "json_event_count": 8,
+      "malformed_jsonl_lines": 0,
+      "model_spawn_compliance": "model_did_not_issue_spawn_tool_call",
+      "parent_thread_ids": [
+        "019ff934-30cf-7283-8fef-251bee84a13e"
+      ],
+      "policy_result": "collaboration_call_observed_without_child_edge: reject_as_native_boundary",
+      "raw_stderr_sha256": "eecd0ee076cd5c31394a518d4695bc07ae0f9cb0c100cece4ce9d728c4015484",
+      "raw_stdout_sha256": "bbe98b373ee665aa25e58490e01b58903c4e5c6d2ede2937cd34195199037172",
+      "spawn_attempt_observed": false,
+      "spawn_schema_availability": "unknown",
+      "strict_config_flags": [
+        "--enable",
+        "multi_agent_v2",
+        "-c",
+        "agents.default.hide_spawn_agent_metadata=true"
+      ],
+      "tool_schema_availability": "not_emitted_by_codex_exec_json",
+      "variant": "v2_role_hide_spawn_metadata"
+    },
+    {
+      "actual_child_edge_observed": false,
+      "agent_messages": [
+        "PARENT_OK"
+      ],
+      "all_observed_thread_or_session_ids": [
+        "019ff934-612d-72b0-b9ee-cdb0964e9f3e"
+      ],
+      "child_thread_edges": [],
+      "collaboration_tool_records": [
+        {
+          "event": "item.started",
+          "item_id": "item_2",
+          "receiver_thread_ids": [],
+          "sender_thread_id": "019ff934-612d-72b0-b9ee-cdb0964e9f3e",
+          "sequence": 4,
+          "status": "in_progress",
+          "tool": "wait"
+        },
+        {
+          "event": "item.completed",
+          "item_id": "item_2",
+          "receiver_thread_ids": [],
+          "sender_thread_id": "019ff934-612d-72b0-b9ee-cdb0964e9f3e",
+          "sequence": 5,
+          "status": "completed",
+          "tool": "wait"
+        }
+      ],
+      "command_shape": [
+        "codex",
+        "--strict-config",
+        "--enable",
+        "multi_agent_v2",
+        "-c",
+        "agents.default.wait_agent_enabled=false",
+        "exec",
+        "--ephemeral",
+        "--json",
+        "--skip-git-repo-check",
+        "-C",
+        "<disposable-empty-git-worktree>",
+        "-m",
+        "gpt-5.6-terra",
+        "-s",
+        "read-only",
+        "<bounded-forced-fan-out-prompt>"
+      ],
+      "exit_status": 0,
+      "forced_spawn_requested": true,
+      "json_event_count": 8,
+      "malformed_jsonl_lines": 0,
+      "model_spawn_compliance": "model_did_not_issue_spawn_tool_call",
+      "parent_thread_ids": [
+        "019ff934-612d-72b0-b9ee-cdb0964e9f3e"
+      ],
+      "policy_result": "collaboration_call_observed_without_child_edge: reject_as_native_boundary",
+      "raw_stderr_sha256": "ee243a74add26478a5a5d6635a820d2bd67e201c761b806b3117cacb860a13dd",
+      "raw_stdout_sha256": "e9ebed1121c348264ea362004ce96602d89a14a2f73ad597ae8a037e65e81c6a",
+      "spawn_attempt_observed": false,
+      "spawn_schema_availability": "unknown",
+      "strict_config_flags": [
+        "--enable",
+        "multi_agent_v2",
+        "-c",
+        "agents.default.wait_agent_enabled=false"
+      ],
+      "tool_schema_availability": "not_emitted_by_codex_exec_json",
+      "variant": "v2_role_wait_disabled"
+    },
+    {
+      "actual_child_edge_observed": false,
+      "agent_messages": [
+        "PARENT_OK"
+      ],
+      "all_observed_thread_or_session_ids": [
+        "019ff934-9211-7443-b2d6-84a8dc441653"
+      ],
+      "child_thread_edges": [],
+      "collaboration_tool_records": [
+        {
+          "event": "item.started",
+          "item_id": "item_2",
+          "receiver_thread_ids": [],
+          "sender_thread_id": "019ff934-9211-7443-b2d6-84a8dc441653",
+          "sequence": 4,
+          "status": "in_progress",
+          "tool": "wait"
+        },
+        {
+          "event": "item.completed",
+          "item_id": "item_2",
+          "receiver_thread_ids": [],
+          "sender_thread_id": "019ff934-9211-7443-b2d6-84a8dc441653",
+          "sequence": 5,
+          "status": "completed",
+          "tool": "wait"
+        }
+      ],
+      "command_shape": [
+        "codex",
+        "--strict-config",
+        "--enable",
+        "multi_agent_v2",
+        "-c",
+        "agents.default.tool_namespace=\"direct_only\"",
+        "exec",
+        "--ephemeral",
+        "--json",
+        "--skip-git-repo-check",
+        "-C",
+        "<disposable-empty-git-worktree>",
+        "-m",
+        "gpt-5.6-terra",
+        "-s",
+        "read-only",
+        "<bounded-forced-fan-out-prompt>"
+      ],
+      "exit_status": 0,
+      "forced_spawn_requested": true,
+      "json_event_count": 8,
+      "malformed_jsonl_lines": 0,
+      "model_spawn_compliance": "model_did_not_issue_spawn_tool_call",
+      "parent_thread_ids": [
+        "019ff934-9211-7443-b2d6-84a8dc441653"
+      ],
+      "policy_result": "collaboration_call_observed_without_child_edge: reject_as_native_boundary",
+      "raw_stderr_sha256": "40f98658ce6b5058d9455a72e2fa4cbd1481589493814189ab3828e1b8d641ec",
+      "raw_stdout_sha256": "c33a52abc17f72936e663e952891a3c2143509bf807bd06d8287cb44d96d97b1",
+      "spawn_attempt_observed": false,
+      "spawn_schema_availability": "unknown",
+      "strict_config_flags": [
+        "--enable",
+        "multi_agent_v2",
+        "-c",
+        "agents.default.tool_namespace=\"direct_only\""
+      ],
+      "tool_schema_availability": "not_emitted_by_codex_exec_json",
+      "variant": "v2_role_direct_only_namespace"
+    }
+  ]
+}

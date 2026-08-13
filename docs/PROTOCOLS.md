@@ -63,6 +63,23 @@ Assessment to Blocked with a reason, its usual escalation when nobody comes back
 workers and reviewers move nothing, there as everywhere else. A card left in Assessment past the
 steward's stale threshold is reported like any other stuck card.
 
+## Codex provider-internal fan-out policy
+
+Codex roles are not trusted to self-limit provider-internal fan-out. A provider control is an
+enforcement boundary only when the exact CLI binary/version, model and role have a captured provider
+tool schema proving no callable child-spawn surface. An instruction, a hidden metadata field, a
+feature inventory, a model declining a forced tool call or a screen/transcript match is not that
+proof.
+
+The capability evidence and the implementation-ready fail-closed contract are in
+[Codex provider-internal fan-out capability evidence](evidence/codex-provider-fanout-2026-08-13.md).
+For the installed 0.147.0 CLI it records no provable native boundary: `--disable multi_agent` still
+produced a real collaboration call. Consequently no worker, reviewer or observer launch may be
+treated as isolated merely because that flag or `hide_spawn_agent_metadata` is present. A future
+attestation must be checked in the shared Codex preflight before a pane exists, bind the provider
+identity to the durable `HeadRun`, and fail closed on every collaboration record or unknown
+parent/child edge.
+
 ## SHA-bound mechanical gate evidence
 
 Every real mechanical gate result materializes a reusable receipt bound to one checkout:
