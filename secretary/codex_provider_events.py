@@ -26,6 +26,7 @@ from triggered_agents.runtime.codex_preflight import (
     EVENT_UNKNOWN_THREAD_EDGE,
     EVENT_UNPARSEABLE_PROVIDER_EVENT,
     FANOUT_TERMINAL_UNKNOWN,
+    codex_provider_source_descriptor,
     enforce_provider_event,
 )
 from triggered_agents.runtime.head import HeadRun
@@ -100,6 +101,9 @@ class CodexProviderEventIngress:
         if str(source.get("state") or "") != "unbound":
             self._unknown("Codex provider source binding is missing or malformed")
             return
+        if not _source_descriptor_matches_run(source, self.run):
+            self._unknown("Codex provider source descriptor does not match this HeadRun")
+            return
         root = Path(str(source.get("root") or ""))
         if not root.is_dir():
             self._unknown("Codex provider session source root is unavailable")
@@ -149,11 +153,12 @@ class CodexProviderEventIngress:
             and str(_event_view(line.event).get("thread_id") or "") == identity["parent_thread_id"]
         )
         first_line = lines[0]
+        # The preflight descriptor is immutable.  Binding adds the facts the selected journal can
+        # prove, but must not replace its run fence with a journal-only record: the retained
+        # continuation reader needs the same exact HeadRun facts on every later poll.
         bound = {
-            "version": SOURCE_VERSION,
-            "kind": SOURCE_KIND,
+            **source,
             "state": "bound",
-            "root": str(root.resolve(strict=False)),
             "path": str(path.resolve(strict=False)),
             "session_id": identity["session_id"],
             "parent_thread_id": identity["parent_thread_id"],
@@ -242,6 +247,9 @@ class CodexProviderEventIngress:
             # A source line which resulted in events was persisted by the recorder at its cursor.
 
     def _verify_binding(self, source: Mapping[str, Any]) -> tuple[dict[str, Any], list[SourceLine]] | None:
+        if not _source_descriptor_matches_run(source, self.run):
+            self._unknown("Codex provider source descriptor does not match this HeadRun")
+            return None
         if (
             source.get("version") != SOURCE_VERSION
             or source.get("kind") != SOURCE_KIND
@@ -338,6 +346,12 @@ class CodexProviderEventIngress:
         finally:
             self.block(evidence)
         raise CodexFanoutRecordingError(failed.fanout_policy["reason"], run=failed, event=event)
+
+
+def _source_descriptor_matches_run(source: Mapping[str, Any], run: HeadRun) -> bool:
+    """Whether the persisted source retained the immutable descriptor preflight wrote."""
+    expected = codex_provider_source_descriptor(run)
+    return all(source.get(name) == value for name, value in expected.items())
 
 
 def _read_source(path: Path) -> tuple[dict[str, Any], list[SourceLine]] | None:

@@ -12,6 +12,10 @@ from secretary.codex_provider_events import (
     CodexProviderEventIngress,
     CodexProviderSourceError,
 )
+from secretary.dispatcher import CommandHostRuntime
+from secretary.dispatcher_state import DispatcherRecord
+from secretary.dispatcher_tui import provider_progress_for_run
+from secretary.dispatcher_worker_lifecycle import WorkerContinuationLiveness
 from triggered_agents.runtime import codex_preflight
 from triggered_agents.runtime.head import HeadRun, HeadSpec, TaskRef
 
@@ -35,13 +39,15 @@ class CodexProviderEventIngressTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    def _run(self) -> HeadRun:
+    def _attested_run(
+        self, *, run_id: str = "run-1", role: str = "worker",
+    ) -> tuple[HeadRun, dict[str, object]]:
         run = HeadRun(
-            run_id="run-1",
+            run_id=run_id,
             spec=HeadSpec(profile_id="codex-extra", adapter="codex", model="gpt-5.6-terra"),
             workspace=str(self.workspace),
             task_ref=TaskRef.card("secretary-1428", document=str(self.workspace / "TASK.md")),
-            role="worker",
+            role=role,
         )
         tools: list[dict] = []
         attestation = {
@@ -57,36 +63,55 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         allowed = codex_preflight.attest_codex_fanout(
             {}, run, schema_attestation=attestation, binary_path=str(self.binary)
         )
+        return allowed, attestation
+
+    def _run(self) -> HeadRun:
+        allowed, _attestation = self._attested_run()
         return allowed.with_fanout_policy({
             **allowed.fanout_policy,
             "provider_source": {
                 "version": 1,
                 "kind": "codex_session_event_jsonl",
                 "state": "unbound",
+                **codex_preflight.codex_provider_source_descriptor(allowed),
                 "root": str(self.sessions),
                 "baseline": [],
             },
         })
 
-    def _write_source(self, *events: object) -> None:
+    def _preflight_run(self, *, run_id: str = "run-1", role: str = "worker") -> HeadRun:
+        """The production preflight path, before the provider creates its new journal."""
+        run, attestation = self._attested_run(run_id=run_id, role=role)
+        return codex_preflight.preflight_codex_launch(
+            {"codex_home": str(self.root)},
+            str(self.workspace),
+            run,
+            schema_attestation=attestation,
+            binary_path=str(self.binary),
+            config=self.root / "config.toml",
+        )
+
+    def _write_source(self, *events: object, source: Path | None = None) -> None:
         records = [
             {"type": "session_meta", "payload": {"session_id": "session-1", "cwd": str(self.workspace)}},
             {"type": "thread.started", "thread_id": "parent-1"},
             *events,
         ]
-        self._write_records(*records)
+        self._write_records(*records, source=source)
 
-    def _write_records(self, *records: object) -> None:
-        self.source.write_text(
+    def _write_records(self, *records: object, source: Path | None = None) -> None:
+        target = source or self.source
+        target.write_text(
             "\n".join(
                 value if isinstance(value, str) else json.dumps(value) for value in records
             ) + "\n",
             encoding="utf-8",
         )
 
-    def _append_records(self, *records: object) -> None:
-        body = self.source.read_text(encoding="utf-8")
-        self.source.write_text(
+    def _append_records(self, *records: object, source: Path | None = None) -> None:
+        target = source or self.source
+        body = target.read_text(encoding="utf-8")
+        target.write_text(
             body + "\n".join(
                 value if isinstance(value, str) else json.dumps(value) for value in records
             ) + "\n",
@@ -118,6 +143,106 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self.assertEqual(source["initial_range"]["last"]["line"], 2)
         self.assertEqual(source["cursor"]["line"], 2)
         self.assertEqual(self.stops, [])
+
+    def test_preflight_descriptor_survives_real_bind_and_admits_new_progress(self) -> None:
+        """The launch source reaches liveness through binding without losing its HeadRun fence."""
+        preflight = self._preflight_run()
+        original = dict(preflight.fanout_policy["provider_source"])
+        self._write_source()
+        ingress = self._ingress(preflight)
+
+        ingress.bind_before_delivery()
+
+        bound = ingress.run
+        source = bound.fanout_policy["provider_source"]
+        for field in ("run_id", "head_run_fingerprint", "workspace", "role", "task_ref", "root", "baseline"):
+            self.assertEqual(source[field], original[field])
+        baseline = provider_progress_for_run(bound)
+        self.assertEqual(baseline["state"], "observed")
+        self.assertEqual(baseline["admission"], "accepted")
+        liveness = WorkerContinuationLiveness.begin(bound.to_json())
+        self.assertEqual(liveness.observe_provider(baseline, 10.0, head_run=bound.to_json()), "baseline")
+
+        self._append_records({"type": "turn.completed", "thread_id": "parent-1"})
+        ingress.poll()
+        progressed_run = ingress.run
+        progress = provider_progress_for_run(progressed_run)
+
+        self.assertTrue(progressed_run.same_run(preflight))
+        self.assertNotEqual(progress["cursor"], baseline["cursor"])
+        self.assertEqual(progress["state"], "observed")
+        self.assertEqual(liveness.observe_provider(
+            progress, 20.0, head_run=progressed_run.to_json(),
+        ), "progressed")
+        self.assertEqual(liveness.busy_attempts, 0)
+
+    def test_real_bound_sources_refresh_the_shared_worker_and_reviewer_progress_seam(self) -> None:
+        worker_preflight = self._preflight_run()
+        self._write_source()
+        worker_ingress = self._ingress(worker_preflight)
+        worker_ingress.bind_before_delivery()
+
+        review_source = self.source.with_name("review.jsonl")
+        review_preflight = self._preflight_run(run_id="review-run", role="reviewer")
+        self._write_source(source=review_source)
+        review_ingress = self._ingress(review_preflight)
+        review_ingress.bind_before_delivery()
+
+        record = DispatcherRecord(
+            worker="secretary-1428-worker",
+            workspace=str(self.workspace),
+            handle="term-worker",
+            head="codex-extra",
+            review_head="codex-extra",
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="reviewing",
+            claimed_at=0.0,
+        )
+        record.worker_head_run = worker_ingress.run.to_json()
+        record.review_head_run = review_ingress.run.to_json()
+        host = object.__new__(CommandHostRuntime)
+        task = {"ref": "secretary-1428"}
+
+        worker_baseline = CommandHostRuntime.provider_progress(host, task, record, "worker")
+        reviewer_progress = CommandHostRuntime.provider_progress(host, task, record, "review")
+        self.assertEqual(worker_baseline["state"], "observed")
+        self.assertEqual(worker_baseline["admission"], "accepted")
+        self.assertEqual(reviewer_progress["state"], "observed")
+        self.assertEqual(reviewer_progress["admission"], "accepted")
+
+        liveness = WorkerContinuationLiveness.begin(record.worker_head_run)
+        self.assertEqual(liveness.observe_provider(
+            worker_baseline, 10.0, head_run=record.worker_head_run,
+        ), "baseline")
+        self._append_records({"type": "turn.completed", "thread_id": "parent-1"})
+        worker_ingress.poll()
+        record.worker_head_run = worker_ingress.run.to_json()
+        worker_progress = CommandHostRuntime.provider_progress(host, task, record, "worker")
+
+        self.assertTrue(worker_ingress.run.same_run(worker_preflight))
+        self.assertNotEqual(worker_progress["cursor"], worker_baseline["cursor"])
+        self.assertEqual(worker_progress["admission"], "accepted")
+        self.assertEqual(liveness.observe_provider(
+            worker_progress, 20.0, head_run=record.worker_head_run,
+        ), "progressed")
+
+    def test_incomplete_or_foreign_bound_descriptor_cannot_admit_progress(self) -> None:
+        self._write_source()
+        ingress = self._ingress()
+        ingress.bind_before_delivery()
+        bound = ingress.run
+        source = dict(bound.fanout_policy["provider_source"])
+        for field, value in (("run_id", ""), ("workspace", "/foreign")):
+            with self.subTest(field=field):
+                damaged = bound.with_fanout_policy({
+                    **bound.fanout_policy,
+                    "provider_source": {**source, field: value},
+                })
+                progress = provider_progress_for_run(damaged)
+                self.assertEqual(progress["state"], "identity_mismatch")
+                self.assertNotEqual(progress.get("admission"), "accepted")
 
     def test_collaboration_call_is_persisted_then_fenced_and_blocked(self) -> None:
         self._write_source()

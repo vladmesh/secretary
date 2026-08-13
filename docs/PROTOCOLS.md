@@ -1124,6 +1124,13 @@ advance the ladder, authorise recovery or replacement, or become progress. The w
 watchdog carries the same typed source result: provider-unavailable, stale handle, identity mismatch,
 confirmed dead and busy are not aliases, and only admitted observed progress renews liveness.
 
+Codex preflight writes its immutable run descriptor: run id, HeadRun fingerprint, resolved
+workspace, role and task reference. Binding selects exactly one journal and retains that descriptor
+verbatim, adding only verified journal identity, range, cursor and bind time. The ingress and the
+shared worker/reviewer provider reader both validate the same descriptor before admitting a cursor.
+A missing, overwritten or foreign field is unavailable or identity mismatch, never evidence for a
+different retained run.
+
 An unchanged cursor records either `completed_turn_residual_composer`, when equal non-empty composer
 and output fingerprints prove the old composer is residual, or `active_or_unknown_turn`; screen text
 is never read as the distinction. Only after three unchanged admitted busy observations does the

@@ -857,6 +857,12 @@ capability is unavailable, the recorded terminal path is the existing identity-f
 stop followed by exactly one replacement. An unconfirmed stop or identity mismatch is a fence, not
 permission to target another pane or launch beside the old run.
 
+For Codex, inspect the bound source after a real preflight-to-bind handoff. It must retain the
+preflight run descriptor exactly: run id, HeadRun fingerprint, resolved workspace, role and task
+reference. Journal selection may add its verified identity, range, cursor and bind time, but may not
+replace those facts. The worker and reviewer provider reads must both reject a source whose
+descriptor is incomplete or foreign.
+
 The head profile comes from the sprint's own `sprint_observer` field: one concrete profile, or `none` for
 a sprint that runs without an observer (see [Protocols](PROTOCOLS.md#the-declared-observer)). It is never
 read from `role_defaults.observer` — a sprint that declares a profile the registry does not have is fenced,

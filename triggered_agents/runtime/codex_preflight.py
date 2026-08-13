@@ -631,15 +631,28 @@ def _with_unbound_provider_source(profile: Mapping[str, Any], run: "HeadRun") ->
         # The provider journal has no Secretary identity of its own.  These launch facts are
         # copied into the source before a pane exists, then rechecked by liveness readers; a
         # same-workspace journal therefore cannot become progress for a different retained run.
+        **codex_provider_source_descriptor(run),
+        "root": str(root.resolve(strict=False)),
+        "baseline": baseline,
+    }
+    return run.with_fanout_policy(policy)
+
+
+def codex_provider_source_descriptor(run: "HeadRun") -> dict[str, Any]:
+    """The immutable launch facts every Codex provider journal keeps for its entire lifetime.
+
+    A provider journal identifies its own session but cannot name the Secretary head that opened
+    it.  The preflight descriptor supplies that missing fence before the pane exists.  Source
+    binding may append verified journal facts, but it must carry these values byte-for-value into
+    every persisted bound source so later readers can reject a same-workspace foreign journal.
+    """
+    return {
         "run_id": run.run_id,
         "head_run_fingerprint": _head_run_fingerprint(run),
         "workspace": str(Path(run.workspace).resolve(strict=False)),
         "role": run.role,
         "task_ref": run.task_ref.to_json(),
-        "root": str(root.resolve(strict=False)),
-        "baseline": baseline,
     }
-    return run.with_fanout_policy(policy)
 
 
 def _head_run_fingerprint(run: "HeadRun") -> str:
