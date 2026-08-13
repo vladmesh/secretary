@@ -765,7 +765,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertIsNone(outcome)
         self.assertIn("stop_workspace", self.host.calls)
 
-    def test_a_red_delivery_recovery_keeps_the_phase_it_persisted(self) -> None:
+    def test_a_legacy_red_delivery_without_a_v1_baseline_blocks_without_waking_it(self) -> None:
         self.host.fail_resume_worker_reason = ""
         self.tick()
         record = self.record()
@@ -778,12 +778,12 @@ class LaunchIntentTests(unittest.TestCase):
         self.runtime.production_state.save(payload)
         recovered = self.tick()
 
-        self.assertEqual(recovered["action"], "merge-gate-red-reused-worker")
-        continuation = self.reader.show(REF)["comments"][-1]["body"]
-        self.assertIn("merge-gate red continuation", continuation)
+        self.assertEqual(recovered["action"], "merge-gate-red-continuation-liveness-unavailable")
+        self.assertNotIn("resume_worker", self.host.calls)
+        self.assertEqual(self.reader.show(REF)["state"], "blocked")
 
-    def test_a_red_review_delivery_recovery_reuses_the_same_session(self) -> None:
-        """A crash between the red verdict and its delivery replays into the same conversation."""
+    def test_a_legacy_red_review_delivery_without_a_v1_baseline_blocks_safely(self) -> None:
+        """A hand-made historical delivery cannot bind an arbitrary current provider source."""
         self.host.fail_resume_worker_reason = ""
         self.tick()
         record = self.record()
@@ -797,9 +797,10 @@ class LaunchIntentTests(unittest.TestCase):
 
         recovered = self.tick()
 
-        self.assertEqual(recovered["action"], "review-red-reused-worker")
+        self.assertEqual(recovered["action"], "review-red-continuation-liveness-unavailable")
         self.assertEqual(self.host.calls.count("restart_worker"), 0)
-        self.assertIn("review red continuation", self.reader.show(REF)["comments"][-1]["body"])
+        self.assertNotIn("resume_worker", self.host.calls)
+        self.assertEqual(self.reader.show(REF)["state"], "blocked")
 
     def test_a_freeze_crash_replays_the_validate_move_without_waking_the_worker(self) -> None:
         self.tick()

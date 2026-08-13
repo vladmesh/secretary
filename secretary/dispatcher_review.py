@@ -238,7 +238,10 @@ def command_terminal_status(
             provider_progress = {"state": "unavailable", "reason": "provider-progress probe failed"}
         if not isinstance(provider_progress, dict):
             provider_progress = {"state": "unavailable", "reason": "invalid provider-progress shape"}
-        if str(provider_progress.get("state") or "") == "observed":
+        if (
+            str(provider_progress.get("state") or "") == "observed"
+            and str(provider_progress.get("admission") or "") == "accepted"
+        ):
             try:
                 observed_at = float(provider_progress.get("observed_at") or 0.0)
             except (TypeError, ValueError):

@@ -8,7 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.dispatcher import CommandHostRuntime, HostError
-from triggered_agents.runtime.head import HeadCommand
+from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
 from secretary.dispatcher_state import DispatcherRecord
 from secretary.dispatcher_tui import (
     DELIVERY_ACCEPTED,
@@ -24,7 +24,9 @@ from secretary.dispatcher_tui import (
     deliver_interactive_prompt,
     delivery_readiness_state,
     latest_claude_user_turn_for,
-    provider_progress_for,
+    bind_claude_provider_progress_source,
+    prepare_claude_provider_progress_source,
+    provider_progress_for_run,
     terminal_readiness,
     terminal_turn_started,
     turn_started_confirm,
@@ -38,37 +40,82 @@ from tests.fanout_fixtures import accepted_transport_run
 
 
 class DispatcherTuiLaunchTests(unittest.TestCase):
-    def test_provider_progress_uses_text_free_codex_and_claude_cursors(self) -> None:
-        """Both provider shapes yield only an opaque source cursor, never session content."""
+    def test_provider_progress_uses_only_text_free_run_bound_cursors(self) -> None:
+        """Both provider shapes reject competing workspace files and expose only opaque cursors."""
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp) / "workspace"
             workspace.mkdir()
             claude_root = Path(tmp) / "claude-projects"
-            transcript = claude_root / claude_project_dir_name(str(workspace)) / "session.jsonl"
-            transcript.parent.mkdir(parents=True)
-            transcript.write_text('{"type":"assistant","message":"secret"}\n', encoding="utf-8")
             with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(claude_root)}):
-                claude = provider_progress_for(str(workspace), "claude")
+                claude_run = prepare_claude_provider_progress_source(HeadRun(
+                    run_id="claude-bound", spec=HeadSpec(profile_id="claude", adapter="claude"),
+                    workspace=str(workspace), task_ref=TaskRef.card("secretary-1429"), role="worker",
+                ))
+                transcript = claude_root / claude_project_dir_name(str(workspace)) / "session.jsonl"
+                foreign = claude_root / claude_project_dir_name(str(workspace)) / "foreign.jsonl"
+                transcript.parent.mkdir(parents=True)
+                transcript.write_text('{"type":"assistant","message":"secret"}\n', encoding="utf-8")
+                claude_run = bind_claude_provider_progress_source(claude_run)
+                foreign.write_text('{"type":"assistant","message":"foreign"}\n', encoding="utf-8")
+                claude = provider_progress_for_run(claude_run)
             self.assertEqual(claude["state"], "observed")
-            self.assertEqual(claude["source"], "claude-transcript")
-            self.assertTrue(claude["cursor"].startswith("mtime:"))
+            self.assertEqual(claude["source"], "claude-session")
+            self.assertIn(":", claude["cursor"])
             self.assertNotIn("secret", str(claude))
+            self.assertNotIn("foreign", str(claude))
 
-            with mock.patch(
-                "triggered_agents.agents.pipeline.codex_sessions.latest_activity_for",
-                return_value=123.125,
-            ):
-                codex = provider_progress_for(str(workspace), "codex")
-            self.assertEqual(codex, {
-                "state": "observed",
-                "source": "codex-rollout",
-                "cursor": "mtime:123.125000000",
-                "observed_at": "123.125",
+            codex_root = Path(tmp) / "codex-sessions"
+            codex_path = codex_root / "session.jsonl"
+            codex_root.mkdir()
+            codex_path.write_text(
+                '{"type":"session_meta","payload":{"session_id":"own","cwd":"' + str(workspace) + '"}}\n'
+                '{"type":"event_msg","payload":{"type":"thread.started","thread_id":"parent"}}\n',
+                encoding="utf-8",
+            )
+            from secretary.codex_provider_events import _range_digest, _read_source
+            from secretary.dispatcher_worker_lifecycle import head_run_binding
+            parsed = _read_source(codex_path)
+            self.assertIsNotNone(parsed)
+            _meta, lines = parsed
+            _, run_fingerprint = head_run_binding(HeadRun(
+                run_id="codex-bound", spec=HeadSpec(profile_id="codex", adapter="codex"),
+                workspace=str(workspace), task_ref=TaskRef.card("secretary-1429"), role="worker",
+            ).to_json())
+            codex_run = HeadRun(
+                run_id="codex-bound", spec=HeadSpec(profile_id="codex", adapter="codex"),
+                workspace=str(workspace), task_ref=TaskRef.card("secretary-1429"), role="worker",
+            )
+            source = {
+                "version": 1, "kind": "codex_session_event_jsonl", "state": "bound",
+                "run_id": codex_run.run_id, "head_run_fingerprint": run_fingerprint,
+                "workspace": str(workspace.resolve()), "role": "worker",
+                "task_ref": codex_run.task_ref.to_json(), "root": str(codex_root.resolve()),
+                "path": str(codex_path.resolve()), "session_id": "own", "parent_thread_id": "parent",
+                "initial_range": {
+                    "first": {"line": 1, "digest": lines[0].digest},
+                    "root": {"line": 2, "digest": lines[1].digest},
+                    "last": {"line": 2, "digest": lines[1].digest},
+                    "digest": _range_digest(lines),
+                },
+                "cursor": {"line": 2, "digest": lines[1].digest}, "bound_at": "2026-08-13T00:00:00Z",
+            }
+            codex_run = codex_run.with_fanout_policy({
+                **codex_run.fanout_policy, "provider_source": source,
             })
+            foreign_codex = codex_root / "foreign.jsonl"
+            foreign_codex.write_text('{"type":"session_meta","payload":{"session_id":"foreign"}}\n', encoding="utf-8")
+            codex = provider_progress_for_run(codex_run)
+            self.assertEqual(codex["state"], "observed")
+            self.assertEqual(codex["source"], "codex-session")
+            self.assertNotIn("foreign", str(codex))
 
     def test_provider_progress_keeps_an_unavailable_source_distinct_from_busy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            unavailable = provider_progress_for(str(Path(tmp) / "workspace"), "claude")
+            unavailable = provider_progress_for_run(HeadRun(
+                run_id="claude-unbound", spec=HeadSpec(profile_id="claude", adapter="claude"),
+                workspace=str(Path(tmp) / "workspace"), task_ref=TaskRef.card("secretary-1429"),
+                role="worker",
+            ))
         self.assertEqual(unavailable["state"], "unavailable")
         self.assertNotEqual(unavailable["state"], READINESS_BUSY)
 

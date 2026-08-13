@@ -31,6 +31,8 @@ class ContinuationLivenessState(StrEnum):
 
     UNKNOWN = "unknown"
     UNAVAILABLE = "unavailable"
+    BASELINE_PENDING = "baseline_pending"
+    BASELINED = "baselined"
     STALLED = "stalled"
     PROGRESSED = "progressed"
 
@@ -46,7 +48,7 @@ class ContinuationRecoveryRung(StrEnum):
     TERMINAL = "terminal"
 
 
-def _head_run_binding(value: Any) -> tuple[str, str]:
+def head_run_binding(value: Any) -> tuple[str, str]:
     """Return the stable identity of a HeadRun without retaining provider or pane contents.
 
     `run_id` is the authoritative identity.  The digest binds the continuation to the run's
@@ -83,9 +85,10 @@ class WorkerContinuationLiveness:
     whether the *same provider run* has made progress while readiness keeps saying busy.  It keeps
     only opaque provider cursors/fingerprints and classifications, never composer or prompt text.
 
-    A record missing this value is not silently upgraded to an empty episode.  It becomes typed
-    unknown and inherits the legacy busy count when first rebound, so recovery cannot spend a
-    fresh set of retries merely because the dispatcher restarted or was upgraded.
+    A record missing this value is never upgraded into an episode.  It remains typed unknown and
+    may retain the old retry count only as audit data.  A v1 episode is created exclusively when a
+    new delivery boundary is written for an already retained HeadRun, which is what prevents a
+    recovered same-workspace pane from being bound after the fact.
     """
 
     version: int = CONTINUATION_LIVENESS_VERSION
@@ -98,6 +101,8 @@ class WorkerContinuationLiveness:
     last_provider_observed_at: float = 0.0
     provider_cursor: str = ""
     provider_source: str = ""
+    provider_source_fingerprint: str = ""
+    baseline_established: bool = False
     # A text-free explanation of why unchanged progress is not treated as a completed turn.
     # `residual_composer` requires equal composer and output fingerprints; everything else stays
     # active-or-unknown rather than guessing from a screen snapshot.
@@ -109,97 +114,134 @@ class WorkerContinuationLiveness:
     recovery_attempts: int = 0
     recovery_resume_used: bool = False
     terminal_outcome: str = ""
+    # Kept solely to explain an historical record.  It is intentionally never copied into
+    # ``busy_attempts`` and therefore cannot spend a recovery rung.
+    legacy_busy_attempts: int = 0
 
     @classmethod
-    def unknown(cls, reason: str = "missing") -> "WorkerContinuationLiveness":
-        return cls(reason=reason[:240])
+    def unknown(
+        cls, reason: str = "missing", *, legacy_busy_attempts: int = 0,
+    ) -> "WorkerContinuationLiveness":
+        return cls(
+            state=ContinuationLivenessState.UNKNOWN,
+            reason=reason[:240],
+            legacy_busy_attempts=max(0, int(legacy_busy_attempts or 0)),
+        )
+
+    @classmethod
+    def begin(cls, head_run: Any) -> "WorkerContinuationLiveness":
+        """Open the only kind of episode which is allowed to acquire a source baseline."""
+        run_id, fingerprint = head_run_binding(head_run)
+        if not run_id:
+            return cls.unknown("retained HeadRun is unavailable or malformed")
+        return cls(
+            state=ContinuationLivenessState.BASELINE_PENDING,
+            reason="awaiting exact run-bound provider source baseline",
+            head_run_id=run_id,
+            head_run_fingerprint=fingerprint,
+        )
 
     @property
     def bound(self) -> bool:
         return bool(self.head_run_id and self.head_run_fingerprint)
 
     @property
+    def admitted(self) -> bool:
+        return self.bound and self.baseline_established and self.state not in {
+            ContinuationLivenessState.UNKNOWN, ContinuationLivenessState.UNAVAILABLE,
+        }
+
+    @property
     def terminal(self) -> bool:
         return bool(self.terminal_outcome) or self.recovery_rung == ContinuationRecoveryRung.TERMINAL
 
-    def bind(self, head_run: Any, *, legacy_busy_attempts: int = 0) -> bool:
-        """Bind a fresh episode to the exact retained run, refusing malformed identities."""
-        run_id, fingerprint = _head_run_binding(head_run)
-        if not run_id:
-            self.state = ContinuationLivenessState.UNKNOWN
-            self.reason = "retained HeadRun is unavailable or malformed"
-            return False
-        if self.bound and (self.head_run_id != run_id or self.head_run_fingerprint != fingerprint):
-            self.state = ContinuationLivenessState.UNKNOWN
-            self.reason = "retained HeadRun does not match continuation liveness binding"
-            self.recovery_rung = ContinuationRecoveryRung.TERMINAL
-            self.terminal_outcome = "identity_fenced"
-            return False
-        self.version = CONTINUATION_LIVENESS_VERSION
-        self.head_run_id = run_id
-        self.head_run_fingerprint = fingerprint
-        if self.reason == "missing" or self.state == ContinuationLivenessState.UNKNOWN:
-            self.reason = ""
-        self.busy_attempts = max(self.busy_attempts, int(legacy_busy_attempts or 0))
-        return True
+    def observe_provider(self, evidence: Any, now: float, *, head_run: Any) -> str:
+        """Apply the sole provider admission rule before any ladder decision.
 
-    def observe_provider(
-        self, evidence: Any, now: float, *, head_run: Any, legacy_busy_attempts: int = 0,
-    ) -> bool:
-        """Record one provider probe and return whether its cursor freshly progressed."""
-        if not self.bind(head_run, legacy_busy_attempts=legacy_busy_attempts):
-            return False
+        The host can report only an opaque cursor, but it must also attest the run and source that
+        produced it.  This method never invents that binding.  In particular, an historical
+        unbound record stays unknown even when a current workspace happens to have an active file.
+        """
+        expected_run_id, expected_fingerprint = head_run_binding(head_run)
+        if (
+            not self.bound
+            or not expected_run_id
+            or self.head_run_id != expected_run_id
+            or self.head_run_fingerprint != expected_fingerprint
+        ):
+            self._reject_as_unknown("continuation liveness episode is not bound to the retained HeadRun")
+            return "unknown"
         if not isinstance(evidence, dict):
             self.state = ContinuationLivenessState.UNAVAILABLE
             self.reason = "provider-progress transport returned an invalid shape"
             self.last_provider_observed_at = now
-            return False
-        state = str(evidence.get("state") or "unavailable")
+            return "unavailable"
+        if (
+            str(evidence.get("state") or "") != "observed"
+            or str(evidence.get("admission") or "") != "accepted"
+            or str(evidence.get("head_run_id") or "") != self.head_run_id
+            or str(evidence.get("head_run_fingerprint") or "") != self.head_run_fingerprint
+        ):
+            self.state = (
+                ContinuationLivenessState.UNKNOWN
+                if str(evidence.get("state") or "") == "identity_mismatch"
+                else ContinuationLivenessState.UNAVAILABLE
+            )
+            self.reason = str(evidence.get("reason") or "provider source was not admitted")[:240]
+            self.last_provider_observed_at = now
+            return self.state.value
         source = str(evidence.get("source") or "")[:80]
+        source_fingerprint = str(evidence.get("source_fingerprint") or "")[:64]
         cursor = str(evidence.get("cursor") or "")[:240]
-        if state == "identity_mismatch":
-            self.state = ContinuationLivenessState.UNKNOWN
-            self.reason = "provider-progress identity does not match retained HeadRun"
-            self.recovery_rung = ContinuationRecoveryRung.TERMINAL
-            self.terminal_outcome = "identity_fenced"
-            self.last_provider_observed_at = now
-            return False
-        if state != "observed" or not cursor:
+        if not source or not _fingerprint(source_fingerprint) or not cursor:
             self.state = ContinuationLivenessState.UNAVAILABLE
-            self.reason = str(evidence.get("reason") or "provider progress is unavailable")[:240]
-            self.provider_source = source
+            self.reason = "provider source admission is incomplete"
             self.last_provider_observed_at = now
-            return False
-        fresh = bool(self.provider_cursor and self.provider_cursor != cursor)
-        self.provider_source = source
-        self.provider_cursor = cursor
-        self.last_provider_observed_at = now
-        if fresh:
-            response_window = (
-                self.recovery_rung == ContinuationRecoveryRung.SAFE_RECOVERY_RESPONSE_WINDOW
-            )
-            self.state = ContinuationLivenessState.PROGRESSED
+            return "unavailable"
+        if not self.baseline_established:
+            if self.state != ContinuationLivenessState.BASELINE_PENDING:
+                self._reject_as_unknown("continuation liveness baseline is incoherent")
+                return "unknown"
+            self.provider_source = source
+            self.provider_source_fingerprint = source_fingerprint
+            self.provider_cursor = cursor
+            self.baseline_established = True
+            self.state = ContinuationLivenessState.BASELINED
             self.reason = ""
-            self.last_provider_progress_at = now
-            # Only the no-progress ladder resets.  The HeadRun, workspace, claim and delivery
-            # intent live outside this value and are deliberately untouched.
-            self.busy_attempts = 0
-            self.recovery_rung = (
-                ContinuationRecoveryRung.SAFE_RECOVERY_RESPONSE_WINDOW
-                if response_window else ContinuationRecoveryRung.NONE
-            )
-            self.recovery_attempted_at = 0.0
-            self.recovery_response_deadline = 0.0
-            self.recovery_attempts = 0
-            self.recovery_resume_used = False
-            self.terminal_outcome = ""
-            self.no_progress_evidence = ""
-            return True
-        self.state = ContinuationLivenessState.STALLED
-        self.reason = "provider cursor has not advanced"
-        return False
+            self.last_provider_observed_at = now
+            return "baseline"
+        if (
+            source != self.provider_source
+            or source_fingerprint != self.provider_source_fingerprint
+        ):
+            self._reject_as_unknown("provider source does not match the persisted v1 baseline")
+            return "unknown"
+        self.last_provider_observed_at = now
+        if cursor == self.provider_cursor:
+            self.state = ContinuationLivenessState.STALLED
+            self.reason = "provider cursor has not advanced"
+            return "stalled"
+        response_window = self.recovery_rung == ContinuationRecoveryRung.SAFE_RECOVERY_RESPONSE_WINDOW
+        self.provider_cursor = cursor
+        self.state = ContinuationLivenessState.PROGRESSED
+        self.reason = ""
+        self.last_provider_progress_at = now
+        self.busy_attempts = 0
+        self.recovery_rung = (
+            ContinuationRecoveryRung.SAFE_RECOVERY_RESPONSE_WINDOW
+            if response_window else ContinuationRecoveryRung.NONE
+        )
+        self.recovery_attempted_at = 0.0
+        self.recovery_response_deadline = 0.0
+        self.recovery_attempts = 0
+        self.recovery_resume_used = False
+        self.terminal_outcome = ""
+        self.no_progress_evidence = ""
+        return "progressed"
 
     def note_busy(self, now: float) -> int:
+        if not self.admitted or self.state != ContinuationLivenessState.STALLED:
+            return self.busy_attempts
         if not self.first_busy_at:
             self.first_busy_at = now
         self.busy_attempts += 1
@@ -227,6 +269,30 @@ class WorkerContinuationLiveness:
         self.terminal_outcome = outcome
         self.reason = reason[:240]
 
+    def _reject_as_unknown(self, reason: str) -> None:
+        """Canonicalise a rejected episode so it cannot be rebound after a restart."""
+        legacy = max(self.legacy_busy_attempts, self.busy_attempts)
+        self.state = ContinuationLivenessState.UNKNOWN
+        self.reason = reason[:240]
+        self.head_run_id = ""
+        self.head_run_fingerprint = ""
+        self.first_busy_at = 0.0
+        self.last_provider_progress_at = 0.0
+        self.last_provider_observed_at = 0.0
+        self.provider_cursor = ""
+        self.provider_source = ""
+        self.provider_source_fingerprint = ""
+        self.baseline_established = False
+        self.no_progress_evidence = ""
+        self.busy_attempts = 0
+        self.recovery_rung = ContinuationRecoveryRung.NONE
+        self.recovery_attempted_at = 0.0
+        self.recovery_response_deadline = 0.0
+        self.recovery_attempts = 0
+        self.recovery_resume_used = False
+        self.terminal_outcome = ""
+        self.legacy_busy_attempts = legacy
+
     def to_json(self) -> dict[str, Any]:
         return {
             "version": CONTINUATION_LIVENESS_VERSION,
@@ -239,6 +305,8 @@ class WorkerContinuationLiveness:
             "last_provider_observed_at": self.last_provider_observed_at,
             "provider_cursor": self.provider_cursor,
             "provider_source": self.provider_source,
+            "provider_source_fingerprint": self.provider_source_fingerprint,
+            "baseline_established": self.baseline_established,
             "no_progress_evidence": self.no_progress_evidence,
             "busy_attempts": self.busy_attempts,
             "recovery_rung": self.recovery_rung.value,
@@ -247,6 +315,7 @@ class WorkerContinuationLiveness:
             "recovery_attempts": self.recovery_attempts,
             "recovery_resume_used": self.recovery_resume_used,
             "terminal_outcome": self.terminal_outcome,
+            "legacy_busy_attempts": self.legacy_busy_attempts,
         }
 
     @classmethod
@@ -264,8 +333,6 @@ class WorkerContinuationLiveness:
             fingerprint = value.get("head_run_fingerprint")
             if not isinstance(run_id, str) or not isinstance(fingerprint, str):
                 return cls.unknown("malformed HeadRun binding")
-            if (bool(run_id) != bool(fingerprint)) or (fingerprint and len(fingerprint) != 32):
-                return cls.unknown("malformed HeadRun binding")
             numeric = {
                 name: float(value.get(name) or 0.0)
                 for name in (
@@ -279,8 +346,60 @@ class WorkerContinuationLiveness:
             recovery_attempts = int(value.get("recovery_attempts") or 0)
             if busy_attempts < 0 or recovery_attempts < 0:
                 return cls.unknown("malformed liveness attempts")
+            legacy_busy_attempts = int(value.get("legacy_busy_attempts") or 0)
+            if legacy_busy_attempts < 0:
+                return cls.unknown("malformed legacy busy attempts")
         except (TypeError, ValueError):
             return cls.unknown("malformed")
+        source = str(value.get("provider_source") or "")[:80]
+        source_fingerprint = str(value.get("provider_source_fingerprint") or "")[:64]
+        cursor = str(value.get("provider_cursor") or "")[:240]
+        baseline_established = value.get("baseline_established")
+        outcome = str(value.get("terminal_outcome") or "")[:80]
+        explicit_unknown = (
+            state == ContinuationLivenessState.UNKNOWN
+            and not run_id and not fingerprint and not source and not source_fingerprint and not cursor
+            and baseline_established is False and busy_attempts == 0
+            and rung == ContinuationRecoveryRung.NONE and not outcome
+            and all(not numeric[name] for name in numeric)
+        )
+        if explicit_unknown:
+            return cls.unknown(str(value.get("reason") or "unknown"), legacy_busy_attempts=legacy_busy_attempts)
+        if not run_id or not _fingerprint(fingerprint):
+            return cls.unknown("malformed HeadRun binding", legacy_busy_attempts=legacy_busy_attempts)
+        if not isinstance(baseline_established, bool):
+            return cls.unknown("historical v1 liveness lacks a baseline", legacy_busy_attempts=legacy_busy_attempts)
+        if state == ContinuationLivenessState.BASELINE_PENDING:
+            if (
+                baseline_established or source or source_fingerprint or cursor or busy_attempts
+                or rung != ContinuationRecoveryRung.NONE or outcome or any(numeric.values())
+                or recovery_attempts or bool(value.get("recovery_resume_used", False))
+            ):
+                return cls.unknown("incoherent pending liveness baseline", legacy_busy_attempts=legacy_busy_attempts)
+        elif state in {
+            ContinuationLivenessState.BASELINED, ContinuationLivenessState.STALLED,
+            ContinuationLivenessState.PROGRESSED,
+        }:
+            if not baseline_established or not source or not cursor or not _fingerprint(source_fingerprint):
+                return cls.unknown("incoherent bound liveness baseline", legacy_busy_attempts=legacy_busy_attempts)
+        else:
+            return cls.unknown("unavailable liveness episode is not safely recoverable", legacy_busy_attempts=legacy_busy_attempts)
+        if rung == ContinuationRecoveryRung.TERMINAL:
+            if not outcome:
+                return cls.unknown("terminal liveness outcome is missing", legacy_busy_attempts=legacy_busy_attempts)
+        elif outcome:
+            return cls.unknown("non-terminal liveness carries a terminal outcome", legacy_busy_attempts=legacy_busy_attempts)
+        elif rung != ContinuationRecoveryRung.NONE and state not in {
+            ContinuationLivenessState.STALLED, ContinuationLivenessState.PROGRESSED,
+        }:
+            return cls.unknown("recovery rung lacks verified no-progress episode", legacy_busy_attempts=legacy_busy_attempts)
+        if rung == ContinuationRecoveryRung.SAFE_RECOVERY_RESPONSE_WINDOW and (
+            recovery_attempts != 1
+            or numeric["recovery_response_deadline"] <= numeric["recovery_attempted_at"]
+        ):
+            return cls.unknown("safe recovery response window is incoherent", legacy_busy_attempts=legacy_busy_attempts)
+        if rung == ContinuationRecoveryRung.SAFE_RECOVERY_RESUME_ONCE and recovery_attempts != 1:
+            return cls.unknown("safe recovery resume is incoherent", legacy_busy_attempts=legacy_busy_attempts)
         return cls(
             version=CONTINUATION_LIVENESS_VERSION,
             state=state,
@@ -290,8 +409,10 @@ class WorkerContinuationLiveness:
             first_busy_at=numeric["first_busy_at"],
             last_provider_progress_at=numeric["last_provider_progress_at"],
             last_provider_observed_at=numeric["last_provider_observed_at"],
-            provider_cursor=str(value.get("provider_cursor") or "")[:240],
-            provider_source=str(value.get("provider_source") or "")[:80],
+            provider_cursor=cursor,
+            provider_source=source,
+            provider_source_fingerprint=source_fingerprint,
+            baseline_established=baseline_established,
             no_progress_evidence=str(value.get("no_progress_evidence") or "")[:80],
             busy_attempts=busy_attempts,
             recovery_rung=rung,
@@ -299,8 +420,13 @@ class WorkerContinuationLiveness:
             recovery_response_deadline=numeric["recovery_response_deadline"],
             recovery_attempts=recovery_attempts,
             recovery_resume_used=bool(value.get("recovery_resume_used", False)),
-            terminal_outcome=str(value.get("terminal_outcome") or "")[:80],
+            terminal_outcome=outcome,
+            legacy_busy_attempts=legacy_busy_attempts,
         )
+
+
+def _fingerprint(value: str) -> bool:
+    return len(value) == 32 and all(character in "0123456789abcdef" for character in value.lower())
 
 
 class ReportNudgeStage(StrEnum):

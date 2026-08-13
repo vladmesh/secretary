@@ -839,18 +839,23 @@ liveness, launch-intent and confirmed-stop fences.
 Before the final live Terra canary, verify that the candidate has the version-1
 `worker_continuation_liveness` record and that it is bound to the worker's current `HeadRun`. The
 record must show the first busy time, last provider cursor observation, last fresh progress (when
-one occurred), opaque cursor/source, busy attempts, recovery rung and terminal outcome. It never
-contains terminal, composer, prompt or provider text. A missing, malformed, unsupported or
-mismatched record is typed `unknown`, not a clean or busy result.
+one occurred), opaque cursor, source fingerprint, baseline status, busy attempts, recovery rung
+and terminal outcome. It never contains terminal, composer, prompt or provider text. A missing,
+malformed, unsupported or mismatched record is typed `unknown`, not a clean or busy result. The
+only unbound shape is that explicit unknown record; a legacy busy count is audit data and cannot
+start a v1 ladder.
 
 The canary's retained post-`report:done` worker must exercise both precedence branches without an
-operator action: advancing Codex rollout or Claude transcript evidence keeps the exact run while
-`tui-idle` is busy; unchanged evidence reaches the three-observation bounded ladder. The only
-recovery extension point is a provider/terminal-safe capability whose receipt names the retained
-run. Do not use `Ctrl-C`, Escape, a generic chord, or screen inspection to clear a composer. The
-current host advertises that this capability is unavailable, so the recorded terminal path is the
-existing identity-fenced confirmed stop followed by exactly one replacement. An unconfirmed stop or
-identity mismatch is a fence, not permission to target another pane or launch beside the old run.
+operator action: advancing evidence from the one launch-bound Codex journal or Claude transcript
+keeps the exact run while `tui-idle` is busy; unchanged evidence after that persisted v1 baseline
+reaches the three-observation bounded ladder. Workspace-wide newest-file mtimes are not evidence.
+An absent, ambiguous, foreign or malformed source blocks the card with a typed reason and preserves
+the retained head, rather than spending a recovery rung. The only recovery extension point is a
+provider/terminal-safe capability whose receipt names the retained run. Do not use `Ctrl-C`, Escape,
+a generic chord, or screen inspection to clear a composer. If the source was admitted and that
+capability is unavailable, the recorded terminal path is the existing identity-fenced confirmed
+stop followed by exactly one replacement. An unconfirmed stop or identity mismatch is a fence, not
+permission to target another pane or launch beside the old run.
 
 The head profile comes from the sprint's own `sprint_observer` field: one concrete profile, or `none` for
 a sprint that runs without an observer (see [Protocols](PROTOCOLS.md#the-declared-observer)). It is never

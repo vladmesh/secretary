@@ -165,7 +165,9 @@ from secretary.dispatcher_tui import (
     terminal_readiness as _terminal_readiness,
     terminal_turn_started as _terminal_turn_started,
     turn_started_confirm as _turn_started_confirm,
-    provider_progress_for as _provider_progress_for,
+    prepare_claude_provider_progress_source as _prepare_claude_provider_progress_source,
+    bind_claude_provider_progress_source as _bind_claude_provider_progress_source,
+    provider_progress_for_run as _provider_progress_for_run,
 )
 from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
 from secretary.dispatcher_worker_lifecycle import (
@@ -799,6 +801,8 @@ class CommandHostRuntime:
             role=role,
             pid_file=pid_file,
         )
+        if spec.adapter == "claude":
+            return _prepare_claude_provider_progress_source(run)
         if spec.adapter != "codex":
             return run
         return preflight_codex_launch(profile, workspace, run)
@@ -1433,27 +1437,20 @@ class CommandHostRuntime:
             or (lifecycle_run.role and lifecycle_run.role != expected_role)
         ):
             return {"state": "identity_mismatch", "reason": "persisted HeadRun binding mismatches role"}
-        if lifecycle_run.spec.adapter == "codex":
-            # Reuse the established Codex rollout seam, but only after the exact HeadRun has
-            # passed the binding check above.  A workspace-only rollout timestamp is not activity
-            # for a malformed or foreign run.
-            activity = self.codex_tui_activity(task, record, kind)
-            if activity is None:
-                return {
-                    "state": "unavailable",
-                    "source": "codex-rollout",
-                    "reason": "Codex rollout cursor is unavailable",
-                }
-            return {
-                "state": "observed",
-                "source": "codex-rollout",
-                "cursor": f"mtime:{float(activity):.9f}",
-                "observed_at": str(float(activity)),
-            }
-        return _provider_progress_for(
-            lifecycle_run.workspace,
-            lifecycle_run.spec.adapter,
-        )
+        # Claude's launch contract records the pre-pane baseline on the HeadRun.  The provider
+        # creates its transcript asynchronously, so the first read may be the first moment a
+        # single new source exists.  Binding still uses only that durable launch baseline and is
+        # persisted before the source can produce a liveness cursor; ambiguity remains typed
+        # unavailable rather than a workspace selection.
+        if lifecycle_run.spec.adapter == "claude":
+            updated = _bind_claude_provider_progress_source(lifecycle_run)
+            if updated != lifecycle_run:
+                if kind == "review":
+                    self._commit_review_run(record, updated)
+                else:
+                    self._commit_worker_run(record, updated)
+                lifecycle_run = updated
+        return _provider_progress_for_run(lifecycle_run)
 
     def safe_recover_worker_continuation(
         self,
@@ -4655,9 +4652,16 @@ class DispatcherRuntime:
             # readiness backoff is interpreted.  A new provider cursor is stronger than a busy
             # pane and resets only that no-progress ladder, never this HeadRun or its claim.
             now = time.time()
-            fresh_provider_progress = self._observe_retained_continuation_progress(
+            provider_observation = self._observe_retained_continuation_progress(
                 task, record, now=now
             )
+            blocked = self._block_unadmitted_continuation_liveness(
+                task, record, records, payload, attempt_id,
+                phase=continuation.phase or "gate", observation=provider_observation,
+            )
+            if blocked is not None:
+                return blocked
+            fresh_provider_progress = provider_observation == "progressed"
             pending = self._continuation_recovery_window(
                 task, record, records, payload, attempt_id,
                 phase=continuation.phase or "gate",
@@ -5795,12 +5799,20 @@ class DispatcherRuntime:
         ref = task["ref"]
         continuation = record.worker_continuation
         step = "review" if phase == "review" else "gate"
+        opening_delivery = not continuation.delivery_pending
         fresh_provider_progress = False
         if continuation.delivery_pending:
             now = time.time()
-            fresh_provider_progress = self._observe_retained_continuation_progress(
+            provider_observation = self._observe_retained_continuation_progress(
                 task, record, now=now
             )
+            blocked = self._block_unadmitted_continuation_liveness(
+                task, record, records, payload, attempt_id, phase=phase,
+                observation=provider_observation,
+            )
+            if blocked is not None:
+                return blocked
+            fresh_provider_progress = provider_observation == "progressed"
             pending = self._continuation_recovery_window(
                 task, record, records, payload, attempt_id, phase=phase,
                 fresh_provider_progress=fresh_provider_progress, now=now,
@@ -5843,26 +5855,39 @@ class DispatcherRuntime:
                     task, record, records, payload, attempt_id,
                     continuation_reason=reason, phase=phase, worker_stopped=True,
                 )
-            # Persist the delivery boundary before waking the worker. If this tick dies after
-            # delivery, replay stays on this branch instead of treating the old done marker as a
-            # completion from the new rework round.
-            continuation.begin_delivery(phase, time.time())
-            record.worker_continuation_liveness = WorkerContinuationLiveness.unknown(
-                "new retained continuation"
-            )
-            # Establish the provider cursor before SIGCONT/readiness.  The first observation is a
-            # baseline, not proof that a historical rollout belongs to this continuation.
-            fresh_provider_progress = self._observe_retained_continuation_progress(
-                task, record, now=time.time()
-            )
-            records[ref] = record
-            self.save_records(payload, records)
-            pending = self._continuation_recovery_window(
-                task, record, records, payload, attempt_id, phase=phase,
-                fresh_provider_progress=fresh_provider_progress, now=time.time(),
-            )
-            if pending is not None:
-                return pending
+            if opening_delivery:
+                # Persist the delivery boundary before waking the worker. If this tick dies after
+                # delivery, replay stays on this branch instead of treating the old done marker as
+                # a completion from the new rework round.
+                continuation.begin_delivery(phase, time.time())
+                record.worker_continuation_liveness = WorkerContinuationLiveness.begin(
+                    record.worker_head_run
+                )
+                # Establish the provider cursor before SIGCONT/readiness.  The first observation
+                # is a baseline, not proof that a historical rollout belongs to this continuation.
+                provider_observation = self._observe_retained_continuation_progress(
+                    task, record, now=time.time()
+                )
+                blocked = self._block_unadmitted_continuation_liveness(
+                    task, record, records, payload, attempt_id, phase=phase,
+                    observation=provider_observation,
+                )
+                if blocked is not None:
+                    return blocked
+                fresh_provider_progress = provider_observation == "progressed"
+                records[ref] = record
+                self.save_records(payload, records)
+                pending = self._continuation_recovery_window(
+                    task, record, records, payload, attempt_id, phase=phase,
+                    fresh_provider_progress=fresh_provider_progress, now=time.time(),
+                )
+                if pending is not None:
+                    return pending
+            else:
+                # This is an already-open delivery boundary.  Recreating the liveness value here
+                # would turn every busy retry into a new baseline and make no-progress unbounded.
+                records[ref] = record
+                self.save_records(payload, records)
             try:
                 self.host.resume_worker(task, record)
             except HostError as exc:
@@ -5883,6 +5908,16 @@ class DispatcherRuntime:
                         return _retained_worker_busy_deferred(
                             ref, record, attempt_id, phase,
                             delay=BUSY_RETRY_INITIAL_SECONDS,
+                        )
+                    if liveness.state != ContinuationLivenessState.STALLED:
+                        # The first exact-source cursor is a persisted v1 baseline, not evidence
+                        # that this retained turn is stalled.  Keep the existing head and retry
+                        # schedule without spending any no-progress attempt.
+                        continuation.busy_next_at = time.time() + BUSY_RETRY_INITIAL_SECONDS
+                        records[ref] = record
+                        self.save_records(payload, records)
+                        return _retained_worker_busy_deferred(
+                            ref, record, attempt_id, phase, delay=BUSY_RETRY_INITIAL_SECONDS,
                         )
                     liveness.no_progress_evidence = _continuation_no_progress_evidence(
                         record, liveness.state
@@ -5926,12 +5961,12 @@ class DispatcherRuntime:
 
     def _observe_retained_continuation_progress(
         self, task: dict[str, Any], record: DispatcherRecord, *, now: float,
-    ) -> bool:
+    ) -> str:
         """Persist provider progress before a continuation interprets `tui-idle`.
 
         The host is allowed to expose only an opaque cursor.  A missing host method, a malformed
-        response and an unavailable provider source all stay non-progress evidence.  This helper
-        does not read pane or composer text and it does not take any recovery action.
+        response and an unavailable provider source all stay typed, non-admitted evidence.  This
+        helper does not read pane or composer text and it does not take any recovery action.
         """
         try:
             evidence = getattr(
@@ -5945,16 +5980,63 @@ class DispatcherRuntime:
                 "reason": f"provider-progress probe failed: {scrub_host_output(str(exc))}",
             }
         liveness = record.worker_continuation_liveness
-        fresh = liveness.observe_provider(
-            evidence,
-            now,
-            head_run=record.worker_head_run,
-            legacy_busy_attempts=record.worker_continuation.busy_attempts,
-        )
-        record.worker_continuation.busy_attempts = liveness.busy_attempts
-        if fresh:
+        if not liveness.bound and record.worker_continuation.busy_attempts:
+            # This explains incident-era retry state without ever admitting it into the v1
+            # ladder.  An old count is audit data, not an unchanged exact-source observation.
+            liveness.legacy_busy_attempts = max(
+                liveness.legacy_busy_attempts, record.worker_continuation.busy_attempts,
+            )
+        observation = liveness.observe_provider(evidence, now, head_run=record.worker_head_run)
+        if liveness.admitted:
+            record.worker_continuation.busy_attempts = liveness.busy_attempts
+        if observation == "progressed":
             record.worker_continuation.busy_next_at = 0.0
-        return fresh
+        return observation
+
+    def _block_unadmitted_continuation_liveness(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        phase: str,
+        observation: str,
+    ) -> dict[str, Any] | None:
+        """Take the explicit safe outcome when the liveness trust boundary is unprovable.
+
+        The board move is deliberately the terminal policy here.  It preserves the retained
+        HeadRun and its claim for the existing identity fence, and does not signal, resume,
+        replace, nudge or spend a safe-recovery rung on an unbound, foreign or malformed source.
+        """
+        if observation in {"baseline", "stalled", "progressed"} and record.worker_continuation_liveness.admitted:
+            return None
+        ref = task["ref"]
+        reason = record.worker_continuation_liveness.reason or "provider source was not admitted"
+        self.writer.move(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            target="blocked",
+            reason=(
+                "retained continuation liveness is unprovable; preserving the exact HeadRun "
+                f"without recovery: {reason}"
+            ),
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id,
+                "continuation-liveness-unavailable", ref, phase,
+            ),
+        )
+        records[ref] = record
+        self.save_records(payload, records)
+        return {
+            "status": "blocked",
+            "step": "review" if phase == "review" else "gate",
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "action": f"{phase}-red-continuation-liveness-unavailable",
+        }
 
     def _continuation_recovery_window(
         self,
@@ -6015,6 +6097,14 @@ class DispatcherRuntime:
     ) -> dict[str, Any] | None:
         """Spend the sole safe-recovery rung, then take one identity-fenced terminal outcome."""
         liveness = record.worker_continuation_liveness
+        if (
+            not liveness.admitted
+            or liveness.state != ContinuationLivenessState.STALLED
+        ):
+            return self._block_unadmitted_continuation_liveness(
+                task, record, records, payload, attempt_id, phase=phase,
+                observation=liveness.state.value,
+            )
         if liveness.busy_attempts < CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS:
             return None
         if liveness.recovery_rung == ContinuationRecoveryRung.SAFE_RECOVERY_RESPONSE_WINDOW:
