@@ -24,6 +24,7 @@ from secretary.dispatcher_launch import (
     write_launch_intent,
 )
 from secretary.dispatcher_state import DispatcherRecord, attempt_request_id as _attempt_request_id
+from secretary.dispatcher_worker_lifecycle import head_run_binding
 from secretary.dispatcher_tui import (
     READINESS_BLOCKED,
     READINESS_BUSY,
@@ -236,8 +237,10 @@ def command_terminal_status(
             )(task, record, kind)
         except Exception:
             provider_progress = {"state": "unavailable", "reason": "provider-progress probe failed"}
-        if not isinstance(provider_progress, dict):
-            provider_progress = {"state": "unavailable", "reason": "invalid provider-progress shape"}
+        provider_progress = _admitted_provider_progress_for_status(
+            provider_progress,
+            record.review_head_run if kind == "review" else record.worker_head_run,
+        )
         if (
             str(provider_progress.get("state") or "") == "observed"
             and str(provider_progress.get("admission") or "") == "accepted"
@@ -309,6 +312,63 @@ def command_terminal_status(
         if started_at and time.time() - started_at <= _initial_output_stall_seconds():
             return {"known": True, "live": True, "reason": "pid-not-written-yet", "pid_confirmed": False}
     return {"known": True, "live": False, "reason": "missing-terminal"}
+
+
+def _admitted_provider_progress_for_status(value: Any, run: Any) -> dict[str, Any]:
+    """Keep shared worker/reviewer liveness inside the same exact-HeadRun admission fence.
+
+    ``CommandHostRuntime.provider_progress`` proves a provider source descriptor before it emits
+    an observation.  The generic status seam still receives a host response as data, though, so
+    it must verify the response's run binding before it lets an opaque cursor renew either role's
+    watchdog.  That prevents a test double, transport regression or foreign same-workspace
+    response from making a reviewer look live longer than its retained run warrants.
+    """
+    if not isinstance(value, dict):
+        return {"state": "unavailable", "reason": "invalid provider-progress shape"}
+    result: dict[str, Any] = {
+        "state": str(value.get("state") or "unavailable")[:40],
+        "reason": scrub_host_output(str(value.get("reason") or ""))[:240],
+    }
+    for name, limit in (
+        ("admission", 40),
+        ("source", 80),
+        ("source_fingerprint", 64),
+        ("cursor", 240),
+        ("head_run_id", 120),
+        ("head_run_fingerprint", 64),
+    ):
+        if name in value:
+            result[name] = str(value.get(name) or "")[:limit]
+    if "observed_at" in value:
+        result["observed_at"] = str(value.get("observed_at") or "")[:64]
+    if result["state"] != "observed" or result.get("admission") != "accepted":
+        return result
+    run_id, fingerprint = head_run_binding(run)
+    if not run_id:
+        return {
+            "state": "unavailable",
+            "reason": "persisted HeadRun is unavailable for provider-progress admission",
+        }
+    if (
+        result.get("head_run_id") != run_id
+        or result.get("head_run_fingerprint") != fingerprint
+    ):
+        return {
+            "state": "identity_mismatch",
+            "reason": "provider-progress observation does not name the persisted HeadRun",
+        }
+    source_fingerprint = str(result.get("source_fingerprint") or "")
+    if (
+        not result.get("source")
+        or not result.get("cursor")
+        or len(source_fingerprint) != 32
+        or any(character not in "0123456789abcdef" for character in source_fingerprint.lower())
+    ):
+        return {
+            "state": "unavailable",
+            "reason": "provider-progress source admission is incomplete",
+        }
+    return result
 
 
 def _pane_work_state(host: Any, handle: str) -> str:

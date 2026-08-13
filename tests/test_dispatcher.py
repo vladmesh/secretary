@@ -262,6 +262,46 @@ class WorkerContinuationStateTests(unittest.TestCase):
         self.assertFalse(liveness.admitted)
         self.assertEqual(liveness.busy_attempts, 0)
 
+    def test_rejected_source_preserves_and_seals_the_existing_ladder(self) -> None:
+        """A foreign cursor cannot turn an exhausted episode into a fresh baseline."""
+        run = head_ops.HeadRun(
+            run_id="retained-run",
+            spec=head_ops.HeadSpec(profile_id="codex", adapter="codex"),
+            workspace="/tmp/continuation",
+            task_ref=head_ops.TaskRef.card("secretary-1432"),
+            role="worker",
+        ).to_json()
+        _, fingerprint = head_run_binding(run)
+        evidence = {
+            "state": "observed", "admission": "accepted", "head_run_id": "retained-run",
+            "head_run_fingerprint": fingerprint, "source": "codex-session",
+            "source_fingerprint": "a" * 32, "cursor": "2:one",
+        }
+        liveness = WorkerContinuationLiveness.begin(run)
+        self.assertEqual(liveness.observe_provider(evidence, 1.0, head_run=run), "baseline")
+        self.assertEqual(liveness.observe_provider(evidence, 2.0, head_run=run), "stalled")
+        liveness.note_busy(2.0)
+        liveness.begin_safe_recovery(2.0)
+
+        self.assertEqual(liveness.observe_provider(
+            {**evidence, "source_fingerprint": "b" * 32, "cursor": "3:foreign"},
+            3.0,
+            head_run=run,
+        ), "unknown")
+        self.assertTrue(liveness.source_rejected)
+        self.assertEqual(liveness.provider_cursor, "2:one")
+        self.assertEqual(liveness.busy_attempts, 1)
+        self.assertEqual(liveness.recovery_rung, ContinuationRecoveryRung.SAFE_RECOVERY_PENDING)
+        self.assertEqual(liveness.last_provider_observed_at, 2.0)
+        self.assertEqual(liveness.observe_provider(evidence, 4.0, head_run=run), "unknown")
+
+        restored = WorkerContinuationLiveness.from_json(liveness.to_json())
+        self.assertTrue(restored.source_rejected)
+        self.assertFalse(restored.admitted)
+        self.assertEqual(restored.busy_attempts, 1)
+        self.assertEqual(restored.recovery_rung, ContinuationRecoveryRung.SAFE_RECOVERY_PENDING)
+        self.assertEqual(restored.observe_provider(evidence, 5.0, head_run=run), "unknown")
+
     def test_liveness_decoder_refuses_unbound_stalled_and_invalid_fingerprints(self) -> None:
         for malformed in (
             {
@@ -13945,6 +13985,47 @@ class ReviewLivenessTests(unittest.TestCase):
         status = host.worker_status(self.task, self._record())
 
         self.assertEqual(status["last_activity"], 1_753_456_800.0)
+
+    def test_foreign_or_incomplete_provider_evidence_does_not_renew_either_role(self) -> None:
+        """The shared status seam has the same exact-HeadRun admission as continuation liveness."""
+        cases = (
+            (
+                "worker",
+                {},
+                {"handle": "term-worker", "leafId": "leaf-worker", "connected": True,
+                 "lastOutputAt": 1_753_456_789_123},
+                "identity_mismatch",
+            ),
+            (
+                "review",
+                {"review_handle": "term-review", "review_leaf": "leaf-review"},
+                {"handle": "term-review", "leafId": "leaf-review", "connected": True,
+                 "lastOutputAt": 1_753_456_789_123},
+                "unavailable",
+            ),
+        )
+        for kind, fields, terminal, expected_state in cases:
+            with self.subTest(kind=kind):
+                record = self._record(**fields)
+                run = record.review_head_run if kind == "review" else record.worker_head_run
+                _, fingerprint = head_run_binding(run)
+                host = self._host([terminal])
+                provider = {
+                    "state": "observed", "admission": "accepted", "source": "codex-session",
+                    "source_fingerprint": "a" * 32, "cursor": "3:cursor",
+                    "head_run_id": run["run_id"], "head_run_fingerprint": fingerprint,
+                    "observed_at": "1753456800.0",
+                }
+                if kind == "worker":
+                    provider["head_run_id"] = "foreign-worker-run"
+                else:
+                    provider["cursor"] = ""
+                host.provider_progress = lambda _task, _record, _kind, value=provider: value  # type: ignore[method-assign]
+
+                status = getattr(host, f"{kind}_status")(self.task, record)
+
+                self.assertEqual(status["provider_progress"]["state"], expected_state)
+                self.assertEqual(status["last_activity"], 1_753_456_789.123)
 
     def test_disconnected_reviewer_pane_is_not_running(self) -> None:
         host = self._host([

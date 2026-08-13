@@ -857,6 +857,11 @@ capability is unavailable, the recorded terminal path is the existing identity-f
 stop followed by exactly one replacement. An unconfirmed stop or identity mismatch is a fence, not
 permission to target another pane or launch beside the old run.
 
+A source rejection seals the persisted episode rather than clearing its baseline or no-progress
+ladder. A later provider reply cannot re-admit that episode. The shared worker and reviewer status
+reads also verify the response's run id and HeadRun fingerprint before its opaque timestamp may
+renew the watchdog clock.
+
 For Codex, inspect the bound source after a real preflight-to-bind handoff. It must retain the
 preflight run descriptor exactly: run id, HeadRun fingerprint, resolved workspace, role and task
 reference. Journal selection may add its verified identity, range, cursor and bind time, but may not

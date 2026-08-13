@@ -114,6 +114,10 @@ class WorkerContinuationLiveness:
     recovery_attempts: int = 0
     recovery_resume_used: bool = False
     terminal_outcome: str = ""
+    # A rejected source does not erase a real episode into a clean, re-baselinable value.  The
+    # retained HeadRun, baseline and ladder stay as audit evidence while the state becomes typed
+    # unknown, so a later tick cannot reinterpret an identity failure as a new first observation.
+    source_rejected: bool = False
     # Kept solely to explain an historical record.  It is intentionally never copied into
     # ``busy_attempts`` and therefore cannot spend a recovery rung.
     legacy_busy_attempts: int = 0
@@ -162,6 +166,11 @@ class WorkerContinuationLiveness:
         produced it.  This method never invents that binding.  In particular, an historical
         unbound record stays unknown even when a current workspace happens to have an active file.
         """
+        if self.source_rejected:
+            # A card with a rejected source is sent to the identity-fenced blocked path.  In
+            # particular, do not let a later, superficially well-formed reply re-admit it and
+            # restart the preserved no-progress ladder.
+            return "unknown"
         expected_run_id, expected_fingerprint = head_run_binding(head_run)
         if (
             not self.bound
@@ -270,28 +279,10 @@ class WorkerContinuationLiveness:
         self.reason = reason[:240]
 
     def _reject_as_unknown(self, reason: str) -> None:
-        """Canonicalise a rejected episode so it cannot be rebound after a restart."""
-        legacy = max(self.legacy_busy_attempts, self.busy_attempts)
+        """Fence a rejected episode without laundering its ladder into a fresh one."""
         self.state = ContinuationLivenessState.UNKNOWN
         self.reason = reason[:240]
-        self.head_run_id = ""
-        self.head_run_fingerprint = ""
-        self.first_busy_at = 0.0
-        self.last_provider_progress_at = 0.0
-        self.last_provider_observed_at = 0.0
-        self.provider_cursor = ""
-        self.provider_source = ""
-        self.provider_source_fingerprint = ""
-        self.baseline_established = False
-        self.no_progress_evidence = ""
-        self.busy_attempts = 0
-        self.recovery_rung = ContinuationRecoveryRung.NONE
-        self.recovery_attempted_at = 0.0
-        self.recovery_response_deadline = 0.0
-        self.recovery_attempts = 0
-        self.recovery_resume_used = False
-        self.terminal_outcome = ""
-        self.legacy_busy_attempts = legacy
+        self.source_rejected = True
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -315,6 +306,7 @@ class WorkerContinuationLiveness:
             "recovery_attempts": self.recovery_attempts,
             "recovery_resume_used": self.recovery_resume_used,
             "terminal_outcome": self.terminal_outcome,
+            "source_rejected": self.source_rejected,
             "legacy_busy_attempts": self.legacy_busy_attempts,
         }
 
@@ -349,6 +341,9 @@ class WorkerContinuationLiveness:
             legacy_busy_attempts = int(value.get("legacy_busy_attempts") or 0)
             if legacy_busy_attempts < 0:
                 return cls.unknown("malformed legacy busy attempts")
+            source_rejected = value.get("source_rejected", False)
+            if not isinstance(source_rejected, bool):
+                return cls.unknown("malformed source-rejection fence")
         except (TypeError, ValueError):
             return cls.unknown("malformed")
         source = str(value.get("provider_source") or "")[:80]
@@ -363,13 +358,27 @@ class WorkerContinuationLiveness:
             and rung == ContinuationRecoveryRung.NONE and not outcome
             and all(not numeric[name] for name in numeric)
         )
-        if explicit_unknown:
+        if explicit_unknown and not source_rejected:
             return cls.unknown(str(value.get("reason") or "unknown"), legacy_busy_attempts=legacy_busy_attempts)
         if not run_id or not _fingerprint(fingerprint):
             return cls.unknown("malformed HeadRun binding", legacy_busy_attempts=legacy_busy_attempts)
         if not isinstance(baseline_established, bool):
             return cls.unknown("historical v1 liveness lacks a baseline", legacy_busy_attempts=legacy_busy_attempts)
-        if state == ContinuationLivenessState.BASELINE_PENDING:
+        if state == ContinuationLivenessState.UNKNOWN:
+            # A foreign or changing source seals an otherwise exact episode.  Its retained
+            # fields are audit-only: no retry may read them back as a new source baseline.
+            if not source_rejected:
+                return cls.unknown("unknown liveness episode lacks a source-rejection fence", legacy_busy_attempts=legacy_busy_attempts)
+            if baseline_established:
+                if not source or not cursor or not _fingerprint(source_fingerprint):
+                    return cls.unknown("incoherent source-rejected liveness baseline", legacy_busy_attempts=legacy_busy_attempts)
+            elif (
+                source or source_fingerprint or cursor or busy_attempts
+                or rung != ContinuationRecoveryRung.NONE or outcome or any(numeric.values())
+                or recovery_attempts or bool(value.get("recovery_resume_used", False))
+            ):
+                return cls.unknown("incoherent source-rejected pending baseline", legacy_busy_attempts=legacy_busy_attempts)
+        elif state == ContinuationLivenessState.BASELINE_PENDING:
             if (
                 baseline_established or source or source_fingerprint or cursor or busy_attempts
                 or rung != ContinuationRecoveryRung.NONE or outcome or any(numeric.values())
@@ -384,6 +393,31 @@ class WorkerContinuationLiveness:
                 return cls.unknown("incoherent bound liveness baseline", legacy_busy_attempts=legacy_busy_attempts)
         else:
             return cls.unknown("unavailable liveness episode is not safely recoverable", legacy_busy_attempts=legacy_busy_attempts)
+        if state == ContinuationLivenessState.UNKNOWN:
+            return cls(
+                version=CONTINUATION_LIVENESS_VERSION,
+                state=state,
+                reason=str(value.get("reason") or "")[:240],
+                head_run_id=run_id,
+                head_run_fingerprint=fingerprint,
+                first_busy_at=numeric["first_busy_at"],
+                last_provider_progress_at=numeric["last_provider_progress_at"],
+                last_provider_observed_at=numeric["last_provider_observed_at"],
+                provider_cursor=cursor,
+                provider_source=source,
+                provider_source_fingerprint=source_fingerprint,
+                baseline_established=baseline_established,
+                no_progress_evidence=str(value.get("no_progress_evidence") or "")[:80],
+                busy_attempts=busy_attempts,
+                recovery_rung=rung,
+                recovery_attempted_at=numeric["recovery_attempted_at"],
+                recovery_response_deadline=numeric["recovery_response_deadline"],
+                recovery_attempts=recovery_attempts,
+                recovery_resume_used=bool(value.get("recovery_resume_used", False)),
+                terminal_outcome=outcome,
+                source_rejected=True,
+                legacy_busy_attempts=legacy_busy_attempts,
+            )
         if rung == ContinuationRecoveryRung.TERMINAL:
             if not outcome:
                 return cls.unknown("terminal liveness outcome is missing", legacy_busy_attempts=legacy_busy_attempts)
@@ -421,6 +455,7 @@ class WorkerContinuationLiveness:
             recovery_attempts=recovery_attempts,
             recovery_resume_used=bool(value.get("recovery_resume_used", False)),
             terminal_outcome=outcome,
+            source_rejected=False,
             legacy_busy_attempts=legacy_busy_attempts,
         )
 

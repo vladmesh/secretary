@@ -1142,6 +1142,12 @@ advance the ladder, authorise recovery or replacement, or become progress. The w
 watchdog carries the same typed source result: provider-unavailable, stale handle, identity mismatch,
 confirmed dead and busy are not aliases, and only admitted observed progress renews liveness.
 
+Once an exact episode rejects a foreign or changing source, it is sealed as `unknown`: the original
+HeadRun binding, source baseline, cursor and no-progress ladder remain audit-only and cannot be
+re-admitted by a later reply. The shared worker/reviewer status seam independently checks every
+apparently accepted provider observation against the persisted HeadRun before it can renew the
+watchdog clock.
+
 Codex preflight writes its immutable run descriptor: run id, HeadRun fingerprint, resolved
 workspace, role and task reference. Binding selects exactly one journal and retains that descriptor
 verbatim, adding only verified journal identity, range, cursor and bind time. The ingress and the
