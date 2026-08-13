@@ -77,11 +77,32 @@ For the installed 0.147.0 CLI it records no provable native boundary: `--disable
 produced a real collaboration call, while the globally configured v2 wait-disabled row had no
 collaboration call but no schema evidence. The artifact records strict-config rejection and
 ignored-role state as typed evidence, so neither a rejected candidate nor a silently ignored role
-can pass as isolation. Consequently no worker, reviewer or observer launch may be
-treated as isolated merely because that flag or `hide_spawn_agent_metadata` is present. A future
-attestation must be checked in the shared Codex preflight before a pane exists, bind the provider
-identity to the durable `HeadRun`, and fail closed on every collaboration record or unknown
-parent/child edge.
+can pass as isolation. Consequently no worker, reviewer or observer launch may be treated as
+isolated merely because that flag or `hide_spawn_agent_metadata` is present.
+
+`triggered_agents.runtime.codex_preflight` is the one pre-pane boundary. Its v1 attestation is
+persisted on the intended `HeadRun` before terminal creation and binds `run_id`, role, model,
+resolved CLI path, SHA-256 binary digest, exact CLI version, canonical provider-tool-schema digest
+and the explicit `no_callable_child_spawn_surface` verdict. A no-op, a non-spawning model response
+or an inventory is not a substitute for any of those fields. The v1 states are `allowed`,
+`schema_absent`, `schema_unknown`, `unknown` and `violation`; only `allowed` with terminal state
+`clean` permits a Codex pane. Historical/missing, malformed and unsupported records normalise only
+to non-clean `unknown`. Recovery does not fill them from today's profile or a transcript. Current
+0.147.0 evidence has no allowable schema capture, so all new Codex worker, reviewer and observer
+launches fail before pane creation.
+
+Provider-edge collection is bound to that same run. Before any consequential action it appends one
+of `collaboration_call`, `child_thread_edge`, `unknown_thread_edge` or
+`unparseable_provider_event`, with parent and child thread identities when present, tool name when
+known, SHA-256 raw-event digest, source sequence/location and capture time. A collaboration call or
+non-empty child edge is a violation. An unknown tool or relation, missing expected parent,
+malformed event or failed event write is unknown. The event and terminal policy state are durably
+written first; only then does the caller use the existing identity-fenced stop path and block the
+card or sprint with typed evidence. A clean event never upgrades a missing attestation.
+
+The live fan-out canary has a hard precondition: an independently captured v1 provider schema for
+the exact binary/version/model/role must already permit the pane, and its run-bound recorder must
+be durable before the canary acts on any provider event.
 
 ## SHA-bound mechanical gate evidence
 

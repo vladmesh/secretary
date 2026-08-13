@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 from secretary.dispatcher_helpers import scrub_host_output
@@ -178,6 +179,27 @@ def write_launch_intent(
     previous = dict(getattr(record, "launch_intent", None) or {})
     previous_workspace_settled = record.workspace_settled
     reserved = record.attempt_round if round_number is None else round_number
+    run_id = uuid.uuid4().hex
+    # The production host can attest a fully-shaped HeadRun before the intent is saved and before
+    # its pane exists.  Test doubles intentionally do not implement this hook: they model a host
+    # which has already crossed the boundary, while this module's real host path remains the only
+    # path allowed to open a terminal.
+    preflight_run: dict[str, Any] | None = None
+    attest = getattr(getattr(runtime, "host", None), "preflight_codex_run", None)
+    if callable(attest):
+        document_name = "REVIEW.md" if role == REVIEW_ROLE else "TASK.md"
+        try:
+            candidate = attest(
+                head,
+                role="reviewer" if role == REVIEW_ROLE else role,
+                workspace=workspace,
+                task_ref=head_ops.TaskRef.card(ref, document=str(Path(workspace) / document_name)),
+                pid_file=launch_pid_file(role, ref),
+                run_id=run_id,
+            )
+        except Exception as exc:
+            return f"codex-fanout-policy: {type(exc).__name__}: {exc}"
+        preflight_run = candidate.to_json()
     record.workspace_settled = False
     record.launch_intent = {
         "role": role,
@@ -188,7 +210,7 @@ def write_launch_intent(
         # The run id is fixed before the host is touched.  A dispatcher that dies while Orca is
         # creating the pane can therefore still prove that a heartbeat belongs to this intent,
         # rather than adopting whichever later process happened to reuse its pid path.
-        "run_id": uuid.uuid4().hex,
+        "run_id": run_id,
         "task": f"card:{ref}",
         "attempt_id": record.attempt_id,
         "round": reserved,
@@ -196,6 +218,9 @@ def write_launch_intent(
         "respawns": int(getattr(record, f"{role}_respawns", 0) or 0),
         "at": time.time(),
     }
+    if preflight_run is not None:
+        record.launch_intent["head_run"] = preflight_run
+        _remember_head_run(record, role, preflight_run)
     records[ref] = record
     try:
         runtime.save_records(payload, records)

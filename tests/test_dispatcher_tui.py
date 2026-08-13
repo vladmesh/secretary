@@ -33,6 +33,7 @@ from tests.test_dispatcher_observer import (
     STALE_HANDLE_WAIT_FAILURE,
     TIMEOUT_WAIT_FAILURE,
 )
+from tests.fanout_fixtures import accepted_transport_run
 
 
 class DispatcherTuiLaunchTests(unittest.TestCase):
@@ -635,6 +636,7 @@ class RecordingTuiHost(CommandHostRuntime):
     ) -> None:
         self.catalog = TuiCatalog()
         super().__init__(self.catalog, root, mode="real")  # type: ignore[arg-type]
+        self.preflight_codex_run = accepted_transport_run  # type: ignore[method-assign]
         self.calls: list[list[str]] = []
         self.reads = list(reads)
         # What Orca answers each `terminal wait`, the last one repeating. The default is a pane it

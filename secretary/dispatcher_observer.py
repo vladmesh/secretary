@@ -82,6 +82,7 @@ from secretary.sprint_observer import (
     executable_observer,
 )
 from secretary.tasks import TaskError, is_significant_observer_event
+from triggered_agents.runtime import head as head_ops
 
 OBSERVER_ROLE = "observer"
 OBSERVER_PID_KIND = "observer"
@@ -643,6 +644,19 @@ def _reconcile_open_sprint(
             "sprint": ref,
             "action": "observer-none",
             "reason": "sprint declares no observer",
+        }
+    if record is not None and record.state == "blocked":
+        # A provider-policy refusal has no retry condition inside the dispatcher.  Keep this
+        # sprint-visible record and typed evidence until an independently attested launch replaces
+        # it; treating it as a normal deferred launch would quietly keep probing forbidden panes.
+        return {
+            "status": "blocked",
+            "step": "observer-reconcile",
+            "sprint": ref,
+            "action": "codex-fanout-policy-blocked",
+            "head": record.head,
+            "policy_evidence": {"kind": "codex_provider_fanout", "state": "unknown"},
+            "reason": record.deferred_reason,
         }
     # A record still in `launching` is a bring-up whose tick did not live to record the outcome.
     # It is resolved before anything else, because until it is, neither "a head is running here"
@@ -2030,10 +2044,26 @@ def _write_launch_intent(
         # Without the workspace the head could not be found again, and without the pid file its
         # liveness could not be read: an intent that names neither is not worth launching against.
         return f"{type(exc).__name__}: {exc}"
+    run_id = uuid.uuid4().hex
+    preflight_run: dict[str, Any] | None = None
+    attest = getattr(runtime.host, "preflight_codex_run", None)
+    if callable(attest):
+        try:
+            candidate = attest(
+                head,
+                role=OBSERVER_ROLE,
+                workspace=workspace,
+                task_ref=head_ops.TaskRef.sprint(ref),
+                pid_file=pid_file,
+                run_id=run_id,
+            )
+        except Exception as exc:
+            return f"codex-fanout-policy: {type(exc).__name__}: {exc}"
+        preflight_run = candidate.to_json()
     record.head = head
     record.workspace = workspace
     record.pid_file = pid_file
-    record.head_run = {"run_id": uuid.uuid4().hex}
+    record.head_run = preflight_run or {"run_id": run_id}
     record.pending_launch = attempt
     record.head_possible = True
     record.workspace_live = True
@@ -2091,8 +2121,13 @@ def _defer(
     a deliberate drain is retried when the drain ends rather than on that deadline.
     """
     record = record or ObserverRecord(sprint=ref)
+    policy_refusal = reason.startswith("codex-fanout-policy:")
     record.head = record.head or head
-    if not keep_state:
+    if policy_refusal:
+        record.state = "blocked"
+        retry = False
+        action = "codex-fanout-policy-blocked"
+    elif not keep_state:
         record.state = "deferred"
     if retry:
         record.launch_attempts += 1
@@ -2117,13 +2152,15 @@ def _defer(
         {"head": record.head, "reason": record.deferred_reason, "launches": record.launches},
     )
     outcome = {
-        "status": "skipped",
+        "status": "blocked" if policy_refusal else "skipped",
         "step": "observer-reconcile",
         "sprint": ref,
         "action": action,
         "head": record.head,
         "reason": record.deferred_reason,
     }
+    if policy_refusal:
+        outcome["policy_evidence"] = {"kind": "codex_provider_fanout", "state": "unknown"}
     if readiness is not None:
         outcome["readiness"] = readiness
     _persist_quietly(runtime, payload, observers)

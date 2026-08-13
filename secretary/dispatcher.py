@@ -215,6 +215,10 @@ from triggered_agents.agents.pipeline.heads import (
 )
 from triggered_agents.runtime.launch_prefix import pythonpath_prefix
 from triggered_agents.runtime import head as head_ops
+from triggered_agents.runtime.codex_preflight import (
+    CodexFanoutPolicyError,
+    preflight_codex_launch,
+)
 from triggered_agents.runtime.head import (
     CODEX_TUI_MODE,
     PYTHON_SAFE_PATH_FLAG as _PYTHON_SAFE_PATH_FLAG,
@@ -707,6 +711,37 @@ class CommandHostRuntime:
         finally:
             self.commit_state = previous
 
+    def preflight_codex_run(
+        self,
+        head: str,
+        *,
+        role: str,
+        workspace: str,
+        task_ref: head_ops.TaskRef,
+        pid_file: str,
+        run_id: str,
+    ) -> head_ops.HeadRun:
+        """Create and attest the durable run that exists before this Codex pane does.
+
+        Callers persist the returned value in their launch intent before they call a host method.
+        Re-running the method immediately before ``spawn`` is intentional: it catches a binary
+        replacement in the gap, while the first copy is the crash-safe pre-pane record recovery
+        reads.  Neither path derives an allow from a registry profile without schema evidence.
+        """
+        profile = self.catalog.head_profile(head)
+        spec = self._head_spec(head, str(profile.get("adapter") or "unknown"))
+        run = head_ops.HeadRun(
+            run_id=run_id,
+            spec=spec,
+            workspace=workspace,
+            task_ref=task_ref,
+            role=role,
+            pid_file=pid_file,
+        )
+        if spec.adapter != "codex":
+            return run
+        return preflight_codex_launch(profile, workspace, run)
+
     def _prompt_adapter(self, run: Any, head: str) -> str:
         """The provider whose framing a prompt for this pane is delivered in.
 
@@ -974,8 +1009,21 @@ class CommandHostRuntime:
             spec=self._head_spec(head, str(run.get("adapter") or "unknown")),
             workspace=str(workspace),
             task_ref=head_ops.TaskRef.sprint(reference),
+            role=OBSERVER_ROLE,
             pid_file=pid_file,
         )
+        if lifecycle_run.spec.adapter == "codex":
+            try:
+                lifecycle_run = self.preflight_codex_run(
+                    head,
+                    role=OBSERVER_ROLE,
+                    workspace=str(workspace),
+                    task_ref=lifecycle_run.task_ref,
+                    pid_file=pid_file,
+                    run_id=lifecycle_run.run_id,
+                )
+            except CodexFanoutPolicyError as exc:
+                raise HostError(str(exc)) from None
         heartbeat = self._run_heartbeat_identity(lifecycle_run, OBSERVER_ROLE)
         if self.mode == "noop":
             return {
@@ -2328,14 +2376,28 @@ class CommandHostRuntime:
         already written its task there. It is what the delivery record is told, and it is what
         decides how a delivery this bring-up could not confirm is answered — see below.
         """
-        if self.mode == "noop":
-            return self._launched(
-                f"noop:{head}:{Path(workspace).name}:{Path(prompt_file).name}", head, task, role,
-                workspace, failover,
-            )
         pid_file = _pid_file_path(_watchdog_kind(role), task["ref"]) if task else ""
         task_ref = self._task_ref(task, role, prompt_document)
         run_id = heartbeat_run_id or head_ops.new_run_id()
+        # ``preflight_codex_run`` is deliberately reached even by noop.  A fake/noop transport is
+        # not an exemption from the policy boundary: it is how tests prove a refused attestation
+        # opens no pane and clears no predecessor state.
+        if self.mode == "noop":
+            try:
+                preflight_run = self.preflight_codex_run(
+                    head,
+                    role=role,
+                    workspace=workspace,
+                    task_ref=task_ref,
+                    pid_file=pid_file,
+                    run_id=run_id,
+                )
+            except CodexFanoutPolicyError as exc:
+                raise HostError(str(exc)) from None
+            return self._launched(
+                f"noop:{head}:{Path(workspace).name}:{Path(prompt_file).name}", head, task, role,
+                workspace, failover, head_run=preflight_run.to_json(),
+            )
         heartbeat = heartbeat_identity(
             run_id=run_id, role=role, task_ref=task_ref.to_json(),
         )
@@ -2364,6 +2426,17 @@ class CommandHostRuntime:
             if pid_file:
                 command = _with_pid_heartbeat(command, pid_file, identity=heartbeat)
         adapter = (getattr(launch, "adapter", "") or "codex") if launch else "codex"
+        try:
+            preflight_run = self.preflight_codex_run(
+                head,
+                role=role,
+                workspace=workspace,
+                task_ref=task_ref,
+                pid_file=pid_file,
+                run_id=run_id,
+            )
+        except CodexFanoutPolicyError as exc:
+            raise HostError(str(exc)) from None
         subject = f"{role or 'head'}-launch"
         pointer = None
         if launch and launch.prompt_after_start:
@@ -2390,6 +2463,8 @@ class CommandHostRuntime:
                 transport=self._head_transport(workspace, prompt_file, adapter, role),
                 subject=subject,
                 run_id=run_id,
+                role=role,
+                run=preflight_run,
             )
         except head_ops.HeadOperationError as exc:
             raise self._launch_failure(exc, workspace, pid_file, subject) from None
@@ -3843,6 +3918,29 @@ class DispatcherRuntime:
             workspace=self.host.restore_workspace(claimed, record.worker),
         )
         if failure is not None:
+            if failure.startswith("codex-fanout-policy:"):
+                # No terminal was created.  This is policy evidence, not a transient state-plane
+                # failure worth retrying around: a later tick with the same schema would be the
+                # same prohibited launch.  The board gets a typed, operator-readable block before
+                # this record is released for a future, independently attested retry.
+                self.writer.move(
+                    role="dispatcher",
+                    actor=self.owner,
+                    reference=ref,
+                    target="blocked",
+                    reason=f"Codex provider fan-out policy refused worker preflight: {failure}",
+                    request_id=_attempt_request_id(record.attempt_id, "codex-fanout-blocked", ref),
+                )
+                records.pop(ref, None)
+                self.save_records(payload, records)
+                return {
+                    "status": "blocked",
+                    "step": "claim",
+                    "pilot_ref": ref,
+                    "attempt_id": record.attempt_id,
+                    "policy_evidence": {"kind": "codex_provider_fanout", "state": "unknown"},
+                    "reason": failure,
+                }
             # A launch nobody can record is exactly how a card ends up with two heads, so the host
             # is not touched at all. The card keeps its claim and the next tick launches again.
             return _launch_intent_unwritable(

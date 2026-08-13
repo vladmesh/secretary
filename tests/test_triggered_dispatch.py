@@ -542,6 +542,7 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
 
         with mock.patch.object(dispatch, "_dispatch_command", return_value=self.command), \
              mock.patch.object(dispatch, "_create_terminal", side_effect=create), \
+             mock.patch.object(dispatch, "preflight_codex_launch", side_effect=lambda _profile, _ws, run: run), \
              mock.patch.object(dispatch, "_deliver_interactive_skill",
                                side_effect=lambda *a, **kw: order.append("deliver")):
             dispatch._spawn_fresh_terminal("retro", None, self.workspace, mock.Mock(), "dispatch",

@@ -110,14 +110,29 @@ evidence](evidence/codex-provider-fanout-2026-08-13.md). In particular, do not p
 an isolation check. The evidence includes the global v2 wait-disabled candidate and per-row typed
 strict-config and ignored-role state; a rejected or ignored configuration is not a capability result.
 
+The runtime's attestation protocol is v1. An allowed `HeadRun` records the exact CLI path and
+SHA-256 digest, CLI version, model, role, canonical tool-schema digest and explicit
+`no_callable_child_spawn_surface` verdict. `schema_absent`, `schema_unknown`, malformed,
+unsupported and historical records are non-clean and cannot open a pane. The current 0.147.0
+evidence has no allowed result, so this is an intentional pre-pane refusal, not a reason to select
+another provider.
+
+Provider events are durable run data, not screen observations. The collector records only
+`collaboration_call`, `child_thread_edge`, `unknown_thread_edge` and
+`unparseable_provider_event`, each with available parent/child identities, tool name, raw-event
+digest, source sequence/location and capture time. It writes the event and terminal state before
+the existing identity-fenced stop path can act. Collaboration calls and child edges are violations;
+unknown tools/relations, missing parent identity, malformed input and an event-write failure are
+unknown and block the affected card or sprint. A clean event does not repair absent attestation.
+
 Rerun the matrix only when a new approved disposable-auth probe is warranted, such as an installed
 Codex binary/model change or a candidate provider control. Use the committed
 `scripts/codex_capability_matrix.py` harness with a freshly isolated empty git worktree and
 `CODEX_HOME`; never direct it at a production home. The harness accepts an explicitly approved auth
 source, does not parse or log it, copies it only into the temporary home and deletes the copy before
 the next matrix row. Its JSON result has only raw-stream digests and typed event summaries. A live
-canary must use the preflight/`HeadRun` telemetry contract in the evidence, rather than promoting a
-fresh model response into policy.
+canary starts only after the exact v1 attestation is allowed and the run-bound recorder is durably
+available; it must not promote a fresh model response into policy.
 
 ## System requirements
 

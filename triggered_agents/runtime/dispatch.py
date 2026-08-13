@@ -125,8 +125,12 @@ import tomllib
 
 from . import claude_env, finalizer, orca_rpc
 from .claude_sessions import claude_session_paths
-from .codex_preflight import CodexPreflightError, ensure_codex_workspace_trusted
-from .head import RUNTIME_ROLE_ENV, render_head_command
+from .codex_preflight import (
+    CodexPreflightError,
+    ensure_codex_workspace_trusted,
+    preflight_codex_launch,
+)
+from .head import HeadRun, HeadSpec, RUNTIME_ROLE_ENV, TaskRef, new_run_id, render_head_command
 from .pane_host import Pane, SessionHost, safe_command_label, session_host
 from .state import AgentState
 from .tui_delivery import (
@@ -599,7 +603,7 @@ def _fresh_steward_report_in_progress(agent: str, now: float, ws: str, state: Ag
     return None
 
 
-def _ensure_head_ready(ws: str, cmd: DispatchCommand) -> None:
+def _ensure_head_ready(ws: str, cmd: DispatchCommand, *, role: str = "service") -> None:
     """Prepare `ws` for the head about to be spawned into it, on that head's own runtime.
 
     A service head is a head like a pipeline worker is, and the first-run question its runtime asks
@@ -618,6 +622,21 @@ def _ensure_head_ready(ws: str, cmd: DispatchCommand) -> None:
     """
     if cmd.prompt_after_start and str((cmd.head_profile or {}).get("adapter") or "") == "codex":
         ensure_codex_workspace_trusted(cmd.head_profile, ws)
+        # This service path does not own a dispatcher record, but it still crosses the shared
+        # pre-pane policy boundary.  The role is explicit rather than inferred from the profile so
+        # a future durable service lifecycle can bind the same attestation unchanged.
+        spec = HeadSpec.from_profile(str(cmd.profile or role), cmd.head_profile)
+        preflight_codex_launch(
+            cmd.head_profile,
+            ws,
+            HeadRun(
+                run_id=new_run_id(),
+                spec=spec,
+                workspace=ws,
+                task_ref=TaskRef.standing(role),
+                role=role,
+            ),
+        )
         return
     _ensure_claude_ready(ws)
 
@@ -807,7 +826,7 @@ def _spawn_fresh_terminal(agent: str, variant: str | None, ws: str, state: Agent
     """
     cmd = _dispatch_command(agent, variant)
     try:
-        _ensure_head_ready(ws, cmd)
+        _ensure_head_ready(ws, cmd, role=agent)
     except CodexPreflightError as exc:
         _escalate_steward_preflight_failure(state, event, cmd, exc)
         raise

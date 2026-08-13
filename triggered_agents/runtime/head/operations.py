@@ -62,7 +62,10 @@ Confirm = Callable[[float], bool]
 Commit = Callable[["HeadRun"], None]
 # The product's launch-identity proof. It receives the exact run it would otherwise attribute to
 # the stop, and therefore runs before that attribution is made durable.
-Preflight = Callable[["HeadRun"], None]
+# A launch preflight returns the exact run it attested.  Keeping that immutable value rather than
+# accepting side metadata is what prevents a pane from being created under a different identity
+# than the policy record persisted before it.
+LaunchPreflight = Callable[["HeadRun"], "HeadRun"]
 
 
 class HeadOperationError(RuntimeError):
@@ -224,6 +227,10 @@ def spawn(
     pid_file: str = "",
     split_from: str = "",
     run_id: str = "",
+    role: str = "",
+    run: HeadRun | None = None,
+    preflight: LaunchPreflight | None = None,
+    commit: Commit | None = None,
     transport: HeadTransport | None = None,
     subject: str = "",
 ) -> HeadOutcome:
@@ -240,17 +247,38 @@ def spawn(
     the host directly, which is all a session manager can promise on its own.
     """
     transport = transport or HostTransport()
-    run = HeadRun(
-        run_id=run_id or new_run_id(),
-        spec=spec,
-        workspace=workspace,
-        task_ref=task_ref,
-        pid_file=pid_file,
-    )
+    if run is None:
+        run = HeadRun(
+            run_id=run_id or new_run_id(),
+            spec=spec,
+            workspace=workspace,
+            task_ref=task_ref,
+            role=role,
+            pid_file=pid_file,
+        )
+    elif (
+        run.spec.profile_id != spec.profile_id
+        or run.spec.adapter != spec.adapter
+        or run.workspace != workspace
+        or run.task_ref != task_ref
+        or (run_id and run.run_id != run_id)
+        or (pid_file and run.pid_file != pid_file)
+        or (role and run.role != role)
+    ):
+        raise HeadSpawnFailed("launch preflight run does not match the pane being opened")
+    if preflight is not None:
+        run = preflight(run)
+    if commit is not None:
+        # A policy attestation must hit durable state before the host is asked to create anything.
+        # This is also useful to the old launch-intent callers, which commit the still-handleless
+        # run before a process can write its heartbeat.
+        commit(run)
     pane = _open_pane(
         host, workspace, title, command, split_from=split_from, transport=transport, run=run,
     )
     run = run.rebound(pane.handle, leaf=pane.leaf)
+    if commit is not None:
+        commit(run)
     if pointer is None:
         # A head whose prompt went on its own command line has already been given its task; there
         # is nothing to deliver and nothing to confirm. Which of the two shapes this head is in is

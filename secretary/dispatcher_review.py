@@ -721,6 +721,26 @@ def start_review(
         workspace=record.workspace,
     )
     if failure is not None:
+        if failure.startswith("codex-fanout-policy:"):
+            runtime.writer.move(
+                role="dispatcher",
+                actor=runtime.owner,
+                reference=ref,
+                target="blocked",
+                reason=f"Codex provider fan-out policy refused reviewer preflight: {failure}",
+                request_id=_attempt_request_id(
+                    record.attempt_id or attempt_id, "codex-fanout-review-blocked", ref
+                ),
+            )
+            records.pop(ref, None)
+            runtime.save_records(payload, records)
+            return {
+                "status": "blocked",
+                "step": "review",
+                "pilot_ref": ref,
+                "policy_evidence": {"kind": "codex_provider_fanout", "state": "unknown"},
+                "reason": failure,
+            }
         record.state = "review_starting"
         if record.gate_state == "green":
             return review_infrastructure_failure(
