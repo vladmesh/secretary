@@ -33,6 +33,7 @@ from triggered_agents.runtime.head import operations as head_ops
 from triggered_agents.runtime.prompt_document import NUDGE_FILE_MODE, NUDGE_MAX_BYTES
 from secretary.dispatcher_tui import TuiDeliveryError, claude_project_dir_name
 from secretary.dispatcher_gate import GateResult
+from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_identity
 from secretary.dispatcher_launch import launch_intent_liveness
 from secretary._fsutil import file_lock
 from secretary.dispatcher_state import DispatcherRecord
@@ -140,6 +141,13 @@ class LaunchIntentTests(unittest.TestCase):
         """The intent as it is on disk, which is the only copy a next tick can read."""
         record = self.runtime.production_state.load().get("records", {}).get(REF) or {}
         return dict(record.get("launch_intent") or {})
+
+    def replace_intent_heartbeat_run(self) -> None:
+        intent = self.stored_intent()
+        path = Path(str(intent["pid_file"]))
+        heartbeat = json.loads(path.read_text(encoding="utf-8"))
+        heartbeat["run_id"] = "foreign-run"
+        path.write_text(json.dumps(heartbeat), encoding="utf-8")
 
     def fail_launch_intent_save(self):
         """A state plane that refuses exactly the write a launch intent needs, and nothing else.
@@ -457,6 +465,19 @@ class LaunchIntentTests(unittest.TestCase):
             ["prepare_worker", "stop_head:worker", "prepare_worker"],
         )
         self.assertEqual(self.stored_intent(), {})
+
+    def test_a_live_foreign_worker_heartbeat_is_fenced_without_a_stop_or_replacement(self) -> None:
+        with self.state_dies_after("prepare_worker"):
+            with self.assertRaises(OSError):
+                self.tick()
+        self.replace_intent_heartbeat_run()
+
+        fenced = self.tick()
+
+        self.assertEqual(fenced["action"], "worker-heartbeat-identity-mismatch")
+        self.assertEqual(self.host.calls.count("prepare_worker"), 1)
+        self.assertNotIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("stop_workspace", self.host.calls)
 
     def test_an_intent_without_a_heartbeat_waits_out_its_grace_window(self) -> None:
         """A head that has been launched but has not written its pid is not a dead head."""
@@ -1485,6 +1506,19 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.host.reviews, [REF, REF])
         self.assertEqual(self.stored_intent(), {})
 
+    def test_a_live_foreign_reviewer_heartbeat_is_fenced_without_a_stop_or_replacement(self) -> None:
+        self.run_to_validate()
+        with self.state_dies_after("start_review"):
+            with self.assertRaises(OSError):
+                self.tick()
+        self.replace_intent_heartbeat_run()
+
+        fenced = self.tick()
+
+        self.assertEqual(fenced["action"], "review-heartbeat-identity-mismatch")
+        self.assertEqual(self.host.reviews, [REF])
+        self.assertNotIn("stop_review", self.host.calls)
+
     def test_a_review_intent_without_a_heartbeat_waits_out_its_grace_window(self) -> None:
         self.run_to_validate()
         self.host.head_pid = None
@@ -2102,7 +2136,11 @@ class LaunchIntentTests(unittest.TestCase):
         def failing_review(task: dict, record: Any):
             self.host.calls.append("start_review")
             self.host.reviews.append(task["ref"])
-            self.host._write_head_pid("review", task["ref"])
+            self.host._write_head_pid(
+                "review",
+                task["ref"],
+                run_id=str((record.launch_intent or {}).get("run_id") or ""),
+            )
             raise HostError("orca terminal rename failed")
 
         with mock.patch.object(self.host, "start_review", failing_review):
@@ -2485,7 +2523,7 @@ class HostLaunchContourTests(unittest.TestCase):
             if pending and command[:3] == ["orca", "terminal", "split"]:
                 path, contents = pending
                 if contents is not None:
-                    path.write_text(contents, encoding="utf-8")
+                    self._write_test_heartbeat(path, int(contents), role="reviewer")
             for key, answer in answers.items():
                 if all(word in command for word in key.split()):
                     if isinstance(answer, Exception):
@@ -2498,8 +2536,48 @@ class HostLaunchContourTests(unittest.TestCase):
     def pid_file(self, contents: str | None) -> str:
         path = self.data_dir / "head.pid"
         if contents is not None:
-            path.write_text(contents, encoding="utf-8")
+            self._write_test_heartbeat(path, int(contents))
         return str(path)
+
+    @staticmethod
+    def _write_test_heartbeat(path: Path, pid: int, *, role: str = "worker") -> None:
+        identity = {
+            "version": 1,
+            "pid": pid,
+            "run_id": "host-test-run",
+            "role": role,
+            "task": f"card:{REF}",
+            "leaf": "",
+        }
+        if pid > 0 and Path(f"/proc/{pid}/stat").exists():
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+            identity["boot_id"] = Path("/proc/sys/kernel/random/boot_id").read_text(
+                encoding="utf-8"
+            ).strip()
+            identity["proc_starttime_ticks"] = stat[stat.rfind(")") + 2:].split()[19]
+        else:
+            identity["boot_id"] = "dead-process"
+            identity["proc_starttime_ticks"] = "0"
+        path.write_text(json.dumps(identity), encoding="utf-8")
+
+    def track_worker(self, record: DispatcherRecord) -> DispatcherRecord:
+        """Bind a controlled process to the same durable HeadRun the runtime will read."""
+        run = head_ops.HeadRun(
+            run_id="host-test-run",
+            spec=head_ops.HeadSpec(profile_id=record.head or "codex", adapter="codex"),
+            workspace=record.workspace,
+            task_ref=head_ops.TaskRef.card(REF),
+            handle=record.handle,
+            leaf=record.worker_leaf,
+            pid_file=record.worker_pid_file,
+        )
+        record.worker_head_run = run.to_json()
+        raw = json.loads(Path(record.worker_pid_file).read_text(encoding="utf-8"))
+        raw.update(run_heartbeat_identity(
+            record.worker_head_run, role="worker", task=f"card:{REF}", leaf=record.worker_leaf,
+        ))
+        Path(record.worker_pid_file).write_text(json.dumps(raw), encoding="utf-8")
+        return record
 
     # the workspace the intent already names ---------------------------------
 
@@ -2718,10 +2796,22 @@ class HostLaunchContourTests(unittest.TestCase):
     def test_a_head_that_ignores_every_signal_is_not_reported_as_stopped(self) -> None:
         pid_file = self.pid_file(str(os.getpid()))
 
-        with mock.patch.object(self.host, "_signal_head", lambda *a: None):
+        with mock.patch.object(self.host, "_signal_head", lambda *a, **k: None):
             with mock.patch.object(secretary_dispatcher, "HEAD_STOP_GRACE_SECONDS", 0.05):
                 with self.assertRaisesRegex(HostError, "still running after stop"):
                     self.host._confirm_head_process_gone(pid_file)
+
+    def test_a_live_foreign_heartbeat_is_never_signalled(self) -> None:
+        pid_file = self.pid_file(str(os.getpid()))
+        expected = heartbeat_identity(
+            run_id="different-run", role="worker", task=f"card:{REF}"
+        )
+
+        with mock.patch.object(self.host, "_signal_head") as signal_head:
+            with self.assertRaisesRegex(HostError, "mismatching launch identity"):
+                self.host._confirm_head_process_gone(pid_file, expected=expected)
+
+        signal_head.assert_not_called()
 
     def test_a_head_with_no_pane_is_stopped_through_its_heartbeat(self) -> None:
         """The shape every adopted head has: no handle, only a pid."""
@@ -2732,6 +2822,7 @@ class HostLaunchContourTests(unittest.TestCase):
             review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=0,
             state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
         )
+        self.track_worker(record)
 
         self.host.stop_head(record, "worker")
 
@@ -2751,6 +2842,7 @@ class HostLaunchContourTests(unittest.TestCase):
                 retained_at=time.time(),
             ),
         )
+        self.track_worker(record)
         os.kill(head.pid, signal.SIGSTOP)
 
         self.host.stop_head(record, "worker")
@@ -2781,6 +2873,7 @@ class HostLaunchContourTests(unittest.TestCase):
             state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
             worker_run={"adapter": "codex", "codex_mode": "tui", "head": "codex"},
         )
+        self.track_worker(record)
 
         self.host.retain_worker(record)
 
@@ -2809,6 +2902,7 @@ class HostLaunchContourTests(unittest.TestCase):
                 sent_at=time.time(),
             ),
         )
+        self.track_worker(record)
         os.kill(head.pid, signal.SIGSTOP)
         time.sleep(0.05)
         calls: list[list[str]] = []
@@ -2869,6 +2963,7 @@ class HostLaunchContourTests(unittest.TestCase):
                 sent_at=time.time(),
             ),
         )
+        self.track_worker(record)
         os.kill(head.pid, signal.SIGSTOP)
         time.sleep(0.05)
         real_signal = self.host._signal_head
@@ -2876,8 +2971,8 @@ class HostLaunchContourTests(unittest.TestCase):
         class DispatcherDied(BaseException):
             pass
 
-        def die_after_continuing(pid_file: str, signal_number: int) -> None:
-            real_signal(pid_file, signal_number)
+        def die_after_continuing(pid_file: str, signal_number: int, **kwargs: Any) -> None:
+            real_signal(pid_file, signal_number, **kwargs)
             raise DispatcherDied()
 
         with mock.patch.object(self.host, "_signal_head", die_after_continuing):
@@ -2931,6 +3026,7 @@ class HostLaunchContourTests(unittest.TestCase):
                 sent_at=time.time(),
             ),
         )
+        self.track_worker(record)
         os.kill(head.pid, signal.SIGSTOP)
         time.sleep(0.05)
         calls: list[list[str]] = []
@@ -2977,6 +3073,7 @@ class HostLaunchContourTests(unittest.TestCase):
                 sent_at=sent_at,
             ),
         )
+        self.track_worker(record)
         projects = self.data_dir / "claude-projects"
         session = projects / claude_project_dir_name(str(self.data_dir)) / "session.jsonl"
         session.parent.mkdir(parents=True)
@@ -3008,6 +3105,7 @@ class HostLaunchContourTests(unittest.TestCase):
                 sent_at=time.time(),
             ),
         )
+        self.track_worker(record)
         calls: list[list[str]] = []
 
         with mock.patch.object(self.host, "_run_json", lambda command: calls.append(command) or {}):
@@ -3047,6 +3145,7 @@ class HostLaunchContourTests(unittest.TestCase):
                 sent_at=time.time(),
             ),
         )
+        self.track_worker(record)
         os.kill(head.pid, signal.SIGSTOP)
         time.sleep(0.05)
 

@@ -463,7 +463,11 @@ def _resume_heads(
             skipped.append(f"{ref}:worker")
             continue
         try:
-            launched = runtime.host.restart_worker(task, record)
+            launched = runtime.host.restart_worker(
+                task,
+                record,
+                heartbeat_run_id=str((record.launch_intent or {}).get("run_id") or ""),
+            )
         except Exception as exc:  # noqa: BLE001 — one failed relaunch must not strand the others
             if isinstance(exc, HeadLaunchAborted) or launch_left_a_head(record):
                 # A pane was already open, or the heartbeat says a head of this relaunch is running

@@ -54,6 +54,17 @@ from tests.test_dispatcher_observer import DEAD_PID, install_skill_registry
 from tests.test_sprints import SprintFixture
 
 
+def mark_observer_heartbeat_dead(record: ObserverRecord) -> None:
+    path = Path(record.pid_file)
+    heartbeat = json.loads(path.read_text(encoding="utf-8"))
+    heartbeat.update({
+        "pid": DEAD_PID,
+        "boot_id": "dead-process",
+        "proc_starttime_ticks": "0",
+    })
+    path.write_text(json.dumps(heartbeat), encoding="utf-8")
+
+
 class ObserverValueTests(unittest.TestCase):
     """Four tagged forms, and nothing that resembles one."""
 
@@ -429,7 +440,7 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.runtime.production_tick()
         self.runtime.production_tick()
         record = load_observers(self.runtime.production_state.load())["sprint:1"]
-        Path(record.pid_file).write_text(str(DEAD_PID), encoding="utf-8")
+        mark_observer_heartbeat_dead(record)
 
         fence = self.fence()
 
@@ -771,7 +782,7 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
     def test_a_dead_declared_head_holds_its_own_sprint_and_leaves_the_other_running(self) -> None:
         self.in_flight_pair()
         record = load_observers(self.runtime.production_state.load())[self.FIRST]
-        Path(record.pid_file).write_text(str(DEAD_PID), encoding="utf-8")
+        mark_observer_heartbeat_dead(record)
 
         # Read before the tick: the tick relaunches the dead head, so this is the state the
         # cards are judged against while it is still dead.

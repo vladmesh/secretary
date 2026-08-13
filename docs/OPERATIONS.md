@@ -817,9 +817,12 @@ the product tree; an installation with no overlay is a supported one. A skill fr
 executable `<skill>.sh`, which sync links into the operator's bin directory as `<skill>`. See
 `skills/README.md` for that contract.
 
-Liveness is the same pid heartbeat as for worker and reviewer. A freshly launched head has not written its pid
-yet, so an unreadable pid file counts as alive for the duration of the initial-output window and dead
-afterwards. There is no automatic repair for a hung (as opposed to dead) head; that case is for the operator.
+Liveness is the same versioned launch-identity heartbeat as for worker and reviewer. A freshly launched head
+has not written it yet, so a missing or unreadable file counts as alive for the duration of the initial-output
+window and dead afterwards. A live file whose run, role, sprint binding, pane leaf, boot id or process start
+ticks do not match the observer record is a distinct `heartbeat-identity-mismatch`: it is neither adopted nor
+stopped, and no replacement is launched beside it. There is no automatic repair for a hung (as opposed to dead)
+head; that case is for the operator.
 
 Lifecycle events go to the shared durable audit log keyed by the sprint reference; a repeat with the same
 request id creates no second event. The request id is built from the reference, the record generation and the
@@ -867,11 +870,12 @@ than the round a red review or gate already closed. Two observable cases again:
 - a worker or review launch-intent-unwritable outcome, status degraded — state is not writable, no head was
   launched and the card is unchanged; fix the disk or permissions and the next tick retries;
 - a non-empty launch intent in the record — the tick died before recording the outcome. The next tick resolves
-  it first, from the pid file in the intent itself: a live pid gives a launch-adopted outcome (the head is
-  accepted, there will be no second one), a missing pid file inside the initial-output window gives a
-  launch-pending outcome (the head is still coming up and nobody touches it), and a dead pid or an expired
-  window drops the intent, closes what is left in the workspace, and lets the ordinary path launch a head
-  again into the round the intent reserved.
+  it first, from the heartbeat in the intent itself: a live matching identity gives a launch-adopted outcome
+  (the head is accepted, there will be no second one), a missing file inside the initial-output window gives a
+  launch-pending outcome (the head is still coming up and nobody touches it), and a dead heartbeat or an expired
+  window drops the intent, closes what is left in the workspace, and lets the ordinary path launch a head again
+  into the round the intent reserved. A live identity mismatch is degraded and leaves the intent in place: it is
+  not signalled, adopted or replaced.
 
 A third case is a launch that failed after the terminal was created: prompt delivery failed but the pane did
 not close, or the reviewer came up but the worker head could not be stopped. The host returns that as a
@@ -887,9 +891,9 @@ that write gives an adopt-deferred outcome (degraded): the head stays adopted, t
 next tick appends the journal entry.
 
 A head adopted that way usually has no handle, because the tick that launched it did not survive to record one.
-Its liveness is read from the pid heartbeat and reported as such in terminal status. It is also stopped that way
-— before review starts, on respawn, on a red review and on freeze — which is why the role's pid file is kept in
-the record.
+Its liveness is read from the launch-identity heartbeat and reported as such in terminal status. It is also
+stopped that way, before review starts, on respawn, on a red review and on freeze, which is why the role's pid
+file and `HeadRun` are kept in the record.
 
 A stop the host did not confirm is not a stop: the tick reports a stop-unconfirmed outcome (degraded) and does
 not launch a replacement until the previous head is confirmed dead. The same holds during reconciliation: a card
@@ -1187,21 +1191,27 @@ A third case: the pane stays connected, but the session manager keeps its own in
 after the head's process has exited, since that shell types the head command line by line and does not close with
 it. Returning to the shell prompt updates the last-output timestamp once, so by the first two signals such a head
 reads as "there was output, then silence" and would wait out the ordinary long ceiling. What separates these cases
-without reading session text is the pid the head writes before exec: the launch command is wrapped so the shell
-records its own pid and then `exec`s the head, replacing the process image without a fork, so the recorded pid stays
-the head's pid for its whole life. On each waiting tick the dispatcher probes that pid with a null signal: a
-connected pane whose pid no longer answers takes the same path as a missing or disconnected pane. The file lives
-outside the workspace, like report and verdict bodies, under `SECRETARY_DISPATCHER_BODY_DIR` (default `/tmp`);
-respawn deletes it before a new launch so a dead predecessor's pid is not read before the new head overwrites it.
+without reading session text is the launch identity the shell writes before exec: the launch command records its own
+pid and then `exec`s the head, replacing the process image without a fork, so the recorded pid stays the head's pid
+for its whole life. The atomically replaced JSON record carries format version 1, pid, Linux boot id, process start
+ticks, HeadRun id, role, card or sprint binding and, once the pane is known, its leaf. On each waiting tick the
+dispatcher compares all of those facts before it probes or signals the process. Terminal create can return before the
+shell reaches its writer, so the returned pane leaf is first handed off atomically beside the heartbeat; the writer
+uses that handoff in either ordering before readers require the leaf. A matching live record confirms liveness; a
+dead record takes the missing-pane path; missing and unreadable records retain the grace and output fallback; a live
+mismatch is degraded and never authorizes a pane close, workspace stop, signal, adoption or replacement. The file
+lives outside the workspace, like report and verdict bodies, under `SECRETARY_DISPATCHER_BODY_DIR` (default `/tmp`);
+respawn deletes it and its leaf handoff before a new launch so a dead predecessor's record is not read before the new
+head overwrites it.
 
-If the pid probe confirms the head's process is alive, that is a positive liveness signal rather than merely an
+If the identity probe confirms the head's process is alive, that is a positive liveness signal rather than merely an
 absence of proof of death, and silence from it proves nothing. The short first-output window never applies to such a
 head: printing nothing right after launch is exactly what the heartbeat answers. Whether the long ceiling applies
 depends on the work state below. While the file does not exist yet — a fresh launch has not run its write, or the
 runner does not provide this signal at all — that is read as neither death nor confirmed life, and the tick keeps
 using the ordinary last-output checks. The only runner without the signal is the raw command override, which
-substitutes a command bypassing the head registry and therefore gets no heartbeat wrapper. For it, as for a session
-manager without a last-output timestamp, the long ceiling is the only fallback, precisely because there is no way to
+substitutes a command bypassing the head registry and therefore gets no heartbeat wrapper. Its PID is never
+promoted into a synthetic identity; it keeps the grace and output fallback precisely because there is no way to
 confirm liveness independently of pane output.
 
 Every fresh progress signal starts a new waiting window. So the ceiling measures how long a head has been silent,

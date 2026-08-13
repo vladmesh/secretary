@@ -5,6 +5,7 @@ import inspect
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -53,6 +54,7 @@ from secretary.dispatcher_helpers import (
     _task_doc_decision,
     red_review_count,
 )
+from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_identity
 from secretary.dispatcher_observer import (
     OBSERVER_HEAD_FALLBACK,
     ObserverRecord,
@@ -70,7 +72,10 @@ from triggered_agents.runtime.head import (
     wrap_role_command,
 )
 from secretary.dispatcher_production import _budget_event_type
-from secretary.dispatcher_review import start_review as start_reviewer
+from secretary.dispatcher_review import (
+    recover_review_launch,
+    start_review as start_reviewer,
+)
 from secretary.dispatcher_tui import (
     DELIVERY_CONFIRMED,
     TuiDeliveryError,
@@ -115,6 +120,7 @@ from secretary.dispatcher_watchdog import (
     WORKER_REPORT_STALL_DEFAULT,
     bring_up_defer_attempts,
     head_process_status,
+    bind_head_heartbeat,
     idle_stall_seconds,
     initial_output_stall_seconds,
     pid_file_path,
@@ -900,13 +906,39 @@ class FakeHost:
             crash, self.crash_after_task_doc = self.crash_after_task_doc, None
             raise crash
 
-    def _write_head_pid(self, kind: str, reference: str) -> None:
+    def _write_head_pid(
+        self,
+        kind: str,
+        reference: str,
+        *,
+        head_run: dict | None = None,
+        leaf: str = "",
+        run_id: str = "",
+    ) -> None:
         path = Path(pid_file_path(kind, reference))
         path.parent.mkdir(parents=True, exist_ok=True)
         if self.head_pid is None:
             path.unlink(missing_ok=True)
             return
-        path.write_text(str(self.head_pid), encoding="utf-8")
+        identity = run_heartbeat_identity(
+            head_run or {"run_id": run_id}, role=kind, task=f"card:{reference}", leaf=leaf,
+        )
+        if self.head_pid > 0 and Path(f"/proc/{self.head_pid}/stat").exists():
+            stat = Path(f"/proc/{self.head_pid}/stat").read_text(encoding="utf-8")
+            starttime = stat[stat.rfind(")") + 2:].split()[19]
+            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+        else:
+            # Death is checked before the kernel identity, so a valid-shaped record can model an
+            # exited head without depending on a recycled or still-present /proc directory.
+            starttime = "0"
+            boot_id = "dead-process"
+        identity.update({
+            "version": 1,
+            "pid": self.head_pid,
+            "boot_id": boot_id,
+            "proc_starttime_ticks": starttime,
+        })
+        path.write_text(json.dumps(identity), encoding="utf-8")
 
     def prepare_worker(
         self,
@@ -918,6 +950,7 @@ class FakeHost:
         require_existing_workspace: bool = False,
         generation: int = 0,
         failover: bool = False,
+        heartbeat_run_id: str = "",
     ) -> dict[str, str]:
         self.calls.append("prepare_worker")
         self.prepare_requires_existing.append(require_existing_workspace)
@@ -925,7 +958,12 @@ class FakeHost:
             if isinstance(self.fail_prepare_error, HeadLaunchAborted):
                 # A bring-up that failed with its terminal already open: the head is running, so
                 # its heartbeat is there for recovery to find, exactly as after a real launch.
-                self._write_head_pid("worker", task["ref"])
+                self._write_head_pid(
+                    "worker",
+                    task["ref"],
+                    run_id=heartbeat_run_id,
+                    leaf=self.fail_prepare_error.leaf,
+                )
             raise self.fail_prepare_error
         if self.fail_prepare_reason:
             raise HostError(self.fail_prepare_reason)
@@ -933,8 +971,10 @@ class FakeHost:
         workspace.mkdir(parents=True, exist_ok=True)
         self._write_task_doc(task, workspace, attempt_id, generation)
         self.prepared.append(task["ref"])
-        self._write_head_pid("worker", task["ref"])
-        launched = self._launched(f"term:{worker_id}", head, task, "worker", failover=failover)
+        launched = self._launched(
+            f"term:{worker_id}", head, task, "worker", failover=failover, run_id=heartbeat_run_id
+        )
+        self._write_head_pid("worker", task["ref"], head_run=launched.head_run, leaf=launched.leaf)
         return {
             "workspace": str(workspace),
             "handle": launched.handle,
@@ -956,6 +996,7 @@ class FakeHost:
 
     def prepare_observer(
         self, sprint: dict, head: str, *, prompt: str, identity: dict[str, str] | None = None,
+        heartbeat_run_id: str = "",
     ) -> dict:
         self.calls.append("prepare_observer")
         self.observer_identities.append(dict(identity or {}))
@@ -970,15 +1011,37 @@ class FakeHost:
         self.observers.append(reference)
         pid_file = Path(self.observer_pid_file(reference))
         pid_file.parent.mkdir(parents=True, exist_ok=True)
-        pid_file.write_text(str(self.observer_pid), encoding="utf-8")
         handle = f"observer:{reference}"
+        leaf = f"leaf:{handle}"
+        head_run = head_ops.HeadRun(
+            run_id=heartbeat_run_id or "fake-observer-run",
+            spec=head_ops.HeadSpec(profile_id=head, adapter="codex"),
+            workspace=str(workspace),
+            task_ref=head_ops.TaskRef.sprint(reference),
+            handle=handle,
+            leaf=leaf,
+            pid_file=str(pid_file),
+        ).to_json()
+        observer_identity = run_heartbeat_identity(
+            head_run, role="observer", task=f"sprint:{reference}", leaf=leaf,
+        )
+        if self.observer_pid > 0 and Path(f"/proc/{self.observer_pid}/stat").exists():
+            stat = Path(f"/proc/{self.observer_pid}/stat").read_text(encoding="utf-8")
+            observer_identity.update({
+                "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip(),
+                "proc_starttime_ticks": stat[stat.rfind(")") + 2:].split()[19],
+            })
+        else:
+            observer_identity.update({"boot_id": "dead-process", "proc_starttime_ticks": "0"})
+        observer_identity.update({"version": 1, "pid": self.observer_pid})
+        pid_file.write_text(json.dumps(observer_identity), encoding="utf-8")
         # Like Orca: the terminal is findable by its workspace, which is how a head whose handle
         # was lost with its tick still gets stopped.
         self.observer_terminals[str(workspace)] = handle
         return {
             "workspace": str(workspace),
             "handle": handle,
-            "leaf": f"leaf:{handle}",
+            "leaf": leaf,
             "pid_file": str(pid_file),
             # Like the real host: a bring-up that puts a prompt in front of the head says so, and
             # hands back what the delivery boundary saw doing it.
@@ -990,6 +1053,7 @@ class FakeHost:
                 "payload_bytes": len(prompt.encode("utf-8")),
             },
             "run": self.catalog.observer_run(head, workspace=str(workspace)).to_json(),
+            "head_run": head_run,
         }
 
     def observer_status(self, _record) -> dict:
@@ -1023,7 +1087,6 @@ class FakeHost:
         if self.fail_review_error is not None:
             raise self.fail_review_error
         self.reviews.append(task["ref"])
-        self._write_head_pid("review", task["ref"])
         # Mirror the real host: the reviewer gets its own pane and the worker head is shut down,
         # pinning the commit the reviewer judges.
         self.split_from.append(record.handle)
@@ -1031,7 +1094,9 @@ class FakeHost:
             f"review:{task['ref']}", record.review_head, task, "reviewer", record.workspace,
             failover=bool(record.preferred_review_head),
             delivery_evidence=dict(self.review_launch_delivery_evidence),
+            run_id=str((record.launch_intent or {}).get("run_id") or ""),
         )
+        self._write_head_pid("review", task["ref"], head_run=launched.head_run, leaf=launched.leaf)
         try:
             if record.worker_continuation.retained and self.worker_retained_vanished(record):
                 # Mirror the real host: a retained worker whose session is provably gone leaves
@@ -1061,19 +1126,24 @@ class FakeHost:
             ) from None
         return ReviewLaunch(
             handle=launched.handle,
-            leaf=f"leaf:{task['ref']}",
+            leaf=launched.leaf,
             commit=self.commit,
             run=launched.run,
             head_run=dict(launched.head_run),
             delivery_evidence=dict(launched.delivery_evidence),
         )
 
-    def restart_worker(self, task: dict, record) -> LaunchedHead:
+    def restart_worker(self, task: dict, record, *, heartbeat_run_id: str = "") -> LaunchedHead:
         self.calls.append("restart_worker")
         if self.fail_restart_error is not None:
             if isinstance(self.fail_restart_error, HeadLaunchAborted):
                 # The pane stayed up, so the head's heartbeat is there for recovery to find.
-                self._write_head_pid("worker", task["ref"])
+                self._write_head_pid(
+                    "worker",
+                    task["ref"],
+                    run_id=heartbeat_run_id,
+                    leaf=self.fail_restart_error.leaf,
+                )
             raise self.fail_restart_error
         if self.fail_restart_reason:
             raise HostError(self.fail_restart_reason)
@@ -1082,15 +1152,17 @@ class FakeHost:
             record.report_decision,
         )
         self.prepared.append(task["ref"])
-        self._write_head_pid("worker", task["ref"])
-        return self._launched(
+        launched = self._launched(
             f"rework:{task['ref']}", record.head, task, "worker",
             failover=bool(record.preferred_head),
+            run_id=heartbeat_run_id,
         )
+        self._write_head_pid("worker", task["ref"], head_run=launched.head_run, leaf=launched.leaf)
+        return launched
 
     def _launched(
         self, handle: str, head: str, task: dict, role: str, workspace: str = "",
-        failover: bool = False, delivery_evidence: dict[str, object] | None = None,
+        failover: bool = False, delivery_evidence: dict[str, object] | None = None, run_id: str = "",
     ) -> LaunchedHead:
         leaf = f"leaf:{handle}"
         return LaunchedHead(
@@ -1105,15 +1177,15 @@ class FakeHost:
             # fake opens no pane, but it does report an identity: what a bring-up owes the record
             # is that this head can be named afterwards, and a fake that answered `{}` could not
             # show a recovery continuing the same run.
-            head_run=self._head_run(handle, head, task, role, workspace, leaf),
+            head_run=self._head_run(handle, head, task, role, workspace, leaf, run_id=run_id),
         )
 
     def _head_run(
-        self, handle: str, head: str, task: dict, role: str, workspace: str, leaf: str
+        self, handle: str, head: str, task: dict, role: str, workspace: str, leaf: str, *, run_id: str = ""
     ) -> dict:
         self.head_runs += 1
         return head_ops.HeadRun(
-            run_id=f"run-{role}-{self.head_runs}",
+            run_id=run_id or f"run-{role}-{self.head_runs}",
             spec=head_ops.HeadSpec(profile_id=head, adapter="codex"),
             workspace=workspace or str(self.root / f"{task['ref']}-pilot"),
             task_ref=head_ops.TaskRef.card(task["ref"]),
@@ -1912,7 +1984,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertNotIn("stop_workspace", self.host.calls, result)
         self.assertEqual(self.host.prepared.count("secretary-510-pilot"), 2)
 
-    def test_fresh_claim_stops_an_unowned_live_worker_before_launch(self) -> None:
+    def test_fresh_claim_does_not_fabricate_identity_for_a_legacy_pid_file(self) -> None:
         pid_file = Path(pid_file_path("worker", "secretary-510-pilot"))
         pid_file.parent.mkdir(parents=True, exist_ok=True)
         process = subprocess.Popen(["sleep", "60"])
@@ -1923,21 +1995,19 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         claim = [a for a in result["actions"] if a.get("step") == "claim"]
         self.assertEqual([a.get("status") for a in claim], ["ok"])
-        self.assertIn("stop_workspace", self.host.calls)
+        self.assertNotIn("stop_workspace", self.host.calls)
         self.assertEqual(self.host.prepared, ["secretary-510-pilot"])
 
-    def test_fresh_claim_blocks_when_an_unowned_worker_will_not_stop(self) -> None:
-        pid_file = Path(pid_file_path("worker", "secretary-510-pilot"))
-        pid_file.parent.mkdir(parents=True, exist_ok=True)
-        pid_file.write_text(str(os.getpid()), encoding="utf-8")
-        self.host.fail_stop_workspace_reason = "orca terminal stop failed"
+    def test_fresh_claim_never_stops_an_unbound_live_heartbeat(self) -> None:
+        self.host._write_head_pid("worker", "secretary-510-pilot", run_id="foreign-run")
 
         result = self.runtime.production_tick()
 
         claim = [a for a in result["actions"] if a.get("step") == "claim"]
-        self.assertEqual([a["action"] for a in claim], ["orphan-worker-stop-unconfirmed"])
-        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertEqual([a["action"] for a in claim], ["orphan-worker-heartbeat-unbound"])
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
         self.assertEqual(self.host.prepared, [])
+        self.assertNotIn("stop_workspace", self.host.calls)
         self.assertIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
 
     def test_production_tick_stops_respawn_started_after_po_parked_the_card(self) -> None:
@@ -3732,7 +3802,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
         payload["records"] = {}
         self.runtime.production_state.save(payload)
 
-        self.tick()  # re-adoption re-verifies the claim
+        # The heartbeat names the exact worker run, so adoption continues it and consumes the
+        # report in this reconciliation instead of launching a second worker over it.
         advanced = self.tick()
 
         self.assertEqual(advanced["to"], "validate")
@@ -5264,8 +5335,10 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
 
     def test_review_recovery_restarts_a_reviewer_whose_terminal_died(self) -> None:
-        """`review_running` asks the host whether the reviewer terminal is live, not whether one
-        was ever launched. A dead terminal must be relaunched rather than waited on forever."""
+        """Recovery reads reviewer status, not whether one was ever launched.
+
+        A dead terminal must be relaunched rather than waited on forever.
+        """
         self.start_dispatcher()
         self._run_worker_to_validate()
         self.tick()  # gate green -> review started
@@ -5827,7 +5900,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         record = self._record_json()
         self.assertEqual(record["review_handle"], "review:secretary-510-pilot")
-        self.assertEqual(record["review_leaf"], "leaf:secretary-510-pilot")
+        self.assertEqual(record["review_leaf"], "leaf:review:secretary-510-pilot")
         self.assertEqual(record["review_commit"], self.host.commit)
         self.assertNotEqual(record["review_handle"], record["handle"])
         self.assertEqual(
@@ -8819,7 +8892,6 @@ class ReportPromptDeliveryTests(unittest.TestCase):
         self.document = self.workspace / "TASK.md"
         self.document.write_text("# Task secretary-1172\n\nthe round the head is in\n", encoding="utf-8")
         self.pid_file = self.root / "worker.pid"
-        self.pid_file.write_text(str(os.getpid()), encoding="utf-8")
         self.host = CommandHostRuntime(FakeCatalog(), self.root / "data", mode="real")  # type: ignore[arg-type]
         self.task = {"ref": "secretary-1172", "project": "secretary"}
         self.record = DispatcherRecord(
@@ -8836,6 +8908,21 @@ class ReportPromptDeliveryTests(unittest.TestCase):
             report_generation=3,
             worker_pid_file=str(self.pid_file),
             worker_run={"adapter": "codex", "codex_mode": "tui"},
+        )
+        self.record.worker_head_run = head_ops.HeadRun(
+            run_id="report-prompt-run",
+            spec=head_ops.HeadSpec(profile_id="codex", adapter="codex"),
+            workspace=str(self.workspace),
+            task_ref=head_ops.TaskRef.card(self.task["ref"]),
+            handle=self.record.handle,
+            pid_file=str(self.pid_file),
+        ).to_json()
+        PidHeartbeatTests.write_heartbeat(
+            self.pid_file,
+            os.getpid(),
+            identity=run_heartbeat_identity(
+                self.record.worker_head_run, role="worker", task=f"card:{self.task['ref']}"
+            ),
         )
 
     def test_a_tui_worker_is_sent_the_round_s_prompt_and_nothing_else(self) -> None:
@@ -8876,8 +8963,10 @@ class ReportPromptDeliveryTests(unittest.TestCase):
     def test_a_suspended_head_is_refused(self) -> None:
         """Waking one is a lifecycle transition with its own durable boundary, and this is not it."""
         with mock.patch.object(
-            dispatcher_module, "_head_process_status",
-            lambda path: {"known": True, "alive": True, "stopped": True},
+            dispatcher_module, "_head_run_process_status",
+            lambda path, **kwargs: {
+                "known": True, "alive": True, "stopped": True, "state": "live-match"
+            },
         ):
             with self.assertRaisesRegex(HostError, "suspended"):
                 self.host.prompt_worker_report(self.task, self.record)
@@ -8886,7 +8975,7 @@ class ReportPromptDeliveryTests(unittest.TestCase):
         self.pid_file.write_text("1", encoding="utf-8")
         with mock.patch.object(
             dispatcher_module, "_head_process_status",
-            lambda path: {"known": True, "alive": False},
+            lambda path, **kwargs: {"known": True, "alive": False},
         ):
             with self.assertRaisesRegex(HostError, "worker session exited"):
                 self.host.prompt_worker_report(self.task, self.record)
@@ -10376,6 +10465,7 @@ class GitBranchHost(CommandHostRuntime):
         split_from: str = "",
         task: dict | None = None,
         failover: bool = False,
+        heartbeat_run_id: str = "",
     ) -> LaunchedHead:
         self.launched.append((head, prompt_file))
         self.launch_prompts.append(launch_prompt)
@@ -11795,13 +11885,30 @@ class PidHeartbeatTests(unittest.TestCase):
     behind after the head exits, without reading terminal text, title, or a generic running flag.
     """
 
-    def test_heartbeat_writes_the_shells_own_pid_then_execs_the_head(self) -> None:
-        wrapped = with_pid_heartbeat("codex exec --dangerously-bypass-approvals-and-sandbox", "/tmp/x.pid")
+    @staticmethod
+    def write_heartbeat(path: Path, pid: int, *, identity: dict[str, str] | None = None) -> None:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        record = dict(identity or heartbeat_identity(
+            run_id="test-run", role="worker", task="card:secretary-751"
+        ))
+        record.update({
+            "version": 1,
+            "pid": pid,
+            "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip(),
+            "proc_starttime_ticks": stat[stat.rfind(")") + 2:].split()[19],
+        })
+        path.write_text(json.dumps(record), encoding="utf-8")
 
-        self.assertEqual(
-            wrapped,
-            'echo "$$" > /tmp/x.pid; exec env codex exec --dangerously-bypass-approvals-and-sandbox',
+    def test_heartbeat_writes_an_atomic_versioned_identity_then_execs_the_head(self) -> None:
+        wrapped = with_pid_heartbeat(
+            "codex exec --dangerously-bypass-approvals-and-sandbox",
+            "/tmp/x.pid",
+            identity=heartbeat_identity(run_id="run-1", role="worker", task="card:secretary-751"),
         )
+
+        self.assertIn("python3 -P -c", wrapped)
+        self.assertIn("os.replace", wrapped)
+        self.assertIn('exec env codex exec --dangerously-bypass-approvals-and-sandbox', wrapped)
 
     def test_heartbeat_survives_a_leading_environment_assignment(self) -> None:
         """secretary-751 review: catalog commands from `head_launch` start with `NAME=value`, which
@@ -11811,7 +11918,9 @@ class PidHeartbeatTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             pid_file = os.path.join(tmp, "x.pid")
             wrapped = with_pid_heartbeat(
-                'FOO=bar python3 -c "import os; print(os.getpid())"', pid_file
+                'FOO=bar python3 -c "import os; print(os.getpid())"',
+                pid_file,
+                identity=heartbeat_identity(run_id="run-1", role="worker", task="card:secretary-751"),
             )
 
             result = subprocess.run(
@@ -11823,11 +11932,16 @@ class PidHeartbeatTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             reported_pid = result.stdout.strip()
-            heartbeat_pid = Path(pid_file).read_text(encoding="utf-8").strip()
-            self.assertEqual(reported_pid, heartbeat_pid)
+            heartbeat = json.loads(Path(pid_file).read_text(encoding="utf-8"))
+            self.assertEqual(reported_pid, str(heartbeat["pid"]))
+            self.assertEqual(heartbeat["version"], 1)
+            self.assertEqual(heartbeat["run_id"], "run-1")
 
     def test_heartbeat_quotes_a_pid_file_path_with_spaces(self) -> None:
-        wrapped = with_pid_heartbeat("codex exec", "/tmp/weird dir/x.pid")
+        wrapped = with_pid_heartbeat(
+            "codex exec", "/tmp/weird dir/x.pid",
+            identity=heartbeat_identity(run_id="run-1", role="worker", task="card:secretary-751"),
+        )
 
         self.assertIn(shlex.quote("/tmp/weird dir/x.pid"), wrapped)
 
@@ -11852,12 +11966,12 @@ class PidHeartbeatTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             pid_file = Path(tmp) / "head.pid"
             proc = subprocess.Popen(["true"])
+            self.write_heartbeat(pid_file, proc.pid)
             proc.wait()
-            pid_file.write_text(str(proc.pid), encoding="utf-8")
 
             status = head_process_status(str(pid_file))
 
-            self.assertEqual(status, {"known": True, "alive": False})
+            self.assertEqual(status["state"], "dead")
 
     def test_a_running_process_is_alive(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -11865,11 +11979,124 @@ class PidHeartbeatTests(unittest.TestCase):
             proc = subprocess.Popen(["sleep", "5"])
             self.addCleanup(proc.wait)
             self.addCleanup(proc.terminate)
-            pid_file.write_text(str(proc.pid), encoding="utf-8")
+            self.write_heartbeat(pid_file, proc.pid)
 
             status = head_process_status(str(pid_file))
 
-            self.assertEqual(status, {"known": True, "alive": True, "stopped": False})
+            self.assertEqual(status["state"], "live-match")
+            self.assertFalse(status["stopped"])
+
+    def test_a_stopped_matching_process_is_live_but_marked_stopped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "head.pid"
+            proc = subprocess.Popen(["sleep", "5"])
+            self.addCleanup(proc.wait)
+            self.addCleanup(proc.terminate)
+            identity = heartbeat_identity(
+                run_id="stopped-run", role="worker", task="card:secretary-751"
+            )
+            self.write_heartbeat(pid_file, proc.pid, identity=identity)
+            os.kill(proc.pid, signal.SIGSTOP)
+            try:
+                # SIGSTOP is asynchronous from this test process.  Wait for the kernel state so
+                # the assertion does not race the scheduler, and always resume before cleanup:
+                # a stopped process cannot act on the cleanup SIGTERM.
+                status = {}
+                for _ in range(50):
+                    status = head_process_status(str(pid_file), expected=identity)
+                    if status.get("stopped"):
+                        break
+                    time.sleep(0.01)
+                self.assertEqual(status["state"], "live-match")
+                self.assertTrue(status["stopped"])
+            finally:
+                os.kill(proc.pid, signal.SIGCONT)
+
+    def test_a_live_process_with_a_stale_start_or_run_is_an_identity_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "head.pid"
+            proc = subprocess.Popen(["sleep", "5"])
+            self.addCleanup(proc.wait)
+            self.addCleanup(proc.terminate)
+            identity = heartbeat_identity(
+                run_id="run-a", role="worker", task="card:secretary-751", leaf="leaf-a"
+            )
+            self.write_heartbeat(pid_file, proc.pid, identity=identity)
+            raw = json.loads(pid_file.read_text(encoding="utf-8"))
+            raw["proc_starttime_ticks"] = "0"
+            pid_file.write_text(json.dumps(raw), encoding="utf-8")
+
+            stale = head_process_status(str(pid_file), expected=identity)
+            self.write_heartbeat(pid_file, proc.pid, identity=identity)
+            foreign_run = head_process_status(
+                str(pid_file),
+                expected=heartbeat_identity(
+                    run_id="run-b", role="worker", task="card:secretary-751", leaf="leaf-a"
+                ),
+            )
+
+            self.assertEqual(stale["state"], "identity-mismatch")
+            self.assertEqual(foreign_run["state"], "identity-mismatch")
+
+    def test_the_pane_leaf_is_bound_by_a_second_atomic_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "head.pid"
+            proc = subprocess.Popen(["sleep", "5"])
+            self.addCleanup(proc.wait)
+            self.addCleanup(proc.terminate)
+            identity = heartbeat_identity(
+                run_id="bind-run", role="worker", task="card:secretary-751"
+            )
+            self.write_heartbeat(pid_file, proc.pid, identity=identity)
+
+            self.assertTrue(bind_head_heartbeat(str(pid_file), expected=identity, leaf="leaf-a"))
+            bound = head_process_status(
+                str(pid_file), expected={**identity, "leaf": "leaf-a"}
+            )
+
+            self.assertEqual(bound["state"], "live-match")
+            self.assertEqual(bound["record"]["leaf"], "leaf-a")
+
+    def test_a_leaf_handoff_before_the_writer_binds_each_dispatcher_role(self) -> None:
+        """Terminal create may return before the shell reaches the heartbeat preamble.
+
+        Worker, reviewer and observer share the writer, but their HeadRun bindings differ.  The
+        handoff must make the first durable base record carry the returned leaf for all three.
+        """
+        roles = (
+            ("worker", "card:secretary-1424", "leaf-worker"),
+            ("reviewer", "card:secretary-1424", "leaf-reviewer"),
+            ("observer", "sprint:secretary-1424", "leaf-observer"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            for role, task, leaf in roles:
+                with self.subTest(role=role):
+                    pid_file = Path(tmp) / f"{role}.pid"
+                    identity = heartbeat_identity(
+                        run_id=f"{role}-race", role=role, task=task
+                    )
+                    # This is the create-return / writer-not-yet-observable ordering.  The bind
+                    # cannot see a base record, but leaves a durable handoff for the shell.
+                    self.assertTrue(bind_head_heartbeat(str(pid_file), expected=identity, leaf=leaf))
+                    wrapped = with_pid_heartbeat(
+                        "python3 -c 'import time; time.sleep(5)'", str(pid_file), identity=identity,
+                    )
+                    proc = subprocess.Popen(["/bin/sh", "-lc", wrapped])
+                    try:
+                        deadline = time.monotonic() + 2
+                        status: dict[str, object] = {}
+                        while time.monotonic() < deadline:
+                            status = head_process_status(
+                                str(pid_file), expected={**identity, "leaf": leaf}
+                            )
+                            if status.get("state") == "live-match":
+                                break
+                            time.sleep(0.01)
+                        self.assertEqual(status.get("state"), "live-match")
+                        self.assertEqual(status["record"]["leaf"], leaf)  # type: ignore[index]
+                    finally:
+                        proc.terminate()
+                        proc.wait(timeout=5)
 
     def test_a_pid_file_that_has_not_been_written_yet_is_not_known(self) -> None:
         """A fresh launch has not run its `echo $$` yet, and a raw
@@ -11877,7 +12104,7 @@ class PidHeartbeatTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             status = head_process_status(str(Path(tmp) / "never-written.pid"))
 
-        self.assertEqual(status, {"known": False})
+        self.assertEqual(status["state"], "not-yet-written")
 
     def test_garbage_pid_file_contents_are_not_known(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -11886,7 +12113,7 @@ class PidHeartbeatTests(unittest.TestCase):
 
             status = head_process_status(str(pid_file))
 
-        self.assertEqual(status, {"known": False})
+        self.assertEqual(status["state"], "unreadable")
 
 
 class RecordingReviewHost(CommandHostRuntime):
@@ -12559,7 +12786,20 @@ class WorkerLifecycleTests(unittest.TestCase):
             worker_run={"adapter": "codex", "codex_mode": "tui"},
         )
         # The heartbeat of a worker that is running: a report prompt is refused over any other.
-        Path(record.worker_pid_file).write_text(f"{os.getpid()}\n", encoding="utf-8")
+        record.worker_head_run = head_ops.HeadRun(
+            run_id="worker-report-prompt-run",
+            spec=head_ops.HeadSpec(profile_id="codex", adapter="codex"),
+            workspace=str(self.workspace),
+            task_ref=head_ops.TaskRef.card(self.task["ref"]),
+            handle=record.handle,
+            leaf=record.worker_leaf,
+            pid_file=record.worker_pid_file,
+        ).to_json()
+        PidHeartbeatTests.write_heartbeat(
+            Path(record.worker_pid_file),
+            os.getpid(),
+            identity=run_heartbeat_identity(record.worker_head_run, role="worker"),
+        )
         (self.workspace / "TASK.md").write_text("task\n", encoding="utf-8")
 
         with self._bounded_delivery():
@@ -12598,6 +12838,45 @@ class WorkerLifecycleTests(unittest.TestCase):
 
         self.assertEqual(record.worker_head_run["lifecycle"], "finishing")
         self.assertEqual(record.worker_head_run["stopped_by"]["actor"], STOPPED_BY_OPERATOR)
+
+    def test_a_live_foreign_worker_heartbeat_fences_the_pane_before_close_or_signal(self) -> None:
+        host = RecordingReviewHost(self.root)
+        pid_file = self.root / "foreign-worker.pid"
+        record = self._record(worker_leaf="leaf-worker", worker_pid_file=str(pid_file))
+        record.worker_head_run = head_ops.HeadRun(
+            run_id="worker-owned-run",
+            spec=head_ops.HeadSpec(profile_id="codex", adapter="codex"),
+            workspace=str(self.workspace),
+            task_ref=head_ops.TaskRef.card(self.task["ref"]),
+            handle=record.handle,
+            leaf=record.worker_leaf,
+            pid_file=str(pid_file),
+        ).to_json()
+        stored_run = json.loads(json.dumps(record.worker_head_run))
+        foreign = subprocess.Popen(["sleep", "5"])
+        def reap_foreign() -> None:
+            if foreign.poll() is None:
+                foreign.terminate()
+            foreign.wait()
+        self.addCleanup(reap_foreign)
+        PidHeartbeatTests.write_heartbeat(
+            pid_file,
+            foreign.pid,
+            identity=heartbeat_identity(
+                run_id="foreign-worker-run", role="worker",
+                task=f"card:{self.task['ref']}", leaf=record.worker_leaf,
+            ),
+        )
+
+        with mock.patch.object(host, "_signal_head") as signal_head:
+            with self.assertRaisesRegex(HostError, "mismatching launch identity"):
+                host.stop_head(record, "worker", STOPPED_BY_OPERATOR)
+
+        self.assertNotIn("list", host.ops(), "the leaf is not looked up after a mismatch")
+        self.assertNotIn("close", host.ops())
+        signal_head.assert_not_called()
+        self.assertIsNone(foreign.poll())
+        self.assertEqual(record.worker_head_run, stored_run, "a foreign process is never attributed")
 
     def test_the_run_identity_is_the_same_one_from_bring_up_to_stop(self) -> None:
         host = NudgingReviewHost(self.root, screen="working\n› ")
@@ -12781,6 +13060,43 @@ class ReviewerLifecycleTests(unittest.TestCase):
         self.assertEqual(record.review_head_run["run_id"], "run-reviewer-1")
         self.assertEqual(record.review_head_run["lifecycle"], "exited")
         self.assertEqual(record.review_head_run["stopped_by"]["actor"], STOPPED_BY_WATCHDOG)
+
+    def test_a_live_foreign_reviewer_heartbeat_fences_the_pane_before_close_or_signal(self) -> None:
+        host = RecordingReviewHost(self.root)
+        pid_file = self.root / "foreign-reviewer.pid"
+        record = self._record(
+            review_handle="term-review",
+            review_leaf="leaf-review",
+            review_pid_file=str(pid_file),
+            review_head_run=self._stored_run(
+                handle="term-review", leaf="leaf-review", pid_file=str(pid_file),
+            ),
+        )
+        stored_run = json.loads(json.dumps(record.review_head_run))
+        foreign = subprocess.Popen(["sleep", "5"])
+        def reap_foreign() -> None:
+            if foreign.poll() is None:
+                foreign.terminate()
+            foreign.wait()
+        self.addCleanup(reap_foreign)
+        PidHeartbeatTests.write_heartbeat(
+            pid_file,
+            foreign.pid,
+            identity=heartbeat_identity(
+                run_id="foreign-reviewer-run", role="reviewer",
+                task=f"card:{self.task['ref']}", leaf=record.review_leaf,
+            ),
+        )
+
+        with mock.patch.object(host, "_signal_head") as signal_head:
+            with self.assertRaisesRegex(HostError, "mismatching launch identity"):
+                host.stop_review(record, STOPPED_BY_WATCHDOG)
+
+        self.assertNotIn("list", host.ops(), "the leaf is not looked up after a mismatch")
+        self.assertNotIn("close", host.ops())
+        signal_head.assert_not_called()
+        self.assertIsNone(foreign.poll())
+        self.assertEqual(record.review_head_run, stored_run, "a foreign process is never attributed")
 
     def test_stopping_the_reviewer_leaves_the_workers_checkout_alone(self) -> None:
         """The split-leaf semantics, which this card moves onto the operations without changing.
@@ -13033,7 +13349,42 @@ class ReviewLivenessTests(unittest.TestCase):
         )
         for name, value in fields.items():
             setattr(record, name, value)
+        record.worker_head_run = head_ops.HeadRun(
+            run_id="worker-liveness-run",
+            spec=head_ops.HeadSpec(profile_id=record.head, adapter="codex"),
+            workspace=record.workspace,
+            task_ref=head_ops.TaskRef.card(self.task["ref"]),
+            handle=record.handle,
+            leaf=record.worker_leaf,
+            pid_file=pid_file_path("worker", self.task["ref"]),
+        ).to_json()
+        record.review_head_run = head_ops.HeadRun(
+            run_id="review-liveness-run",
+            spec=head_ops.HeadSpec(profile_id=record.review_head, adapter="codex"),
+            workspace=record.workspace,
+            task_ref=head_ops.TaskRef.card(self.task["ref"]),
+            handle=record.review_handle,
+            leaf=record.review_leaf,
+            pid_file=pid_file_path("review", self.task["ref"]),
+        ).to_json()
         return record
+
+    def _write_heartbeat(self, kind: str, pid: int, record: DispatcherRecord | None = None) -> None:
+        record = record or self._record()
+        run = record.review_head_run if kind == "review" else record.worker_head_run
+        leaf = record.review_leaf if kind == "review" else record.worker_leaf
+        heartbeat = run_heartbeat_identity(run, role=kind, task=f"card:{self.task['ref']}", leaf=leaf)
+        heartbeat.update({"version": 1, "pid": pid})
+        stat_path = Path(f"/proc/{pid}/stat")
+        if stat_path.exists():
+            stat = stat_path.read_text(encoding="utf-8")
+            heartbeat.update({
+                "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip(),
+                "proc_starttime_ticks": stat[stat.rfind(")") + 2:].split()[19],
+            })
+        else:
+            heartbeat.update({"boot_id": "dead-process", "proc_starttime_ticks": "0"})
+        Path(pid_file_path(kind, self.task["ref"])).write_text(json.dumps(heartbeat), encoding="utf-8")
 
     def test_an_unreadable_inventory_raises_for_either_role(self) -> None:
         """secretary-1414: the inventory is the session host's now, and what it cannot read it
@@ -13120,6 +13471,37 @@ class ReviewLivenessTests(unittest.TestCase):
 
         self.assertFalse(host.review_running(self.task, self._record(review_handle="term-review")))
 
+    def test_disconnected_pane_preserves_a_foreign_heartbeat_fence_for_both_roles(self) -> None:
+        """The shared status seam reads identity before an inventory result can authorize a
+        replacement. A disconnected pane must not hide a live process from another HeadRun."""
+        for kind, status_name, record_fields, terminal in (
+            (
+                "worker",
+                "worker_status",
+                {"worker_leaf": "leaf-worker"},
+                {"handle": "term-worker", "leafId": "leaf-worker", "connected": False},
+            ),
+            (
+                "review",
+                "review_status",
+                {"review_handle": "term-review", "review_leaf": "leaf-review"},
+                {"handle": "term-review", "leafId": "leaf-review", "connected": False},
+            ),
+        ):
+            with self.subTest(kind=kind):
+                record = self._record(**record_fields)
+                self._write_heartbeat(kind, self._live_pid(), record)
+                path = Path(pid_file_path(kind, self.task["ref"]))
+                heartbeat = json.loads(path.read_text(encoding="utf-8"))
+                heartbeat["run_id"] = f"foreign-{kind}-run"
+                path.write_text(json.dumps(heartbeat), encoding="utf-8")
+
+                status = getattr(self._host([terminal]), status_name)(self.task, record)
+
+                self.assertTrue(status["live"])
+                self.assertTrue(status["identity_mismatch"])
+                self.assertEqual(status["reason"], "heartbeat-identity-mismatch")
+
     def test_worker_pane_is_never_mistaken_for_the_reviewer(self) -> None:
         host = self._host([
             {"handle": "term-worker", "leafId": "leaf-worker", "title": "codex", "connected": True},
@@ -13140,9 +13522,7 @@ class ReviewLivenessTests(unittest.TestCase):
         """secretary-751: Codex crashed and Orca kept the pane's own workspace shell alive. The
         pane answers connected and even keeps producing output (the shell's own prompt), so only
         the pid heartbeat tells the watchdog the head itself is gone."""
-        Path(pid_file_path("worker", self.task["ref"])).write_text(
-            str(self._dead_pid()), encoding="utf-8"
-        )
+        self._write_heartbeat("worker", self._dead_pid())
         host = self._host([
             {"handle": "term-worker", "leafId": "leaf-worker", "connected": True, "lastOutputAt": 1_753_456_789_123},
         ])
@@ -13153,9 +13533,7 @@ class ReviewLivenessTests(unittest.TestCase):
         self.assertEqual(status["reason"], "process-exited")
 
     def test_connected_reviewer_pane_with_an_exited_head_process_is_not_live(self) -> None:
-        Path(pid_file_path("review", self.task["ref"])).write_text(
-            str(self._dead_pid()), encoding="utf-8"
-        )
+        self._write_heartbeat("review", self._dead_pid())
         host = self._host([
             {"handle": "term-review", "leafId": "leaf-review", "connected": True},
         ])
@@ -13165,10 +13543,74 @@ class ReviewLivenessTests(unittest.TestCase):
         self.assertFalse(status["live"])
         self.assertEqual(status["reason"], "process-exited")
 
-    def test_connected_pane_with_a_live_head_process_stays_live(self) -> None:
-        Path(pid_file_path("worker", self.task["ref"])).write_text(
-            str(self._live_pid()), encoding="utf-8"
+    def test_foreign_reviewer_heartbeat_cannot_adopt_a_review_launch(self) -> None:
+        """Recovery sees full status, so a live foreign PID is not a reviewing reviewer."""
+        record = self._record(review_handle="term-review", review_leaf="leaf-review")
+        record.state = "review_starting"
+        record.review_launch_aborts = 2
+        record.review_infra_failures = 3
+        record.review_infra_error = "previous launch failure"
+        foreign = self._live_pid()
+        self._write_heartbeat("review", foreign, record)
+        path = Path(pid_file_path("review", self.task["ref"]))
+        heartbeat = json.loads(path.read_text(encoding="utf-8"))
+        heartbeat["run_id"] = "foreign-reviewer-run"
+        path.write_text(json.dumps(heartbeat), encoding="utf-8")
+        host = self._host([
+            {"handle": "term-review", "leafId": "leaf-review", "connected": True},
+        ])
+        runtime = mock.Mock()
+        runtime.host = host
+
+        status = host.review_status(self.task, record)
+        outcome = recover_review_launch(
+            runtime, self.task, {self.task["ref"]: record}, record, "attempt-1", payload={},
         )
+
+        self.assertTrue(status["live"])
+        self.assertTrue(status["identity_mismatch"])
+        self.assertFalse(host.review_running(self.task, record))
+        self.assertEqual(outcome["action"], "review-heartbeat-identity-mismatch")
+        self.assertEqual(record.state, "review_starting")
+        self.assertEqual(record.review_launch_aborts, 2)
+        self.assertEqual(record.review_infra_failures, 3)
+        self.assertEqual(record.review_infra_error, "previous launch failure")
+        os.kill(foreign, 0)
+        runtime.save_records.assert_not_called()
+
+    def test_disconnected_foreign_reviewer_heartbeat_cannot_adopt_a_review_launch(self) -> None:
+        """A disconnected pane still preserves a live foreign PID's no-replacement fence."""
+        record = self._record(review_handle="term-review", review_leaf="leaf-review")
+        record.state = "review_starting"
+        foreign = self._live_pid()
+        self._write_heartbeat("review", foreign, record)
+        path = Path(pid_file_path("review", self.task["ref"]))
+        heartbeat = json.loads(path.read_text(encoding="utf-8"))
+        heartbeat["run_id"] = "foreign-reviewer-run"
+        path.write_text(json.dumps(heartbeat), encoding="utf-8")
+        host = self._host([
+            {"handle": "term-review", "leafId": "leaf-review", "connected": False},
+        ])
+        runtime = mock.Mock()
+        runtime.host = host
+
+        status = host.review_status(self.task, record)
+        with mock.patch("secretary.dispatcher_review.start_review") as start_review:
+            outcome = recover_review_launch(
+                runtime, self.task, {self.task["ref"]: record}, record, "attempt-1", payload={},
+            )
+
+        self.assertTrue(status["live"])
+        self.assertTrue(status["identity_mismatch"])
+        self.assertEqual(outcome["action"], "review-heartbeat-identity-mismatch")
+        self.assertEqual(record.state, "review_starting")
+        os.kill(foreign, 0)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["run_id"], "foreign-reviewer-run")
+        start_review.assert_not_called()
+        runtime.save_records.assert_not_called()
+
+    def test_connected_pane_with_a_live_head_process_stays_live(self) -> None:
+        self._write_heartbeat("worker", self._live_pid())
         host = self._host([
             {"handle": "term-worker", "leafId": "leaf-worker", "connected": True},
         ])
@@ -13181,24 +13623,22 @@ class ReviewLivenessTests(unittest.TestCase):
         """secretary-820: a head adopted from a launch intent never had its handle persisted, so
         the inventory cannot name its pane. Its heartbeat can, and reading it as a missing terminal
         would respawn a working head: the second launch the intent exists to prevent."""
-        Path(pid_file_path("worker", self.task["ref"])).write_text(
-            str(self._live_pid()), encoding="utf-8"
-        )
+        record = self._record(handle="", worker_leaf="")
+        self._write_heartbeat("worker", self._live_pid(), record)
         host = self._host([{"handle": "term-other", "leafId": "leaf-other", "connected": True}])
 
-        status = host.worker_status(self.task, self._record(handle="", worker_leaf=""))
+        status = host.worker_status(self.task, record)
 
         self.assertTrue(status["live"])
         self.assertEqual(status["reason"], "pid")
         self.assertTrue(status["pid_confirmed"])
 
     def test_a_record_with_no_pane_identity_and_a_dead_head_is_still_missing(self) -> None:
-        Path(pid_file_path("worker", self.task["ref"])).write_text(
-            str(self._dead_pid()), encoding="utf-8"
-        )
+        record = self._record(handle="", worker_leaf="")
+        self._write_heartbeat("worker", self._dead_pid(), record)
         host = self._host([{"handle": "term-other", "leafId": "leaf-other", "connected": True}])
 
-        status = host.worker_status(self.task, self._record(handle="", worker_leaf=""))
+        status = host.worker_status(self.task, record)
 
         self.assertFalse(status["live"])
         self.assertEqual(status["reason"], "missing-terminal")
@@ -13208,12 +13648,11 @@ class ReviewLivenessTests(unittest.TestCase):
         back, and the leaf lookup that would have saved us keys on that same handle, so
         `worker_leaf` stays empty. A persisted-but-unmatchable identity used to make the heartbeat
         unreachable and killed three live heads in a row, 1-2 minutes into each round."""
-        Path(pid_file_path("worker", self.task["ref"])).write_text(
-            str(self._live_pid()), encoding="utf-8"
-        )
+        record = self._record(handle="term-worker", worker_leaf="")
+        self._write_heartbeat("worker", self._live_pid(), record)
         host = self._host([{"handle": "term-alias", "leafId": "leaf-alias", "connected": True}])
 
-        status = host.worker_status(self.task, self._record(handle="term-worker", worker_leaf=""))
+        status = host.worker_status(self.task, record)
 
         self.assertTrue(status["live"])
         self.assertEqual(status["reason"], "pid")
@@ -13267,12 +13706,11 @@ class ReviewLivenessTests(unittest.TestCase):
 
     def test_a_persisted_handle_that_matches_nothing_with_a_dead_head_is_missing(self) -> None:
         """The heartbeat is evidence, not an amnesty: without it the verdict stays unchanged."""
-        Path(pid_file_path("worker", self.task["ref"])).write_text(
-            str(self._dead_pid()), encoding="utf-8"
-        )
+        record = self._record(handle="term-worker", worker_leaf="")
+        self._write_heartbeat("worker", self._dead_pid(), record)
         host = self._host([{"handle": "term-alias", "leafId": "leaf-alias", "connected": True}])
 
-        status = host.worker_status(self.task, self._record(handle="term-worker", worker_leaf=""))
+        status = host.worker_status(self.task, record)
 
         self.assertFalse(status["live"])
         self.assertEqual(status["reason"], "missing-terminal")
@@ -13281,9 +13719,7 @@ class ReviewLivenessTests(unittest.TestCase):
         """The pid signal must not read silence as death: a head that has said nothing since it
         started is a separate, pre-existing case (secretary-726's short initial-output window),
         not this one."""
-        Path(pid_file_path("worker", self.task["ref"])).write_text(
-            str(self._live_pid()), encoding="utf-8"
-        )
+        self._write_heartbeat("worker", self._live_pid())
         host = self._host([
             {"handle": "term-worker", "leafId": "leaf-worker", "connected": True, "lastOutputAt": 1_000_000},
         ])
@@ -13295,9 +13731,7 @@ class ReviewLivenessTests(unittest.TestCase):
     def test_a_live_head_reports_whether_its_pane_is_waiting_for_input(self) -> None:
         """secretary-1063: the timing ceilings do not apply to a pid-confirmed head, so the wait
         needs the one signal that separates a finished turn from a thinking one."""
-        Path(pid_file_path("worker", self.task["ref"])).write_text(
-            str(self._live_pid()), encoding="utf-8"
-        )
+        self._write_heartbeat("worker", self._live_pid())
         host = self._host([
             {"handle": "term-worker", "leafId": "leaf-worker", "connected": True},
         ])
@@ -13314,12 +13748,11 @@ class ReviewLivenessTests(unittest.TestCase):
     def test_an_adopted_head_with_no_pane_identity_answers_no_work_state(self) -> None:
         """Nothing to probe, so the status says so instead of guessing: the caller falls back to
         its ceilings rather than treating an unprobed head as one that is working."""
-        Path(pid_file_path("worker", self.task["ref"])).write_text(
-            str(self._live_pid()), encoding="utf-8"
-        )
+        record = self._record(handle="", worker_leaf="")
+        self._write_heartbeat("worker", self._live_pid(), record)
         host = self._host([{"handle": "term-other", "leafId": "leaf-other", "connected": True}])
 
-        status = host.worker_status(self.task, self._record(handle="", worker_leaf=""))
+        status = host.worker_status(self.task, record)
 
         self.assertTrue(status["pid_confirmed"])
         self.assertNotIn("idle", status)
@@ -13328,9 +13761,7 @@ class ReviewLivenessTests(unittest.TestCase):
         """A live pane whose binding the runtime has lost: `terminal list` still names it, and the
         readiness probe fails with `terminal_handle_stale`. That is not a busy head and not an idle
         one, so no work state is reported for it."""
-        Path(pid_file_path("worker", self.task["ref"])).write_text(
-            str(self._live_pid()), encoding="utf-8"
-        )
+        self._write_heartbeat("worker", self._live_pid())
         host = self._host([
             {"handle": "term-worker", "leafId": "leaf-worker", "connected": True},
         ])
@@ -13342,9 +13773,7 @@ class ReviewLivenessTests(unittest.TestCase):
         self.assertNotIn("idle", status)
 
     def test_a_pane_held_in_a_dialog_is_not_working(self) -> None:
-        Path(pid_file_path("worker", self.task["ref"])).write_text(
-            str(self._live_pid()), encoding="utf-8"
-        )
+        self._write_heartbeat("worker", self._live_pid())
         host = self._host([
             {"handle": "term-worker", "leafId": "leaf-worker", "connected": True},
         ])
@@ -13356,9 +13785,7 @@ class ReviewLivenessTests(unittest.TestCase):
         self.assertEqual(status["idle_reason"], "dialog")
 
     def test_a_working_pane_is_not_idle(self) -> None:
-        Path(pid_file_path("worker", self.task["ref"])).write_text(
-            str(self._live_pid()), encoding="utf-8"
-        )
+        self._write_heartbeat("worker", self._live_pid())
         host = self._host([
             {"handle": "term-worker", "leafId": "leaf-worker", "connected": True},
         ])
@@ -13573,8 +14000,8 @@ class ProductionPauseTests(unittest.TestCase):
                 raise OSError("production state is not writable")
             real_save(payload)
 
-        def restart(task: dict, record):
-            result = real_restart(task, record)
+        def restart(task: dict, record, **kwargs):
+            result = real_restart(task, record, **kwargs)
             launched["yet"] = True
             return result
 
@@ -13913,3 +14340,39 @@ class CommandHostStopWorkspaceTests(unittest.TestCase):
 
         with self.assertRaises(HostError):
             host.stop_workspace(self.record)
+
+    def test_a_live_foreign_heartbeat_fences_a_workspace_before_its_first_stop(self) -> None:
+        host = _SelectorNotFoundHost(self.root)
+        pid_file = self.root / "foreign-workspace.pid"
+        self.record.worker_pid_file = str(pid_file)
+        self.record.worker_leaf = "leaf-worker"
+        self.record.worker_head_run = head_ops.HeadRun(
+            run_id="workspace-owned-run",
+            spec=head_ops.HeadSpec(profile_id="head", adapter="unknown"),
+            workspace=self.record.workspace,
+            task_ref=head_ops.TaskRef.card("secretary-997"),
+            leaf=self.record.worker_leaf,
+            pid_file=str(pid_file),
+        ).to_json()
+        foreign = subprocess.Popen(["sleep", "5"])
+        def reap_foreign() -> None:
+            if foreign.poll() is None:
+                foreign.terminate()
+            foreign.wait()
+        self.addCleanup(reap_foreign)
+        PidHeartbeatTests.write_heartbeat(
+            pid_file,
+            foreign.pid,
+            identity=heartbeat_identity(
+                run_id="foreign-workspace-run", role="worker", task="card:secretary-997",
+                leaf=self.record.worker_leaf,
+            ),
+        )
+
+        with mock.patch.object(host, "_signal_head") as signal_head:
+            with self.assertRaisesRegex(HostError, "mismatching launch identity"):
+                host.stop_workspace(self.record)
+
+        self.assertFalse(host.calls, "the workspace stop is fenced before Orca is called")
+        signal_head.assert_not_called()
+        self.assertIsNone(foreign.poll())

@@ -35,7 +35,10 @@ from secretary.dispatcher_types import (
     review_pane_label,
 )
 from secretary.dispatcher_watchdog import (
-    head_process_status as _head_process_status,
+    heartbeat_is_dead as _heartbeat_is_dead,
+    heartbeat_is_live_match as _heartbeat_is_live_match,
+    heartbeat_is_mismatch as _heartbeat_is_mismatch,
+    head_run_process_status as _head_run_process_status,
     initial_output_stall_seconds as _initial_output_stall_seconds,
     pid_file_path as _pid_file_path,
     review_infra_retry_attempts as _review_infra_retry_attempts,
@@ -192,10 +195,26 @@ def command_terminal_status(
     for terminal in terminals:
         if not matches(terminal):
             continue
+        run = record.review_head_run if kind == "review" else record.worker_head_run
+        leaf = record.review_leaf if kind == "review" else record.worker_leaf
+        pid_status = _head_run_process_status(
+            _pid_file_path(kind, task["ref"]),
+            run=run, role=kind, task=f"card:{task['ref']}", leaf=leaf,
+        )
+        # A disconnected pane is otherwise terminal evidence for a relaunch.  Classify the
+        # expected HeadRun first: its old heartbeat path can now name a live foreign process,
+        # which has to remain fenced even when Orca no longer considers the pane connected.
+        if _heartbeat_is_mismatch(pid_status):
+            return {
+                "known": True,
+                "live": True,
+                "reason": "heartbeat-identity-mismatch",
+                "identity_mismatch": True,
+                "pid_confirmed": False,
+            }
         if not terminal.connected:
             return {"known": True, "live": False, "reason": "disconnected"}
-        pid_status = _head_process_status(_pid_file_path(kind, task["ref"]))
-        if pid_status.get("known") and not pid_status.get("alive"):
+        if _heartbeat_is_dead(pid_status):
             # The pane is connected and Orca kept its wrapping shell open, but the head process
             # itself is gone (secretary-751): a provider crash or a killed runtime, not silence.
             return {"known": True, "live": False, "reason": "process-exited"}
@@ -208,7 +227,7 @@ def command_terminal_status(
         )
         if supplemental:
             activity = max(activity or 0.0, float(supplemental))
-        pid_confirmed = bool(pid_status.get("known") and pid_status.get("alive"))
+        pid_confirmed = _heartbeat_is_live_match(pid_status)
         status = {
             "known": True, "live": True, "reason": "live", "last_activity": activity,
             # A pid-heartbeat that proves this exact process still runs; only this — not a
@@ -239,8 +258,21 @@ def command_terminal_status(
     # In both the pid heartbeat is the stronger evidence: it proves this exact process runs. A
     # pane we cannot name is not a dead head, and respawning over a live one is the second head
     # the intent contour exists to prevent.
-    pid_status = _head_process_status(_pid_file_path(kind, task["ref"]))
-    if pid_status.get("known") and pid_status.get("alive"):
+    run = record.review_head_run if kind == "review" else record.worker_head_run
+    leaf = record.review_leaf if kind == "review" else record.worker_leaf
+    pid_status = _head_run_process_status(
+        _pid_file_path(kind, task["ref"]),
+        run=run, role=kind, task=f"card:{task['ref']}", leaf=leaf,
+    )
+    if _heartbeat_is_mismatch(pid_status):
+        return {
+            "known": True,
+            "live": True,
+            "reason": "heartbeat-identity-mismatch",
+            "identity_mismatch": True,
+            "pid_confirmed": False,
+        }
+    if _heartbeat_is_live_match(pid_status):
         return {"known": True, "live": True, "reason": "pid", "pid_confirmed": True}
     if not pid_status.get("known"):
         # `pid_file_path`'s own contract: the dispatcher clears the pid file before every fresh
@@ -292,7 +324,8 @@ def command_review_running(host: Any, task: dict[str, Any], record: DispatcherRe
     never persisted — a tick killed between the split and the state write, or a card adopted from a
     dispatcher that predates persisted reviewer handles. It cannot be the primary check: the
     reviewer head overwrites its terminal title with its own OSC sequence seconds after launch."""
-    return bool(command_terminal_status(host, task, record, kind="review").get("live"))
+    status = command_terminal_status(host, task, record, kind="review")
+    return bool(status.get("live") and not status.get("identity_mismatch"))
 
 
 def end_review_pane(
@@ -330,7 +363,7 @@ def recover_review_launch(
 ) -> dict[str, Any]:
     ref = task["ref"]
     try:
-        running = runtime.host.review_running(task, record)
+        status = runtime.host.review_status(task, record)
     except Exception as exc:
         # Inventory silence cannot prove the reviewer is absent. Preserve launch ambiguity and ask
         # the same liveness question next tick; never launch beside a possibly-live head.
@@ -340,7 +373,18 @@ def recover_review_launch(
             "action": "review-inventory-unavailable",
             "reason": scrub_host_output(str(exc)),
         }
-    if running:
+    if status.get("identity_mismatch"):
+        # A readable live heartbeat can still name a foreign process.  Do not adopt it into the
+        # review state or reset the launch episode; this record remains the un-attributed run.
+        return {
+            "status": "degraded",
+            "step": "review",
+            "pilot_ref": ref,
+            "attempt_id": record.attempt_id or attempt_id,
+            "action": "review-heartbeat-identity-mismatch",
+            "reason": "review heartbeat names a live process with a mismatching launch identity",
+        }
+    if status.get("live"):
         record.state = "reviewing"
         # A reviewer is on the checkout: whatever stuck launches came before belong to an episode
         # that is over, so the abort ceiling starts fresh for the next one (issue:aa9a8ae4), and so

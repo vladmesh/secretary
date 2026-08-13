@@ -64,7 +64,9 @@ from typing import Any
 
 from secretary.dispatcher_state import now_rfc3339, request_token
 from secretary.dispatcher_watchdog import (
-    head_process_status,
+    heartbeat_is_live_match,
+    heartbeat_is_mismatch,
+    head_run_process_status,
     initial_output_stall_seconds,
     pid_file_path,
 )
@@ -351,6 +353,8 @@ class ObserverRecord:
     launch_attempts: int = 0
     launch_next_at: float = 0.0
     run: dict[str, Any] = field(default_factory=dict)
+    # `run` is routing telemetry.  This is the actual runtime HeadRun used to bind the heartbeat.
+    head_run: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -380,6 +384,7 @@ class ObserverRecord:
             "launch_attempts": self.launch_attempts,
             "launch_next_at": self.launch_next_at,
             "run": dict(self.run),
+            "head_run": dict(self.head_run),
         }
 
     @classmethod
@@ -421,6 +426,7 @@ class ObserverRecord:
             launch_attempts=_int(payload.get("launch_attempts")),
             launch_next_at=_float(payload.get("launch_next_at")),
             run=dict(run) if isinstance(run, dict) else {},
+            head_run=(dict(payload["head_run"]) if isinstance(payload.get("head_run"), dict) else {}),
         )
 
 
@@ -447,9 +453,22 @@ def observer_alive(record: ObserverRecord, *, now: float | None = None) -> dict[
     dispatcher already uses for a pane that has produced no output at all has passed.
     """
     now = time.time() if now is None else now
-    status = head_process_status(record.pid_file or observer_pid_file(record.sprint))
+    status = head_run_process_status(
+        record.pid_file or observer_pid_file(record.sprint),
+        run=record.head_run,
+        role="observer",
+        task=f"sprint:{record.sprint}",
+        leaf=record.leaf,
+    )
+    if heartbeat_is_mismatch(status):
+        return {
+            "alive": False,
+            "reason": "heartbeat-identity-mismatch",
+            "pid_known": True,
+            "identity_mismatch": True,
+        }
     if status.get("known"):
-        return {"alive": bool(status.get("alive")), "reason": "pid", "pid_known": True}
+        return {"alive": heartbeat_is_live_match(status), "reason": "pid", "pid_known": True}
     grace = initial_output_stall_seconds()
     if record.launched_at and now - record.launched_at <= grace:
         return {"alive": True, "reason": "pid-not-written-yet", "pid_known": False}
@@ -471,6 +490,7 @@ def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "launches": record.launches,
             "alive": liveness["alive"],
             "pid_known": liveness["pid_known"],
+            "heartbeat_state": liveness["reason"],
             # A head adopted from a launch intent is watching its sprint, but its terminal handle
             # died with the tick that started it: it is stopped by workspace, not by handle.
             "handle_known": bool(record.handle),
@@ -1536,6 +1556,15 @@ def _adopt_launch_intent(
     in the workspace first.
     """
     liveness = observer_alive(record)
+    if liveness.get("identity_mismatch"):
+        return {
+            "status": "degraded",
+            "step": "observer-reconcile",
+            "sprint": ref,
+            "action": "observer-heartbeat-identity-mismatch",
+            "head": record.head,
+            "reason": "observer heartbeat names a live process with a mismatching launch identity",
+        }
     if not liveness["alive"]:
         return None
     if not liveness["pid_known"]:
@@ -1797,6 +1826,7 @@ def _launch_observer(
             # previous one. Not `ref` and not the sprint document, so nothing between the record
             # and the head can hand it another sprint's name.
             identity=observer_binding(record.sprint or ref, record.generation),
+            heartbeat_run_id=str(record.head_run.get("run_id") or ""),
         )
     except ObserverLaunchAborted as exc:
         # The bring-up failed with its terminal still up. The staged event is dropped, because no
@@ -1852,6 +1882,9 @@ def _launch_observer(
     record.leaf = str(launched.get("leaf") or "")
     record.pid_file = str(launched.get("pid_file") or observer_pid_file(ref))
     record.run = launched.get("run") if isinstance(launched.get("run"), dict) else {}
+    record.head_run = (
+        dict(launched["head_run"]) if isinstance(launched.get("head_run"), dict) else record.head_run
+    )
     # The host has answered, so the create-time pane identity belongs on the durable launch intent
     # before the ordinary state commit below.  A crash in the rest of this branch then adopts this
     # exact pane rather than falling back to the create-time handle or another inventory lookup.
@@ -1942,6 +1975,7 @@ def _write_launch_intent(
     record.head = head
     record.workspace = workspace
     record.pid_file = pid_file
+    record.head_run = {"run_id": uuid.uuid4().hex}
     record.pending_launch = attempt
     record.head_possible = True
     record.workspace_live = True
@@ -2112,6 +2146,10 @@ def stop_observer_head(runtime: Any, record: ObserverRecord) -> bool:
     """
     if not _needs_teardown(record):
         return True
+    if observer_alive(record).get("identity_mismatch"):
+        # The recorded PID is a live foreign process.  Keep the record and let an operator resolve
+        # the owned pane rather than signalling or replacing over it.
+        return False
     try:
         runtime.host.stop_observer(record)
     except HostError:

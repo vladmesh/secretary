@@ -56,9 +56,11 @@ unconfirmed stop followed by a launch is the same two heads by another route.
 from __future__ import annotations
 
 import time
+import uuid
 from typing import Any
 
 from secretary.dispatcher_helpers import scrub_host_output
+from secretary.dispatcher_heartbeat import intent_heartbeat_identity
 from secretary.dispatcher_state import DispatcherRecord
 from secretary.dispatcher_tui import READINESS_BLOCKED, READINESS_BUSY
 from secretary.dispatcher_types import (
@@ -73,6 +75,7 @@ from secretary.dispatcher_watchdog import (
     initial_output_stall_seconds,
     pid_file_path,
 )
+from triggered_agents.runtime.head import operations as head_ops
 
 WORKER_ROLE = "worker"
 REVIEW_ROLE = "review"
@@ -130,6 +133,11 @@ def write_launch_intent(
         "head": head,
         "workspace": workspace,
         "pid_file": launch_pid_file(role, ref),
+        # The run id is fixed before the host is touched.  A dispatcher that dies while Orca is
+        # creating the pane can therefore still prove that a heartbeat belongs to this intent,
+        # rather than adopting whichever later process happened to reuse its pid path.
+        "run_id": uuid.uuid4().hex,
+        "task": f"card:{ref}",
         "attempt_id": record.attempt_id,
         "round": reserved,
         "opens_round": bool(reserved) and reserved != record.attempt_round,
@@ -193,6 +201,10 @@ def confirm_launch_intent(
         # replaces whatever run the previous head of this role left on the record.
         if head_run:
             intent["head_run"] = dict(head_run)
+            # The launcher writes this id into its heartbeat before Orca opens the pane. Keeping
+            # the same value in the recovered intent makes the HeadRun, intent and file one
+            # identity even if the ordinary record save lands later.
+            intent["run_id"] = str(head_run.get("run_id") or intent.get("run_id") or "")
         _remember_head_run(record, str(intent.get("role") or ""), head_run)
     intent["launched"] = True
     record.launch_intent = intent
@@ -219,8 +231,10 @@ def launch_left_a_head(record: DispatcherRecord) -> bool:
     intent = launch_intent(record)
     if not intent:
         return False
-    status = head_process_status(str(intent.get("pid_file") or ""))
-    return bool(status.get("known") and status.get("alive"))
+    status = head_process_status(
+        str(intent.get("pid_file") or ""), expected=intent_heartbeat_identity(intent)
+    )
+    return bool(status.get("match"))
 
 
 def role_field(role: str, suffix: str) -> str:
@@ -428,9 +442,13 @@ def launch_intent_liveness(intent: dict[str, Any], *, now: float | None = None) 
     that has produced no output at all has passed.
     """
     now = time.time() if now is None else now
-    status = head_process_status(str(intent.get("pid_file") or ""))
+    status = head_process_status(
+        str(intent.get("pid_file") or ""), expected=intent_heartbeat_identity(intent)
+    )
+    if status.get("state") == "identity-mismatch":
+        return {"alive": False, "pid_known": True, "identity_mismatch": True}
     if status.get("known"):
-        return {"alive": bool(status.get("alive")), "pid_known": True}
+        return {"alive": bool(status.get("match")), "pid_known": True}
     started_at = float(intent.get("at") or 0.0)
     if started_at and now - started_at <= initial_output_stall_seconds():
         return {"alive": True, "pid_known": False}
@@ -459,6 +477,18 @@ def resolve_launch_intent(
     role = str(intent.get("role"))
     step = "review" if role == REVIEW_ROLE else "advance"
     liveness = launch_intent_liveness(intent)
+    if liveness.get("identity_mismatch"):
+        # The pid is a living process, but not this launch.  It cannot be signalled or attributed
+        # to this HeadRun, and a replacement over the still-owned pane would be just as unsafe.
+        return {
+            "status": "degraded",
+            "step": step,
+            "pilot_ref": ref,
+            "attempt_id": record.attempt_id,
+            "action": f"{role}-heartbeat-identity-mismatch",
+            "head": str(intent.get("head") or ""),
+            "reason": "launch heartbeat names a live process with a mismatching launch identity",
+        }
     if liveness["alive"] and not liveness["pid_known"]:
         # Left exactly as it is: the next tick asks again, once the grace window has either
         # produced a heartbeat or run out. Killing a head that is still starting would cost the
@@ -533,7 +563,10 @@ def stop_launch_intent(
     pid_file = getattr(record, role_field(role, "pid_file"), "")
     # The path is known before the head exists, so it says nothing on its own; a heartbeat that can
     # be read is what proves this launch left something a role-scoped stop can address.
-    named = bool(handle or leaf) or bool(head_process_status(pid_file).get("known"))
+    status = head_process_status(pid_file, expected=intent_heartbeat_identity(intent))
+    if status.get("state") == "identity-mismatch":
+        return "launch heartbeat names a live process with a mismatching launch identity"
+    named = bool(handle or leaf) or bool(status.get("known"))
     try:
         if role == REVIEW_ROLE and named:
             # Imported here rather than at module scope: `dispatcher_review` writes the reviewer's
@@ -574,6 +607,27 @@ def _remember_launch_identity(
     else:
         record.handle = record.handle or handle
         record.worker_leaf = record.worker_leaf or leaf
+    stored_run = intent.get("head_run")
+    if not isinstance(stored_run, dict) or not stored_run.get("run_id"):
+        # An interrupted create can leave only the pre-launch intent and a heartbeat.  Rebuild the
+        # same HeadRun identity from that intent before routing it through a fenced stop; minting
+        # a new run here would turn our own live head into an apparent foreign process.
+        run_id = str(intent.get("run_id") or "")
+        task = str(intent.get("task") or "")
+        task_kind, separator, task_ref = task.partition(":")
+        if run_id and separator and task_kind == "card" and task_ref:
+            stored_run = head_ops.HeadRun(
+                run_id=run_id,
+                spec=head_ops.HeadSpec(
+                    profile_id=str(intent.get("head") or "unknown"), adapter="unknown"
+                ),
+                workspace=record.workspace,
+                task_ref=head_ops.TaskRef.card(task_ref),
+                handle=handle,
+                leaf=leaf,
+                pid_file=pid_file,
+            ).to_json()
+    _remember_head_run(record, role, stored_run if isinstance(stored_run, dict) else None)
 
 
 def _adopt_launch_intent(
@@ -601,6 +655,23 @@ def _adopt_launch_intent(
     handle = str(intent.get("handle") or "")
     leaf = str(intent.get("leaf") or "")
     stored_run = intent.get("head_run")
+    if not isinstance(stored_run, dict) or not stored_run.get("run_id"):
+        # A launch can fail after its process wrote the pre-pane heartbeat but before the host can
+        # return a HeadRun.  The intent's run id was fixed before that process existed, so it is
+        # enough to recover the same durable run rather than minting a new identity over it.
+        run_id = str(intent.get("run_id") or "")
+        if run_id:
+            stored_run = head_ops.HeadRun(
+                run_id=run_id,
+                spec=head_ops.HeadSpec(
+                    profile_id=str(intent.get("head") or "unknown"), adapter="unknown"
+                ),
+                workspace=record.workspace,
+                task_ref=head_ops.TaskRef.card(ref),
+                handle=handle,
+                leaf=leaf,
+                pid_file=str(intent.get("pid_file") or ""),
+            ).to_json()
     _remember_head_run(record, role, stored_run if isinstance(stored_run, dict) else None)
     if role == REVIEW_ROLE:
         # A reviewer bring-up shuts the worker head down before it hands the pane back, and an
