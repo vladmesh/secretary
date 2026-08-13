@@ -2,6 +2,12 @@
 requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
+[tool.uv]
+# This installation is managed by the product's venv/pip bootstrap and upgrade
+# path. Keep incidental `uv run` invocations from creating a second dependency
+# authority (`uv.lock`) or resynchronizing the production environment.
+managed = false
+
 [project]
 name = "secretary"
 version = "0.1.0"
