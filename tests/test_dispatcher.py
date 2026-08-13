@@ -10724,6 +10724,32 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertTrue(any("gh pr merge pipeline/secretary-510-pilot --merge" in c for c in cmds))
         self.assertTrue(any(c.endswith("git -C /home/dev/secretary fetch origin main") for c in cmds))
 
+    def test_complete_green_survives_default_checkout_fetch_failure_after_pr_merge(self) -> None:
+        """The remote merge is complete even when the checkout cannot refresh from origin."""
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            host = _RecordingMergeHost(Path(tmp), {"validation": {"ci": "github"}})
+            original_run = host._run
+            fetch_attempted = False
+
+            def fail_fetch(args, label, *, cwd=None):
+                nonlocal fetch_attempted
+                if label == "post-merge fetch":
+                    fetch_attempted = True
+                    raise HostError("post-merge fetch failed: temporary network outage")
+                return original_run(args, label, cwd=cwd)
+
+            with mock.patch.object(host, "_run", side_effect=fail_fetch):
+                host.complete_green(
+                    {"ref": "secretary-510-pilot", "project": "secretary"},
+                    SimpleNamespace(workspace=str(Path(tmp) / "ws")),
+                )
+
+        cmds = [" ".join(run) for run in host.runs]
+        self.assertTrue(any("gh pr merge pipeline/secretary-510-pilot --merge" in c for c in cmds))
+        self.assertTrue(fetch_attempted)
+
     def test_complete_green_refreshes_checkout_from_default_branch_for_stacked_base(self) -> None:
         from types import SimpleNamespace
 
