@@ -71,9 +71,15 @@ LaunchPreflight = Callable[["HeadRun"], "HeadRun"]
 class HeadOperationError(RuntimeError):
     """Any refusal from one of the three operations, with the delivery evidence there was."""
 
-    def __init__(self, message: str, *, evidence: Any = None) -> None:
+    def __init__(
+        self, message: str, *, evidence: Any = None, run: "HeadRun | None" = None,
+    ) -> None:
         super().__init__(message)
         self.evidence = evidence
+        # A delivery callback can durably refine the run after the pane was opened, before the
+        # prompt is sent.  Failures after that boundary still have to hand the caller that exact
+        # run, or a launch-intent recovery would overwrite the source it just persisted.
+        self.run = run
 
 
 class HeadSpawnFailed(HeadOperationError):
@@ -93,8 +99,7 @@ class HeadSpawnAborted(HeadOperationError):
     """
 
     def __init__(self, message: str, *, run: HeadRun, evidence: Any = None) -> None:
-        super().__init__(message, evidence=evidence)
-        self.run = run
+        super().__init__(message, evidence=evidence, run=run)
 
 
 class HeadPaneBusy(HeadOperationError):
@@ -163,6 +168,19 @@ class HeadOutcome:
     delivery: DeliveryOutcome | None = None
 
 
+@dataclass(frozen=True)
+class HeadDelivery:
+    """The transport receipt together with the run authoritative after pre-send work.
+
+    Delivery can persist a provider-source binding after the pane was created but immediately
+    before the prompt is sent.  The operation cannot keep returning its earlier local copy in
+    that case: every following launcher and launch intent must receive this handoff value.
+    """
+
+    run: HeadRun
+    outcome: DeliveryOutcome
+
+
 class HeadTransport(Protocol):
     """A product's own delivery and pane-close semantics, performed against the host it is given.
 
@@ -176,8 +194,8 @@ class HeadTransport(Protocol):
 
     def deliver(
         self, run: HeadRun, pointer: NudgePointer, *, host: SessionHost, subject: str
-    ) -> DeliveryOutcome:
-        """Put one prompt into this head's pane and answer with what the pane did."""
+    ) -> HeadDelivery:
+        """Put one prompt into this head's pane and return its post-delivery run."""
 
     def close(self, run: HeadRun, *, host: SessionHost) -> None:
         """Close this head's pane, or refuse in whatever terms this product's evidence allows."""
@@ -197,18 +215,21 @@ class HostTransport:
 
     def deliver(
         self, run: HeadRun, pointer: NudgePointer, *, host: SessionHost, subject: str
-    ) -> DeliveryOutcome:
-        return deliver_interactive_prompt(
-            run.handle,
-            pointer.text,
-            host=host,
-            adapter=run.spec.adapter,
-            confirm=self.confirm,
-            # Pretending to a confirmation it did not make would be the weaker report, not the
-            # stronger one.
-            ack_out_of_band=self.confirm is None,
-            subject=subject,
-            document_path=pointer.document,
+    ) -> HeadDelivery:
+        return HeadDelivery(
+            run=run,
+            outcome=deliver_interactive_prompt(
+                run.handle,
+                pointer.text,
+                host=host,
+                adapter=run.spec.adapter,
+                confirm=self.confirm,
+                # Pretending to a confirmation it did not make would be the weaker report, not the
+                # stronger one.
+                ack_out_of_band=self.confirm is None,
+                subject=subject,
+                document_path=pointer.document,
+            ),
         )
 
     def close(self, run: HeadRun, *, host: SessionHost) -> None:
@@ -286,10 +307,10 @@ def spawn(
         # a raw command override runs an adapter's binary in a shape the profile never described.
         return HeadOutcome(run)
     try:
-        outcome = _deliver(transport, host, run, pointer, subject=subject or "head-launch")
+        delivery = _deliver(transport, host, run, pointer, subject=subject or "head-launch")
     except Exception as exc:  # noqa: BLE001 — classified by what it left running, not by type
         raise _spawn_delivery_failure(host, run, pointer, exc, transport=transport) from None
-    return HeadOutcome(run.working(), outcome)
+    return HeadOutcome(delivery.run.working(), delivery.outcome)
 
 
 def nudge(
@@ -311,10 +332,10 @@ def nudge(
     live = _relocated(host, run)
     if not live.handle:
         raise HeadNudgeFailed("the head's pane can no longer be addressed")
-    outcome = _deliver(
+    delivery = _deliver(
         transport or HostTransport(), host, live, pointer, subject=subject or "head-nudge"
     )
-    return HeadOutcome(live.working(), outcome)
+    return HeadOutcome(delivery.run.working(), delivery.outcome)
 
 
 def stop(
@@ -478,6 +499,12 @@ def _spawn_delivery_failure(
     can ask about is not a busy pane, it is a pane nothing can wait for, and it takes the ordinary
     failure path.
     """
+    # `HeadDelivery` makes a successful pre-send mutation authoritative on the success path.
+    # A later transport refusal takes the same handoff: an aborted launch must retain the bound
+    # source for recovery rather than returning the pre-delivery local copy.
+    post_delivery = getattr(exc, "run", None)
+    if isinstance(post_delivery, HeadRun):
+        run = post_delivery
     evidence = getattr(exc, "evidence", None)
     if pointer.document:
         return HeadSpawnAborted(
@@ -507,7 +534,7 @@ def _deliver(
     pointer: NudgePointer,
     *,
     subject: str,
-) -> DeliveryOutcome:
+) -> HeadDelivery:
     """One delivery into this head's pane, performed by the transport against this host.
 
     A delivery boundary failure is re-raised as this package's own, evidence and all, whichever
@@ -515,9 +542,37 @@ def _deliver(
     confirmation criterion or the plain host path made it.
     """
     try:
-        return transport.deliver(run, pointer, host=host, subject=subject)
+        delivery = transport.deliver(run, pointer, host=host, subject=subject)
     except TuiDeliveryError as exc:
-        raise HeadNudgeFailed(str(exc), evidence=getattr(exc, "evidence", None)) from None
+        raise HeadNudgeFailed(
+            str(exc), evidence=getattr(exc, "evidence", None), run=getattr(exc, "head_run", run),
+        ) from None
+    return HeadDelivery(post_delivery_run(run, delivery.run), delivery.outcome)
+
+
+def post_delivery_run(before: HeadRun, after: HeadRun) -> HeadRun:
+    """Merge the exact pre-send handoff with pane facts this operation has proved.
+
+    A provider callback owns its newly persisted source.  `spawn` and `nudge` own only the pane
+    address they just used and the lifecycle transition they can prove.  Keeping those writers
+    separate makes a stale launch result unable to erase a newer source binding.
+    """
+    if not isinstance(after, HeadRun) or not before.same_run(after):
+        raise HeadNudgeFailed("post-delivery HeadRun does not match the launched head", run=before)
+    if (
+        before.spec != after.spec
+        or before.workspace != after.workspace
+        or before.task_ref != after.task_ref
+        or before.role != after.role
+        or before.pid_file != after.pid_file
+    ):
+        raise HeadNudgeFailed("post-delivery HeadRun changed its launch identity", run=before)
+    if after.lifecycle != before.lifecycle or after.stopped_by != before.stopped_by:
+        raise HeadNudgeFailed("pre-send delivery callback changed HeadRun lifecycle", run=before)
+    # The callback receives the rebound run in the normal launch path.  Reapplying these exact
+    # operation-owned facts also covers a retained callback that read the same run just before
+    # the session manager supplied its stable leaf; it cannot change any provider source field.
+    return after.rebound(before.handle, leaf=before.leaf)
 
 
 def _relocated(host: SessionHost, run: HeadRun) -> HeadRun:

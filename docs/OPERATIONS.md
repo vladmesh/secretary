@@ -861,7 +861,11 @@ For Codex, inspect the bound source after a real preflight-to-bind handoff. It m
 preflight run descriptor exactly: run id, HeadRun fingerprint, resolved workspace, role and task
 reference. Journal selection may add its verified identity, range, cursor and bind time, but may not
 replace those facts. The worker and reviewer provider reads must both reject a source whose
-descriptor is incomplete or foreign.
+descriptor is incomplete or foreign. The same check applies to an observer launch and its recovered
+watchdog record. Before the final Terra canary, verify that the post-delivery HeadRun returned by the
+worker, reviewer and observer launch paths is the one in the durable intent/record, with the same
+bound source and cursor. A stale local launch copy, conflicting source or mismatched run is a canary
+failure: do not nudge, stop, replace, clean up or attribute that head.
 
 The head profile comes from the sprint's own `sprint_observer` field: one concrete profile, or `none` for
 a sprint that runs without an observer (see [Protocols](PROTOCOLS.md#the-declared-observer)). It is never
@@ -992,6 +996,14 @@ is reported the same aborted way. By then the intent holds the launch configurat
 the routing journal with its own profile rather than whatever the registry holds now. A journal that fails at
 that write gives an adopt-deferred outcome (degraded): the head stays adopted, the intent stays on disk, and the
 next tick appends the journal entry.
+
+The launch result is the authoritative post-delivery `HeadRun`, not the pre-pane/pre-send value. Pane creation
+may add its verified handle and leaf, and the delivery boundary may bind the Codex source. Intent confirmation,
+routing and role records merge those facts only after their identities agree. A later write cannot turn a bound
+source back into `unbound`, rewind its cursor or substitute its session/range; it may add only its own verified
+pane or forward lifecycle evidence. A mismatch leaves the intent and prior run in place and permits no adoption,
+signal, stop, resume or replacement. This ordering applies equally to worker, reviewer and observer launch and
+recovery, while the generic non-Codex launch path keeps its existing behavior.
 
 A head adopted that way usually has no handle, because the tick that launched it did not survive to record one.
 Its liveness is read from the launch-identity heartbeat and reported as such in terminal status. It is also

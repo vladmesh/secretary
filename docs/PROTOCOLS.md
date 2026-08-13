@@ -125,6 +125,24 @@ complete initial range, session id, workspace, parent identity and prior cursor 
 line. Missing, unreadable, changed or ambiguous source evidence is `unknown`: it is fenced and blocked
 without signalling a possibly foreign head.
 
+### Post-delivery HeadRun handoff
+
+There is one authoritative `HeadRun` after a launch delivery. The writer order is fixed: construct
+and validate the exact run; persist its handleless preflight identity in the role launch intent;
+create and bind the pane; persist the rebound handle and leaf; bind and persist the Codex source
+when applicable; capture that post-delivery run; then write routing, role state and clear the
+intent. `head_ops.spawn` returns the captured run, and worker, reviewer and observer launchers,
+intent confirmation and adoption consume that value rather than a pre-delivery local copy.
+
+The provider callback owns source facts. A later launcher or lifecycle writer may add only the pane
+address it proved and its own forward lifecycle evidence. It cannot remove a bound source, move a
+cursor backwards, replace a bound session/range, or replace run id, spec, workspace, task, role or
+pid identity. A conflicting, stale, malformed or foreign candidate is an identity fence: it is not
+adopted, resumed, signalled, stopped, replaced or attributed. The same merge is used by worker,
+reviewer and observer recovery, so a retained continuation and an observer watchdog read the exact
+source delivery committed. Source binding is observational for lifecycle purposes; only the owner's
+separate advisory fan-out policy may request its existing identity-fenced policy handling.
+
 ## SHA-bound mechanical gate evidence
 
 Every real mechanical gate result materializes a reusable receipt bound to one checkout:

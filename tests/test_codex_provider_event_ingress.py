@@ -13,8 +13,11 @@ from secretary.codex_provider_events import (
     CodexProviderSourceError,
 )
 from secretary.dispatcher import CommandHostRuntime
+from secretary.dispatcher_launch import REVIEW_ROLE, WORKER_ROLE, confirm_launch_intent
 from secretary.dispatcher_state import DispatcherRecord
 from secretary.dispatcher_tui import provider_progress_for_run
+from secretary.dispatcher_types import HostError
+from secretary.dispatcher_observer import ObserverRecord, _bind_codex_provider_ingress
 from secretary.dispatcher_worker_lifecycle import WorkerContinuationLiveness
 from triggered_agents.runtime import codex_preflight
 from triggered_agents.runtime.head import HeadRun, HeadSpec, TaskRef
@@ -243,6 +246,123 @@ class CodexProviderEventIngressTests(unittest.TestCase):
                 progress = provider_progress_for_run(damaged)
                 self.assertEqual(progress["state"], "identity_mismatch")
                 self.assertNotEqual(progress.get("admission"), "accepted")
+
+    def test_launch_intent_handoff_keeps_the_real_bound_source_for_worker_and_reviewer(self) -> None:
+        """The later launcher result may add pane/lifecycle facts but cannot restore `unbound`."""
+        class Runtime:
+            def save_records(self, _payload, _records) -> None:
+                return None
+
+        for intent_role, run_role in ((WORKER_ROLE, "worker"), (REVIEW_ROLE, "reviewer")):
+            with self.subTest(role=intent_role):
+                self.source.unlink(missing_ok=True)
+                preflight = self._preflight_run(run_id=f"{intent_role}-run", role=run_role)
+                self._write_source()
+                ingress = self._ingress(preflight)
+                ingress.bind_before_delivery()
+                bound = ingress.run
+                stale = preflight.rebound(f"term-{intent_role}", leaf=f"leaf-{intent_role}").working()
+                record = DispatcherRecord(
+                    worker="worker-1",
+                    workspace=str(self.workspace),
+                    handle="",
+                    head="codex-extra",
+                    review_head="codex-extra",
+                    attempt_id="attempt-1",
+                    comment_baseline=0,
+                    review_baseline=0,
+                    state="claimed",
+                    claimed_at=0.0,
+                )
+                record.launch_intent = {"role": intent_role, "head_run": bound.to_json()}
+                if intent_role == REVIEW_ROLE:
+                    record.review_head_run = bound.to_json()
+                else:
+                    record.worker_head_run = bound.to_json()
+                records = {"secretary-1428": record}
+
+                confirm_launch_intent(
+                    Runtime(), {}, records, "secretary-1428", record,
+                    handle=stale.handle, leaf=stale.leaf, head_run=stale.to_json(),
+                )
+
+                stored = record.review_head_run if intent_role == REVIEW_ROLE else record.worker_head_run
+                source = stored["fanout_policy"]["provider_source"]
+                self.assertEqual(source["state"], "bound")
+                self.assertEqual(source["session_id"], "session-1")
+                self.assertEqual(stored["lifecycle"], "working")
+                self.assertEqual(stored["handle"], stale.handle)
+                self.assertEqual(record.launch_intent["head_run"], stored)
+
+    def test_launch_intent_handoff_refuses_a_conflicting_bound_source(self) -> None:
+        class Runtime:
+            def save_records(self, _payload, _records) -> None:
+                return None
+
+        preflight = self._preflight_run()
+        self._write_source()
+        ingress = self._ingress(preflight)
+        ingress.bind_before_delivery()
+        bound = ingress.run
+        conflicting_source = {
+            **bound.fanout_policy["provider_source"], "session_id": "foreign-session",
+        }
+        conflicting = bound.with_fanout_policy({
+            **bound.fanout_policy, "provider_source": conflicting_source,
+        })
+        record = DispatcherRecord(
+            worker="worker-1", workspace=str(self.workspace), handle="", head="codex-extra",
+            review_head="codex-extra", attempt_id="attempt-1", comment_baseline=0,
+            review_baseline=0, state="claimed", claimed_at=0.0,
+        )
+        record.launch_intent = {"role": WORKER_ROLE, "head_run": bound.to_json()}
+        record.worker_head_run = bound.to_json()
+        before = record.launch_intent["head_run"]
+
+        with self.assertRaisesRegex(HostError, "bound provider sources conflict"):
+            confirm_launch_intent(
+                Runtime(), {}, {"secretary-1428": record}, "secretary-1428", record,
+                head_run=conflicting.to_json(),
+            )
+
+        self.assertEqual(record.launch_intent["head_run"], before)
+
+    def test_observer_writer_keeps_the_bound_delivery_handoff_over_a_stale_launch_copy(self) -> None:
+        class State:
+            def save(self, _payload) -> None:
+                return None
+
+        class Host:
+            def configure_codex_provider_ingress(self, _run, *, persist, stop, block) -> None:
+                self.persist = persist
+
+        class Runtime:
+            def __init__(self) -> None:
+                self.host = Host()
+                self.production_state = State()
+
+        self.source.unlink(missing_ok=True)
+        preflight = self._preflight_run(run_id="observer-run", role="observer")
+        self._write_source()
+        ingress = self._ingress(preflight)
+        ingress.bind_before_delivery()
+        bound = ingress.run
+        stale = preflight.rebound("term-observer", leaf="leaf-observer")
+        record = ObserverRecord(
+            sprint="sprint:1", workspace=str(self.workspace), head="codex-extra",
+            head_run=bound.to_json(),
+        )
+        runtime = Runtime()
+        observers = {"sprint:1": record}
+
+        _bind_codex_provider_ingress(runtime, {}, observers, "sprint:1", record)
+        runtime.host.persist(stale)
+
+        source = record.head_run["fanout_policy"]["provider_source"]
+        self.assertEqual(source["state"], "bound")
+        self.assertEqual(source["session_id"], "session-1")
+        self.assertEqual(record.handle, "term-observer")
+        self.assertEqual(observers["sprint:1"].head_run, record.head_run)
 
     def test_collaboration_call_is_persisted_then_fenced_and_blocked(self) -> None:
         self._write_source()

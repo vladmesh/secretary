@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -278,11 +279,17 @@ def confirm_launch_intent(
         # answered without one — noop mode, or a host seam that reports none — and that answer
         # replaces whatever run the previous head of this role left on the record.
         if head_run:
-            intent["head_run"] = dict(head_run)
+            # The pre-send ingress can have durably bound a provider source before this caller
+            # receives its launcher result.  Reconcile every copy that belongs to this launch
+            # before writing: pane/lifecycle evidence may move forward, but a stale result cannot
+            # write an unbound or conflicting source back over the handoff recovery will read.
+            canonical = _canonical_launch_head_run(record, str(intent.get("role") or ""), intent, head_run)
+            intent["head_run"] = canonical
             # The launcher writes this id into its heartbeat before Orca opens the pane. Keeping
             # the same value in the recovered intent makes the HeadRun, intent and file one
             # identity even if the ordinary record save lands later.
-            intent["run_id"] = str(head_run.get("run_id") or intent.get("run_id") or "")
+            intent["run_id"] = str(canonical.get("run_id") or intent.get("run_id") or "")
+            head_run = canonical
         _remember_head_run(record, str(intent.get("role") or ""), head_run)
     if delivery is not None:
         # Delivery confirmation shares the intent write with the run it confirms.  A recovery
@@ -302,6 +309,141 @@ def _remember_head_run(
     if head_run is None or not role:
         return
     setattr(record, role_field(role, "head_run"), dict(head_run))
+
+
+def _canonical_launch_head_run(
+    record: DispatcherRecord,
+    role: str,
+    intent: dict[str, Any],
+    reported: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the one post-delivery HeadRun a launch intent is permitted to write.
+
+    The ingress writer and the pane operation own different facts.  A callback can advance the
+    provider source while the pane operation adds its returned handle and `working` lifecycle.
+    Both must describe the exact same launch identity.  A foreign or damaged persistent copy is a
+    fence, never a prompt to reconstruct or attribute a different head.
+    """
+    values: list[dict[str, Any]] = []
+    stored = intent.get("head_run")
+    if isinstance(stored, dict) and stored.get("run_id"):
+        values.append(stored)
+    record_run = getattr(record, role_field(role, "head_run"), {}) if role else {}
+    if isinstance(record_run, dict) and record_run.get("run_id"):
+        values.append(record_run)
+    values.append(reported)
+    # The ordinary adapter paths predate provider source binding and intentionally retain their
+    # old launcher-result behavior.  The canonical merge is the Codex source-bearing contour;
+    # applying it to a generic snapshot would turn harmless fixture/registry differences into a
+    # new lifecycle fence without any source to protect.
+    if not any(_has_provider_source(value) for value in values):
+        return dict(reported)
+    try:
+        current = head_ops.HeadRun.from_json(values[0])
+        for value in values[1:]:
+            current = _merge_launch_head_runs(current, head_ops.HeadRun.from_json(value))
+    except HostError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise HostError(f"launch HeadRun handoff is unreadable or identity-mismatched: {exc}") from None
+    return current.to_json()
+
+
+def _has_provider_source(value: dict[str, Any]) -> bool:
+    policy = value.get("fanout_policy") if isinstance(value, dict) else None
+    return isinstance(policy, dict) and isinstance(policy.get("provider_source"), dict)
+
+
+def _merge_launch_head_runs(current: head_ops.HeadRun, later: head_ops.HeadRun) -> head_ops.HeadRun:
+    """Merge verified pane/lifecycle evidence without ever discarding a bound source."""
+    if (
+        not current.same_run(later)
+        or current.spec != later.spec
+        or current.workspace != later.workspace
+        or current.task_ref != later.task_ref
+        or current.role != later.role
+        or current.pid_file != later.pid_file
+    ):
+        raise HostError("launch HeadRun identity mismatch")
+    policy = _newer_provider_policy(current.fanout_policy, later.fanout_policy)
+    lifecycle_rank = {"spawned": 0, "working": 1, "finishing": 2, "exited": 3}
+    if lifecycle_rank.get(later.lifecycle, -1) < lifecycle_rank.get(current.lifecycle, -1):
+        lifecycle = current.lifecycle
+        stopped_by = current.stopped_by
+    else:
+        lifecycle = later.lifecycle
+        stopped_by = later.stopped_by
+    # The latest writer may know a newly returned pane identity; its empty fields never erase a
+    # retained address, because that address is also what a fenced adoption must use after a crash.
+    return replace(
+        later,
+        handle=later.handle or current.handle,
+        leaf=later.leaf or current.leaf,
+        lifecycle=lifecycle,
+        stopped_by=stopped_by,
+        fanout_policy=policy,
+    )
+
+
+def merge_launch_head_run(current: dict[str, Any], later: dict[str, Any]) -> dict[str, Any]:
+    """Merge two source-bearing writers for one run, fencing foreign identity at the boundary."""
+    try:
+        return _merge_launch_head_runs(
+            head_ops.HeadRun.from_json(current), head_ops.HeadRun.from_json(later),
+        ).to_json()
+    except HostError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise HostError(f"launch HeadRun handoff is unreadable: {exc}") from None
+
+
+def _newer_provider_policy(current: dict[str, Any], later: dict[str, Any]) -> dict[str, Any]:
+    """Choose a compatible provider source, preferring a bound cursor over stale launch state."""
+    current_source = current.get("provider_source") if isinstance(current, dict) else None
+    later_source = later.get("provider_source") if isinstance(later, dict) else None
+    if not isinstance(current_source, dict):
+        if isinstance(current, dict) and current.get("provider_source_required") is True:
+            raise HostError("persisted provider source is incomplete")
+        return dict(later)
+    if not isinstance(later_source, dict):
+        # A pane/lifecycle writer that knows nothing about a source has no authority to erase
+        # either the preflight baseline or the source binding it was handed.
+        return dict(current)
+    current_state = str(current_source.get("state") or "")
+    later_state = str(later_source.get("state") or "")
+    if current_state == "unbound":
+        preflight_keys = (
+            "version", "kind", "run_id", "head_run_fingerprint", "workspace", "role", "task_ref",
+            "root", "baseline",
+        )
+        if any(current_source.get(key) != later_source.get(key) for key in preflight_keys):
+            raise HostError("preflight provider source conflicts for one launch HeadRun")
+        if later_state in ("unbound", "bound"):
+            return dict(later)
+        return dict(current)
+    if current_state != "bound":
+        # This is a typed unavailable/identity-mismatch record.  It is intentionally not healed
+        # by a later local result which happens to carry a well-formed source.
+        raise HostError("persisted provider source is unavailable")
+    if later_state != "bound":
+        return dict(current)
+    identity_keys = (
+        "version", "kind", "run_id", "head_run_fingerprint", "workspace", "role", "task_ref",
+        "root", "baseline", "path", "session_id", "parent_thread_id", "initial_range",
+    )
+    if any(current_source.get(key) != later_source.get(key) for key in identity_keys):
+        raise HostError("bound provider sources conflict for one launch HeadRun")
+    current_cursor = current_source.get("cursor") if isinstance(current_source.get("cursor"), dict) else {}
+    later_cursor = later_source.get("cursor") if isinstance(later_source.get("cursor"), dict) else {}
+    current_line = current_cursor.get("line")
+    later_line = later_cursor.get("line")
+    if not isinstance(current_line, int) or not isinstance(later_line, int):
+        raise HostError("bound provider source cursor is malformed")
+    if current_line == later_line:
+        if current_cursor.get("digest") != later_cursor.get("digest"):
+            raise HostError("bound provider source cursor conflicts for one launch HeadRun")
+        return dict(later)
+    return dict(later if later_line > current_line else current)
 
 
 def launch_left_a_head(record: DispatcherRecord) -> bool:
