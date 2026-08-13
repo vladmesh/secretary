@@ -15,6 +15,7 @@ The main areas are:
 - [dispatcher operation and watchdogs](#auto-merging-green-cards);
 - [background roles and units](#background-role-telemetry);
 - [upgrade and runtime health](#upgrade).
+- [Codex provider-internal fan-out policy](#codex-provider-internal-fan-out-policy).
 
 ## Install and check the code
 
@@ -98,6 +99,25 @@ userinfo remains sensitive.
 
 Instance config holds no secret materialisation inputs. `reconcile` builds the host plan from bindings
 and config and never decrypts the store.
+
+## Codex provider-internal fan-out policy
+
+The installed Codex CLI has no accepted provider-native child-agent isolation boundary for Secretary
+roles. The current capability matrix, binary digest, strictly parsed candidate controls and exact
+typed rollout evidence are recorded in [Codex provider-internal fan-out capability
+evidence](evidence/codex-provider-fanout-2026-08-13.md). In particular, do not present
+`--disable multi_agent`, `hide_spawn_agent_metadata`, an instruction or a non-spawning response as
+an isolation check. The evidence includes the global v2 wait-disabled candidate and per-row typed
+strict-config and ignored-role state; a rejected or ignored configuration is not a capability result.
+
+Rerun the matrix only when a new approved disposable-auth probe is warranted, such as an installed
+Codex binary/model change or a candidate provider control. Use the committed
+`scripts/codex_capability_matrix.py` harness with a freshly isolated empty git worktree and
+`CODEX_HOME`; never direct it at a production home. The harness accepts an explicitly approved auth
+source, does not parse or log it, copies it only into the temporary home and deletes the copy before
+the next matrix row. Its JSON result has only raw-stream digests and typed event summaries. A live
+canary must use the preflight/`HeadRun` telemetry contract in the evidence, rather than promoting a
+fresh model response into policy.
 
 ## System requirements
 

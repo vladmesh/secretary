@@ -1,0 +1,28 @@
+{
+  "auth_source_used": false,
+  "captured_at_utc": "2026-08-13T04:21:27.256944+00:00",
+  "codex_executable": "/home/dev/.local/lib/node_modules/@openai/codex/bin/codex.js",
+  "codex_version": "codex-cli 0.147.0",
+  "command_shape": [
+    "CODEX_HOME=<disposable-empty-home>",
+    "codex",
+    "features",
+    "list"
+  ],
+  "disposable_codex_home": true,
+  "evidence_format": 1,
+  "exit_status": 0,
+  "missing_pinned_features": [],
+  "pinned_features": {
+    "multi_agent": {
+      "default_enabled": true,
+      "status": "stable"
+    },
+    "multi_agent_v2": {
+      "default_enabled": false,
+      "status": "stable"
+    }
+  },
+  "raw_stderr_sha256": "5e6523f6f200f8e7e5c3ba1fa4eff09896f4ff0089c88bbebb13ccf4cb7b4d8a",
+  "raw_stdout_sha256": "84657247e0d197ea156e4dffd1bd75e876659cc6fc4e28af4cf98aa6f0d40435"
+}
