@@ -2942,10 +2942,11 @@ class HostLaunchContourTests(unittest.TestCase):
             "the round is in the document, not in the pane",
         )
 
-    def test_a_running_retained_claude_replays_delivery_after_a_crash_before_send(self) -> None:
-        """SIGCONT alone is not a delivered continuation.
+    def test_a_running_retained_claude_replays_delivery_after_a_crash_after_readiness(self) -> None:
+        """SIGCONT after a ready probe is still not a delivered continuation.
 
-        The first call models a dispatcher dying in that boundary. The recovery call sees a
+        The first call models a dispatcher dying after the readiness boundary but before the
+        send. The recovery call sees a
         running but idle provider, waits for its TUI to settle, sends the prompt and confirms the
         turn rather than treating process liveness as delivery evidence.
         """
@@ -2975,7 +2976,8 @@ class HostLaunchContourTests(unittest.TestCase):
             real_signal(pid_file, signal_number, **kwargs)
             raise DispatcherDied()
 
-        with mock.patch.object(self.host, "_signal_head", die_after_continuing):
+        with mock.patch.object(self.host, "_signal_head", die_after_continuing), \
+             mock.patch.object(self.host, "_run_json", return_value={"wait": {"satisfied": True}}):
             with self.assertRaises(DispatcherDied):
                 self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
 

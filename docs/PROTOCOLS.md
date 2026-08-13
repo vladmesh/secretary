@@ -1005,7 +1005,13 @@ confirmably suspended is stopped with a confirmed stop and replaced exactly once
 updates `TASK.md` with the failure and the round's report identity, persists a pending-delivery
 boundary before SIGCONT, then checkpoints confirmation only after the provider durably records the
 continuation user turn. Terminal activity is a recovery hint for records without that boundary, not
-the delivery proof. Recovery after a crash cannot mistake the previous `done` report for a new
+the delivery proof. A refused `tui-idle` wait carrying `timeout` or `satisfied:false` is explicit
+busy evidence, not a transport failure: the readiness wait runs before SIGCONT, so the retained
+HeadRun, pane binding, workspace and pending continuation remain exactly as recorded. Its durable
+bounded retry delay is not a delivery acknowledgement and never authorizes a stop, replacement or
+new lifecycle attribution. Unavailable transport, malformed evidence and `terminal_handle_stale`
+remain separately typed conservative failures; absent fields on historical evidence are unknown,
+never busy. Recovery after a crash cannot mistake the previous `done` report for a new
 completion, replay an incomplete delivery as if it were confirmed, or overwrite a confirmed
 continuation. A checkpointed delivery is finished on the next tick, so the rework opens its own
 round and the reuse is recorded on the card once and only once. A pending delivery whose head is

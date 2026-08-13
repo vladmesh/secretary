@@ -26,6 +26,7 @@ from secretary.dispatcher_tui import (
     READINESS_BLOCKED,
     READINESS_BUSY,
     READINESS_READY,
+    delivery_readiness_state,
     terminal_readiness,
 )
 from secretary.dispatcher_types import (
@@ -461,7 +462,10 @@ def _record_review_delivery_failure(record: DispatcherRecord, exc: Exception) ->
     # The reviewer can receive its prompt before a later launch step, such as freezing the
     # retained worker, fails.  That successful receipt still has to survive recovery, but it is
     # not a delivery failure merely because the enclosing reviewer bring-up later aborted.
-    if not bool(evidence.get("turn_confirmed")):
+    if (
+        not bool(evidence.get("turn_confirmed"))
+        and delivery_readiness_state(evidence) != READINESS_BUSY
+    ):
         record.review_delivery_failures += 1
 
 

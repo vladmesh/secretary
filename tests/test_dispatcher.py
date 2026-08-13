@@ -4194,6 +4194,67 @@ class DispatcherRuntimeTests(unittest.TestCase):
             self.reader.show("secretary-510-pilot")["comments"][-1]["body"],
         )
 
+    def test_a_busy_retained_continuation_preserves_the_exact_worker_and_retries_later(self) -> None:
+        """A readiness timeout is not a failed delivery or permission to replace its worker."""
+        self.start_dispatcher()
+        self.host.fail_resume_worker_reason = ""
+        self._run_worker_to_validate()
+        before = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
+        worker_identity = (
+            before["handle"], before["worker_leaf"], before["worker_pid_file"],
+            before["workspace"], before["worker_head_run"],
+        )
+        self.assertEqual(self.tick()["action"], "review-started")
+        self._review_red()
+        busy = HostError("retained worker continuation was not delivered: tui-idle timeout")
+        busy.evidence = {
+            "subject": "worker-continuation",
+            "handle": before["handle"],
+            "stage": "none",
+            "readiness_state": "busy",
+            "readiness_before": "busy",
+            "reason": "readiness-busy",
+        }
+
+        def refuse_busy(_task, _record) -> None:
+            self.host.calls.append("resume_worker")
+            raise busy
+
+        with mock.patch.object(self.host, "resume_worker", side_effect=refuse_busy):
+            held = self._park_and_decide("rework")
+
+        self.assertEqual(held["action"], "review-red-worker-busy")
+        self.assertNotIn("restart_worker", self.host.calls)
+        self.assertNotIn("stop_head:worker", self.host.calls)
+        record = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(
+            (record["handle"], record["worker_leaf"], record["worker_pid_file"],
+             record["workspace"], record["worker_head_run"]),
+            worker_identity,
+        )
+        continuation = record["worker_continuation"]
+        self.assertEqual(continuation["stage"], "delivery_pending")
+        self.assertTrue(continuation["session_held"])
+        self.assertEqual(continuation["busy_attempts"], 1)
+        self.assertGreater(continuation["busy_next_at"], time.time())
+        self.assertEqual(record["worker_delivery_failures"], 0)
+        self.assertEqual(record["worker_delivery_evidence"]["readiness_state"], "busy")
+
+        deferred = self.tick()
+        self.assertEqual(deferred["action"], "review-red-worker-busy")
+        self.assertNotIn("restart_worker", self.host.calls)
+
+        payload = self.runtime.production_state.load()
+        payload["records"]["secretary-510-pilot"]["worker_continuation"]["busy_next_at"] = time.time() - 1
+        self.runtime.production_state.save(payload)
+        delivered = self.tick()
+
+        self.assertEqual(delivered["action"], "review-red-reused-worker")
+        self.assertEqual(self.host.calls.count("resume_worker"), 2)
+        self.assertNotIn("restart_worker", self.host.calls)
+        after_delivery = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(after_delivery["worker_continuation"], {})
+
     def test_a_red_review_retries_an_unconfirmed_stop_before_a_replacement(self) -> None:
         """A stop the host will not confirm never earns a replacement, only the next tick."""
         self.start_dispatcher()
@@ -12164,6 +12225,8 @@ class RecordingReviewHost(CommandHostRuntime):
         if op == "create":
             return {"terminal": {"handle": "term-created", "paneKey": "tab-1:leaf-created"}}
         if op == "wait":
+            if isinstance(self.wait_answer, Exception):
+                raise self.wait_answer
             return self.wait_answer
         return {}
 
@@ -12580,6 +12643,24 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
         self.assertTrue(evidence["submit_count"], "the submits are counted, the text is not kept")
         self.assertNotIn("terminator", json.dumps(evidence), "no prompt text in the telemetry")
 
+    def test_a_busy_readiness_wait_keeps_the_live_reviewer_run_and_pane(self) -> None:
+        """A 60s `tui-idle` timeout is evidence the reviewer pane is working, not absent."""
+        host = NudgingReviewHost(self.root)
+        host.wait_answer = HostError(
+            'orca terminal wait --terminal term-review --for tui-idle --timeout-ms 60000 '
+            'failed: {"error":{"code":"timeout","message":"timeout"}}'
+        )
+
+        with self.assertRaises(HeadLaunchAborted) as caught:
+            host.start_review(self.task, self._record())
+
+        evidence = caught.exception.evidence
+        self.assertEqual(evidence["readiness_state"], "busy")
+        self.assertEqual(evidence["reason"], "readiness-busy")
+        self.assertEqual((caught.exception.handle, caught.exception.leaf), ("term-review", "leaf-review"))
+        self.assertEqual(host.closed_panes(), [], "a busy reviewer is never closed or replaced")
+        self.assertNotIn("close", host.ops(), "the worker remains owned until review is settled")
+
     def test_a_document_that_cannot_be_written_stops_the_bring_up_before_any_pane(self) -> None:
         """An unprompted reviewer would sit at its prompt forever; the caller's infrastructure
         retry is the right answer to a launch that never started."""
@@ -12811,6 +12892,52 @@ class WorkerLifecycleTests(unittest.TestCase):
             self.assertEqual(call[call.index("--terminal") + 1], "term-alias")
         self.assertEqual(record.worker_head_run["handle"], "term-alias")
         self.assertEqual(record.worker_head_run["lifecycle"], "working")
+
+    def test_a_busy_continuation_wait_does_not_signal_the_retained_worker(self) -> None:
+        """The signal is inside the shared delivery path, after its readiness wait."""
+        host = NudgingReviewHost(self.root)
+        host.wait_answer = HostError(
+            'orca terminal wait --for tui-idle --timeout-ms 60000 failed: '
+            '{"error":{"code":"timeout"}}'
+        )
+        pid_file = self.root / "retained.pid"
+        record = self._record(
+            worker_leaf="leaf-worker",
+            worker_pid_file=str(pid_file),
+            worker_run={"adapter": "codex", "codex_mode": "tui"},
+            report_generation=2,
+            worker_continuation=WorkerContinuation(
+                stage=WorkerContinuationStage.DELIVERY_PENDING,
+                phase="review",
+                session_held=True,
+                sent_at=time.time(),
+            ),
+        )
+        record.worker_head_run = head_ops.HeadRun(
+            run_id="retained-busy-run",
+            spec=head_ops.HeadSpec(profile_id="codex", adapter="codex"),
+            workspace=str(self.workspace),
+            task_ref=head_ops.TaskRef.card(self.task["ref"]),
+            handle=record.handle,
+            leaf=record.worker_leaf,
+            pid_file=str(pid_file),
+        ).to_json()
+
+        with mock.patch.object(
+            host,
+            "_head_status",
+            return_value={"known": True, "alive": True, "match": True,
+                          "state": "live-match", "stopped": True},
+        ), mock.patch.object(host, "_signal_head") as signal_head:
+            with self.assertRaises(HostError) as raised:
+                host.resume_worker(self.task, record)
+
+        evidence = raised.exception.evidence
+        self.assertEqual(evidence.readiness_state, "busy")
+        self.assertEqual(evidence.reason, "readiness-busy")
+        signal_head.assert_not_called()
+        self.assertEqual(host.sends(), [])
+        self.assertEqual(record.worker_head_run["run_id"], "retained-busy-run")
 
     def test_a_stopped_worker_records_who_stopped_it_and_that_survives_a_restart(self) -> None:
         host = NudgingReviewHost(self.root)

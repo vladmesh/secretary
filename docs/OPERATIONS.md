@@ -760,6 +760,21 @@ Prompt delivery does not poll the audit log for the observer's resume. It establ
 acceptance only; the following production reconciliation reads the durable resume and advances the
 delivery cursor. This keeps a ready or slow pane from multiplying full audit scans inside one tick.
 
+A refused `terminal wait --for tui-idle` has its own durable evidence state. Orca's failed-command
+body `error.code: timeout`, and a body whose `wait.satisfied` is false, mean `busy`: Orca observed
+the owned pane working before any prompt was sent. The dispatcher leaves that exact HeadRun, pane
+handle and leaf, workspace and pending delivery/acknowledgement marker in place. It does not signal,
+close, stop, clean up, release, reattribute or replace that head. An observer wake returns to its
+persisted waiting-for-idle state under the turn ceiling; a retained worker continuation records a
+bounded durable backoff and remains pending until one later delivery reaches the ordinary
+confirmation boundary. Busy is neither a failed wake nor an acknowledgement.
+
+`unavailable` and `stale_handle` are different evidence states. An unreadable or malformed wait,
+or a real transport refusal, is unavailable; `error.code: terminal_handle_stale` is stale-handle
+evidence. Neither historical evidence that lacks this typed field nor either of those current states
+is treated as busy. They retain their existing conservative recovery paths, including the normal
+liveness, launch-intent and confirmed-stop fences.
+
 The head profile comes from the sprint's own `sprint_observer` field: one concrete profile, or `none` for
 a sprint that runs without an observer (see [Protocols](PROTOCOLS.md#the-declared-observer)). It is never
 read from `role_defaults.observer` — a sprint that declares a profile the registry does not have is fenced,

@@ -29,7 +29,9 @@ from triggered_agents.runtime.tui_delivery import (
     READINESS_BLOCKED,
     READINESS_BUSY,
     READINESS_READY,
+    READINESS_STALE_HANDLE,
     READINESS_UNKNOWN,
+    READINESS_UNAVAILABLE,
     STAGE_ACKNOWLEDGED,
     STAGE_ENTER_ACCEPTED,
     STAGE_PAYLOAD_WRITTEN,
@@ -40,6 +42,7 @@ from triggered_agents.runtime.tui_delivery import (
     TuiDeliveryError,
     composer_fingerprint,
     deliver_interactive_prompt,
+    delivery_readiness_state,
     output_cursor,
     read_pane_text,
     strip_ansi,
@@ -55,7 +58,9 @@ __all__ = [
     "READINESS_BLOCKED",
     "READINESS_BUSY",
     "READINESS_READY",
+    "READINESS_STALE_HANDLE",
     "READINESS_UNKNOWN",
+    "READINESS_UNAVAILABLE",
     "STAGE_ACKNOWLEDGED",
     "STAGE_ENTER_ACCEPTED",
     "STAGE_PAYLOAD_WRITTEN",
@@ -69,6 +74,7 @@ __all__ = [
     "close_terminal_strict",
     "composer_fingerprint",
     "deliver_interactive_prompt",
+    "delivery_readiness_state",
     "deliver_tui_prompt",
     "latest_claude_user_turn_for",
     "latest_user_turn_for",
@@ -109,6 +115,7 @@ def deliver_tui_prompt(
     prompt_text: str | None = None,
     subject: str = "",
     document_path: str = "",
+    before_send: Callable[[], None] | None = None,
 ) -> DeliveryOutcome:
     """Deliver one provider TUI prompt through the shared transport and confirmation path.
 
@@ -141,6 +148,7 @@ def deliver_tui_prompt(
         ),
         subject=subject,
         document_path=document_path,
+        before_send=before_send,
     )
 
 

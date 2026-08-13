@@ -159,6 +159,7 @@ from secretary.dispatcher_tui import (
     TuiDeliveryError,
     close_terminal_strict as _close_tui_terminal_strict,
     deliver_interactive_prompt as _deliver_interactive_prompt,
+    delivery_readiness_state as _delivery_readiness_state,
     terminal_readiness as _terminal_readiness,
     terminal_turn_started as _terminal_turn_started,
     turn_started_confirm as _turn_started_confirm,
@@ -643,6 +644,7 @@ class DispatcherHeadTransport:
     prompt_file: str = ""
     adapter: str = ""
     role: str = ""
+    before_send: Callable[[], None] | None = None
 
     def deliver(
         self,
@@ -665,6 +667,7 @@ class DispatcherHeadTransport:
             prompt_text=pointer.text or None,
             subject=subject,
             document_path=pointer.document,
+            before_send=self.before_send,
         )
 
     def close(self, run: head_ops.HeadRun, *, host: SessionHost) -> None:
@@ -2384,7 +2387,12 @@ class CommandHostRuntime:
         return head_ops.TaskRef.standing(role or "head", document=pointer)
 
     def _head_transport(
-        self, workspace: str, prompt_file: str = "", adapter: str = "", role: str = ""
+        self,
+        workspace: str,
+        prompt_file: str = "",
+        adapter: str = "",
+        role: str = "",
+        before_send: Callable[[], None] | None = None,
     ) -> "DispatcherHeadTransport":
         """This product's delivery and close semantics, for the operation to perform through
         the host it is running on.
@@ -2397,7 +2405,7 @@ class CommandHostRuntime:
         this runtime's command runner: whatever the operation reaches, it reaches through the
         `SessionHost` it was given.
         """
-        return DispatcherHeadTransport(self, workspace, prompt_file, adapter, role)
+        return DispatcherHeadTransport(self, workspace, prompt_file, adapter, role, before_send)
 
     @staticmethod
     def _run_heartbeat_identity(run: head_ops.HeadRun, role: str) -> dict[str, str]:
@@ -2803,8 +2811,12 @@ class CommandHostRuntime:
             )
         except PromptDocumentError as exc:
             raise HostError(f"the continuation pointer could not be built: {exc}") from None
+        activate = None
         if status.get("stopped"):
-            self._signal_head(
+            # The delivery transport waits for `tui-idle` before this callback.  In particular a
+            # readiness timeout that says the pane is busy leaves the retained HeadRun frozen:
+            # it does not become a SIGCONT followed by a replacement recovery.
+            activate = lambda: self._signal_head(
                 record.worker_pid_file,
                 signal.SIGCONT,
                 run=record.worker_head_run,
@@ -2812,7 +2824,11 @@ class CommandHostRuntime:
                 leaf=record.worker_leaf,
             )
         self._nudge_worker(
-            record, pointer, "retained worker continuation", subject="worker-continuation",
+            record,
+            pointer,
+            "retained worker continuation",
+            subject="worker-continuation",
+            before_send=activate,
         )
 
     def _nudge_worker(
@@ -2822,6 +2838,7 @@ class CommandHostRuntime:
         what: str,
         *,
         subject: str,
+        before_send: Callable[[], None] | None = None,
     ) -> None:
         """Point this card's live worker at one thing, through the head operation (secretary-1412).
 
@@ -2849,6 +2866,7 @@ class CommandHostRuntime:
                 transport=self._head_transport(
                     record.workspace, "TASK.md",
                     self._prompt_adapter(record.worker_run, record.head),
+                    before_send=before_send,
                 ),
                 subject=subject,
             )
@@ -4203,6 +4221,10 @@ class DispatcherRuntime:
                     task, record, records, payload, attempt_id,
                     phase=continuation.phase or "gate",
                 )
+            if not continuation.busy_retry_due(time.time()):
+                return _retained_worker_busy_deferred(
+                    ref, record, attempt_id, continuation.phase or "gate"
+                )
             # Nothing is woken from here. The suspension this delivery was opened over is a fact
             # of the tick that died: terminal recovery or an operator may have resumed that head
             # since, and re-entering the transition is what asks the heartbeat again before the
@@ -5344,6 +5366,17 @@ class DispatcherRuntime:
             try:
                 self.host.resume_worker(task, record)
             except HostError as exc:
+                if _delivery_readiness_state(exc) == READINESS_BUSY:
+                    # The shared delivery boundary observed an owned pane working before it sent
+                    # anything. That is neither acknowledgement nor a dead-head vote: preserve
+                    # the exact continuation and try its durable, bounded schedule later.
+                    _record_worker_delivery_evidence(record, exc)
+                    delay = continuation.defer_busy(time.time())
+                    records[ref] = record
+                    self.save_records(payload, records)
+                    return _retained_worker_busy_deferred(
+                        ref, record, attempt_id, phase, delay=delay
+                    )
                 _record_worker_delivery_evidence(record, exc, failure=True)
                 records[ref] = record
                 self.save_records(payload, records)
@@ -6560,8 +6593,34 @@ def _record_worker_delivery_evidence(
     if not evidence:
         return
     record.worker_delivery_evidence = evidence
-    if failure:
+    if failure and _delivery_readiness_state(evidence) != READINESS_BUSY:
         record.worker_delivery_failures += 1
+
+
+def _retained_worker_busy_deferred(
+    reference: str,
+    record: DispatcherRecord,
+    attempt_id: str,
+    phase: str,
+    *,
+    delay: int | None = None,
+) -> dict[str, Any]:
+    """Report a retained continuation held by its own busy pane without changing ownership."""
+    continuation = record.worker_continuation
+    remaining = max(0, int(continuation.busy_next_at - time.time()))
+    wait = delay if delay is not None else remaining
+    return {
+        "status": "degraded",
+        "step": "review" if phase == "review" else "gate",
+        "pilot_ref": reference,
+        "attempt_id": record.attempt_id or attempt_id,
+        "action": f"{phase}-red-worker-busy",
+        "attempts": continuation.busy_attempts,
+        "reason": (
+            "the retained worker pane is busy before its continuation was delivered; its exact "
+            f"HeadRun remains owned and the pending delivery retries in {wait}s"
+        ),
+    }
 
 
 def _report_nudge_prompt(generation: int, reference: str) -> str:
