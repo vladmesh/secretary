@@ -1147,6 +1147,17 @@ class FakeHost:
             "head_run_id": run_id, "head_run_fingerprint": fingerprint,
         }
 
+    def observer_provider_progress(self, record) -> dict[str, str]:
+        """The observer twin of the shared exact-HeadRun progress seam."""
+        run_id, fingerprint = head_run_binding(record.head_run)
+        if not run_id:
+            return {"state": "unavailable", "reason": "fake has no persisted observer HeadRun"}
+        return {
+            "state": "observed", "admission": "accepted", "source": "fake-bound-session",
+            "source_fingerprint": "f" * 32, "cursor": "fake:unchanged",
+            "head_run_id": run_id, "head_run_fingerprint": fingerprint,
+        }
+
     def observer_pid_file(self, reference: str) -> str:
         return str(self.root / "observers" / f"{reference.replace(':', '-')}.pid")
 
@@ -1171,9 +1182,12 @@ class FakeHost:
         leaf = f"leaf:{handle}"
         head_run = head_ops.HeadRun(
             run_id=heartbeat_run_id or "fake-observer-run",
-            spec=head_ops.HeadSpec(profile_id=head, adapter="codex"),
+            spec=head_ops.HeadSpec(
+                profile_id=head, adapter="codex", model="gpt-5.6-terra"
+            ),
             workspace=str(workspace),
             task_ref=head_ops.TaskRef.sprint(reference),
+            role="observer",
             handle=handle,
             leaf=leaf,
             pid_file=str(pid_file),

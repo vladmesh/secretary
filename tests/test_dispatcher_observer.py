@@ -21,7 +21,7 @@ from secretary.dispatcher import (
 )
 from secretary.dispatcher_heartbeat import heartbeat_identity
 from secretary.dispatcher_observer_fence import EVENT_CLEARED, EVENT_FENCED
-from triggered_agents.runtime.head import HeadCommand
+from triggered_agents.runtime.head import HeadCommand, HeadRun
 from secretary.dispatcher_tui import DeliveryEvidence, TuiDeliveryError
 from secretary.dispatcher_observer import (
     EVENT_DEFERRED,
@@ -62,7 +62,9 @@ from secretary.role_env import (
 from secretary.status import _observers as status_observers
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter, _now
 from triggered_agents.runtime.agent_prompt_transport import BRACKETED_PASTE_END, BRACKETED_PASTE_START
+from triggered_agents.runtime import codex_preflight
 from triggered_agents.runtime.codex_preflight import ensure_codex_workspace_trusted
+from secretary.dispatcher_worker_lifecycle import head_run_binding
 
 from tests.observer_identity import as_observer, bind_observer
 from tests.fanout_fixtures import accepted_transport_run
@@ -285,6 +287,49 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         observers[reference].launch_next_at = time.time() - 1
         put_observers(payload, observers)
         self.runtime.production_state.save(payload)
+
+    def install_observer_provider_source(self, *, precontract: bool = False) -> None:
+        """Give the retained fake observer the same persisted source shape production reads."""
+        payload = self.runtime.production_state.load()
+        record = load_observers(payload)["sprint:1"]
+        current = HeadRun.from_json(record.head_run)
+        policy = accepted_transport_run(
+            record.head,
+            role="observer",
+            workspace=record.workspace,
+            task_ref=HeadRun.from_json(record.head_run).task_ref,
+            pid_file=record.pid_file,
+            run_id=current.run_id,
+        ).fanout_policy
+        source: dict[str, object] = {
+            "version": 1,
+            "kind": "codex_session_event_jsonl",
+            "state": "unbound",
+            "root": str(self.data_dir / "codex-sessions"),
+            "baseline": [],
+        }
+        if not precontract:
+            source.update(codex_preflight.codex_provider_source_descriptor(current))
+        record.head_run = current.with_fanout_policy({
+            **policy,
+            "provider_source_required": True,
+            "provider_source": source,
+        }).to_json()
+        put_observers(payload, {"sprint:1": record})
+        self.runtime.production_state.save(payload)
+
+    @staticmethod
+    def observer_progress(record: ObserverRecord, cursor: str) -> dict[str, str]:
+        run_id, fingerprint = head_run_binding(record.head_run)
+        return {
+            "state": "observed",
+            "admission": "accepted",
+            "source": "fake-observer-session",
+            "source_fingerprint": "a" * 32,
+            "cursor": cursor,
+            "head_run_id": run_id,
+            "head_run_fingerprint": fingerprint,
+        }
 
     # lifecycle ---------------------------------------------------------------
 
@@ -1703,6 +1748,142 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual([row["action"] for row in self.actions(replaced)], ["observer-relaunched"])
         self.assertIn("turn ceiling", self.actions(replaced)[0]["reason"])
         self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
+
+    def test_exact_provider_progress_outranks_idle_past_the_legacy_turn_ceiling(self) -> None:
+        """A live Codex rollout is authority even when the pane looks ready to wake."""
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.install_observer_provider_source()
+        cursors = iter(("cursor:before", "cursor:after"))
+        self.host.observer_provider_progress = lambda record: self.observer_progress(  # type: ignore[method-assign]
+            record, next(cursors)
+        )
+        self.host.observer_status_result = {"last_activity": time.time(), "idle": False}
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="observer-progress-precedence-event",
+        )
+
+        baseline = self.runtime.production_tick()
+        self.assertEqual([row["action"] for row in self.actions(baseline)], ["observer-wake-waiting"])
+        self.age_delivery(4 * 60 * 60, deadline=True)
+        self.host.observer_status_result = {"last_activity": time.time(), "idle": True}
+        progressed = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(progressed)], ["observer-wake-progressing"])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.wake_liveness.state.value, "progressed")
+        self.assertEqual(record.wake_liveness.busy_attempts, 0)
+        self.assertEqual(self.host.observer_nudges, [])
+        self.assertEqual(self.host.stopped_observers, [])
+
+    def test_precontract_unbound_observer_is_fenced_relaunched_and_acknowledges_same_batch(self) -> None:
+        """No workspace scan may upgrade an old source into progress for a live observer."""
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.install_observer_provider_source(precontract=True)
+        old = self.observers()["sprint:1"]
+        self.host.observer_status_result = {"last_activity": time.time(), "idle": False}
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="rollout complete", request_id="observer-precontract-unbound-event",
+        )
+        event_id = next(
+            event["event_id"]
+            for event in self.audit.events()
+            if event.get("request_id") == "observer-precontract-unbound-event:semantic"
+        )
+
+        replaced = self.runtime.production_tick()
+
+        action = self.actions(replaced)[0]
+        self.assertEqual(action["action"], "observer-relaunched")
+        self.assertIn("cannot be rebound from workspace journal discovery", action["reason"])
+        self.assertLess(
+            self.host.calls.index("stop_observer"),
+            len(self.host.calls) - 1 - self.host.calls[::-1].index("prepare_observer"),
+        )
+        self.assertEqual(self.host.codex_provider_ingresses, [])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.delivery.through_event, event_id)
+        self.assertEqual(record.wake_liveness.head_run_id, old.head_run["run_id"])
+        self.assertEqual(record.wake_liveness.state.value, "unavailable")
+        self.assertEqual(record.wake_liveness.terminal_outcome, "replacement")
+
+        # Reload proves the old terminal outcome survives while the replacement carries the same
+        # acknowledgement marker. Its own resume is the only acknowledgement authority.
+        restored = self.observers()["sprint:1"]
+        self.assertEqual(restored.wake_liveness.terminal_outcome, "replacement")
+        entry = {
+            "selected_step": "read board", "selected_why": "rollout complete",
+            "rejected_alternatives": "wait", "current_task": "secretary-510-pilot",
+            "dod_state": "open", "next_safe_step": "resume",
+        }
+        self.acknowledge_delivery(entry, request_id="observer-precontract-replacement-ack")
+        self.host.observer_status_result = {"last_activity": time.time(), "idle": True}
+        acknowledged = self.runtime.production_tick()
+        self.assertEqual([row["action"] for row in self.actions(acknowledged)], ["observer-idle"])
+        self.assertEqual(self.observers()["sprint:1"].delivery.acknowledged_through, event_id)
+
+    def test_stalled_residual_composer_reaches_bounded_replacement_without_terminal_input(self) -> None:
+        """A stale composer is evidence on a bounded exact-cursor episode, never a 3h wait."""
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.install_observer_provider_source()
+        self.host.observer_provider_progress = lambda record: self.observer_progress(  # type: ignore[method-assign]
+            record, "cursor:stalled"
+        )
+        self.host.observer_status_result = {
+            "last_activity": time.time(),
+            "idle": False,
+            "delivery_evidence": {"reason": "payload-left-in-composer"},
+        }
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="observer-stalled-composer-event",
+        )
+
+        self.assertEqual(
+            [row["action"] for row in self.actions(self.runtime.production_tick())],
+            ["observer-wake-waiting"],
+        )
+        first = self.runtime.production_tick()
+        second = self.runtime.production_tick()
+        terminal = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(first)], ["observer-wake-no-progress"])
+        self.assertEqual([row["action"] for row in self.actions(second)], ["observer-wake-no-progress"])
+        self.assertEqual([row["action"] for row in self.actions(terminal)], ["observer-relaunched"])
+        self.assertNotIn("nudge_observer", self.host.calls)
+        self.assertEqual(self.host.calls.count("stop_observer"), 1)
+        liveness = self.observers()["sprint:1"].wake_liveness
+        self.assertEqual(liveness.terminal_outcome, "replacement")
+        self.assertEqual(liveness.no_progress_evidence, "completed_turn_residual_composer")
+
+    def test_unadmitted_observer_progress_never_refreshes_a_current_episode(self) -> None:
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.install_observer_provider_source()
+        self.host.observer_provider_progress = lambda _record: {  # type: ignore[method-assign]
+            "state": "identity_mismatch", "reason": "foreign observer HeadRun",
+        }
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="observer-foreign-provider-event",
+        )
+
+        outcome = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(outcome)], ["observer-wake-liveness-unavailable"])
+        liveness = self.observers()["sprint:1"].wake_liveness
+        self.assertEqual(liveness.state.value, "unknown")
+        self.assertTrue(liveness.source_rejected)
+        self.assertEqual(self.host.observer_nudges, [])
+        self.assertEqual(self.host.stopped_observers, [])
 
     def test_a_long_card_mid_turn_is_not_torn_down_by_the_turn_ceiling(self) -> None:
         """The negative case: a busy head past its acknowledgement deadline is still working."""

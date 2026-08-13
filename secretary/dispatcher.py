@@ -1321,6 +1321,32 @@ class CommandHostRuntime:
         # Only the idle-recovery path needs that clock, and it says so itself when it is missing.
         return status
 
+    def observer_provider_progress(self, record: Any) -> dict[str, str]:
+        """Read provider progress only from this observer's persisted HeadRun.
+
+        This deliberately has no workspace discovery fallback.  A Codex source that was not bound
+        by the run which opened the pane stays typed unavailable, so an upgrade cannot attribute
+        another session's journal to a retained observer.
+        """
+        stored = getattr(record, "head_run", {})
+        expected_workspace = str(getattr(record, "workspace", "") or "")
+        expected_sprint = str(getattr(record, "sprint", "") or "")
+        try:
+            run = head_ops.HeadRun.from_json(stored)
+        except (head_ops.HeadRunError, TypeError, ValueError):
+            return {"state": "unavailable", "reason": "persisted observer HeadRun is unavailable"}
+        if (
+            run.workspace != expected_workspace
+            or run.task_ref.kind != "sprint"
+            or run.task_ref.ref != expected_sprint
+            or (run.role and run.role != OBSERVER_ROLE)
+        ):
+            return {
+                "state": "identity_mismatch",
+                "reason": "persisted observer HeadRun binding mismatches observer record",
+            }
+        return _provider_progress_for_run(run)
+
     def nudge_observer(self, record: Any) -> str:
         """Give an idle observer one event-driven turn without replacing its head.
 

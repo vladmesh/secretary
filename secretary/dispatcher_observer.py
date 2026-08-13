@@ -43,13 +43,12 @@ Liveness is the same pid heartbeat the worker and reviewer get (`head_process_st
 been launched has not written it, so an unknown pid counts as alive for a short grace window and as
 dead afterwards.
 
-Two separate ceilings bound an event delivery, and they answer different questions. The
-acknowledgement deadline says how long one delivery may stay unacknowledged before it is sent
-again; it is armed by the delivery and it is never compared against the age of the event. The turn
-ceiling says how long one head may hold a batch without ever being seen ready for input; it is much
-longer, because firing it interrupts a head that by all available evidence is still working. An
-observer seen idle with its batch still unacknowledged does not wait for either: the tick that
-observes the idleness redelivers.
+The acknowledgement deadline says how long one sent delivery may stay unacknowledged before it is
+sent again; it is armed by the delivery and it is never compared against the age of the event. A
+current Codex HeadRun uses its own persisted provider cursor while the pane is non-idle: fresh
+progress outranks `tui-idle`, and unchanged admitted progress reaches the bounded identity-fenced
+replacement path. The legacy turn ceiling remains only for observers which have no attested provider
+source. An observer seen idle with its batch still unacknowledged redelivers on that tick.
 """
 
 from __future__ import annotations
@@ -64,7 +63,18 @@ from typing import Any
 
 from secretary.dispatcher_state import now_rfc3339, request_token
 from secretary.dispatcher_launch import merge_launch_head_run
-from secretary.dispatcher_tui import READINESS_BUSY, delivery_readiness_state
+from secretary.dispatcher_tui import (
+    COMPOSER_EMPTY,
+    COMPOSER_UNKNOWN,
+    READINESS_BUSY,
+    delivery_readiness_state,
+)
+from secretary.dispatcher_worker_lifecycle import (
+    CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS,
+    ContinuationLivenessState,
+    WorkerContinuationLiveness,
+    head_run_binding,
+)
 from secretary.dispatcher_watchdog import (
     heartbeat_is_live_match,
     heartbeat_is_mismatch,
@@ -105,10 +115,9 @@ OBSERVER_SKILL = "observe-sprint"
 # How long one delivery may stay unacknowledged before it is sent again. Armed by the delivery, so
 # it measures the silence of this head on this batch and nothing else.
 OBSERVER_ACK_DEADLINE_DEFAULT_SECONDS = 30 * 60
-# How long one head may hold a batch while never being seen ready for input. Deliberately far
-# above the acknowledgement deadline: a resend to an idle head costs a duplicate prompt, while
-# this ceiling ends a delivery held by a head that still looks busy, so it has to outlast the
-# longest legitimate observer turn on a long card.
+# Compatibility ceiling for observers without an attested provider-progress source.  A current
+# Codex HeadRun never consults it: its exact provider cursor drives the durable no-progress ladder.
+# Keep this for historical non-Codex/no-source records until they leave the fleet.
 OBSERVER_TURN_CEILING_DEFAULT_SECONDS = 3 * 60 * 60
 OBSERVER_WAKE_RETRY_INITIAL_SECONDS = 30
 OBSERVER_WAKE_RETRY_MAX_SECONDS = 5 * 60
@@ -175,6 +184,15 @@ class DeliveryStage(str, Enum):
     DELIVERY_INTENT = "delivery_intent"
     AWAITING_ACK = "awaiting_ack"
     RETRY_DEFERRED = "retry_deferred"
+
+
+class ObserverWakeLiveness(WorkerContinuationLiveness):
+    """The exact-run provider-progress episode for one observer event batch.
+
+    The state shape is deliberately shared with worker/reviewer continuation liveness.  It records
+    no provider text and never gets rebound from a workspace scan: a new observer HeadRun opens a
+    new episode, while a recovered episode accepts only the binding it already names.
+    """
 
 
 @dataclass
@@ -361,6 +379,9 @@ class ObserverRecord:
     run: dict[str, Any] = field(default_factory=dict)
     # `run` is routing telemetry.  This is the actual runtime HeadRun used to bind the heartbeat.
     head_run: dict[str, Any] = field(default_factory=dict)
+    # Exact-HeadRun provider progress for an event delivery held by this observer.  A missing or
+    # malformed value is historical/unknown, never permission to bind today's workspace journal.
+    wake_liveness: ObserverWakeLiveness = field(default_factory=ObserverWakeLiveness)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -391,6 +412,7 @@ class ObserverRecord:
             "launch_next_at": self.launch_next_at,
             "run": dict(self.run),
             "head_run": dict(self.head_run),
+            "wake_liveness": self.wake_liveness.to_json(),
         }
 
     @classmethod
@@ -433,6 +455,7 @@ class ObserverRecord:
             launch_next_at=_float(payload.get("launch_next_at")),
             run=dict(run) if isinstance(run, dict) else {},
             head_run=(dict(payload["head_run"]) if isinstance(payload.get("head_run"), dict) else {}),
+            wake_liveness=ObserverWakeLiveness.from_json(payload.get("wake_liveness")),
         )
 
 
@@ -513,6 +536,7 @@ def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
             "idle_since": record.idle_since,
             "idle_reason": record.idle_reason,
             "delivery": record.delivery.to_json(),
+            "wake_liveness": record.wake_liveness.to_json(),
             "launch_attempts": record.launch_attempts,
             "launch_next_at": record.launch_next_at,
         })
@@ -1318,6 +1342,184 @@ def _redelivery_reason(
     )
 
 
+def _observer_provider_source(record: ObserverRecord) -> tuple[head_ops.HeadRun | None, dict[str, Any]]:
+    """Return the persisted Codex source, never a source found from the workspace."""
+    stored = record.head_run if isinstance(record.head_run, dict) else {}
+    try:
+        run = head_ops.HeadRun.from_json(stored)
+    except (head_ops.HeadRunError, head_ops.TaskRefError, TypeError, ValueError):
+        return None, {}
+    source = run.fanout_policy.get("provider_source")
+    if run.spec.adapter != "codex" or not isinstance(source, dict):
+        return run, {}
+    return run, dict(source)
+
+
+def _observer_has_provider_liveness_contract(record: ObserverRecord) -> bool:
+    """Whether this record must use run-bound provider progress for its event wake."""
+    _, source = _observer_provider_source(record)
+    return bool(source) or record.wake_liveness.bound
+
+
+def _precontract_unbound_observer_source(record: ObserverRecord) -> bool:
+    """Recognise, but never repair, the pre-rollout unbound Codex source shape.
+
+    A current preflight source carries the run descriptor and the exact pre-pane baseline which
+    makes later binding safe.  An old source which has neither is not a delayed current launch;
+    accepting a journal from the workspace now would be a retroactive identity claim.
+    """
+    run, source = _observer_provider_source(record)
+    if run is None or not source or source.get("state") != "unbound":
+        return False
+    run_id, fingerprint = head_run_binding(record.head_run)
+    return not (
+        run_id
+        and str(source.get("run_id") or "") == run_id
+        and str(source.get("head_run_fingerprint") or "") == fingerprint
+        and str(source.get("workspace") or "") == run.workspace
+        and str(source.get("role") or "") == OBSERVER_ROLE
+        and source.get("task_ref") == run.task_ref.to_json()
+        and str(source.get("root") or "")
+        and isinstance(source.get("baseline"), list)
+    )
+
+
+def _begin_observer_wake_liveness(record: ObserverRecord) -> None:
+    """Open one episode only at a new event-delivery boundary.
+
+    An old terminal episode remains available after its replacement.  It is replaced only after a
+    later acknowledged batch opens a new delivery on the new HeadRun, never on an observation from
+    an arbitrary same-workspace source.
+    """
+    if not _observer_has_provider_liveness_contract(record):
+        return
+    run_id, _ = head_run_binding(record.head_run)
+    if not run_id:
+        return
+    if record.wake_liveness.bound or record.wake_liveness.terminal:
+        record.wake_liveness = ObserverWakeLiveness.begin(record.head_run)
+        return
+    if (
+        record.wake_liveness.state == ContinuationLivenessState.UNKNOWN
+        and record.wake_liveness.reason == "missing"
+    ):
+        record.wake_liveness = ObserverWakeLiveness.begin(record.head_run)
+
+
+def _observe_observer_wake_progress(record: ObserverRecord, runtime: Any, *, now: float) -> str:
+    """Record one exact-run provider observation before any TUI readiness interpretation."""
+    if not _observer_has_provider_liveness_contract(record):
+        return "disabled"
+    liveness = record.wake_liveness
+    if not liveness.bound:
+        # A malformed or historical episode cannot acquire a source halfway through a delivery.
+        return "unknown"
+    try:
+        probe = getattr(runtime.host, "observer_provider_progress", None)
+        evidence = (
+            probe(record)
+            if callable(probe)
+            else {"state": "unavailable", "reason": "host has no observer provider-progress probe"}
+        )
+    except Exception as exc:
+        evidence = {"state": "unavailable", "reason": f"provider-progress probe failed: {exc}"}
+    return liveness.observe_provider(evidence, now, head_run=record.head_run)
+
+
+def _observer_no_progress_evidence(record: ObserverRecord, status: dict[str, Any]) -> str:
+    """Classify a stale exact cursor without making screen text liveness authority."""
+    evidence = record.delivery.last_evidence if isinstance(record.delivery.last_evidence, dict) else {}
+    evidence = {**evidence, **(status.get("delivery_evidence") or {})} if isinstance(
+        status.get("delivery_evidence"), dict
+    ) else evidence
+    if str(evidence.get("reason") or "") == "payload-left-in-composer":
+        return "completed_turn_residual_composer"
+    composer_before = str(evidence.get("composer_before") or "")
+    composer_after = str(evidence.get("composer_after") or "")
+    cursor_before = str(evidence.get("cursor_before") or "")
+    cursor_after = str(evidence.get("cursor_after") or "")
+    if (
+        composer_before
+        and composer_before == composer_after
+        and composer_before not in {COMPOSER_EMPTY, COMPOSER_UNKNOWN}
+        and cursor_before
+        and cursor_before == cursor_after
+    ):
+        return "completed_turn_residual_composer"
+    return "active_or_unknown_turn"
+
+
+def _replace_observer_for_no_progress(
+    runtime: Any,
+    payload: dict[str, Any],
+    observers: dict[str, ObserverRecord],
+    ref: str,
+    record: ObserverRecord,
+    event: dict[str, Any],
+    *,
+    reason: str,
+) -> dict[str, Any]:
+    """Persist the terminal exact-run outcome before the fenced stop/relaunch path."""
+    record.wake_liveness.terminalize("replacement", reason)
+    observers[ref] = record
+    if not _persist_quietly(runtime, payload, observers):
+        return {
+            "status": "degraded",
+            "step": "observer-reconcile",
+            "sprint": ref,
+            "action": "observer-wake-liveness-persist-failed",
+            "head": record.head,
+            "reason": "observer provider-progress terminal outcome could not be persisted",
+        }
+    replaced = _launch_observer(runtime, payload, observers, ref, record, pending_event=event)
+    original = str(replaced.get("reason") or "")
+    replaced["reason"] = reason + (f"; {original}" if original else "")
+    return replaced
+
+
+def _adopt_precontract_unbound_observer(
+    runtime: Any,
+    payload: dict[str, Any],
+    observers: dict[str, ObserverRecord],
+    ref: str,
+    record: ObserverRecord,
+    event: dict[str, Any],
+    *,
+    now: float,
+) -> dict[str, Any]:
+    """Replace an old unbound Codex observer without treating a workspace journal as its own."""
+    if not record.wake_liveness.bound:
+        record.wake_liveness = ObserverWakeLiveness.begin(record.head_run)
+    record.wake_liveness.observe_provider(
+        {
+            "state": "unavailable",
+            "reason": "pre-contract Codex observer source is unbound and has no exact baseline",
+        },
+        now,
+        head_run=record.head_run,
+    )
+    _new_delivery_intent(
+        record.delivery,
+        method="replacement",
+        through_event=str(event["event_id"]),
+        resume_cursor=str(event.get("latest_resume_id") or ""),
+        now=now,
+        delivery_id=record.delivery.delivery_id,
+    )
+    return _replace_observer_for_no_progress(
+        runtime,
+        payload,
+        observers,
+        ref,
+        record,
+        event,
+        reason=(
+            "pre-contract Codex observer provider source is unbound; it cannot be rebound from "
+            "workspace journal discovery and is being identity-fenced for replacement"
+        ),
+    )
+
+
 def _turn_ceiling_overrun(delivery: ObserverDelivery, *, now: float) -> str:
     """Why a head that is never ready for input has held this batch too long, or an empty string.
 
@@ -1361,7 +1563,50 @@ def _wake_for_event(
     now = time.time()
     delivery = record.delivery
     event_id = str(event["event_id"])
-    active = delivery.stage in {DeliveryStage.DELIVERY_INTENT, DeliveryStage.AWAITING_ACK}
+    if delivery.stage == DeliveryStage.IDLE:
+        _set_delivery_waiting(
+            delivery, event, reason="observer has unacknowledged significant card work"
+        )
+        _begin_observer_wake_liveness(record)
+    if _precontract_unbound_observer_source(record):
+        return _adopt_precontract_unbound_observer(
+            runtime, payload, observers, ref, record, event, now=now
+        )
+    provider_observation = _observe_observer_wake_progress(record, runtime, now=now)
+    if provider_observation != "disabled":
+        # The cursor and its admission are durable before a pane read can cause delivery,
+        # replacement or a return that leaves this process.  A fresh cursor is stronger than an
+        # idle screen and means this exact observer is already making progress on the same batch.
+        observers[ref] = record
+        if not _persist_quietly(runtime, payload, observers):
+            return {
+                "status": "degraded",
+                "step": "observer-reconcile",
+                "sprint": ref,
+                "action": "observer-wake-liveness-persist-failed",
+                "head": record.head,
+                "reason": "observer provider-progress evidence could not be persisted",
+            }
+        if provider_observation == "progressed":
+            return {
+                "status": "ok",
+                "step": "observer-reconcile",
+                "sprint": ref,
+                "action": "observer-wake-progressing",
+                "head": record.head,
+                "event_id": delivery.through_event or event_id,
+                "reason": "an admitted exact-HeadRun provider cursor advanced",
+            }
+        if provider_observation in {"unknown", "unavailable"}:
+            return {
+                "status": "degraded",
+                "step": "observer-reconcile",
+                "sprint": ref,
+                "action": "observer-wake-liveness-unavailable",
+                "head": record.head,
+                "event_id": delivery.through_event or event_id,
+                "reason": record.wake_liveness.reason or "observer provider progress was not admitted",
+            }
     if delivery.stage == DeliveryStage.RETRY_DEFERRED and now < delivery.next_at:
         return {
             "status": "degraded",
@@ -1373,10 +1618,7 @@ def _wake_for_event(
             "event_id": delivery.through_event,
             "reason": delivery.reason,
         }
-    if delivery.stage == DeliveryStage.IDLE:
-        _set_delivery_waiting(
-            delivery, event, reason="observer has unacknowledged significant card work"
-        )
+    active = delivery.stage in {DeliveryStage.DELIVERY_INTENT, DeliveryStage.AWAITING_ACK}
     try:
         status = getattr(runtime.host, "observer_status", lambda _record: {})(record)
     except (HostError, OSError, TypeError, ValueError) as exc:
@@ -1397,9 +1639,46 @@ def _wake_for_event(
             f"observer terminal could not be read: {exc}",
         )
     if not isinstance(status, dict) or not status.get("idle"):
-        overrun = _turn_ceiling_overrun(delivery, now=now)
-        if overrun:
-            return _fail_delivery(runtime, payload, observers, ref, record, event, overrun)
+        if provider_observation == "stalled" and _observer_has_provider_liveness_contract(record):
+            liveness = record.wake_liveness
+            liveness.no_progress_evidence = _observer_no_progress_evidence(record, status)
+            attempts = liveness.note_busy(now)
+            if attempts >= CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS:
+                return _replace_observer_for_no_progress(
+                    runtime,
+                    payload,
+                    observers,
+                    ref,
+                    record,
+                    event,
+                    reason=(
+                        "the exact observer provider cursor remained unchanged through "
+                        f"{attempts} bounded no-progress observations "
+                        f"({liveness.no_progress_evidence})"
+                    ),
+                )
+            _set_observer_state(
+                record,
+                "waiting",
+                reason=(
+                    "observer terminal is not ready and its exact provider cursor has not advanced "
+                    f"({attempts}/{CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS})"
+                ),
+            )
+            return {
+                "status": "ok",
+                "step": "observer-reconcile",
+                "sprint": ref,
+                "action": "observer-wake-no-progress",
+                "head": record.head,
+                "event_id": delivery.through_event or event_id,
+                "attempts": attempts,
+                "reason": delivery.reason,
+            }
+        if not _observer_has_provider_liveness_contract(record):
+            overrun = _turn_ceiling_overrun(delivery, now=now)
+            if overrun:
+                return _fail_delivery(runtime, payload, observers, ref, record, event, overrun)
         if active and now < delivery.deadline:
             return _wake_pending(ref, record)
         if delivery.stage == DeliveryStage.IDLE:
@@ -2098,6 +2377,11 @@ def _poll_codex_provider_ingress(
     ref: str,
     record: ObserverRecord,
 ) -> dict[str, Any] | None:
+    if _precontract_unbound_observer_source(record):
+        # This record predates the descriptor/baseline contract.  In particular, do not install
+        # an ingress which would scan the workspace and bind a journal retroactively; the pending
+        # event path replaces this exact old HeadRun under its normal identity fence.
+        return None
     _bind_codex_provider_ingress(runtime, payload, observers, ref, record)
     if not isinstance(record.head_run, dict) or not record.head_run.get("run_id"):
         # A record from before runtime HeadRuns cannot be identified as Codex from this field.

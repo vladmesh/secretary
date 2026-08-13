@@ -134,6 +134,16 @@ reviewer and observer recovery, so a retained continuation and an observer watch
 source delivery committed. Source binding is observational for lifecycle purposes and never grants
 fan-out telemetry the authority to change that lifecycle.
 
+Observer event delivery has one narrow exception to screen-advisory liveness: when a retained Codex
+observer HeadRun carries its v1 source descriptor, the dispatcher persists a versioned
+`wake_liveness` episode before it interprets `tui-idle`. The episode names that exact run id and
+HeadRun fingerprint, source fingerprint and opaque cursor, first observation, last admitted
+progress, no-progress rung and terminal outcome. A new admitted cursor keeps the same head and
+event batch and resets only that batch's no-progress ladder. Missing, malformed, incomplete and
+foreign source evidence is typed unavailable or identity-mismatch; it cannot refresh, reset or
+rebind an episode. This is provider-progress liveness only. Fan-out events remain telemetry and
+have no stop, delivery, replacement, cleanup or blocking authority.
+
 ## SHA-bound mechanical gate evidence
 
 Every real mechanical gate result materializes a reusable receipt bound to one checkout:

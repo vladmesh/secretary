@@ -191,10 +191,14 @@ class WorkerContinuationLiveness:
             or str(evidence.get("head_run_id") or "") != self.head_run_id
             or str(evidence.get("head_run_fingerprint") or "") != self.head_run_fingerprint
         ):
+            if str(evidence.get("state") or "") == "identity_mismatch":
+                self._reject_as_unknown(
+                    str(evidence.get("reason") or "provider progress names another HeadRun")
+                )
+                self.last_provider_observed_at = now
+                return "unknown"
             self.state = (
-                ContinuationLivenessState.UNKNOWN
-                if str(evidence.get("state") or "") == "identity_mismatch"
-                else ContinuationLivenessState.UNAVAILABLE
+                ContinuationLivenessState.UNAVAILABLE
             )
             self.reason = str(evidence.get("reason") or "provider source was not admitted")[:240]
             self.last_provider_observed_at = now
@@ -374,7 +378,9 @@ class WorkerContinuationLiveness:
                     return cls.unknown("incoherent source-rejected liveness baseline", legacy_busy_attempts=legacy_busy_attempts)
             elif (
                 source or source_fingerprint or cursor or busy_attempts
-                or rung != ContinuationRecoveryRung.NONE or outcome or any(numeric.values())
+                or rung != ContinuationRecoveryRung.NONE or outcome
+                or numeric["first_busy_at"] or numeric["last_provider_progress_at"]
+                or numeric["recovery_attempted_at"] or numeric["recovery_response_deadline"]
                 or recovery_attempts or bool(value.get("recovery_resume_used", False))
             ):
                 return cls.unknown("incoherent source-rejected pending baseline", legacy_busy_attempts=legacy_busy_attempts)
@@ -391,6 +397,16 @@ class WorkerContinuationLiveness:
         }:
             if not baseline_established or not source or not cursor or not _fingerprint(source_fingerprint):
                 return cls.unknown("incoherent bound liveness baseline", legacy_busy_attempts=legacy_busy_attempts)
+        elif state == ContinuationLivenessState.UNAVAILABLE:
+            # An unavailable source ordinarily cannot drive recovery and therefore is not a
+            # recoverable live episode.  It may, however, be the typed terminal evidence for an
+            # identity-fenced adoption/replacement decision.  Preserve that durable outcome rather
+            # than laundering it into a fresh baseline after a dispatcher reload.
+            if rung != ContinuationRecoveryRung.TERMINAL or not outcome:
+                return cls.unknown(
+                    "unavailable liveness episode is not safely recoverable",
+                    legacy_busy_attempts=legacy_busy_attempts,
+                )
         else:
             return cls.unknown("unavailable liveness episode is not safely recoverable", legacy_busy_attempts=legacy_busy_attempts)
         if state == ContinuationLivenessState.UNKNOWN:
