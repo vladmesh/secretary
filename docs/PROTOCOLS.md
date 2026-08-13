@@ -141,7 +141,9 @@ HeadRun fingerprint, source fingerprint and opaque cursor, first observation, la
 progress, no-progress rung and terminal outcome. A new admitted cursor keeps the same head and
 event batch and resets only that batch's no-progress ladder. Missing, malformed, incomplete and
 foreign source evidence is typed unavailable or identity-mismatch; it cannot refresh, reset or
-rebind an episode. This is provider-progress liveness only. Fan-out events remain telemetry and
+rebind an episode. A bound unavailable episode retains its binding and observation across dispatcher
+reload; without an admitted baseline, a later cursor cannot create one for that same batch. This is
+provider-progress liveness only. Fan-out events remain telemetry and
 have no stop, delivery, replacement, cleanup or blocking authority.
 
 ## SHA-bound mechanical gate evidence

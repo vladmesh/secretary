@@ -398,13 +398,31 @@ class WorkerContinuationLiveness:
             if not baseline_established or not source or not cursor or not _fingerprint(source_fingerprint):
                 return cls.unknown("incoherent bound liveness baseline", legacy_busy_attempts=legacy_busy_attempts)
         elif state == ContinuationLivenessState.UNAVAILABLE:
-            # An unavailable source ordinarily cannot drive recovery and therefore is not a
-            # recoverable live episode.  It may, however, be the typed terminal evidence for an
-            # identity-fenced adoption/replacement decision.  Preserve that durable outcome rather
-            # than laundering it into a fresh baseline after a dispatcher reload.
-            if rung != ContinuationRecoveryRung.TERMINAL or not outcome:
+            # An unavailable probe is a durable observation of this already-bound episode, not an
+            # unbound historical value.  In particular, preserve it across a reload so a missing
+            # source cannot be re-baselined from a later workspace scan.  A prior admitted baseline
+            # and its bounded ladder are audit evidence too: a later exact source may report real
+            # progress, but it cannot start a fresh episode.
+            if source_rejected:
                 return cls.unknown(
-                    "unavailable liveness episode is not safely recoverable",
+                    "unavailable liveness carries a source-rejection fence",
+                    legacy_busy_attempts=legacy_busy_attempts,
+                )
+            if baseline_established:
+                if not source or not cursor or not _fingerprint(source_fingerprint):
+                    return cls.unknown(
+                        "incoherent unavailable liveness baseline",
+                        legacy_busy_attempts=legacy_busy_attempts,
+                    )
+            elif (
+                source or source_fingerprint or cursor or busy_attempts
+                or rung not in {ContinuationRecoveryRung.NONE, ContinuationRecoveryRung.TERMINAL}
+                or numeric["first_busy_at"] or numeric["last_provider_progress_at"]
+                or numeric["recovery_attempted_at"] or numeric["recovery_response_deadline"]
+                or recovery_attempts or bool(value.get("recovery_resume_used", False))
+            ):
+                return cls.unknown(
+                    "incoherent unavailable pending baseline",
                     legacy_busy_attempts=legacy_busy_attempts,
                 )
         else:
@@ -441,6 +459,7 @@ class WorkerContinuationLiveness:
             return cls.unknown("non-terminal liveness carries a terminal outcome", legacy_busy_attempts=legacy_busy_attempts)
         elif rung != ContinuationRecoveryRung.NONE and state not in {
             ContinuationLivenessState.STALLED, ContinuationLivenessState.PROGRESSED,
+            ContinuationLivenessState.UNAVAILABLE,
         }:
             return cls.unknown("recovery rung lacks verified no-progress episode", legacy_busy_attempts=legacy_busy_attempts)
         if rung == ContinuationRecoveryRung.SAFE_RECOVERY_RESPONSE_WINDOW and (

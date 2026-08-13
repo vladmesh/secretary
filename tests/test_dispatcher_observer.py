@@ -1885,6 +1885,56 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.host.observer_nudges, [])
         self.assertEqual(self.host.stopped_observers, [])
 
+    def test_unavailable_observer_liveness_survives_reload_without_rebaseline(self) -> None:
+        """A lost exact source remains bound evidence, never a new workspace-wide baseline."""
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.install_observer_provider_source()
+        self.host.observer_provider_progress = lambda _record: {  # type: ignore[method-assign]
+            "state": "unavailable", "reason": "bound provider journal cannot be verified",
+        }
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="provider journal disappeared", request_id="observer-unavailable-reload-event",
+        )
+
+        unavailable = self.runtime.production_tick()
+
+        self.assertEqual(
+            [row["action"] for row in self.actions(unavailable)],
+            ["observer-wake-liveness-unavailable"],
+        )
+        before_reload = self.observers()["sprint:1"].wake_liveness
+        self.assertEqual(before_reload.state.value, "unavailable")
+        self.assertTrue(before_reload.bound)
+        self.assertGreater(before_reload.last_provider_observed_at, 0.0)
+        self.assertFalse(before_reload.baseline_established)
+
+        # `load_observers` reconstructs the durable state as a restarted dispatcher would.  The
+        # first admitted-looking reply cannot turn the unavailable episode into a new baseline.
+        reloaded = self.observers()["sprint:1"].wake_liveness
+        self.assertEqual(reloaded.state.value, "unavailable")
+        self.assertEqual(reloaded.head_run_id, before_reload.head_run_id)
+        self.assertEqual(reloaded.head_run_fingerprint, before_reload.head_run_fingerprint)
+        self.assertEqual(reloaded.last_provider_observed_at, before_reload.last_provider_observed_at)
+        self.host.observer_provider_progress = lambda record: self.observer_progress(  # type: ignore[method-assign]
+            record, "cursor:must-not-baseline-after-reload",
+        )
+
+        rejected = self.runtime.production_tick()
+
+        self.assertEqual(
+            [row["action"] for row in self.actions(rejected)],
+            ["observer-wake-liveness-unavailable"],
+        )
+        liveness = self.observers()["sprint:1"].wake_liveness
+        self.assertEqual(liveness.state.value, "unknown")
+        self.assertTrue(liveness.source_rejected)
+        self.assertEqual(liveness.head_run_id, before_reload.head_run_id)
+        self.assertEqual(self.host.observer_nudges, [])
+        self.assertEqual(self.host.stopped_observers, [])
+
     def test_a_long_card_mid_turn_is_not_torn_down_by_the_turn_ceiling(self) -> None:
         """The negative case: a busy head past its acknowledgement deadline is still working."""
         self.open_sprint()

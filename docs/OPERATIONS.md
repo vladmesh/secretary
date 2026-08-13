@@ -763,7 +763,8 @@ The tick's decision per sprint is visible in its actions under an `observer-reco
 - `observer-wake-no-progress` — the exact admitted provider cursor is unchanged while the pane remains busy.
   The durable three-observation ladder advances without sending raw input;
 - `observer-wake-liveness-unavailable` — the source or its run identity was unavailable, incomplete or
-  foreign. This is typed evidence, not busy or screen liveness, and it cannot reset the episode;
+  foreign. This is typed evidence, not busy or screen liveness; its exact binding and observation survive
+  dispatcher reload, and it cannot reset or rebaseline the episode;
 - `observer-redelivered` — a batch already on the head was sent again, with the reason on the row: the
   observer was seen ready for input without having acknowledged it, or its acknowledgement deadline
   (`SECRETARY_OBSERVER_ACK_DEADLINE_SECONDS`, 30 minutes by default) ran out. The redelivery keeps the
