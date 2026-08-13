@@ -170,33 +170,35 @@ class CodexProviderEventIngressTests(unittest.TestCase):
 
     def test_binds_codex_0147_session_meta_without_thread_started(self) -> None:
         """The live TUI journal uses session_meta as its root identity anchor."""
-        self._write_records(
-            {
-                "type": "session_meta",
-                "payload": {"id": "session-1", "cwd": str(self.workspace)},
-            },
-            {
-                "type": "event_msg",
-                "payload": {"type": "task_started", "thread_id": "session-1"},
-            },
-            {
-                "type": "event_msg",
-                "payload": {"type": "task_complete", "thread_id": "session-1"},
-            },
-        )
-        ingress = self._ingress()
+        for identifier in ("id", "session_id"):
+            with self.subTest(identifier=identifier):
+                self._write_records(
+                    {
+                        "type": "session_meta",
+                        "payload": {identifier: "session-1", "cwd": str(self.workspace)},
+                    },
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "task_started", "thread_id": "session-1"},
+                    },
+                    {
+                        "type": "event_msg",
+                        "payload": {"type": "task_complete", "thread_id": "session-1"},
+                    },
+                )
+                ingress = self._ingress()
 
-        ingress.bind_before_delivery()
+                ingress.bind_before_delivery()
 
-        source = self.written[-1].fanout_policy["provider_source"]
-        self.assertEqual(source["state"], "bound")
-        self.assertEqual(source["session_id"], "session-1")
-        self.assertEqual(source["parent_thread_id"], "session-1")
-        self.assertEqual(source["initial_range"]["root"]["line"], 1)
-        self.assertEqual(source["cursor"]["line"], 3)
-        recovered = self._ingress(self.written[-1])
-        recovered.poll()
-        self.assertEqual(recovered.run.fanout_policy["provider_source"]["state"], "bound")
+                source = self.written[-1].fanout_policy["provider_source"]
+                self.assertEqual(source["state"], "bound")
+                self.assertEqual(source["session_id"], "session-1")
+                self.assertEqual(source["parent_thread_id"], "session-1")
+                self.assertEqual(source["initial_range"]["root"]["line"], 1)
+                self.assertEqual(source["cursor"]["line"], 3)
+                recovered = self._ingress(self.written[-1])
+                recovered.poll()
+                self.assertEqual(recovered.run.fanout_policy["provider_source"]["state"], "bound")
 
     def test_preflight_descriptor_survives_real_bind_and_admits_new_progress(self) -> None:
         """The launch source reaches liveness through binding without losing its HeadRun fence."""
