@@ -151,6 +151,14 @@ worker round over the same code. An inventory that will not answer is
 different: it cannot prove whether a reviewer is already live, so it preserves launch ambiguity
 and retries the inventory without launching another head or consuming the headless-failure ceiling.
 
+When a reviewer pane and heartbeat already exist but its document nudge receives typed `busy`
+evidence before any send, that is a pending delivery rather than a started review. The launch
+intent retains the exact reviewer HeadRun, handle/leaf binding and workspace with a capped durable
+retry schedule. Until a later nudge confirms delivery, recovery does not freeze or signal the
+worker, write reviewer routing or lifecycle attribution, clear the intent, or replace the pane.
+Successful confirmation crosses the ordinary launch adoption boundary once; `unavailable`, malformed
+and stale-handle evidence remain separately typed and use their existing conservative recovery paths.
+
 Workers use focused checks while developing and run no more than one local broad suite for a report
 generation/unchanged SHA unless they state why it was rerun. That broad run goes through
 `secretary check broad`, which streams the combined output, returns the check's own exit status and
@@ -1005,7 +1013,13 @@ confirmably suspended is stopped with a confirmed stop and replaced exactly once
 updates `TASK.md` with the failure and the round's report identity, persists a pending-delivery
 boundary before SIGCONT, then checkpoints confirmation only after the provider durably records the
 continuation user turn. Terminal activity is a recovery hint for records without that boundary, not
-the delivery proof. Recovery after a crash cannot mistake the previous `done` report for a new
+the delivery proof. A refused `tui-idle` wait carrying `timeout` or `satisfied:false` is explicit
+busy evidence, not a transport failure: the readiness wait runs before SIGCONT, so the retained
+HeadRun, pane binding, workspace and pending continuation remain exactly as recorded. Its durable
+bounded retry delay is not a delivery acknowledgement and never authorizes a stop, replacement or
+new lifecycle attribution. Unavailable transport, malformed evidence and `terminal_handle_stale`
+remain separately typed conservative failures; absent fields on historical evidence are unknown,
+never busy. Recovery after a crash cannot mistake the previous `done` report for a new
 completion, replay an incomplete delivery as if it were confirmed, or overwrite a confirmed
 continuation. A checkpointed delivery is finished on the next tick, so the rework opens its own
 round and the reuse is recorded on the card once and only once. A pending delivery whose head is

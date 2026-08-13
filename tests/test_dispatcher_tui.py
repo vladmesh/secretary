@@ -16,10 +16,13 @@ from secretary.dispatcher_tui import (
     READINESS_BLOCKED,
     READINESS_BUSY,
     READINESS_READY,
+    READINESS_STALE_HANDLE,
     READINESS_UNKNOWN,
+    READINESS_UNAVAILABLE,
     TuiDeliveryError,
     claude_project_dir_name,
     deliver_interactive_prompt,
+    delivery_readiness_state,
     latest_claude_user_turn_for,
     terminal_readiness,
     terminal_turn_started,
@@ -950,7 +953,45 @@ class TuiDeliveryStageTests(unittest.TestCase):
             self.deliver(pane, ack_out_of_band=True)
 
         evidence = raised.exception.evidence
-        self.assertEqual(evidence.reason, "transport-refused-wait-for-readiness")
+        self.assertEqual(evidence.reason, "readiness-unavailable")
+        self.assertEqual(evidence.readiness_state, READINESS_UNAVAILABLE)
+        self.assertEqual(delivery_readiness_state(evidence), READINESS_UNAVAILABLE)
         self.assertEqual(evidence.handle, "term-observer")
         self.assertEqual(evidence.payload_bytes, len("wake the observer"))
         self.assertEqual(pane.sends, [], "nothing was written into a pane that could not be waited for")
+
+    def test_a_refused_readiness_wait_keeps_busy_unavailable_and_stale_distinct(self) -> None:
+        """The live CLI uses non-zero exits for a working pane and for broken transport alike."""
+        cases = (
+            (HostError(TIMEOUT_WAIT_FAILURE), READINESS_BUSY, "readiness-busy"),
+            (
+                HostError(
+                    'orca terminal wait --for tui-idle failed: '
+                    '{"result":{"wait":{"satisfied":false,"status":"running"}}}'
+                ),
+                READINESS_BUSY,
+                "readiness-busy",
+            ),
+            (HostError("orca terminal wait --for tui-idle failed: connection refused"),
+             READINESS_UNAVAILABLE, "readiness-unavailable"),
+            (HostError(STALE_HANDLE_WAIT_FAILURE), READINESS_STALE_HANDLE, "readiness-stale_handle"),
+        )
+        for refusal, state, reason in cases:
+            with self.subTest(state=state, refusal=str(refusal)):
+                def run_json(_command: list[str]) -> dict:
+                    raise refusal
+
+                with self.assertRaises(TuiDeliveryError) as raised:
+                    deliver_interactive_prompt(
+                        "term-observer",
+                        "wake the observer",
+                        run_json=run_json,
+                        adapter="codex",
+                        ack_out_of_band=True,
+                    )
+
+                evidence = raised.exception.evidence
+                self.assertEqual(evidence.readiness_state, state)
+                self.assertEqual(evidence.reason, reason)
+                self.assertEqual(delivery_readiness_state(evidence), state)
+                self.assertEqual(evidence.stage, "none")

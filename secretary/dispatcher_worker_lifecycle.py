@@ -13,6 +13,10 @@ from enum import StrEnum
 from typing import Any
 
 
+BUSY_RETRY_INITIAL_SECONDS = 30
+BUSY_RETRY_MAX_SECONDS = 5 * 60
+
+
 class ReportNudgeStage(StrEnum):
     NONE = "none"
     # The intent is on disk and nothing has been sent yet, or the tick that sent it died before it
@@ -155,6 +159,11 @@ class WorkerContinuation:
     intent has to be durable whether or not anything can take the continuation, and a confirmed
     stop in the middle of one drops the session without dropping the transition.
     """
+    # A readiness timeout is evidence that the owned head is working, not a failed continuation.
+    # This bounded retry clock keeps that distinction durable across dispatcher restarts. It never
+    # becomes evidence that the head died or that the prompt was acknowledged.
+    busy_attempts: int = 0
+    busy_next_at: float = 0.0
 
     @property
     def retained(self) -> bool:
@@ -297,6 +306,21 @@ class WorkerContinuation:
         }:
             raise ValueError(f"cannot confirm worker delivery from {self.stage}")
         self.stage = WorkerContinuationStage.DELIVERY_CONFIRMED
+        self.busy_attempts = 0
+        self.busy_next_at = 0.0
+
+    def defer_busy(self, now: float) -> int:
+        """Defer a readiness-busy retry while retaining the same pending delivery."""
+        self.busy_attempts += 1
+        delay = min(
+            BUSY_RETRY_INITIAL_SECONDS * (2 ** min(self.busy_attempts - 1, 4)),
+            BUSY_RETRY_MAX_SECONDS,
+        )
+        self.busy_next_at = now + delay
+        return delay
+
+    def busy_retry_due(self, now: float) -> bool:
+        return not self.busy_next_at or now >= self.busy_next_at
 
     def drop_session(self) -> None:
         """The session is gone, by a confirmed stop or by its own death.
@@ -325,6 +349,8 @@ class WorkerContinuation:
         self.decision = ""
         self.decision_body = ""
         self.session_held = False
+        self.busy_attempts = 0
+        self.busy_next_at = 0.0
 
     def to_json(self) -> dict[str, Any]:
         if self.stage == WorkerContinuationStage.NONE:
@@ -341,6 +367,8 @@ class WorkerContinuation:
             "decision": self.decision,
             "decision_body": self.decision_body,
             "session_held": self.session_held,
+            "busy_attempts": self.busy_attempts,
+            "busy_next_at": self.busy_next_at,
         }
 
     @classmethod
@@ -366,4 +394,6 @@ class WorkerContinuation:
             # Records written before the session flag existed only ever reached a stage by
             # retaining one.
             session_held=bool(value.get("session_held", stage != WorkerContinuationStage.NONE)),
+            busy_attempts=int(value.get("busy_attempts") or 0),
+            busy_next_at=float(value.get("busy_next_at") or 0.0),
         )

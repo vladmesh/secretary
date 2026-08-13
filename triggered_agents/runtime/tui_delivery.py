@@ -99,6 +99,11 @@ READINESS_READY = "ready"
 READINESS_BUSY = "busy"
 READINESS_BLOCKED = "blocked"
 READINESS_UNKNOWN = "unknown"
+# These are evidence states for a refused readiness wait, not answers returned by
+# `terminal_readiness`: a stale terminal binding and an unavailable transport both make that
+# probe unknown, but recovery must not confuse either one with a pane Orca actually found busy.
+READINESS_UNAVAILABLE = "unavailable"
+READINESS_STALE_HANDLE = "stale_handle"
 
 
 @dataclass
@@ -144,6 +149,11 @@ class DeliveryEvidence:
     # One attempt is one Enter: the first send and every re-entry after it.
     attempts: int = 0
     resends: int = 0
+    # The typed outcome of a readiness wait that failed before any pane probe or write could be
+    # made.  Empty historical evidence is deliberately not busy; `delivery_readiness_state`
+    # reads it as unknown.  The normal before/after fields continue to describe probes made once
+    # a wait succeeded.
+    readiness_state: str = ""
     readiness_before: str = ""
     readiness_after: str = ""
     composer_before: str = COMPOSER_UNKNOWN
@@ -184,6 +194,7 @@ class DeliveryEvidence:
             "bytes_written": self.bytes_written,
             "attempts": self.attempts,
             "resends": self.resends,
+            "readiness_state": self.readiness_state,
             "readiness_before": self.readiness_before,
             "readiness_after": self.readiness_after,
             "composer_before": self.composer_before,
@@ -445,6 +456,25 @@ def terminal_readiness(
     return READINESS_READY
 
 
+def delivery_readiness_state(carrier: Any) -> str:
+    """Return the typed readiness state carried by a failed delivery, conservatively.
+
+    A persisted evidence record predating `readiness_state` did not observe this refusal.  It is
+    therefore unknown rather than busy: only a current failed `tui-idle` wait that parsed one of
+    Orca's working answers earns the no-replacement treatment.
+    """
+    evidence = getattr(carrier, "evidence", carrier)
+    if hasattr(evidence, "to_json"):
+        evidence = evidence.to_json()
+    if isinstance(evidence, dict):
+        state = str(evidence.get("readiness_state") or "")
+    else:
+        state = str(getattr(evidence, "readiness_state", "") or "")
+    if state in {READINESS_BUSY, READINESS_BLOCKED, READINESS_UNAVAILABLE, READINESS_STALE_HANDLE}:
+        return state
+    return READINESS_UNKNOWN
+
+
 def _refused_wait_readiness(exc: Exception) -> str:
     """Classify a `terminal wait` the host refused, from the body Orca printed with it.
 
@@ -462,13 +492,33 @@ def _refused_wait_readiness(exc: Exception) -> str:
     wait = result.get("wait") if isinstance(result, dict) else None
     if isinstance(wait, dict) and "satisfied" in wait:
         return _answered_readiness(wait)
+    code = _wait_error_code(body, exc)
+    return READINESS_BUSY if code == "timeout" else READINESS_UNKNOWN
+
+
+def _wait_error_code(body: dict[str, Any], exc: Exception) -> str:
     error = body.get("error") if isinstance(body.get("error"), dict) else {}
     code = str(error.get("code") or "")
     if not code:
         # A body too damaged to parse can still carry its code in the text.
         codes = _WAIT_ERROR_CODE_RE.findall(str(exc))
         code = codes[-1] if codes else ""
-    return READINESS_BUSY if code == "timeout" else READINESS_UNKNOWN
+    return code
+
+
+def _refused_wait_evidence_state(exc: Exception) -> str:
+    """Keep the three refusal classes separate in durable delivery evidence."""
+    body = _json_object(str(exc))
+    result = body.get("result") if isinstance(body.get("result"), dict) else body
+    wait = result.get("wait") if isinstance(result, dict) else None
+    if isinstance(wait, dict) and "satisfied" in wait:
+        return _answered_readiness(wait)
+    code = _wait_error_code(body, exc)
+    if code == "timeout":
+        return READINESS_BUSY
+    if code == "terminal_handle_stale":
+        return READINESS_STALE_HANDLE
+    return READINESS_UNAVAILABLE
 
 
 def _answered_readiness(wait: dict[str, Any]) -> str:
@@ -499,6 +549,7 @@ def deliver_interactive_prompt(
     ack_out_of_band: bool = False,
     subject: str = "",
     document_path: str = "",
+    before_send: Callable[[], None] | None = None,
 ) -> DeliveryOutcome:
     """Deliver a prompt into a live interactive head, on one path for every role that has one.
 
@@ -561,6 +612,12 @@ def deliver_interactive_prompt(
     evidence.payload_bytes, evidence.payload_sha256 = payload_fingerprint(prepared.text)
     with _transport_evidence(evidence, "wait-for-readiness"):
         wait_for_tui_idle(handle, run_json=run_json, host=host)
+    if before_send is not None:
+        # Retained workers stay frozen until the exact delivery path has observed a ready pane.
+        # A busy wait therefore does not turn into a SIGCONT followed by a stop-and-replacement
+        # recovery; once ready, activation remains immediately before the existing send path.
+        with _transport_evidence(evidence, "activate-head"):
+            before_send()
     before = probe_pane(handle, run_json=run_json, host=host)
     evidence.readiness_before = before.readiness
     evidence.composer_before = before.composer
@@ -600,7 +657,14 @@ def _transport_evidence(evidence: DeliveryEvidence, step: str):
     except (TuiDeliveryError, ValueError):
         raise
     except Exception as exc:
-        evidence.reason = f"transport-refused-{step}"
+        if step == "wait-for-readiness":
+            state = _refused_wait_evidence_state(exc)
+            evidence.readiness_state = state
+            if state in {READINESS_BUSY, READINESS_BLOCKED}:
+                evidence.readiness_before = state
+            evidence.reason = f"readiness-{state}"
+        else:
+            evidence.reason = f"transport-refused-{step}"
         raise TuiDeliveryError(
             f"the {step} step of prompt delivery was refused (stage={evidence.stage}): {exc}",
             evidence=evidence,

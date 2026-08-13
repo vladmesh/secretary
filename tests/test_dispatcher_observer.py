@@ -838,6 +838,85 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(evidence["readiness_before"], "ready")
         self.assertEqual(evidence["cursor_before"], "orca:42")
 
+    def test_a_busy_delivery_wait_preserves_the_observer_and_its_pending_ack(self) -> None:
+        """A stale status-to-send race does not make the owned observer disposable."""
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="busy-wake-event",
+        )
+        real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
+        record = self.observers()["sprint:1"]
+        waits = [
+            {"wait": {"condition": "tui-idle", "satisfied": True}},
+            HostError(TIMEOUT_WAIT_FAILURE),
+        ]
+        sends: list[list[str]] = []
+
+        def run_json(args: list[str]) -> dict:
+            if args[1:3] == ["terminal", "list"]:
+                return {"terminals": [{
+                    "handle": record.handle, "leafId": record.leaf,
+                    "connected": True, "lastOutputAt": int((time.time() - 2) * 1000),
+                }]}
+            if args[1:3] == ["terminal", "wait"]:
+                answer = waits.pop(0)
+                if isinstance(answer, Exception):
+                    raise answer
+                return answer
+            if args[1:3] == ["terminal", "send"]:
+                sends.append(args)
+                return {"send": {"accepted": True, "bytesWritten": 1}}
+            raise AssertionError(args)
+
+        with mock.patch.object(real_host, "_run_json", side_effect=run_json):
+            self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
+            self.host.nudge_observer = real_host.nudge_observer  # type: ignore[method-assign]
+            held = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(held)], ["observer-wake-busy"])
+        self.assertEqual(sends, [], "a busy wait sends no duplicate prompt")
+        self.assertEqual(self.host.observers, ["sprint:1"])
+        self.assertEqual(self.host.stopped_observers, [])
+        after = self.observers()["sprint:1"]
+        self.assertEqual((after.handle, after.leaf, after.workspace),
+                         (record.handle, record.leaf, record.workspace))
+        self.assertEqual(after.delivery.stage, DeliveryStage.WAITING_FOR_IDLE)
+        self.assertTrue(after.delivery.delivery_id)
+        self.assertTrue(after.delivery.through_event)
+        self.assertEqual((after.delivery.wake_attempts, after.delivery.wake_failures), (0, 0))
+        self.assertEqual(after.delivery.last_evidence["readiness_state"], "busy")
+        self.assertEqual(after.delivery.last_evidence["reason"], "readiness-busy")
+
+        delivery_id = after.delivery.delivery_id
+        working = [False]
+
+        def deliver_after_busy(args: list[str]) -> dict:
+            if args[1:3] == ["terminal", "list"]:
+                return {"terminals": [{
+                    "handle": record.handle, "leafId": record.leaf,
+                    "connected": True, "lastOutputAt": int((time.time() - 2) * 1000),
+                }]}
+            if args[1:3] == ["terminal", "wait"]:
+                return {"wait": {"condition": "tui-idle", "satisfied": not working[0]}}
+            if args[1:3] == ["terminal", "read"]:
+                return {"terminal": {"tail": ["working" if working[0] else "›"], "nextCursor": "1"}}
+            if args[1:3] == ["terminal", "send"]:
+                working[0] = True
+                return {"send": {"accepted": True, "bytesWritten": 1}}
+            raise AssertionError(args)
+
+        with mock.patch.object(real_host, "_run_json", side_effect=deliver_after_busy):
+            sent = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(sent)], ["observer-nudged"])
+        pending = self.observers()["sprint:1"].delivery
+        self.assertEqual(pending.stage, DeliveryStage.AWAITING_ACK)
+        self.assertEqual(pending.delivery_id, delivery_id)
+        self.assertEqual((pending.wake_attempts, pending.wake_failures), (1, 0))
+
     def test_a_resume_for_a_refused_delivery_stops_the_retry(self) -> None:
         """A wake refused after its prompt landed is not sent twice.
 

@@ -63,6 +63,7 @@ from enum import Enum
 from typing import Any
 
 from secretary.dispatcher_state import now_rfc3339, request_token
+from secretary.dispatcher_tui import READINESS_BUSY, delivery_readiness_state
 from secretary.dispatcher_watchdog import (
     heartbeat_is_live_match,
     heartbeat_is_mismatch,
@@ -1170,6 +1171,43 @@ def _defer_delivery(
     }
 
 
+def _wait_for_busy_delivery(
+    record: ObserverRecord,
+    ref: str,
+    reason: str,
+    *,
+    evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Keep an observed-working observer and its exact undelivered batch intact.
+
+    The intent was already durable before the nudge.  A `tui-idle` timeout with a busy body says
+    the prompt was not sent, so it must not consume a failed-wake retry or arm an acknowledgement
+    deadline.  `WAITING_FOR_IDLE` and its existing persisted `held_since` put it under the turn
+    ceiling instead: that is the bounded recovery for a head that keeps working, without closing
+    it or replacing it merely because the delivery race lost.
+    """
+    delivery = record.delivery
+    delivery.stage = DeliveryStage.WAITING_FOR_IDLE
+    delivery.deadline = 0.0
+    delivery.next_at = 0.0
+    if not delivery.held_since:
+        delivery.held_since = time.time()
+    delivery.reason = reason
+    if evidence:
+        delivery.last_evidence = dict(evidence)
+    _set_observer_state(record, "waiting", reason=reason)
+    return {
+        "status": "degraded",
+        "step": "observer-reconcile",
+        "sprint": ref,
+        "action": "observer-wake-busy",
+        "head": record.head,
+        "delivery_id": delivery.delivery_id,
+        "event_id": delivery.through_event,
+        "reason": reason,
+    }
+
+
 def _fail_delivery(
     runtime: Any,
     payload: dict[str, Any],
@@ -1380,6 +1418,18 @@ def _wake_for_event(
             now=now,
             delivery_id=delivery.delivery_id,
         )
+    elif delivery.stage == DeliveryStage.WAITING_FOR_IDLE and delivery.delivery_id:
+        # A direct delivery wait saw this same live pane busy before any send. Keep its marker and
+        # high-water mark when it eventually becomes idle; a fresh id would make a later resume
+        # unable to acknowledge the intent that was already written before that busy observation.
+        _new_delivery_intent(
+            delivery,
+            method="nudge",
+            through_event=delivery.through_event or event_id,
+            resume_cursor=str(event.get("latest_resume_id") or ""),
+            now=now,
+            delivery_id=delivery.delivery_id,
+        )
     else:
         _new_delivery_intent(
             delivery,
@@ -1397,10 +1447,18 @@ def _wake_for_event(
         # instead of polling the complete audit stream while the prompt-delivery loop runs.
         accepted = runtime.host.nudge_observer(record)
     except (AttributeError, HostError, OSError, TypeError, ValueError) as exc:
+        evidence = _evidence_of(exc)
+        if delivery_readiness_state(evidence) == READINESS_BUSY:
+            return _wait_for_busy_delivery(
+                record,
+                ref,
+                "observer terminal became busy before its event wake could be delivered",
+                evidence=evidence,
+            )
         return _fail_delivery(
             runtime, payload, observers, ref, record, event,
             f"observer wake failed: {exc}",
-            evidence=_evidence_of(exc),
+            evidence=evidence,
         )
     _count_delivery_attempt(delivery, "nudge")
     delivery.last_evidence = _evidence_of(accepted) or delivery.last_evidence
