@@ -122,6 +122,16 @@ class RolloutSummaryTests(unittest.TestCase):
 
 
 class CandidateInventoryTests(unittest.TestCase):
+    def test_feature_inventory_parser_pins_stable_default_disabled_v2(self) -> None:
+        features = probe._parse_feature_list(
+            b"multi_agent                          stable             true\n"
+            b"multi_agent_v2                       stable             false\n"
+        )
+
+        self.assertEqual(
+            features["multi_agent_v2"], {"status": "stable", "default_enabled": False}
+        )
+
     def test_v2_global_wait_candidate_and_valid_role_tables_are_required(self) -> None:
         variants = dict(probe.VARIANTS)
         self.assertIn("v2_feature_wait_disabled", variants)
@@ -158,3 +168,26 @@ class CandidateInventoryTests(unittest.TestCase):
             rows["v2_feature_wait_disabled"]["policy_result"],
             "no_collaboration_call_observed: schema_unavailable_not_proof_of_absence",
         )
+
+    def test_committed_feature_inventory_pins_v2_status_and_report_uses_it(self) -> None:
+        inventory = Path(
+            "docs/evidence/codex-feature-inventory-2026-08-13.json"
+        )
+        payload = json.loads(inventory.read_text(encoding="utf-8"))
+
+        self.assertTrue(payload["disposable_codex_home"])
+        self.assertFalse(payload["auth_source_used"])
+        self.assertEqual(payload["codex_version"], "codex-cli 0.147.0")
+        self.assertEqual(
+            payload["command_shape"],
+            ["CODEX_HOME=<disposable-empty-home>", "codex", "features", "list"],
+        )
+        self.assertEqual(payload["exit_status"], 0)
+        self.assertEqual(payload["missing_pinned_features"], [])
+        self.assertEqual(
+            payload["pinned_features"]["multi_agent_v2"],
+            {"default_enabled": False, "status": "stable"},
+        )
+        report = _REPORT.read_text(encoding="utf-8")
+        self.assertIn("multi_agent_v2` as stable and disabled by default", report)
+        self.assertIn("codex-feature-inventory-2026-08-13.json", report)

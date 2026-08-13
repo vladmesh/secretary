@@ -33,6 +33,7 @@ observer. This report does not make that production change.
 | Probe lifetime | one `--ephemeral` turn, 90-second ceiling per variant |
 | Workspace/home | new empty `git init` worktree and new `CODEX_HOME` for every row |
 | Raw rollout retention | none; the JSON capture retains SHA-256 values for stdout and stderr plus typed facts |
+| Feature inventory | [`codex-feature-inventory-2026-08-13.json`](codex-feature-inventory-2026-08-13.json), captured with an unauthenticated disposable home |
 
 The bounded prompt requested exactly one `collaboration.spawn_agent`, required the child to return
 `CHILD_OK`, then required `PARENT_OK`; it prohibited shell, filesystem, web and other tools. Each
@@ -51,11 +52,14 @@ disposable-auth authority as this one.
 
 ## Candidate inventory
 
-The installed feature inventory marks `multi_agent` stable and enabled by default, `multi_agent_v2`
-under development and disabled by default, and `enable_fanout`, `collaboration_modes` and
-`multi_agent_mode` removed. Removed names are not provider controls and were not treated as a
-boundary. Fresh `exec --strict-config` parsing rejects `hide_spawn_agent` and
-`features.hide_spawn_agent` as unknown, and rejects the unnested
+The disposable-home feature inventory captures `multi_agent` as stable and enabled by default, and
+`multi_agent_v2` as stable and disabled by default. Its typed fields and raw-stream digests are in
+[`codex-feature-inventory-2026-08-13.json`](codex-feature-inventory-2026-08-13.json); the exact
+command shape is `CODEX_HOME=<disposable-empty-home> codex features list`, with no auth source used.
+The same inventory marks `enable_fanout`, `collaboration_modes` and `multi_agent_mode` removed.
+Removed names are not provider controls and were not treated as a boundary. Fresh
+`exec --strict-config` parsing rejects `hide_spawn_agent` and `features.hide_spawn_agent` as
+unknown, and rejects the unnested
 `agents.hide_spawn_agent_metadata` shape because `agents` expects a role table.
 
 The matrix covers the finite fields that parse in the installed role/v2 surfaces and could be read as

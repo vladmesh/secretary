@@ -7,10 +7,11 @@ Secretary record.  The JSON result preserves the provider-visible facts needed
 to audit a proposed launch guard: IDs and every collaboration item, plus a
 SHA-256 digest of each raw stream.
 
-An operator must name a short-lived approved auth file explicitly.  This tool
-copies that file byte-for-byte into the temporary ``CODEX_HOME`` without
+Matrix mode requires an explicitly named short-lived approved auth file. This
+tool copies that file byte-for-byte into the temporary ``CODEX_HOME`` without
 printing, parsing or hashing it, and removes the entire temporary root after
-the matrix finishes.
+the matrix finishes. ``--features-only`` is the unauthenticated inventory
+capture path and neither accepts nor reads an auth source.
 """
 
 from __future__ import annotations
@@ -91,10 +92,69 @@ VARIANTS: tuple[tuple[str, tuple[str, ...]], ...] = (
 
 _CONFIG_REJECTION = re.compile(r"^Error loading config\.toml: (?P<reason>.+)$", re.MULTILINE)
 _IGNORED_ROLE = re.compile(r"^Ignoring malformed agent role definition: (?P<reason>.+)$", re.MULTILINE)
+_FEATURE_LINE = re.compile(
+    r"^(?P<name>[A-Za-z0-9_]+)\s+(?P<status>.+?)\s+(?P<enabled>true|false)\s*$",
+    re.MULTILINE,
+)
+PINNED_FEATURES = ("multi_agent", "multi_agent_v2")
 
 
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _parse_feature_list(raw_stdout: bytes) -> dict[str, dict[str, Any]]:
+    """Parse the CLI's tabular feature inventory into typed pinned facts."""
+    parsed: dict[str, dict[str, Any]] = {}
+    text = raw_stdout.decode("utf-8", errors="replace")
+    for match in _FEATURE_LINE.finditer(text):
+        parsed[match.group("name")] = {
+            "status": match.group("status"),
+            "default_enabled": match.group("enabled") == "true",
+        }
+    return parsed
+
+
+def run_feature_inventory(*, codex: str) -> dict[str, Any]:
+    """Capture the pinned feature facts using an unauthenticated disposable home.
+
+    This does not inspect or copy credentials and makes no provider request. Keeping a typed
+    snapshot beside the rollout evidence prevents later prose from drifting from the installed
+    CLI's actual feature classification.
+    """
+    resolved_codex = shutil.which(codex) if os.path.sep not in codex else codex
+    if not resolved_codex:
+        raise ValueError("codex executable was not found")
+    version = subprocess.run(
+        [resolved_codex, "--version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
+    )
+    if version.returncode:
+        raise RuntimeError("codex --version failed")
+    with tempfile.TemporaryDirectory(prefix="secretary-codex-feature-inventory-") as temporary_root:
+        home = Path(temporary_root) / "codex-home"
+        home.mkdir(mode=0o700)
+        completed = subprocess.run(
+            [resolved_codex, "features", "list"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            env={"CODEX_HOME": str(home), "PATH": os.environ.get("PATH", "")},
+        )
+    features = _parse_feature_list(completed.stdout)
+    return {
+        "evidence_format": 1,
+        "captured_at_utc": dt.datetime.now(dt.UTC).isoformat(),
+        "codex_executable": str(Path(resolved_codex).resolve()),
+        "codex_version": version.stdout.decode("utf-8", errors="replace").strip(),
+        "disposable_codex_home": True,
+        "auth_source_used": False,
+        "command_shape": ["CODEX_HOME=<disposable-empty-home>", "codex", "features", "list"],
+        "exit_status": completed.returncode,
+        "raw_stdout_sha256": _sha256(completed.stdout),
+        "raw_stderr_sha256": _sha256(completed.stderr),
+        "pinned_features": {name: features.get(name) for name in PINNED_FEATURES},
+        "missing_pinned_features": [name for name in PINNED_FEATURES if name not in features],
+    }
 
 
 def _json_events(raw_stdout: bytes) -> tuple[list[dict[str, Any]], int]:
@@ -407,11 +467,12 @@ def run_matrix(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--auth-source", type=Path, required=True)
+    parser.add_argument("--auth-source", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--codex", default="codex")
     parser.add_argument("--model", default=MODEL)
     parser.add_argument("--timeout-seconds", type=int, default=90)
+    parser.add_argument("--features-only", action="store_true")
     return parser.parse_args()
 
 
@@ -419,12 +480,19 @@ def main() -> int:
     args = parse_args()
     if args.timeout_seconds <= 0:
         raise SystemExit("--timeout-seconds must be positive")
-    result = run_matrix(
-        auth_source=args.auth_source,
-        codex=args.codex,
-        model=args.model,
-        timeout_seconds=args.timeout_seconds,
-    )
+    if args.features_only:
+        if args.auth_source is not None:
+            raise SystemExit("--features-only does not accept --auth-source")
+        result = run_feature_inventory(codex=args.codex)
+    else:
+        if args.auth_source is None:
+            raise SystemExit("--auth-source is required unless --features-only is used")
+        result = run_matrix(
+            auth_source=args.auth_source,
+            codex=args.codex,
+            model=args.model,
+            timeout_seconds=args.timeout_seconds,
+        )
     _write_json(args.output, result)
     return 0
 
