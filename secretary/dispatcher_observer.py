@@ -63,6 +63,7 @@ from enum import Enum
 from typing import Any
 
 from secretary.dispatcher_state import now_rfc3339, request_token
+from secretary.dispatcher_launch import merge_launch_head_run
 from secretary.dispatcher_tui import READINESS_BUSY, delivery_readiness_state
 from secretary.dispatcher_watchdog import (
     heartbeat_is_live_match,
@@ -2051,7 +2052,11 @@ def _bind_codex_provider_ingress(
     def persist(updated: head_ops.HeadRun) -> None:
         if not updated.same_run(run):
             raise HostError("observer provider event writer was handed another HeadRun")
-        record.head_run = updated.to_json()
+        updated_json = updated.to_json()
+        existing = record.head_run if isinstance(record.head_run, dict) else {}
+        if existing.get("run_id"):
+            updated_json = merge_launch_head_run(existing, updated_json)
+        record.head_run = updated_json
         record.workspace = updated.workspace or record.workspace
         record.handle = updated.handle or record.handle
         record.leaf = updated.leaf or record.leaf

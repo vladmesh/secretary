@@ -731,6 +731,14 @@ def start_review(
     # split, because the record does not learn the reviewer's handle until this function returns
     # and the caller saves: a tick that dies in between would otherwise leave a live reviewer that
     # the next tick cannot see, and would launch a second one beside.
+    intent_kwargs: dict[str, Any] = {}
+    prompt_document_path = getattr(runtime.host, "_prompt_document_path", None)
+    if callable(prompt_document_path):
+        # The real host writes the review packet outside the checkout. Its preflight descriptor
+        # must carry that same pointer, not the historical in-worktree placeholder.
+        intent_kwargs["document"] = str(
+            prompt_document_path(REVIEW_ROLE, ref, record.review_baseline)
+        )
     failure = write_launch_intent(
         runtime,
         payload,
@@ -741,6 +749,7 @@ def start_review(
         action=action,
         head=record.review_head,
         workspace=record.workspace,
+        **intent_kwargs,
     )
     if failure is not None:
         if failure.startswith("codex-fanout-policy:"):

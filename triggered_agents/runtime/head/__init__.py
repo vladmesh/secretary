@@ -36,6 +36,7 @@ from .command import (
 from .operations import (
     Commit,
     Confirm,
+    HeadDelivery,
     HeadNudgeFailed,
     HeadOperationError,
     HeadOutcome,
@@ -48,6 +49,7 @@ from .operations import (
     LaunchPreflight,
     NudgePointer,
     nudge,
+    post_delivery_run,
     spawn,
     stop,
 )
@@ -85,6 +87,7 @@ __all__ = [
     "HeadCommand",
     "HeadCommandError",
     "HeadNudgeFailed",
+    "HeadDelivery",
     "HeadOperationError",
     "HeadOutcome",
     "HeadPaneBusy",
@@ -117,6 +120,7 @@ __all__ = [
     "load_head_specs",
     "new_run_id",
     "nudge",
+    "post_delivery_run",
     "render_head_command",
     "spawn",
     "stop",

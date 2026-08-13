@@ -85,8 +85,8 @@ class CodexProviderEventIngress:
         self.persist(run)
         self.run = run
 
-    def bind_before_delivery(self) -> None:
-        """Bind and scan a Codex session before any prompt is sent.
+    def bind_before_delivery(self) -> HeadRun:
+        """Bind and scan a Codex session before any prompt is sent, returning its handoff run.
 
         Binding is not a permission to skip what the provider wrote while the pane was coming
         up.  The durable parent cursor is the only point at which a source belongs to this run;
@@ -97,7 +97,7 @@ class CodexProviderEventIngress:
         source = self.source
         if str(source.get("state") or "") == "bound":
             self.poll()
-            return
+            return self.run
         if str(source.get("state") or "") != "unbound":
             self._unknown("Codex provider source binding is missing or malformed")
             return
@@ -180,6 +180,7 @@ class CodexProviderEventIngress:
         # scanner starts at its first raw line, crosses the root, and consumes the pre-existing
         # tail before the caller can type a prompt.
         self.poll()
+        return self.run
 
     def poll(self) -> None:
         """Consume all new provider events, verifying binding and cursor before each action."""

@@ -90,6 +90,7 @@ from secretary.dispatcher_launch import (
     launch_left_a_head as _launch_left_a_head,
     launch_pid_file as _launch_pid_file,
     mark_launch_aborted as _mark_launch_aborted,
+    merge_launch_head_run as _merge_launch_head_run,
     pane_state_label as _pane_state_label,
     reset_launch_attempts as _reset_launch_attempts,
     resolve_launch_intent as _resolve_launch_intent,
@@ -665,7 +666,7 @@ class DispatcherHeadTransport:
     prompt_file: str = ""
     adapter: str = ""
     role: str = ""
-    before_send: Callable[[], None] | None = None
+    before_send: Callable[[], head_ops.HeadRun | None] | None = None
 
     def deliver(
         self,
@@ -674,22 +675,40 @@ class DispatcherHeadTransport:
         *,
         host: SessionHost,
         subject: str,
-    ) -> DeliveryOutcome:
+    ) -> head_ops.HeadDelivery:
         # The framing is the *rendered command's* fact, not the profile's: what is running in that
         # pane is what the launcher just started, and a registry edited since would frame a prompt
         # for a head this launch never ran. The run offers its own view of the adapter and this
         # deliberately keeps the launcher's when there is one.
-        return _deliver_tui_prompt(
-            run.handle,
-            self.workspace,
-            self.prompt_file,
-            host=host,
-            adapter=self.adapter or run.spec.adapter,
-            prompt_text=pointer.text or None,
-            subject=subject,
-            document_path=pointer.document,
-            before_send=self.before_send,
-        )
+        post_delivery = run
+
+        def handoff_before_send() -> None:
+            nonlocal post_delivery
+            if self.before_send is None:
+                return
+            updated = self.before_send()
+            if updated is not None:
+                post_delivery = head_ops.post_delivery_run(run, updated)
+
+        try:
+            outcome = _deliver_tui_prompt(
+                run.handle,
+                self.workspace,
+                self.prompt_file,
+                host=host,
+                adapter=self.adapter or run.spec.adapter,
+                prompt_text=pointer.text or None,
+                subject=subject,
+                document_path=pointer.document,
+                before_send=handoff_before_send if self.before_send is not None else None,
+            )
+        except Exception as exc:
+            # A source may already have been durably bound when a later delivery stage refuses.
+            # The abort path receives this exact run so its intent cannot write the old unbound
+            # copy back over the source recovery has to read.
+            setattr(exc, "head_run", post_delivery)
+            raise
+        return head_ops.HeadDelivery(run=post_delivery, outcome=outcome)
 
     def close(self, run: head_ops.HeadRun, *, host: SessionHost) -> None:
         self.runtime._close_head_pane(
@@ -1128,8 +1147,18 @@ class CommandHostRuntime:
         _bind_head_heartbeat(pid_file, expected=heartbeat, leaf=pane.leaf)
         delivered = False
         delivery_evidence: dict[str, Any] = {}
+        post_delivery_run = lifecycle_run
         if launch.prompt_after_start:
             try:
+                def bind_before_send() -> head_ops.HeadRun:
+                    nonlocal post_delivery_run
+                    if ingress is None:
+                        return post_delivery_run
+                    post_delivery_run = head_ops.post_delivery_run(
+                        lifecycle_run, ingress.bind_before_delivery(),
+                    )
+                    return post_delivery_run
+
                 outcome = _deliver_tui_prompt(
                     pane.handle,
                     str(workspace),
@@ -1138,8 +1167,9 @@ class CommandHostRuntime:
                     adapter=launch.adapter or "codex",
                     prompt_text=_observer_launch_prompt(),
                     subject="observer-launch",
-                    before_send=ingress.bind_before_delivery if ingress is not None else None,
+                    before_send=bind_before_send if ingress is not None else None,
                 )
+                lifecycle_run = post_delivery_run
                 delivered = True
                 delivery_evidence = _delivery_evidence_json(outcome, "observer-launch")
             except (TuiDeliveryError, HostError) as exc:
@@ -1182,7 +1212,11 @@ class CommandHostRuntime:
             "delivery_evidence": delivery_evidence,
             "pid_file": pid_file,
             "run": run,
-            "head_run": (ingress.run if ingress is not None else lifecycle_run).to_json(),
+            # This mirrors `head_ops.spawn`: delivery owns the source handoff, while this
+            # launcher adds only the pane facts it already proved.  Returning `lifecycle_run`
+            # rather than its pre-send copy keeps observer adoption on the same run the ingress
+            # persisted.
+            "head_run": lifecycle_run.to_json(),
         }
 
     def stop_observer(self, record: Any) -> None:
@@ -2662,7 +2696,7 @@ class CommandHostRuntime:
         prompt_file: str = "",
         adapter: str = "",
         role: str = "",
-        before_send: Callable[[], None] | None = None,
+        before_send: Callable[[], head_ops.HeadRun | None] | None = None,
     ) -> "DispatcherHeadTransport":
         """This product's delivery and close semantics, for the operation to perform through
         the host it is running on.
@@ -3743,14 +3777,21 @@ class DispatcherRuntime:
         def persist(updated: head_ops.HeadRun) -> None:
             if not updated.same_run(run):
                 raise HostError("provider event writer was handed another HeadRun")
+            updated_json = updated.to_json()
             if role == WORKER_ROLE:
-                record.worker_head_run = updated.to_json()
+                existing = record.worker_head_run
+                if isinstance(existing, dict) and existing.get("run_id"):
+                    updated_json = _merge_launch_head_run(existing, updated_json)
+                record.worker_head_run = updated_json
                 record.workspace = updated.workspace or record.workspace
                 record.handle = updated.handle or record.handle
                 record.worker_leaf = updated.leaf or record.worker_leaf
                 record.worker_pid_file = updated.pid_file or record.worker_pid_file
             else:
-                record.review_head_run = updated.to_json()
+                existing = record.review_head_run
+                if isinstance(existing, dict) and existing.get("run_id"):
+                    updated_json = _merge_launch_head_run(existing, updated_json)
+                record.review_head_run = updated_json
                 record.workspace = updated.workspace or record.workspace
                 record.review_handle = updated.handle or record.review_handle
                 record.review_leaf = updated.leaf or record.review_leaf
@@ -3758,7 +3799,7 @@ class DispatcherRuntime:
             current_intent = dict(record.launch_intent or {})
             intent_run = current_intent.get("head_run")
             if isinstance(intent_run, dict) and str(intent_run.get("run_id") or "") == updated.run_id:
-                current_intent["head_run"] = updated.to_json()
+                current_intent["head_run"] = _merge_launch_head_run(intent_run, updated_json)
                 record.launch_intent = current_intent
             records[reference] = record
             self.save_records(payload, records)
