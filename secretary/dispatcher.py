@@ -1936,17 +1936,18 @@ class CommandHostRuntime:
         self._run(["gh", "pr", "merge", branch, "--merge"], "merge pr", cwd=Path(record.workspace))
         repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
         default_branch = self.catalog.default_branch(task["project"], None)
-        if base == default_branch:
-            self._run(["git", "-C", str(repo), "fetch", "origin", base], "post-merge fetch")
-            self._run(["git", "-C", str(repo), "merge", "--ff-only", f"origin/{base}"], "post-merge fast-forward")
-            return
+        # `gh pr merge` is the irreversible delivery boundary.  Refreshing this checkout afterwards
+        # is only a convenience for future worktree bases; a user's preserved local commit or dirty
+        # branch may legitimately make ff-only impossible.  Never report the already-merged card as
+        # failed because that best-effort cache refresh could not be applied.
         try:
+            refresh_branch = base if base == default_branch else default_branch
             self._run(
-                ["git", "-C", str(repo), "fetch", "origin", default_branch],
+                ["git", "-C", str(repo), "fetch", "origin", refresh_branch],
                 "post-merge fetch",
             )
             self._run(
-                ["git", "-C", str(repo), "merge", "--ff-only", f"origin/{default_branch}"],
+                ["git", "-C", str(repo), "merge", "--ff-only", f"origin/{refresh_branch}"],
                 "post-merge fast-forward",
             )
         except HostError:
