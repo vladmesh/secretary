@@ -165,6 +165,10 @@ from secretary.dispatcher_tui import (
     turn_started_confirm as _turn_started_confirm,
 )
 from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
+from secretary.codex_provider_events import (
+    CodexProviderEventIngress,
+    CodexProviderSourceError,
+)
 from secretary.dispatcher_types import (
     # Who a stop is recorded as having been initiated by. Every stop the dispatcher performs has an
     # agent — the reviewer taking the checkout, a verdict ending the review round, a watchdog over
@@ -217,6 +221,7 @@ from triggered_agents.runtime.launch_prefix import pythonpath_prefix
 from triggered_agents.runtime import head as head_ops
 from triggered_agents.runtime.codex_preflight import (
     CodexFanoutPolicyError,
+    CodexFanoutRecordingError,
     preflight_codex_launch,
 )
 from triggered_agents.runtime.head import (
@@ -695,6 +700,52 @@ class CommandHostRuntime:
         # belongs to. Unset, a run reaches disk with the tick's records, which is all a caller
         # outside a tick can promise.
         self.commit_state: Callable[[], None] | None = None
+        # The owner installs one entry before it asks this host to open a Codex pane.  It is keyed
+        # by the HeadRun id written in that launch intent, rather than by workspace or pane, so a
+        # same-workspace respawn cannot inherit a predecessor's provider event source.
+        self._codex_provider_ingresses: dict[str, CodexProviderEventIngress] = {}
+
+    def configure_codex_provider_ingress(
+        self,
+        run: head_ops.HeadRun,
+        *,
+        persist: Callable[[head_ops.HeadRun], None],
+        stop: Callable[[head_ops.HeadRun, str], None],
+        block: Callable[[dict[str, Any]], None],
+    ) -> None:
+        """Install the launch owner's exact-run provider-event ingress.
+
+        This is deliberately an explicit hand-off, not a workspace scanner that looks up an
+        arbitrary record later.  The launch intent has already persisted ``run`` before this call.
+        """
+        source = run.fanout_policy.get("provider_source")
+        if run.spec.adapter != "codex" or not isinstance(source, dict):
+            return
+        self._codex_provider_ingresses[run.run_id] = CodexProviderEventIngress(
+            run, persist, stop=stop, block=block,
+        )
+
+    def poll_codex_provider_ingress(self, run: head_ops.HeadRun) -> None:
+        """Read new provider events only through the run-bound ingress installed at launch."""
+        ingress = self._codex_provider_ingresses.get(run.run_id)
+        if ingress is None:
+            if isinstance(run.fanout_policy.get("provider_source"), dict):
+                raise CodexProviderSourceError(
+                    "Codex HeadRun has no launch-bound provider event ingress", run=run
+                )
+            return
+        ingress.commit_run(run)
+        ingress.poll()
+
+    def _codex_provider_ingress(self, run: head_ops.HeadRun) -> CodexProviderEventIngress | None:
+        ingress = self._codex_provider_ingresses.get(run.run_id)
+        if ingress is not None:
+            return ingress
+        if isinstance(run.fanout_policy.get("provider_source"), dict):
+            raise CodexProviderSourceError(
+                "Codex HeadRun has no launch-bound provider event ingress", run=run
+            )
+        return None
 
     @contextlib.contextmanager
     def committing(self, flush: Callable[[], None]):
@@ -1054,6 +1105,12 @@ class CommandHostRuntime:
             _with_pid_heartbeat(launch.command, pid_file, identity=heartbeat),
         )
         lifecycle_run = lifecycle_run.rebound(pane.handle, leaf=pane.leaf)
+        ingress = self._codex_provider_ingress(lifecycle_run)
+        if ingress is not None:
+            # The returned pane leaf is part of the run identity that the event source is bound
+            # to.  Persist it before the first provider prompt, not in the ordinary post-launch
+            # observer save below.
+            ingress.commit_run(lifecycle_run)
         _bind_head_heartbeat(pid_file, expected=heartbeat, leaf=pane.leaf)
         delivered = False
         delivery_evidence: dict[str, Any] = {}
@@ -1067,6 +1124,7 @@ class CommandHostRuntime:
                     adapter=launch.adapter or "codex",
                     prompt_text=_observer_launch_prompt(),
                     subject="observer-launch",
+                    before_send=ingress.bind_before_delivery if ingress is not None else None,
                 )
                 delivered = True
                 delivery_evidence = _delivery_evidence_json(outcome, "observer-launch")
@@ -1110,7 +1168,7 @@ class CommandHostRuntime:
             "delivery_evidence": delivery_evidence,
             "pid_file": pid_file,
             "run": run,
-            "head_run": lifecycle_run.to_json(),
+            "head_run": (ingress.run if ingress is not None else lifecycle_run).to_json(),
         }
 
     def stop_observer(self, record: Any) -> None:
@@ -1444,6 +1502,14 @@ class CommandHostRuntime:
         leaf = str(intent.get("leaf") or run.leaf)
         pid_file = str(intent.get("pid_file") or run.pid_file)
         run = replace(run, workspace=workspace, handle=handle, leaf=leaf, pid_file=pid_file)
+        ingress = self._codex_provider_ingress(run)
+        if ingress is not None:
+            ingress.commit_run(run)
+            # A recovered, already-bound source is consumed before another delivery can act.  An
+            # unbound source belongs to a prior busy pre-send attempt and is bound by the same
+            # before-send boundary as the original launch.
+            if ingress.source.get("state") == "bound":
+                ingress.poll()
         document, nudge = self._review_document(task, record)
         try:
             outcome = head_ops.nudge(
@@ -1455,6 +1521,7 @@ class CommandHostRuntime:
                     str(document),
                     self._prompt_adapter(intent.get("run"), record.review_head),
                     "reviewer",
+                    before_send=ingress.bind_before_delivery if ingress is not None else None,
                 ),
                 subject="reviewer-launch",
             )
@@ -2437,6 +2504,7 @@ class CommandHostRuntime:
             )
         except CodexFanoutPolicyError as exc:
             raise HostError(str(exc)) from None
+        ingress = self._codex_provider_ingress(preflight_run)
         subject = f"{role or 'head'}-launch"
         pointer = None
         if launch and launch.prompt_after_start:
@@ -2460,11 +2528,15 @@ class CommandHostRuntime:
                 pointer=pointer,
                 pid_file=pid_file,
                 split_from=split_from,
-                transport=self._head_transport(workspace, prompt_file, adapter, role),
+                transport=self._head_transport(
+                    workspace, prompt_file, adapter, role,
+                    before_send=ingress.bind_before_delivery if ingress is not None else None,
+                ),
                 subject=subject,
                 run_id=run_id,
                 role=role,
                 run=preflight_run,
+                commit=ingress.commit_run if ingress is not None else None,
             )
         except head_ops.HeadOperationError as exc:
             raise self._launch_failure(exc, workspace, pid_file, subject) from None
@@ -3566,6 +3638,123 @@ class DispatcherRuntime:
         if not readiness.launch_allowed:
             raise HostError(f"head resource {readiness.resource} is {readiness.status}: {readiness.reason}")
 
+    def bind_codex_provider_ingress(
+        self,
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        *,
+        role: str,
+        reference: str,
+    ) -> None:
+        """Give a persisted Codex HeadRun its only provider-event ingress.
+
+        This is called both immediately after a launch intent is saved and when a dispatcher
+        recovers an existing run.  The callbacks close over the record, not a workspace lookup,
+        and every persistence call saves that record before a source cursor advances or a stop can
+        touch the pane.
+        """
+        stored = (
+            record.worker_head_run if role == WORKER_ROLE else record.review_head_run
+        )
+        intent = dict(record.launch_intent or {})
+        if not isinstance(stored, dict) or not stored.get("run_id"):
+            candidate = intent.get("head_run")
+            stored = candidate if isinstance(candidate, dict) else {}
+        if not stored.get("run_id"):
+            return
+        try:
+            run = head_ops.HeadRun.from_json(stored)
+        except (head_ops.HeadRunError, head_ops.TaskRefError):
+            return
+        if run.spec.adapter != "codex" or not isinstance(run.fanout_policy.get("provider_source"), dict):
+            return
+
+        def persist(updated: head_ops.HeadRun) -> None:
+            if not updated.same_run(run):
+                raise HostError("provider event writer was handed another HeadRun")
+            if role == WORKER_ROLE:
+                record.worker_head_run = updated.to_json()
+                record.workspace = updated.workspace or record.workspace
+                record.handle = updated.handle or record.handle
+                record.worker_leaf = updated.leaf or record.worker_leaf
+                record.worker_pid_file = updated.pid_file or record.worker_pid_file
+            else:
+                record.review_head_run = updated.to_json()
+                record.workspace = updated.workspace or record.workspace
+                record.review_handle = updated.handle or record.review_handle
+                record.review_leaf = updated.leaf or record.review_leaf
+                record.review_pid_file = updated.pid_file or record.review_pid_file
+            current_intent = dict(record.launch_intent or {})
+            intent_run = current_intent.get("head_run")
+            if isinstance(intent_run, dict) and str(intent_run.get("run_id") or "") == updated.run_id:
+                current_intent["head_run"] = updated.to_json()
+                record.launch_intent = current_intent
+            records[reference] = record
+            self.save_records(payload, records)
+
+        def stop(updated: head_ops.HeadRun, reason: str) -> None:
+            # The head operation re-reads the heartbeat identity before it commits ``finishing``
+            # or signals anything.  A mismatch is intentionally swallowed here: the block still
+            # records the unknown source, while no foreign process is signalled.
+            try:
+                with self.host.committing(lambda: self.save_records(payload, records)):
+                    self.host.stop_head(record, "worker" if role == WORKER_ROLE else "review")
+            except HostError:
+                return
+
+        def block(evidence: dict[str, Any]) -> None:
+            self.writer.move(
+                role="dispatcher",
+                actor=self.owner,
+                reference=reference,
+                target="blocked",
+                reason=(
+                    "Codex provider fan-out policy blocked this head: "
+                    f"{evidence.get('state') or 'unknown'}; {evidence.get('reason') or 'provider event observed'}"
+                ),
+                request_id=_attempt_request_id(
+                    record.attempt_id, "codex-provider-event-blocked", reference, role, run.run_id
+                ),
+            )
+
+        self.host.configure_codex_provider_ingress(run, persist=persist, stop=stop, block=block)
+
+    def poll_codex_provider_ingress(
+        self,
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        *,
+        reference: str,
+    ) -> dict[str, Any] | None:
+        """Fence a recovered worker/reviewer before it receives lifecycle work this tick."""
+        for role, stored in (
+            (WORKER_ROLE, record.worker_head_run),
+            (REVIEW_ROLE, record.review_head_run),
+        ):
+            if not isinstance(stored, dict) or not stored.get("run_id"):
+                continue
+            try:
+                run = head_ops.HeadRun.from_json(stored)
+            except (head_ops.HeadRunError, head_ops.TaskRefError):
+                continue
+            if run.spec.adapter != "codex" or not isinstance(run.fanout_policy.get("provider_source"), dict):
+                continue
+            self.bind_codex_provider_ingress(record, records, payload, role=role, reference=reference)
+            try:
+                self.host.poll_codex_provider_ingress(run)
+            except (CodexProviderSourceError, CodexFanoutRecordingError) as exc:
+                return {
+                    "status": "blocked",
+                    "step": "codex-provider-event",
+                    "pilot_ref": reference,
+                    "attempt_id": record.attempt_id,
+                    "policy_evidence": {"kind": "codex_provider_fanout", "state": "unknown"},
+                    "reason": str(exc),
+                }
+        return None
+
     def pause_pipeline(
         self,
         *,
@@ -3615,6 +3804,14 @@ class DispatcherRuntime:
         attempt_id: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
+        # A launch intent can outlive its tick.  Re-establish the exact provider source before
+        # launch adoption/recovery reads a heartbeat or delivers another prompt, not afterwards
+        # when an unbound/mismatched session might already have been attributed to this card.
+        record = records.get(ref)
+        if record is not None:
+            fanout = self.poll_codex_provider_ingress(record, records, payload, reference=ref)
+            if fanout is not None:
+                return fanout
         # A record carrying a launch intent is a bring-up whose tick did not live to record its
         # outcome. It is settled before anything else: until it is, neither "this card has a head"
         # nor "this card is headless" is known, and acting on the wrong answer is how a card ends
@@ -3946,6 +4143,12 @@ class DispatcherRuntime:
             return _launch_intent_unwritable(
                 step="claim", ref=ref, attempt_id=record.attempt_id, role=WORKER_ROLE, reason=failure
             )
+        # The launch intent already contains the exact preflight HeadRun.  Bind its provider
+        # source before ``prepare_worker`` can create a pane; the transport will establish the
+        # new session identity and cursor before it delivers TASK.md.
+        self.bind_codex_provider_ingress(
+            record, records, payload, role=WORKER_ROLE, reference=ref,
+        )
         try:
             prepared = self.host.prepare_worker(
                 claimed,
@@ -4224,6 +4427,9 @@ class DispatcherRuntime:
         ref = task["ref"]
         try:
             self._require_head_ready(record.head)
+            self.bind_codex_provider_ingress(
+                record, records, payload, role=WORKER_ROLE, reference=ref,
+            )
             launched = self.host.restart_worker(
                 task, record, heartbeat_run_id=str((record.launch_intent or {}).get("run_id") or "")
             )

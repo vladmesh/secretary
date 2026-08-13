@@ -133,6 +133,8 @@ class CodexFanoutPolicyTests(unittest.TestCase):
         )
 
         self.assertTrue(allowed.fanout_clean)
+        self.assertEqual(allowed.fanout_policy["provider_source"]["state"], "unbound")
+        self.assertEqual(allowed.fanout_policy["provider_source"]["kind"], "codex_session_event_jsonl")
         trusted = config.read_text(encoding="utf-8")
         self.assertIn("trust_level = \"trusted\"", trusted)
 
@@ -225,6 +227,32 @@ class CodexFanoutPolicyTests(unittest.TestCase):
         self.assertFalse(historical.fanout_clean)
         self.assertFalse(malformed.fanout_clean)
         self.assertEqual(historical.fanout_policy_state, "unknown")
+
+    def test_malformed_provider_source_remains_unknown_on_recovery(self) -> None:
+        allowed = self._allowed_run()
+        malformed = HeadRun.from_json({
+            **allowed.to_json(),
+            "fanout_policy": {
+                **allowed.fanout_policy,
+                "provider_source": {"version": 1, "state": "bound"},
+            },
+        })
+
+        self.assertFalse(malformed.fanout_clean)
+        self.assertEqual(malformed.fanout_policy_state, "unknown")
+        self.assertTrue(malformed.fanout_policy["provider_source_required"])
+        self.assertEqual(malformed.fanout_policy["provider_source"], {})
+
+    def test_missing_required_provider_source_remains_an_ingress_fenced_unknown(self) -> None:
+        allowed = self._allowed_run()
+        missing = HeadRun.from_json({
+            **allowed.to_json(),
+            "fanout_policy": {**allowed.fanout_policy, "provider_source_required": True},
+        })
+
+        self.assertFalse(missing.fanout_clean)
+        self.assertEqual(missing.fanout_policy_state, "unknown")
+        self.assertEqual(missing.fanout_policy["provider_source"], {})
 
     def test_worker_reviewer_and_observer_preflight_refuse_before_pane_creation(self) -> None:
         for role in ("worker", "reviewer", "observer"):

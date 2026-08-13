@@ -783,6 +783,10 @@ class FakeHost:
         self.prepare_requires_existing: list[bool] = []
         # Every launch this fake performs gets its own head run identity, numbered in order.
         self.head_runs = 0
+        # The production runtime installs this exact-run ingress immediately after a Codex launch
+        # intent is durable.  Most dispatcher fixtures use non-source HeadRuns, so the double
+        # records the hand-off without inventing a provider journal event.
+        self.codex_provider_ingresses: list[str] = []
         self.reviews: list[str] = []
         self.stopped: list[str] = []
         self.torn_down: list[str] = []
@@ -996,6 +1000,12 @@ class FakeHost:
 
     def observer_workspace(self, reference: str) -> str:
         return str(self.root / "observers" / reference.replace(":", "-"))
+
+    def configure_codex_provider_ingress(self, run, *, persist, stop, block) -> None:
+        self.codex_provider_ingresses.append(run.run_id)
+
+    def poll_codex_provider_ingress(self, run) -> None:
+        return None
 
     def observer_pid_file(self, reference: str) -> str:
         return str(self.root / "observers" / f"{reference.replace(':', '-')}.pid")

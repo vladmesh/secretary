@@ -510,6 +510,9 @@ def retry_busy_reviewer_launch_delivery(
                 f"retry is due in {max(0, int(next_at - now))}s"
             ),
         }
+    bind_ingress = getattr(runtime, "bind_codex_provider_ingress", None)
+    if callable(bind_ingress):
+        bind_ingress(record, records, payload, role=REVIEW_ROLE, reference=ref)
     try:
         retried = runtime.host.nudge_review_delivery(task, record, intent)
     except Exception as exc:  # noqa: BLE001 — evidence is the delivery boundary's contract
@@ -754,6 +757,11 @@ def start_review(
             role=REVIEW_ROLE,
             reason=failure,
         )
+    # The durable intent owns the exact pre-pane HeadRun.  The host's transport binds the new
+    # provider session and cursor from this entry before it can send REVIEW.md.
+    bind_ingress = getattr(runtime, "bind_codex_provider_ingress", None)
+    if callable(bind_ingress):
+        bind_ingress(record, records, payload, role=REVIEW_ROLE, reference=ref)
     try:
         launch = runtime.host.start_review(task, record)
     except Exception as exc:

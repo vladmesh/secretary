@@ -348,6 +348,48 @@ def _fanout_policy_json(payload: Any) -> dict[str, Any]:
             or not str(event.get("captured_at") or "")
         ):
             return _unknown_fanout_policy("fan-out policy event log is malformed")
+    source_required = result.get("provider_source_required") is True
+    source = result.get("provider_source")
+    if source_required and source is None:
+        return _unknown_fanout_policy(
+            "fan-out provider source binding is missing", provider_source_required=True
+        )
+    if source is not None:
+        if not isinstance(source, dict):
+            return _unknown_fanout_policy(
+                "fan-out provider source binding is malformed", provider_source_required=True
+            )
+        source_version = source.get("version")
+        source_state = str(source.get("state") or "")
+        if source_version != 1 or source.get("kind") != "codex_session_event_jsonl":
+            return _unknown_fanout_policy(
+                "fan-out provider source binding has an unsupported version", provider_source_required=True
+            )
+        if source_state == "unbound":
+            if not str(source.get("root") or "") or not isinstance(source.get("baseline"), list):
+                return _unknown_fanout_policy(
+                    "fan-out provider source baseline is malformed", provider_source_required=True
+                )
+        elif source_state == "bound":
+            cursor = source.get("cursor")
+            if (
+                not str(source.get("root") or "")
+                or not str(source.get("path") or "")
+                or not str(source.get("session_id") or "")
+                or not str(source.get("parent_thread_id") or "")
+                or not isinstance(cursor, dict)
+                or not isinstance(cursor.get("line"), int)
+                or cursor.get("line") < 1
+                or not _digest(cursor.get("digest"))
+                or not str(source.get("bound_at") or "")
+            ):
+                return _unknown_fanout_policy(
+                    "fan-out provider source binding is malformed", provider_source_required=True
+                )
+        else:
+            return _unknown_fanout_policy(
+                "fan-out provider source binding is malformed", provider_source_required=True
+            )
     if state == FANOUT_ALLOWED and terminal_state == "clean" and result["events"]:
         return _unknown_fanout_policy("a clean fan-out policy record carries provider events")
     # The only shape that could be read as clean needs its complete binding.  A damaged historic
@@ -371,11 +413,19 @@ def _digest(value: Any) -> bool:
     return len(text) == 64 and all(character in "0123456789abcdef" for character in text)
 
 
-def _unknown_fanout_policy(reason: str) -> dict[str, Any]:
-    return {
+def _unknown_fanout_policy(
+    reason: str, *, provider_source_required: bool = False
+) -> dict[str, Any]:
+    result = {
         "version": FANOUT_POLICY_VERSION,
         "state": FANOUT_UNKNOWN,
         "terminal_state": FANOUT_UNKNOWN,
         "reason": reason,
         "events": [],
     }
+    if provider_source_required:
+        # Keep enough typed provenance for the runtime to route the damaged binding through the
+        # exact run's ingress.  Replacing it with absence would let recovery skip the fence.
+        result["provider_source_required"] = True
+        result["provider_source"] = {}
+    return result

@@ -104,6 +104,17 @@ The live fan-out canary has a hard precondition: an independently captured v1 pr
 the exact binary/version/model/role must already permit the pane, and its run-bound recorder must
 be durable before the canary acts on any provider event.
 
+The concrete Codex source is its structured session-event JSONL, not a pane read and not the
+tolerant workspace-level session liveness lookup. The pre-pane attestation stores the v1 source
+root and the set of journal paths that existed before the pane. The collector reads the journal's
+`session_meta` and `event_msg` envelopes, never pane text. Before the first prompt, exactly one
+newly created journal for that workspace must supply one session identity and parent
+`thread.started` identity; that path, identity and line/digest cursor are written onto the same
+`HeadRun`. The canary precondition is therefore that Codex exposes its root-thread identity before
+task delivery. Recovery reopens only that path and verifies its root, session id, workspace, parent
+identity and prior cursor before reading a later line. Missing, unreadable, changed or ambiguous
+source evidence is `unknown`: it is fenced and blocked without signalling a possibly foreign head.
+
 ## SHA-bound mechanical gate evidence
 
 Every real mechanical gate result materializes a reusable receipt bound to one checkout:

@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -65,7 +66,7 @@ PROVIDER_EVENT_TYPES = (
 # new tomorrow; that is why a tool not in this set is treated as unknown when an event calls it.
 KNOWN_COLLABORATION_TOOLS = frozenset({
     "spawn_agent", "create_agent", "create_child_thread", "fork_thread", "delegate",
-    "collaboration", "collaboration_call",
+    "collaboration", "collaboration_call", "wait", "wait_agent",
 })
 
 
@@ -217,6 +218,14 @@ def preflight_codex_launch(
             f"{policy.get('reason') or 'no independently acceptable schema attestation'}",
             run=attested,
         )
+    # The source is bound only after the newly created pane has made its own Codex session.  Its
+    # pre-pane baseline is nevertheless durable now: a session file that already existed before
+    # this run is never attributed to it merely because it shares a workspace.
+    try:
+        attested = _with_unbound_provider_source(profile, attested)
+    except OSError as exc:
+        refused = _unknown_run(attested, f"cannot establish Codex provider event source baseline: {exc}")
+        raise CodexFanoutPolicyError(str(refused.fanout_policy["reason"]), run=refused) from None
     # Refused fan-out evidence must be side-effect free: a schema-absent launch is not entitled
     # to amend a shared Codex trust config merely because it reached the host.  Trust is still
     # established for the only path that can actually open a pane.
@@ -416,8 +425,13 @@ def enforce_provider_event(
         # The run identity is still the one this recorder was given.  ``stop`` must prove that
         # identity before touching a pane or pid, so a storage error never authorises a foreign
         # process signal.
-        stop(exc.run, "provider fan-out event could not be durably recorded")
-        block(evidence)
+        try:
+            stop(exc.run, "provider fan-out event could not be durably recorded")
+        finally:
+            # A refused identity-fenced stop is not permission to continue, nor a reason to lose
+            # the typed card/sprint block.  The stop callback itself decides whether a signal was
+            # safe; this boundary still records the policy consequence either way.
+            block(evidence)
         raise
     if outcome.blocked:
         evidence = {
@@ -425,8 +439,10 @@ def enforce_provider_event(
             "event": dict(outcome.event),
             "state": outcome.terminal_state,
         }
-        stop(outcome.run, f"provider fan-out policy {outcome.terminal_state}")
-        block(evidence)
+        try:
+            stop(outcome.run, f"provider fan-out policy {outcome.terminal_state}")
+        finally:
+            block(evidence)
     return outcome
 
 
@@ -586,6 +602,38 @@ def _policy_run(
     })
 
 
+def _with_unbound_provider_source(profile: Mapping[str, Any], run: "HeadRun") -> "HeadRun":
+    """Attach the pre-pane source baseline used to bind the new Codex event journal.
+
+    Session JSONL has a provider session id and parent thread id, but no Secretary run id.  The
+    baseline is therefore part of the attestation: a future lifecycle can select exactly one
+    *new* provider journal, never re-label an older same-workspace session as this run.
+    """
+    root = Path(codex_home(profile)) / "sessions"
+    if root.exists() and not root.is_dir():
+        raise OSError(f"Codex session root {root} is not a directory")
+    baseline: list[str] = []
+    if root.is_dir():
+        try:
+            baseline = sorted(
+                str(path.resolve(strict=False))
+                for path in root.rglob("*.jsonl")
+                if path.is_file()
+            )
+        except OSError as exc:
+            raise OSError(f"cannot enumerate Codex session root {root}: {exc}") from None
+    policy = dict(run.fanout_policy)
+    policy["provider_source_required"] = True
+    policy["provider_source"] = {
+        "version": 1,
+        "kind": "codex_session_event_jsonl",
+        "state": "unbound",
+        "root": str(root.resolve(strict=False)),
+        "baseline": baseline,
+    }
+    return run.with_fanout_policy(policy)
+
+
 def _unknown_run(run: "HeadRun", reason: str) -> "HeadRun":
     return _policy_run(
         run,
@@ -675,8 +723,13 @@ def _typed_provider_event(
     event: accepting it as an empty result would be a transcript reconstruction path in disguise.
     """
     captured = captured_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    supplied_digest = (
+        str(raw_event.get("_secretary_raw_event_digest") or "")
+        if isinstance(raw_event, Mapping) else ""
+    )
+    raw_digest = supplied_digest if re.fullmatch(r"[0-9a-f]{64}", supplied_digest) else _raw_event_digest(raw_event)
     base = {
-        "raw_event_digest": _raw_event_digest(raw_event),
+        "raw_event_digest": raw_digest,
         "source_sequence": source_sequence,
         "source_location": str(source_location or ""),
         "captured_at": captured,
@@ -710,12 +763,12 @@ def _typed_provider_event(
     else:
         return dict(base, type=EVENT_UNPARSEABLE_PROVIDER_EVENT, policy_outcome=FANOUT_TERMINAL_UNKNOWN,
                     reason="provider event has no recognised collaboration shape")
-    if not expected_parent_thread_id or not parent or parent != expected_parent_thread_id:
-        return dict(base, type=EVENT_UNKNOWN_THREAD_EDGE, policy_outcome=FANOUT_TERMINAL_UNKNOWN,
-                    reason="provider event parent identity is absent or does not match this HeadRun")
     if declared == EVENT_UNPARSEABLE_PROVIDER_EVENT:
         return dict(base, type=declared, policy_outcome=FANOUT_TERMINAL_UNKNOWN,
                     reason="provider emitted an unparseable collaboration event")
+    if not expected_parent_thread_id or not parent or parent != expected_parent_thread_id:
+        return dict(base, type=EVENT_UNKNOWN_THREAD_EDGE, policy_outcome=FANOUT_TERMINAL_UNKNOWN,
+                    reason="provider event parent identity is absent or does not match this HeadRun")
     if declared == EVENT_UNKNOWN_THREAD_EDGE:
         return dict(base, type=declared, policy_outcome=FANOUT_TERMINAL_UNKNOWN,
                     reason="provider reported an unknown parent or child thread relation")
