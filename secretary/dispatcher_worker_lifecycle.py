@@ -107,6 +107,9 @@ class WorkerContinuationLiveness:
     reason: str = "missing"
     head_run_id: str = ""
     head_run_fingerprint: str = ""
+    # The first probe of this exact HeadRun episode.  It is distinct from busy timing and is
+    # written for progressing, idle and unavailable evidence alike.
+    first_observed_at: float = 0.0
     first_busy_at: float = 0.0
     last_provider_progress_at: float = 0.0
     last_provider_observed_at: float = 0.0
@@ -191,6 +194,8 @@ class WorkerContinuationLiveness:
         ):
             self._reject_as_unknown("continuation liveness episode is not bound to the retained HeadRun")
             return "unknown"
+        if not self.first_observed_at:
+            self.first_observed_at = now
         if not isinstance(evidence, dict):
             self.state = ContinuationLivenessState.UNAVAILABLE
             self.reason = "provider-progress transport returned an invalid shape"
@@ -216,10 +221,14 @@ class WorkerContinuationLiveness:
             or str(evidence.get("head_run_id") or "") != self.head_run_id
             or str(evidence.get("head_run_fingerprint") or "") != self.head_run_fingerprint
         ):
+            if str(evidence.get("state") or "") == "identity_mismatch":
+                self._reject_as_unknown(
+                    str(evidence.get("reason") or "provider progress names another HeadRun")
+                )
+                self.last_provider_observed_at = now
+                return "unknown"
             self.state = (
-                ContinuationLivenessState.UNKNOWN
-                if str(evidence.get("state") or "") == "identity_mismatch"
-                else ContinuationLivenessState.UNAVAILABLE
+                ContinuationLivenessState.UNAVAILABLE
             )
             self.reason = str(evidence.get("reason") or "provider source was not admitted")[:240]
             self.last_provider_observed_at = now
@@ -316,6 +325,7 @@ class WorkerContinuationLiveness:
             "reason": self.reason,
             "head_run_id": self.head_run_id,
             "head_run_fingerprint": self.head_run_fingerprint,
+            "first_observed_at": self.first_observed_at,
             "first_busy_at": self.first_busy_at,
             "last_provider_progress_at": self.last_provider_progress_at,
             "last_provider_observed_at": self.last_provider_observed_at,
@@ -353,7 +363,7 @@ class WorkerContinuationLiveness:
             numeric = {
                 name: float(value.get(name) or 0.0)
                 for name in (
-                    "first_busy_at", "last_provider_progress_at", "last_provider_observed_at",
+                    "first_observed_at", "first_busy_at", "last_provider_progress_at", "last_provider_observed_at",
                     "recovery_attempted_at", "recovery_response_deadline",
                 )
             }
@@ -399,7 +409,9 @@ class WorkerContinuationLiveness:
                     return cls.unknown("incoherent source-rejected liveness baseline", legacy_busy_attempts=legacy_busy_attempts)
             elif (
                 source or source_fingerprint or cursor or busy_attempts
-                or rung != ContinuationRecoveryRung.NONE or outcome or any(numeric.values())
+                or rung != ContinuationRecoveryRung.NONE or outcome
+                or numeric["first_busy_at"] or numeric["last_provider_progress_at"]
+                or numeric["recovery_attempted_at"] or numeric["recovery_response_deadline"]
                 or recovery_attempts or bool(value.get("recovery_resume_used", False))
             ):
                 return cls.unknown("incoherent source-rejected pending baseline", legacy_busy_attempts=legacy_busy_attempts)
@@ -417,17 +429,33 @@ class WorkerContinuationLiveness:
             if not baseline_established or not source or not cursor or not _fingerprint(source_fingerprint):
                 return cls.unknown("incoherent bound liveness baseline", legacy_busy_attempts=legacy_busy_attempts)
         elif state == ContinuationLivenessState.UNAVAILABLE:
-            # The sole durable unavailable outcome is the exact legacy-unbound Codex v1 case
-            # after it has been terminalized for the existing fenced replacement path.  Its source
-            # still has to be re-read and re-classified on recovery; this record itself is never
-            # permission to replace a generic unavailable or malformed source.
-            if (
-                baseline_established or source or source_fingerprint or cursor or busy_attempts
+            # An unavailable probe is a durable observation of this already-bound episode, not an
+            # unbound historical value.  In particular, preserve it across a reload so a missing
+            # source cannot be re-baselined from a later workspace scan.  A prior admitted baseline
+            # and its bounded ladder are audit evidence too: a later exact source may report real
+            # progress, but it cannot start a fresh episode.
+            if source_rejected:
+                return cls.unknown(
+                    "unavailable liveness carries a source-rejection fence",
+                    legacy_busy_attempts=legacy_busy_attempts,
+                )
+            if baseline_established:
+                if not source or not cursor or not _fingerprint(source_fingerprint):
+                    return cls.unknown(
+                        "incoherent unavailable liveness baseline",
+                        legacy_busy_attempts=legacy_busy_attempts,
+                    )
+            elif (
+                source or source_fingerprint or cursor or busy_attempts
+                or rung not in {ContinuationRecoveryRung.NONE, ContinuationRecoveryRung.TERMINAL}
+                or numeric["first_busy_at"] or numeric["last_provider_progress_at"]
+                or numeric["recovery_attempted_at"] or numeric["recovery_response_deadline"]
                 or recovery_attempts or bool(value.get("recovery_resume_used", False))
-                or source_rejected or rung != ContinuationRecoveryRung.TERMINAL
-                or outcome != "replacement"
             ):
-                return cls.unknown("incoherent unavailable liveness baseline", legacy_busy_attempts=legacy_busy_attempts)
+                return cls.unknown(
+                    "incoherent unavailable pending baseline",
+                    legacy_busy_attempts=legacy_busy_attempts,
+                )
         else:
             return cls.unknown("unavailable liveness episode is not safely recoverable", legacy_busy_attempts=legacy_busy_attempts)
         if state == ContinuationLivenessState.UNKNOWN:
@@ -437,6 +465,7 @@ class WorkerContinuationLiveness:
                 reason=str(value.get("reason") or "")[:240],
                 head_run_id=run_id,
                 head_run_fingerprint=fingerprint,
+                first_observed_at=numeric["first_observed_at"],
                 first_busy_at=numeric["first_busy_at"],
                 last_provider_progress_at=numeric["last_provider_progress_at"],
                 last_provider_observed_at=numeric["last_provider_observed_at"],
@@ -462,6 +491,7 @@ class WorkerContinuationLiveness:
             return cls.unknown("non-terminal liveness carries a terminal outcome", legacy_busy_attempts=legacy_busy_attempts)
         elif rung != ContinuationRecoveryRung.NONE and state not in {
             ContinuationLivenessState.STALLED, ContinuationLivenessState.PROGRESSED,
+            ContinuationLivenessState.UNAVAILABLE,
         }:
             return cls.unknown("recovery rung lacks verified no-progress episode", legacy_busy_attempts=legacy_busy_attempts)
         if rung == ContinuationRecoveryRung.SAFE_RECOVERY_RESPONSE_WINDOW and (
@@ -477,6 +507,7 @@ class WorkerContinuationLiveness:
             reason=str(value.get("reason") or "")[:240],
             head_run_id=run_id,
             head_run_fingerprint=fingerprint,
+            first_observed_at=numeric["first_observed_at"],
             first_busy_at=numeric["first_busy_at"],
             last_provider_progress_at=numeric["last_provider_progress_at"],
             last_provider_observed_at=numeric["last_provider_observed_at"],

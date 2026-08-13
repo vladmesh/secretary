@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tempfile
@@ -172,12 +173,15 @@ class BoardHostContractTests(unittest.TestCase):
                 self.assertEqual((declaration.source, declaration.target), (source, target))
 
     def test_task_writer_can_import_the_registry_without_loading_kanboard(self) -> None:
+        source_root = Path(__file__).resolve().parents[1]
+        env = dict(os.environ)
+        env["PYTHONPATH"] = str(source_root)
         result = subprocess.run(
             [
                 sys.executable, "-P", "-c",
                 "import secretary.tasks, sys; assert 'secretary.board.kanboard' not in sys.modules",
             ],
-            cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, check=False,
+            cwd=source_root, env=env, capture_output=True, text=True, check=False,
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)

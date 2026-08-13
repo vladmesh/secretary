@@ -135,8 +135,8 @@ class CodexProviderEventIngress:
             meta, lines = parsed
             if str(meta.get("cwd") or "") != str(Path(self.run.workspace).resolve(strict=False)):
                 continue
-            parent = _parent_thread(lines)
             session_id = str(meta.get("session_id") or "")
+            parent = _parent_thread(lines, session_id=session_id)
             if not session_id or not parent:
                 continue
             candidates.append((path, {"session_id": session_id, "parent_thread_id": parent}, lines))
@@ -148,8 +148,11 @@ class CodexProviderEventIngress:
         path, identity, lines = candidates[0]
         parent_line = next(
             line for line in lines
-            if _is_parent_started(_event_view(line.event))
-            and str(_event_view(line.event).get("thread_id") or "") == identity["parent_thread_id"]
+            if _is_parent_anchor(
+                line.event,
+                identity["parent_thread_id"],
+                identity["session_id"],
+            )
         )
         first_line = lines[0]
         # The preflight descriptor is immutable.  Binding adds the facts the selected journal can
@@ -273,7 +276,8 @@ class CodexProviderEventIngress:
         if (
             str(meta.get("session_id") or "") != str(source.get("session_id") or "")
             or str(meta.get("cwd") or "") != str(Path(self.run.workspace).resolve(strict=False))
-            or _parent_thread(lines) != str(source.get("parent_thread_id") or "")
+            or _parent_thread(lines, session_id=str(meta.get("session_id") or ""))
+            != str(source.get("parent_thread_id") or "")
         ):
             self._unknown("Codex provider source identity no longer matches this HeadRun")
             return None
@@ -353,7 +357,7 @@ def _read_source(path: Path) -> tuple[dict[str, Any], list[SourceLine]] | None:
     return meta, lines
 
 
-def _parent_thread(lines: Iterable[SourceLine]) -> str:
+def _parent_thread(lines: Iterable[SourceLine], *, session_id: str = "") -> str:
     parents = [
         str(_event_view(line.event).get("thread_id") or "") for line in lines
         if _is_parent_started(_event_view(line.event))
@@ -362,7 +366,24 @@ def _parent_thread(lines: Iterable[SourceLine]) -> str:
     # The first ``thread.started`` is the parent established at source binding.  Later starts
     # are not allowed to rewrite that identity: ``_provider_events`` records them as unknown
     # relations during polling instead of making recovery attribute a child as the parent.
-    return parents[0] if parents else ""
+    # Codex 0.147's interactive journal identifies the root thread in ``session_meta`` and then
+    # emits ``task_started``/``task_complete`` without a separate ``thread.started`` record.  The
+    # session id is the provider thread id in that format. Prefer the explicit event when present,
+    # otherwise retain the exact selected journal's immutable session identity as the root.
+    return parents[0] if parents else session_id
+
+
+def _is_parent_anchor(event: Any, parent_thread_id: str, session_id: str) -> bool:
+    """Whether one physical line proves the selected journal's root identity."""
+    view = _event_view(event)
+    if _is_parent_started(view):
+        return str(view.get("thread_id") or "") == parent_thread_id
+    if not isinstance(event, Mapping) or event.get("type") != "session_meta":
+        return False
+    payload = event.get("payload")
+    payload = payload if isinstance(payload, Mapping) else {}
+    recorded = payload.get("session_id") or payload.get("id") or event.get("session_id")
+    return bool(session_id and parent_thread_id == session_id and recorded == session_id)
 
 
 def _initial_range_matches(source: Mapping[str, Any], lines: list[SourceLine]) -> bool:
@@ -394,10 +415,10 @@ def _initial_range_matches(source: Mapping[str, Any], lines: list[SourceLine]) -
     root_record = next((line for line in lines if line.number == root_line), None)
     if root_record is None or root_record.digest != root_digest:
         return False
-    root_event = _event_view(root_record.event)
-    if not (
-        _is_parent_started(root_event)
-        and str(root_event.get("thread_id") or "") == str(source.get("parent_thread_id") or "")
+    if not _is_parent_anchor(
+        root_record.event,
+        str(source.get("parent_thread_id") or ""),
+        str(source.get("session_id") or ""),
     ):
         return False
     last_line = last.get("line")

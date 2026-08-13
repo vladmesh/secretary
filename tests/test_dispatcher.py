@@ -410,6 +410,45 @@ class WorkerContinuationStateTests(unittest.TestCase):
         self.assertEqual(restored.recovery_rung, ContinuationRecoveryRung.SAFE_RECOVERY_PENDING)
         self.assertEqual(restored.observe_provider(evidence, 5.0, head_run=run), "unknown")
 
+    def test_unavailable_liveness_round_trips_the_existing_exact_episode(self) -> None:
+        """A temporarily unreadable exact source cannot erase a bound no-progress ladder."""
+        run = head_ops.HeadRun(
+            run_id="retained-run",
+            spec=head_ops.HeadSpec(profile_id="codex", adapter="codex"),
+            workspace="/tmp/continuation",
+            task_ref=head_ops.TaskRef.card("secretary-1434"),
+            role="worker",
+        ).to_json()
+        _, fingerprint = head_run_binding(run)
+        evidence = {
+            "state": "observed", "admission": "accepted", "head_run_id": "retained-run",
+            "head_run_fingerprint": fingerprint, "source": "codex-session",
+            "source_fingerprint": "a" * 32, "cursor": "2:one",
+        }
+        liveness = WorkerContinuationLiveness.begin(run)
+        self.assertEqual(liveness.observe_provider(evidence, 10.0, head_run=run), "baseline")
+        self.assertEqual(liveness.observe_provider(evidence, 20.0, head_run=run), "stalled")
+        liveness.note_busy(20.0)
+        liveness.begin_safe_recovery(20.0)
+        self.assertEqual(liveness.observe_provider(
+            {"state": "unavailable", "reason": "selected journal is unreadable"},
+            30.0,
+            head_run=run,
+        ), "unavailable")
+
+        restored = WorkerContinuationLiveness.from_json(liveness.to_json())
+
+        self.assertEqual(restored.state, ContinuationLivenessState.UNAVAILABLE)
+        self.assertEqual(restored.head_run_id, "retained-run")
+        self.assertEqual(restored.head_run_fingerprint, fingerprint)
+        self.assertEqual(restored.provider_cursor, "2:one")
+        self.assertEqual(restored.busy_attempts, 1)
+        self.assertEqual(restored.recovery_rung, ContinuationRecoveryRung.SAFE_RECOVERY_PENDING)
+        self.assertEqual(restored.last_provider_observed_at, 30.0)
+        self.assertEqual(restored.observe_provider(evidence, 40.0, head_run=run), "stalled")
+        self.assertEqual(restored.busy_attempts, 1)
+        self.assertEqual(restored.recovery_rung, ContinuationRecoveryRung.SAFE_RECOVERY_PENDING)
+
     def test_liveness_decoder_refuses_unbound_stalled_and_invalid_fingerprints(self) -> None:
         for malformed in (
             {
@@ -1255,6 +1294,17 @@ class FakeHost:
             "head_run_id": run_id, "head_run_fingerprint": fingerprint,
         }
 
+    def observer_provider_progress(self, record) -> dict[str, str]:
+        """The observer twin of the shared exact-HeadRun progress seam."""
+        run_id, fingerprint = head_run_binding(record.head_run)
+        if not run_id:
+            return {"state": "unavailable", "reason": "fake has no persisted observer HeadRun"}
+        return {
+            "state": "observed", "admission": "accepted", "source": "fake-bound-session",
+            "source_fingerprint": "f" * 32, "cursor": "fake:unchanged",
+            "head_run_id": run_id, "head_run_fingerprint": fingerprint,
+        }
+
     def observer_pid_file(self, reference: str) -> str:
         return str(self.root / "observers" / f"{reference.replace(':', '-')}.pid")
 
@@ -1279,9 +1329,12 @@ class FakeHost:
         leaf = f"leaf:{handle}"
         head_run = head_ops.HeadRun(
             run_id=heartbeat_run_id or "fake-observer-run",
-            spec=head_ops.HeadSpec(profile_id=head, adapter="codex"),
+            spec=head_ops.HeadSpec(
+                profile_id=head, adapter="codex", model="gpt-5.6-terra"
+            ),
             workspace=str(workspace),
             task_ref=head_ops.TaskRef.sprint(reference),
+            role="observer",
             handle=handle,
             leaf=leaf,
             pid_file=str(pid_file),

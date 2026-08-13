@@ -128,6 +128,8 @@ launch. It reads the journal's `session_meta` and `event_msg` envelopes, not pan
 HeadRun first records an unbound source root and pre-launch path baseline, then the one new matching
 journal's path, provider session id, parent thread id and line/digest cursor before its first
 prompt. The retained TUI collaboration item is `event_msg.payload.item.type = CollabAgentToolCall`;
+an explicit `thread.started` anchors the parent when present, while Codex 0.147's
+`session_meta`-plus-`task_started`/`task_complete` journal uses its selected session id as that root.
 its `tool`, `sender_thread_id` and `receiver_thread_ids` are normalized with the documented
 `collab_tool_call` form. Any other collaboration-shaped item is unknown, not a clean record. Once
 the binding is durable, it records first/root/last anchors and a digest of the complete initially
@@ -730,6 +732,13 @@ head back up bound. No operator step: an installation upgraded while its observe
 on its own, one stop and one launch, and pays for it with the head's delivery cursor, which the new head
 baselines from the current board like any first launch.
 
+The same no-operator adoption rule applies to the Codex provider source. A live pre-contract observer
+whose persisted source is `unbound` but lacks the current run descriptor and pre-pane baseline is not
+retroactively matched to a journal in its workspace. On a pending significant event the dispatcher persists
+typed unavailable wake-liveness evidence, identity-fences the old pid/leaf through the ordinary confirmed-stop
+path, and launches the installed observer profile with the same delivery id and event high-water mark. A
+foreign heartbeat or an unconfirmed stop remains a fence: no cleanup or replacement is performed beside it.
+
 Before launching, the production tick checks the budget audit of the linked cards. At the signal threshold the
 observer's prompt carries a note that the threshold was reached, and the role skill tells it to reconsider the
 plan and record that in a resume entry. At the hard threshold the sprint becomes `stopped`: the head is stopped
@@ -749,7 +758,15 @@ The tick's decision per sprint is visible in its actions under an `observer-reco
 - `observer-nudged` — a committed linked-card event woke one idle observer turn;
 - `observer-wake-pending` — a delivery batch was already sent and awaits its own acknowledgement;
 - `observer-wake-waiting` — an event arrived while the observer was working; the next tick after its
-  pane is ready again delivers one nudge, without waiting for either ceiling below;
+  pane is ready again delivers one nudge, unless exact provider progress says the same run is still advancing;
+- `observer-wake-progressing` — an admitted opaque cursor from this record's exact HeadRun advanced. The
+  observer, event batch and causal acknowledgement marker remain unchanged; no nudge, stop, replacement,
+  cleanup or block occurs;
+- `observer-wake-no-progress` — the exact admitted provider cursor is unchanged while the pane remains busy.
+  The durable three-observation ladder advances without sending raw input;
+- `observer-wake-liveness-unavailable` — the source or its run identity was unavailable, incomplete or
+  foreign. This is typed evidence, not busy or screen liveness; its exact binding and observation survive
+  dispatcher reload, and it cannot reset or rebaseline the episode;
 - `observer-redelivered` — a batch already on the head was sent again, with the reason on the row: the
   observer was seen ready for input without having acknowledged it, or its acknowledgement deadline
   (`SECRETARY_OBSERVER_ACK_DEADLINE_SECONDS`, 30 minutes by default) ran out. The redelivery keeps the
@@ -781,21 +798,21 @@ The tick's decision per sprint is visible in its actions under an `observer-reco
   record;
 - `sprint-board-unavailable` — the sprints board could not be read, and no live head is stopped.
 
-Two ceilings bound one delivery, and they are not interchangeable. The acknowledgement deadline
-(`SECRETARY_OBSERVER_ACK_DEADLINE_SECONDS`, 30 minutes) is armed when the batch is sent and says how long
-that one delivery may stay unacknowledged before it is sent again. It is never compared against the age of
-the card event: an event that sat on the board for a day, delivered a minute ago, is a delivery a minute
-old. The turn ceiling (`SECRETARY_OBSERVER_TURN_CEILING_SECONDS`, 3 hours) covers the case the deadline
-cannot: a head that is never reported ready for input holds its batch without ever being asked again, since
-a redelivery only ever goes to an idle pane. Once it expires the delivery fails, takes the same bounded
-retries as any other failed wake and then the replacement path.
+The acknowledgement deadline (`SECRETARY_OBSERVER_ACK_DEADLINE_SECONDS`, 30 minutes) remains separate
+from provider-progress liveness. It is armed when the batch is sent and says how long that one delivery may
+stay unacknowledged before it is sent again. It is never compared against the age of the card event: an event
+that sat on the board for a day, delivered a minute ago, is a delivery a minute old.
 
-The two numbers are deliberately far apart. Acting on the deadline costs at most a duplicate prompt to a
-head that is standing at its prompt doing nothing, so 30 minutes is cheap. Acting on the turn ceiling ends
-a delivery held by a head that by every available signal is still working, and the retries behind it end in
-a replacement, so it has to sit above the longest legitimate observer turn on a long card. A ceiling near
-the deadline would tear down working observers mid-turn, which is a failure nothing reports loudly: the
-sprint simply stops being supervised.
+For a current Codex observer source, `wake_liveness` is the authority while a pane is non-idle. Its first
+admitted cursor is a baseline; a later cursor outranks `tui-idle` and resets only the no-progress ladder;
+an unchanged cursor advances the persisted three-observation ladder to an identity-fenced replacement and
+relaunch. `payload-left-in-composer` is bounded evidence of a completed/quiescent turn only when it accompanies
+unchanged admitted progress. It never authorizes Ctrl-C, Escape, a generic key chord or a raw terminal input.
+The old `SECRETARY_OBSERVER_TURN_CEILING_SECONDS` applies only to observer records with no attested
+provider-progress source, retained for compatibility with non-Codex and historical records.
+Replacement retains the terminal old-run episode as audit-only state and durably opens a new
+episode for the replacement HeadRun before its first provider probe; neither source baseline nor
+recovery rung crosses that identity boundary.
 
 Idleness on this path is the pane-readiness signal from the session manager, plus a last-output
 timestamp that can be read at all. That is the whole test: the tick that sees a ready pane holding an
@@ -816,9 +833,10 @@ body `error.code: timeout`, and a body whose `wait.satisfied` is false, mean `bu
 the owned pane working before any prompt was sent. The dispatcher leaves that exact HeadRun, pane
 handle and leaf, workspace and pending delivery/acknowledgement marker in place. It does not signal,
 close, stop, clean up, release, reattribute or replace that head. An observer wake returns to its
-persisted waiting-for-idle state under the turn ceiling; a retained worker continuation records a
-bounded durable backoff and remains pending until one later delivery reaches the ordinary
-confirmation boundary. A reviewer launch whose document nudge sees busy keeps the exact run, pane
+persisted exact-source liveness episode: fresh provider progress keeps the run, while unchanged admitted
+progress advances only its bounded ladder. A retained worker continuation records a bounded durable backoff
+and remains pending until one later delivery reaches the ordinary confirmation boundary. A reviewer launch
+whose document nudge sees busy keeps the exact run, pane
 binding and pending delivery in its launch intent; recovery retries that same nudge on its capped
 durable schedule before it may freeze the worker, record reviewer routing, set reviewer lifecycle
 state or clear the intent. Busy is neither a failed wake nor an acknowledgement.
@@ -829,7 +847,7 @@ evidence. Neither historical evidence that lacks this typed field nor either of 
 is treated as busy. They retain their existing conservative recovery paths, including the normal
 liveness, launch-intent and confirmed-stop fences.
 
-### Retained continuation liveness canary
+### Provider-progress liveness canary
 
 Before the final live Terra canary, verify that the candidate has the version-1
 `worker_continuation_liveness` record and that it is bound to the worker's current `HeadRun`. The
@@ -839,6 +857,15 @@ and terminal outcome. It never contains terminal, composer, prompt or provider t
 malformed, unsupported or mismatched record is typed `unknown`, not a clean or busy result. The
 only unbound shape is that explicit unknown record; a legacy busy count is audit data and cannot
 start a v1 ladder.
+
+The observer side has the same zero-operator prerequisite. Its `wake_liveness` record must name the
+exact observer HeadRun, source baseline/cursor or a typed unavailable/identity-mismatch state, first
+observation, last admitted progress, no-progress rung and terminal outcome. Exercise both branches:
+a fresh admitted cursor must outrank `tui-idle` without a nudge or replacement; unchanged cursor plus
+residual-composer evidence must reach the bounded identity-fenced relaunch without raw terminal input.
+An installed-revision observer with a pre-contract unbound source must be replaced automatically, carrying
+the same delivery id/high-water marker until the replacement's matching resume acknowledges it. A missing,
+foreign or incomplete source is a canary failure, not evidence that a workspace journal is reusable.
 
 The canary's retained post-`report:done` worker must exercise both precedence branches without an
 operator action: advancing evidence from the one launch-bound Codex journal or Claude transcript
@@ -930,8 +957,9 @@ Liveness is the same versioned launch-identity heartbeat as for worker and revie
 has not written it yet, so a missing or unreadable file counts as alive for the duration of the initial-output
 window and dead afterwards. A live file whose run, role, sprint binding, pane leaf, boot id or process start
 ticks do not match the observer record is a distinct `heartbeat-identity-mismatch`: it is neither adopted nor
-stopped, and no replacement is launched beside it. There is no automatic repair for a hung (as opposed to dead)
-head; that case is for the operator.
+stopped, and no replacement is launched beside it. A Codex head with an admitted but unchanged provider cursor
+does have automatic bounded repair through `wake_liveness`; an untrusted source or foreign heartbeat remains
+fenced for an operator rather than targeting a possibly unrelated process.
 
 Lifecycle events go to the shared durable audit log keyed by the sprint reference; a repeat with the same
 request id creates no second event. The request id is built from the reference, the record generation and the
@@ -1034,7 +1062,8 @@ An observer row carries the sprint, the head profile, the state (`running`, `wai
 `launching`, `deferred`, `stop-pending`, `pause-stop-pending`, `stopped-by-pause`, `pending`), pid liveness,
 the launch count, the workspace, the handle-known and abandoned-handle flags, the time and kind of the last
 action, the reason for a deferred launch, and a delivery object with its stage, fixed event high-water mark,
-causal acknowledgement, deadline, retry state and external-failure reason.
+causal acknowledgement, deadline, retry state and external-failure reason. It also carries `wake_liveness`,
+the versioned exact-HeadRun provider-progress episode, without terminal or composer text.
 
 ## Checkpoint push
 
