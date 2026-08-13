@@ -767,7 +767,10 @@ handle and leaf, workspace and pending delivery/acknowledgement marker in place.
 close, stop, clean up, release, reattribute or replace that head. An observer wake returns to its
 persisted waiting-for-idle state under the turn ceiling; a retained worker continuation records a
 bounded durable backoff and remains pending until one later delivery reaches the ordinary
-confirmation boundary. Busy is neither a failed wake nor an acknowledgement.
+confirmation boundary. A reviewer launch whose document nudge sees busy keeps the exact run, pane
+binding and pending delivery in its launch intent; recovery retries that same nudge on its capped
+durable schedule before it may freeze the worker, record reviewer routing, set reviewer lifecycle
+state or clear the intent. Busy is neither a failed wake nor an acknowledgement.
 
 `unavailable` and `stale_handle` are different evidence states. An unreadable or malformed wait,
 or a real transport refusal, is unavailable; `error.code: terminal_handle_stale` is stale-handle

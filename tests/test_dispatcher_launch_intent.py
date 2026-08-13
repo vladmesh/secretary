@@ -1870,6 +1870,110 @@ class LaunchIntentTests(unittest.TestCase):
         # result, and the count is one for one refused prompt.
         self.assertEqual(record.review_delivery_failures, 1)
 
+    def test_a_busy_reviewer_launch_intent_retries_its_document_before_adoption(self) -> None:
+        """A live heartbeat after a pre-send timeout is not reviewer launch confirmation.
+
+        This drives the persisted intent through the next dispatcher tick.  The first launch has
+        already created the reviewer pane and written its heartbeat, but its production-shaped
+        `tui-idle` timeout happened before a terminal send.  Until the durable retry confirms the
+        document nudge, recovery must neither freeze the worker nor attribute/clear the reviewer.
+        """
+        self.run_to_validate()
+        self.host.calls.clear()
+        evidence = {
+            "subject": "reviewer-launch",
+            "handle": f"review:{REF}",
+            "stage": "none",
+            "readiness_before": "busy",
+            "readiness_state": "busy",
+            "reason": "readiness-busy",
+            "transport_error": (
+                "orca terminal wait --for tui-idle failed: "
+                '{"error":{"code":"timeout","message":"timeout"}}'
+            ),
+        }
+
+        def busy_before_send(task: dict, record: DispatcherRecord) -> ReviewLaunch:
+            self.host.calls.append("start_review")
+            self.host.reviews.append(task["ref"])
+            launched = self.host._launched(
+                f"review:{task['ref']}",
+                record.review_head,
+                task,
+                "reviewer",
+                record.workspace,
+                run_id=str(record.launch_intent["run_id"]),
+            )
+            self.host._write_head_pid(
+                "review", task["ref"], head_run=launched.head_run, leaf=launched.leaf
+            )
+            raise HeadLaunchAborted(
+                "reviewer document nudge met a busy pane before send",
+                handle=launched.handle,
+                leaf=launched.leaf,
+                workspace=record.workspace,
+                pid_file=pid_file_path("review", task["ref"]),
+                evidence=evidence,
+                head_run=dict(launched.head_run),
+            )
+
+        with mock.patch.object(self.host, "start_review", side_effect=busy_before_send):
+            held = self.tick()
+
+        self.assertEqual(held["action"], "review-launch-busy")
+        intent = self.stored_intent()
+        self.assertEqual((intent["role"], intent["delivery"]["state"]), ("review", "busy"))
+        self.assertEqual(intent["delivery"]["evidence"], evidence)
+        self.assertGreater(intent["delivery"]["next_at"], time.time())
+        preserved = {
+            key: intent[key]
+            for key in ("workspace", "handle", "leaf", "pid_file", "run_id", "head_run")
+        }
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.review_delivery_evidence, evidence)
+        self.assertEqual(record.review_delivery_failures, 0, "busy is not a delivery failure")
+        self.assertEqual(record.review_launch_aborts, 0, "busy is not a launch-abort episode")
+        self.assertNotIn("freeze_worker", self.host.calls)
+        self.assertNotIn("stop_head:worker", self.host.calls)
+        self.assertEqual(self.host.reviews, [REF], "the existing reviewer is never replaced")
+
+        waiting = self.tick()
+
+        self.assertEqual(waiting["action"], "review-launch-busy")
+        self.assertNotIn("nudge_review_delivery", self.host.calls)
+        self.assertNotIn("freeze_worker", self.host.calls)
+        self.assertEqual(self.stored_intent()["head_run"], preserved["head_run"])
+
+        payload = self.runtime.production_state.load()
+        payload["records"][REF]["launch_intent"]["delivery"]["next_at"] = 0.0
+        self.runtime.production_state.save(payload)
+        review_routes_before = sum(
+            1 for attempt in self.routing_history() if attempt.reviewer is not None
+        )
+
+        confirmed = self.tick()
+
+        self.assertEqual(confirmed["action"], "review-launch-adopted")
+        self.assertEqual(self.host.calls.count("start_review"), 1)
+        self.assertEqual(self.host.calls.count("nudge_review_delivery"), 1)
+        self.assertEqual(self.host.calls.count("freeze_worker"), 1)
+        self.assertEqual(self.host.reviews, [REF], "retry uses the same reviewer run")
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.state, "reviewing")
+        self.assertEqual(record.review_head_run["run_id"], preserved["head_run"]["run_id"])
+        self.assertTrue(record.review_delivery_evidence["turn_confirmed"])
+        self.assertEqual(self.stored_intent(), {}, "only confirmed delivery spends the intent")
+        self.assertEqual(
+            sum(1 for attempt in self.routing_history() if attempt.reviewer is not None),
+            review_routes_before + 1,
+        )
+
+        self.assertEqual(self.tick()["action"], "waiting-review-verdict")
+        self.assertEqual(self.host.calls.count("nudge_review_delivery"), 1)
+        self.assertEqual(self.host.calls.count("freeze_worker"), 1)
+
     def test_a_pane_that_would_not_take_the_prompt_counts_once_on_the_ordinary_path(self) -> None:
         """The other half of the sink's exception family, and the no-double-count case.
 

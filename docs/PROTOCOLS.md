@@ -151,6 +151,14 @@ worker round over the same code. An inventory that will not answer is
 different: it cannot prove whether a reviewer is already live, so it preserves launch ambiguity
 and retries the inventory without launching another head or consuming the headless-failure ceiling.
 
+When a reviewer pane and heartbeat already exist but its document nudge receives typed `busy`
+evidence before any send, that is a pending delivery rather than a started review. The launch
+intent retains the exact reviewer HeadRun, handle/leaf binding and workspace with a capped durable
+retry schedule. Until a later nudge confirms delivery, recovery does not freeze or signal the
+worker, write reviewer routing or lifecycle attribution, clear the intent, or replace the pane.
+Successful confirmation crosses the ordinary launch adoption boundary once; `unavailable`, malformed
+and stale-handle evidence remain separately typed and use their existing conservative recovery paths.
+
 Workers use focused checks while developing and run no more than one local broad suite for a report
 generation/unchanged SHA unless they state why it was rerun. That broad run goes through
 `secretary check broad`, which streams the combined output, returns the check's own exit status and

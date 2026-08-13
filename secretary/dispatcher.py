@@ -1368,6 +1368,59 @@ class CommandHostRuntime:
             delivery_evidence=dict(launched.delivery_evidence),
         )
 
+    def nudge_review_delivery(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        intent: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Retry the document nudge for the exact reviewer a busy launch intent retained.
+
+        This is deliberately not `start_review`: splitting a second pane would replace a live
+        reviewer, while calling the normal adoption path first would freeze the worker and
+        attribute a reviewer which has not received its document.  The intent's HeadRun and pane
+        binding are the only identities used here, and a successful return is handed back for the
+        caller to commit at the ordinary launch-confirmation boundary.
+        """
+        if not record.workspace:
+            raise HostError("review workspace is unavailable for a retained launch")
+        stored_run = intent.get("head_run")
+        if not isinstance(stored_run, dict) or not stored_run.get("run_id"):
+            raise HostError("retained reviewer launch has no durable head run")
+        try:
+            run = head_ops.HeadRun.from_json(stored_run)
+        except (head_ops.HeadRunError, head_ops.TaskRefError) as exc:
+            raise HostError(f"retained reviewer launch has an unreadable head run: {exc}") from None
+        workspace = str(intent.get("workspace") or record.workspace)
+        handle = str(intent.get("handle") or run.handle)
+        leaf = str(intent.get("leaf") or run.leaf)
+        pid_file = str(intent.get("pid_file") or run.pid_file)
+        run = replace(run, workspace=workspace, handle=handle, leaf=leaf, pid_file=pid_file)
+        document, nudge = self._review_document(task, record)
+        try:
+            outcome = head_ops.nudge(
+                run,
+                head_ops.NudgePointer(text=nudge, document=str(document)),
+                host=self.session,
+                transport=self._head_transport(
+                    workspace,
+                    str(document),
+                    self._prompt_adapter(intent.get("run"), record.review_head),
+                    "reviewer",
+                ),
+                subject="reviewer-launch",
+            )
+        except (head_ops.HeadOperationError, TuiDeliveryError, HostError) as exc:
+            failure = HostError(f"retained reviewer document nudge was not delivered: {exc}")
+            failure.evidence = _delivery_evidence_json(exc, "reviewer-launch")
+            raise failure from None
+        return {
+            "handle": outcome.run.handle,
+            "leaf": outcome.run.leaf,
+            "head_run": outcome.run.to_json(),
+            "delivery_evidence": _delivery_evidence_json(outcome.delivery, "reviewer-launch"),
+        }
+
     def review_running(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
         return _command_review_running(self, task, record)
 

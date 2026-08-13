@@ -792,6 +792,11 @@ class FakeHost:
         self.fail_prepare_error: Exception | None = None
         self.fail_result_reason = ""
         self.fail_review_error: Exception | None = None
+        # Recovery retries a busy reviewer nudge against the launch intent's existing HeadRun.
+        # Keep that operation independently scriptable: it is neither another split nor a worker
+        # freeze, and tests use the call log to prove the ordering.
+        self.fail_review_delivery_retry_error: Exception | None = None
+        self.review_delivery_retries: list[str] = []
         # A production reviewer can receive its prompt before a later freeze fails.  Tests that
         # exercise that boundary give the fake the same completed metadata-only receipt.
         self.review_launch_delivery_evidence: dict[str, object] = {}
@@ -1132,6 +1137,26 @@ class FakeHost:
             head_run=dict(launched.head_run),
             delivery_evidence=dict(launched.delivery_evidence),
         )
+
+    def nudge_review_delivery(self, task: dict, record, intent: dict) -> dict:
+        """Fake the direct document retry on the one reviewer this intent already owns."""
+        self.calls.append("nudge_review_delivery")
+        self.review_delivery_retries.append(task["ref"])
+        if self.fail_review_delivery_retry_error is not None:
+            raise self.fail_review_delivery_retry_error
+        run = head_ops.HeadRun.from_json(dict(intent["head_run"])).working()
+        return {
+            "handle": str(intent.get("handle") or run.handle),
+            "leaf": str(intent.get("leaf") or run.leaf),
+            "head_run": run.to_json(),
+            "delivery_evidence": {
+                "subject": "reviewer-launch",
+                "handle": str(intent.get("handle") or run.handle),
+                "stage": "acknowledged",
+                "turn_confirmed": True,
+                "readiness_state": "ready",
+            },
+        }
 
     def restart_worker(self, task: dict, record, *, heartbeat_run_id: str = "") -> LaunchedHead:
         self.calls.append("restart_worker")
@@ -12660,6 +12685,25 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
         self.assertEqual((caught.exception.handle, caught.exception.leaf), ("term-review", "leaf-review"))
         self.assertEqual(host.closed_panes(), [], "a busy reviewer is never closed or replaced")
         self.assertNotIn("close", host.ops(), "the worker remains owned until review is settled")
+
+        # The later retry addresses the exact run and document nudge, rather than splitting a
+        # replacement reviewer or moving into the worker-freeze adoption path first.
+        intent = {
+            "role": "review",
+            "workspace": str(self.workspace),
+            "handle": caught.exception.handle,
+            "leaf": caught.exception.leaf,
+            "pid_file": caught.exception.pid_file,
+            "head_run": dict(caught.exception.head_run),
+        }
+        host.wait_answer = {"wait": {"condition": "tui-idle", "satisfied": True}}
+        with self._bounded_delivery():
+            retried = host.nudge_review_delivery(self.task, self._record(), intent)
+
+        self.assertEqual(retried["head_run"]["run_id"], caught.exception.head_run["run_id"])
+        self.assertEqual(retried["handle"], "term-review")
+        self.assertTrue(retried["delivery_evidence"]["turn_confirmed"])
+        self.assertEqual(host.closed_panes(), [], "retry never closes the retained reviewer pane")
 
     def test_a_document_that_cannot_be_written_stops_the_bring_up_before_any_pane(self) -> None:
         """An unprompted reviewer would sit at its prompt forever; the caller's infrastructure

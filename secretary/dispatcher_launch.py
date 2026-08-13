@@ -83,6 +83,13 @@ REVIEW_ROLE = "review"
 # two are `busy` and `blocked`, and "blocked" is already the name of a board column here.
 PANE_STATE_LABELS = {READINESS_BUSY: "busy", READINESS_BLOCKED: "held in a dialog"}
 
+# A review launch whose document nudge met a working pane is not a failed launch.  The existing
+# reviewer is still the exact run the intent names, so retry the nudge through that run rather than
+# adopting it as though it had already received its task.  The delay is capped to keep the durable
+# schedule finite even when a reviewer spends a long time in a real turn.
+REVIEW_BUSY_RETRY_INITIAL_SECONDS = 30
+REVIEW_BUSY_RETRY_MAX_SECONDS = 5 * 60
+
 # What "the data plane refused this write" looks like. Deliberately not bare `Exception`: a launch
 # that cannot be recorded is answered by not launching, and anything that is not a storage failure
 # (a bug in the record, the health probe's own abort signal) has to keep travelling instead of
@@ -98,6 +105,51 @@ def launch_pid_file(role: str, reference: str) -> str:
 def launch_intent(record: DispatcherRecord) -> dict[str, Any]:
     intent = getattr(record, "launch_intent", None)
     return intent if isinstance(intent, dict) and intent.get("role") else {}
+
+
+def busy_launch_delivery(intent: dict[str, Any]) -> dict[str, Any]:
+    """Return a durable, still-undelivered busy launch nudge, if this intent has one.
+
+    Older launch intents have no delivery member.  They are deliberately not inferred to be busy:
+    their missing evidence remains unknown and follows the historical recovery route.
+    """
+    delivery = intent.get("delivery") if isinstance(intent, dict) else None
+    if not isinstance(delivery, dict):
+        return {}
+    if delivery.get("state") != READINESS_BUSY:
+        return {}
+    return dict(delivery)
+
+
+def defer_busy_launch_delivery(
+    record: DispatcherRecord,
+    evidence: dict[str, Any],
+    *,
+    now: float | None = None,
+) -> int:
+    """Persist the next capped retry for a pre-send reviewer document nudge.
+
+    The intent is the only durable owner of a reviewer which has not crossed launch delivery
+    confirmation.  Keeping the retry there prevents a live heartbeat from being mistaken for a
+    successful reviewer launch on the next dispatcher tick.
+    """
+    intent = dict(launch_intent(record))
+    if not intent:
+        return 0
+    previous = busy_launch_delivery(intent)
+    attempts = int(previous.get("attempts") or 0) + 1
+    delay = min(
+        REVIEW_BUSY_RETRY_INITIAL_SECONDS * (2 ** min(attempts - 1, 4)),
+        REVIEW_BUSY_RETRY_MAX_SECONDS,
+    )
+    intent["delivery"] = {
+        "state": READINESS_BUSY,
+        "attempts": attempts,
+        "next_at": (time.time() if now is None else now) + delay,
+        "evidence": dict(evidence),
+    }
+    record.launch_intent = intent
+    return delay
 
 
 def write_launch_intent(
@@ -165,6 +217,7 @@ def confirm_launch_intent(
     leaf: str = "",
     run: dict[str, Any] | None = None,
     head_run: dict[str, Any] | None = None,
+    delivery: dict[str, Any] | None = None,
 ) -> None:
     """Put what the finished host call knows about the head into its intent, on disk.
 
@@ -206,6 +259,11 @@ def confirm_launch_intent(
             # identity even if the ordinary record save lands later.
             intent["run_id"] = str(head_run.get("run_id") or intent.get("run_id") or "")
         _remember_head_run(record, str(intent.get("role") or ""), head_run)
+    if delivery is not None:
+        # Delivery confirmation shares the intent write with the run it confirms.  A recovery
+        # therefore either sees a pending busy nudge and retries it, or sees this exact run with
+        # a confirmed nudge and may finish adoption; it never invents success from a heartbeat.
+        intent["delivery"] = dict(delivery)
     intent["launched"] = True
     record.launch_intent = intent
     records[ref] = record
@@ -283,10 +341,12 @@ def mark_launch_aborted(
     """Keep the intent of a bring-up that failed with a pane already open.
 
     The host could not promise that nothing of that head is running, so the intent survives with
-    whatever identity the failure carried. The next tick reads the heartbeat and either adopts the
-    head — pane included, so its lifecycle is whole — or stops what is left of it. A persist that
-    refuses here is not a problem: the pre-launch intent is already on disk and names the same pid
-    file, which is the identity recovery actually settles the question with.
+    whatever identity the failure carried. The next tick reads the heartbeat and ordinarily adopts
+    the head — pane included, so its lifecycle is whole — or stops what is left of it. A reviewer
+    whose pre-send document nudge recorded busy is the narrow exception: it retries that exact
+    nudge before either adoption side effect. A persist that refuses here is not a problem: the
+    pre-launch intent is already on disk and names the same pid file, which is the identity
+    recovery actually settles the question with.
     """
     intent = dict(launch_intent(record))
     if not intent:
@@ -516,6 +576,19 @@ def resolve_launch_intent(
                 reason=failure,
             )
         return None
+    if role == REVIEW_ROLE and busy_launch_delivery(intent):
+        # `dispatcher_review` owns the review document and its confirmation rule.  Importing it
+        # only here avoids its normal dependency on this launch-intent module becoming a cycle at
+        # import time.  A busy result takes the tick; a confirmed retry falls through to the same
+        # adoption boundary every completed reviewer launch uses.
+        from secretary.dispatcher_review import retry_busy_reviewer_launch_delivery
+
+        deferred = retry_busy_reviewer_launch_delivery(
+            runtime, task, records, payload, record, intent, step
+        )
+        if deferred is not None:
+            return deferred
+        intent = launch_intent(record)
     return _adopt_launch_intent(runtime, task, records, payload, record, intent, role, step)
 
 

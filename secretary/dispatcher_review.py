@@ -9,9 +9,11 @@ from secretary.dispatcher_helpers import scrub_host_output
 from secretary.dispatcher_launch import (
     REVIEW_ROLE,
     WORKER_ROLE,
+    busy_launch_delivery,
     bring_up_blocked_reason,
     clear_launch_intent,
     confirm_launch_intent,
+    defer_busy_launch_delivery,
     forget_role_head,
     launch_aborted,
     launch_deferred,
@@ -418,14 +420,42 @@ def _reviewer_launch_aborted(
 ) -> dict[str, Any]:
     """The ambiguous reviewer bring-up: its pane is open and nothing can say the head is gone.
 
-    Unchanged behaviour, moved out of the `try` so the one delivery-evidence sink runs before it.
-    "No reviewer exists" is exactly what cannot be claimed here, so the intent stays on disk with
-    what the failure knew of that head and the next tick adopts it or stops it. Blocking the card
-    and dropping the record instead would leave a live reviewer with nothing pointing at it, and
-    that still outranks the ordinary infrastructure retry.
+    The one delivery-evidence sink runs before this branch.  "No reviewer exists" is exactly what
+    cannot be claimed here, so the intent stays on disk with what the failure knew of that head.
+    A pre-send busy document nudge retries that delivery before adoption; other ambiguous launches
+    retain the established adopt-or-stop recovery.  Blocking the card and dropping the record
+    instead would leave a live reviewer with nothing pointing at it, and that still outranks the
+    ordinary infrastructure retry.
     """
+    evidence = getattr(exc, "evidence", None)
+    if hasattr(evidence, "to_json"):
+        evidence = evidence.to_json()
+    busy = delivery_readiness_state(exc) == READINESS_BUSY
+    if busy:
+        # The pane was observed working before any document nudge was sent.  Its live heartbeat is
+        # not launch confirmation, so retain the exact run and schedule the delivery retry on the
+        # intent before it reaches launch recovery.
+        defer_busy_launch_delivery(record, evidence if isinstance(evidence, dict) else {})
     mark_launch_aborted(runtime, payload, records, ref, record, exc)
     record.state = "review_starting"
+    if busy:
+        records[ref] = record
+        runtime.save_records(payload, records)
+        delivery = busy_launch_delivery(record.launch_intent)
+        delay = max(0, int(float(delivery.get("next_at") or 0.0) - time.time()))
+        return {
+            "status": "degraded",
+            "step": "review",
+            "pilot_ref": ref,
+            "attempt_id": record.attempt_id or attempt_id,
+            "action": "review-launch-busy",
+            "head": record.review_head,
+            "attempts": int(delivery.get("attempts") or 0),
+            "reason": (
+                "the reviewer pane was busy before its document nudge was sent; its exact launch "
+                f"intent is retained and retry is due in {delay}s"
+            ),
+        }
     # Count this abort and, once it has repeated past the ceiling, pull an operator in once.
     # The record and its intent are untouched — a head may still be running, so this never
     # blocks or drops the card — but a launch that cannot freeze its worker for this many ticks
@@ -441,6 +471,129 @@ def _reviewer_launch_aborted(
         role=REVIEW_ROLE,
         reason=scrub_host_output(str(exc)),
     )
+
+
+def retry_busy_reviewer_launch_delivery(
+    runtime: Any,
+    task: dict[str, Any],
+    records: dict[str, DispatcherRecord],
+    payload: dict[str, Any],
+    record: DispatcherRecord,
+    intent: dict[str, Any],
+    step: str,
+) -> dict[str, Any] | None:
+    """Retry a pre-send busy reviewer nudge before its live launch can be adopted.
+
+    A launch heartbeat only proves that the pane exists.  Until the document nudge is confirmed,
+    it does not permit the reviewer adoption side effects: freezing the worker, recording routing,
+    clearing the intent or setting the review lifecycle.  The intent is also the retry's durable
+    cursor, so a dispatcher restart retains the same pane and its backoff rather than opening a
+    second reviewer.
+    """
+    delivery = busy_launch_delivery(intent)
+    if not delivery:
+        return None
+    ref = task["ref"]
+    now = time.time()
+    next_at = float(delivery.get("next_at") or 0.0)
+    if next_at and now < next_at:
+        return {
+            "status": "degraded",
+            "step": step,
+            "pilot_ref": ref,
+            "attempt_id": record.attempt_id,
+            "action": "review-launch-busy",
+            "head": str(intent.get("head") or record.review_head),
+            "attempts": int(delivery.get("attempts") or 0),
+            "reason": (
+                "the reviewer document nudge is still deferred while its exact pane is busy; "
+                f"retry is due in {max(0, int(next_at - now))}s"
+            ),
+        }
+    try:
+        retried = runtime.host.nudge_review_delivery(task, record, intent)
+    except Exception as exc:  # noqa: BLE001 — evidence is the delivery boundary's contract
+        evidence = getattr(exc, "evidence", None)
+        if hasattr(evidence, "to_json"):
+            evidence = evidence.to_json()
+        if not isinstance(evidence, dict):
+            evidence = {}
+        _record_review_delivery_failure(record, exc)
+        state = delivery_readiness_state(exc)
+        if state == READINESS_BUSY:
+            delay = defer_busy_launch_delivery(record, evidence, now=now)
+            records[ref] = record
+            runtime.save_records(payload, records)
+            attempts = int(busy_launch_delivery(record.launch_intent).get("attempts") or 0)
+            return {
+                "status": "degraded",
+                "step": step,
+                "pilot_ref": ref,
+                "attempt_id": record.attempt_id,
+                "action": "review-launch-busy",
+                "head": str(intent.get("head") or record.review_head),
+                "attempts": attempts,
+                "reason": (
+                    "the reviewer pane remained busy before its document nudge was sent; its "
+                    f"exact launch intent is retained and retry {attempts} waits {delay}s"
+                ),
+            }
+        # Do not silently convert an unavailable, malformed or stale probe into busy.  The intent
+        # stays on disk with the typed evidence; on the following tick the existing live-launch
+        # recovery path owns its conservative stop/adoption decision.
+        updated = dict(intent)
+        updated["delivery"] = {
+            **delivery,
+            "state": state,
+            "next_at": 0.0,
+            "evidence": dict(evidence),
+        }
+        record.launch_intent = updated
+        records[ref] = record
+        runtime.save_records(payload, records)
+        return {
+            "status": "degraded",
+            "step": step,
+            "pilot_ref": ref,
+            "attempt_id": record.attempt_id,
+            "action": "review-launch-delivery-unavailable",
+            "head": str(intent.get("head") or record.review_head),
+            "readiness": state,
+            "reason": "the retained reviewer launch could not be nudged; its typed delivery "
+            "evidence is retained for normal launch recovery",
+        }
+    if not isinstance(retried, dict):
+        raise HostError("reviewer delivery retry returned no durable result")
+    evidence = retried.get("delivery_evidence")
+    head_run = retried.get("head_run")
+    if not isinstance(evidence, dict) or not bool(evidence.get("turn_confirmed")):
+        raise HostError("reviewer delivery retry returned without confirmation evidence")
+    if not isinstance(head_run, dict) or not head_run.get("run_id"):
+        raise HostError("reviewer delivery retry returned without the launched head run")
+    if evidence:
+        record.review_delivery_evidence = dict(evidence)
+    # One intent write makes both the accepted delivery and the exact run durable.  Only after this
+    # point can `resolve_launch_intent` enter ordinary reviewer adoption, which crosses the freeze,
+    # routing and clear-intent boundary exactly once.
+    confirmed = {
+        **delivery,
+        "state": "confirmed",
+        "next_at": 0.0,
+        "confirmed_at": now,
+        "evidence": dict(evidence),
+    }
+    confirm_launch_intent(
+        runtime,
+        payload,
+        records,
+        ref,
+        record,
+        handle=str(retried.get("handle") or intent.get("handle") or ""),
+        leaf=str(retried.get("leaf") or intent.get("leaf") or ""),
+        head_run=dict(head_run),
+        delivery=confirmed,
+    )
+    return None
 
 
 def _record_review_delivery_failure(record: DispatcherRecord, exc: Exception) -> None:
