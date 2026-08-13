@@ -367,7 +367,15 @@ def _render_codex_tui(
     del prompt
     if not workspace:
         raise HeadCommandError("codex TUI launch requires workspace for directory trust override")
-    args = ["codex", "--dangerously-bypass-approvals-and-sandbox"]
+    # Best-effort fan-out suppression. Codex does not expose the submitted provider tool schema,
+    # so this is deliberately an operational preference rather than a capability boundary. The
+    # companion journal monitor records collaboration events without stopping the run; prompts
+    # independently tell every role not to delegate.
+    args = [
+        "codex", "--dangerously-bypass-approvals-and-sandbox",
+        "--enable", "multi_agent_v2",
+        "-c", "features.multi_agent_v2.wait_agent_enabled=false",
+    ]
     model = profile.get("model")
     if model:
         args += ["-m", str(model)]

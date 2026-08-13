@@ -3300,7 +3300,9 @@ class CommandHostRuntime:
         and an unconfirmed delivery of it can no longer be answered by closing the pane."""
         return (
             "The full task is in TASK.md at the workspace root. Read it first and follow it. "
-            "Report done or blocked with the command given in TASK.md. Do not commit TASK.md."
+            "Do not spawn, create, delegate to, or manage subagents; perform the work in this "
+            "head only. Report done or blocked with the command given in TASK.md. Do not commit "
+            "TASK.md."
         )
 
     def _worker_task_doc(
@@ -3327,6 +3329,11 @@ class CommandHostRuntime:
             f"# Task {task['ref']}",
             "",
             task.get("description") or "(empty task description)",
+            "",
+            "## No subagents",
+            "",
+            "Perform this task in this head only. Do not spawn, create, delegate to, or manage",
+            "subagents or child agents. Use ordinary tools directly when needed.",
             "",
         ]
         decision = (decision or "").strip()
@@ -3521,6 +3528,11 @@ class CommandHostRuntime:
             f"# Review {task['ref']}",
             "",
             task.get("description") or "(empty task description)",
+            "",
+            "## No subagents",
+            "",
+            "Perform this review in this head only. Do not spawn, create, delegate to, or manage",
+            "subagents or child agents. Use ordinary tools directly when needed.",
             "",
             # One verdict carries every blocker the reviewer has. Holding some back for a later
             # round ratchets the card through extra worker attempts, and each of those costs the

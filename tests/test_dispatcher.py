@@ -8838,6 +8838,15 @@ class HeadPromptTests(unittest.TestCase):
             self.assertIn("Read the commit messages on this branch", review)
             self.assertIn("RED blocker", review)
 
+    def test_worker_and_reviewer_prompt_sources_forbid_subagents(self) -> None:
+        worker = self.host._worker_task_doc(self.task, "main", "attempt-1")
+        reviewer = self.host._review_prompt(self.task, "attempt-1", 1)
+        launch = self.host._worker_launch_prompt()
+
+        for prompt in (worker, reviewer, launch):
+            self.assertIn("Do not spawn", prompt)
+            self.assertIn("subagents", prompt)
+
     def test_worker_packet_points_at_the_receipt_and_forbids_a_scrolled_pane_rerun(self) -> None:
         """secretary-1406: the packet used to leave the evidence in the terminal, so the only way
         back to a summary was to run the whole suite again over unchanged code."""

@@ -40,6 +40,7 @@ from secretary.dispatcher_observer import (
     observer_snapshot,
     put_observers,
     observer_request_id,
+    observer_launch_prompt,
     render_observer_prompt,
     stop_observer_head,
 )
@@ -3804,6 +3805,14 @@ class ObserverConfigurationTests(unittest.TestCase):
         self.assertIn("secretary-800", prompt)
         self.assertIn("/shell/skills/observe-sprint/SKILL.md", prompt)
         self.assertIn("python3 -P -m secretary sprint show --ref sprint:9", prompt)
+
+    def test_observer_prompt_sources_forbid_subagents(self) -> None:
+        document = render_observer_prompt({"ref": "sprint:9"})
+        launch = observer_launch_prompt()
+
+        for prompt in (document, launch):
+            self.assertIn("Do not spawn", prompt)
+            self.assertIn("subagents", prompt)
 
     def test_the_prompt_points_at_the_skill_instead_of_restating_it(self) -> None:
         """The launch document carries data and one pointer; the instructions live in the skill."""
