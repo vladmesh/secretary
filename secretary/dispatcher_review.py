@@ -648,6 +648,33 @@ def retry_busy_reviewer_launch_delivery(
         raise HostError("reviewer delivery retry returned no durable result")
     evidence = retried.get("delivery_evidence")
     head_run = retried.get("head_run")
+    # A readiness transition can confirm that a turn began while the transport's final composer
+    # read still proves the document remained in the input buffer.  That is not a reviewer
+    # receipt: adopting it strands the card behind a live pane which never saw the review task.
+    # Keep the exact launch intent and retry the same pane instead.
+    if (
+        isinstance(evidence, dict)
+        and bool(evidence.get("turn_confirmed"))
+        and bool(evidence.get("payload_left_in_composer"))
+    ):
+        record.review_delivery_evidence = dict(evidence)
+        delay = defer_busy_launch_delivery(record, evidence, now=now)
+        records[ref] = record
+        runtime.save_records(payload, records)
+        attempts = int(busy_launch_delivery(record.launch_intent).get("attempts") or 0)
+        return {
+            "status": "degraded",
+            "step": step,
+            "pilot_ref": ref,
+            "attempt_id": record.attempt_id,
+            "action": "review-launch-busy",
+            "head": str(intent.get("head") or record.review_head),
+            "attempts": attempts,
+            "reason": (
+                "the reviewer transport observed a turn but the document remained in the "
+                f"composer; its exact launch intent is retained and retry waits {delay}s"
+            ),
+        }
     if not isinstance(evidence, dict) or not bool(evidence.get("turn_confirmed")):
         raise HostError("reviewer delivery retry returned without confirmation evidence")
     if not isinstance(head_run, dict) or not head_run.get("run_id"):

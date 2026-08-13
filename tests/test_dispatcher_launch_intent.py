@@ -2046,6 +2046,62 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.host.calls.count("nudge_review_delivery"), 1)
         self.assertEqual(self.host.calls.count("freeze_worker"), 1)
 
+    def test_busy_retry_does_not_adopt_when_payload_remains_in_composer(self) -> None:
+        """A started turn is not a document receipt when the composer still holds the payload."""
+        self.run_to_validate()
+        evidence = {
+            "subject": "reviewer-launch",
+            "handle": f"review:{REF}",
+            "stage": "none",
+            "readiness_before": "busy",
+            "readiness_state": "busy",
+            "reason": "readiness-busy",
+        }
+
+        def busy_before_send(task: dict, record: DispatcherRecord) -> ReviewLaunch:
+            launched = self.host._launched(
+                f"review:{task['ref']}", record.review_head, task, "reviewer", record.workspace,
+                run_id=str(record.launch_intent["run_id"]),
+            )
+            self.host._write_head_pid(
+                "review", task["ref"], head_run=launched.head_run, leaf=launched.leaf
+            )
+            raise HeadLaunchAborted(
+                "reviewer document nudge met a busy pane before send",
+                handle=launched.handle,
+                leaf=launched.leaf,
+                workspace=record.workspace,
+                pid_file=pid_file_path("review", task["ref"]),
+                evidence=evidence,
+                head_run=dict(launched.head_run),
+            )
+
+        with mock.patch.object(self.host, "start_review", side_effect=busy_before_send):
+            self.assertEqual(self.tick()["action"], "review-launch-busy")
+
+        payload = self.runtime.production_state.load()
+        payload["records"][REF]["launch_intent"]["delivery"]["next_at"] = 0.0
+        self.runtime.production_state.save(payload)
+        self.host.review_delivery_retry_evidence = {
+            "subject": "reviewer-launch",
+            "stage": "acknowledged",
+            "turn_confirmed": True,
+            "cursor_moved": True,
+            "payload_left_in_composer": True,
+            "readiness_state": "busy",
+        }
+
+        held = self.tick()
+
+        self.assertEqual(held["action"], "review-launch-busy")
+        record = self.record()
+        assert record is not None
+        self.assertEqual(record.state, "review_starting")
+        self.assertEqual(record.launch_intent["delivery"]["state"], "busy")
+        self.assertTrue(record.review_delivery_evidence["payload_left_in_composer"])
+        self.assertNotIn("freeze_worker", self.host.calls)
+        self.assertTrue(self.stored_intent(), "the exact reviewer launch stays recoverable")
+
     def test_a_pane_that_would_not_take_the_prompt_counts_once_on_the_ordinary_path(self) -> None:
         """The other half of the sink's exception family, and the no-double-count case.
 
