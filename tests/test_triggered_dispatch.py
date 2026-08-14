@@ -145,6 +145,12 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
 
         self.assertIn("pipeline pause state is unreadable; refusing dispatch", output.getvalue())
 
+    def test_unreadable_automation_spec_disables_warm_reuse(self) -> None:
+        with mock.patch.object(
+            dispatch, "_load_spec", side_effect=ValueError("malformed automation.toml")
+        ):
+            self.assertTrue(dispatch._is_ephemeral("curator"))
+
     def test_live_agent_repl_is_reused_after_delivery_is_confirmed(self) -> None:
         host = FakeSessionHost(
             panes=(self.term,),

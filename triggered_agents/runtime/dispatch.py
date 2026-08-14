@@ -542,13 +542,16 @@ def _is_ephemeral(agent: str) -> bool:
     watchdog, tears the whole workspace down and starts a brand new `claude` process instead of
     `/clear`-ing the live one — no provider session or transcript ever survives past the tick
     that produced it. Best-effort like every other spec read in this module: a spec with no
-    `ephemeral` field, a missing automation.toml (e.g. a test's synthetic agent name), or any
-    parse failure all default to the existing warm-reuse behavior rather than breaking dispatch.
+    `ephemeral` field or a missing automation.toml (e.g. a test's synthetic agent name) retain
+    the existing warm-reuse behavior. A spec that exists but cannot be read is fail-closed: it
+    never grants a warm session that may retain curator material across ticks.
     """
     try:
         return bool(_load_spec(agent).get("ephemeral"))
-    except Exception:
+    except FileNotFoundError:
         return False
+    except Exception:
+        return True
 
 
 def _dispatch_command(agent: str, variant: str | None) -> DispatchCommand:
