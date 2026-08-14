@@ -51,11 +51,7 @@ RUNTIME_TAILS = ("secretary-data",)
 
 
 def durability_dirt(porcelain: str) -> list[str]:
-    """Porcelain lines that count against durability.
-
-    Untracked runtime tails are dropped: they belong to the secretary installation,
-    not to the worker's project, and a worker cannot commit its way out of them.
-    """
+    """Porcelain lines that count against durability."""
     dirt: list[str] = []
     for line in porcelain.splitlines():
         if not line.strip():
@@ -207,12 +203,7 @@ def _check_execution_record(task: dict[str, Any]) -> None:
 
 
 def _forbidden_move_message(role: str, source: str, target: str) -> str:
-    """Why a role may not make this move, said in the terms of the role that asked.
-
-    The observer out of Assessment is the one case worth its own sentence: the refusal is not
-    that the card cannot go there, it is that the observer records the decision and the
-    dispatcher performs it, so the answer is `task decide` rather than another move.
-    """
+    """Why a role may not make this move, said in the terms of the role that asked."""
     if role == "observer" and source == "assessment":
         return (
             "the observer decides about a parked card and the dispatcher performs the decision: "
@@ -222,19 +213,12 @@ def _forbidden_move_message(role: str, source: str, target: str) -> str:
 
 
 def _transition_reason(reason: str, target: str) -> str:
-    """The non-empty reason a typed Card transition event carries.
-
-    Not every released move required one, and the protocol event does. The substitute names the
-    edge rather than inventing a motive the caller never gave.
-    """
+    """The non-empty reason a typed Card transition event carries."""
     return reason if reason.strip() else f"Card transition to {target}"
 
 
 def assessment_resolution(events: Iterable[dict[str, Any]]) -> tuple[str, dict[str, Any] | None]:
-    """The current Assessment visit and its one canonical decision.
-
-    All decision readers use this resolver so an older decision can never leak into a later park.
-    """
+    """The current Assessment visit and its one canonical decision."""
     ordered = list(events)
     latest_park = -1
     for index, event in enumerate(ordered):
@@ -270,11 +254,9 @@ def standing_decision(events: Iterable[dict[str, Any]]) -> str:
 def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -> bool:
     """Whether a card transition needs a new observer decision.
 
-    The dispatcher already owns ordinary progress: claiming, reports, Validate moves and reviewer
-    launch are inputs to the next machine step, not work for the observer.  Keep this predicate
-    deliberately small because it drives both wake delivery and resume freshness.  A broad
-    ``successful event`` rule turns every piece of machinery telemetry (including the observer's
-    own decision) into another observer turn.
+    Deliberately small, because it drives both wake delivery and resume freshness: a broad
+    "successful event" rule turns every piece of machinery telemetry — the observer's own decision
+    included — into another observer turn.
     """
     if str(event.get("ref") or "") not in linked_refs:
         return False
@@ -313,13 +295,7 @@ def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -
 def is_significant_observer_event(
     event: dict[str, Any], *, linked_refs: set[str], sprint_ref: str,
 ) -> bool:
-    """Whether an audit event is a semantic wake for one sprint observer.
-
-    Card transitions use :func:`is_significant_card_event`.  The remaining two sources are scoped
-    to the sprint entity itself: a budget threshold and an operator's comment.  This keeps
-    dispatcher routing and observer writes from waking the same head again, while preserving a
-    human's ability to change direction without inventing a card transition.
-    """
+    """Whether an audit event is a semantic wake for one sprint observer."""
     if is_significant_card_event(event, linked_refs=linked_refs):
         return True
     if str(event.get("ref") or "") != sprint_ref:
@@ -378,9 +354,8 @@ class KanboardClient:
 def all_project_cards(client: KanboardClient, project_id: int) -> list[dict[str, Any]]:
     """Return every Kanboard card by combining its open and closed status sets.
 
-    Kanboard 1.2.52 uses status 1 for open cards and 0 for closed cards. It does
-    not support a complete-set status, so retain the first copy of each task id in
-    case a backend returns a row in both responses.
+    Kanboard 1.2.52 uses status 1 for open cards and 0 for closed, and has no complete-set status,
+    so the first copy of each task id is retained in case a backend returns a row in both responses.
     """
     cards: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
@@ -655,10 +630,9 @@ class TaskAudit:
     def marker_comment_lock(self, reference: str) -> Iterator[None]:
         """Serialize all internal Card comment effects for one marker identity.
 
-        Generic restore replay re-enters this guard while finishing its own
-        pending record.  Keep the file lock process-wide while making that
-        same-thread contour re-entrant; a second process still blocks at the
-        flock until the outer effect completes.
+        Generic restore replay re-enters this guard while finishing its own pending record, so the file
+        lock stays process-wide while that same-thread contour is re-entrant; a second process still
+        blocks at the flock until the outer effect completes.
         """
         from secretary.board.events import marker_comment_lock
 
@@ -683,13 +657,8 @@ class TaskAudit:
     def pending_marker_owner(self, reference: str, content: str, *, request_id: str | None = None) -> str | None:
         """Return a different pending owner of an indistinguishable marker.
 
-        This is the common ownership check for the normalized marker adapter
-        and every internal historical-comment writer.  A generic
-        ``restored_comment`` retains its exact body until its effect is proven,
-        so it is the same kind of unresolved marker occurrence as a typed
-        event for this reservation.  It runs under the audit lock while callers
-        hold the per-Card marker lock, so no writer can put a matching row on
-        Kanboard between the reservation check and its own effect.
+        Runs under the audit lock while callers hold the per-Card marker lock, so no writer can put a
+        matching row on Kanboard between the reservation check and its own effect.
         """
         from secretary.board.events import render_marker_comment
 
@@ -738,10 +707,9 @@ class TaskAudit:
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, bool]:
         """Resolve a request-id owner while ``.audit.lock`` is held.
 
-        The return value is ``(committed, pending, replace_generic_pending)``.  The first two
-        values are the durable evidence in priority order.  A generic ``stage`` is the sole
-        released operation allowed to replace a pending record, and only when both records are
-        generic.  Every other pending mismatch fails before a write, append, unlink or discard.
+        Returns ``(committed, pending, replace_generic_pending)``. A generic ``stage`` is the sole
+        released operation allowed to replace a pending record, and only when both records are generic.
+        Every other pending mismatch fails before a write, append, unlink or discard.
         """
         committed = self.committed_event(request_id)
         if committed is not None:
@@ -835,8 +803,8 @@ class TaskAudit:
     ) -> str:
         """Append one exact owner and clear only that owner's pending evidence.
 
-        The caller holds ``.audit.lock``.  Reconciliation shares this primitive so it cannot
-        race a stage or recover a file another owner has replaced.
+        The caller holds ``.audit.lock``. Reconciliation shares this primitive so it cannot race a stage
+        or recover a file another owner has replaced.
         """
         committed, pending, _replace = self._pending_owner(request_id, event, operation=operation)
         if operation == "reconcile" and committed is None and pending is None:
@@ -919,11 +887,7 @@ class TaskAudit:
         return self.pending_event(request_id)
 
     def events(self, reference: str = "", *, kind: str = "") -> list[dict[str, Any]]:
-        """Committed events in append order, optionally narrowed to one card and/or kind.
-
-        The card's own routing history lives here once it is Done: board metadata is reset on the
-        way back to Ready and cleared on the way out of Validate.
-        """
+        """Committed events in append order, optionally narrowed to one card and/or kind."""
         result: list[dict[str, Any]] = []
         try:
             with open(self.events_path, encoding="utf-8") as events:
@@ -948,9 +912,8 @@ class TaskAudit:
     def _anchor_intact(self) -> bool:
         """Лежит ли последняя прочитанная строка всё там же.
 
-        Журнал по контракту только дописывается, но переписать его на месте может
-        починка: inode тот же, размер не меньше, и одних stat-полей не хватает.
-        Проверка якоря ловит это за одно короткое чтение вместо полного разбора.
+        Журнал по контракту только дописывается, но переписать его на месте может починка: inode тот же,
+        размер не меньше, и одних stat-полей не хватает.
         """
         if not self._committed_anchor:
             return True
@@ -1058,17 +1021,11 @@ class TaskAudit:
     ) -> None:
         """Refuse a replay whose caller meant an operation other than the recorded one.
 
-        `_require_same_event` states the invariant but can only see events that are already
-        equal: the replay paths hand the recorded event straight back to `append`. This
-        compares the caller's intent instead, before anything is appended or answered.
-
-        The event kind and the card ref always have to match, and so does the `identity` every
-        write declares: what the caller asked for, which is the whole payload for most writes.
-        The only fields left out are the ones a retry cannot recompute after the write went
-        through, because they describe the state the write itself replaced: `moved` records the
-        column the card left, `edited` records the digests of the text it overwrote, and
-        `restored_comment` drops its body from the payload once the comment is known to be on
-        the card. Comparing those would turn an ordinary retry into a conflict.
+        The event kind, the card ref and the `identity` every write declares all have to match. The only
+        fields left out are the ones a retry cannot recompute after the write went through, because they
+        describe the state the write replaced: `moved`, `edited`'s digests, and `restored_comment`'s
+        body once the comment is known to be on the card. Comparing those would turn a retry into a
+        conflict.
         """
         if str(existing.get("kind") or "") != kind:
             raise TaskError("validation", "request id belongs to another operation or payload", 2)
@@ -1159,13 +1116,10 @@ class TaskWriter:
     def _redact_for_board(self, text: str) -> str:
         """Remove credentials before they reach either board or audit history.
 
-        Task events normally retain only digests, but an interrupted archive
-        keeps its retry body locally and every board comment is exported into
-        the checkpoint.  Scrub at the protocol boundary so both copies receive
-        the same safe text.  The normal file is bound to this client's
-        instance; an explicit role-env override selects its external file so
-        ``SECRETARY_RUNTIME_ENV_FILE`` and ``TA_RUNTIME_ENV_FILE`` are
-        scrubbed too.
+        An interrupted archive keeps its retry body locally and every board comment is exported into the
+        checkpoint, so scrubbing happens at the protocol boundary and both copies receive the same safe
+        text. An explicit role-env override selects its external file, so ``SECRETARY_RUNTIME_ENV_FILE``
+        and ``TA_RUNTIME_ENV_FILE`` are scrubbed too.
         """
         # Keep TaskWriter importable while config is loading sprints.  The
         # store depends on that same config module and is needed only at a real
@@ -1487,9 +1441,8 @@ class TaskWriter:
     def _require_committed_workspace(self) -> None:
         """Refuse a done report from a dirty checkout.
 
-        The worker runs the protocol from its own workspace, so CWD is that checkout.
-        Failing here lets the worker commit and retry inside the same session instead of
-        learning from the dispatcher that its card went to blocked.
+        The worker runs the protocol from its own workspace, so failing here lets it commit and retry
+        inside the same session instead of learning from the dispatcher that its card went to blocked.
         """
         if self.workspace is not None:
             workspace: Path = self.workspace
@@ -1513,15 +1466,10 @@ class TaskWriter:
     ) -> dict[str, Any]:
         """A worker's report, and for a blocked one the kind of blocker it hit.
 
-        The classification is required rather than offered: an external fact and a wrong task
-        definition are repaired by different people in different places, and prose that leaves
-        the observer to infer which one it is costs an analysis the worker had already done.
-        Two values and no free text, so repeated blocks from one head are countable.
-
-        Its complete payload is staged as one typed Card occurrence, then that
-        occurrence renders the `classification:` line under the marker.  It is
-        deliberately not card metadata: a second backend write can fail on its
-        own and leave a field that silently disagrees with the event.
+        The classification is required rather than offered: an external fact and a wrong task definition
+        are repaired by different people. Two values and no free text, so repeated blocks from one head
+        are countable. Its payload is staged as one typed Card occurrence which renders the
+        `classification:` line, deliberately not card metadata that could disagree with the event.
         """
         self._role(role, {"worker"})
         body = self._redact_for_board(body)
@@ -1562,22 +1510,14 @@ class TaskWriter:
     def decide(self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None) -> dict[str, Any]:
         """Record what to do with a parked card, apart from the move that does it.
 
-        The decision and its effect are two facts. The effect, a merge or a rework round or a
-        reslice, belongs to the dispatcher; recording it first is what makes the decision
-        checkable, because the move out of Assessment refuses to carry one that is not on the
-        card. An effect that fails takes the card to Blocked with its reason.
+        The decision and its effect are two facts. Recording the decision first is what makes it
+        checkable, because the move out of Assessment refuses to carry one that is not on the card.
 
-        The observer decides, and nobody else. One sprint has one observer and the decision is
-        its judgement about a card it has been watching; a PO that has to intervene moves the
-        card with `--sprint-override` and a reason, which reads in the audit as the override it
-        is rather than as an unmarked decision.
-
-        The same sprint reservation guard `move` carries applies here, and it answers about the
-        caller as well as the card: a decision is refused on a card whose project no open sprint
-        holds, and refused before that if the caller is not the observer of the sprint the card is
-        linked to. The caller's sprint is the one the dispatcher launched its head for, carried in
-        the head's environment; every observer process still runs as `--actor observer`, so the
-        binding, not the actor id, is what distinguishes one sprint's observer from another's.
+        The observer decides, and nobody else; a PO that has to intervene moves the card with
+        `--sprint-override` and a reason. The same sprint reservation guard `move` carries applies here
+        and answers about the caller as well as the card: the caller's sprint is the one the dispatcher
+        launched its head for, carried in the head's environment, so the binding rather than the actor
+        id distinguishes one sprint's observer from another's.
         """
         self._role(role, {"observer"})
         body = self._redact_for_board(body)
@@ -1662,10 +1602,9 @@ class TaskWriter:
     ) -> dict[str, Any]:
         """Append one routing telemetry record for the card.
 
-        Journal-only: the board holds no per-attempt routing history (Ready resets it, leaving
-        Validate clears the reviewer head), so this write has no backend mutation. The event still
-        goes through the normal pending/commit path, which makes it idempotent per request id and
-        carries it into the recovery checkpoint with the rest of `events.ndjson`.
+        Journal-only: the board holds no per-attempt routing history, so this write has no backend
+        mutation. The event still goes through the normal pending/commit path, which makes it idempotent
+        per request id and carries it into the recovery checkpoint.
         """
         self._role(role, {"dispatcher"})
         phase = _text(payload.get("phase"))
@@ -1863,12 +1802,7 @@ class TaskWriter:
         self, *, role: str, actor: str, reference: str, target: str, reason: str, decision: str,
         sprint_override: bool, sprint_override_reason: str, request_id: str, task: dict[str, Any],
     ) -> dict[str, Any]:
-        """Replay a move this request id already recorded as a released generic operation.
-
-        Only reachable when that record exists, so the mutation below is never the writer of a
-        state change: `_write` replays a committed record and finishes a pending one through the
-        released `_finish_pending_cleanup`.  Mirrors the same branch in :meth:`claim`.
-        """
+        """Replay a move this request id already recorded as a released generic operation."""
         override_payload = self._guard_sprint_write(
             role=role, actor=actor, project=task["project"], card_sprint=str(task.get("sprint") or ""),
             linked_sprint=None, sprint_override=sprint_override,
@@ -1897,9 +1831,8 @@ class TaskWriter:
     def _legacy_record(self, request_id: str) -> dict[str, Any] | None:
         """The released generic audit record this request id owns, if it owns one.
 
-        The two representations are told apart by the record's own discriminator, never by
-        guessing from a payload: a request id written before this migration keeps the released
-        operation it named, and a typed request id is handled by the typed path alone.
+        The two representations are told apart by the record's own discriminator, never by guessing from
+        a payload.
         """
         record = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
         if record is None or record.get("record_type") == TaskAudit._PROTOCOL_EVENT_RECORD_TYPE:
@@ -1911,9 +1844,9 @@ class TaskWriter:
     ) -> Callable[[Any], None]:
         """The board work a migrated Card state edge still owes once its column effect lands.
 
-        Handed to the adapter so it runs inside the transition's transaction: it completes before
-        the event commits, and an incomplete one leaves the exact pending typed record that both
-        a retry of this request id and :meth:`reconcile` know how to finish.
+        Handed to the adapter so it runs inside the transition's transaction: it completes before the
+        event commits, and an incomplete one leaves the exact pending typed record that both a retry and
+        :meth:`reconcile` know how to finish.
         """
         def finish(_entity: Any) -> None:
             self._reset_transition_metadata(task, source=source, target=target)
@@ -1928,8 +1861,8 @@ class TaskWriter:
     def _reset_transition_metadata(self, task: dict[str, Any], *, source: str, target: str) -> None:
         """Apply the board metadata a Card state edge resets.
 
-        Kept idempotent on purpose: this is the one part of a migrated move that a retry or
-        :meth:`reconcile` may repeat after the column effect and its typed event are durable.
+        Kept idempotent on purpose: a retry or :meth:`reconcile` may repeat it after the column effect
+        and its typed event are durable.
         """
         if target in {"ready", "done"}:
             self.client.call("saveTaskMetadata", task_id=_task_number(task), values=_READY_RESET_METADATA)
@@ -1949,9 +1882,8 @@ class TaskWriter:
     ) -> MutationResult:
         """Run one state edge through the typed adapter and its shared journal.
 
-        The sprint the card belongs to is not passed here: the adapter reads the live card to
-        authorize the edge anyway, and relates the event to that card's own sprint.  `finish`
-        carries this writer's remaining board work into the same transaction.
+        The sprint the card belongs to is not passed here: the adapter reads the live card to authorize
+        the edge anyway. `finish` carries this writer's remaining board work into the same transaction.
         """
         try:
             return self.board_host.transition(
@@ -1985,21 +1917,14 @@ class TaskWriter:
     ) -> None:
         """A card leaves Assessment on a decision somebody recorded, or it does not leave.
 
-        Two rules, and they bind different callers. A decision that is supplied has to be real and
-        has to agree with where the card is going, whoever passes it: each decision has exactly one
-        destination, so a `release` paired with a move back to In progress is a rework nobody
-        decided. Needing a decision at all is the dispatcher's rule, because the dispatcher is what
-        performs decisions; the PO is the human operator and its move is the escape hatch, already
-        recorded as a sprint override on a reserved project. Holding the PO to a decision would
-        close the only way past a seam that is stuck.
+        Two rules binding different callers. A supplied decision has to be real and has to agree with
+        where the card is going, whoever passes it: each decision has exactly one destination. Needing a
+        decision at all is the dispatcher's rule, because the dispatcher performs decisions; the PO's
+        move is the escape hatch, already recorded as a sprint override.
 
-        `blocked` without a decision is left open on purpose even for the dispatcher: the steward's
-        stale escalation and the dispatcher's own failure paths reach it without anyone having
-        decided anything, and a card that cannot be blocked is a card nothing can rescue. The three
-        remaining exits are closed to the dispatcher, because each of them leaves the column with
-        the decision still unmade. The observer reaches none of this: the authority matrix gives it
-        no exit from Assessment at all, because performing a decision is the dispatcher's part of
-        the seam.
+        `blocked` without a decision stays open even for the dispatcher: the steward's stale escalation
+        and the dispatcher's own failure paths reach it without anyone deciding, and a card that cannot
+        be blocked is a card nothing can rescue. The observer has no exit from Assessment at all.
         """
         if decision and decision not in _DECISIONS:
             raise TaskError("validation", f"decision must be one of {', '.join(sorted(_DECISIONS))}", 2)
@@ -2054,11 +1979,9 @@ class TaskWriter:
     ) -> dict[str, Any]:
         """Revise a card's spec in place instead of piling corrections into comments.
 
-        The audit event chains old and new content digests; full text history is
-        recoverable from the Git checkpoint of `state/board/cards.ndjson`. Cards with
-        an active attempt (In progress / Validate) are not editable: the running head
-        works from a TASK.md snapshot, so a mid-flight revision must go through
-        preempt/requeue, not a silent spec swap.
+        The audit event chains old and new content digests. Cards with an active attempt (In progress /
+        Validate) are not editable: the running head works from a TASK.md snapshot, so a mid-flight
+        revision must go through preempt/requeue, not a silent spec swap.
         """
         self._role(role, _EDIT_ROLES)
         title = self._redact_for_board(title) if title is not None else None
@@ -2123,11 +2046,7 @@ class TaskWriter:
         return self._write("edited", role, actor, reference, request_id, payload, mutation, identity=identity)
 
     def _sprint_holds_project(self, project: str) -> bool:
-        """Whether an open sprint reserves this card's project.
-
-        Both callers run after `_guard_sprint_write`, which initializes the index and
-        refreshes the entries of the project it was asked about.
-        """
+        """Whether an open sprint reserves this card's project."""
         from secretary.sprints import active_sprint_projects
 
         return bool(active_sprint_projects(self.data_dir).get(project))
@@ -2147,14 +2066,12 @@ class TaskWriter:
     ) -> dict[str, str]:
         """Authorize one create/move/edit against the caller and the open-sprint reservation index.
 
-        Two questions, in this order. Who is writing: a caller of role `observer` names the sprint
-        it was launched for, and a write about any other sprint's card is refused as the identity
-        failure it is. Then what is being written: which open sprint reserves the card's project,
-        which is what the rest of this guard answers.
+        Two questions, in this order. Who is writing: a caller of role `observer` names the sprint it
+        was launched for, and a write about any other sprint's card is refused as the identity failure
+        it is. Then what is being written: which open sprint reserves the card's project.
 
-        The identity half is fail-closed. A head that carries no binding cannot prove which sprint
-        it is the observer of, and an unprovable caller is refused rather than admitted as one
-        that happens to have nothing to check.
+        The identity half is fail-closed. A head that carries no binding cannot prove which sprint it is
+        the observer of, and an unprovable caller is refused rather than admitted.
         """
         self._guard_observer_identity(
             role=role, actor=actor, project=project, card_sprint=card_sprint,
@@ -2230,19 +2147,12 @@ class TaskWriter:
     ) -> None:
         """Refuse a write of role `observer` that is not about the caller's own sprint.
 
-        The binding is the launcher's, carried in the head's own environment, and it answers the
-        question the reservation index cannot: the index says which sprint holds the card, and
-        this says which sprint the caller is. Two open sprints therefore no longer read each
-        other's cards as their own.
+        The binding is the launcher's, carried in the head's own environment: the reservation index says
+        which sprint holds the card, and this says which sprint the caller is.
 
-        The two refusals are separate codes because they are separate failures. A missing binding
-        is a head nobody bound; a mismatch is a bound head reaching outside its sprint. Neither is
-        `role_forbidden`: the role is permitted, the caller is not this sprint's observer.
-
-        A card that names no sprint is left to the reservation guard below. There is no sprint to
-        compare the caller to, and the write is not a reach into another sprint's work: the guard
-        refuses it wherever an open sprint holds its project, and where none does the card belongs
-        to nobody's sprint.
+        The two refusals are separate codes because they are separate failures — a missing binding is a
+        head nobody bound, a mismatch is a bound head reaching outside its sprint — and neither is
+        `role_forbidden`. A card that names no sprint is left to the reservation guard below.
         """
         if role != "observer":
             return
@@ -2272,17 +2182,10 @@ class TaskWriter:
     ) -> None:
         """Record the granted single-writer override before the operation it authorizes runs.
 
-        The refusal has always been audited; a grant is the same question answered the other way,
-        and the audit has to answer "who overrode this sprint's reservation, and why" for both. It
-        is a generic control-plane record like the denial, not part of the Card's typed event: the
-        event describes the lifecycle edge, and this describes the authority the writer used to
-        make it. That also keeps the answer in one shape for every operation the guard admits -
-        `move`, `create` and `edit` alike - rather than only for the ones whose own payload
-        happens to have room for it.
-
-        It is written before the operation stages or effects anything, so an override that could
-        not be recorded does not happen. The derived request id keeps it off the operation's own
-        retry key, and a retry under the same id recognizes the grant it already made.
+        A generic control-plane record like the denial, not part of the Card's typed event: the event
+        describes the lifecycle edge, this describes the authority the writer used. Written before the
+        operation stages or effects anything, so an override that could not be recorded does not happen.
+        The derived request id keeps it off the operation's own retry key.
         """
         override_request_id = _sprint_guard_override_request_id(request_id)
         if self.audit.committed_event(override_request_id) is not None:
@@ -2434,9 +2337,9 @@ class TaskWriter:
     ) -> dict[str, Any]:
         """Send a control-plane marker through the typed host transaction.
 
-        The command supplies its semantic fields once.  The host stages them as
-        an immutable event and derives the board comment from that event, so a
-        retry never has a second command-composed representation to drift from.
+        The command supplies its semantic fields once; the host stages them as an immutable event and
+        derives the board comment from that event, so a retry never has a second representation to
+        drift from.
         """
         request_id = request_id or str(uuid.uuid4())
         if require_assessment:
@@ -2596,12 +2499,10 @@ class TaskWriter:
     def _finish_pending_transition(self, event: dict[str, Any]) -> None:
         """Finish one typed pending Card transition: prove it, clean up, then commit it.
 
-        A typed pending record is a different obligation from a generic one, and it is read as
-        the transition it declares rather than guessed from a payload. The adapter proves the
-        exact target on the board and never repeats a move; the metadata reset runs only once
-        that target is live, so a transition whose effect was lost cannot strip a card's claim.
-        The reset is the same one the transition itself owed, and the event is published only
-        after it is complete, exactly as the released cleanup published a pending move.
+        A typed pending record is read as the transition it declares rather than guessed from a payload.
+        The adapter proves the exact target on the board and never repeats a move; the metadata reset
+        runs only once that target is live, so a transition whose effect was lost cannot strip a card's
+        claim, and the event is published only after the reset is complete.
         """
         transition = event.get("transition") if isinstance(event.get("transition"), dict) else {}
         target = str(transition.get("target") or "")

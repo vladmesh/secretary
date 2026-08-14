@@ -1,19 +1,16 @@
 """Supported fresh-install and Git-checkpoint recovery flow.
 
-The private instance repository is the only portable input.  This module turns
-its normalized checkpoint into a new local data plane and then calls the same
-materializer used by ``secretary upgrade``.
+The private instance repository is the only portable input. This module turns its normalized
+checkpoint into a new local data plane and then calls the same materializer ``secretary upgrade``
+uses.
 
-The secret store opens before anything reads ``runtime.env``, because on a clean
-host that file does not exist yet: it is what the store writes once the recovery
-phrase rebuilds the installation key.  Without the phrase the recovery still
-brings back everything that needs no credentials and reports which secrets stayed
-locked or went missing, and only an installation with no store at all is told to
-write ``runtime.env`` by hand.
+The secret store opens before anything reads ``runtime.env``, because on a clean host that file
+does not exist yet: it is what the store writes once the recovery phrase rebuilds the
+installation key. Without the phrase the recovery still brings back everything that needs no
+credentials and reports which secrets stayed locked or went missing.
 
-It deliberately does not install Kanboard or Orca: their package transport and
-supported versions are product decision gates, so a missing runtime is reported
-before any live state is written.
+It deliberately does not install Kanboard or Orca: their package transport and supported versions
+are product decision gates, so a missing runtime is reported before any live state is written.
 """
 
 from __future__ import annotations
@@ -216,14 +213,9 @@ def _runtime_env_file(instance_dir: Path, override: str | None) -> Path:
 def _recovery_phrase(args: argparse.Namespace, instance_dir: Path) -> str | None:
     """Read the phrase the same way a secret value is read: never from argv.
 
-    A phrase on the command line lands in the process table and the shell
-    history, and a phrase in the environment is inherited by everything this
-    command starts, so the only inputs are a file, standard input and a terminal
-    prompt that does not echo. No flag and no terminal means no phrase, which is
-    the branch that recovers everything else and reports what stayed locked.
-
-    The prompt only appears when it would change something: a store that is there
-    and a key file that is not.
+    A phrase on the command line lands in the process table and the shell history, and one in the
+    environment is inherited by everything this command starts, so the only inputs are a file,
+    standard input and a non-echoing terminal prompt. No flag and no terminal means no phrase.
     """
     path = getattr(args, "recovery_phrase_file", None)
     if path:
@@ -254,10 +246,9 @@ def _open_secret_store(
 ) -> SecretRecovery:
     """Open the store before anything asks for credentials.
 
-    The catalog says a secret materializes into `runtime-env`; which file that is
-    belongs to the installation being recovered, not to the host default, so the
-    resolution override is pinned to this target for the duration of the write.
-    That is also what keeps a recovery drill off a live installation's env file.
+    Which file `runtime-env` materializes into belongs to the installation being recovered, not to
+    the host default, so the resolution override is pinned to this target for the duration of the
+    write. That is also what keeps a recovery drill off a live installation's env file.
     """
     try:
         with _runtime_environment({"SECRETARY_RUNTIME_ENV_FILE": str(runtime_env)}):
@@ -275,12 +266,7 @@ def _secret_store_step(recovery: SecretRecovery) -> tuple[str, str]:
 
 
 def _add_secret_steps(result: InstallResult, recovery: SecretRecovery) -> None:
-    """One line per secret that did not come back, ids and targets only.
-
-    These ride in the step list rather than in a print, so `--json` carries the
-    same report a human reads, and nothing downstream has to infer from a green
-    run that every secret is in place.
-    """
+    """One line per secret that did not come back, ids and targets only."""
     for status, entries in (("locked", recovery.locked), ("missing", recovery.missing)):
         for entry in entries:
             where = entry.get("path") or entry.get("target") or "not materialized"
@@ -294,14 +280,7 @@ def _add_secret_steps(result: InstallResult, recovery: SecretRecovery) -> None:
 def _blocked_by_secrets(
     cause: InstallError, recovery: SecretRecovery, runtime_env: Path
 ) -> InstallError:
-    """Say what is still closed instead of asking for a hand-written file.
-
-    The old refusal told the operator to create runtime.env themselves. That
-    answer only fits an installation with no store at all; once the store is
-    there, the file is the store's output, and the useful thing to print is which
-    secrets did not open. A file that is there but unusable keeps its own reason,
-    which is about the file and not about the store.
-    """
+    """Say what is still closed instead of asking for a hand-written file."""
     reason = (
         str(cause)
         if runtime_env.exists()
@@ -477,13 +456,7 @@ def materialize_checkpoint(
 
 
 def _restored_run_journals(runs_source: Path) -> dict[Path, list[tuple[int, str]]]:
-    """Rebuild the JSONL files whose records the checkpoint normalizes.
-
-    ``runs.ndjson`` deliberately wraps every source line with its relative
-    source and line number.  It is the portable representation of the live
-    pipeline journal; watermarks only describe the other state files and are
-    not a second copy of their contents.
-    """
+    """Rebuild the JSONL files whose records the checkpoint normalizes."""
     grouped: dict[Path, list[tuple[int, object]]] = {}
     try:
         lines = (runs_source / "runs.ndjson").read_text(encoding="utf-8").splitlines()
@@ -558,11 +531,9 @@ def materialize_pipeline_state(
 ) -> PipelineStateMaterialization:
     """Put canonical run journals back where the dispatcher checkpoint reads them.
 
-    Recovery creates the role worktrees after it restores ``state/runs`` into
-    the data plane.  The dispatcher, however, exports from its pipeline
-    worktree.  This bridge is intentionally narrow: it restores only the
-    JSONL content that the canonical checkpoint actually carries, and refuses
-    to overwrite a different non-empty live journal.
+    Recovery restores ``state/runs`` into the data plane, but the dispatcher exports from its
+    pipeline worktree. This bridge is intentionally narrow: it restores only the JSONL content the
+    canonical checkpoint carries, and refuses to overwrite a different non-empty live journal.
     """
     try:
         runs_source = Path(instance_dir).expanduser().resolve() / "state" / "runs"
@@ -732,8 +703,7 @@ def _product_root(args: argparse.Namespace) -> Path:
     """The checkout this install materializes from, refused here if it is not one.
 
     Named, else configured, else the home default — never the checkout running this module. A path
-    that holds no product would otherwise surface as an ENOENT from whichever step read it first,
-    naming a file inside a directory the operator never meant to install from.
+    that holds no product would otherwise surface as an ENOENT from whichever step read it first.
     """
     if args.product_root:
         root = Path(args.product_root).expanduser().resolve()
@@ -755,12 +725,9 @@ def _restore_without_credentials(
 ) -> None:
     """Recover everything that does not go through Kanboard.
 
-    A locked store costs the operator their credentials, not their installation:
-    the config, the knowledge plane and the state repo came back with the clone,
-    and the checkpoint, the memory index and the project checkouts are local work
-    that needs no board. What is left undone is named as skipped rather than
-    quietly attempted with half a configuration, and the caller then fails with
-    the secret report.
+    A locked store costs the operator their credentials, not their installation. What is left undone
+    is named as skipped rather than quietly attempted with half a configuration, and the caller then
+    fails with the secret report.
     """
     report = _validated_instance(target)
     data_dir = Path(report.instance["data_dir"]).expanduser().resolve()

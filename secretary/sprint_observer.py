@@ -1,7 +1,7 @@
 """The observer a sprint declares: one durable tagged value, four forms, nothing implied.
 
-A sprint carries exactly one observer value. There is no dynamic default, no value inherited
-from the head registry, no missing-field fallback and no permanent tri-state:
+A sprint carries exactly one observer value. There is no dynamic default, no value inherited from
+the head registry, no missing-field fallback and no permanent tri-state:
 
   {"kind": "head", "profile": "claude-observer"}   executable, one concrete head
   {"kind": "none"}                                  executable, the sprint runs without one
@@ -12,9 +12,8 @@ from the head registry, no missing-field fallback and no permanent tri-state:
    "source": "migration_unknown"}                   there is nothing honest to recover
 
 A historical value is never executable: it is provenance of what happened, not a declaration of
-what to run. An open sprint carrying one is corrupt in exactly the way a missing value is.
-
-The absent field is not a fifth form. Every row carries a value, and a row without one is corrupt.
+what to run. An open sprint carrying one is corrupt in exactly the way a missing value is. The
+absent field is not a fifth form — every row carries a value, and a row without one is corrupt.
 """
 
 from __future__ import annotations
@@ -45,11 +44,7 @@ REASON_UNKNOWN_PROFILE = "observer_unknown_profile"
 
 
 class ObserverMetadataError(Exception):
-    """An open sprint whose declared observer cannot be executed.
-
-    Carries the reason apart from the message: the fence keys its durable outcome on it, and an
-    operator repairing the row needs to know whether the field is gone or merely unreadable.
-    """
+    """An open sprint whose declared observer cannot be executed."""
 
     def __init__(self, reason: str, message: str) -> None:
         super().__init__(message)
@@ -81,13 +76,12 @@ def historical_unknown() -> dict[str, Any]:
 def parse_observer(raw: Any) -> dict[str, Any] | None:
     """One of the four tagged forms, or None for anything else.
 
-    None means the row carries something that is not an observer value. It never means "absent":
-    the caller decides that from whether the metadata key is there at all, because an absent field
-    and an unreadable one are repaired differently.
+    None means the row carries something that is not an observer value. It never means "absent": the
+    caller decides that from whether the metadata key is there at all, because an absent field and an
+    unreadable one are repaired differently.
 
-    The shapes are matched exactly, keys included. A value with an extra key is not a form this
-    module knows, and reading it as the form it resembles would let a writer nobody audited put
-    fields on the sprint's most load-bearing decision.
+    The shapes are matched exactly, keys included: reading a value with an extra key as the form it
+    resembles would let a writer nobody audited put fields on the sprint's most load-bearing decision.
     """
     source = raw
     if isinstance(raw, str):
@@ -126,8 +120,8 @@ def parse_observer(raw: Any) -> dict[str, Any] | None:
 def encode_observer(value: dict[str, Any]) -> str:
     """The exact text one observer value is stored as, so equality is byte equality.
 
-    A caller comparing what a row already holds against what it would write needs a difference to
-    mean "a different value", not "the same value serialized differently".
+    A caller comparing what a row holds against what it would write needs a difference to mean "a
+    different value", not "the same value serialized differently".
     """
     parsed = parse_observer(value)
     if parsed is None:
@@ -140,11 +134,7 @@ def is_executable(value: dict[str, Any] | None) -> bool:
 
 
 def observer_choice(spelling: str) -> dict[str, Any] | None:
-    """The executable value an operator spelled, or None when the word is not one.
-
-    `none` is the sprint that runs without an observer; anything else is read as the profile of
-    the one concrete head it declares. There is no spelling for `default` or `inherited`.
-    """
+    """The executable value an operator spelled, or None when the word is not one."""
     text = (spelling or "").strip()
     if not text:
         return None
@@ -179,12 +169,9 @@ def executable_observer(sprint: dict[str, Any]) -> dict[str, Any]:
 def installed_observer_profiles(instance: str | Path | None) -> set[str]:
     """The head profiles this installation runs off, or `ObserverMetadataError`.
 
-    The same snapshot the dispatcher resolves a declared head against (`InstanceCatalog` reads
-    `installed_heads` too), so "valid profile" means one thing at every boundary: the transition
-    that declares it, the recovery that republishes it, and the fence that judges it at a tick.
-
-    A registry that cannot be read is a refusal, never a pass.  Accepting a declaration nobody
-    could check is how an open sprint ends up fenced the moment it opens.
+    The same snapshot the dispatcher resolves a declared head against, so "valid profile" means one
+    thing at every boundary. A registry that cannot be read is a refusal, never a pass: accepting a
+    declaration nobody could check is how an open sprint ends up fenced the moment it opens.
     """
     if instance is None:
         raise ObserverMetadataError(

@@ -92,11 +92,7 @@ def degraded_actions(outcomes: Any) -> list[dict[str, Any]]:
 
 
 def _counter(value: Any) -> int:
-    """A monotonic counter read back from state, defaulting to 0 for anything unusable.
-
-    The file is written by this process, but a hand-edited or half-restored state must degrade to
-    "start counting again", never crash the tick that is trying to record its own outcome.
-    """
+    """A monotonic counter read back from state, defaulting to 0 for anything unusable."""
     try:
         return max(0, int(value))
     except (TypeError, ValueError):
@@ -108,11 +104,8 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
 
     Called with the result the tick is about to return, right before the state is saved, so the
     durable record and the returned outcome cannot disagree. A tick that never reaches a save
-    (the singleton lock is held by another tick, the mutation guard refuses because the state is
-    not ours to write) deliberately records nothing: taking the state file in either case would
-    write outside the lock or across an ownership fence, and both leave their own evidence
-    already — a held lock means another tick is recording, and a guard-blocked dispatcher stops
-    producing healthy ticks, which is exactly what the freshness check reads.
+    deliberately records nothing: taking the state file would write outside the lock or across an
+    ownership fence, and both leave their own evidence already.
     """
     telemetry = payload.get("tick_telemetry")
     telemetry = dict(telemetry) if isinstance(telemetry, dict) else {}
@@ -189,17 +182,14 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
 def _record_incident(telemetry: dict[str, Any], entry: dict[str, Any]) -> None:
     """Fold one tick into the open incident, closing it when the tick is healthy again.
 
-    An incident is one continuous run of unhealthy ticks. A Kanboard outage fails every tick for
-    as long as it lasts, and each of those ticks is the same failure — one thing to look at, with
-    one cause and one moment it ended. So the tick that finds no incident open opens one and bumps
-    `incident_total`; every unhealthy tick after it only extends that record, and the first healthy
+    An incident is one continuous run of unhealthy ticks: the tick that finds none open opens one and
+    bumps `incident_total`, every unhealthy tick after it extends that record, and the first healthy
     tick closes it into `recovery` and bumps `recovery_total`. Both counters are monotonic within a
-    generation for the same reason `unhealthy_total` is: a reader dedupes on them, and a counter
-    that can go down would let a later event consume an earlier one the reader has not seen yet.
+    generation, because a reader dedupes on them and a counter that can go down would let a later
+    event consume an earlier one the reader has not seen.
 
-    The tick that opened the incident is kept whole under `opened`, so the cause (its errors,
-    its degradations — `backend_unavailable` and friends) survives into the recovery record. It is
-    the same already-bounded entry that `last` holds, so this costs one entry, not a history.
+    The tick that opened the incident is kept whole under `opened`, so its cause survives into the
+    recovery record.
     """
     incident = telemetry.get("incident")
     incident = dict(incident) if isinstance(incident, dict) else None
@@ -238,13 +228,12 @@ def _record_failed_tick(runtime: Any, exc: BaseException) -> None:
     """Record a tick that died on an exception instead of returning a result.
 
     The tick that raises never reaches its own save, and a board outage raises on the very first
-    read, so without this record the pipeline keeps reporting the last healthy tick for the whole
-    freshness window while nothing is moving. The failure is written as a terminal unhealthy tick:
-    same shape as a degraded one, so health and the steward need to know nothing about it.
+    read, so without this the pipeline keeps reporting the last healthy tick for the whole freshness
+    window while nothing is moving. Written as a terminal unhealthy tick, in the same shape as a
+    degraded one.
 
-    The state is re-read rather than reused: the payload the failed tick was mutating is half
-    applied, and only the telemetry belongs on disk. Recording is best effort — the tick's own
-    exception is the one that must reach the caller, not a second one from the state file.
+    The state is re-read rather than reused, because the payload the failed tick was mutating is half
+    applied. Recording is best effort: the tick's own exception is the one that must reach the caller.
     """
     try:
         payload = runtime.production_state.load()
@@ -365,12 +354,8 @@ def _committing_records(
 ):
     """Lend the host a flush of this tick's records, for the span the tick holds them.
 
-    A head lifecycle transition — a stop entering `finishing` with its initiator (secretary-1412) —
-    has to be durable *before* the host call it describes, and the host is the one object that has
-    the record in hand and not the file it lives in. Handing it the tick's own save is what closes
-    that: a dispatcher killed between the transition and the pane close comes back to a record that
-    still knows which head was being stopped and by whom, instead of one that has forgotten there
-    was a stop.
+    A head lifecycle transition has to be durable *before* the host call it describes, and the host
+    is the one object that has the record in hand and not the file it lives in.
     """
     return runtime.host.committing(lambda: runtime.save_records(payload, records))
 
@@ -381,15 +366,7 @@ def _production_tick_body(
     pause: dict[str, Any],
     auto_resume: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """The tick proper, from the first board read to the durable record of how it ended.
-
-    Split out from `production_tick` so the caller can wrap exactly the region that runs under the
-    lock with the state already proven writable: everything before it either writes nothing or
-    records its own outcome.
-
-    The records are loaded here and lent to the host for the whole of it, so a head lifecycle
-    transition can be made durable at the moment it is decided rather than at the end of the tick.
-    """
+    """The tick proper, from the first board read to the durable record of how it ended."""
     records = runtime.production_state.records(payload)
     with _committing_records(runtime, payload, records):
         return _production_tick_work(runtime, payload, records, pause, auto_resume)
@@ -517,9 +494,8 @@ def _frozen_tick(
 ) -> dict[str, Any]:
     """A frozen tick moves no card, and still writes and pushes the checkpoint.
 
-    A freeze stops the pipeline, not durability. Returning before the snapshot would turn every
-    freeze into a hole in the checkpoint history and a push lag that only grows, and the restore path
-    is exactly what an operator reaches for after the incident the freeze was called for.
+    A freeze stops the pipeline, not durability: returning before the snapshot would turn every
+    freeze into a hole in the checkpoint history and a push lag that only grows.
     """
     result: dict[str, Any] = {
         "status": "skipped",
@@ -596,12 +572,7 @@ def _frozen_tick_body(
 
 
 def _checkpoint_degradation(checkpoint: dict[str, Any]) -> dict[str, str]:
-    """Expose a durability gate failure as an ordinary degraded action.
-
-    Telemetry already knows how to retain and report degraded actions.  Putting
-    the checkpoint here gives the health line and steward the blocking reason
-    rather than only a bare top-level ``degraded`` status.
-    """
+    """Expose a durability gate failure as an ordinary degraded action."""
     return {
         "status": "degraded",
         "step": "checkpoint",
@@ -613,8 +584,8 @@ def _checkpoint_degradation(checkpoint: dict[str, Any]) -> dict[str, str]:
 def _write_checkpoint(runtime: Any) -> dict[str, Any] | None:
     """Commit the normalized `state/` snapshot at the end of the tick.
 
-    The gate is fail-closed on the checkpoint, not on the tick: a blocked
-    snapshot leaves its reason in state and the next tick retries.
+    The gate is fail-closed on the checkpoint, not on the tick: a blocked snapshot leaves its reason
+    in state and the next tick retries.
     """
     writer = getattr(runtime, "checkpoint", None)
     if writer is None:
@@ -630,9 +601,8 @@ def _write_checkpoint(runtime: Any) -> dict[str, Any] | None:
 def _push_checkpoint(runtime: Any, payload: dict[str, Any]) -> dict[str, Any] | None:
     """Run the 30-minute push window at the end of the tick.
 
-    Fail-closed on the checkpoint, not on the work: a push that cannot land
-    records why, the lag keeps growing in plain sight, and the tick still
-    reports on the cards it moved.
+    Fail-closed on the checkpoint, not on the work: a push that cannot land records why, the lag
+    keeps growing in plain sight, and the tick still reports on the cards it moved.
     """
     pusher = getattr(runtime, "checkpoint_push", None)
     if pusher is None:
@@ -657,12 +627,7 @@ def _push_checkpoint(runtime: Any, payload: dict[str, Any]) -> dict[str, Any] | 
 
 
 class ProbeAbort(Exception):
-    """A dry tick reached the point where the real tick would have written.
-
-    The operation and its arguments are the probe's actual result: they say what
-    the next real tick will do, which is the only evidence that the tick's
-    decision logic still works end to end.
-    """
+    """A dry tick reached the point where the real tick would have written."""
 
     def __init__(self, operation: str, detail: dict[str, Any]) -> None:
         super().__init__(operation)
@@ -695,9 +660,8 @@ class _ProbeWriter:
 class _ProbeHost:
     """Stands in for the command host. Path arithmetic passes; effects abort.
 
-    ``gate_check`` is listed as an effect even though it mostly reads: it runs
-    the project's setup and test commands, which is far too expensive and far
-    too side-effecting for a health probe that a timer may call every minute.
+    ``gate_check`` is listed as an effect even though it mostly reads: it runs the project's setup
+    and test commands, far too expensive for a health probe a timer may call every minute.
     """
 
     EFFECTS = (
@@ -753,10 +717,9 @@ class _ProbeState:
 def _probe_runtime(runtime: Any) -> Any:
     """The real runtime with only its writers swapped out.
 
-    A wrapper object would not work: the tick's own methods are bound to the
-    real runtime, so ``self.writer`` inside them would still reach the live
-    board. A shallow copy shares every collaborator by reference and rebinds
-    those methods to an object whose writer, host and state cannot write.
+    A wrapper object would not work: the tick's own methods are bound to the real runtime, so
+    ``self.writer`` inside them would still reach the live board. A shallow copy shares every
+    collaborator by reference and rebinds those methods to an object that cannot write.
     """
     probe = copy.copy(runtime)
     probe.writer = _ProbeWriter(runtime.writer)
@@ -768,11 +731,9 @@ def _probe_runtime(runtime: Any) -> Any:
 def production_probe(runtime: Any) -> dict[str, Any]:
     """Run a real tick with every write replaced by an abort.
 
-    This is the health gate, so it has to fail for the same reasons the real
-    tick fails: it takes the same singleton lock, runs the same mutation guards,
-    scans the same task states and drives the same ``_tick_task`` decision for
-    each of them. The only difference is that the first write per task raises
-    instead of landing, and the state file is never saved.
+    This is the health gate, so it fails for the same reasons the real tick fails: same singleton
+    lock, same mutation guards, same task states, same ``_tick_task`` decision. The only difference
+    is that the first write per task raises instead of landing.
     """
     with try_file_lock(runtime.production_state.tick_lock) as acquired:
         if not acquired:
@@ -928,10 +889,9 @@ def _advance_active(
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]], dict[str, set[str]]]:
     """Advance every active card, and report which scopes a blocked card closed for claims.
 
-    The scopes are the blocked card's sprint and its project. A blocked card says nothing about
-    the work of another sprint in another project, so the claim suppression it causes is keyed by
-    those two rather than installation-wide. A card with no linked sprint still closes its own
-    project.
+    The scopes are the blocked card's sprint and its project: a blocked card says nothing about the
+    work of another sprint in another project, so the claim suppression it causes is keyed by those
+    two rather than installation-wide.
     """
     outcomes: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
@@ -963,9 +923,8 @@ def _fence_failed_tick(
 ) -> dict[str, Any]:
     """End the tick without touching a card, and leave a durable record of why.
 
-    The state is still saved: the fence may have opened or cleared fences and refreshed its
-    snapshot before it raised, and those are what the next tick reads. Nothing else in the payload
-    has been touched yet, because this runs before every pass that writes one.
+    The state is still saved: the fence may have opened or cleared fences and refreshed its snapshot
+    before it raised, and those are what the next tick reads.
     """
     result = {
         "status": "critical",
@@ -999,14 +958,10 @@ def _reconcile_production(
 ) -> list[dict[str, Any]]:
     """Reconcile records and controlled divergences against the current board.
 
-    `_advance_active` only ever looks at cards the board currently reports as
-    in_progress/validate, so a record whose card left that cycle from outside the
-    dispatcher (a PO move, an archive, a delete) is invisible to it forever. This
-    runs every tick, before the active cards are advanced. A record owns every
-    head launched for the card, so reconciliation must settle those heads before
-    it can remove the record. A controlled divergence closes the same way: once
-    the card tied to it is no longer in the active cycle, whatever the reason it
-    opened, it does not need an operator's eyes anymore.
+    `_advance_active` only looks at cards the board currently reports as in_progress/validate, so a
+    record whose card left that cycle from outside the dispatcher is invisible to it forever. A record
+    owns every head launched for the card, so reconciliation must settle those heads before it can
+    remove the record.
     """
     outcomes: list[dict[str, Any]] = []
     state_cache: dict[str, str | None] = {}
@@ -1030,9 +985,8 @@ def _reconcile_production(
     def fenced(ref: str) -> bool:
         """Whether this record's card belongs to a fenced sprint, decided a second way.
 
-        `fenced_refs` is the fence's own inventory of the fenced cards. This asks the card the tick
-        has just read, by its sprint link and its project, so a card missing from that inventory —
-        a card created since, or one the fence's read did not see — is still not settled while its
+        `fenced_refs` is the fence's own inventory. This asks the card the tick has just read, by its
+        sprint link and its project, so a card missing from that inventory is still not settled while its
         sprint is fenced.
         """
         if ref in fenced_refs:
@@ -1180,10 +1134,9 @@ def _close_divergences_for_ref(payload: dict[str, Any], ref: str, card_state: st
 def _current_card(runtime: Any, ref: str) -> dict[str, Any] | None:
     """The card as the board has it right now, or None when it could not be asked.
 
-    A `None` here means "skip this ref this tick", never "treat as gone": a
-    transient backend error must not look like the card left the cycle, or a
-    Kanboard hiccup would reconcile away a record that is still legitimately
-    in flight. A card the board says is gone comes back as a `not_found` state.
+    A `None` here means "skip this ref this tick", never "treat as gone": a transient backend error
+    must not look like the card left the cycle. A card the board says is gone comes back as a
+    `not_found` state.
     """
     try:
         return runtime.reader.show(ref)
@@ -1481,9 +1434,8 @@ def _record_unlinked_budget_event(
 ) -> None:
     """Durably remember that a budget-shaped card event has no sprint to charge.
 
-    The audit request id is deliberately the same one a charge would use.  A card's sprint link
-    is assigned at creation and cannot appear later, so this is a terminal result and prevents an
-    old unrelated red verdict from causing board reads forever.
+    The audit request id is deliberately the same one a charge would use. A card's sprint link is
+    assigned at creation and cannot appear later, so this is a terminal result.
     """
     runtime.audit.append(request_id, {
         "event_id": "evt_budget_unlinked_" + source_event_id,

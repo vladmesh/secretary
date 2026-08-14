@@ -1,24 +1,17 @@
 """The pane operations interactive delivery and a head's lifecycle need, and Orca's answers to them.
 
 Delivery asks a session manager for very little: write bytes into a pane, read the pane back, and
-wait until it will accept input.  Everything above this module is about what those answers mean —
-readiness classification, composer residue, framing, the body/submit pair — and none of it is
-specific to Orca.
+wait until it will accept input. Everything above this module is about what those answers mean,
+and none of it is specific to Orca.
 
-A head's own life needs more than delivery, and it needs it through the same seam: `spawn` opens a
+A head's own life needs more than delivery and needs it through the same seam: `spawn` opens a
 pane, `stop` closes one, and both have to find a pane again after the session manager aliased the
-handle it first gave out.  Those verbs used to exist only as ``orca terminal`` argument vectors
-inside the dispatcher, which is what made the three head operations impossible to run without Orca.
-So ``SessionHost`` extends ``PaneHost`` with them rather than a second protocol being invented
-beside it: one live pane is one thing, and a head that is delivered to and later closed would
-otherwise have to hold two objects and hope they name the same pty.
+handle it first gave out. So ``SessionHost`` extends ``PaneHost`` with them rather than a second
+protocol being invented beside it.
 
-Orca is nonetheless the only session manager this product has, so ``OrcaPaneHost`` and
-``OrcaSessionHost`` are the defaults everywhere.  What this seam buys is that its argument vectors
-exist in one file: a second implementation is a class with these methods, not a search for
-``"orca"`` through the delivery and bring-up paths.  What it still does not cover is worktree
-registration and removal — a larger and differently-shaped dependency (`docs/ARCHITECTURE.md`) that
-belongs to a workspace rather than to a pane.
+Orca is the only session manager this product has, so ``OrcaPaneHost`` and ``OrcaSessionHost`` are
+the defaults everywhere; what this seam buys is that its argument vectors exist in one file. What
+it does not cover is worktree registration and removal, which belongs to a workspace, not a pane.
 """
 
 from __future__ import annotations
@@ -37,9 +30,8 @@ class PaneHostError(RuntimeError):
 class Pane:
     """One pane as the session manager named it: the handle to address, and its stable leaf.
 
-    Orca can alias the handle it returned at create time while the leaf stays put, so the leaf is
-    what a later tick re-finds the same pty by.  A host that has no such notion returns the handle
-    alone and every lookup then goes by handle, which is what a backend with stable handles means.
+    Orca can alias the handle it returned at create time while the leaf stays put, so the leaf is what
+    a later tick re-finds the same pty by. A host with no such notion returns the handle alone.
     """
 
     handle: str
@@ -75,8 +67,7 @@ class PaneHost(Protocol):
 class SessionHost(PaneHost, Protocol):
     """The pane's whole life: everything `PaneHost` answers, plus opening and closing one.
 
-    A head operation reaches the session manager through this and nothing else, so an
-    implementation of these methods is the whole of what a backend-independent head run needs.
+    A head operation reaches the session manager through this and nothing else.
     """
 
     def open_pane(self, workspace: str, title: str, command: str) -> Pane:
@@ -100,11 +91,7 @@ class SessionHost(PaneHost, Protocol):
 
 @dataclass(frozen=True)
 class OrcaPaneHost:
-    """The installed session manager, reached through its public ``orca terminal`` CLI.
-
-    The runner is injected rather than built here because its callers already own how a subprocess
-    is spawned, timed out and redacted; this type owns only which arguments that runner is given.
-    """
+    """The installed session manager, reached through its public ``orca terminal`` CLI."""
 
     run_json: RunJson
 
@@ -150,13 +137,7 @@ def _pane_key_leaf(value: Any) -> str:
 
 @dataclass(frozen=True)
 class OrcaSessionHost(OrcaPaneHost):
-    """Orca's answer to the whole pane lifecycle, as its ``orca terminal`` CLI spells it.
-
-    These argument vectors were the dispatcher's private ones (`_create_terminal`, `_split_pane`,
-    the terminal inventory and the by-worktree stop). They are here so that the operations above
-    them hold no opinion about which session manager is installed, and so the dispatcher's own
-    lifecycle paths and the head operations issue one set of commands rather than two.
-    """
+    """Orca's answer to the whole pane lifecycle, as its ``orca terminal`` CLI spells it."""
 
     def open_pane(self, workspace: str, title: str, command: str) -> Pane:
         result = self.run_json([
@@ -231,16 +212,11 @@ class OrcaSessionHost(OrcaPaneHost):
 def safe_command_label(args: Sequence[str]) -> str:
     """Describe one of the argument vectors above without retaining a prompt in an exception.
 
-    A runner includes its label in failures, and a failure record outlives the pane, so the label
-    has to be redacted before a subprocess is started rather than scrubbed after an arbitrary
-    provider error has been made durable. `send` deliberately passes the prompt as `--text`, which
-    is the only argument here that can hold one.
-
-    This lives beside the vectors rather than with the runner that is handed them: which word of an
-    `orca terminal` call carries a prompt is a fact about the CLI this module spells, and a redactor
-    kept anywhere else is a redactor that goes stale the next time a vector changes. It reads a
-    vector rather than building one, so a runner for another session manager passes its own through
-    and gets it back unchanged.
+    A runner includes its label in failures and a failure record outlives the pane, so the label is
+    redacted before a subprocess is started rather than scrubbed after an arbitrary provider error
+    has been made durable. `send` deliberately passes the prompt as `--text`, the only argument here
+    that can hold one. It lives beside the vectors, because which word carries a prompt is a fact
+    about the CLI this module spells.
     """
     args = list(args)
     if args[:3] != ["orca", "terminal", "send"]:
@@ -260,9 +236,8 @@ def safe_command_label(args: Sequence[str]) -> str:
 def pane_host(run_json: RunJson | None = None, *, host: PaneHost | None = None) -> PaneHost:
     """Resolve the host a delivery call should use.
 
-    Callers pass the runner they always passed and get Orca.  A caller that has a session manager
-    of its own passes ``host`` and the runner is never consulted, which is what makes the argument
-    vectors above replaceable rather than merely tidy.
+    Callers pass the runner they always passed and get Orca. A caller that has a session manager of
+    its own passes ``host`` and the runner is never consulted.
     """
     if host is not None:
         return host

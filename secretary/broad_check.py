@@ -1,30 +1,24 @@
 """Workspace-local structured receipt for one broad check run.
 
-A worker runs a broad suite once per report generation.  The evidence it produces used to live
-only in the terminal, so a scrolled-away TUI pane was indistinguishable from a suite that had
-never run, and the cheapest way back to a summary was to run the whole suite again.  This module
-runs the broad command once, keeps the combined output visible while it runs, and writes what the
-run actually decided into a bounded local artifact: the command and its digest, where it ran and
-which project it imported, when it started and how long it took, the process exit status, the
-parsed verdict and counts where the runner prints them, and a bounded diagnostic tail.
+A worker runs a broad suite once per report generation. This module runs the broad command once,
+keeps the combined output visible while it runs, and writes what the run actually decided into a
+bounded local artifact: the command and its digest, where it ran and which project it imported,
+when it started and how long it took, the process exit status, the parsed verdict and counts, and
+a bounded diagnostic tail.
 
-The receipt is evidence about content, not about a wall clock.  It records the checkout's content
-identity (HEAD object id plus a digest of the tracked diff and untracked files), so a later reader
-can tell "this is a receipt for exactly the code in front of me" from "this describes something
-else".  Everything else fails closed: an incomplete run, a corrupt or truncated artifact, a
-checkout with no resolvable identity, or a receipt for other content is not usable evidence, and
-the reader is told which of those it is rather than being handed a hopeful summary.
+The receipt is evidence about content, not about a wall clock: it records the checkout's content
+identity (HEAD object id plus a digest of the tracked diff and untracked files). Everything else
+fails closed — an incomplete run, a corrupt or truncated artifact, a checkout with no resolvable
+identity, or a receipt for other content is not usable evidence, and the reader is told which.
 
-Provenance is held to the same standard as the rest.  A receipt only reports the project a check
-imported when the check process itself said so, which is why the standard shape is a module this
-wrapper launches; an arbitrary shell may `cd` elsewhere or reach another interpreter before any
-work starts, so that shape records no import and is never reused in place of a run.  The runner's
-verdict is likewise scanned off the stream while it goes past rather than reconstructed from the
-diagnostic tail, because output printed after a summary must not be able to erase it.
+A receipt only reports the project a check imported when the check process itself said so, which
+is why the standard shape is a module this wrapper launches; an arbitrary shell may `cd` elsewhere
+before any work starts, so that shape records no import. The runner's verdict is scanned off the
+stream while it goes past rather than reconstructed from the diagnostic tail, because output
+printed after a summary must not be able to erase it.
 
-This is deliberately not the exact-SHA gate receipt in ``dispatcher_gate_receipt``.  That one is
-machinery-owned attestation that travels downstream to reviewers and observers; this one is a
-worker's own note-to-self inside an ignored workspace path and never leaves it.
+This is deliberately not the exact-SHA gate receipt in ``dispatcher_gate_receipt``: that one is
+machinery-owned attestation that travels downstream, this one is a worker's own note-to-self.
 """
 
 from __future__ import annotations
@@ -142,11 +136,9 @@ class CheckSpec:
     """One accepted shape of a broad check, and what its receipt may claim.
 
     ``module`` is the documented standard shape: this wrapper builds the argv itself and runs the
-    suite in a process that reports its own import provenance, so a receipt can attest what was
-    imported.  ``shell`` accepts any command a project needs, and buys that generality by
-    attesting nothing about imports: a shell command may change directory or import environment
-    between the wrapper and the interpreter that ends up doing the work, and a receipt that
-    guessed at provenance there would be guessing about exactly the thing worth knowing.
+    suite in a process that reports its own import provenance. ``shell`` accepts any command and
+    attests nothing about imports, because a shell command may change directory or import environment
+    between the wrapper and the interpreter that ends up doing the work.
     """
 
     shape: str
@@ -171,11 +163,10 @@ class CheckSpec:
     def check_set(self) -> dict[str, object]:
         """The canonical structured identity of this check: what is digested and stored.
 
-        A rendered command line cannot carry an argument vector faithfully — `--module-arg 'one two'`
-        and `--module-arg one --module-arg two` render identically while running different checks,
-        and a receipt keyed on that rendering hands the first one's result to the second
-        (secretary-1406 review).  The argument vector is kept as a list, and every route that keys,
-        looks up or validates a receipt uses this representation rather than the display string.
+        A rendered command line cannot carry an argument vector faithfully — `--module-arg 'one two'` and
+        `--module-arg one --module-arg two` render identically while running different checks — so the
+        argument vector is kept as a list and every route that keys, looks up or validates a receipt uses
+        this representation rather than the display string.
         """
         if self.shape == _SHAPE_MODULE:
             return {
@@ -254,12 +245,10 @@ def _git(root: Path, args: list[str]) -> subprocess.CompletedProcess[str] | None
 def content_identity(root: Path) -> ContentIdentity:
     """Digest the checkout's content, not merely its commit.
 
-    A worker reports from a dirty worktree far more often than from a clean one, so a HEAD object
-    id alone would happily match a receipt taken before the last three edits.  The digest covers
-    the tracked diff against HEAD and every untracked, non-ignored file's content; ignored paths
-    (the receipt directory among them) are excluded by construction, so writing a receipt cannot
-    invalidate the receipt it just wrote.  A checkout whose identity cannot be resolved returns an
-    unresolved value, and unresolved never matches anything.
+    A worker reports from a dirty worktree far more often than from a clean one, so a HEAD object id
+    alone would match a receipt taken before the last three edits. The digest covers the tracked diff
+    against HEAD and every untracked, non-ignored file's content; ignored paths (the receipt directory
+    among them) are excluded by construction. An unresolvable identity never matches anything.
     """
     head = _git(root, ["rev-parse", "HEAD"])
     if head is None or head.returncode != 0:
@@ -286,11 +275,9 @@ def content_identity(root: Path) -> ContentIdentity:
 def _read_provenance(record: Path | None, root: Path) -> dict[str, object]:
     """Read what the check process said about its own import, or claim nothing at all.
 
-    A separate preflight probe answers a different question than the one asked: it reports what
-    *it* would import, while the check may run somewhere else entirely.  Only the record written
-    from inside the running check counts here, and its absence — a shell shape, a crash before the
-    bootstrap got that far, an unreadable record — is reported as unobserved rather than filled in
-    from the wrapper's own environment (secretary-1406 review).
+    A separate preflight probe reports what *it* would import, while the check may run somewhere else
+    entirely. Only the record written from inside the running check counts, and its absence is
+    reported as unobserved rather than filled in from the wrapper's own environment.
     """
     if record is None:
         return dict(_UNOBSERVED_PROVENANCE)
@@ -351,10 +338,8 @@ class _SummaryScanner:
     """Read the runner's verdict off the stream as it goes by, in constant memory.
 
     The verdict must not depend on the diagnostic tail: a runner prints ``OK (skipped=8)`` and then
-    an ``atexit`` handler, a cleanup hook or a subprocess can print megabytes after it, pushing the
-    summary out of any bounded tail (secretary-1406 review).  So the scanner keeps only what a
-    summary can be — a test count, a duration, a verdict word and its short detail — and forgets
-    every line that is not one.
+    an ``atexit`` handler or a subprocess can print megabytes after it, pushing the summary out of any
+    bounded tail. So the scanner keeps only what a summary can be and forgets every other line.
     """
 
     def __init__(self) -> None:
@@ -463,8 +448,8 @@ def run_broad_check(
 ) -> tuple[int, dict[str, object]]:
     """Run one broad check, keep its combined output visible, and write its receipt.
 
-    Returns the process's own exit status alongside the receipt: the caller reports exactly what
-    the check decided, and the receipt never becomes a second, softer answer to that question.
+    Returns the process's own exit status alongside the receipt, so the receipt never becomes a
+    second, softer answer to what the check decided.
     """
     spec = as_spec(check)
     if len(json.dumps(spec.check_set)) > MAX_COMMAND_CHARS:
@@ -626,14 +611,12 @@ class RunResult:
     """The one canonical model of what a check process did.
 
     Every recorded result field is a function of two facts: the raw ``Popen.returncode`` and the
-    reason the runner has for calling the run unfinished.  Deriving `signal`, `status`, `verdict`,
-    the stored reason and the shell status from that one model — rather than checking them against
-    each other one predicate at a time — is what keeps a reader from having to guess which of two
-    disagreeing fields to believe, and is why a stored `" "` reason or an exit code of `256` are
-    refused without anybody having thought of them individually (secretary-1406 review).
+    reason the runner has for calling the run unfinished. Deriving `signal`, `status`, `verdict`, the
+    stored reason and the shell status from that one model keeps a reader from having to guess which
+    of two disagreeing fields to believe.
 
-    The domain is what this POSIX wrapper can actually observe: a normal status of 0..255, or a
-    negative code naming a signal this platform defines.  Anything else was never written by a run.
+    The domain is what this POSIX wrapper can observe: a normal status of 0..255, or a negative code
+    naming a signal this platform defines. Anything else was never written by a run.
     """
 
     exit_code: int
@@ -674,11 +657,7 @@ class RunResult:
 
     @property
     def shell_status(self) -> int:
-        """The status this result gives a caller: `128+N` for a signal, otherwise its own.
-
-        One rule, used whether the result was just observed or read back from a receipt, so a
-        reused receipt answers exactly what the run it replaces answered.
-        """
+        """The status this result gives a caller: `128+N` for a signal, otherwise its own."""
         return self.exit_code if self.exit_code >= 0 else 128 - self.exit_code
 
     def as_fields(self) -> dict[str, object]:
@@ -711,9 +690,8 @@ def result_refusal(payload: Mapping[str, object]) -> str:
     """Why this receipt's recorded result could not have been written by a run, or ``""``.
 
     The digest proves a payload was not edited after something computed it; it says nothing about
-    whether the numbers inside describe a run that happened.  This states the difference, and it
-    states it by rebuilding the canonical model and comparing every stored field with it, so the
-    answer cannot drift from what the writer actually writes.
+    whether the numbers inside describe a run that happened. This rebuilds the canonical model and
+    compares every stored field with it, so the answer cannot drift from what the writer writes.
     """
     result = RunResult.observe(payload.get("exit_code"), payload.get("incomplete_reason"))
     if result is None:
@@ -734,10 +712,9 @@ def result_refusal(payload: Mapping[str, object]) -> str:
 def load_receipt(path: Path) -> dict[str, object] | None:
     """The one semantic boundary: a receipt reaches a reader through here or not at all.
 
-    `usable_receipt` — and therefore `check show` and `check broad --reuse`, which have no other
-    way in — call this first, so an unreadable, undigestible, structurally short or internally
-    contradictory artifact is never authorized, never has its status preserved, and never reaches
-    `_shell_status`.  Corruption outranks both.
+    `usable_receipt` — and therefore `check show` and `check broad --reuse` — call this first, so an
+    unreadable, undigestible, structurally short or internally contradictory artifact is never
+    authorized and never has its status preserved. Corruption outranks both.
     """
     try:
         raw = Path(path).read_text(encoding="utf-8")
@@ -783,9 +760,7 @@ class ReceiptLookup:
     """Whether an existing receipt may stand in for running the broad check again.
 
     Constructed only by :func:`usable_receipt`, and the one place a caller may ask "may I skip the
-    run?" is :meth:`authorized`.  Every route — ``check show``, ``check broad --reuse``, anything
-    later — therefore passes the same predicate; there is no field a caller can read to reach a
-    softer conclusion of its own (secretary-1406 review, twice over).
+    run?" is :meth:`authorized`. There is no field a caller can read to reach a softer conclusion.
     """
 
     usable: bool
@@ -798,11 +773,7 @@ class ReceiptLookup:
         return self.receipt if self.usable else None
 
     def authorized_result(self) -> RunResult | None:
-        """The canonical result an authorized receipt recorded, for a caller that owes a status.
-
-        A caller never reads `exit_code` out of a receipt for itself: it asks here, and the answer
-        comes from the model the load boundary already reconstructed and matched.
-        """
+        """The canonical result an authorized receipt recorded, for a caller that owes a status."""
         receipt = self.authorized()
         return None if receipt is None else recorded_result(receipt)
 
@@ -818,11 +789,10 @@ class ReceiptLookup:
 def candidate_import_refusal(receipt: Mapping[str, object], root: Path) -> str:
     """The candidate-trust boundary: why this receipt's import may not be trusted, or ``""``.
 
-    Observed provenance is necessary and not sufficient.  A check process reports honestly that it
-    imported some project; only an import resolved *inside this candidate workspace* says the run
-    that produced the receipt was a run of this code.  A missing record, an unreadable one, an
-    empty path, a path that no longer resolves, and a path outside the candidate are all refusals,
-    and they are refusals here, once, for every caller.
+    Observed provenance is necessary and not sufficient: only an import resolved *inside this
+    candidate workspace* says the run that produced the receipt was a run of this code. A missing
+    record, an unreadable one, an empty path, a path that no longer resolves and a path outside the
+    candidate are all refusals, here, once, for every caller.
     """
     provenance = receipt.get("project_provenance")
     if not isinstance(provenance, Mapping):
@@ -852,10 +822,9 @@ def candidate_import_refusal(receipt: Mapping[str, object], root: Path) -> str:
 def usable_receipt(root: Path, check: "CheckSpec | str") -> ReceiptLookup:
     """Answer the only question a scrolled-away pane raises: has this run already happened here?
 
-    Usable means the artifact is intact, the run finished, the check process imported this
-    candidate workspace, and the receipt describes the content in this checkout right now.  A red
-    result is usable evidence too — it is a concrete answer, and the caller decides whether fixing
-    the cause justifies a new run.
+    Usable means the artifact is intact, the run finished, the check process imported this candidate
+    workspace, and the receipt describes the content in this checkout right now. A red result is
+    usable evidence too.
     """
     spec = as_spec(check)
     path = receipt_path(root, spec)

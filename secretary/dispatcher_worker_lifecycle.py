@@ -1,10 +1,4 @@
-"""Durable state for handing a worker across mechanical validation.
-
-The board state and the head state are separate machines.  A card can still be In progress while
-its completed worker is already suspended, or already be back In progress while a retained worker
-is accepting its continuation.  Keeping those facts in one typed value avoids invalid combinations
-of timestamps and string flags on ``DispatcherRecord``.
-"""
+"""Durable state for handing a worker across mechanical validation."""
 
 from __future__ import annotations
 
@@ -40,9 +34,9 @@ class ContinuationLivenessState(StrEnum):
 class ContinuationProviderCondition(StrEnum):
     """Narrow provider-source conditions a retained-continuation policy may act on.
 
-    These are protocol classifications, not host error text.  In particular, an unavailable
-    transport, malformed evidence, or a source that fails the HeadRun fence must not acquire this
-    condition merely because its diagnostic happens to resemble an unbound source.
+    Protocol classifications, not host error text: an unavailable transport, malformed evidence or a
+    source that fails the HeadRun fence must not acquire this condition merely because its diagnostic
+    resembles an unbound source.
     """
 
     LEGACY_UNBOUND_V1 = "legacy_unbound_v1"
@@ -62,9 +56,9 @@ class ContinuationRecoveryRung(StrEnum):
 def head_run_binding(value: Any) -> tuple[str, str]:
     """Return the stable identity of a HeadRun without retaining provider or pane contents.
 
-    `run_id` is the authoritative identity.  The digest binds the continuation to the run's
-    immutable launch facts as a second fence: a corrupted record cannot turn a same-workspace
-    session into this continuation simply because it copied a convenient run id.
+    `run_id` is the authoritative identity; the digest binds the continuation to the run's immutable
+    launch facts as a second fence, so a corrupted record cannot turn a same-workspace session into
+    this continuation by copying a convenient run id.
     """
     if not isinstance(value, dict):
         return "", ""
@@ -91,15 +85,13 @@ def head_run_binding(value: Any) -> tuple[str, str]:
 class WorkerContinuationLiveness:
     """Versioned provider-progress evidence for a retained red continuation.
 
-    This is intentionally separate from the delivery receipt.  The receipt says whether the
-    continuation prompt reached the pane; this record answers the later and narrower question of
-    whether the *same provider run* has made progress while readiness keeps saying busy.  It keeps
-    only opaque provider cursors/fingerprints and classifications, never composer or prompt text.
+    Separate from the delivery receipt: the receipt says whether the continuation prompt reached the
+    pane, this answers whether the *same provider run* has made progress while readiness keeps saying
+    busy. Only opaque cursors and classifications, never composer or prompt text.
 
-    A record missing this value is never upgraded into an episode.  It remains typed unknown and
-    may retain the old retry count only as audit data.  A v1 episode is created exclusively when a
-    new delivery boundary is written for an already retained HeadRun, which is what prevents a
-    recovered same-workspace pane from being bound after the fact.
+    A record missing this value is never upgraded into an episode. A v1 episode is created
+    exclusively when a new delivery boundary is written for an already retained HeadRun, which
+    prevents a recovered same-workspace pane from being bound after the fact.
     """
 
     version: int = CONTINUATION_LIVENESS_VERSION
@@ -177,8 +169,7 @@ class WorkerContinuationLiveness:
         """Apply the sole provider admission rule before any ladder decision.
 
         The host can report only an opaque cursor, but it must also attest the run and source that
-        produced it.  This method never invents that binding.  In particular, an historical
-        unbound record stays unknown even when a current workspace happens to have an active file.
+        produced it. This method never invents that binding.
         """
         if self.source_rejected:
             # A card with a rejected source is sent to the identity-fenced blocked path.  In
@@ -544,22 +535,16 @@ class ReportNudgeStage(StrEnum):
 class WorkerReportNudge:
     """The one reminder a report round may spend on a live worker that has stopped working.
 
-    A head that is alive, at its prompt and holding no report is the failure the idle watchdog was
-    built for, and its answer was to replace the head. Replacing one that has finished the work and
-    only missed the report throws that work away, so the round gets a single prompt at the
-    confirmed-idle boundary before anything destructive happens. Everything after that prompt is
-    unchanged: the report itself, its result verification and the gate all keep the paths they had.
+    Replacing a head that has finished the work and only missed the report throws that work away, so
+    the round gets a single prompt at the confirmed-idle boundary before anything destructive happens.
 
-    Bounded by `generation`, which is the report round. That is what makes the bound a fact of the
-    round rather than of a tick: a second confirmed-idle episode in the same round finds the intent
-    already spent and escalates, and a round that opens later is a different number and gets its own
-    single prompt. It is also why nothing has to remember to clear this — a stale nudge from a round
-    that is over can never be mistaken for the current one's.
+    Bounded by `generation`, which is the report round: a second confirmed-idle episode in the same
+    round finds the intent already spent and escalates, and a round that opens later gets its own
+    prompt. That is also why nothing has to remember to clear this.
 
     `PENDING` is deliberately as spent as `DELIVERED`. A tick that died between the intent and its
     confirmation may or may not have typed into a live conversation, and re-entering the delivery to
-    find out would be the second prompt this bound exists to prevent. The unconfirmed intent instead
-    holds the card on the fail-closed path: nothing replaces that worker until its stop is confirmed.
+    find out would be the second prompt this bound exists to prevent.
     """
 
     stage: ReportNudgeStage = ReportNudgeStage.NONE
@@ -735,12 +720,9 @@ class WorkerContinuation:
     ) -> None:
         """Record the reviewer's verdict before the card is parked in Assessment.
 
-        This is the whole point of the seam: the verdict is durable here, and nothing has yet
-        merged, resumed a worker or moved the board. A tick that dies between this write and the
-        move is recovered by finishing the move, never by re-deciding what the verdict meant.
-
-        Re-entry from `ASSESSMENT_PENDING` is allowed so the recovery of an unlanded move is the
-        same call as the first attempt.
+        The verdict is durable here, and nothing has yet merged, resumed a worker or moved the board. A
+        tick that dies between this write and the move is recovered by finishing the move, never by
+        re-deciding what the verdict meant. Re-entry from `ASSESSMENT_PENDING` is allowed.
         """
         if self.stage not in {
             WorkerContinuationStage.NONE,
@@ -769,17 +751,12 @@ class WorkerContinuation:
     ) -> None:
         """Record the red verdict before the board is moved.
 
-        The board move and the state write are separate durable facts. Without this the record of a
-        crashed tick still names the report that closed the previous round, and recovery reads that
-        report as a new completion instead of finishing the red transition.
+        Without this the record of a crashed tick still names the report that closed the previous round,
+        and recovery reads that report as a new completion instead of finishing the red transition.
 
-        Opening one over a round that holds no session is the same transition, not a lesser case:
-        whether the continuation ends up in the old conversation or in a replacement is decided
-        after this, and a round with nothing to reuse is exactly the one whose replacement must not
-        be lost to a crash.
-
-        An open transition is immutable. It carries everything its own completion needs, so a tick
-        that finds one finishes it rather than opening a second one over a freshly read verdict.
+        Opening one over a round that holds no session is the same transition, not a lesser case. An open
+        transition is immutable: it carries everything its own completion needs, so a tick that finds one
+        finishes it rather than opening a second one over a freshly read verdict.
         """
         if self.stage not in {
             WorkerContinuationStage.NONE,
@@ -840,10 +817,9 @@ class WorkerContinuation:
     def drop_session(self) -> None:
         """The session is gone, by a confirmed stop or by its own death.
 
-        A retention that has nothing else pending disappears with it. A park and a red transition
-        do not. A parked card still owes the observer a decision; a red transition still owes the
-        card a replacement, and losing that intent here is what would let a later tick read the
-        closed round's report as a new completion.
+        A retention that has nothing else pending disappears with it; a park and a red transition do not.
+        Losing the red transition's intent here is what would let a later tick read the closed round's
+        report as a new completion.
         """
         self.session_held = False
         if self.stage in {

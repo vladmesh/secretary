@@ -99,11 +99,7 @@ def restore_state(data_dir: Path) -> dict[str, Any]:
 def import_normalized_board(
     data_dir: Path, *, client: KanboardClient | None = None, instance: Path | None = None
 ) -> int:
-    """Populate an empty board from the normalized export and prove parity on every retry.
-
-    Returns the number of restored Pipeline cards; the sprint entities restored
-    alongside them are counted in `restore-state.json`.
-    """
+    """Populate an empty board from the normalized export and prove parity on every retry."""
     from secretary.sprints import sprint_admission_lock
 
     data_dir = data_dir.expanduser().resolve()
@@ -196,11 +192,7 @@ def import_normalized_board(
 def _existing_sprints(
     data_dir: Path, client: KanboardClient, sprints: list[dict[str, Any]]
 ) -> dict[str, dict[str, Any]]:
-    """The sprint entities the target already holds, read once before any write.
-
-    An export without sprint entities never touches the sprint board, so it never
-    asks the backend about one either.
-    """
+    """The sprint entities the target already holds, read once before any write."""
     if not sprints:
         return {}
     from secretary.sprints import SprintReader
@@ -212,12 +204,7 @@ def _existing_sprints(
 
 
 def _existing_board_cards(reader: TaskReader) -> dict[str, dict[str, Any]]:
-    """Read both active and closed Pipeline records before deciding a restore is empty.
-
-    The restore loop needs only references here. Keep the live raw row when a
-    pre-recovery duplicate exists, instead of normalizing each closed row through
-    ``TaskReader.show`` and repeatedly scanning all active cards.
-    """
+    """Read both active and closed Pipeline records before deciding a restore is empty."""
     board_id, _, _ = reader._board()
     raw_cards = all_project_cards(reader.client, board_id)
     result: dict[str, dict[str, Any]] = {}
@@ -236,11 +223,7 @@ def _import_sprints(
     data_dir: Path, client: KanboardClient, sprints: list[dict[str, Any]],
     existing: dict[str, dict[str, Any]], prefix: str,
 ) -> None:
-    """Recreate the sprint entities and prove they match the export.
-
-    Cards come first: a restored sprint names its current card, and the entity is
-    only worth as much as the cards it points at.
-    """
+    """Recreate the sprint entities and prove they match the export."""
     if not sprints:
         # An installation that never opened a sprint has no board to create and
         # nothing to compare; creating an empty one would be recovery inventing state.
@@ -303,14 +286,9 @@ SPRINT_PARITY_FIELDS = (
 def _check_restored_observers(sprints: list[dict[str, Any]], instance: Path | None) -> None:
     """Validate the whole exported observer set before the first backend write of any set.
 
-    Every row carries a readable value.  A row without one is either a corrupt export or one taken
-    before the observer migration, and restoring it either way would publish a row the reader this
-    installation comes back with immediately calls corrupt.  The two are not told apart here: the
-    archive carries nothing that dates it against a migration this product no longer runs, and both
-    are repaired the same way, by declaring the value in the export before restoring again.
-
-    Nothing is written here: it is the preflight, and its whole job is to decide the entire set
-    before the first backend write of any of it.
+    A row without a readable value is either a corrupt export or one taken before the observer
+    migration, and restoring it either way would publish a row the reader this installation comes
+    back with immediately calls corrupt. Nothing is written here: it is the preflight.
     """
     profiles: set[str] = set()
     if any(str(sprint.get("status") or "") == "open" for sprint in sprints):
@@ -359,15 +337,10 @@ def _check_restored_observers(sprints: list[dict[str, Any]], instance: Path | No
 def _check_restored_admission(sprints: list[dict[str, Any]], instance: Path | None) -> None:
     """Refuse an export whose open sprints this installation would never have admitted.
 
-    `restore_create` is deliberately not an admission decision: it reproduces rows one
-    after another, and an export of finished work is not a request to open anything.  The
-    set as a whole is a different question, and it is asked once, here, before the first
-    backend write of any set: an archive that carries two open sprints sharing a product,
-    a reservation, a repository tree or an observer head would otherwise be a way to
-    arrive at exactly the pair admission exists to refuse.
-
-    The limit is the target installation's, not the source's: recovery lands on this
-    host, and this host's setting says how many open sprints it can carry.
+    `restore_create` is deliberately not an admission decision, so the set as a whole is asked once,
+    here, before the first backend write: an archive carrying two open sprints that share a product,
+    a reservation, a repository tree or an observer head would otherwise be a way to arrive at
+    exactly the pair admission exists to refuse. The limit is the target installation's.
     """
     from secretary.sprints import instance_open_sprint_limit, open_sprint_admission_error
 
@@ -395,12 +368,7 @@ _ABSENT = object()
 
 
 def _sprint_core(sprint: dict[str, Any]) -> dict[str, Any]:
-    """The exported sprint contract, without what a rewrite cannot reproduce.
-
-    Kanboard stamps its own creation time on a restored record, so records compare
-    by body; the source timestamps of the entity travel in its audit metadata and
-    do compare exactly.
-    """
+    """The exported sprint contract, without what a rewrite cannot reproduce."""
     core: dict[str, Any] = {
         field: sprint[field] if field in sprint else _ABSENT for field in SPRINT_PARITY_FIELDS
     }
@@ -456,14 +424,7 @@ def rebuild_memory_index(
     script: Path | None = None, model: str | None = None, dim: int | None = None,
     threads: int | None = None, runner=None,
 ) -> int:
-    """Replace the derived index from restored canon.
-
-    Canon is `state/memory/facts` in the private repo (docs/RECOVERY.md,
-    "Layout"), so recovery rebuilds the index straight off the checkpoint the
-    remote carries. The in-package implementation is the default; ``python`` and
-    ``script`` keep the old memory-mcp argv contract available during the
-    side-by-side window.
-    """
+    """Replace the derived index from restored canon."""
     data_dir = data_dir.expanduser().resolve()
     memory_dir = data_dir / "memory"
     facts_dir = _memory_canon_dir(data_dir, instance_dir)
@@ -603,11 +564,7 @@ def _normalized_cards(
 
 
 def _normalized_sprints(data_dir: Path) -> list[dict[str, Any]]:
-    """Read the exported sprint entities.
-
-    A checkpoint written before sprints joined the export has no file at all; that
-    reads as an installation without sprint entities, not as a broken export.
-    """
+    """Read the exported sprint entities."""
     from secretary.sprints import SPRINT_REFERENCE_PREFIX
 
     path = data_dir / "board" / "sprints.json"
@@ -665,13 +622,11 @@ def _normalized_sprints(data_dir: Path) -> list[dict[str, Any]]:
 def _restore_request_prefix(data_dir: Path, audit: TaskAudit, live_refs: set[str]) -> str:
     """Return the request-id namespace this recovery writes its audit under.
 
-    Restore events are durable: the checkpoint of a recovered instance carries them, so a
-    second recovery from that checkpoint meets its own request ids again. Reusing them
-    would short-circuit every write as already committed against a backend that holds
-    nothing, and recovery would fail reading an entity it never created. A namespace whose
-    committed events name entities the target does not have was written against an earlier
-    backend, so this recovery takes a fresh one; `restore-state.json` keeps it so the
-    retries of one recovery stay on the same namespace.
+    Restore events are durable, so a second recovery from a recovered checkpoint meets its own
+    request ids again; reusing them would short-circuit every write as already committed against a
+    backend that holds nothing. A namespace whose committed events name entities the target does not
+    have was written against an earlier backend, so this recovery takes a fresh one and
+    `restore-state.json` keeps it.
     """
     state = restore_state(data_dir)
     token = state.get("restore_namespace")
@@ -715,11 +670,7 @@ def _create_restored_card(writer: TaskWriter, card: dict[str, Any], prefix: str)
 
 
 def _create_restored_non_task(writer: TaskWriter, card: dict[str, Any]) -> None:
-    """Recreate a Product or an Issue in its own column, without classifying it.
-
-    The following restore metadata write preserves the export exactly: such a record never
-    passes through ``TaskWriter.create``, which stamps a task type it does not have.
-    """
+    """Recreate a Product or an Issue in its own column, without classifying it."""
     board_id, columns, swimlanes = writer.reader._board()
     column = str(card.get("column") or "")
     column_id = next((identifier for identifier, title in columns.items() if title == column), None)
@@ -771,15 +722,10 @@ def _restore_position(card: dict[str, Any]) -> int | None:
 def _restored_order_mismatch(cards: list[dict[str, Any]], actual: dict[str, dict[str, Any]]) -> bool:
     """Сверяет порядок открытых карточек внутри (колонка, свимлейн).
 
-    Абсолютные номера позиций сравнивать нельзя. Kanboard держит позиции плотными
-    среди активных задач, а закрытая задача сохраняет устаревшее значение и перестаёт
-    занимать слот, поэтому экспорт живой доски содержит и дыры, и повторы: замерено на
-    восстановлении 745 карточек — экспорт [.. 13, 15, 16 ..] с парами 126,126 и 141,141
-    против плотных 1..142 на восстановленной доске. Две активные задачи на одной
-    позиции воспроизвести невозможно, так что гейт по номерам не проходим в принципе.
-
-    Восстановимо и осмысленно здесь относительное расположение. У закрытых карточек
-    позиции нет вовсе: их Kanboard в потоке колонки не держит.
+    Абсолютные номера позиций сравнивать нельзя: Kanboard держит позиции плотными среди активных
+    задач, а закрытая задача сохраняет устаревшее значение и перестаёт занимать слот, поэтому
+    экспорт живой доски содержит и дыры, и повторы. Восстановимо здесь только относительное
+    расположение; у закрытых карточек позиции нет вовсе.
     """
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for card in cards:

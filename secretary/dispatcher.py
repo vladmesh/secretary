@@ -402,17 +402,9 @@ class InstanceCatalog:
     def _resolved_head(self, head: str) -> str:
         """The profile in this snapshot that serves a head id somebody else wrote down.
 
-        A card's `head_override`, a dispatcher record and this catalog's own last-resort ids all
-        outlive the registry generation that defined them. An ordinary id the snapshot still
-        defines is used as written; a declared old Codex id resolves to the equivalent interactive
-        Codex profile the snapshot does define, so already-recorded overrides are not orphaned by
-        an installation republishing its Codex heads. Every other unknown id is returned unchanged
-        and fails at the profile lookup that follows.
-
-        A Codex id whose snapshot holds no interactive Codex profile for it — including one this
-        snapshot published as another family's profile — is refused here, as the same unavailable
-        head the profile lookup below refuses. Launching what that name happens to point at now
-        would move a claimed attempt onto another model family.
+        A declared old Codex id resolves to the equivalent interactive Codex profile; a Codex id with
+        no interactive Codex profile at all is refused rather than resolved, because launching what
+        that name points at now would move a claimed attempt onto another model family.
         """
         profiles = self._heads.get("profiles")
         try:
@@ -421,12 +413,7 @@ class InstanceCatalog:
             raise HostError(f"head {head!r} is unavailable: {exc}") from None
 
     def head_fallback(self, head: str) -> list[str]:
-        """The ordered fallback chain `head` names in the registry, empty when it names none.
-
-        The chain is the canon's own statement of which other head is an acceptable stand-in for
-        this one; the dispatcher walks it at claim and never invents an entry. A profile that
-        writes no chain is the canon saying "this head or nothing", which is a claim-skip.
-        """
+        """The ordered fallback chain `head` names in the registry, empty when it names none."""
         profile = self._head_profile(head)
         chain = profile.get("fallback")
         if not isinstance(chain, list):
@@ -447,13 +434,9 @@ class InstanceCatalog:
     ) -> str:
         """The head the card was claimed with, for a card the dispatcher is picking back up.
 
-        The head is decided once, at claim, and the claim writes it onto the card. Re-reading the
-        override or the role default here would hand the rest of a running attempt to whatever the
-        board says now, so a role default edited mid-attempt would silently move the reviewer. If
-        that head has since left `heads.yaml` there is nothing to resume it on: the attempt stops
-        and a human decides, because substituting today's role default would launch a head the
-        claim never picked and file it under the running attempt. A card claimed before the claim
-        recorded a head has no decision to keep, so it takes the current one.
+        The head is decided once, at claim. Re-reading the override or the role default here would
+        hand the rest of a running attempt to whatever the board says now, so a head that has since
+        left `heads.yaml` stops the attempt instead of substituting today's default.
         """
         claimed = (task.get("routing") or {}).get(key)
         if not claimed:
@@ -471,17 +454,6 @@ class InstanceCatalog:
     ) -> HeadRun:
         """The launch record for one head of `role`: the profile id plus the configuration it is
         launched with, read from the same snapshot the launcher renders its command from.
-
-        `head` is the profile the bring-up handed to the launcher. There is still no substitution
-        between the routing decision and the launch — the head is decided once, at claim — but that
-        decision may itself have walked the canon's fallback chain, because the preferred head's
-        resource was red or spent (secretary-1165). `failover` is the claim saying it did: the
-        dispatcher record kept the preference it left behind, and that record is the only thing
-        that knows. It is not re-derived from the chains here, because the shipped chains are
-        cyclic and reachability would make nearly every head reachable from nearly every other,
-        labelling an ordinary record-pinned head `fallback` and losing exactly the distinction the
-        journal promises to keep. Passing the head explicitly keeps the record describing the
-        process that runs even when the card's metadata is edited afterwards.
         """
         routing = task.get("routing") or {}
         if role == "worker":
@@ -521,25 +493,13 @@ class InstanceCatalog:
         )
 
     def observer_head(self) -> str:
-        """The head profile a sprint observer is launched with.
-
-        Its own `role_defaults` key, never the worker's: an observer is a different role with a
-        different job, and repointing the worker default must not move it. The fallback is a named
-        profile rather than a silent reuse of another role's default, and it is validated here, so
-        a registry that has neither the key nor the fallback profile fails loudly at bring-up.
-        """
+        """The head profile a sprint observer is launched with."""
         head = str(self._heads.get("role_defaults", {}).get("observer") or OBSERVER_HEAD_FALLBACK)
         self._head_profile(head)
         return head
 
     def observer_profile(self, head: str) -> dict[str, Any]:
-        """The registry entry for a head a sprint declares, or `HostError`.
-
-        The declaration is durable and the registry is not: a sprint can name a profile that was
-        removed from `heads.yaml` after it was declared. That is the sprint being unrunnable, not
-        an invitation to substitute the role default, so the resolution is one lookup with no
-        fallback and the fence answers for the failure.
-        """
+        """The registry entry for a head a sprint declares, or `HostError`."""
         return self._head_profile(head)
 
     def observer_run(self, head: str, *, workspace: str = "") -> HeadRun:
@@ -575,15 +535,7 @@ class InstanceCatalog:
         launch_prompt: str | None = None,
         identity: dict[str, str] | None = None,
     ) -> HeadCommand:
-        """The command this workspace's pane will run, with its workspace made fit to run it in.
-
-        Every head this dispatcher brings up is interactive, whatever its adapter: the command
-        carries no prompt and the caller delivers one into the live pane. So `prompt_file` and
-        `launch_prompt` are the caller's own resolved prompt inputs, named here because the caller
-        resolves them the same way for every adapter, and deliberately not passed to the renderer —
-        asking it for the prompt-carrying shape is what would put a worker's task on a command line
-        Orca stores.
-        """
+        """The command this workspace's pane will run, with its workspace made fit to run it in."""
         profile = self._head_profile(head)
         try:
             self.prepare_head_workspace(head, workspace, role=role)
@@ -600,18 +552,10 @@ class InstanceCatalog:
     def prepare_head_workspace(self, head: str, workspace: str, *, role: str = "") -> None:
         """Pre-answer the first-run questions a head's CLI would otherwise put to an operator.
 
-        Every codex head runs as a TUI, so every codex head is asked about directory trust before
-        it will take a prompt — worker, reviewer and observer alike. The role made no difference to
-        that question and this branch no longer asks about it: what used to make workers and
-        reviewers look exempt is that the repositories they are cut from happen to be trusted on a
-        host that has been running heads for a while, which is a property of that host, not of the
-        role. A clean host has no such entry, and a head launched into a workspace whose root codex
-        has never seen sits on the dialog, never answers Orca's readiness probe and never receives
-        its prompt.
-
-        This runs on the bring-up path before the pane is created, which is the ordering
-        `triggered_agents.runtime.codex_preflight` states for every interactive codex head and the
-        service launcher keeps too: trust, then pane, then readiness, then delivery.
+        Every codex head runs as a TUI and is asked about directory trust before it will take a prompt,
+        whatever its role; a head launched into an untrusted root sits on the dialog, never answers
+        Orca's readiness probe and never receives its prompt. This runs before the pane is created:
+        trust, then pane, then readiness, then delivery.
         """
         profile = self._head_profile(head)
         adapter = profile.get("adapter") if isinstance(profile, dict) else ""
@@ -653,13 +597,6 @@ class InstanceCatalog:
 @dataclass(frozen=True)
 class DispatcherHeadTransport:
     """How this dispatcher delivers to a head and closes its pane, against whatever host it is on.
-
-    The one implementation of `head_ops.HeadTransport` the production paths use. It carries no
-    command runner and holds no argument vector: every session-manager call it makes goes to the
-    `SessionHost` the operation passes in, which is what lets the same object that runs in
-    production run in the contract suite against a fake. What it does own is the product's two
-    pieces of knowledge the operations must not invent — the confirmation criterion for a delivered
-    prompt, and what a refused close means over a pid heartbeat.
     """
 
     runtime: "CommandHostRuntime"
@@ -745,11 +682,7 @@ class CommandHostRuntime:
         stop: Callable[[head_ops.HeadRun, str], None],
         block: Callable[[dict[str, Any]], None],
     ) -> None:
-        """Install the launch owner's exact-run provider-event ingress.
-
-        This is deliberately an explicit hand-off, not a workspace scanner that looks up an
-        arbitrary record later.  The launch intent has already persisted ``run`` before this call.
-        """
+        """Install the launch owner's exact-run provider-event ingress."""
         source = run.fanout_policy.get("provider_source")
         if run.spec.adapter != "codex" or not isinstance(source, dict):
             return
@@ -776,10 +709,6 @@ class CommandHostRuntime:
     @contextlib.contextmanager
     def committing(self, flush: Callable[[], None]):
         """Lend this runtime a way to flush the durable state, for as long as the caller holds it.
-
-        Restores whatever was there before rather than clearing, so a nested span — a pause
-        performed inside a tick — hands the state back to the span that owns it instead of leaving
-        the runtime unable to commit.
         """
         previous = self.commit_state
         self.commit_state = flush
@@ -798,14 +727,7 @@ class CommandHostRuntime:
         pid_file: str,
         run_id: str,
     ) -> head_ops.HeadRun:
-        """Create and attest the durable run that exists before this Codex pane does.
-
-        Callers persist the returned value in their launch intent before they call a host method.
-        Re-running the method immediately before ``spawn`` is intentional: it catches a binary
-        replacement in the gap, while the first copy is the crash-safe pre-pane record recovery
-        reads.  Provider-schema evidence remains telemetry rather than a pane admission rule;
-        workspace trust is the only hard pre-pane requirement.
-        """
+        """Create and attest the durable run that exists before this Codex pane does."""
         profile = self.catalog.head_profile(head)
         spec = self._head_spec(head, str(profile.get("adapter") or "unknown"))
         run = head_ops.HeadRun(
@@ -823,21 +745,7 @@ class CommandHostRuntime:
         return preflight_codex_launch(profile, workspace, run)
 
     def _prompt_adapter(self, run: Any, head: str) -> str:
-        """The provider whose framing a prompt for this pane is delivered in.
-
-        The run snapshot wins: it is what the head was actually started as, and it is immutable, so
-        a record written before the registry moved keeps being addressed the way its session
-        expects. A record that predates the snapshot has only the head's name, so the current
-        profile is resolved into a `HeadSpec`, which is the type that cannot exist without an
-        adapter.
-
-        Neither of those is allowed to fall through to a guess. This used to answer `"codex"` when
-        the head was unknown or its profile carried no adapter, on the reasoning that Codex framing
-        was the historical shape; what that actually does is send Codex framing at whatever is
-        running in the pane, and the delivery it was meant to protect is exactly the one it then
-        loses. An unresolvable head is a fact about the installation, so it stops the delivery by
-        name and lets the caller report it.
-        """
+        """The provider whose framing a prompt for this pane is delivered in."""
         if isinstance(run, dict):
             adapter = str(run.get("adapter") or "").lower()
             if adapter:
@@ -961,11 +869,9 @@ class CommandHostRuntime:
     def _observer_repo(self) -> Path:
         """The repo observer workspaces are cut from: standalone, empty, without a remote.
 
-        Orca only gives terminals to worktrees it knows, and it only registers git repositories, so
-        a directory made with `mkdir` gets no terminal at all. What the observer needs is that
-        registration, not a checkout of the project it watches: it reads the board and the sprint
-        entity and writes no code, so a workspace it could commit the project from would be wrong
-        as well as unnecessary. Hence a repo of its own, created once and shared by every sprint.
+        Orca only gives terminals to worktrees of repositories it has registered, so a directory made
+        with `mkdir` gets no terminal at all. The observer needs that registration, not a checkout of
+        the project it watches, hence a repo of its own created once and shared by every sprint.
         """
         repo = observer_root_repo(self.data_dir)
         if not (repo / ".git").is_dir():
@@ -995,8 +901,7 @@ class CommandHostRuntime:
         """Whether Orca knows this path as a worktree of its own.
 
         Only `selector_not_found` reads as "not registered". Any other failure is Orca declining to
-        answer, and an unanswered question must not pass for a free path: the caller clears an
-        unregistered directory out of the way, and the stop path removes what it finds.
+        answer, and an unanswered question must not pass for a free path.
         """
         try:
             self._run_json(
@@ -1010,12 +915,6 @@ class CommandHostRuntime:
 
     def _create_observer_workspace(self, reference: str) -> Path:
         """The observer's workspace, registered with Orca and at the path the record already names.
-
-        A workspace Orca already knows is reused: a relaunch after a dead pid keeps the sprint's
-        directory. An unregistered directory at that path is left over from a bring-up that never
-        reached Orca and holds nothing but the prompt file this launch rewrites, so it is cleared
-        rather than worked around: `worktree create` would otherwise sidestep it and put the
-        workspace at a path no record points at.
         """
         workspace = Path(self.observer_workspace(reference))
         if self._observer_workspace_registered(str(workspace)):
@@ -1044,12 +943,7 @@ class CommandHostRuntime:
         return workspace
 
     def observer_pid_file(self, reference: str) -> str:
-        """Where this sprint's observer heartbeat writes its pid.
-
-        Path arithmetic over the reference, like `observer_workspace`: the lifecycle records both
-        before it calls `prepare_observer`, so a tick that dies mid-launch still leaves behind
-        enough to read the head's liveness and find its terminal.
-        """
+        """Where this sprint's observer heartbeat writes its pid."""
         return _observer_pid_file(reference)
 
     def prepare_observer(
@@ -1061,20 +955,7 @@ class CommandHostRuntime:
         identity: dict[str, str] | None = None,
         heartbeat_run_id: str = "",
     ) -> dict[str, Any]:
-        """Bring one observer head up on its own workspace and terminal.
-
-        Same rendering and role environment as any other dispatcher-launched head: the command
-        comes from the catalog launcher, the process runs through `role_env exec --role observer`,
-        and the pid heartbeat wrapper writes the head's own pid where the tick reads it back.
-
-        `identity` is the sprint binding of the record this bring-up is for, rendered into the
-        head's command line. It comes from the lifecycle rather than from the sprint document
-        passed here, because the record is what the launch is about; a head that reaches the board
-        without it can prove nothing about which sprint it observes and is refused there.
-
-        The workspace is registered with Orca first, the way the worker path registers its own:
-        `terminal create` takes a worktree selector, and a plain directory is not one.
-        """
+        """Bring one observer head up on its own workspace and terminal."""
         reference = str(sprint.get("ref") or "")
         if self.mode == "noop":
             workspace = Path(self.observer_workspace(reference))
@@ -1216,21 +1097,7 @@ class CommandHostRuntime:
         }
 
     def stop_observer(self, record: Any) -> None:
-        """End one observer head and give back what its bring-up took.
-
-        The stop goes through the workspace, not pane by pane. That workspace belongs to one sprint
-        and nothing else runs there, so its terminals are that head: the pane the record names, the
-        pane a head adopted from a launch intent has lost the handle of, and the shell Orca opens
-        beside a worktree it has just created. The worktree registration goes with them, so a
-        stopped sprint leaves Orca neither a terminal of its observer nor a workspace for it.
-
-        A workspace Orca does not know is a head that is already gone, which is what makes the
-        retry of a half-finished stop terminate. Anything else Orca refuses — an answer it will not
-        give, a stop it will not perform, a worktree it will not remove — is a failed stop: it
-        raises, and the lifecycle keeps the record as `stop-pending` and comes back to it. Dropping
-        the record instead would leave a live head with nothing pointing at it, and the next tick
-        would put a second head on the same sprint.
-        """
+        """End one observer head and give back what its bring-up took."""
         if self.mode == "noop":
             return
         observer_run = getattr(record, "head_run", {})
@@ -1281,18 +1148,7 @@ class CommandHostRuntime:
         ])
 
     def observer_status(self, record: Any) -> dict[str, Any]:
-        """Read the observer pane's output clock and whether it is ready for a prompt.
-
-        Readiness is Orca's `tui-idle`, the same signal the delivery path waits on before it sends
-        to any head. Nothing here reads the screen, so the answer does not depend on which provider
-        the observer profile happens to name.
-
-        This is advisory work liveness, not process liveness. The lifecycle still owns the pid
-        heartbeat. A pane nothing can be sent to, though, is not a busy observer: a record whose
-        handle died with the tick that launched it, a terminal Orca no longer lists and a
-        disconnected one all refuse here, so the caller's bounded failure path replaces that head
-        instead of waiting for a readiness that can never arrive.
-        """
+        """Read the observer pane's output clock and whether it is ready for a prompt."""
         if self.mode == "noop":
             return {}
         if not record.workspace or not (record.handle or record.leaf):
@@ -1323,12 +1179,7 @@ class CommandHostRuntime:
         return status
 
     def observer_provider_progress(self, record: Any) -> dict[str, str]:
-        """Read provider progress only from this observer's persisted HeadRun.
-
-        This deliberately has no workspace discovery fallback.  A Codex source that was not bound
-        by the run which opened the pane stays typed unavailable, so an upgrade cannot attribute
-        another session's journal to a retained observer.
-        """
+        """Read provider progress only from this observer's persisted HeadRun."""
         stored = getattr(record, "head_run", {})
         expected_workspace = str(getattr(record, "workspace", "") or "")
         expected_sprint = str(getattr(record, "sprint", "") or "")
@@ -1349,13 +1200,7 @@ class CommandHostRuntime:
         return _provider_progress_for_run(run)
 
     def nudge_observer(self, record: Any) -> str:
-        """Give an idle observer one event-driven turn without replacing its head.
-
-        The prompt goes through the same delivery path as a worker or reviewer continuation: wait
-        for the pane, send, re-enter a swallowed prompt, and refuse upwards when the retries run
-        out. This reports terminal acceptance only. The observer's later durable resume, consumed
-        by the next lifecycle reconciliation, is the sole acknowledgement of the batch.
-        """
+        """Give an idle observer one event-driven turn without replacing its head."""
         if self.mode == "noop":
             return DELIVERY_ACCEPTED
         workspace = str(getattr(record, "workspace", "") or "")
@@ -1422,12 +1267,8 @@ class CommandHostRuntime:
         """Stop every pane of an observer workspace.
 
         One verb for the whole workspace rather than a close per handle: `close_pane` answers
-        `tab_not_found` for a pane the runtime never gave a UI tab, and that is every pane a
-        dispatcher-launched head gets on a headless serve, so a per-handle close reports a stop
-        that worked as a stop that failed. This is the same verb the worker teardown reaches for,
-        and it is the session host's rather than this runtime's: a stop of a whole worktree is a
-        pane-lifecycle command like any other, and the only difference from `stop_head` is what it
-        addresses — a workspace nothing can name a head in, not a head.
+        `tab_not_found` for a pane the runtime never gave a UI tab, so a per-handle close reports a
+        stop that worked as a stop that failed.
         """
         if run is not None:
             self._guard_head_run(run, role, pid_file=pid_file, task=task, leaf=leaf)
@@ -1473,12 +1314,7 @@ class CommandHostRuntime:
     def provider_progress(
         self, task: dict[str, Any], record: DispatcherRecord, kind: str
     ) -> dict[str, str]:
-        """Read an opaque provider cursor for this exact role's persisted HeadRun.
-
-        This is shared liveness evidence for worker and reviewer panes.  It has no terminal
-        mutation capability, and an absent source is deliberately `unavailable`, never a fresh
-        turn.  The caller owns comparison against its durable cursor.
-        """
+        """Read an opaque provider cursor for this exact role's persisted HeadRun."""
         run = record.review_head_run if kind == "review" else record.worker_head_run
         expected_workspace = record.workspace
         try:
@@ -1517,9 +1353,8 @@ class CommandHostRuntime:
         """Advertise that this host has no safe provider recovery primitive.
 
         An operator's raw interrupt can terminate a Codex provider session and a generic key chord
-        cannot prove which composer it affected.  Until a provider/terminal API supplies an exact
-        HeadRun-bound recovery receipt, the only permitted answer is this typed absence.  The
-        dispatcher then takes its existing confirmed-stop fence before replacement.
+        cannot prove which composer it affected, so the only permitted answer is this typed absence.
+        The dispatcher then takes its confirmed-stop fence before replacement.
         """
         return {
             "state": "unavailable",
@@ -1530,13 +1365,11 @@ class CommandHostRuntime:
         """Bring the reviewer up as a second pane inside the worker's own worktree.
 
         The pane is split off a live pane there rather than created as a new terminal: a plain
-        `terminal create` on a headless serve lands as a background surface a client that already
-        has the worktree open never materialises, so the operator would have no reviewer to watch.
-        Once the reviewer has its own pane the worker head is shut down and the commit it left is
-        pinned, so the reviewer judges a checkout nothing else is still editing.
-
-        What that pane is given is a nudge, not the review: the task itself is a document written
-        outside the checkout, and only its path travels through the keyboard."""
+        `terminal create` on a headless serve lands as a background surface no client materialises.
+        Once the reviewer has its pane the worker is shut down and its commit pinned, so the reviewer
+        judges a checkout nothing else is still editing. What that pane is given is a nudge at a
+        document written outside the checkout, not the review itself.
+        """
         if not record.workspace:
             raise HostError("review workspace is unavailable")
         workspace = Path(record.workspace)
@@ -1606,14 +1439,7 @@ class CommandHostRuntime:
         record: DispatcherRecord,
         intent: dict[str, Any],
     ) -> dict[str, Any]:
-        """Retry the document nudge for the exact reviewer a busy launch intent retained.
-
-        This is deliberately not `start_review`: splitting a second pane would replace a live
-        reviewer, while calling the normal adoption path first would freeze the worker and
-        attribute a reviewer which has not received its document.  The intent's HeadRun and pane
-        binding are the only identities used here, and a successful return is handed back for the
-        caller to commit at the ordinary launch-confirmation boundary.
-        """
+        """Retry the document nudge for the exact reviewer a busy launch intent retained."""
         if not record.workspace:
             raise HostError("review workspace is unavailable for a retained launch")
         stored_run = intent.get("head_run")
@@ -1677,10 +1503,7 @@ class CommandHostRuntime:
         """End the reviewer's lifecycle alone. `stop` would take the whole worktree down with it,
         which on a red verdict means killing the checkout's terminals the worker is about to get
         back. Closing the reviewer's own split leaf removes that pane and leaves the rest alone.
-
-        A reviewer adopted from a launch intent is stopped by its pid heartbeat, for the same
-        reason the worker freeze is: without it the red-verdict bounce, the reviewer respawn and
-        the pipeline freeze would all leave a live reviewer behind and start a head beside it."""
+        """
         if self.mode == "noop" or not (
             record.review_handle or record.review_leaf or record.review_pid_file
         ):
@@ -1781,11 +1604,9 @@ class CommandHostRuntime:
     def restore_workspace(self, task: dict[str, Any], worker: str) -> str:
         """Where this card's worker checkout lives, new or already cut.
 
-        The namespace under the workspaces root is Orca's, not the Secretary's: Orca puts a worktree
-        at <root>/<repo registration name>/<worktree name>, and that registration name is the
-        binding's `orca_binding`. Reconstructing it from the Secretary project id was the defect:
-        `codegen-orchestrator` and `codegen_orchestrator` are the same project spelled by two
-        different authorities, and the id is not the one that decides where the checkout goes.
+        The namespace under the workspaces root is Orca's: <root>/<repo registration name>/<worktree
+        name>, where the registration name is the binding's `orca_binding` and not the Secretary
+        project id — the two spellings differ and the id is not what decides where the checkout goes.
         """
         if self.mode == "noop":
             return str(self.data_dir / "dispatcher" / "workspaces" / worker)
@@ -1793,12 +1614,7 @@ class CommandHostRuntime:
         return str(root / self._orca_binding_name(str(task.get("project") or "")) / worker)
 
     def _orca_binding_name(self, project: str) -> str:
-        """The Orca repo registration name this project's workspaces are namespaced by.
-
-        Configured `orca_binding` first: an enabled binding is required to carry it, and it is what
-        the host plan registers the repo under, so it answers without a live call. A binding without
-        one is resolved from Orca itself by repo path.
-        """
+        """The Orca repo registration name this project's workspaces are namespaced by."""
         binding = self.catalog.binding(project)
         name = binding.get("orca_binding")
         if isinstance(name, str) and name:
@@ -1806,12 +1622,7 @@ class CommandHostRuntime:
         return str(self._orca_repo(project).get("displayName") or "")
 
     def _orca_repo(self, project: str) -> dict[str, Any]:
-        """This project's Orca repo registration, resolved from the configured repo path.
-
-        The repo path is the one fact both authorities agree on, so it is the join key. The `id` it
-        answers with is what a returned worktree is checked against; no name or path is compared as
-        a string.
-        """
+        """This project's Orca repo registration, resolved from the configured repo path."""
         repo = Path(str(self.catalog.binding(project)["repo"])).expanduser()
         listing = self._run_json(["orca", "repo", "list", "--json"])
         repos = listing.get("repos") if isinstance(listing, dict) else None
@@ -1852,13 +1663,7 @@ class CommandHostRuntime:
         base: str,
         repo: Path,
     ) -> None:
-        """Publish an instance-repo card without racing checkpoint commits.
-
-        Checkpoints are normal local commits in the instance repo. If one was
-        already pushed, fold only the local checkout's known checkpoint history
-        into the reviewed branch. A remote tip that is neither in the reviewed
-        branch nor in the local checkpoint history is true foreign divergence.
-        """
+        """Publish an instance-repo card without racing checkpoint commits."""
         with state_repo.state_repo_lock(repo):
             self._run(["git", "-C", record.workspace, "fetch", "origin", base], "merge preflight fetch")
             branch_head = self._run(
@@ -1920,19 +1725,13 @@ class CommandHostRuntime:
         return True
 
     def _merge_github_pr(self, task: dict[str, Any], record: DispatcherRecord, branch: str, base: str) -> None:
-        """Land a github-CI project through its PR. gh honours branch protection and refuses to
-        merge while required checks are unsatisfied, so a non-green CI never lands even though the
-        dispatcher has already re-run the gate on this same tick. Then fast-forward the project's
-        own checkout (from the worker workspace's origin) so the next worktree bases on the merged
-        tree, matching the local-merge path.
+        """Land a github-CI project through its PR, then fast-forward the project's own checkout so the
+        next worktree bases on the merged tree.
 
-        The checkout tracks the project's default branch, not the card's base: a stacked card bases
-        on another `pipeline/<ref>` branch, and `_create_workspace` fetches that base itself. So the
-        refresh follows the default branch even when the PR landed on a stacked base, where
-        `origin/<base>` is a sibling of the checkout's branch and any unrelated card that merged
-        meanwhile makes it unmergeable. The card is already merged at this point, so the refresh
-        failing there is not the card's failure either; it stays best-effort and the deliverable
-        does not get reported as a merge that did not happen."""
+        gh honours branch protection and refuses to merge while required checks are unsatisfied. The
+        checkout tracks the project's default branch, not the card's base, and the refresh stays
+        best-effort: the card is already merged by then, so a failed refresh is not the card's failure.
+        """
         self._run(["gh", "pr", "merge", branch, "--merge"], "merge pr", cwd=Path(record.workspace))
         repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
         default_branch = self.catalog.default_branch(task["project"], None)
@@ -1964,15 +1763,9 @@ class CommandHostRuntime:
     def stop_workspace(self, record: DispatcherRecord) -> None:
         """Stop every head of this workspace and let a refusal reach the caller.
 
-        The confirmed twin of `stop`. A path that opens a replacement head afterwards cannot use
-        the suppressing one: a refused workspace stop is not evidence the head is gone, and the
-        replacement would then be the second process on the same checkout.
-
-        `selector_not_found` is the one exception: as in `_observer_workspace_registered`, it means
-        Orca has no worktree left at this path at all, which a stop cannot be refused on since
-        there is nothing there to refuse stopping. A workspace already removed out from under the
-        dispatcher (a manual cleanup, a PO taking a card back out of the cycle) must not read as a
-        stop that failed.
+        The confirmed twin of `stop`: a refused workspace stop is not evidence the head is gone, so a
+        path that opens a replacement afterwards must use this one. `selector_not_found` is the single
+        exception — Orca has no worktree there at all, which is not a refused stop.
         """
         if self.mode == "noop" or not record.workspace:
             return
@@ -2000,19 +1793,7 @@ class CommandHostRuntime:
     def stop_head(
         self, record: DispatcherRecord, kind: str, initiator: str = STOPPED_BY_DISPATCHER
     ) -> None:
-        """Stop one role's head through the head operation, recording who ended it.
-
-        Both roles live on the same three operations now (secretary-1414): whichever head this is,
-        the run enters `finishing` with its initiator and is written down before the pane is
-        touched, the saved leaf is resolved to the inventory's current handle so a stop cannot
-        close a pane Orca has since aliased away, and the heartbeat is what confirms the head is
-        actually gone.
-
-        The pane close stays best-effort because Orca answers `tab_not_found` for a pane it never
-        gave a UI tab, which is every pane a dispatcher-launched head gets on a headless serve. The
-        heartbeat is what actually decides: a head still answering it after the close is a stop
-        that did not happen, and it raises rather than letting a replacement start.
-        """
+        """Stop one role's head through the head operation, recording who ended it."""
         if self.mode == "noop":
             return
         if kind == "review":
@@ -2023,18 +1804,7 @@ class CommandHostRuntime:
     def stop_review_head(
         self, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER
     ) -> None:
-        """End this card's reviewer through the head operation, recording who ended it.
-
-        The worker's twin (`stop_worker_head`), and deliberately its twin rather than a variant:
-        the reviewer is the head this dispatcher stops from the most places — a red verdict, a
-        green one parking the round, a stalled reviewer's respawn, a pipeline freeze, launch
-        recovery, reconciliation — and every one of them used to leave the same record behind, a
-        reviewer that was simply gone. Each of those callers now names itself.
-
-        What stays exactly as it was is the split-leaf semantics `stop_review` exists for: this
-        closes the reviewer's own pane inside the worker's worktree and nothing else. The worker's
-        checkout, and the terminals a red verdict is about to hand back to it, are untouched.
-        """
+        """End this card's reviewer through the head operation, recording who ended it."""
         run = self.review_lifecycle_run(record)
         try:
             outcome = head_ops.stop(
@@ -2056,34 +1826,13 @@ class CommandHostRuntime:
 
     def _commit_review_run(self, record: DispatcherRecord, run: head_ops.HeadRun) -> None:
         """Write this reviewer's run onto the record, flushing it when the caller lent us the state.
-
-        Same contract as `_commit_worker_run`: the record is the run's durable home, this runtime
-        does not own the file that record lives in, and a caller that installed `commit_state` gets
-        the transition on disk immediately rather than at the end of a tick that may not get there.
         """
         record.review_head_run = run.to_json()
         if self.commit_state is not None:
             self.commit_state()
 
     def review_lifecycle_run(self, record: DispatcherRecord) -> head_ops.HeadRun:
-        """This card's reviewer as the head operations see it.
-
-        The worker's rule, applied to the other head: the stored run decides which head a stop is
-        continuing and reconciliation may only readdress it, so the handle, leaf and heartbeat the
-        record currently carries are bound onto it while its identity, lifecycle and initiator are
-        left alone. A run in `finishing` is continued, initiator and all.
-
-        `settled` is dropped for the same reason it is on the worker path, and only `settled`: a
-        run whose head was confirmed gone cannot be what the record's pane or heartbeat still names,
-        and stopping that pane *as* that run would skip a live reviewer on the strength of an older
-        confirmation. `finishing` is neither running nor finished with, and is kept.
-
-        A reviewer recorded before this field existed has no stored run, so one is reconstructed —
-        same head, same pane, same heartbeat, fresh identity. A reviewer that is running has to be
-        stoppable whichever dispatcher started it. An adopted reviewer is not such a case: its
-        launch intent carries the run its bring-up started, and the adoption puts it back on the
-        record before anything reads it here.
-        """
+        """This card's reviewer as the head operations see it."""
         stored = record.review_head_run if isinstance(record.review_head_run, dict) else {}
         run: head_ops.HeadRun | None = None
         if stored.get("run_id"):
@@ -2119,26 +1868,7 @@ class CommandHostRuntime:
     def stop_worker_head(
         self, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER
     ) -> None:
-        """End this card's worker through the head operation, recording who ended it.
-
-        The initiator is the point. Every stop the dispatcher performs has an agent — the reviewer
-        taking the checkout, the idle watchdog, a red verdict opening a rework, an operator pausing
-        the pipeline, reconciliation settling an orphaned record, launch recovery ending a head it
-        could not adopt — and until now none of that reached the record: a worker that was gone
-        looked the same however it had gone. Every one of those paths arrives here, and here is
-        where the record learns who was ending this head.
-
-        `commit` is the ordering that makes it survive: the run enters `finishing` with its
-        initiator and is written down before the operation touches the pane, so a stop that is
-        refused, or one whose dispatcher dies between the close and the heartbeat, leaves a durable
-        run the next tick continues rather than a record that has forgotten there was a stop at
-        all. `finishing` being idempotent by initiator is the other half — the retry that arrives
-        as `reconciliation` does not rename the freeze that began this.
-
-        The close and the heartbeat confirmation are the transport's and this runtime's: a close is
-        best-effort because Orca answers `tab_not_found` for a pane it never gave a UI tab, and the
-        heartbeat is what actually decides whether the head is gone.
-        """
+        """End this card's worker through the head operation, recording who ended it."""
         run = self.worker_lifecycle_run(record)
         try:
             outcome = head_ops.stop(
@@ -2160,54 +1890,19 @@ class CommandHostRuntime:
 
     def _commit_worker_run(self, record: DispatcherRecord, run: head_ops.HeadRun) -> None:
         """Write this worker's run onto the record, and flush it if the caller gave us the state.
-
-        The record is the durable home of the run, but this runtime does not own the file it lives
-        in: a tick loads the production state, hands records around and saves them at the end. So
-        the owner installs `commit_state` for the span it has that state loaded, and a lifecycle
-        transition committed here reaches disk immediately rather than at the end of a tick that
-        may not get there. Without one — a caller outside a tick — the record still carries the run
-        and is saved by whoever loaded it, which is exactly the guarantee that path already has.
         """
         record.worker_head_run = run.to_json()
         if self.commit_state is not None:
             self.commit_state()
 
     def commit_gate_pr_authorship(self, record: DispatcherRecord, entry: dict[str, Any]) -> None:
-        """Write down that the github gate wrote a known text on a known pull request.
-
-        Same contract as the head runs above, for the same reason: the record is the durable home
-        of the fact, this runtime does not own the file it lives in, so a caller that lent us
-        `commit_state` gets it on disk at once and one that did not gets it saved with its own
-        records. The gate calls this only after the backend has accepted the write, and reads it
-        back on every later tick as its only evidence that a pull request's text is its own
-        (secretary-1439) — nothing in the pull request itself is evidence of anything.
-        """
+        """Write down that the github gate wrote a known text on a known pull request."""
         record.gate_pr_authorship = dict(entry)
         if self.commit_state is not None:
             self.commit_state()
 
     def worker_lifecycle_run(self, record: DispatcherRecord) -> head_ops.HeadRun:
-        """This card's worker as the head operations see it.
-
-        The durable run decides which head a stop is continuing; reconciliation may only readdress
-        it. A tick that re-found the pane, or an adoption that took a launch intent back, wrote the
-        current handle, leaf and heartbeat onto the record, and those are bound onto the stored run
-        below — the identity, the lifecycle and the initiator are not touched by any of it. A run in
-        `finishing` is therefore continued, initiator and all, however many ticks the stop takes.
-
-        A run that is `settled` is the one case where the stored value is dropped: its head was
-        confirmed gone, so whatever the record still names a pane or a heartbeat for is not that
-        run, and stopping it *as* that run would quietly skip a live head on the strength of a
-        previous confirmation. Note that this is `settled`, not `not running`: `finishing` is
-        neither running nor finished with, and reading the two as one is what used to hand the
-        retry a new identity and no initiator.
-
-        A record from before this field existed has no run to read, so one is reconstructed — same
-        head, same pane, same heartbeat, a fresh identity — because a worker that is running has to
-        be stoppable whichever dispatcher started it. That is the whole of the reconstruction: a
-        worker adopted from a launch intent arrives here with the run its bring-up started, which
-        the adoption restored from that intent.
-        """
+        """This card's worker as the head operations see it."""
         stored = record.worker_head_run if isinstance(record.worker_head_run, dict) else {}
         run: head_ops.HeadRun | None = None
         if stored.get("run_id"):
@@ -2252,12 +1947,7 @@ class CommandHostRuntime:
         leaf: str = "",
         expected: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        """Classify a head through its persisted run whenever one is available.
-
-        `expected` remains only for the compatibility seam used by pre-HeadRun records and the
-        low-level close tests. Lifecycle callers pass `run`, so they all construct their expected
-        launch identity at the same watchdog boundary.
-        """
+        """Classify a head through its persisted run whenever one is available."""
         if run is not None:
             return _head_run_process_status(
                 pid_file, run=run, role=role, task=task, leaf=leaf,
@@ -2297,12 +1987,7 @@ class CommandHostRuntime:
         leaf: str = "",
         expected: dict[str, str] | None = None,
     ) -> None:
-        """Make sure the process behind a heartbeat is not running, escalating if it is.
-
-        A pid file that was never written (a raw `SECRETARY_DISPATCHER_*_COMMAND` override skips
-        the heartbeat wrapper) says nothing either way, and the close that came before is then all
-        the evidence there is.
-        """
+        """Make sure the process behind a heartbeat is not running, escalating if it is."""
         if not pid_file:
             return
         for signal_number in (signal.SIGTERM, signal.SIGKILL):
@@ -2415,20 +2100,11 @@ class CommandHostRuntime:
     ) -> str:
         """Cut the card's worktree and accept it only as this card's workspace of this repo.
 
-        What Orca returns is checked against what Orca itself registered: the worktree has to belong
-        to the repo registration this project's binding resolves to, and to carry this card's worker
-        id as its own name. That is an identity check on Orca's records, so a path from another
-        repo, another card, or nowhere at all fails closed without any path being reconstructed.
-
-        `expected` is `restore_workspace`'s answer, which the launch intent wrote to disk before
-        this call. A tick that dies right after this call can only find the head through the intent,
-        and an intent naming the wrong directory would send every later review, stop, respawn and
-        teardown to a checkout with nothing in it, so a workspace that landed anywhere else is a
-        deferred bring-up with a readable reason. Same invariant the observer workspace holds.
-
-        A create that succeeded and then failed any of this is removed before the failure is raised:
-        the path is known, so this is the deterministic case, and leaving it registered would leave
-        an orphan behind.
+        What Orca returns is checked against what Orca itself registered — the repo registration this
+        project's binding resolves to, and this card's worker id as the worktree name — and against the
+        `expected` path the launch intent already wrote to disk, so a workspace that landed anywhere
+        else is a deferred bring-up rather than a checkout no later stop or teardown can find. A create
+        that succeeded and then failed any of this is removed before the failure is raised.
         """
         if self.mode == "noop":
             workspace = self.data_dir / "dispatcher" / "workspaces" / worker_id
@@ -2464,8 +2140,7 @@ class CommandHostRuntime:
     ) -> str:
         """Why this returned worktree may not be adopted, or "" when it may.
 
-        Orca's own record answers it. A worktree it will not describe is not a worktree this card
-        may run in either, so an unreadable answer is a rejection rather than a pass.
+        A worktree Orca will not describe is a rejection rather than a pass.
         """
         try:
             shown = self._run_json(
@@ -2491,12 +2166,7 @@ class CommandHostRuntime:
         return ""
 
     def _discard_workspace(self, path: str) -> str:
-        """Remove a worktree that was created but must not be adopted, and say what is left.
-
-        Returns "" when Orca confirmed the removal, and otherwise a note naming the registration
-        that survived, so the failure the caller raises says whether an orphan remains. Only ever
-        called over a path Orca has just answered with, never over an adopted workspace.
-        """
+        """Remove a worktree that was created but must not be adopted, and say what is left."""
         try:
             self._run_json(
                 ["orca", "worktree", "rm", "--worktree", f"path:{path}", "--force", "--json"]
@@ -2506,12 +2176,7 @@ class CommandHostRuntime:
         return ""
 
     def _validate_resumable_workspace(self, task: dict[str, Any], workspace: str) -> None:
-        """Accept only the registered project worktree on this card's worker branch.
-
-        A Blocked card can be returned to Ready after an infrastructure outage. Its old checkout is
-        valuable state, including commits and WIP, but a path merely happening to exist must never
-        be adopted as a dispatcher workspace.
-        """
+        """Accept only the registered project worktree on this card's worker branch."""
         if self.mode == "noop":
             return
         path = Path(workspace)
@@ -2574,15 +2239,6 @@ class CommandHostRuntime:
         heartbeat_run_id: str = "",
     ) -> LaunchedHead:
         """Bring one head up and hand back the pane together with the configuration it started with.
-
-        The snapshot is taken here, on the bring-up path itself, so every route out of this call
-        (the real launcher, the `SECRETARY_DISPATCHER_*_COMMAND` override, noop mode) reports the
-        same thing, and no caller has to re-read the registry afterwards. `failover` travels with
-        it because only the caller's record knows the claim walked a chain to reach this head.
-
-        `prompt_document` names the file `launch_prompt` is a nudge at, for a caller that has
-        already written its task there. It is what the delivery record is told, and it is what
-        decides how a delivery this bring-up could not confirm is answered — see below.
         """
         pid_file = _pid_file_path(_watchdog_kind(role), task["ref"]) if task else ""
         task_ref = self._task_ref(task, role, prompt_document)
@@ -2709,11 +2365,6 @@ class CommandHostRuntime:
 
     def _head_spec(self, head: str, adapter: str) -> HeadSpec:
         """The launch shape the run is recorded with, degrading rather than failing a live bring-up.
-
-        A registry that no longer describes this head — or a caller running a raw command override
-        with no profile behind it at all — still has to yield a usable run: the head is about to
-        exist whatever the table says. So the profile is preferred and the adapter the command was
-        rendered for stands in for it, which is the same degradation the routing snapshot makes.
         """
         try:
             return HeadSpec.from_profile(head, self.catalog.head_profile(head))
@@ -2722,12 +2373,7 @@ class CommandHostRuntime:
 
     @staticmethod
     def _task_ref(task: dict[str, Any] | None, role: str, document: str) -> head_ops.TaskRef:
-        """What this head is being pointed at.
-
-        A card when the bring-up has one, and the role's standing instruction when it does not:
-        the in-process host seams and the service heads run without a Pipeline card, and inventing
-        one for them would put a card reference in a record no card ever opened.
-        """
+        """What this head is being pointed at."""
         pointer = document if document and os.path.isabs(document) else ""
         if task and task.get("ref"):
             return head_ops.TaskRef.card(str(task["ref"]), document=pointer)
@@ -2743,14 +2389,6 @@ class CommandHostRuntime:
     ) -> "DispatcherHeadTransport":
         """This product's delivery and close semantics, for the operation to perform through
         the host it is running on.
-
-        The head package can deliver and close through a session host by itself; what it cannot do
-        is what this product knows on top of that — the provider transcript this role's head writes
-        when its turn starts, and the fact that Orca answers `tab_not_found` for every pane it never
-        gave a UI tab, so a refused close decides nothing while a heartbeat can still be read. Both
-        of those are policy, and both arrive here as a transport rather than as a callback holding
-        this runtime's command runner: whatever the operation reaches, it reaches through the
-        `SessionHost` it was given.
         """
         return DispatcherHeadTransport(self, workspace, prompt_file, adapter, role, before_send)
 
@@ -2772,11 +2410,6 @@ class CommandHostRuntime:
         self, exc: head_ops.HeadOperationError, workspace: str, pid_file: str, subject: str
     ) -> Exception:
         """Translate one operation's refusal into the failure the dispatcher's callers already read.
-
-        The three kinds are the ones the bring-up path has always had, and the distinction between
-        them is the whole reason they are three: a pane that may still hold a head keeps the
-        caller's launch intent, a pane that was busy is a launch worth making again, and only a
-        bring-up that left nothing running may block the card.
         """
         evidence = _delivery_evidence_json(exc, subject)
         if isinstance(exc, head_ops.HeadSpawnAborted):
@@ -2815,15 +2448,9 @@ class CommandHostRuntime:
     ) -> None:
         """Close a head's pane through the session host and confirm nothing of it survived.
 
-        The close is asked strictly, but its refusal is not the answer on its own: Orca reports
-        `tab_not_found` for a pane it never gave a UI tab, which is every pane a dispatcher-launched
-        head gets on a headless serve. The heartbeat decides. Only when there is no heartbeat to
-        read is a refused close taken at face value, because then nothing else can say whether the
-        head is still there.
-
-        The heartbeat half is not session-manager business at all — it is a pid this product wrote
-        and this product signals — which is why it stays here while the pane itself is closed
-        through the host the operation handed in.
+        The heartbeat decides, not the close: Orca answers `tab_not_found` for a pane it never gave a
+        UI tab, which is every pane a dispatcher-launched head gets on a headless serve. Only when
+        there is no heartbeat to read is a refused close taken at face value.
         """
         if run is not None:
             self._guard_head_run(run, role, pid_file=pid_file, task=task, leaf=leaf)
@@ -2852,13 +2479,7 @@ class CommandHostRuntime:
         failover: bool = False, leaf: str = "", delivery_evidence: dict[str, Any] | None = None,
         head_run: dict[str, Any] | None = None,
     ) -> LaunchedHead:
-        """Pair the pane with the launch snapshot of the head running in it.
-
-        A registry that no longer describes the launched head still has to yield a usable record:
-        the point of the journal is that it survives edits to `heads.toml`. So an unreadable profile
-        degrades to the head id under an `unknown` adapter instead of failing a bring-up that
-        already succeeded.
-        """
+        """Pair the pane with the launch snapshot of the head running in it."""
         if task is None:
             return LaunchedHead(
                 handle=handle, head=head, leaf=leaf,
@@ -2884,13 +2505,7 @@ class CommandHostRuntime:
 
     @property
     def session(self) -> OrcaSessionHost:
-        """The session manager this runtime opens, addresses and closes panes through.
-
-        Everything about which session manager that is lives in `pane_host` now. This runtime's own
-        pane verbs — `_create_terminal` below, the terminal inventory, the by-workspace stop — are
-        thin translations of that host's answers into the errors the dispatcher's callers already
-        handle, and the head operations reach the same host directly.
-        """
+        """The session manager this runtime opens, addresses and closes panes through."""
         return OrcaSessionHost(self._run_json)
 
     def _create_terminal(self, workspace: str, title: str, command: str) -> PaneIdentity:
@@ -2936,13 +2551,11 @@ class CommandHostRuntime:
             raise HostError(str(exc)) from None
 
     def _freeze_worker(self, record: DispatcherRecord) -> None:
-        """Shut the worker head down now that the reviewer is up. Nothing else stops the worker
-        from editing the checkout mid-review, which would leave the verdict describing a tree that
-        no longer exists. The workspace itself is untouched: a red verdict hands it straight back.
+        """Shut the worker head down now that the reviewer is up, leaving the workspace untouched.
 
-        A worker adopted from a launch intent has no pane handle, so the stop goes by its pid
-        heartbeat instead: a freeze that quietly did nothing for want of a handle would leave that
-        worker editing the tree the reviewer is judging."""
+        Nothing else stops the worker from editing the checkout mid-review. A worker adopted from a
+        launch intent has no pane handle, so the stop goes by its pid heartbeat instead.
+        """
         if self.mode == "noop" or not (record.handle or record.worker_leaf or record.worker_pid_file):
             return
         self.stop_head(record, "worker", STOPPED_BY_REVIEW_FREEZE)
@@ -2950,14 +2563,9 @@ class CommandHostRuntime:
     def retain_worker(self, record: DispatcherRecord) -> None:
         """Suspend a completed worker without throwing its provider conversation away.
 
-        The pid heartbeat names the actual head rather than its surrounding terminal shell.  A
-        missing or dead heartbeat is not safe to retain: the caller falls back through the
-        confirmed-stop and durable replacement path instead of guessing that a pane is idle.
-
-        A head with no pane handle is not retained at all: nothing can address it, so there is no
-        conversation to keep and the caller stops it before the reviewer takes the checkout.
-        Whether the provider behind that pane will actually take a continuation is decided at
-        delivery, where a refusal falls back to a confirmed stop and a replacement.
+        A missing or dead pid heartbeat is not safe to retain, and a head with no pane handle is not
+        retained at all: the caller falls back through the confirmed-stop and durable replacement path
+        rather than guessing that a pane is idle.
         """
         if self.mode == "noop":
             raise HostError("noop runtime cannot retain a worker session")
@@ -2997,17 +2605,7 @@ class CommandHostRuntime:
         raise HostError("worker session could not be confirmed suspended")
 
     def _continuation_addressable(self, record: DispatcherRecord) -> bool:
-        """Whether this worker head is a live provider conversation a prompt can be sent into.
-
-        Codex TUI and Claude's interactive terminal are; a head with no pane handle cannot be
-        typed into at all.
-
-        The record is read, not the registry: it describes the head that actually started for this
-        card. Every Codex head the product launches now is interactive, but a record written
-        before that says `exec`, and that worker really was one-shot — its turn is spent, so it is
-        refused here. This is the record being read as it was written; nothing on this path can
-        make a new head launch that way.
-        """
+        """Whether this worker head is a live provider conversation a prompt can be sent into."""
         run = record.worker_run
         adapter = run.get("adapter")
         return bool(record.handle) and (
@@ -3016,12 +2614,7 @@ class CommandHostRuntime:
         )
 
     def worker_retained_alive(self, record: DispatcherRecord) -> bool:
-        """Whether this card's worker session is confirmably alive and still suspended.
-
-        The record saying `retained` is a memory of a past tick. Only the heartbeat says whether
-        that head is still frozen now, and an ambiguous answer is never permission to leave it
-        beside a reviewer.
-        """
+        """Whether this card's worker session is confirmably alive and still suspended."""
         if self.mode == "noop" or not record.worker_continuation.retained:
             return False
         status = self._record_heartbeat_status(record, "worker")
@@ -3037,13 +2630,8 @@ class CommandHostRuntime:
     def worker_retained_vanished(self, record: DispatcherRecord) -> bool:
         """Whether this card's retained worker is provably gone, so nothing is left to freeze.
 
-        The distinction `worker_retained_alive` folds away: a worker that is neither frozen nor
-        alive is a different thing from one that is alive but woke up. Only the first has no second
-        writer the reviewer could collide with, so only the first is safe to launch review over
-        without a freeze. This asks the pid heartbeat for the *definitive* death signal — a pid the
-        OS has no record of (`known and not alive`) — and never the ambiguous `known: False` of a
-        heartbeat that was never written or has been removed: an unproven death stays on the
-        cautious confirm-or-freeze path, where the launch aborts rather than risk a live writer.
+        Only the pid heartbeat's definitive death signal (`known and not alive`) counts; the ambiguous
+        `known: False` of a heartbeat that was never written stays on the confirm-or-freeze path.
         """
         if self.mode == "noop" or not record.worker_continuation.retained:
             return False
@@ -3051,28 +2639,13 @@ class CommandHostRuntime:
         return _heartbeat_is_dead(status)
 
     def worker_addressable(self, record: DispatcherRecord) -> bool:
-        """Whether this card's worker is a live conversation a prompt could be typed into.
-
-        The same question `resume_worker` answers for itself, asked before anything durable is
-        written: a head that cannot take a prompt at all must not have an intent reserved against
-        it, or the round would spend its one report prompt on a delivery that was never possible.
-        """
+        """Whether this card's worker is a live conversation a prompt could be typed into."""
         if self.mode == "noop":
             return False
         return self._continuation_addressable(record)
 
     def prompt_worker_report(self, task: dict[str, Any], record: DispatcherRecord) -> None:
-        """Ask a live worker to run the open round's ordinary report command. Nothing else.
-
-        Deliberately not a small `resume_worker`. That one hands a conversation a *new* round: it
-        rewrites TASK.md, drops the report bodies and wakes a suspended process. This one arrives in
-        the middle of a round nobody has closed, so it touches none of that — the document the head
-        already has is the document it is being pointed back at, and rewriting it under a head that
-        may be mid-turn would replace the instructions it is working from.
-
-        A suspended head is refused rather than continued for the same reason: waking one is a
-        lifecycle transition with its own durable boundary, and this is not it.
-        """
+        """Ask a live worker to run the open round's ordinary report command. Nothing else."""
         status = self._head_status(
             record.worker_pid_file,
             run=record.worker_head_run,
@@ -3097,15 +2670,7 @@ class CommandHostRuntime:
         )
 
     def resume_worker(self, task: dict[str, Any], record: DispatcherRecord) -> None:
-        """Resume an addressable retained worker and deliver its updated rework task.
-
-        Codex TUI and Claude's interactive terminal are both live provider conversations. A worker
-        whose own record says it ran one-shot has already spent its turn, so it deliberately
-        follows the replacement path — see `_continuation_addressable`, which reads that record
-        rather than deciding from a registry the head no longer runs off. A running process after
-        a crash is only known to have received the prompt when its
-        provider turn is visibly underway; otherwise replay resumes at the SIGCONT/send boundary.
-        """
+        """Resume an addressable retained worker and deliver its updated rework task."""
         status = self._head_status(
             record.worker_pid_file,
             run=record.worker_head_run,
@@ -3188,21 +2753,6 @@ class CommandHostRuntime:
         before_send: Callable[[], None] | None = None,
     ) -> None:
         """Point this card's live worker at one thing, through the head operation (secretary-1412).
-
-        Both prompts a running worker ever gets — "report the round you are in" and "here is your
-        continuation" — go through `nudge`, so the pane is re-found by the run's own leaf before
-        anything is typed into it and the delivery is recorded against the head rather than against
-        a handle. How a turn is confirmed is unchanged: this passes the same confirming transport
-        the launch nudge uses, because the criterion is the product's, not the operation's.
-
-        What is delivered is the caller's pointer, and the two callers do not deliver the same
-        shape. The continuation opens a round, so it points at the round's document and the pane
-        receives a bounded line; the report prompt opens nothing and is the other legitimate case,
-        where the line is the whole message. Taking a `NudgePointer` rather than a string is what
-        keeps that difference at the call site instead of guessing it here.
-
-        The failure is the caller's to read as it always was: a worker prompt that did not reach
-        its confirmation is a `HostError` carrying the delivery boundary's own evidence.
         """
         run = self.worker_lifecycle_run(record)
         try:
@@ -3243,25 +2793,9 @@ class CommandHostRuntime:
     ) -> tuple[Path, str]:
         """This round's review task, on disk, and the one line that points a reviewer at it.
 
-        The review used to be typed into the pane in full — some 12 KiB of it, card description
-        included — and that is the payload Codex kept in its composer while consuming the Enter,
-        24 times in a row on one card (`codegen-orchestrator-1165`, 2026-08-10). Nothing about the
-        text was wrong; its size was. So the text stops travelling: it is written where the head
-        can open it and the pane receives a bounded pointer, which is the one shape of delivery
-        that has never failed.
-
-        A retry re-renders the same document at the same path and sends a fresh nudge, so the
-        pointer always names the round's current task rather than a version a previous attempt
-        left. A document that cannot be written or a path no nudge can carry stops the bring-up
-        before a pane is opened: an unprompted reviewer would sit at its prompt forever, and the
-        caller's infrastructure retry is the right answer to a launch that has not started.
-
-        Nothing here writes to, or removes anything from, the candidate checkout. A `REVIEW.md`
-        left in a workspace by a dispatcher that predates this seam stays exactly where it is: the
-        nudge names an absolute path, so nothing is ambiguous without deleting it, and this product
-        does not get to mutate the tree a reviewer is about to judge — that file can be a tracked
-        part of a candidate, and identity is what the whole document-outside-the-worktree rule is
-        protecting.
+        The text never travels through the pane; only a bounded pointer does. A retry re-renders the
+        same document at the same path, and a document that cannot be written stops the bring-up before
+        a pane is opened. Nothing here writes to or removes anything from the candidate checkout.
         """
         document = self._prompt_document_path(REVIEW_ROLE, task["ref"], record.review_baseline)
         prompt = self._review_prompt(
@@ -3275,19 +2809,7 @@ class CommandHostRuntime:
         return document, nudge
 
     def _prompt_document_path(self, role: str, reference: str, round_number: int) -> Path:
-        """Where a head's task document lives: outside every worktree, with the run's artifacts.
-
-        Not the body directory the report and verdict files use. Those are scratch a head writes
-        and the dispatcher consumes inside one round; this is the record of what a head was asked
-        to do, so it is kept where run artifacts are kept and inherits their retention rather than
-        a temporary directory's. Outside the workspace for the reason the writer enforces: a
-        receipt names the code it is evidence for by hashing the checkout's own content, and a
-        prompt dropped in there would move that identity for nothing.
-
-        The round is in the name for the same reason it is in a body file's: a re-review is a
-        different task, and a pointer that resolved to the previous round's document would have a
-        head reviewing the wrong one.
-        """
+        """Where a head's task document lives: outside every worktree, with the run's artifacts."""
         root = os.environ.get("SECRETARY_DISPATCHER_PROMPT_DIR")
         base = Path(root).expanduser() if root else self.data_dir / "artifacts" / "prompts"
         name = f"{_request_token(role)}-{_request_token(str(round_number))}.md"
@@ -3296,14 +2818,10 @@ class CommandHostRuntime:
     def _clear_body_file(self, kind: str, reference: str, review_round: int) -> None:
         """Drop the body file before launching the head that is supposed to write it.
 
-        Heads are told to leave the file in place, and the path is keyed on ref+round, so a
-        respawned head inherits whatever its half-dead predecessor left there. Nothing downstream
-        catches a stale body: `_read_body` only rejects a missing file, and `report done` /
-        `verdict green` accept an empty one, so a truncated body would land on the board as a real
-        report. A missing file at least fails loudly.
-
-        This is the reviewer's path. A report goes through `_clear_report_bodies`, which clears the
-        rounds already over as well."""
+        The path is keyed on ref+round and heads are told to leave the file in place, so a respawned
+        head would inherit its predecessor's body; nothing downstream rejects a stale one. A missing
+        file at least fails loudly. Reports go through `_clear_report_bodies`.
+        """
         try:
             Path(_body_file_path(kind, reference, review_round)).unlink(missing_ok=True)
         except OSError:
@@ -3312,14 +2830,8 @@ class CommandHostRuntime:
     def _clear_report_bodies(self, reference: str) -> None:
         """Drop every report body file this card has, the round about to start included.
 
-        The new round's path is cleared for the reason above. The rounds already over are cleared
-        because their file is the last thing that makes a command from an earlier round look like a
-        report of this one: the task protocol answers an identical retry from its committed event,
-        and an unchanged body file left in place is exactly how a retained conversation produces
-        one. With the file gone the stale command fails on a missing body instead of telling a
-        worker that a report the board never received was recorded. A worker that types the round's
-        body again into the old path is still a retry the protocol may answer; only authorising the
-        open generation inside the report protocol closes that, which is a durable protocol change.
+        The rounds already over are cleared too: the task protocol answers an identical retry from its
+        committed event, and a leftover body file is how a retained conversation produces one.
         """
         sample = _body_file_path("report", reference, 0)
         directory, name = os.path.split(sample)
@@ -3342,10 +2854,7 @@ class CommandHostRuntime:
         """Short pointer delivered to the worker head at launch. The full spec lives in TASK.md
         (written next to the workspace root); duplicating it into the launch prompt would ship
         the whole task twice. The head opens TASK.md itself and reports with the command there.
-
-        This is a nudge at a task document in exactly the sense the reviewer's is, so the bring-up
-        is told which document it points at: the delivery record then names the mode and the file,
-        and an unconfirmed delivery of it can no longer be answered by closing the pane."""
+        """
         return (
             "The full task is in TASK.md at the workspace root. Read it first and follow it. "
             "Do not spawn, create, delegate to, or manage subagents; perform the work in this "
@@ -3768,12 +3277,9 @@ class DispatcherRuntime:
     def _head_fallback(self, head: str) -> list[str] | None:
         """`head`'s fallback chain, or None when the registry does not describe it at all.
 
-        None is not an empty chain, and asking about such a head is not a cheap question: against
-        the real catalog `head_readiness` reads the profile through `head_profile`, which raises
-        `HostError` for a head that is not there — `HeadHealth.check` catches only the shapes a
-        malformed registry entry can take, so that exception would leave the walk and take the
-        tick's Ready pass with it. The walk answers the existence question here, where it is one
-        lookup, and never puts it to a readiness probe.
+        None is not an empty chain. The existence question is answered here as one lookup and never
+        put to a readiness probe, whose `HostError` for an undescribed head would escape the walk and
+        take the tick's Ready pass with it.
         """
         try:
             return self.catalog.head_fallback(head)
@@ -3783,12 +3289,9 @@ class DispatcherRuntime:
     def resolve_head(self, preferred: str) -> HeadChoice:
         """The head to actually launch for `preferred`, walking the canon's fallback chain.
 
-        Red is a property of the resource, so a head whose subscription is spent can still be
-        replaced by one of another family drawing on another account — but only along the chain the
-        canon writes down, and only at claim, where the decision is recorded on the card. When
-        nothing in the chain is launchable the answer is an empty head: the caller claim-skips and
-        the card waits in Ready, which is what the 2026-08-06 canary paid two launches and a round
-        to learn is cheaper than a head in a dead resource.
+        Substitution follows only the chain the canon writes down, and only at claim, where the
+        decision is recorded on the card. When nothing in the chain is launchable the answer is an
+        empty head: the caller claim-skips and the card waits in Ready.
         """
         return resolve_head_chain(preferred, self.head_readiness, self._head_fallback)
 
@@ -3806,14 +3309,7 @@ class DispatcherRuntime:
         role: str,
         reference: str,
     ) -> None:
-        """Give a persisted Codex HeadRun its only provider-event ingress.
-
-        This is called both immediately after a launch intent is saved and when a dispatcher
-        recovers an existing run.  The callbacks close over the record, not a workspace lookup,
-        and every persistence call saves that record before a source cursor advances.  The
-        installed callback shape is retained for compatibility, but fan-out observation has no
-        stop or board-transition authority.
-        """
+        """Give a persisted Codex HeadRun its only provider-event ingress."""
         stored = (
             record.worker_head_run if role == WORKER_ROLE else record.review_head_run
         )
@@ -4017,13 +3513,8 @@ class DispatcherRuntime:
     ) -> dict[str, Any] | None:
         """The refusal when a failover would hand both roles to one head, else None.
 
-        A review is worth having because someone other than the worker reads the work. A transfer
-        that lands the worker and the reviewer on the same profile does not weaken that rule a
-        little, it removes it — so it is not a transfer at all, and the card waits in Ready with
-        the reason on the tick instead of being reviewed by its own author. Only a failover can
-        collapse the pair here: two roles pointed at one head by the canon itself is an
-        installation's own decision, made with its eyes open, and this is not where it is
-        overruled.
+        Only a failover can collapse the pair here: two roles pointed at one head by the canon itself
+        is an installation's own decision and is not overruled.
         """
         if not review.resolved or review.head != worker.head:
             return None
@@ -4046,12 +3537,7 @@ class DispatcherRuntime:
     def _comment_head_failover(
         self, ref: str, attempt_id: str, worker: HeadChoice, review: HeadChoice
     ) -> None:
-        """Write the substitution onto the card, once per claim, or do nothing.
-
-        Its own comment rather than a phrase inside the claim comment: this is the sentence a
-        reviewer or an observer looks for when the work reads unlike the head the card asked for,
-        and it must be findable whether or not the claim comment is read.
-        """
+        """Write the substitution onto the card, once per claim, or do nothing."""
         lines = [
             f"{role} head {choice.head} instead of {choice.preferred}: {choice.reason}"
             for role, choice in (("Worker", worker), ("Reviewer", review))
@@ -4445,15 +3931,6 @@ class DispatcherRuntime:
         initiator: str,
     ) -> dict[str, Any] | None:
         """End the reviewer before a replacement head opens. Returns the tick's outcome on refusal.
-
-        A refusal leaves the record pointing at that reviewer exactly as it was, so the next tick
-        retries the same stop, initiator and all — the run is in `finishing` by then and the actor
-        that began the stop is the one it keeps. Nothing after this call runs on this tick: whatever
-        it was going to open — the rework worker, the replacement reviewer — would be the second
-        process in a checkout the previous head may still be holding.
-
-        `initiator` has no default: these callers are the ones an operator asks about later, and a
-        verdict, a watchdog and a gate ending a reviewer are three different facts.
         """
         try:
             _end_review_pane(self.host, record, initiator)
@@ -4509,14 +3986,7 @@ class DispatcherRuntime:
         step: str,
         attempt_id: str,
     ) -> dict[str, Any]:
-        """A worker bring-up that failed with its terminal already open.
-
-        Nothing is blocked and nothing is dropped: the host could not say the head is gone, so the
-        launch intent stays on disk carrying whatever identity the failure knew. The next tick
-        reads the heartbeat and either adopts that head or stops it. Moving the card to Blocked and
-        removing its record here — which is what an ordinary bring-up failure does, because there
-        it is true that no head exists — would leave a live worker on a checkout nothing points at.
-        """
+        """A worker bring-up that failed with its terminal already open."""
         _mark_launch_aborted(self, payload, records, ref, record, exc)
         return _launch_aborted(
             step=step,
@@ -4538,11 +4008,6 @@ class DispatcherRuntime:
         attempt_id: str,
     ) -> dict[str, Any] | None:
         """The aborted-launch outcome when this failure may have left a worker running, else None.
-
-        `HeadLaunchAborted` says so outright. An ordinary failure claims the opposite, and is taken
-        at its word only while the heartbeat agrees: a bring-up that got far enough to write one
-        left a process behind whatever the error said, and blocking the card and dropping its record
-        over that process is exactly the head the next requeue would open a second one beside.
         """
         _record_worker_delivery_evidence(record, exc, failure=True)
         if not isinstance(exc, HeadLaunchAborted):
@@ -4561,13 +4026,7 @@ class DispatcherRuntime:
     def _settle_worker_pane(
         self, ref: str, record: DispatcherRecord, handle: str, leaf: str
     ) -> None:
-        """Put the pane identity of a worker head that is already up onto its record.
-
-        Everything from here runs against a live process, so a failure is ambiguous rather than a
-        launch that did not happen: it comes back as `HeadLaunchAborted` carrying that pane, the
-        caller keeps the launch intent, and the next tick settles the head instead of the record
-        being dropped out from under it.
-        """
+        """Put the pane identity of a worker head that is already up onto its record."""
         record.handle = handle
         record.worker_leaf = leaf
 
@@ -4583,14 +4042,7 @@ class DispatcherRuntime:
         blocked_reason: str,
         blocked_request_id: str,
     ) -> tuple[LaunchedHead | None, dict[str, Any] | None]:
-        """Relaunch this card's worker in its own workspace, under the intent already on disk.
-
-        Returns the launched head, or the tick's outcome when nothing usable came up. Every step
-        after `restart_worker` runs over a process that exists, so a failure there is ambiguous and
-        the record must not be dropped for it: only a launch that left no head at all clears the
-        intent and blocks the card. The caller keeps the intent until it has written the head's
-        routing event, which is the last thing the round owes a bring-up.
-        """
+        """Relaunch this card's worker in its own workspace, under the intent already on disk."""
         ref = task["ref"]
         try:
             self._require_head_ready(record.head)
@@ -4666,13 +4118,7 @@ class DispatcherRuntime:
         action: str,
         round_number: int | None = None,
     ) -> str | None:
-        """Fix a rework or respawn bring-up on disk before `restart_worker` is called.
-
-        Every relaunch reuses the workspace the record already names, so the intent has the head's
-        identity from the record itself. A rework passes the round it has reserved for the head it
-        is about to start, so an adoption resumes that round and not the one being left behind.
-        Returns the failure, or None when the launch may proceed.
-        """
+        """Fix a rework or respawn bring-up on disk before `restart_worker` is called."""
         return _write_launch_intent(
             self,
             payload,
@@ -5321,23 +4767,11 @@ class DispatcherRuntime:
         """Spend this round's one report prompt on a confirmed-idle worker, or decline to.
 
         Hands back the tick's outcome and the trigger the caller carries on with. A `None` outcome
-        means the watchdog carries on into the stop-and-replace path it always had, and every way
-        this declines is a way that path is the right one:
+        means the watchdog carries on into its stop-and-replace path.
 
-          * the round already spent its prompt — a second confirmed-idle episode, or a restart over
-            an intent nobody confirmed. Either way the head has had its reminder or cannot be given
-            a second one, and the escalation is what is left;
-          * the head is not a conversation anything can be typed into (a spent Codex exec turn, a
-            head with no pane). Asked before the intent is written, so an unaddressable worker
-            neither burns the round's prompt nor writes a record nobody can act on;
-          * the delivery failed or could not be confirmed. Nothing here recovers from that: an
-            unconfirmed prompt intent is precisely when a second writer must not be opened, and the
-            caller's next step is `_stop_worker_confirmed`, which either confirms the head is gone
-            or ends the tick without a replacement.
-
-        The order is the durability contract, the same one the red continuation uses: intent on
-        disk, then the send, then the confirmation. A tick that dies in the middle leaves an intent
-        that reads as spent, which is what stops a restart from typing the same prompt twice.
+        The order is the durability contract: intent on disk, then the send, then the confirmation. A
+        tick that dies in the middle leaves an intent that reads as spent, which is what stops a
+        restart from typing the same prompt twice.
         """
         ref = task["ref"]
         nudge = record.worker_report_nudge
@@ -5644,13 +5078,7 @@ class DispatcherRuntime:
         *,
         stage: str,
     ) -> dict[str, Any] | None:
-        """Validate and persist every green gate through one exact-SHA policy boundary.
-
-        ``initial`` supplies review evidence, ``assessment`` publishes the fresh post-review
-        receipt used to park, and ``release`` publishes the fresh final pre-merge receipt.  A
-        local/GitHub gate can never pass this boundary without evidence; none/noop remains an
-        explicit absence of evidence and therefore emits no attestation audit.
-        """
+        """Validate and persist every green gate through one exact-SHA policy boundary."""
         ref = task["ref"]
         accepted = AcceptedGreenGate.accept(
             result.attestation,
@@ -5710,9 +5138,8 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         """A configured broad gate cannot turn green without exact-SHA evidence to hand on.
 
-        This is deliberately separate from ``ci:none``: the latter is an explicit no-mechanical-
-        validation mode, while local/github promised to execute a check and therefore fail closed
-        if the SHA/base/check receipt cannot be materialized.
+        Deliberately separate from ``ci:none``: local/github promised to execute a check and therefore
+        fail closed if the SHA/base/check receipt cannot be materialized.
         """
         ref = task["ref"]
         self.host.stop(record)
@@ -5785,15 +5212,10 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         """The only way a card goes back to In progress for rework.
 
-        A red gate and a red review differ in the comment they leave and in the identities they
-        dedupe on, not in the order they owe the card. That order lives here and nowhere else: the
-        intent is on disk, with its phase, the report baseline it was opened against and the reason
-        the card is moving, before anything observable moves; the board moves; and only then is it
-        decided whether the round's own session takes the continuation or a replacement does.
-
-        Whether a session is held is deliberately not a precondition of this call. The round with
-        nothing to reuse is the one whose replacement a crash would otherwise lose, leaving the
-        report that closed the round to be read as a fresh completion.
+        The order lives here and nowhere else: the intent is on disk, with its phase, the report
+        baseline it was opened against and the reason the card is moving, before anything observable
+        moves; the board moves; and only then is it decided whether the round's own session takes the
+        continuation or a replacement does. Holding a session is deliberately not a precondition.
         """
         ref = task["ref"]
         baseline = len(task.get("comments") or [])
@@ -5818,12 +5240,9 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         """Finish the open red transition from the board as it is now.
 
-        Every tick that finds one comes here, whichever phase opened it and whether or not a session
-        is held, before it reads a gate result, a report marker or a review verdict. The move is
-        keyed on the baseline the intent was opened against, so the tick that already moved the card
-        and the tick recovering from a crash before that move run the same call and the card moves
-        once. Nothing here re-reads the verdict: the transition carries its own reason, so a gate
-        that has since turned green cannot talk this card out of the red round it already owes.
+        The move is keyed on the baseline the intent was opened against, so the tick that already moved
+        the card and the tick recovering from a crash before that move run the same call and the card
+        moves once. Nothing here re-reads the verdict: the transition carries its own reason.
         """
         continuation = record.worker_continuation
         phase = continuation.phase or "gate"
@@ -5888,10 +5307,9 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         """Hand a red verdict back to the session that wrote the code, or to one replacement.
 
-        Both red verdicts and the recovery of an interrupted red transition come through here, so
-        the order is the same for the gate and for the review: the suspension is re-confirmed at the
-        moment of use, the delivery boundary is durable before the worker is woken, and every way
-        out that cannot reuse the session goes through a confirmed stop first.
+        The order is the same for the gate and for the review: the suspension is re-confirmed at the
+        moment of use, the delivery boundary is durable before the worker is woken, and every way out
+        that cannot reuse the session goes through a confirmed stop first.
         """
         ref = task["ref"]
         continuation = record.worker_continuation
@@ -6059,12 +5477,7 @@ class DispatcherRuntime:
     def _observe_retained_continuation_progress(
         self, task: dict[str, Any], record: DispatcherRecord, *, now: float,
     ) -> str:
-        """Persist provider progress before a continuation interprets `tui-idle`.
-
-        The host is allowed to expose only an opaque cursor.  A missing host method, a malformed
-        response and an unavailable provider source all stay typed, non-admitted evidence.  This
-        helper does not read pane or composer text and it does not take any recovery action.
-        """
+        """Persist provider progress before a continuation interprets `tui-idle`."""
         try:
             evidence = getattr(
                 self.host, "provider_progress", lambda _task, _record, _kind: {
@@ -6101,14 +5514,7 @@ class DispatcherRuntime:
         phase: str,
         observation: str,
     ) -> dict[str, Any] | None:
-        """Take the explicit safe outcome when the liveness trust boundary is unprovable.
-
-        A structurally complete Codex v1 descriptor that remains unbound is the one exception:
-        its exact retained HeadRun still goes through the ordinary confirmed-stop identity fence,
-        then the existing durable rework launch intent.  Every other unadmitted source retains the
-        terminal board policy and never signals, resumes, replaces, nudges or spends a recovery
-        rung.
-        """
+        """Take the explicit safe outcome when the liveness trust boundary is unprovable."""
         if observation in {"baseline", "stalled", "progressed"} and record.worker_continuation_liveness.admitted:
             return None
         if observation == ContinuationProviderCondition.LEGACY_UNBOUND_V1.value:
@@ -6311,12 +5717,7 @@ class DispatcherRuntime:
         payload: dict[str, Any], attempt_id: str, *, continuation_reason: str, phase: str,
         worker_stopped: bool = False,
     ) -> dict[str, Any]:
-        """Launch the red-verdict fallback only after its worker was conclusively stopped.
-
-        Both red verdicts land here when the round's own session cannot take the continuation: a
-        red mechanical gate and a red review differ in the request identities they dedupe on and in
-        the step they report, not in what they have to guarantee before a second head opens.
-        """
+        """Launch the red-verdict fallback only after its worker was conclusively stopped."""
         ref = task["ref"]
         review = phase == "review"
         step = "review" if review else "gate"
@@ -6414,12 +5815,7 @@ class DispatcherRuntime:
         step: str,
         error: Exception,
     ) -> dict[str, Any]:
-        """A claimed card the dispatcher cannot pick back up on the head it was claimed with.
-
-        Nothing is launched and nothing is recorded: the routing journal keeps the attempt as the
-        last bring-up left it rather than gaining a head that never ran. A human re-points the card
-        or restores the profile.
-        """
+        """A claimed card the dispatcher cannot pick back up on the head it was claimed with."""
         ref = task["ref"]
         self.writer.move(
             role="dispatcher",
@@ -6452,11 +5848,7 @@ class DispatcherRuntime:
         request_id: str,
         error: Exception,
     ) -> dict[str, Any]:
-        """Block a failed rework launch while retaining the workspace's resume provenance.
-
-        `reason` is the tick's own short verdict. The card gets the longer one, which for a head
-        pane that stayed busy or held in a dialog names that pane instead of the launch.
-        """
+        """Block a failed rework launch while retaining the workspace's resume provenance."""
         self.writer.move(
             role="dispatcher",
             actor=self.owner,
@@ -6479,10 +5871,7 @@ class DispatcherRuntime:
         records: dict[str, DispatcherRecord],
         payload: dict[str, Any],
     ) -> None:
-        """The backend answered, so the transport retry budget starts over.
-
-        Any answer counts, including a red or a pending one: what the counter measures is silence,
-        not disapproval."""
+        """The backend answered, so the transport retry budget starts over."""
         if not record.gate_transport_failures and not record.gate_transport_error:
             return
         record.gate_transport_failures = 0
@@ -6504,9 +5893,8 @@ class DispatcherRuntime:
         """Count one unanswered gate question and, while the budget lasts, keep the card as it is.
 
         Returns the tick outcome of a deferred retry, or None once the attempts are spent and the
-        caller must block the card. Nothing about the card moves here: no board move, no head is
-        stopped, no verdict or decision is spent. The same question is asked again on the next
-        tick, which is the deferral — the observer's wake retry defers the same way.
+        caller must block the card. Nothing about the card moves here: no board move, no head stopped,
+        no verdict or decision spent.
         """
         ref = task["ref"]
         record.gate_transport_failures += 1
@@ -6544,12 +5932,7 @@ class DispatcherRuntime:
         action: str,
         prefix: str = "",
     ) -> dict[str, Any]:
-        """The gate backend stayed unreachable for the whole retry budget: Blocked, saying so.
-
-        The reason names the transport and the last error rather than "gate failed", because the
-        gate never gave a verdict: nothing is known about the code, and an operator reading this
-        has to look at the network, not at the branch.
-        """
+        """The gate backend stayed unreachable for the whole retry budget: Blocked, saying so."""
         attempts = record.gate_transport_failures or GATE_TRANSPORT_MAX_ATTEMPTS
         last = record.gate_transport_error or "(no error text)"
         reason = (
@@ -6574,9 +5957,10 @@ class DispatcherRuntime:
         attempt_id: str,
         result: GateResult,
     ) -> dict[str, Any]:
-        """CI is non-terminal (a check still running, or none posted yet). Wait, tracking how long
-        the rollup has sat non-terminal; past GATE_PENDING_STALL_SECONDS escalate once to Blocked so
-        a required check nothing ever posts does not leave the card unwatched forever."""
+        """CI is non-terminal (a check still running, or none posted yet). Wait, tracking how long the
+        rollup has sat non-terminal; past GATE_PENDING_STALL_SECONDS escalate once to Blocked so a
+        required check nothing ever posts does not leave the card unwatched forever.
+        """
         ref = task["ref"]
         now = time.time()
         if not record.gate_pending_since:
@@ -6603,14 +5987,7 @@ class DispatcherRuntime:
         return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "to": "blocked"}
 
     def _parks_for_decision(self, task: dict[str, Any]) -> bool:
-        """Whether a substantive verdict on this card waits for a decision, or acts at once.
-
-        A card parks only where a decision can come from: its sprint is open and declares a
-        concrete observer head. A card with no sprint, a card whose sprint declares `none`, and a
-        card whose sprint is closed keep the immediate behaviour, because parking one of those is
-        parking it forever. The same is true of a sprint board that cannot be read: an unreadable
-        answer moves nothing into a wait nobody can end.
-        """
+        """Whether a substantive verdict on this card waits for a decision, or acts at once."""
         reference = str(task.get("sprint") or "")
         if not reference:
             return False
@@ -6630,14 +6007,10 @@ class DispatcherRuntime:
     ) -> tuple[str, GateResult | None, str]:
         """Everything that must hold before this checkout may be merged, read once.
 
-        Returns one of "drift", "transport", "failed", "pending", "red" or "green"; the gate result
-        where there is one, and the operator-facing detail where there is not. Both sides of the
-        seam ask it: Validate asks before parking a green verdict, so a card only ever parks with
-        its mechanical state green, and the release asks again immediately before the merge itself.
-
-        "transport" is the question that never got an answer, and it is deliberately not "failed":
-        a backend that could not be reached says nothing about the checkout, so the caller retries
-        it rather than deciding the card on silence.
+        Returns one of "drift", "transport", "failed", "pending", "red" or "green". Both sides of the
+        seam ask it: Validate before parking a green verdict, and the release again immediately before
+        the merge. "transport" is deliberately not "failed" — a backend that could not be reached says
+        nothing about the checkout, so the caller retries rather than deciding the card on silence.
         """
         drift = self._review_drift(task, record)
         if drift:
@@ -6662,13 +6035,7 @@ class DispatcherRuntime:
         payload: dict[str, Any],
         attempt_id: str,
     ) -> dict[str, Any]:
-        """A green review verdict parks the card; it does not merge it.
-
-        The mechanical re-checks stay on this side of the seam deliberately. A drifted checkout
-        and a red or pending gate resolve in Validate exactly as they did before Assessment
-        existed, so nothing mechanical ever reaches the observer: a parked card has passed
-        everything a machine is going to decide, and the only question left is the decision.
-        """
+        """A green review verdict parks the card; it does not merge it."""
         ref = task["ref"]
         # The verdict is recorded before the gate runs: it is a fact about the head pair of this
         # round and stays true even when the mechanical re-check bounces the card back afterwards.
@@ -6763,9 +6130,8 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         """The only way a substantive verdict leaves Validate.
 
-        The order is the red transition's order, and for the same reason: the intent is on disk,
-        with the reason the card is moving, before anything observable moves. What differs is
-        what comes after the move: nothing. No merge, no worker, no reviewer. The card waits.
+        The red transition's order, for the same reason: the intent is on disk, with the reason the
+        card is moving, before anything observable moves. Nothing comes after the move — the card waits.
         """
         ref = task["ref"]
         # Re-pinned after the reviewer's pane was forgotten: the merge gate refuses a release for
@@ -6785,9 +6151,8 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         """Finish an open park from the board as it is now.
 
-        The move is keyed on the baseline the intent was opened against, so the tick that already
-        moved the card and the tick recovering from a crash before that move run the same call and
-        the card moves once. Nothing here re-reads the verdict: the park carries its own reason.
+        Keyed on the baseline the intent was opened against, so the tick that already moved the card
+        and the tick recovering from a crash before that move run the same call and it moves once.
         """
         continuation = record.worker_continuation
         self.writer.move(
@@ -6818,13 +6183,7 @@ class DispatcherRuntime:
         payload: dict[str, Any],
         attempt_id: str,
     ) -> dict[str, Any]:
-        """A parked card. Nothing here runs a head, reads a gate or merges anything.
-
-        The one input is the decision on the card, and until there is one the tick's whole job is
-        to leave the card alone: the worker of the round stays suspended and its workspace stays
-        owned, so a rework decision has something to go back to and a release has the reviewed
-        checkout to merge.
-        """
+        """A parked card. Nothing here runs a head, reads a gate or merges anything."""
         ref = task["ref"]
         record = records.get(ref)
         if record is None:
@@ -6867,12 +6226,7 @@ class DispatcherRuntime:
         return self._release_parked(task, record, records, payload, attempt_id, reason=reason)
 
     def _recorded_decision(self, task: dict[str, Any]) -> tuple[str, str]:
-        """The decision standing on this card since it entered Assessment, with its reason.
-
-        Read from the audit rather than from a comment baseline on the record: the audit is what
-        the board writer itself checks when it refuses a decision-less move, and it is still
-        there for a card whose dispatcher record was lost while it was parked.
-        """
+        """The decision standing on this card since it entered Assessment, with its reason."""
         decision = standing_decision(self.audit.events(task["ref"]))
         if not decision:
             return "", ""
@@ -6888,12 +6242,7 @@ class DispatcherRuntime:
         *,
         reason: str,
     ) -> dict[str, Any]:
-        """A rework decision releases the round the park was holding back.
-
-        From here it is the ordinary red transition, same intent, same move, same ownership
-        decision about the retained session, with the decision carried into the board move,
-        which is what makes the audit say who sent the card back and why.
-        """
+        """A rework decision releases the round the park was holding back."""
         ref = task["ref"]
         # A parked card should have no reviewer left; an adopted one may still carry the
         # identity of a pane nobody stopped. Either way nothing is woken beside a head the host
@@ -6925,12 +6274,7 @@ class DispatcherRuntime:
         *,
         reason: str,
     ) -> dict[str, Any]:
-        """A reslice decision ends the attempt and leaves the card for a fresh cut.
-
-        The heads go down confirmed before the card is blocked, because a card nobody is watching
-        is exactly the one that must not keep a writer in its checkout, while the workspace and the
-        branch stay, because the recut is expected to start from the work that is already there.
-        """
+        """A reslice decision ends the attempt and leaves the card for a fresh cut."""
         ref = task["ref"]
         unconfirmed = self._stop_worker_confirmed(record, ref, step="assessment", attempt_id=attempt_id)
         if unconfirmed is not None:
@@ -6971,12 +6315,7 @@ class DispatcherRuntime:
         outcome: str,
         decision: str = "",
     ) -> dict[str, Any]:
-        """A merge path that cannot finish leaves the card Blocked with its heads down.
-
-        An escaping error would leave the card where it is with a verdict or a decision already
-        standing, so the next tick retries the same doomed merge forever while the worker's
-        terminals stay up.
-        """
+        """A merge path that cannot finish leaves the card Blocked with its heads down."""
         ref = task["ref"]
         self.host.stop(record)
         self.writer.move(
@@ -7004,13 +6343,9 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         """The last red review a card with no observer gets: Blocked instead of another round.
 
-        The verdict is still recorded against the heads that earned it. It happened, and the
-        round's outcome is the same red whether or not it opened a rework. What does not happen
-        is the red transition: no board move to In progress, no continuation delivered, no
-        replacement head. `_block_merge_path` takes the heads down and moves the card, and it
-        stops the terminals of the workspace rather than removing it, so the checkout and the
-        branch are exactly where the third round left them. Coming back is one transition someone
-        makes on purpose, which is the whole point of the ceiling.
+        The verdict is still recorded against the heads that earned it; what does not happen is the red
+        transition. The workspace's terminals are stopped rather than the workspace removed, so the
+        checkout and the branch stay where the last round left them.
         """
         self._record_verdict_routing(task["ref"], record, "red")
         return self._block_merge_path(
@@ -7037,14 +6372,7 @@ class DispatcherRuntime:
         *,
         reason: str,
     ) -> dict[str, Any]:
-        """Perform a release decision: re-check the mechanical state, then merge.
-
-        The gate is asked again here rather than trusted from the park: a card can sit in
-        Assessment for as long as the decision takes, and the reviewed checkout is the only thing
-        that may land. A release that cannot be carried out goes to Blocked with the reason, the
-        same as any other merge path that cannot finish: leaving it parked would mean taking the
-        decision back down, and that machinery is a card of its own.
-        """
+        """Perform a release decision: re-check the mechanical state, then merge."""
         ref = task["ref"]
         kind, result, detail = self._merge_readiness(task, record)
         if kind == "transport":
@@ -7106,13 +6434,7 @@ class DispatcherRuntime:
         move_reason: str,
         decision: str = "",
     ) -> dict[str, Any]:
-        """Merge the reviewed branch, tear the round down and move the card to Done.
-
-        One linear release, whether a decision opened it or a card nobody watches merged on its
-        own verdict. A merge that cannot be carried out ends in Blocked with its reason.
-        Recovering a release that failed part-way through is deliberately not attempted here, so
-        no retry can publish a second time.
-        """
+        """Merge the reviewed branch, tear the round down and move the card to Done."""
         ref = task["ref"]
         try:
             self.host.complete_green(task, record)
@@ -7141,10 +6463,11 @@ class DispatcherRuntime:
         return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "to": "done"}
 
     def _review_drift(self, task: dict[str, Any], record: DispatcherRecord) -> str:
-        """Has the checkout moved off the commit the reviewer was pointed at? A verdict describes
-        one code state; merging a different one lands work nobody reviewed. Returns the operator
-        message for the bounce, or "" when the states match (or when neither can be read — an
-        unreadable workspace is the gate's failure to report, not a silent bounce)."""
+        """Has the checkout moved off the commit the reviewer was pointed at? A verdict describes one code
+        state; merging a different one lands work nobody reviewed. Returns the operator message for the
+        bounce, or "" when the states match, or when neither can be read — an unreadable workspace is
+        the gate's failure to report, not a silent bounce.
+        """
         if not record.review_commit:
             return ""
         current = self.host.head_commit(record)
@@ -7164,13 +6487,6 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         """The launch snapshot for a head the runtime has no launcher record of, or a marked
         minimal one when its profile can no longer be read.
-
-        Only an adopted card takes this path: its bring-up happened in a previous dispatcher life,
-        so the configuration is re-read now. A registry edited since must still leave a usable
-        attempt record rather than take the tick down: the point of the journal is that it keeps
-        working when `heads.toml` moves. `failover` comes from the record's kept preference, which
-        survives the dispatcher that wrote it, so an adopted card still says why its head is not
-        the one the card asks for.
         """
         try:
             return self.catalog.head_run(
@@ -7189,10 +6505,6 @@ class DispatcherRuntime:
 
     def open_worker_round(self, record: DispatcherRecord, *, round_number: int = 0) -> None:
         """Start the card's next worker round: stamp its number and drop the previous round's heads.
-
-        A round is one worker bring-up plus the review it earns. Claim opens round 1, each rework
-        bounce opens the next; a respawn inside a round continues that round. Nothing is snapshotted
-        here: the heads are recorded by the bring-ups themselves, once they are actually up.
         """
         record.attempt_round = round_number or (record.attempt_round + 1)
         record.worker_run = {}
@@ -7201,16 +6513,7 @@ class DispatcherRuntime:
     def record_worker_routing(
         self, task: dict[str, Any], record: DispatcherRecord, run: dict[str, Any] | None = None
     ) -> None:
-        """Record the worker head this bring-up just put up, as launched.
-
-        Called after every worker launch (claim, rework, respawn) and never before: the record must
-        name the process that is running, and `run` is the snapshot the launcher handed back for it.
-        Only an adopted card, whose launch happened in a previous dispatcher life, has no such
-        snapshot and falls back to reading the registry now. A relaunch onto the same configuration
-        is the same record and dedupes on its request id; one onto a different configuration appends
-        its own event and replaces the round's active head, so the verdict below reports the head
-        that actually earned it.
-        """
+        """Record the worker head this bring-up just put up, as launched."""
         ref = task["ref"]
         if not record.attempt_round:
             record.attempt_round = self._journal_round(ref) + 1
@@ -7223,12 +6526,7 @@ class DispatcherRuntime:
     def record_review_routing(
         self, task: dict[str, Any], record: DispatcherRecord, run: dict[str, Any] | None = None
     ) -> None:
-        """Record the reviewer head this bring-up just put up, as launched.
-
-        Same rule as the worker: `run` comes from the reviewer's own bring-up. A restart onto an
-        unchanged configuration is the same record; one onto a repinned profile is a second reviewer
-        for the round and says so.
-        """
+        """Record the reviewer head this bring-up just put up, as launched."""
         ref = task["ref"]
         if not record.attempt_round:
             record.attempt_round = self._journal_round(ref) + 1
@@ -7287,11 +6585,7 @@ class DispatcherRuntime:
         )
 
     def save_records(self, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> None:
-        """Flush the dispatcher records into the production state.
-
-        Public because the launch-intent contour (`dispatcher_launch`) persists through it: an
-        intent that is not on disk before the host call is not an intent at all.
-        """
+        """Flush the dispatcher records into the production state."""
         self.production_state.put_records(payload, records)
         payload["last_tick_at"] = now_rfc3339()
         self.production_state.save(payload)
@@ -7412,9 +6706,8 @@ def _gate_attestation_for_prompt(
 ) -> dict[str, object]:
     """Return a complete persisted receipt, never a guessed substitute.
 
-    A FakeHost or a legacy record may have only the old boolean ``gate_state``.  Treat that as
-    unavailable evidence instead of inventing a SHA: the exact binding is the safety property.
-    ``current_sha`` is deliberately only a consistency check for callers that already hold one.
+    A record carrying only the old boolean ``gate_state`` is unavailable evidence rather than an
+    invented SHA: the exact binding is the safety property.
     """
     source = candidate if isinstance(candidate, dict) else getattr(record, "gate_attestation", {})
     return _accepted_gate_receipt(source, current_sha)
@@ -7423,27 +6716,11 @@ def _gate_attestation_for_prompt(
 def _continuation_note(generation: int = 0, decision: str = "") -> str:
     """The discriminating tail of the continuation pointer: what a pointer cannot delegate.
 
-    What sent the card back and what the round owes are in the document, because a round typed
-    into a composer is the payload that gets swallowed there: `enter-accepted-without-turn` with
-    the text still in the pane, twice in one day on this path alone, each one costing a retained
-    worker's context and a fresh head. So the continuation is a pointer like every other prompt in
-    the product (`prompt_document`), and this is only the part of the line the document itself
-    cannot carry.
-
-    Two things cannot. The generation, because the retained conversation still has the previous
-    round's report command in its own scrollback: "read the updated TASK.md" is exactly the
-    instruction the incident worker followed while re-running the old command, and a number both
-    the agent and a human reading the pane can compare is what makes a replayed one visibly the
-    wrong one. And the standing of the decision, because a pointer that only names a document
-    leaves the retained conversation to rank that document's sections itself — the worker that did
-    so read the reviewer's findings as the instruction and reworked findings the observer had
-    rejected (secretary-1064). Naming the ranking here is not a second copy of the decision: the
-    decision's text stays in the document, under the heading this sentence points at.
-
-    This is a tail and not a line: it is handed to `NudgePointer.at_document`, which builds it into
-    the same nudge as the document's absolute path and checks the ceiling over both together. That
-    is why the wording is this terse — the path takes most of the budget, and a discriminator is
-    not what gets cut to fit. Whether it fits is that constructor's answer, not a guess here.
+    The generation, because the retained conversation still holds the previous round's report
+    command in its own scrollback and a number is what makes a replayed one visibly wrong; and the
+    standing of the decision, because a pointer that only names a document leaves the conversation
+    to rank that document's sections itself. This is a tail, not a line: `NudgePointer.at_document`
+    builds it into the nudge with the document's absolute path and checks the ceiling over both.
     """
     note = f"Generation {generation}: use its report command, not an earlier turn's."
     if decision.strip():
@@ -7452,13 +6729,7 @@ def _continuation_note(generation: int = 0, decision: str = "") -> str:
 
 
 def _delivery_evidence_json(carrier: Any, subject: str) -> dict[str, Any]:
-    """The bounded evidence a delivery verdict or failure carries, ready to persist.
-
-    A failure that reaches here without one is still a delivery that did not happen, so a minimal
-    record is synthesised for it rather than nothing being kept: the subject and the reason are
-    what tell a later reader which prompt this was and why it stopped. Prompt text is never in it —
-    the boundary records size and hash only.
-    """
+    """The bounded evidence a delivery verdict or failure carries, ready to persist."""
     evidence = getattr(carrier, "evidence", None)
     if hasattr(evidence, "to_json"):
         evidence = evidence.to_json()
@@ -7474,12 +6745,7 @@ def _delivery_evidence_json(carrier: Any, subject: str) -> dict[str, Any]:
 def _record_worker_delivery_evidence(
     record: DispatcherRecord, carrier: Any, *, failure: bool = False
 ) -> None:
-    """Persist a worker prompt receipt before recovery can replace its conversation.
-
-    Worker launch, rework and retained continuation recover on different paths, but the prompt
-    receipt is one fact.  Keeping it on the record makes the later path see body/submit acceptance
-    and turn confirmation instead of flattening a partially delivered prompt to a prose error.
-    """
+    """Persist a worker prompt receipt before recovery can replace its conversation."""
     evidence = (
         dict(carrier)
         if isinstance(carrier, dict) and carrier
@@ -7569,15 +6835,9 @@ def _continuation_no_progress_evidence(
 def _report_nudge_prompt(generation: int, reference: str) -> str:
     """What a worker that stopped working without reporting is told, once per round.
 
-    It opens no round and carries no instruction about the work: the round, its TASK.md and its
-    ownership are exactly what they were a moment before this was sent. The generation is spelled
-    out for the same reason the continuation prompt spells it out — the conversation's own scrollback
-    holds earlier rounds' commands, and a number is what makes a replayed one visibly wrong.
-
-    The last sentence is the point of the whole prompt. The incident this answers was a head that
-    had committed its work and gone back to its prompt believing it was finished, so a reminder that
-    only named the command would have been read as something already done. A commit, a push or a
-    green test run is not a report, and the pipeline is holding this card until the command runs.
+    It opens no round and carries no instruction about the work. The generation is spelled out
+    because the conversation's own scrollback holds earlier rounds' commands. The last sentence is
+    the point: a commit, a push or a green test run is not a report.
     """
     card = f" for {reference}" if reference else ""
     return (
@@ -7602,18 +6862,19 @@ def _watchdog_kind(role: str) -> str:
 
 
 def _body_file_path(kind: str, reference: str, review_round: int) -> str:
-    """Where a head writes its report/verdict body. Outside the workspace on purpose: a stray
-    file in the worktree makes `git status` dirty, and the done-report check rejects that. The
-    round is in the name because heads are told to leave the file behind: without it round 2
-    starts on top of round 1's body and a head that skips the write posts a stale verdict."""
+    """Where a head writes its report/verdict body. Outside the workspace on purpose: a stray file in
+    the worktree makes `git status` dirty, and the done-report check rejects that. The round is in
+    the name because heads are told to leave the file behind: without it round 2 starts on top of
+    round 1's body and a head that skips the write posts a stale verdict.
+    """
     root = os.environ.get("SECRETARY_DISPATCHER_BODY_DIR", "/tmp").rstrip("/") or "/tmp"
     return f"{root}/secretary-{kind}-{_request_token(reference)}-{_request_token(str(review_round))}.md"
 
 
 def _body_file_instructions(body_file: str) -> list[str]:
-    """Spell out the delivery path (secretary-637: a reviewer assembled the body inline with
-    mktemp/rm, the codex runtime refused the rm, and the card sat in validate for four hours
-    with no verdict). File first with a normal editing tool, then one plain command."""
+    """Spell out the delivery path: file first with a normal editing tool, then one plain command.
+    The codex runtime refuses an inline mktemp/rm assembly.
+    """
     return [
         f"Write the body to {body_file} with your file-writing tool,",
         "then run the command below verbatim. Do not assemble the body inside the shell command",

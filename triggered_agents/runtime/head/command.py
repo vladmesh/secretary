@@ -1,29 +1,21 @@
 """The one place a head's shell command is built: profile plus prompt input, out comes a command.
 
-A head is one model: `HeadSpec` says which head it is, the three operations say what happens to it,
-and this says what its pane actually runs. Until this module there were three answers to that last
-question — the dispatcher's (`secretary.dispatcher_launcher`), the pipeline registry's
-(`agents.pipeline.heads.render_command`) and the operator shell's (`secretary.session`) — which is
-three chances for a Codex head brought up by a tick to differ from the same profile brought up by
-the dispatcher. There is one now, and the registry hands it data.
-
 What this module owns and what it deliberately does not:
 
-  * **it owns the adapter shapes.** What a `claude`, a `codex` or a `hermes` invocation looks like,
-    which efforts each accepts, and which of them carry their prompt on the command line at all;
+  * **it owns the adapter shapes.** What a `claude`, a `codex` or a `hermes` invocation looks
+    like, which efforts each accepts, and which of them carry their prompt on the command line;
   * **it owns the role-env wrapper**, because a head's command is not the adapter's argv — it is
-    that argv under the role environment its launcher binds, and a head whose wrapper was chosen
-    somewhere else is a head whose environment nobody rendered;
+    that argv under the role environment its launcher binds;
   * **it does not own the registry.** `[profiles.*]`, `heads.yaml`, `load_registry` and the
-    fallback chains stay in `agents.pipeline.heads`; a profile arrives here as a mapping. The
-    dependency runs that way and only that way — this package is imported by the registry, never
-    the reverse, which is what keeps a head operation runnable without the pipeline package;
+    fallback chains stay in `agents.pipeline.heads`; a profile arrives here as a mapping. This
+    package is imported by the registry, never the reverse, which is what keeps a head operation
+    runnable without the pipeline package;
   * **it does not open a pane.** A rendered command is a string; `spawn` is what runs it.
 
-`prompt` is the whole of the launch-shape decision. A prompt given is a prompt on the command line
-for the adapters that can carry one; `prompt=None` renders the interactive shape, where the caller
-delivers the prompt into the live pane afterwards and `prompt_after_start` says so. A Codex head has
-only the interactive shape, so it ignores a prompt either way.
+`prompt` is the whole of the launch-shape decision. A prompt given is a prompt on the command
+line for the adapters that can carry one; `prompt=None` renders the interactive shape, where the
+caller delivers the prompt into the live pane afterwards and `prompt_after_start` says so. A
+Codex head has only the interactive shape, so it ignores a prompt either way.
 """
 from __future__ import annotations
 
@@ -99,14 +91,10 @@ class HeadCommand:
 def validate_launch_shape(profile_id: str, profile: Mapping[str, Any]) -> None:
     """Whether one profile describes a launch shape this module can actually render.
 
-    The rules live with the renderer because the renderer is what has to spell them: an adapter it
-    has no function for, an effort it has no flag for, a Codex launch mode it stopped producing.
-    Both readers of a registry run through this one — `validate_registry` for the whole table
-    before anything is launched off it, and `HeadSpec.from_profile` for a single profile — so a
-    head refused at load time and a head refused at bring-up are refused by the same rule.
-
-    Only the launch shape. Whether the resource a profile names exists, and whether its fallback
-    chain points anywhere, are facts about a whole table and stay with the registry.
+    Both readers of a registry run through this one — `validate_registry` for the whole table and
+    `HeadSpec.from_profile` for a single profile — so a head refused at load time and a head refused
+    at bring-up are refused by the same rule. Only the launch shape: whether the resource a profile
+    names exists, and whether its fallback chain points anywhere, stay with the registry.
     """
     adapter = _named(profile.get("adapter"), f"profile {profile_id!r} adapter")
     if adapter not in _ADAPTERS:
@@ -142,8 +130,7 @@ def _named(value: object, what: str) -> str:
     """A profile field that has to be a plain name before anything can be looked up by it.
 
     Checked before the membership tests above rather than left to them: a list where a name belongs
-    is unhashable, so `value not in table` would raise TypeError past every caller that only knows
-    how to handle this module's own error.
+    is unhashable, so `value not in table` would raise TypeError past every caller.
     """
     if not isinstance(value, str):
         raise HeadCommandError(f"{what} must be a name, got {type(value).__name__}")
@@ -162,12 +149,9 @@ def render_head_command(
     """The shell command that brings one head up, and how its prompt reaches it.
 
     `role` is what the command is wrapped for. An empty role renders the adapter command bare, for
-    the one caller that is not launching a head into a pane at all: `secretary shell`, which execs
-    it in an operator's own terminal under an environment that operator already has.
-
-    `workspace` is what a Codex head's directory-trust override names and is required for one.
-    `identity` is a head's own binding (an observer's sprint and generation) and only the secretary
-    entry point renders it.
+    the one caller that is not launching a head into a pane at all: `secretary shell`. `workspace` is
+    what a Codex head's directory-trust override names and is required for one. `identity` is a
+    head's own binding and only the secretary entry point renders it.
     """
     adapter = str(profile.get("adapter") or "")
     render = _ADAPTERS.get(adapter)
@@ -198,13 +182,10 @@ def wrap_role_command(
     The installation binding is written into the command itself because a head does not start as a
     child of its launcher: Orca creates the terminal, so nothing the launcher's unit exported is
     guaranteed to be in the environment `role_env exec` then runs in. Without it, a dispatcher
-    rendered for a non-default instance launches heads that read the home default's `runtime.env`
-    and route off that installation's heads.
+    rendered for a non-default instance launches heads that read the home default's `runtime.env`.
 
-    `identity` is rendered beside that binding rather than left to `runtime.env`, so the same
-    `UNIT_BOUND_ENV` rule that keeps the file from moving the installation keeps it from renaming
-    the caller. Only names the role's allowlist knows are rendered; anything else would be dropped
-    by `runtime_env` on the way in and is refused here instead of silently ignored.
+    `identity` is rendered beside that binding rather than left to `runtime.env`. Only names the
+    role's allowlist knows are rendered; anything else is refused here instead of silently ignored.
     """
     if binding not in ROLE_ENV_ENTRY_POINTS:
         known = ", ".join(ROLE_ENV_ENTRY_POINTS)
@@ -233,20 +214,16 @@ def with_pid_heartbeat(
     """Prefix a head command with an atomic versioned launch-identity heartbeat.
 
     `$$` inside a shell always names that shell's own pid, and the trailing `exec` replaces the
-    shell's process image with the head instead of forking it as a child, so the pid written here
-    stays the head's own pid for its whole life. That holds regardless of whether the local `sh`
-    would otherwise have folded a single trailing command into an exec on its own: the two
-    statements before `;` force a real shell to run first, which is what makes `$$` mean anything.
-    Orca still keeps the pane's own wrapping shell around once the head exits, but that shell is no
-    longer this pid, so a watchdog can tell the two apart.
+    shell's process image with the head instead of forking it, so the pid written here stays the
+    head's own for its whole life. The two statements before `;` force a real shell to run first,
+    which is what makes `$$` mean anything. Orca keeps the pane's wrapping shell around once the head
+    exits, but that shell is no longer this pid.
 
-    A wrapped head command starts with a leading `NAME=value` environment assignment, e.g.
-    `PYTHONPATH=... python3 -P -m secretary.role_env exec ...`. POSIX `exec` treats the word right
-    after it as the program to run, not an assignment, so `exec PYTHONPATH=... python3` fails to
-    find a program named `PYTHONPATH=...`. Routing the whole command through `env` instead keeps
-    `exec` a single-word invocation while `env` itself parses and applies any leading assignments
-    before it execs the real program in place, so the pid captured above still ends up belonging to
-    the head once `env` hands off to it.
+    A wrapped head command starts with a leading `NAME=value` assignment, and POSIX `exec` treats the
+    word right after it as the program to run, so `exec PYTHONPATH=... python3` fails. Routing the
+    whole command through `env` keeps `exec` a single-word invocation while `env` applies the leading
+    assignments before it execs the real program in place, so the captured pid still belongs to the
+    head.
     """
     # The terminal already puts its foreground head in a process group. Keeping that terminal
     # session matters for interactive heads: they need /dev/tty, resize signals and normal pane
@@ -347,22 +324,17 @@ def _render_codex_tui(
 ) -> str:
     """The command that brings one Codex head up. There is one shape and it is interactive.
 
-    Nothing selects it: no profile field, no card, no caller argument. The one-shot `codex exec`
-    head is gone (secretary-1173), so a launch mode carried by routing data or by a registry that
-    predates that has nothing left to select and is not consulted here at all. `prompt` is accepted
-    and never used for the same reason: the caller delivers it into the live pane once Orca reports
-    the TUI idle.
+    Nothing selects it: no profile field, no card, no caller argument. `prompt` is accepted and never
+    used — the caller delivers it into the live pane once Orca reports the TUI idle.
 
-    `--skip-git-repo-check` is an `exec`-only flag in Codex 0.143; the top-level TUI rejects it.
-    Pipeline worker/reviewer workspaces are git worktrees already, so the TUI path does not need it.
+    `--skip-git-repo-check` is an `exec`-only flag in Codex 0.143; the top-level TUI rejects it, and
+    pipeline workspaces are git worktrees already.
 
-    The trust overrides state the intent on the command line, for the provisioned worktree and, for
-    a linked worktree, the same repository root Codex derives from the common git dir. They do not
-    on their own answer the dialog: Codex 0.145 still shows it with them in place, which is why the
-    only thing that actually gets a pane past it is the `codex_preflight` write into the CODEX_HOME
-    this command names, before the pane is created. The paths come from that same preflight, so the
-    two can never name different directories. The head already runs with
-    `--dangerously-bypass-approvals-and-sandbox`, so this grants no extra rights.
+    The trust overrides state the intent on the command line, for the provisioned worktree and, for a
+    linked worktree, the same repository root Codex derives from the common git dir. They do not on
+    their own answer the dialog: Codex 0.145 still shows it with them in place, which is why the only
+    thing that gets a pane past it is the `codex_preflight` write into the CODEX_HOME this command
+    names, before the pane is created. The paths come from that same preflight.
     """
     del prompt
     if not workspace:

@@ -1,20 +1,14 @@
 """Checkpoint writer and pusher for the private instance repository.
 
-Contract: docs/RECOVERY.md, sections "Layout", "Cadence and RPO", "Writers",
-"Validation gate", "Failure and divergence", "Observability". The writer
-regenerates the normalized board and runs exports, validates the snapshot, and
-commits `state/board` and `state/runs` into the private repo. It runs at the end
-of a dispatcher tick under `tick_lock`, and also takes the instance repo writer
-lock so checkpoint writes cannot overlap a green-card publish against the same
-checkout. The pusher runs on the same tick but on its own 30-minute window, and
-`checkpoint_snapshot` turns both into the freshness view `status` and `doctor`
-print.
+Contract: docs/RECOVERY.md, sections "Layout", "Cadence and RPO", "Writers", "Validation gate",
+"Failure and divergence", "Observability". The writer regenerates the normalized board and runs
+exports, validates the snapshot, and commits `state/board` and `state/runs` into the private
+repo. It runs at the end of a dispatcher tick under `tick_lock`, and also takes the instance repo
+writer lock so checkpoint writes cannot overlap a green-card publish against the same checkout.
 
-Memory (`state/memory`) and knowledge (`state/knowledge`) are written by their
-own writers (`secretary.memory_write`, `secretary.knowledge_write`) directly
-into the same repo, so both are deliberately outside this pathspec: the writers
-share the repo but never the paths. `state_repo_lock` keeps their index
-operations from overlapping.
+Memory (`state/memory`) and knowledge (`state/knowledge`) are written by their own writers
+directly into the same repo, so both are deliberately outside this pathspec; `state_repo_lock`
+keeps their index operations from overlapping.
 """
 
 from __future__ import annotations
@@ -195,11 +189,8 @@ class CheckpointWriter:
     def _prevent_run_history_loss(self) -> None:
         """Never truncate or rewrite canonical history from a live export.
 
-        A recovered host used to restore the normalized ``state/runs`` data
-        plane but not the pipeline-worktree source that ``export_runs`` reads.
-        The first timer tick then committed an empty export.  Normal operation
-        appends history, so an empty replacement is an unsafe recovery signal,
-        not routine compaction.
+        Normal operation appends history, so an empty replacement is an unsafe recovery signal, not
+        routine compaction.
         """
         canonical = self.instance_dir / "state" / "runs" / "runs.ndjson"
         live = self.data_dir / "runs" / "runs.ndjson"
@@ -346,12 +337,7 @@ class CheckpointWriter:
 
 
 class _GitFailure(Exception):
-    """A git command the pusher needs did not run or did not succeed.
-
-    `output` keeps the whole stderr: git reports a rejected push on a different
-    line than the one that reads best in `status`, so the classifier needs all
-    of it while the message stays short.
-    """
+    """A git command the pusher needs did not run or did not succeed."""
 
     def __init__(self, message: str, output: str = "") -> None:
         super().__init__(message)
@@ -368,11 +354,9 @@ class PushOutcome:
 class CheckpointPusher:
     """Send the committed checkpoint to the remote, fast-forward only.
 
-    Fail-closed on the checkpoint, not on the work: a failed push leaves its
-    reason and a growing lag in state while the dispatcher keeps running, and
-    the next window retries. A remote holding commits the local repo does not
-    have stops the push and raises `remote diverged` for an operator; there is
-    no force-push path here by construction.
+    Fail-closed on the checkpoint, not on the work: a failed push leaves its reason and a growing lag
+    in state while the dispatcher keeps running. A remote holding commits the local repo does not
+    have stops the push and raises `remote diverged`; there is no force-push path here.
     """
 
     def __init__(
@@ -500,8 +484,7 @@ class CheckpointPusher:
     def _fast_forward(self, remote_head: str, head: str) -> bool:
         """True when the remote tip is already in the local history.
 
-        A tip the local repo has never even seen is divergence, not a missing
-        object: the remote moved on without us.
+        A tip the local repo has never even seen is divergence, not a missing object.
         """
         known = self._run(["cat-file", "-e", f"{remote_head}^{{commit}}"], timeout=120)
         # Git reports an object absent from this clone as either 1 or 128
@@ -554,12 +537,7 @@ def checkpoint_snapshot(
     push_state: dict[str, Any] | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
-    """Checkpoint freshness for `status` and `doctor`.
-
-    Contract: docs/RECOVERY.md, "Observability". Last commit, last successful
-    push, lag in minutes and commits, the gate's blocking reason and the
-    `remote diverged` alarm.
-    """
+    """Checkpoint freshness for `status` and `doctor`."""
     write = dict(write_state or {})
     push = dict(push_state or {})
     stamp = time.time() if now is None else float(now)
@@ -676,8 +654,8 @@ def _float_field(payload: dict[str, Any], key: str) -> float:
 def _drop_vanished(destination: Path, entries: tuple[str, ...], staged: tuple[str, ...]) -> None:
     """An optional entry the source no longer has must leave the checkpoint too.
 
-    Otherwise a once-written `events.ndjson` would stay in `state/board` forever and keep
-    getting committed as if it were current.
+    Otherwise a once-written `events.ndjson` would stay in `state/board` forever and keep getting
+    committed as if it were current.
     """
     for entry in entries:
         if entry in staged:

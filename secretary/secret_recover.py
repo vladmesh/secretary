@@ -1,21 +1,18 @@
 """Opening the secret store on a recovered installation.
 
-A recovery starts with a clone of the private instance repo and nothing else:
-the catalog and the sealed values are there, the installation key is not, because
-it is the one file the repo never carries. This module turns that clone plus a
-recovery phrase back into readable secrets and into the env files the catalog
-says they belong to, and, when there is no phrase, into a report of what stayed
-closed instead of a dead end.
+A recovery starts with a clone of the private instance repo and nothing else: the catalog and the
+sealed values are there, the installation key is not, because it is the one file the repo never
+carries. This module turns that clone plus a recovery phrase back into readable secrets and into
+the env files the catalog says they belong to.
 
 Two failure shapes are worth telling apart, so they are separate lists:
 
     locked   the ciphertext is here, the key is not; a phrase reopens it
     missing  the catalog names a secret whose envelope is not in the repo
 
-Only ids and open catalog metadata leave this module. A value never appears in a
-report, and a target file whose secrets are not all readable is not written at
-all: half an env file is a component that starts with a plausible-looking
-configuration and fails somewhere further away.
+Only ids and open catalog metadata leave this module. A value never appears in a report, and a
+target file whose secrets are not all readable is not written at all: half an env file is a
+component that starts with a plausible-looking configuration and fails somewhere further away.
 """
 
 from __future__ import annotations
@@ -42,12 +39,7 @@ from secretary.secret_store import (
 
 @dataclass(frozen=True)
 class SecretRecovery:
-    """What opening the store did, and what it could not do.
-
-    `locked` and `missing` hold one open metadata record per secret: the id, its
-    scope, the environment variable it materializes into and the file it belongs
-    to. No value, sealed or otherwise, is ever part of this.
-    """
+    """What opening the store did, and what it could not do."""
 
     store_present: bool
     unlocked: bool
@@ -124,14 +116,9 @@ def recover_secrets(
 ) -> SecretRecovery:
     """Open the store with the phrase, or report what stays closed without it.
 
-    A wrong phrase is rejected by the verifier before anything is written, so a
-    failed attempt leaves the clone exactly as it was. An installation whose key
-    file survived opens without a phrase at all: recovery is then the same
-    idempotent materialization a running host does.
-
-    `dry_run` still checks the phrase against the verifier, so the preview cannot
-    promise an opening that would not happen, but writes neither the key file nor
-    any env file.
+    A wrong phrase is rejected by the verifier before anything is written, so a failed attempt leaves
+    the clone exactly as it was. `dry_run` still checks the phrase against the verifier but writes
+    neither the key file nor any env file.
     """
     instance_dir = Path(instance_dir)
     if not is_initialized(instance_dir):
@@ -174,11 +161,9 @@ def recover_secrets(
 def _unlock(instance_dir: Path, phrase: str | None, *, dry_run: bool) -> bool:
     """Make the installation key usable, from the phrase if one was given.
 
-    The phrase is checked first, against the verifier and without touching a
-    file, so a wrong one fails the same way whether or not a key file is lying
-    around. A key file that already opens the store is then left alone: a second
-    recover with the same phrase has nothing to rebuild, and rewriting the file
-    would only move its mtime.
+    The phrase is checked first, against the verifier and without touching a file, so a wrong one
+    fails the same way whether or not a key file is lying around. A key file that already opens the
+    store is then left alone.
     """
     if phrase is not None:
         verify_recovery_phrase(instance_dir, phrase)

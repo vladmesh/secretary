@@ -1,9 +1,4 @@
-"""Durable Product and Issue records on the existing Pipeline board.
-
-Products and issues use ordinary Kanboard rows with explicit record metadata.  This keeps the
-board, its checkpoint export and its append-only audit as the only durable backend; products are
-not mirrored into a local registry.
-"""
+"""Durable Product and Issue records on the existing Pipeline board."""
 from __future__ import annotations
 
 import fcntl
@@ -54,13 +49,7 @@ class ProductIssueValidationError(ValueError):
 def validate_product_issue_records(
     records: list[dict[str, Any]], *, registered_project_ids: set[str] | None = None
 ) -> None:
-    """Validate typed board records without classifying any legacy cards.
-
-    Checkpoint has the instance project registry and passes it here. Restore is also
-    used as a standalone recovery primitive, so it always validates the durable
-    shape and cross-record Product references, while its callers may additionally
-    supply the registry when it is available.
-    """
+    """Validate typed board records without classifying any legacy cards."""
     products: dict[str, dict[str, Any]] = {}
     issues: list[tuple[dict[str, Any], dict[str, str]]] = []
     for record in records:
@@ -154,8 +143,8 @@ def registered_projects(instance: str | Path) -> set[str]:
 class ProductIssueTransaction:
     """The private staged journal for Product/Issue writes.
 
-    It is deliberately separate from TaskAudit's generic pending records.  Generic task
-    reconciliation must not turn a partially applied Product/Issue intent into an audit event.
+    Deliberately separate from TaskAudit's generic pending records: generic task reconciliation must
+    not turn a partially applied Product/Issue intent into an audit event.
     """
 
     def __init__(self, data_dir: str | Path, audit: TaskAudit) -> None:
@@ -345,12 +334,7 @@ class ProductIssueTransaction:
         return document
 
     def adopt(self, path: str | Path) -> dict[str, Any]:
-        """Take a transaction document that lives outside the journal back into it.
-
-        This is the supported way back for a document an operator had to carry out of the
-        journal by hand: the file is validated as a transaction of this journal, filed under
-        its own request id and removed from where it was, so `retry` and `discard` can see it.
-        """
+        """Take a transaction document that lives outside the journal back into it."""
         source = Path(path).expanduser()
         try:
             document = json.loads(source.read_text(encoding="utf-8"))
@@ -392,8 +376,7 @@ class ProductIssueTransaction:
 def ensure_swimlane(client: KanboardClient, board_id: int, name: str) -> int:
     """The id of the board's active swimlane called ``name``, created when the board has none.
 
-    The name is matched exactly, so a lane is the same lane for every caller and no near-name
-    ever stands in for it.  Kanboard answers an ``addSwimlane`` for a name the board already
+    The name is matched exactly. Kanboard answers an ``addSwimlane`` for a name the board already
     carries with a false-ish reply rather than the existing id, so a refused create is read back
     once: a lane another writer added between the two calls is that answer, and only a board that
     still has no such lane is an error.
@@ -427,12 +410,7 @@ def _named_swimlane(client: KanboardClient, board_id: int, name: str) -> int | N
 
 
 def product_lane_name(product: str) -> str:
-    """The name of the lane a Product or Issue row belongs in: its product id.
-
-    This is the naming half of the product lane rule, split out so a reader that must not write -
-    the reconcile plan - names the same lane the writer would create, instead of restating the
-    rule in a second place.
-    """
+    """The name of the lane a Product or Issue row belongs in: its product id."""
     identifier = str(product).removeprefix("product:").strip()
     if not identifier:
         raise TaskError("validation", "a Product/Issue row needs its product to choose a lane", 2)
@@ -442,16 +420,11 @@ def product_lane_name(product: str) -> str:
 def product_swimlane_id(client: KanboardClient, board_id: int, product: str) -> int:
     """The lane a Product or Issue row belongs in: the one named after its product.
 
-    A record belongs to its product, so the lane is the active swimlane whose name is exactly the
-    product id, created on demand when the board has none.  Nothing about the board takes part in
-    the choice - not the order of the lanes, not which lane happens to be first, not whether a
-    `Default swimlane` exists - so every writer, every retry and every restore of the same record
-    choose the same lane.  Project bindings take no part either, which is why a product bound to
-    several projects (`codegen`, `secretary`) is not ambiguous here: `issue_product`, and for a
-    Product its own id, stay the single source of truth about what a record belongs to.
+    Nothing about the board takes part in the choice — not the order of the lanes, not which lane
+    happens to be first, not whether a `Default swimlane` exists — so every writer, every retry and
+    every restore of the same record choose the same lane. Project bindings take no part either.
 
-    This is the one implementation of that rule; both secretarial writers call it, and the
-    reconcile command that repairs an existing row's placement takes its destination from here.
+    This is the one implementation of that rule; both secretarial writers call it.
     """
     return ensure_swimlane(client, board_id, product_lane_name(product))
 
@@ -810,13 +783,7 @@ class ProductIssueStore:
         return self.show_issue(str(document["event"]["ref"]))
 
     def _backend_trace(self, document: dict[str, Any]) -> str:
-        """What this staged transaction has already written, as an operator-readable phrase.
-
-        Every transaction writes its own recognisable mark first: a create writes the row (with
-        the request marker in the description), a priority or close change writes the comment
-        that carries the request id.  An empty answer therefore means the backend has not been
-        touched by this request at all.
-        """
+        """What this staged transaction has already written, as an operator-readable phrase."""
         event = document.get("event") if isinstance(document.get("event"), dict) else {}
         reference = str(event.get("ref") or "")
         if document.get("kind") in {"product_created", "issue_created"}:

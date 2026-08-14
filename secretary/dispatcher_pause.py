@@ -1,25 +1,21 @@
 """The production dispatcher's pause flag, and the legacy flag it mirrors itself into.
 
-`ProductionPause` is the working pause. It lives next to the production dispatcher's state in the
-live data plane (`<data_dir>/dispatcher/pause.json`), because that is the file the tick reads on
-every run. The legacy flag under the pipeline worktree is still read by the background roles
-(steward/curator/retro, `triggered_agents/runtime/dispatch.py`), so a pause mirrors itself there
-and a resume removes that mirror again — but only when the pause wrote it, never a file that was
-already on disk.
+`ProductionPause` is the working pause, next to the production dispatcher's state in the live
+data plane (`<data_dir>/dispatcher/pause.json`). The legacy flag under the pipeline worktree is
+still read by the background roles, so a pause mirrors itself there and a resume removes that
+mirror again — but only when the pause wrote it, never a file that was already on disk.
 
-Semantics come from the legacy `dispatcher.pause()` docstring and are unchanged:
+Semantics:
 
   drain  — no new claims and no background-role dispatch; cards already in flight keep riding
            their cycle to the end.
   freeze — drain, plus the live worker and reviewer heads are stopped and the tick advances
-           nothing at all. Workspaces and worktrees are never removed, so branches and
-           uncommitted work stay exactly as the heads left them.
+           nothing at all. Workspaces and worktrees are never removed.
 
-A freeze set by automation also carries the legacy TTL: an automation-owned freeze that outlives
-`TA_HARD_PAUSE_AUTO_RESUME_TTL_S` is resumed by the next tick. `secretary backup create` freezes the
-pipeline and resumes in its `finally`, so a backup killed before that block would otherwise leave the
-dispatcher frozen forever, with stopped heads and no watchdog recovery. A freeze held by a human is
-a maintenance window and never expires.
+A freeze set by automation carries a TTL and is resumed by the next tick once it outlives
+`TA_HARD_PAUSE_AUTO_RESUME_TTL_S`, because `secretary backup create` resumes in its `finally` and
+a backup killed before that block would otherwise leave the dispatcher frozen forever. A freeze
+held by a human is a maintenance window and never expires.
 """
 
 from __future__ import annotations
@@ -47,11 +43,7 @@ def normalize_pause_mode(mode: str | None) -> str:
 
 
 def auto_resume_ttl_seconds() -> int:
-    """TTL for an automation-owned freeze, 0 when auto-resume is turned off.
-
-    Read from the env on every call, and from the same variable the legacy pause used, so one unit
-    override still covers both flags while the legacy contour is around.
-    """
+    """TTL for an automation-owned freeze, 0 when auto-resume is turned off."""
     try:
         ttl = int(os.environ.get("TA_HARD_PAUSE_AUTO_RESUME_TTL_S", str(AUTO_RESUME_TTL_DEFAULT)))
     except ValueError:
@@ -68,8 +60,8 @@ def auto_resume_actors() -> tuple[str, ...]:
 def auto_resume_status(state: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
     """Whether this pause state is an automation-owned freeze that has outlived its TTL.
 
-    A freeze without a readable `since` counts as expired rather than eternal: the pause is
-    automation-owned either way, and the failure mode being fixed here is a freeze nobody lifts.
+    A freeze without a readable `since` counts as expired rather than eternal: the failure mode being
+    fixed here is a freeze nobody lifts.
     """
     ttl = auto_resume_ttl_seconds()
     out: dict[str, Any] = {"eligible": False, "ttl_seconds": ttl, "reason": "not-freeze"}
@@ -123,9 +115,8 @@ class ProductionPause:
     def load(self) -> dict[str, Any]:
         """State, or {} when the pause is not set.
 
-        A corrupt file is read as a freeze. Continuing a dispatch while an operator's stop state
-        cannot be read is worse than deferring it until the file is repaired. `summary()` and
-        `status()` carry an explicit warning so the condition is visible in the tick log.
+        A corrupt file is read as a freeze: continuing a dispatch while an operator's stop state cannot
+        be read is worse than deferring it. `summary()` and `status()` carry an explicit warning.
         """
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
@@ -222,9 +213,8 @@ def on_resume_text(mode: str, stopped_worker: list[str], stopped_reviewer: list[
 def legacy_mirror_path() -> Path:
     """Where a mirrored legacy flag is written.
 
-    Resolved the way the background roles resolve their own state dir
-    (`triggered_agents/runtime/shared_state.resolve_pipeline_state_dir`), not the wider candidate
-    list the probe reads: a mirror written anywhere else is a file nobody checks.
+    Resolved the way the background roles resolve their own state dir, not the wider candidate list
+    the probe reads: a mirror written anywhere else is a file nobody checks.
     """
     explicit = os.environ.get("SECRETARY_LEGACY_PAUSE_FILE")
     if explicit:
@@ -240,10 +230,9 @@ def legacy_mirror_path() -> Path:
 def write_legacy_mirror(*, mode: str, actor: str, reason: str, since: str) -> dict[str, Any]:
     """Mirror the pause into the legacy flag so steward/curator/retro keep shedding.
 
-    Best effort by design: the product dispatcher is paused by its own file, and a legacy path that
-    cannot be written must not fail the pause. The result records what happened either way, and an
-    existing legacy flag is never overwritten — someone else owns it, and clearing it on resume
-    would lift a pause this command did not set.
+    Best effort by design: a legacy path that cannot be written must not fail the pause. An existing
+    legacy flag is never overwritten — someone else owns it, and clearing it on resume would lift a
+    pause this command did not set.
     """
     path = legacy_mirror_path()
     out: dict[str, Any] = {"path": str(path), "written": False}

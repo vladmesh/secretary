@@ -1,17 +1,13 @@
 """Desired host state and read-only host inventory.
 
-This compares what an instance config describes against what is actually on the
-host across three resource kinds: project repos, systemd units and Orca repo
-registrations. Nothing here changes the host, and no source reads config values
-or secrets: they only list resource *names*, so env files and secret material
-are never opened.
+Compares what an instance config describes against what is on the host across three resource
+kinds: project repos, systemd units and Orca repo registrations. Nothing here changes the host,
+and no source reads config values or secrets — only resource *names*.
 
-Desired state has two inputs, both of them declarative. The instance config says
-which components this installation runs and which foreign names under its unit
-prefix it does not own; the product's own ``packaging/systemd`` directory says
-what those components actually are. Because a unit file's content is part of the
-desired state, its digest rides in the planned resource's spec, so editing a
-shipped unit shows up as an ``update`` on the next plan.
+Desired state has two declarative inputs: the instance config says which components this
+installation runs and which foreign names under its unit prefix it does not own; the product's
+``packaging/systemd`` directory says what those components are. A unit file's content is part of
+the desired state, so its digest rides in the planned resource's spec.
 """
 
 from __future__ import annotations
@@ -85,8 +81,7 @@ def default_packaging_root() -> Path:
     """Where the product this host is configured with keeps its shipped units.
 
     Not this checkout's own directory: a plan or a doctor run describes an installation, and the
-    units that installation runs come from the checkout it was installed from. Callers that know
-    which checkout that is — upgrade, and doctor through the recorded pin — name it instead.
+    units that installation runs come from the checkout it was installed from.
     """
     return packaging_root(configured_product_root())
 
@@ -137,9 +132,8 @@ def render_systemd_unit(template: bytes, layout: SystemdLayout) -> bytes:
 def load_packaged_units(root: Path, prefix: str, layout: SystemdLayout | None = None) -> list[PackagedUnit]:
     """Read the shipped unit catalogue. A unit outside the prefix is not ours.
 
-    Returns an empty catalogue when the directory is absent or unreadable rather
-    than raising: callers that need the units to exist say so themselves, and a
-    plan built without them must not crash a read-only doctor run.
+    Returns an empty catalogue when the directory is absent or unreadable rather than raising, so a
+    read-only doctor run does not crash on a plan built without them.
     """
     if not prefix:
         return []
@@ -176,13 +170,7 @@ def load_packaged_units(root: Path, prefix: str, layout: SystemdLayout | None = 
 
 
 def component_enabled(host: dict[str, Any], component: str) -> bool:
-    """Whether this installation runs a shipped component. Absent means yes.
-
-    The product ships a component because it is part of the runtime; an
-    installation opts out explicitly. That keeps a fresh install complete by
-    default and makes a deliberately shed component a config fact rather than
-    an undocumented gap on the host.
-    """
+    """Whether this installation runs a shipped component. Absent means yes."""
     components = host.get("components") if isinstance(host, dict) else None
     if not isinstance(components, dict):
         return True
@@ -207,13 +195,10 @@ def build_plan(
 ) -> list[PlannedResource]:
     """Render the supported host surface without consulting the live host.
 
-    Heads produce systemd services. Every enabled component of the shipped unit
-    catalogue produces its unit. Project bindings with an explicit
-    ``orca_binding`` produce Orca registrations, whose names are explicit
-    binding data. This is independent from ``enabled``: that flag gates task
-    routing after onboarding, while an inventory-only project may still need a
-    durable Orca registration. The host block only supplies a namespace boundary
-    and the component opt-outs; it never carries a second list of resources.
+    Heads produce systemd services; every enabled component of the shipped unit catalogue produces
+    its unit; project bindings with an explicit ``orca_binding`` produce Orca registrations. That is
+    independent from ``enabled``, which gates task routing after onboarding: an inventory-only project
+    may still need a durable Orca registration.
     """
     host = instance.get("host", {}) if isinstance(instance, dict) else {}
     prefix = host.get("unit_prefix", "") if isinstance(host, dict) else ""
@@ -260,12 +245,7 @@ def build_plan(
 
 
 def _production_dispatcher_units(prefix: str, digests: dict[str, str]) -> list[PlannedResource]:
-    """The dispatcher pair keeps its own logical ids and semantic spec.
-
-    doctor reads these ids to tell an operator that the tick's own units drifted,
-    so they are not folded into the generic packaged-component ids. The shipped
-    file's digest still rides along, so editing the unit is an update here too.
-    """
+    """The dispatcher pair keeps its own logical ids and semantic spec."""
     service = f"{prefix}dispatcher-production.service"
     timer = f"{prefix}dispatcher-production.timer"
     service_spec = {
@@ -367,9 +347,8 @@ def load_managed_manifest(path: Path) -> list[PlannedResource]:
 def strict_manifest(path: Path) -> tuple[list[PlannedResource], str]:
     """Load state for a write path. Unlike plan, a writer must fail closed.
 
-    Returns ``(resources, reason)``; a non-empty reason means the manifest could
-    not be trusted, and the caller must refuse to write rather than treat the
-    unreadable state as "we own nothing".
+    Returns ``(resources, reason)``; a non-empty reason means the manifest could not be trusted, and
+    the caller must refuse to write rather than treat the unreadable state as "we own nothing".
     """
     if path.is_symlink():
         return [], "managed manifest must not be a symlink"
@@ -515,10 +494,8 @@ class KindDiff:
 class CollectResult:
     """What a source found on the host, plus why any kind could not be read.
 
-    ``errors`` maps a kind ("projects" / "units" / "orca repos") to a reason
-    when that kind could not be inspected. An unreadable kind is never reported
-    as an empty host: doctor marks it unavailable instead of comparing against
-    an empty set, so "could not inspect" never masquerades as "nothing there".
+    An unreadable kind is never reported as an empty host: doctor marks it unavailable instead of
+    comparing against an empty set, so "could not inspect" never masquerades as "nothing there".
     """
 
     inventory: HostInventory
@@ -526,11 +503,7 @@ class CollectResult:
 
 
 def _project_name(binding: dict[str, Any]) -> str:
-    """Pick the host-facing name of a project binding.
-
-    A repo given as a path maps to a directory (and Orca repo) named after its
-    last path segment; otherwise the stable ``id`` is used.
-    """
+    """Pick the host-facing name of a project binding."""
     repo = binding.get("repo")
     if isinstance(repo, str) and "/" in repo:
         name = PurePosixPath(repo).name
@@ -655,10 +628,9 @@ def inventory(expected: Expectations, actual: HostInventory) -> dict[str, KindDi
 def _orca_repo_diff(expected: Expectations, actual: HostInventory) -> KindDiff:
     """Compare registered repos, admitting the dispatcher's lazy repository by path.
 
-    The dispatcher creates its observer root only when an observer is first
-    needed, so absence is healthy. Once it exists, its configured path proves
-    that this installation owns it; another repo merely reusing the display
-    name remains unmanaged.
+    The dispatcher creates its observer root only when an observer is first needed, so absence is
+    healthy. Once it exists, its configured path proves that this installation owns it; another repo
+    merely reusing the display name remains unmanaged.
     """
     matched = expected.orca_repos & actual.orca_repos
     for name, path in expected.lazy_orca_repos.items():
@@ -693,15 +665,12 @@ class FixtureHostSource(HostSource):
 
     Layout under ``root``::
 
-        projects/<name>/     one directory per project repo on the fixture host
-        units.txt            one systemd unit name per line
-        orca-repos.txt       one Orca repo name per line
+            projects/<name>/     one directory per project repo on the fixture host
+            units.txt            one systemd unit name per line
+            orca-repos.txt       one Orca repo name per line
 
-    Reads only. The root itself must exist: a missing root is an inspection
-    failure (nothing was read), so every kind is marked unavailable rather than
-    reported as an empty host. Within an existing root a missing per-kind file
-    means an empty set, since the fixture is authored deliberately and a file's
-    absence is not an inspection failure.
+    Reads only. A missing root is an inspection failure, so every kind is marked unavailable; within
+    an existing root a missing per-kind file means an empty set.
     """
 
     def __init__(self, root: Path):
@@ -783,10 +752,9 @@ class FixtureHostSource(HostSource):
 class _CmdResult:
     """Outcome of one host probe.
 
-    ``ran`` is False only when the process could not execute at all (missing
-    binary, timeout, OS error); ``reason`` is set then. When ``ran`` is True the
-    caller interprets ``returncode``/``stderr`` itself, because a non-zero exit
-    is not always a failure (``systemctl list-unit-files`` exits 1 on no match).
+    ``ran`` is False only when the process could not execute at all; ``reason`` is set then. When
+    ``ran`` is True the caller interprets ``returncode``/``stderr`` itself, because a non-zero exit is
+    not always a failure (``systemctl list-unit-files`` exits 1 on no match).
     """
 
     ran: bool
@@ -799,10 +767,8 @@ class _CmdResult:
 class LiveHostSource(HostSource):
     """The real host: the projects directory, systemd and Orca, all read-only.
 
-    Inspecting a kind can fail: a tool is missing, exits non-zero, hangs, or a
-    directory is unreadable. Such a failure is recorded per kind in the
-    CollectResult rather than silently turning into an empty set, so doctor can
-    tell the operator "could not inspect" instead of a false "nothing there".
+    A failure to inspect a kind is recorded per kind in the CollectResult rather than silently
+    turning into an empty set, so doctor can say "could not inspect" instead of a false "nothing".
     """
 
     # Cap each host probe so a hung systemctl or orca cannot wedge doctor.
@@ -899,9 +865,8 @@ class LiveHostSource(HostSource):
     def _systemctl_error(result: _CmdResult) -> str:
         """Real failure vs. an empty match.
 
-        ``list-unit-files`` exits 1 with no stderr when a pattern matches no
-        units. That is a legitimately empty result, not an inspection failure,
-        so only a failed exec or a non-empty stderr counts as an error.
+        ``list-unit-files`` exits 1 with no stderr when a pattern matches no units, which is a
+        legitimately empty result, so only a failed exec or a non-empty stderr counts as an error.
         """
         if not result.ran:
             return result.reason
@@ -933,12 +898,7 @@ class LiveHostSource(HostSource):
         return names, paths, ""
 
     def orca_repo_paths(self) -> tuple[dict[str, str], str]:
-        """Return Orca registration name -> normalized repo path.
-
-        Adoption needs stronger evidence than the name-only inventory used by
-        ``plan``. JSON output lets us compare the registered path with the
-        explicit binding without reading project files or secrets.
-        """
+        """Return Orca registration name -> normalized repo path."""
         result = self._run(self._orca_command(["orca", "repo", "list", "--json"]))
         if not result.ran:
             return {}, result.reason
