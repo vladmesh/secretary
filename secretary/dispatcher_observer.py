@@ -1,9 +1,8 @@
 """Observer-head lifecycle: one head per open sprint, reconciled by the production tick.
 
-An observer is not the interactive secretary session. It is a dispatcher-launched role beside
-worker and reviewer: its own head profile, its own workspace, its own terminal handle and the
-role-scoped environment `role_env` hands a dispatcher-launched head. It never claims a card and
-never appears in a card record, so the per-project claim gate and the card cycle are untouched.
+An observer is a dispatcher-launched role beside worker and reviewer, with its own head profile,
+workspace, terminal handle and role-scoped environment. It never claims a card and never appears
+in a card record, so the per-project claim gate and the card cycle are untouched.
 
 The tick reconciles the observer records against the sprint board on every run:
 
@@ -12,43 +11,31 @@ The tick reconciles the observer records against the sprint board on every run:
   open sprint, no record   -> launch
   closed or gone sprint    -> stop the head and drop the record
 
-A bring-up that fails once its terminal is already up is not a headless sprint either. The host
-hands the handle back with the failure (`ObserverLaunchAborted`), the record keeps it marked as an
-abandoned handle, and the next tick closes that terminal before it opens the replacement. A live
-pid behind an abandoned handle does not read as a working observer: that head never got its sprint.
+A bring-up that fails once its terminal is already up is not a headless sprint: the host hands
+the handle back with the failure (`ObserverLaunchAborted`), the record keeps it marked as an
+abandoned handle, and the next tick closes that terminal before opening the replacement. A stop
+the host refused is not a stop either: the record stays `stop-pending` and `observer_stopped` is
+written only once the terminal is actually gone.
 
-A stop the host refused is not a stop. The record then stays as `stop-pending` with its terminal
-handle, the tick retries it, and `observer_stopped` is written only once the terminal is actually
-gone: dropping the record on a failed stop would leave a live head with nothing pointing at it.
+Every lifecycle event is staged on disk before the host call it describes and committed to the
+log after it, the same order `TaskWriter` uses for a card. Storage that refuses the commit does
+not propagate: the staged copy is what `TaskAudit.reconcile()` repairs later, the record is
+written regardless, and the outcome says `audit: pending`.
 
-Every lifecycle event is staged on disk before the host call it describes and committed to the log
-after it, the same order `TaskWriter` uses for a card. Storage that refuses the commit does not
-propagate: the staged copy is what `TaskAudit.reconcile()` repairs later, the record is written
-regardless, and the outcome says `audit: pending`. An exception escaping here instead would leave a
-terminal that is running with no record pointing at it, and the next tick would open a second head
-on the same sprint.
+The record itself is fixed the same way. A launch intent — sprint, generation, head, attempt,
+workspace and pid file — is written into the production state and flushed to disk *before*
+`prepare_observer` is called, so state that cannot be written costs the sprint a tick rather
+than putting a second head on it, and a tick that dies mid-launch leaves an intent the next tick
+resolves from the pid file.
 
-The record itself is fixed the same way, and for the same reason. A launch intent — sprint,
-generation, head, attempt, the workspace and pid file the head will get — is written into the
-production state and flushed to disk *before* `prepare_observer` is called, not with the rest of the
-tick at the end of it. State that cannot be written means no head is launched at all, so a failing
-data plane costs the sprint a tick rather than putting a second head on it; a tick that dies between
-the host call and its own end leaves the intent behind, and the next tick resolves it from the pid
-file: a live pid is adopted as the head of that sprint (its handle is gone, so the stop goes by
-workspace), a pid that is not there yet waits out the same grace window every fresh head gets, and
-a dead one is relaunched after the workspace's terminals are closed.
+Liveness is the same pid heartbeat the worker and reviewer get. A pid file that does not exist
+yet is not evidence of death: an unknown pid counts as alive for a short grace window.
 
-Liveness is the same pid heartbeat the worker and reviewer get (`head_process_status` over
-`pid_file_path`). A pid file that does not exist yet is not evidence of death: a head that has just
-been launched has not written it, so an unknown pid counts as alive for a short grace window and as
-dead afterwards.
-
-The acknowledgement deadline says how long one sent delivery may stay unacknowledged before it is
-sent again; it is armed by the delivery and it is never compared against the age of the event. A
+The acknowledgement deadline says how long one sent delivery may stay unacknowledged before it
+is sent again; it is armed by the delivery and never compared against the age of the event. A
 current Codex HeadRun uses its own persisted provider cursor while the pane is non-idle: fresh
-progress outranks `tui-idle`, and unchanged admitted progress reaches the bounded identity-fenced
-replacement path. The legacy turn ceiling remains only for observers which have no attested provider
-source. An observer seen idle with its batch still unacknowledged redelivers on that tick.
+progress outranks `tui-idle`. The legacy turn ceiling remains only for observers with no
+attested provider source.
 """
 
 from __future__ import annotations
@@ -150,9 +137,8 @@ class ObserverLaunchAborted(HostError):
     """A bring-up that failed after the head's terminal had already been created.
 
     An empty `handle` means nothing of that head is left running. A non-empty one means the host
-    could not close the terminal it opened, so the head has to be assumed alive: the caller keeps
-    the handle in the record and retries the stop. Dropping it would leave a running head with
-    nothing pointing at it, and the next tick would put a second head on the same sprint.
+    could not close the terminal it opened, so the head is assumed alive: the caller keeps the
+    handle in the record and retries the stop.
     """
 
     def __init__(
@@ -190,9 +176,8 @@ class DeliveryStage(str, Enum):
 class ObserverWakeLiveness(WorkerContinuationLiveness):
     """The exact-run provider-progress episode for one observer event batch.
 
-    The state shape is deliberately shared with worker/reviewer continuation liveness.  It records
-    no provider text and never gets rebound from a workspace scan: a new observer HeadRun opens a
-    new episode, while a recovered episode accepts only the binding it already names.
+    Records no provider text and is never rebound from a workspace scan: a new observer HeadRun
+    opens a new episode, while a recovered episode accepts only the binding it already names.
     """
 
 
@@ -200,9 +185,8 @@ class ObserverWakeLiveness(WorkerContinuationLiveness):
 class ObserverDelivery:
     """One causal delivery cursor, independent of observer process lifecycle.
 
-    `through_event` is fixed before a terminal send or replacement launch.  A resume can only
-    acknowledge that fixed batch after the cursor that was present when its intent was written.
-    Events appended after the intent are deliberately left for the next batch.
+    `through_event` is fixed before a terminal send or replacement launch, and events appended after
+    the intent are deliberately left for the next batch.
     """
 
     stage: DeliveryStage = DeliveryStage.IDLE
@@ -486,9 +470,8 @@ def put_observers(payload: dict[str, Any], observers: dict[str, ObserverRecord])
 def observer_alive(record: ObserverRecord, *, now: float | None = None) -> dict[str, Any]:
     """Whether the head recorded here is still running, and on what evidence.
 
-    `known: False` means the pid file is not readable — a head that has just been launched has not
-    written its pid yet. That is not death, so it reads as alive until the grace window the
-    dispatcher already uses for a pane that has produced no output at all has passed.
+    `known: False` means the pid file is not readable, which a head that has just been launched has
+    not written yet. That is not death, so it reads as alive until the grace window has passed.
     """
     now = time.time() if now is None else now
     status = head_run_process_status(
@@ -572,12 +555,9 @@ def reconcile_observers(
 ) -> list[dict[str, Any]]:
     """Bring the observer heads in line with the open sprints. Returns the tick's outcomes.
 
-    Nothing at all happens when there is neither an open sprint nor a tracked observer: no record
-    is written, no head call is made, and `payload` is left exactly as it was.
-
-    A fenced sprint is still reconciled here.  The fence stops the sprint's *cards*, and it clears
-    only once an observer has been adopted — which is a launch, which is this pass.  Excluding it
-    from here too would fence the sprint permanently.
+    Nothing happens when there is neither an open sprint nor a tracked observer. A fenced sprint is
+    still reconciled: the fence stops the sprint's *cards* and clears only once an observer has been
+    adopted, which is this pass, so excluding it would fence the sprint permanently.
     """
     observers = load_observers(payload)
     try:
@@ -866,8 +846,7 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
     """Read semantic sprint work and acknowledge only the active delivery batch.
 
     A resume acknowledges only when its audit payload carries the active delivery's immutable
-    marker. That prevents an older turn, which may complete after a newer intent is persisted,
-    from crediting work it never received.
+    marker, so an older turn cannot credit work it never received.
     """
     try:
         # Observer reconciliation needs cards and the event stream, but not the independently
@@ -994,10 +973,8 @@ def _acknowledge_delivery_from_resume(
 ) -> None:
     """Advance only when the active batch's marker was written by its observer.
 
-    A refused delivery counts here too. The marker only exists in a prompt that reached the head,
-    so a resume naming it is proof of the turn whatever the dispatcher managed to observe of the
-    send: a wake refused after the prompt landed must not be sent a second time once its own
-    resume is on the board.
+    A refused delivery counts here too: the marker only exists in a prompt that reached the head, so
+    a resume naming it is proof of the turn whatever the dispatcher observed of the send.
     """
 
     if delivery.stage not in {
@@ -1088,12 +1065,7 @@ def _set_delivery_waiting(delivery: ObserverDelivery, event: dict[str, Any], *, 
 
 
 def _evidence_of(carrier: Any) -> dict[str, Any]:
-    """The bounded delivery evidence a host answer or failure carries, or nothing.
-
-    The host layer speaks the shared delivery boundary's evidence and this lifecycle stores it, so
-    a host seam that predates it — an in-process double, a noop run — simply contributes none
-    rather than being required to invent one.
-    """
+    """The bounded delivery evidence a host answer or failure carries, or nothing."""
     evidence = getattr(carrier, "evidence", None)
     if hasattr(evidence, "to_json"):
         evidence = evidence.to_json()
@@ -1103,10 +1075,8 @@ def _evidence_of(carrier: Any) -> dict[str, Any]:
 def _delivery_subject(method: str) -> str:
     """Which delivery this is, in the words the sprint's evidence keeps it under.
 
-    A wake is a prompt sent into the observer head that is already up; a launch delivery is the
-    prompt a replacement head is brought up with. Neither is a reviewer bring-up, which belongs to
-    a card and counts on that card's record: a sprint that reads "the reviewer came up" has said
-    nothing about whether its observer was ever reached.
+    A wake is a prompt sent into an observer head already up; a launch delivery is the prompt a
+    replacement head is brought up with. Neither is a reviewer bring-up, which belongs to a card.
     """
     return "observer-launch" if method == "launch" else "observer-wake"
 
@@ -1127,9 +1097,8 @@ def _count_delivery_failure(
 ) -> None:
     """Record one delivery that did not reach the head, as sprint evidence rather than as state.
 
-    An attempt is counted with it: a delivery that failed before the pane was touched at all —
-    an intent that could not be persisted, a replacement that never came up — was still a turn
-    the observer was owed and did not get.
+    An attempt is counted with it: a delivery that failed before the pane was touched at all was
+    still a turn the observer was owed and did not get.
     """
     _count_delivery_attempt(delivery, method)
     if method == "launch":
@@ -1146,12 +1115,9 @@ def _count_delivery_failure(
 def delivery_evidence_summary(delivery: Any) -> str:
     """One line of delivery evidence for the head that has to report it, or an empty string.
 
-    This is what the final resume and the closeout are written from. It is deliberately counts and
-    a reason, never a retry instruction: redelivery is the dispatcher's, and a head reading this
-    is reporting history, not acting on it.
-
-    It reads its numbers defensively because a host seam may hand it any record shape, and a wake
-    is not worth refusing over the line of provenance printed inside it.
+    Deliberately counts and a reason, never a retry instruction: redelivery is the dispatcher's, and
+    a head reading this is reporting history. It reads its numbers defensively because a host seam
+    may hand it any record shape.
     """
     wake_failures = _int(getattr(delivery, "wake_failures", 0))
     launch_failures = _int(getattr(delivery, "launch_delivery_failures", 0))
@@ -1217,11 +1183,9 @@ def _wait_for_busy_delivery(
 ) -> dict[str, Any]:
     """Keep an observed-working observer and its exact undelivered batch intact.
 
-    The intent was already durable before the nudge.  A `tui-idle` timeout with a busy body says
-    the prompt was not sent, so it must not consume a failed-wake retry or arm an acknowledgement
-    deadline.  `WAITING_FOR_IDLE` and its existing persisted `held_since` put it under the turn
-    ceiling instead: that is the bounded recovery for a head that keeps working, without closing
-    it or replacing it merely because the delivery race lost.
+    The intent was already durable before the nudge. A `tui-idle` timeout with a busy body says the
+    prompt was not sent, so it must not consume a failed-wake retry or arm an acknowledgement
+    deadline; `WAITING_FOR_IDLE` puts it under the turn ceiling instead.
     """
     delivery = record.delivery
     delivery.stage = DeliveryStage.WAITING_FOR_IDLE
@@ -1257,12 +1221,9 @@ def _fail_delivery(
 ) -> dict[str, Any]:
     """Refuse one wake, retry it a bounded number of times, then replace the head.
 
-    A pane that takes none of its prompts is not woken by asking it again forever, and the batch
-    would otherwise sit in a growing backoff instead of reaching the head that can act on it. Once
-    the retries are spent the delivery goes to the replacement path every other unreachable head
-    already takes: it stops this head before it opens the next one, and carries the same
-    `delivery_id` and `through_event` into the new launch, so a resume still acknowledges exactly
-    the batch that was owed.
+    Once the retries are spent the delivery takes the replacement path: it stops this head before it
+    opens the next one, and carries the same `delivery_id` and `through_event` into the new launch,
+    so a resume still acknowledges exactly the batch that was owed.
     """
     outcome = _defer_delivery(record, ref, reason, method="nudge", evidence=evidence)
     if record.delivery.attempts < observer_wake_max_attempts():
@@ -1297,20 +1258,14 @@ def _redelivery_reason(
 ) -> str:
     """Why an active delivery is sent again, or an empty string to keep waiting for its deadline.
 
-    The head being idle is the first reason and does not wait the deadline out: a head that took
-    its turn and came back to the prompt without writing a resume for this batch is asked again on
-    the tick that sees it, with no quiet interval over either the last output or the send.
+    The head being idle is the first reason and does not wait the deadline out. Idle evidence is the
+    readiness signal plus a readable `last_activity`; a pane whose activity cannot be read says
+    nothing about whether a turn ended, so it is not idle here.
 
-    The idle evidence is the readiness signal plus a readable `last_activity`. A pane whose
-    activity cannot be read at all says nothing about whether a turn ended, so it is not idle here
-    and waits for the deadline. A head that is mid-sentence is not ready for input, and the
-    not-idle branch of the caller owns that case.
-
-    A delivery whose send never completed is a third thing again: it sits in `DELIVERY_INTENT`
-    because the tick died between persisting the intent and confirming the prompt landed, so a
-    ready pane may simply be one that never received it. Reading that as a finished turn would
-    nudge the head a second time for a prompt it is still about to answer, so only a delivery known
-    to have been sent is redelivered on idleness. The deadline covers the other one.
+    A delivery still in `DELIVERY_INTENT` is a third case: the tick died between persisting the
+    intent and confirming the prompt landed, so a ready pane may simply be one that never received
+    it. Only a delivery known to have been sent is redelivered on idleness; the deadline covers the
+    other one.
     """
     if now >= delivery.deadline:
         return (
@@ -1352,9 +1307,9 @@ def _observer_has_provider_liveness_contract(record: ObserverRecord) -> bool:
 def _precontract_unbound_observer_source(record: ObserverRecord) -> bool:
     """Recognise, but never repair, the pre-rollout unbound Codex source shape.
 
-    A current preflight source carries the run descriptor and the exact pre-pane baseline which
-    makes later binding safe.  An old source which has neither is not a delayed current launch;
-    accepting a journal from the workspace now would be a retroactive identity claim.
+    A current preflight source carries the run descriptor and the exact pre-pane baseline that makes
+    later binding safe. Accepting a journal from the workspace now would be a retroactive identity
+    claim.
     """
     run, source = _observer_provider_source(record)
     if run is None or not source or source.get("state") != "unbound":
@@ -1375,9 +1330,8 @@ def _precontract_unbound_observer_source(record: ObserverRecord) -> bool:
 def _begin_observer_wake_liveness(record: ObserverRecord) -> None:
     """Open one episode only at a new event-delivery boundary.
 
-    An old terminal episode remains available after its replacement.  It is replaced only after a
-    later acknowledged batch opens a new delivery on the new HeadRun, never on an observation from
-    an arbitrary same-workspace source.
+    An old terminal episode is replaced only after a later acknowledged batch opens a new delivery
+    on the new HeadRun, never on an observation from an arbitrary same-workspace source.
     """
     if not _observer_has_provider_liveness_contract(record):
         return
@@ -1511,10 +1465,9 @@ def _adopt_precontract_unbound_observer(
 def _turn_ceiling_overrun(delivery: ObserverDelivery, *, now: float) -> str:
     """Why a head that is never ready for input has held this batch too long, or an empty string.
 
-    This is not the acknowledgement deadline under another name. That one ends a silence on a head
-    that is standing at its prompt, where asking again costs a duplicate prompt. This one ends a
-    delivery held by a head that still looks busy, which is why it is much longer: below the
-    longest legitimate turn it would tear down an observer that is working a long card.
+    Not the acknowledgement deadline under another name: that one ends a silence on a head standing
+    at its prompt, this one ends a delivery held by a head that still looks busy, which is why it is
+    much longer — below the longest legitimate turn it would tear down an observer that is working.
     """
     if delivery.stage == DeliveryStage.IDLE:
         return ""
@@ -1544,9 +1497,8 @@ def _wake_for_event(
     """Deliver one immutable event batch to a completed observer queue.
 
     A delivery already on the head is repeated for one of two reasons, and never because the event
-    itself has aged: the head was seen idle without having acknowledged the batch, or its
-    acknowledgement deadline ran out. A head that is never seen idle at all is ended by the turn
-    ceiling instead, which is a different and much longer clock.
+    itself has aged: the head was seen idle without acknowledging the batch, or its acknowledgement
+    deadline ran out. A head never seen idle is ended by the turn ceiling instead.
     """
     now = time.time()
     delivery = record.delivery
@@ -1778,10 +1730,8 @@ def _wake_for_event(
 def _observer_work_state(runtime: Any, ref: str, record: ObserverRecord) -> dict[str, Any]:
     """Classify the live observer without turning an ordinary card wait into a restart.
 
-    A pane Orca reports ready for input means the observer is idle even while a card is in flight.
-    The card's next durable transition, not a periodic idle check, provides its next model turn.
-    Readiness is the same signal the delivery path waits on, so this does not depend on which
-    provider the observer head runs.
+    A pane Orca reports ready for input means the observer is idle even while a card is in flight:
+    the card's next durable transition, not a periodic idle check, provides its next model turn.
     """
     try:
         runtime.sprints.show(ref, include_resume_freshness=False)
@@ -1836,7 +1786,7 @@ def _mark_idle_grace(record: ObserverRecord, *, since: float, reason: str) -> No
 def _head_may_be_running(record: ObserverRecord) -> bool:
     """Whether a terminal of this record's head may still be up.
 
-    A launch intent counts. It is written before the host is called, so a record that carries one
+    A launch intent counts: it is written before the host is called, so a record that carries one
     may well have a head behind it, and the workspace is where that head is, handle or no handle.
     """
     return bool(record.handle) or (record.head_possible and bool(record.workspace))
@@ -1846,8 +1796,7 @@ def _needs_teardown(record: ObserverRecord) -> bool:
     """Whether the stop still has something of this record to give back to Orca.
 
     A head that may be up is one such thing, a workspace the bring-up may have registered is the
-    other, and the two do not arrive or leave together: a bring-up that fails after `worktree
-    create` leaves the registration behind with no process at all.
+    other, and they do not arrive or leave together.
     """
     return _head_may_be_running(record) or (record.workspace_live and bool(record.workspace))
 
@@ -1862,11 +1811,9 @@ def _bring_up_request_id(ref: str, generation: str, attempt: int) -> str:
 def _abandon_launch_intent(runtime: Any, ref: str, record: ObserverRecord) -> None:
     """Close the books on an intent whose head could not be found alive.
 
-    An attempt the log already carries is a head that came up and has since died: it is spent, and
-    the next bring-up is a relaunch with its own request id and its own line. An attempt that never
-    got past its pending copy was not observed to launch anything, so it is simply retried as
-    itself. Either way the record still says a terminal may be up, so the relaunch closes the
-    workspace first.
+    An attempt the log already carries is spent, so the next bring-up is a relaunch with its own
+    request id; an attempt that never got past its pending copy is retried as itself. Either way the
+    record still says a terminal may be up, so the relaunch closes the workspace first.
     """
     attempt = record.pending_launch
     record.state = "pending"
@@ -1894,16 +1841,10 @@ def _adopt_launch_intent(
 ) -> dict[str, Any] | None:
     """Resolve a launch whose tick died before it could record the outcome.
 
-    A pid that is readable and alive is this sprint's head: it is adopted with the attempt number
-    the intent reserved, and the event staged before the host call is committed now.
-
-    A head that has not written its pid yet is not a dead one. Inside the grace window the intent
-    is simply left as it is: no stop, no replacement, and the next tick asks again. Killing a head
-    that is still starting would cut the sprint's one continuous session for no reason.
-
-    Anything else (a pid file still missing past the grace window, a dead pid) is not evidence of a
-    head, so None is returned and the caller relaunches, closing whatever the intent may have left
-    in the workspace first.
+    A readable live pid is this sprint's head, adopted with the attempt number the intent reserved.
+    A head that has not written its pid yet is left as it is inside the grace window — killing one
+    that is still starting would cut the sprint's one continuous session. Anything else returns None
+    and the caller relaunches, closing whatever the intent left in the workspace first.
     """
     liveness = observer_alive(record)
     if liveness.get("identity_mismatch"):
@@ -1961,14 +1902,11 @@ def observer_decision(runtime: Any, sprint: dict[str, Any]) -> dict[str, Any]:
 
     Two answers, and no third:
 
-      `head`   the sprint declares one concrete profile, and the registry has it
-      `none`   the sprint declares that it runs without an observer
+          `head`   the sprint declares one concrete profile, and the registry has it
+          `none`   the sprint declares that it runs without an observer
 
-    There is no path back to the role default: a declared observer is read from the sprint or not
-    at all.
-
-    `ObserverMetadataError` for an open row whose value is missing, unreadable, provenance rather
-    than a declaration, or a profile the registry does not have.
+    There is no path back to the role default. `ObserverMetadataError` for an open row whose value is
+    missing, unreadable, provenance rather than a declaration, or a profile the registry lacks.
     """
     value = executable_observer(sprint)
     if value["kind"] == KIND_NONE:
@@ -1988,8 +1926,7 @@ def observer_decision(runtime: Any, sprint: dict[str, Any]) -> dict[str, Any]:
 def _role_default_observer_head(runtime: Any) -> str:
     """The registry's observer default, for a record filled in without a sprint to read.
 
-    Empty when the registry cannot answer: a row is still worth more without a head profile than
-    not at all, and the launch path reports the same failure properly.
+    Empty when the registry cannot answer; the launch path reports the same failure properly.
     """
     try:
         return runtime.catalog.observer_head()
@@ -2000,9 +1937,8 @@ def _role_default_observer_head(runtime: Any) -> str:
 def _observer_head_or_blank(runtime: Any, sprint: dict[str, Any] | None = None) -> str:
     """The head to fill a record with, without deciding anything the launch has to decide again.
 
-    A sprint answers from its own metadata; the registry default is only for a record filled in
-    without one.  Corruption is not reported here: this fills in a record, and the fence and
-    the launch path are where an unusable observer is answered for.
+    Corruption is not reported here: the fence and the launch path are where an unusable observer
+    is answered for.
     """
     if sprint is not None:
         try:
@@ -2017,9 +1953,8 @@ def observer_skill_delivery(runtime: Any, head: str) -> dict[str, Any]:
     """Whether the observer skill is in the shell this head runs in.
 
     The shell is the head's own adapter, read from the same registry the launch command is rendered
-    from: repointing `role_defaults.observer` at a profile of another shell moves the check with it.
-    A registry that cannot name the adapter reads as undelivered — a head brought up without its
-    instructions is worse than a sprint that waits for the next tick.
+    from. A registry that cannot name the adapter reads as undelivered — a head brought up without
+    its instructions is worse than a sprint that waits for the next tick.
     """
     try:
         shell = str(runtime.catalog.observer_run(head).adapter or "")
@@ -2066,8 +2001,7 @@ def _launch_observer(
     """Bring up one head for one sprint, on the profile that sprint declares.
 
     `head` is decided by the caller from the sprint's own metadata, so nothing between the
-    declaration and the launch can substitute another profile.  A caller with none passes an empty
-    head and this resolves the declaration itself.
+    declaration and the launch can substitute another profile.
     """
     record = record or ObserverRecord(sprint=ref)
     relaunch = record.launches > 0
@@ -2320,11 +2254,7 @@ def _bind_codex_provider_ingress(
     ref: str,
     record: ObserverRecord,
 ) -> None:
-    """Bind the observer's persisted HeadRun to the only provider-event ingress.
-
-    The callbacks mutate this exact record and flush the observer state before a cursor can move
-    or an identity-fenced stop can act.  There is no workspace-level fallback after recovery.
-    """
+    """Bind the observer's persisted HeadRun to the only provider-event ingress."""
     stored = record.head_run if isinstance(record.head_run, dict) else {}
     if not stored.get("run_id"):
         return
@@ -2427,14 +2357,10 @@ def _write_launch_intent(
 ) -> str | None:
     """Fix this launch on disk before the host is called. Returns the failure, or None on success.
 
-    The workspace and the pid file are asked of the host rather than taken from its answer: they
-    are pure path arithmetic over the sprint reference, and the answer is exactly what a tick that
-    dies mid-launch never gets to see. With them in the record, the next tick can read the head's
-    liveness and close its terminal without ever having held its handle.
-
-    The intent also says the workspace may become registered with Orca, and that outlives the
-    launch: a bring-up that fails after `worktree create` leaves a registration behind whether or
-    not a head ever ran, and the stop is what gives it back.
+    The workspace and pid file are asked of the host rather than taken from its answer: they are
+    path arithmetic over the sprint reference, and the answer is exactly what a tick that dies
+    mid-launch never sees. The intent also says the workspace may become registered with Orca, which
+    outlives the launch, and the stop is what gives it back.
     """
     previous = record.to_json()
     now = time.time()
@@ -2523,11 +2449,10 @@ def _defer(
 ) -> dict[str, Any]:
     """Park a launch without losing the sprint or damaging an existing record.
 
-    Only the deferral fields are written: the head, workspace, handle and launch counter of a
-    record that already exists stay as they were, so the next tick retries from the same state.
-    `keep_state` leaves even the state alone, for a record whose unresolved launch intent is the
-    one thing the next tick must still see. Failed launches use a persisted exponential deadline;
-    a deliberate drain is retried when the drain ends rather than on that deadline.
+    Only the deferral fields are written, so the next tick retries from the same state. `keep_state`
+    leaves even the state alone, for a record whose unresolved launch intent is the one thing the
+    next tick must still see. Failed launches use a persisted exponential deadline; a deliberate
+    drain is retried when the drain ends.
     """
     record = record or ObserverRecord(sprint=ref)
     policy_refusal = reason.startswith("codex-fanout-policy:")
@@ -2644,9 +2569,8 @@ def _mark_stop_pending(record: ObserverRecord, state: str, reason: str) -> None:
 def stop_observer_head(runtime: Any, record: ObserverRecord) -> bool:
     """Stop one observer head. True when nothing of it is left running.
 
-    A record that points at neither a terminal, nor a workspace with a head possibly in it, nor a
-    workspace its bring-up may have registered is already stopped. False means the host refused the
-    request and the head must be assumed alive, so the caller keeps the record and retries.
+    False means the host refused the request and the head must be assumed alive, so the caller keeps
+    the record and retries.
     """
     if not _needs_teardown(record):
         return True
@@ -2729,13 +2653,9 @@ def retry_pending_observer_stops(runtime: Any, payload: dict[str, Any]) -> list[
     """Retry the stops the host refused. Returns one row per pending stop it tried.
 
     The reconciliation pass does not run while the pipeline is frozen, so without this a head the
-    freeze failed to stop would sit alive and unattended until the resume.
-
-    Each row carries a `status` like any other action outcome, so a stop the host refused again
-    reads as a `degraded` action to the frozen tick that called this and lands in its telemetry.
-    Without it the retry failed silently into a row nobody classified, and the freeze recorded
-    itself as a healthy terminal tick over a head it could not take down (secretary-833 review,
-    round 4).
+    freeze failed to stop would sit alive and unattended until the resume. Each row carries a
+    `status` like any other action outcome, so a stop refused again reads as a `degraded` action
+    rather than failing silently into a row nobody classified.
     """
     observers = load_observers(payload)
     pending = {
@@ -2798,8 +2718,7 @@ def _retry_row(ref: str, action: str, reason: str, *, ok: bool = False) -> dict[
 def resume_observers(payload: dict[str, Any]) -> list[str]:
     """Clear the freeze marks so the next tick brings the observers back.
 
-    Resume does not launch anything itself: the tick's own reconciliation is the single bring-up
-    path, and it already knows how to tell a dead head from a live one.
+    Resume launches nothing itself: the tick's own reconciliation is the single bring-up path.
     """
     observers = load_observers(payload)
     if not observers:
@@ -2831,9 +2750,9 @@ def stage_event(
 ) -> dict[str, Any] | None:
     """Put one lifecycle event on durable disk before the host call it describes.
 
-    Returns the staged event for `commit_event`, or None when there is nothing to commit: no audit
-    at all, or this request id is already in the log because the tick is a retry. Raises OSError
-    when the pending copy cannot be written, which the caller answers by not touching the host.
+    Returns the staged event for `commit_event`, or None when there is nothing to commit. Raises
+    OSError when the pending copy cannot be written, which the caller answers by not touching the
+    host.
     """
     audit = getattr(runtime, "audit", None)
     if audit is None or audit.committed_event(request_id) is not None:
@@ -2861,7 +2780,7 @@ def _persist_quietly(
     """Flush the observer records mid-tick. False means only the tick's own save carries them now.
 
     Never raised at the caller: the head this record describes is already up or already gone, and
-    the launch intent that precedes every bring-up is what keeps that decision recoverable.
+    the launch intent that precedes every bring-up keeps that decision recoverable.
     """
     put_observers(payload, observers)
     try:
@@ -2896,8 +2815,7 @@ def commit_event(runtime: Any, event: dict[str, Any] | None) -> bool:
     """Move a staged event into the log. False means the pending copy is what carries it now.
 
     A refused commit is never raised at the caller: the effect the event describes has already
-    happened, and losing the record of it costs more than a late audit line. `TaskAudit.reconcile()`
-    appends the pending copy on the next repair pass.
+    happened, and `TaskAudit.reconcile()` appends the pending copy on the next repair pass.
     """
     audit = getattr(runtime, "audit", None)
     if audit is None or event is None:
@@ -2953,8 +2871,8 @@ def render_observer_prompt(
 ) -> str:
     """The observer's launch document: the sprint entity, and the skill that says what to do.
 
-    The document carries data and one pointer. How a sprint is led belongs to the role skill alone,
-    because two texts about the same job drift apart and the head then follows the stale one.
+    Data and one pointer. How a sprint is led belongs to the role skill alone, because two texts
+    about the same job drift apart and the head then follows the stale one.
     """
     ref = str(sprint.get("ref") or "")
     repositories = [str(repo) for repo in (sprint.get("repositories") or [])]

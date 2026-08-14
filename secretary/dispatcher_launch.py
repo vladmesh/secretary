@@ -1,19 +1,15 @@
 """Durable launch intent for the dispatcher-launched worker and reviewer heads.
 
-Same contour as the observer's (`dispatcher_observer`) and for the same reason. A head is a real
-process from the moment the host is asked for one, but `DispatcherRecord` only learns its workspace,
-its pane and its routing from the `save_records` at the end of the launch path. A state write that
-refuses in that window leaves a running head with nothing pointing at it, and the next tick reads
-the card as headless and opens a second one.
+Same contour as the observer's (`dispatcher_observer`) and for the same reason: a head is a real
+process from the moment the host is asked for one, but `DispatcherRecord` only learns its
+workspace, pane and routing from the `save_records` at the end of the launch path.
 
 So the launch is fixed on disk first. The intent names the role, the round and attempt it belongs
 to, the workspace the head runs in and the pid file it writes its heartbeat to. Workspace and pid
 file are path arithmetic over the card reference and the worker id, so both are known before the
-host answers, which is exactly what a tick that dies mid-launch never gets to see. With them the
-next tick can settle the only question that matters, "is the head of that launch alive", without
-the terminal handle the lost tick never persisted. The round is the round the new head belongs to,
-which for a rework is the next one: it is reserved here, before the host call, so an adoption
-resumes the rework rather than the round the red result closed.
+host answers, which is what lets the next tick settle "is the head of that launch alive" without
+the terminal handle the lost tick never persisted. The round is reserved here, before the host
+call, so an adoption resumes the rework rather than the round the red result closed.
 
 Resolution runs before anything else the tick would do with the card:
 
@@ -26,31 +22,23 @@ Resolution runs before anything else the tick would do with the card:
                  stopped, the intent is dropped, and the ordinary path relaunches — into the round
                  the intent reserved, since a rework's round is over whether or not its head lived.
 
-The intent is held for the whole bring-up, not only up to the host call. Once the host answers, the
-pane it opened and the configuration it launched go into the intent, and only when the record has
-everything — pane identity, routing event, its own save — is the intent spent. Everything in that
-tail runs over a process that already exists, so a failure there is ambiguous rather than a launch
-that did not happen, and an adoption reads the launch's own snapshot instead of asking a registry
-that may have been edited since.
+The intent is held for the whole bring-up, not only up to the host call: the pane the host opened
+and the configuration it launched go into the intent, and only when the record has everything is
+the intent spent. Everything in that tail runs over a process that already exists, so a failure
+there is ambiguous rather than a launch that did not happen.
 
 State that cannot be written is a launch that does not happen: the caller answers a failed intent
-write by not touching the host at all. A failing data plane then costs the card a tick instead of
-giving it two heads. A bring-up that fails once its terminal is already up is not a headless card
-either: the host reports it as `HeadLaunchAborted` with the pane it opened, the intent stays on
-disk carrying that handle, and the same resolution settles it a tick later.
+write by not touching the host at all. A bring-up that fails once its terminal is already up is
+reported as `HeadLaunchAborted` with the pane it opened, and the intent stays on disk carrying
+that handle.
 
 A head adopted this way usually has no pane handle, which is why `command_terminal_status` falls
-back to the pid heartbeat when a record carries no pane identity for its role. Without that the
-wait watchdog would read the adopted head as a missing terminal and respawn it: the double launch
-this module exists to prevent, one tick later. For the same reason the heartbeat stays on the
-record as that role's identity (`worker_pid_file` / `review_pid_file`): every stop the lifecycle
-makes afterwards — the freeze before review, a respawn, a red verdict, a pipeline freeze — goes
-through it when there is no pane to close, and one that quietly stopped nothing would put a second
-process on the checkout just as surely.
+back to the pid heartbeat when a record carries no pane identity for its role, and why the
+heartbeat stays on the record as that role's identity (`worker_pid_file` / `review_pid_file`):
+every later stop goes through it when there is no pane to close.
 
-Nothing here assumes a stop worked. A head the host will not confirm gone keeps its record and its
-intent, and the tick that wanted to replace it returns `*-stop-unconfirmed` instead: an
-unconfirmed stop followed by a launch is the same two heads by another route.
+Nothing here assumes a stop worked. A head the host will not confirm gone keeps its record and
+its intent, and the tick returns `*-stop-unconfirmed` instead.
 """
 
 from __future__ import annotations
@@ -111,11 +99,7 @@ def launch_intent(record: DispatcherRecord) -> dict[str, Any]:
 
 
 def busy_launch_delivery(intent: dict[str, Any]) -> dict[str, Any]:
-    """Return a durable, still-undelivered busy launch nudge, if this intent has one.
-
-    Older launch intents have no delivery member.  They are deliberately not inferred to be busy:
-    their missing evidence remains unknown and follows the historical recovery route.
-    """
+    """Return a durable, still-undelivered busy launch nudge, if this intent has one."""
     delivery = intent.get("delivery") if isinstance(intent, dict) else None
     if not isinstance(delivery, dict):
         return {}
@@ -130,12 +114,7 @@ def defer_busy_launch_delivery(
     *,
     now: float | None = None,
 ) -> int:
-    """Persist the next capped retry for a pre-send reviewer document nudge.
-
-    The intent is the only durable owner of a reviewer which has not crossed launch delivery
-    confirmation.  Keeping the retry there prevents a live heartbeat from being mistaken for a
-    successful reviewer launch on the next dispatcher tick.
-    """
+    """Persist the next capped retry for a pre-send reviewer document nudge."""
     intent = dict(launch_intent(record))
     if not intent:
         return 0
@@ -171,11 +150,8 @@ def write_launch_intent(
 ) -> str | None:
     """Fix one bring-up on disk before the host is called. Returns the failure, or None.
 
-    The record is left exactly as it was when the write fails, so a caller that answers with "no
-    host call this tick" leaves nothing behind for the next one to misread.
-
-    `round_number` is the round the head being launched will belong to. A rework opens a new one,
-    and it has to be reserved here rather than after the host call: the round the intent carries is
+    The record is left exactly as it was when the write fails. `round_number` is the round the head
+    being launched will belong to and has to be reserved here rather than after the host call: it is
     the round an adoption resumes, and a rework recovered on the round its red verdict ended would
     merge two rounds and their routing into one.
     """
@@ -251,22 +227,15 @@ def confirm_launch_intent(
     """Put what the finished host call knows about the head into its intent, on disk.
 
     The pane and the launch snapshot exist only once the host has answered, and everything the tick
-    still owes that head afterwards — its pane leaf, its routing record, its own save — runs against
-    a process that is already up and can refuse. Writing them into the intent here is what lets a
-    recovery adopt that head with the configuration it actually launched on, instead of inventing
-    one from a registry that may have been edited since.
+    still owes that head afterwards runs against a process that is already up and can refuse.
+    Writing them here lets a recovery adopt that head with the configuration it actually launched on.
 
-    `head_run` is the head's own run — its identity and its lifecycle, as the three head operations
-    keep it — and it is why this is the single place a launched head is written down (secretary-1414).
-    Every caller used to assign it to the record on the line after this call, which put a durable
-    save between the two: a tick that died in that window left a head whose run nothing recorded,
-    and the next tick reconstructed a fresh identity for the same process, so a stop already begun
-    stopped being a continuation of itself and its initiator was lost. Written here, into the intent
-    and onto the record in one save, there is no window to die in, and the adoption below brings
-    that same run back.
+    `head_run` is written here too, into the intent and onto the record in one save, so there is no
+    window in which a tick can die leaving a head whose run nothing recorded and the next tick
+    reconstructs a fresh identity for the same process, losing an in-progress stop's initiator.
 
     A refused write is not a problem: the pre-launch intent is already on disk and names the same
-    head, so recovery still finds it and only its routing snapshot falls back to the registry.
+    head.
     """
     intent = dict(launch_intent(record))
     if not intent:
@@ -322,10 +291,9 @@ def _canonical_launch_head_run(
 ) -> dict[str, Any]:
     """Return the one post-delivery HeadRun a launch intent is permitted to write.
 
-    The ingress writer and the pane operation own different facts.  A callback can advance the
-    provider source while the pane operation adds its returned handle and `working` lifecycle.
-    Both must describe the exact same launch identity.  A foreign or damaged persistent copy is a
-    fence, never a prompt to reconstruct or attribute a different head.
+    The ingress writer and the pane operation own different facts, and both must describe the exact
+    same launch identity. A foreign or damaged persistent copy is a fence, never a prompt to
+    reconstruct or attribute a different head.
     """
     values: list[dict[str, Any]] = []
     stored = intent.get("head_run")
@@ -452,9 +420,8 @@ def _newer_provider_policy(current: dict[str, Any], later: dict[str, Any]) -> di
 def launch_left_a_head(record: DispatcherRecord) -> bool:
     """Does this launch's heartbeat prove a head exists, whatever the failure claimed?
 
-    A host reporting an ordinary failure is claiming that no head of this bring-up is running. The
-    heartbeat is the one piece of evidence that can contradict it, and where it does, the intent has
-    to survive: a record dropped over a live process is the second head this contour prevents.
+    The heartbeat is the one piece of evidence that can contradict a host claiming no head is
+    running, and where it does the intent has to survive.
     """
     intent = launch_intent(record)
     if not intent:
@@ -472,10 +439,8 @@ def role_field(role: str, suffix: str) -> str:
 def clear_launch_intent(record: DispatcherRecord) -> None:
     """Take back an intent whose host call has answered. The caller's own save persists it.
 
-    The heartbeat the intent named stays on the record as that role's head identity. It is what
-    every later stop falls back on when the pane handle is missing — an adopted head never had one
-    — and without it a freeze, a respawn or a red-verdict bounce would quietly stop nothing and
-    open a second process beside the one still running.
+    The heartbeat the intent named stays on the record as that role's head identity: it is what every
+    later stop falls back on when the pane handle is missing, and an adopted head never had one.
     """
     intent = launch_intent(record)
     role = str(intent.get("role") or "")
@@ -511,12 +476,9 @@ def mark_launch_aborted(
     """Keep the intent of a bring-up that failed with a pane already open.
 
     The host could not promise that nothing of that head is running, so the intent survives with
-    whatever identity the failure carried. The next tick reads the heartbeat and ordinarily adopts
-    the head — pane included, so its lifecycle is whole — or stops what is left of it. A reviewer
-    whose pre-send document nudge recorded busy is the narrow exception: it retries that exact
-    nudge before either adoption side effect. A persist that refuses here is not a problem: the
-    pre-launch intent is already on disk and names the same pid file, which is the identity
-    recovery actually settles the question with.
+    whatever identity the failure carried; the next tick adopts the head or stops what is left of it.
+    A reviewer whose pre-send document nudge recorded busy retries that exact nudge first. A persist
+    that refuses is not a problem: the pre-launch intent already names the same pid file.
     """
     intent = dict(launch_intent(record))
     if not intent:
@@ -580,14 +542,10 @@ def launch_deferred(
 ) -> dict[str, Any] | None:
     """Park a bring-up whose head pane would not take its prompt. None when it cannot be parked.
 
-    None means the ordinary failure path owns this failure: either it is not a pane that was busy
-    or held in a dialog — a probe nobody answered is deliberately not one, since a pane that cannot
-    be asked is not a pane anything can wait for — or this role has spent its attempts and the card
-    is blocked over that pane.
-
-    A parked launch changes nothing else on the record. The state it is in is what the next tick
-    relaunches from, exactly as it would have without this failure, and only the counter moves. The
-    caller persists it: a deferral nobody wrote down is an unbounded retry.
+    None means the ordinary failure path owns this failure: either it is not a pane that was busy or
+    held in a dialog — a probe nobody answered is deliberately not one — or this role has spent its
+    attempts. A parked launch changes nothing else on the record; only the counter moves, and the
+    caller persists it, since a deferral nobody wrote down is an unbounded retry.
     """
     if not isinstance(exc, HeadPaneNotReady):
         return None
@@ -617,12 +575,7 @@ def launch_deferred(
 def bring_up_blocked_reason(
     default: str, exc: Exception, record: DispatcherRecord, role: str
 ) -> str:
-    """The card's Blocked reason for a bring-up that will not be retried.
-
-    A pane that never became ready is named, with the state it stayed in and how many bring-ups it
-    cost. `default` is the caller's own wording for every other failure, which is what "bring-up
-    failed" means and all it should ever have meant.
-    """
+    """The card's Blocked reason for a bring-up that will not be retried."""
     if not isinstance(exc, HeadPaneNotReady):
         return f"{default}: {scrub_host_output(str(exc))}"
     return (
@@ -637,8 +590,8 @@ def head_stop_unconfirmed(
 ) -> dict[str, Any]:
     """The outcome of a tick that refused to launch because a stop was not confirmed.
 
-    A head the host would not promise is gone is a head that may still be editing the checkout, so
-    nothing takes its place this tick. The card keeps its record and the next tick retries the stop.
+    A head the host would not promise is gone may still be editing the checkout, so nothing takes
+    its place this tick.
     """
     return {
         "status": "degraded",
@@ -667,9 +620,8 @@ def launch_intent_unwritable(
 def launch_intent_liveness(intent: dict[str, Any], *, now: float | None = None) -> dict[str, Any]:
     """Whether the head this intent was written for is running, and on what evidence.
 
-    `pid_known: False` means the heartbeat is not readable yet. A head launched seconds ago has not
-    written one, so that reads as alive until the grace window the watchdog already uses for a pane
-    that has produced no output at all has passed.
+    `pid_known: False` means the heartbeat is not readable yet, which a head launched seconds ago has
+    not written, so it reads as alive until the grace window has passed.
     """
     now = time.time() if now is None else now
     pid_file = str(intent.get("pid_file") or "")
@@ -706,9 +658,8 @@ def resolve_launch_intent(
 ) -> dict[str, Any] | None:
     """Settle an unresolved bring-up before the tick acts on this card.
 
-    Returns the tick's outcome when the intent takes the tick (adopted, or still coming up), and
-    None when there is nothing pending or the launch left nothing running, in which case the
-    ordinary path relaunches from a record that no longer claims a head.
+    Returns the tick's outcome when the intent takes the tick, and None when there is nothing pending
+    or the launch left nothing running, in which case the ordinary path relaunches.
     """
     ref = task["ref"]
     record = records.get(ref)
@@ -779,13 +730,9 @@ def keep_reserved_round(runtime: Any, record: DispatcherRecord, intent: dict[str
     """Carry the round a dropped worker intent reserved onto the record it was written over.
 
     A rework reserves the next round before the host call, while the record still carries the round
-    the red result closed. Dropping such an intent — the launch left nothing running, or a freeze
-    stopped what it left — is not the same as giving the reservation back: the round is over either
-    way, and the relaunch that follows belongs to the new one. Without this the respawn runs the
-    rework inside the round that rejected it, and its routing and its verdict land there too.
-
-    Only for an intent that opens a round. A claim or a respawn continues the round the record
-    already names, and its state is the ordinary path's to decide.
+    the red result closed. Dropping such an intent is not giving the reservation back: the round is
+    over either way, and without this the respawn runs the rework inside the round that rejected it.
+    Only for an intent that opens a round.
     """
     if str(intent.get("role") or "") == REVIEW_ROLE:
         return
@@ -803,15 +750,10 @@ def stop_launch_intent(
 ) -> str | None:
     """End whatever a launch left behind and take its intent back. Returns the failure, or None.
 
-    Called both for a launch whose head is not there — the pane can outlive the process, and the
-    relaunch reuses this workspace — and wherever a card leaves the cycle with an intent still on
-    it. Either way the intent survives an unconfirmed stop: a head the host will not promise is
-    gone must keep a pointer, or a later requeue starts a second process in the same checkout.
-
-    The identity is whatever the launch got as far as recording: the pane the failure handed back,
-    the heartbeat the head wrote for itself, and failing both the workspace itself. That last case
-    is a head nothing can name individually — a raw `SECRETARY_DISPATCHER_*_COMMAND` override runs
-    without the heartbeat wrapper — and stopping the workspace is all that can still reach it.
+    The intent survives an unconfirmed stop: a head the host will not promise is gone must keep a
+    pointer, or a later requeue starts a second process in the same checkout. The identity is
+    whatever the launch got as far as recording — the pane, the heartbeat, and failing both the
+    workspace itself, which is all that can reach a head running without the heartbeat wrapper.
     """
     _remember_launch_identity(record, intent, role)
     handle = getattr(record, "review_handle" if role == REVIEW_ROLE else "handle", "")
@@ -898,12 +840,9 @@ def _adopt_launch_intent(
 ) -> dict[str, Any]:
     """Take the head of a launch whose tick did not survive as this card's head for that role.
 
-    The run comes back first, and the pane pointers below are re-addressed on top of it: the head
-    being adopted is the head that launch started, so its identity, its lifecycle and any initiator
-    a stop already wrote are the launch's, while the handle, the leaf and the heartbeat are only
-    where that same head is currently reachable. Nothing after this reconstructs a run over it —
-    `worker_lifecycle_run`/`review_lifecycle_run` reconstruct only for a record that carries none,
-    and after this one does (secretary-1414).
+    The run comes back first and the pane pointers are re-addressed on top of it: identity, lifecycle
+    and any initiator a stop already wrote are the launch's, while the handle, leaf and heartbeat are
+    only where that head is currently reachable. Nothing after this reconstructs a run over it.
     """
     ref = task["ref"]
     launched_at = float(intent.get("at") or 0.0) or time.time()
@@ -1007,12 +946,8 @@ def _record_adopted_routing(
     """Give the adopted head its routing record. Returns the tick's outcome when that write fails.
 
     The head an interrupted tick launched is a head that ran, so the round owes it the same routing
-    event every other bring-up writes: without it the verdict names only the other role, and the
-    history reads as a round nobody worked. The snapshot is the launch's own where the intent got as
-    far as carrying it, and the registry as it stands now otherwise.
-
-    A journal that refuses keeps the intent: the head is adopted again next tick and the routing is
-    retried then, which is one head with late telemetry instead of a head with none.
+    event every other bring-up writes. A journal that refuses keeps the intent: the head is adopted
+    again next tick and the routing retried then.
     """
     ref = task["ref"]
     run = intent.get("run") if isinstance(intent.get("run"), dict) else None
@@ -1041,8 +976,8 @@ def _persist_quietly(
 ) -> bool:
     """Flush the records mid-tick. False means this tick's own save is what carries them.
 
-    Never raised at the caller: an adoption that is not persisted is repeated by the next tick
-    from the same intent, which is the same answer rather than a second head.
+    Never raised at the caller: an adoption that is not persisted is repeated by the next tick from
+    the same intent, which is the same answer rather than a second head.
     """
     try:
         runtime.save_records(payload, records)
