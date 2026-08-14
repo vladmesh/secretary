@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Callable
 
 from secretary.config import ConfigError, load_config
+from secretary.cli_output import print_json
 from secretary.onboarding import DEFAULT_INSTANCE
 from secretary.tasks import (
     _BLOCK_CLASSIFICATIONS,
@@ -210,14 +211,19 @@ def run_task_show(args: argparse.Namespace) -> int:
 
 
 def _run_task_read(args: argparse.Namespace, operation: Callable[[TaskReader], object]) -> int:
+    return run_task_command(
+        lambda: operation(TaskReader(KanboardClient.for_instance(_instance(args))))
+    )
+
+
+def run_task_command(operation: Callable[[], object], *, exit_code: Callable[[object], int] | None = None) -> int:
     try:
-        reader = TaskReader(KanboardClient.for_instance(_instance(args)))
-        result = operation(reader)
+        result = operation()
     except TaskError as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
         return exc.exit_code
-    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
-    return 0
+    print_json(result, compact=True)
+    return exit_code(result) if exit_code is not None else 0
 
 
 def _read_body(path: str | None) -> str:
@@ -230,15 +236,12 @@ def _read_body(path: str | None) -> str:
 
 
 def _run_task_write(args: argparse.Namespace, operation: Callable[[TaskWriter, str, str], object]) -> int:
-    try:
+    def command() -> object:
         body = _read_body(getattr(args, "body_file", None) or getattr(args, "reason_file", None))
         writer = TaskWriter(KanboardClient.for_instance(_instance(args)), data_dir=resolve_data_dir(args))
-        result = operation(writer, body, args.actor or args.role)
-    except TaskError as exc:
-        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
-        return exc.exit_code
-    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
-    return 0
+        return operation(writer, body, args.actor or args.role)
+
+    return run_task_command(command)
 
 
 def run_task_comment(args: argparse.Namespace) -> int:
@@ -246,11 +249,11 @@ def run_task_comment(args: argparse.Namespace) -> int:
 
 
 def run_task_create(args: argparse.Namespace) -> int:
-    try:
+    def command() -> object:
         _validate_codex_mode_for_create(args)
         description = _read_body(args.body_file) if args.body_file else args.description
         writer = TaskWriter(KanboardClient.for_instance(_instance(args)), data_dir=resolve_data_dir(args))
-        result = writer.create(
+        return writer.create(
             role=args.role,
             actor=args.actor or args.role,
             project=args.project,
@@ -274,18 +277,15 @@ def run_task_create(args: argparse.Namespace) -> int:
             sprint_override_reason=_read_body(args.sprint_override_reason_file),
             request_id=args.request_id,
         )
-    except TaskError as exc:
-        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
-        return exc.exit_code
-    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
-    return 0
+
+    return run_task_command(command)
 
 
 def run_task_edit(args: argparse.Namespace) -> int:
-    try:
+    def command() -> object:
         description = _read_body(args.body_file) if args.body_file else args.description
         writer = TaskWriter(KanboardClient.for_instance(_instance(args)), data_dir=resolve_data_dir(args))
-        result = writer.edit(
+        return writer.edit(
             role=args.role,
             actor=args.actor or args.role,
             reference=args.ref,
@@ -297,11 +297,8 @@ def run_task_edit(args: argparse.Namespace) -> int:
             sprint_override_reason=_read_body(args.sprint_override_reason_file),
             request_id=args.request_id,
         )
-    except TaskError as exc:
-        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
-        return exc.exit_code
-    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
-    return 0
+
+    return run_task_command(command)
 
 
 def run_task_report(args: argparse.Namespace) -> int:
@@ -352,25 +349,20 @@ def run_task_claim(args: argparse.Namespace) -> int:
 
 
 def run_task_reconcile_audit(args: argparse.Namespace) -> int:
-    try:
+    def command() -> object:
         repaired, unresolved = TaskWriter(
             KanboardClient.for_instance(_instance(args)), data_dir=resolve_data_dir(args),
         ).reconcile()
-    except TaskError as exc:
-        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
-        return exc.exit_code
-    print(json.dumps({"repaired": repaired, "unresolved": unresolved}, sort_keys=True, separators=(",", ":")))
-    return 0 if unresolved == 0 else 1
+        return {"repaired": repaired, "unresolved": unresolved}
+
+    return run_task_command(command, exit_code=lambda result: 0 if result["unresolved"] == 0 else 1)
 
 
 def run_task_verify_audit(args: argparse.Namespace) -> int:
-    try:
-        status = TaskAudit(resolve_data_dir(args)).status()
-    except TaskError as exc:
-        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
-        return exc.exit_code
-    print(json.dumps(status, sort_keys=True, separators=(",", ":")))
-    return 0 if status["ok"] else 1
+    return run_task_command(
+        lambda: TaskAudit(resolve_data_dir(args)).status(),
+        exit_code=lambda result: 0 if result["ok"] else 1,
+    )
 
 
 def _validate_codex_mode_for_create(args: argparse.Namespace) -> None:

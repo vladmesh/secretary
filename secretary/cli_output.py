@@ -6,5 +6,6 @@ import json
 from typing import Any
 
 
-def print_json(payload: Any, *, indent: int | None = None) -> None:
-    print(json.dumps(payload, ensure_ascii=False, indent=indent, sort_keys=True))
+def print_json(payload: Any, *, indent: int | None = None, compact: bool = False) -> None:
+    separators = (",", ":") if compact else None
+    print(json.dumps(payload, ensure_ascii=False, indent=indent, separators=separators, sort_keys=True))
