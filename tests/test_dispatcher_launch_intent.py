@@ -52,7 +52,7 @@ from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 
 from tests.observer_identity import bind_observer
 from tests.fakes.host import FakeSessionHost as HeadOperationFakeHost
-from tests.test_dispatcher import (
+from tests.fakes.dispatcher import (
     FakeCatalog,
     FakeHost,
     FakeKanboard,

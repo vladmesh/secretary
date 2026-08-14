@@ -24,7 +24,7 @@ from secretary.cli import main
 from secretary.secret_store import RecoveryPhraseError, import_env_file, initialize_store
 from secretary.secret_words import RECOVERY_WORDS
 
-from tests.test_installation import PRODUCT_ROOT, _checkpoint, _git
+from tests.fakes.installation import PRODUCT_ROOT, _checkpoint, _git
 
 
 PHRASE = " ".join(RECOVERY_WORDS[:16])

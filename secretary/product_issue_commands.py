@@ -7,8 +7,8 @@ import os
 
 from secretary.onboarding import DEFAULT_INSTANCE
 from secretary.product_issues import ProductIssueStore
-from secretary.task_commands import resolve_data_dir
-from secretary.tasks import KanboardClient, TaskError
+from secretary.task_commands import resolve_data_dir, run_task_command
+from secretary.tasks import KanboardClient
 
 
 def _common(parser: argparse.ArgumentParser, *, write: bool = False) -> None:
@@ -116,13 +116,7 @@ def _store(args: argparse.Namespace) -> ProductIssueStore:
 
 
 def _run(args: argparse.Namespace, callback) -> int:
-    try:
-        output = callback(_store(args))
-    except TaskError as exc:
-        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
-        return exc.exit_code
-    print(json.dumps(output, sort_keys=True, separators=(",", ":")))
-    return 0
+    return run_task_command(lambda: callback(_store(args)))
 
 
 def run_product_create(args):

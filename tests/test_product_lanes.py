@@ -17,7 +17,7 @@ from unittest import mock
 from secretary.cli import main
 from secretary.product_issues import ProductIssueStore
 from secretary.tasks import TaskError
-from tests.test_product_issues import ProductBoard
+from tests.fakes.product_issues import ProductBoard
 
 
 class LaneBoard(ProductBoard):

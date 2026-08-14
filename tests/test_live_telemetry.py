@@ -41,7 +41,7 @@ from secretary.dispatcher_watchdog import idle_stall_seconds
 from secretary.head_health import HeadHealth
 from secretary.head_registry import materialize_snapshot, record_source
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
-from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard
+from tests.fakes.dispatcher import FakeCatalog, FakeHost, FakeKanboard
 
 from triggered_agents.agents.steward import cli as steward_cli
 from triggered_agents.agents.steward import signals as steward_signals

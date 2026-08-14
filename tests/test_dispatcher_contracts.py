@@ -59,7 +59,7 @@ from triggered_agents.runtime import dispatch, role_env
 from secretary.tasks import KanboardClient
 from secretary.board_transport import ensure as ensure_board_transport
 
-from tests.test_dispatcher import FakeCatalog, FakeHost, FakeKanboard
+from tests.fakes.dispatcher import FakeCatalog, FakeHost, FakeKanboard
 from tests.fanout_fixtures import accepted_transport_run
 
 # Modules that reach through a runtime into the host/catalog collaborators.

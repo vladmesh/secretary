@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from secretary import head_registry
+from secretary import _proc, head_registry
 from secretary.board_transport import findings as board_transport_findings
 from secretary.checkpoint import checkpoint_snapshot
 from secretary.dispatcher_observer import observer_snapshot
@@ -236,7 +236,7 @@ class _StatusWatchdogHost:
 
     def _run_json(self, args: list[str]) -> dict[str, Any]:
         try:
-            completed = subprocess.run(args, text=True, capture_output=True, timeout=10, check=False)
+            completed = _proc.run(args, timeout=10)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise HostError(f"terminal inventory unavailable: {exc}") from None
         if completed.returncode:

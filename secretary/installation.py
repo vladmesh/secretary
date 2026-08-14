@@ -58,7 +58,7 @@ from secretary.secret_store import (
     key_path,
     normalize_phrase,
 )
-from secretary import state_repo
+from secretary import _proc, state_repo
 from secretary.state_repo import StateRepoError
 from secretary.tasks import KanboardClient, TaskError, TaskReader
 from secretary.upgrade import (
@@ -123,14 +123,7 @@ def _run(
     environment.setdefault("GIT_TERMINAL_PROMPT", "0")
     environment.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
     try:
-        completed = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=environment,
-            cwd=str(cwd) if cwd is not None else None,
-        )
+        completed = _proc.run(argv, timeout=timeout, env=environment, cwd=cwd)
     except FileNotFoundError:
         raise InstallError(f"{label}: command not found") from None
     except (OSError, subprocess.TimeoutExpired):

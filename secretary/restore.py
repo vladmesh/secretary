@@ -25,7 +25,7 @@ from secretary.backup_policy import (
 )
 from secretary.backup_verify import _verify_plain_tar
 from secretary.config import ConfigError, load_config, validate_instance
-from secretary import state_repo
+from secretary import _proc, state_repo
 from secretary.data import init_layout
 from secretary.sprint_observer import (
     ObserverMetadataError,
@@ -478,15 +478,12 @@ def rebuild_memory_index(
             script = script.expanduser().resolve()
             if not python.is_file() or not os.access(python, os.X_OK) or not script.is_file():
                 raise RuntimeError("external memory rebuild argv contract is unavailable")
-            completed = subprocess.run(
+            completed = _proc.run(
                 [
                     str(python), str(script), "--canon", str(facts_dir), "--export",
                     str(memory_dir / "export.ndjson"), "--target-db",
                     str(memory_dir / "index.sqlite"), "--model", model, "--dim", str(dim),
                 ],
-                text=True,
-                capture_output=True,
-                check=False,
                 timeout=MEMORY_REINDEX_TIMEOUT_SECONDS,
                 env={
                     **os.environ,

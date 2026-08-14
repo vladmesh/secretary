@@ -43,8 +43,8 @@ from secretary.restore import (
 from secretary.restore import _normalized_cards, _restored_order_mismatch
 from secretary.product_issues import ProductIssueValidationError, validate_product_issue_records
 from secretary.tasks import TaskReader
-from tests.test_sprints import SprintKanboard
-from tests.test_tasks import WriteKanboard
+from tests.fakes.sprints import SprintKanboard
+from tests.fakes.tasks import WriteKanboard
 
 
 from tests.restore_fixtures import (

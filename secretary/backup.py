@@ -15,6 +15,7 @@ from typing import Any, Callable, Iterator
 
 import fcntl
 
+from secretary import _proc
 from secretary.config import ConfigError, load_config, validate
 from secretary._fsutil import sha256_file
 from secretary.data import (
@@ -277,14 +278,7 @@ def _pipeline_action(
     else:
         raise RuntimeError(f"unknown pipeline action: {action}")
     try:
-        result = subprocess.run(
-            [*cmd, *args],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=os.environ.copy(),
-        )
+        result = _proc.run([*cmd, *args], check=True, env=os.environ.copy())
         return json.loads(result.stdout) if result.stdout.strip() else None
     except FileNotFoundError:
         raise RuntimeError(f"pipeline command not found: {cmd[0]}") from None
@@ -312,13 +306,8 @@ def _pipeline_status(
 ) -> dict[str, Any]:
     cmd = command or [sys.executable, "-P", "-m", "secretary"]
     try:
-        result = subprocess.run(
-            [*cmd, "pause-status", "--instance", str(instance_file)],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            env=os.environ.copy(),
+        result = _proc.run(
+            [*cmd, "pause-status", "--instance", str(instance_file)], check=True, env=os.environ.copy()
         )
     except FileNotFoundError:
         raise RuntimeError(f"pipeline command not found: {cmd[0]}") from None
@@ -490,14 +479,7 @@ def _instance_file(path: Path) -> Path:
 
 def _git_commit(repo_root: Path) -> str | None:
     try:
-        result = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=repo_root,
-        )
+        result = _proc.run(["git", "rev-parse", "HEAD"], check=True, cwd=repo_root)
     except (FileNotFoundError, subprocess.CalledProcessError):
         return None
     return result.stdout.strip() or None

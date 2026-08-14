@@ -14,7 +14,7 @@ from unittest import mock
 
 from secretary.config import validate_instance
 from secretary.status import collect_status
-from tests.test_dispatcher import FakeKanboard
+from tests.fakes.dispatcher import FakeKanboard
 
 
 def _report(root: Path):

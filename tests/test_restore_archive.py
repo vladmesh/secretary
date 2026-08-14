@@ -32,7 +32,7 @@ from secretary.restore import (
     restore_findings,
     restore_state,
 )
-from tests.test_tasks import WriteKanboard
+from tests.fakes.tasks import WriteKanboard
 
 
 from tests.restore_fixtures import (

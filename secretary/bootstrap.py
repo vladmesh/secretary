@@ -21,6 +21,7 @@ from typing import Any
 import yaml
 
 from secretary._fsutil import write_text_atomic
+from secretary import _proc
 from secretary.board_transport import ensure_from_runtime_values, transport_path
 from secretary.config import validate_instance
 from secretary.host_apply import pinned_orca_executable
@@ -367,9 +368,7 @@ def _compose_package() -> str:
     """Return the Compose v2 package exposed by this distribution's own apt archive."""
     for package in ("docker-compose-v2", "docker-compose-plugin"):
         try:
-            result = subprocess.run(
-                ["apt-cache", "show", package], capture_output=True, text=True, timeout=30,
-            )
+            result = _proc.run(["apt-cache", "show", package], timeout=30)
         except (OSError, subprocess.TimeoutExpired):
             raise BootstrapError("could not inspect apt packages for Docker Compose") from None
         if result.returncode == 0:
@@ -381,9 +380,7 @@ def _docker_compose_available() -> bool:
     if shutil.which("docker") is None:
         return False
     try:
-        return subprocess.run(
-            ["docker", "compose", "version"], capture_output=True, text=True, timeout=30,
-        ).returncode == 0
+        return _proc.run(["docker", "compose", "version"], timeout=30).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 
@@ -396,9 +393,7 @@ def _ensure_docker_ready(*, timeout: int = 60) -> None:
     deadline = time.monotonic() + timeout
     while True:
         try:
-            ready = subprocess.run(
-                ["docker", "info"], capture_output=True, text=True, timeout=15,
-            ).returncode == 0
+            ready = _proc.run(["docker", "info"], timeout=15).returncode == 0
         except (OSError, subprocess.TimeoutExpired):
             ready = False
         if ready:

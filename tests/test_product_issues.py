@@ -15,7 +15,7 @@ from secretary.board.kanboard import KanboardBoardHost
 from secretary.board.transitions import BoardProtocolError
 from secretary.product_issues import ProductIssueStore
 from secretary.tasks import TaskAudit, TaskError, TaskWriter
-from tests.test_tasks import WriteKanboard
+from tests.fakes.tasks import WriteKanboard
 from tests.observer_identity import as_observer
 
 

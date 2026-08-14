@@ -1364,6 +1364,45 @@ class SecretCliCase(SecretStoreCase):
         self.assertTrue(json.loads(out)["ok"])
         self.assertTrue(secret_store.is_initialized(self.instance_dir))
 
+    def test_list_keeps_the_public_pretty_json_contract(self) -> None:
+        with mock.patch.object(
+            secret_commands,
+            "list_secrets",
+            return_value=({"id": "board.token", "scope": "installation"},),
+        ):
+            code, output, errors = self.run_cli(
+                ["secret", "list", "--instance", str(self.instance_dir)]
+            )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(errors, "")
+        self.assertEqual(
+            output,
+            '{\n  "ok": true,\n  "op": "list",\n  "secrets": [\n    {\n'
+            '      "id": "board.token",\n      "scope": "installation"\n    }\n'
+            '  ]\n}\n',
+        )
+
+    def test_list_keeps_secret_error_kinds_and_exit_codes(self) -> None:
+        cases = (
+            (SecretStoreStateError("locked catalog"), "state", 3),
+            (SecretStoreError("cannot read catalog"), "runtime", 1),
+            (state_repo.StateRepoError("git unavailable"), "runtime", 1),
+        )
+        for error, kind, code in cases:
+            with self.subTest(error=type(error).__name__):
+                with mock.patch.object(secret_commands, "list_secrets", side_effect=error):
+                    actual_code, output, errors = self.run_cli(
+                        ["secret", "list", "--instance", str(self.instance_dir)]
+                    )
+
+                self.assertEqual(actual_code, code)
+                self.assertEqual(errors, "")
+                self.assertEqual(
+                    json.loads(output),
+                    {"ok": False, "op": "list", "error": kind, "message": str(error)},
+                )
+
     def test_init_without_a_correct_confirmation_initializes_nothing(self) -> None:
         def fake_read_line(prompt: str) -> str:
             return "yes" if prompt.startswith("Type 'yes'") else "wrong"

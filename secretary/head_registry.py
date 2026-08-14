@@ -28,6 +28,7 @@ from typing import Any
 
 import yaml
 
+from secretary import _proc
 from secretary._fsutil import write_text_atomic
 from triggered_agents.runtime.paths import configured_product_root
 from triggered_agents.agents.pipeline.heads import (
@@ -189,10 +190,9 @@ def product_revision(product_root: Path) -> str:
     then records the path alone rather than refusing to be written.
     """
     try:
-        result = subprocess.run(
-            ["git", "-c", f"safe.directory={product_root}", "-C", str(product_root),
-             "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=30,
+        result = _proc.run(
+            ["git", "-c", f"safe.directory={product_root}", "-C", str(product_root), "rev-parse", "HEAD"],
+            timeout=30,
         )
     except (OSError, subprocess.TimeoutExpired):
         return UNKNOWN_REVISION

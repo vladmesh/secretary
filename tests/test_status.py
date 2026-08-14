@@ -19,7 +19,7 @@ from secretary.config import validate_instance
 from secretary.secret_store import initialize_store, set_secret
 from secretary.status import collect_status
 from secretary.tasks import TaskAudit
-from tests.test_dispatcher import FakeKanboard
+from tests.fakes.dispatcher import FakeKanboard
 
 
 def _git(cwd: Path, *args: str) -> None:

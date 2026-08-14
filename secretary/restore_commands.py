@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import json
+from functools import wraps
 from pathlib import Path
 
+from secretary.cli_output import print_json
 from secretary.restore import (
     RestoreError,
     _target,
@@ -64,6 +65,27 @@ def add_restore_subcommands(subparsers) -> None:
     reconcile.add_argument("--instance", required=True)
     reconcile.set_defaults(handler=run_restore_reconcile)
 
+
+def _restore_command(action: str):
+    def decorate(command):
+        @wraps(command)
+        def run(args: argparse.Namespace) -> int:
+            try:
+                payload = command(args)
+            except RestoreError as exc:
+                _print_json({"ok": False, "action": action, "error": str(exc)})
+                return 2
+            if isinstance(payload, int):
+                return payload
+            _print_json(payload)
+            return 0
+
+        return run
+
+    return decorate
+
+
+@_restore_command("bootstrap")
 def run_bootstrap(args: argparse.Namespace) -> int:
     if not args.empty:
         required = (args.instance_remote, args.instance_dir, args.installation_user)
@@ -75,39 +97,28 @@ def run_bootstrap(args: argparse.Namespace) -> int:
     if not args.instance:
         _print_json({"ok": False, "action": "bootstrap", "error": "--empty requires --instance"})
         return 2
-    try:
-        plan = bootstrap_empty(Path(args.instance), dry_run=args.dry_run)
-    except RestoreError as exc:
-        _print_json({"ok": False, "action": "bootstrap", "error": str(exc)})
-        return 2
-    _print_json(plan_as_json(plan, action="bootstrap", dry_run=args.dry_run))
-    return 0
+    return plan_as_json(
+        bootstrap_empty(Path(args.instance), dry_run=args.dry_run),
+        action="bootstrap",
+        dry_run=args.dry_run,
+    )
 
 
+@_restore_command("restore")
 def run_restore(args: argparse.Namespace) -> int:
-    try:
-        plan = restore_backup(
-            Path(args.archive),
-            Path(args.instance),
-            dry_run=args.dry_run,
-        )
-    except RestoreError as exc:
-        _print_json({"ok": False, "action": "restore", "error": str(exc)})
-        return 2
-    _print_json(plan_as_json(plan, action="restore", dry_run=args.dry_run))
-    return 0
+    return plan_as_json(
+        restore_backup(Path(args.archive), Path(args.instance), dry_run=args.dry_run),
+        action="restore",
+        dry_run=args.dry_run,
+    )
 
 
+@_restore_command("restore-board")
 def run_restore_board(args: argparse.Namespace) -> int:
-    try:
-        instance_path, data_dir, _ = _target(Path(args.instance))
-        count = import_normalized_board(data_dir, instance=instance_path.parent)
-    except RestoreError as exc:
-        _print_json({"ok": False, "action": "restore-board", "error": str(exc)})
-        return 2
+    instance_path, data_dir, _ = _target(Path(args.instance))
+    count = import_normalized_board(data_dir, instance=instance_path.parent)
     sprints = restore_state(data_dir).get("sprint_count", 0)
-    _print_json({"ok": True, "action": "restore-board", "cards": count, "sprints": sprints})
-    return 0
+    return {"ok": True, "action": "restore-board", "cards": count, "sprints": sprints}
 
 
 def _board_subcommand_required(args: argparse.Namespace) -> int:
@@ -115,17 +126,15 @@ def _board_subcommand_required(args: argparse.Namespace) -> int:
     return 2
 
 
+@_restore_command("board migrate-assessment")
 def run_board_migrate_assessment(args: argparse.Namespace) -> int:
     """Add the Assessment column to the board bound to ``--instance``."""
     from secretary.bootstrap import BootstrapError, migrate_assessment_column
 
     try:
-        result = migrate_assessment_column(Path(args.instance).expanduser())
+        return migrate_assessment_column(Path(args.instance).expanduser())
     except BootstrapError as exc:
-        _print_json({"ok": False, "action": "board migrate-assessment", "error": str(exc)})
-        return 2
-    _print_json(result)
-    return 0
+        raise RestoreError(str(exc)) from None
 
 
 def run_restore_reconcile(args: argparse.Namespace) -> int:
@@ -167,32 +176,27 @@ def run_restore_reconcile(args: argparse.Namespace) -> int:
     return 0
 
 
+@_restore_command("memory-reindex")
 def run_memory_reindex(args: argparse.Namespace) -> int:
-    try:
-        instance_path, data_dir, _ = _target(Path(args.instance))
-        report = validate_instance(instance_path)
-        host = report.host if isinstance(report.host, dict) else {}
-        python = host.get("memory_reindex_python")
-        script = host.get("memory_reindex_script")
-        model = host.get("memory_model", "intfloat/multilingual-e5-large")
-        dim = host.get("memory_dim", 1024)
-        threads = host.get("memory_threads", 1)
-        count = rebuild_memory_index(
-            data_dir,
-            # `_target` hands back instance.yaml; canon hangs off the repo root.
-            instance_path.parent,
-            python=Path(python) if isinstance(python, str) else None,
-            script=Path(script) if isinstance(script, str) else None,
-            model=model if isinstance(model, str) else None,
-            dim=dim if isinstance(dim, int) else None,
-            threads=threads if isinstance(threads, int) else None,
-        )
-    except RestoreError as exc:
-        _print_json({"ok": False, "action": "memory-reindex", "error": str(exc)})
-        return 2
-    _print_json({"ok": True, "action": "memory-reindex", "facts": count})
-    return 0
+    instance_path, data_dir, _ = _target(Path(args.instance))
+    report = validate_instance(instance_path)
+    host = report.host if isinstance(report.host, dict) else {}
+    python = host.get("memory_reindex_python")
+    script = host.get("memory_reindex_script")
+    model = host.get("memory_model", "intfloat/multilingual-e5-large")
+    dim = host.get("memory_dim", 1024)
+    threads = host.get("memory_threads", 1)
+    count = rebuild_memory_index(
+        data_dir,
+        instance_path.parent,
+        python=Path(python) if isinstance(python, str) else None,
+        script=Path(script) if isinstance(script, str) else None,
+        model=model if isinstance(model, str) else None,
+        dim=dim if isinstance(dim, int) else None,
+        threads=threads if isinstance(threads, int) else None,
+    )
+    return {"ok": True, "action": "memory-reindex", "facts": count}
 
 
 def _print_json(payload: dict) -> None:
-    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    print_json(payload)
