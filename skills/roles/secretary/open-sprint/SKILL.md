@@ -74,7 +74,8 @@ overlap:
 1. Do not create the entity. A refusal here is cheaper than two writers on one repository.
 2. Name the conflicting sprint (ref, goal) to the person and offer a choice: wait for it to close, narrow
    the new sprint to the free repositories, or close the current one by an explicit decision
-   (`python3 -P -m secretary sprint close --role po --actor <you> --ref sprint:<ID>`).
+   (`python3 -P -m secretary sprint close --role po --actor <you> --ref sprint:<ID> --decisions-file
+   <decisions>.yaml`, which states the verdict on every issue that sprint declared).
 3. You may not close someone else's open sprint on your own "so it stops getting in the way".
 
 Anything urgent that lands in a running sprint's repository does not become a separate sprint: it is added

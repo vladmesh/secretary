@@ -743,6 +743,17 @@ class FakeKanboard:
             self.metadata[task_id] = {}
             self.comments[task_id] = []
             return task_id
+        if method == "closeTask":
+            # A sprint close archives the cards its dispositions take off the contract, so
+            # this fake answers the archival write the same way the board does.
+            task = next(
+                task for task in self.tasks + self.sprints
+                if int(task["id"]) == int(params["task_id"])
+            )
+            task["is_active"] = 0
+            self.now += 1
+            task["date_modification"] = self.now
+            return True
         if method == "updateTask":
             task = next(
                 task for task in self.tasks + self.sprints

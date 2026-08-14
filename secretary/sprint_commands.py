@@ -81,6 +81,12 @@ def add_sprint_subcommands(subparsers) -> None:
             command.add_argument("--through-event")
         elif name == "reopen":
             _add_observer_argument(command)
+        elif name == "close":
+            command.add_argument(
+                "--decisions-file",
+                help="YAML file stating the verdict on every declared issue and the disposition "
+                     "of every card that is not done",
+            )
         command.set_defaults(handler=handler)
     sprint.set_defaults(handler=not_implemented)
 
@@ -218,4 +224,14 @@ def run_reopen(args: argparse.Namespace) -> int:
 
 
 def run_close(args: argparse.Namespace) -> int:
-    return _write(args, lambda writer: writer.close(role=args.role, actor=args.actor or args.role, reference=args.ref, request_id=args.request_id))
+    from secretary.sprint_close import parse_close_decisions
+
+    try:
+        decisions = parse_close_decisions(_read_body(args.decisions_file)) if args.decisions_file else None
+    except TaskError as exc:
+        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
+        return exc.exit_code
+    return _write(args, lambda writer: writer.close(
+        role=args.role, actor=args.actor or args.role, reference=args.ref,
+        decisions=decisions, request_id=args.request_id,
+    ))

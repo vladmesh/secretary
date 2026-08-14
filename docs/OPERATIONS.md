@@ -685,9 +685,10 @@ whole restore with `restored open sprints are not admissible on this installatio
 
 So the procedure is:
 
-1. close the second sprint first: `python3 -P -m secretary sprint close --role po --ref sprint:ID`. Its
-   terminal Done cards are archived, its linked non-terminal cards stay on the board, and its
-   reservations are released.
+1. close the second sprint first: `python3 -P -m secretary sprint close --role po --ref sprint:ID
+   --decisions-file DECISIONS.yaml`, whose decisions cover every issue that sprint declared and every
+   card of it outside Done. Its terminal Done cards are archived, each disposed card is taken into the
+   end its disposition names, and its reservations are released.
 2. confirm with `python3 -P -m secretary sprint list --status open` that exactly one sprint is open.
 3. set `open_sprint_limit: 1` in `instance.yaml`, or delete the key (absent means one), and commit it.
 4. verify with the read-back command above that the effective limit is `1`.

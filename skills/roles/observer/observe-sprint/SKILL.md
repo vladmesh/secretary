@@ -386,12 +386,15 @@ When the Definition of Done is confirmed by a check against the default branch a
    never reached a head at all: you cannot have seen those, which is why they are handed to you.
    A sprint whose reviewer came up normally can still have lost observer wakes; report them as
    observer delivery, not as reviewer bring-up, and do not retry delivery yourself.
-5. Close the sprint:
+5. Close the sprint. The close decides every issue the sprint declared and every card it still
+   holds outside Done, so write those verdicts first (the format is in `docs/PROTOCOLS.md`) and pass
+   them as one file:
    ```bash
-   python3 -P -m secretary sprint close --ref <sprint-ref> --role po --actor observer
+   python3 -P -m secretary sprint close --ref <sprint-ref> --role po --actor observer \
+     --decisions-file <decisions>.yaml
    ```
    Closing a sprint is separately authorised for the PO role only; this is neither a task write nor an
-   override.
+   override. A close short of a decision is refused and names what is missing; it writes nothing.
 6. Do not start the next sprint: sprints are opened by a person.
 
 ## Permitted stops

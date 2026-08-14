@@ -68,6 +68,7 @@ from secretary.dispatcher_worker_lifecycle import head_run_binding
 
 from tests.observer_identity import as_observer, bind_observer
 from tests.fanout_fixtures import accepted_transport_run
+from tests.sprint_close_fixtures import close_decisions, settle_dispatcher_work
 from tests.test_dispatcher import (
     FakeCatalog,
     FakeHost,
@@ -3723,7 +3724,14 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.settled_pair()
         self.assertEqual(self.host.observers, ["sprint:1"])
 
-        self.sprint_writer.close(role="po", actor="operator", reference=self.FIRST)
+        settle_dispatcher_work(
+            self.data_dir,
+            [card["ref"] for card in self.runtime.sprints.show(self.FIRST)["cards"]],
+        )
+        self.sprint_writer.close(
+            role="po", actor="operator", reference=self.FIRST,
+            decisions=close_decisions(self.sprint_writer, self.FIRST),
+        )
         result = self.runtime.production_tick()
 
         self.assertEqual(self.runtime.sprints.show(self.FIRST)["status"], "closed")
@@ -3731,10 +3739,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.observers(), {})
         self.assertEqual(self.runtime.sprints.show(self.SECOND)["status"], "open")
         self.assertEqual(self.claimed(result)[0]["pilot_ref"], "third-1")
-        self.assertEqual(
-            self.skipped(result),
-            [{"ref": "fourth-1", "reason": "linked sprint is stopped or closed"}],
-        )
+        # Nothing is skipped for the closed sprint any more: its cards left the board with it,
+        # taken off the contract by the dispositions the close carried.
+        self.assertEqual(self.skipped(result), [])
+        self.assertEqual([card["ref"] for card in self.runtime.sprints.show(self.FIRST)["cards"]], [])
         # The open sprint's card in flight keeps riding its cycle.
         self.assertIn("secretary-510-neighbor", self.advanced(result))
 
@@ -3742,7 +3750,14 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         """The other way round: the sprint closed here is not the first one opened."""
         self.settled_pair()
 
-        self.sprint_writer.close(role="po", actor="operator", reference=self.SECOND)
+        settle_dispatcher_work(
+            self.data_dir,
+            [card["ref"] for card in self.runtime.sprints.show(self.SECOND)["cards"]],
+        )
+        self.sprint_writer.close(
+            role="po", actor="operator", reference=self.SECOND,
+            decisions=close_decisions(self.sprint_writer, self.SECOND),
+        )
         result = self.runtime.production_tick()
 
         self.assertEqual(self.runtime.sprints.show(self.SECOND)["status"], "closed")
@@ -3753,13 +3768,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.runtime.sprints.show(self.FIRST)["status"], "open")
         self.assertEqual(self.claimed(result)[0]["pilot_ref"], "fourth-1")
         self.assertIn("secretary-510-pilot", self.advanced(result))
-        # The closed sprint's own Ready card is the one left alone, on the next pass that
-        # reaches it.
-        self.assertEqual(
-            self.skipped(self.runtime.production_tick()),
-            [{"ref": "third-1", "reason": "linked sprint is stopped or closed"}],
-        )
-        self.assertEqual(self.reader.show("third-1")["state"], "ready")
+        # The closed sprint's own Ready card is not left alone on the board any more: its
+        # disposition archived it with the close, so no later pass reaches it at all.
+        self.assertEqual(self.skipped(self.runtime.production_tick()), [])
+        self.assertEqual([card["ref"] for card in self.runtime.sprints.show(self.SECOND)["cards"]], [])
 
     # two open sprints, one head each ----------------------------------------
 
