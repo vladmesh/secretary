@@ -32,7 +32,7 @@ from secretary.head_registry import (
     snapshot_path,
 )
 
-from tests.test_upgrade import FakeRegistrar, FakeUnitInstaller
+from tests.fakes.upgrade import FakeRegistrar, FakeUnitInstaller
 
 UNIT_PREFIX = "secretary-"
 # Read at import, before any fixture patches the home or the account database: these are the two
