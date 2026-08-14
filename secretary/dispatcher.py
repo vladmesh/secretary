@@ -1290,27 +1290,6 @@ class CommandHostRuntime:
                 role=OBSERVER_ROLE, head=head, adapter="unknown", model_source=MODEL_UNKNOWN
             ).to_json()
 
-    def codex_tui_activity(
-        self, task: dict[str, Any], record: DispatcherRecord, kind: str
-    ) -> float | None:
-        """Return Codex TUI rollout activity without reading the session contents."""
-        if not isinstance(getattr(self.catalog, "_heads", None), dict):
-            return None
-        head = record.review_head if kind == "review" else record.head
-        try:
-            profile = self.catalog._head_profile(head)
-        except HostError:
-            # Head snapshots can change while a card is waiting.  That makes the optional TUI
-            # supplement unavailable, not the terminal inventory itself unavailable.
-            return None
-        # Every Codex head is one interactive session, so the rollout supplement applies to all of
-        # them. Neither the card's retired `codex_launch_mode` nor the profile's own mode is
-        # consulted: there is no second launch shape left for either to select.
-        if profile.get("adapter") != "codex" or not record.workspace:
-            return None
-        from triggered_agents.agents.pipeline.codex_sessions import latest_activity_for
-        return latest_activity_for(record.workspace)
-
     def provider_progress(
         self, task: dict[str, Any], record: DispatcherRecord, kind: str
     ) -> dict[str, str]:

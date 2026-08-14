@@ -9,7 +9,6 @@ from unittest import mock
 
 from secretary.dispatcher import CommandHostRuntime, HostError
 from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
-from secretary.dispatcher_state import DispatcherRecord
 from secretary.dispatcher_tui import (
     DELIVERY_ACCEPTED,
     DELIVERY_CONFIRMED,
@@ -517,56 +516,6 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
         self.assertEqual(handle.handle, "term-tui")
         self.assertNotIn(["orca", "terminal", "close", "--terminal", "term-tui", "--json"], host.calls)
 
-    def test_tui_activity_uses_rollout_mtime_for_every_codex_head(self) -> None:
-        """Alternate-screen TUI output gets a progress signal; another adapter gets none.
-
-        The card's retired `codex_launch_mode` no longer gates it either: a legacy `exec` on the
-        card cannot take the supplement away from the interactive head that actually ran.
-        """
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            catalog = ActivityCatalog()
-            host = CommandHostRuntime(catalog, root / "data", mode="noop")  # type: ignore[arg-type]
-            codex_record = DispatcherRecord(
-                worker="worker", workspace=str(root), handle="term", head="codex-tui",
-                review_head="codex-tui", attempt_id="attempt", comment_baseline=0,
-                review_baseline=0, state="claimed", claimed_at=0.0,
-            )
-            claude_record = DispatcherRecord(
-                worker="worker", workspace=str(root), handle="term", head="claude-opus",
-                review_head="claude-opus", attempt_id="attempt", comment_baseline=0,
-                review_baseline=0, state="claimed", claimed_at=0.0,
-            )
-
-            with mock.patch(
-                "triggered_agents.agents.pipeline.codex_sessions.latest_activity_for",
-                return_value=123.0,
-            ) as latest_activity:
-                self.assertEqual(host.codex_tui_activity({"routing": {}}, codex_record, "worker"), 123.0)
-                self.assertEqual(
-                    host.codex_tui_activity(
-                        {"routing": {"codex_launch_mode": "exec"}}, codex_record, "worker"
-                    ),
-                    123.0,
-                )
-                self.assertIsNone(host.codex_tui_activity({"routing": {}}, claude_record, "worker"))
-
-        self.assertEqual(latest_activity.call_args_list, [mock.call(str(root))] * 2)
-
-    def test_tui_activity_ignores_a_head_removed_from_the_snapshot(self) -> None:
-        """A stale record cannot turn an optional supplemental signal into an inventory failure."""
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            catalog = ActivityCatalog()
-            host = CommandHostRuntime(catalog, root / "data", mode="noop")  # type: ignore[arg-type]
-            record = DispatcherRecord(
-                worker="worker", workspace=str(root), handle="term", head="removed-head",
-                review_head="removed-head", attempt_id="attempt", comment_baseline=0,
-                review_baseline=0, state="claimed", claimed_at=0.0,
-            )
-
-            self.assertIsNone(host.codex_tui_activity({"routing": {}}, record, "worker"))
-
 
 class ClaudeTranscriptPathTests(unittest.TestCase):
     """Where Claude Code keeps a workspace's transcripts, checked against where it keeps them.
@@ -767,22 +716,6 @@ class TuiCatalog:
             "CODEX_HOME=/tmp/codex-home codex --dangerously-bypass-approvals-and-sandbox",
             prompt_after_start=True,
         )
-
-
-class ActivityCatalog:
-    def __init__(self) -> None:
-        self._heads = {
-            "profiles": {
-                "codex-tui": {"adapter": "codex", "codex_mode": "tui"},
-                "claude-opus": {"adapter": "claude", "model": "opus"},
-            },
-        }
-
-    def _head_profile(self, head: str) -> dict:
-        try:
-            return self._heads["profiles"][head]
-        except KeyError:
-            raise HostError(f"unknown head {head}") from None
 
 
 class RecordingTuiHost(CommandHostRuntime):

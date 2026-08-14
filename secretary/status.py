@@ -247,9 +247,6 @@ class _StatusWatchdogHost:
             raise HostError("terminal inventory returned invalid JSON") from None
         return payload.get("result", payload) if isinstance(payload, dict) else {}
 
-    def codex_tui_activity(self, _task, _record, _kind):
-        return None
-
 
 def _observers(production: dict[str, Any]) -> list[dict[str, Any]]:
     """One row per sprint the dispatcher tracks an observer head for.
