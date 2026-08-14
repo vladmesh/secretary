@@ -29,6 +29,8 @@ from secretary.sprints import (
     refresh_active_sprint_projects,
     sprint_admission_lock,
 )
+from secretary.sprints import _close_archive_request_id, _close_step_request_id
+from secretary.product_issues import ProductIssueStore
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 from tests.head_registry import write_installed_pair
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
@@ -3580,13 +3582,13 @@ class SprintCloseDecisionTests(SprintFixture):
         self.assertNotEqual(successor["ref"], ref)
 
     def test_an_issue_closed_from_elsewhere_leaves_the_close_recoverable(self) -> None:
-        """A verdict somebody else performed first is resolved, and the retry finishes.
+        """A close never adopts somebody else's verdict as its own, and never walls up.
 
         `issue close` does not ask whether an open sprint declared the issue, so a close can
-        find one of its verdicts already performed.  That is a conflict with one recorded
-        answer, not a wall: the step is settled as closed elsewhere with the reason the issue
-        actually carries, the close stays on its record while it is interrupted, refuses a
-        retry that states other decisions, and the retry of the same file completes.
+        find one of its verdicts already performed with another reason.  A `resolved` decision
+        on an issue closed as `duplicate` is not this sprint's decision, so the preflight
+        refuses it before the transaction and names what the issue carries; the closer
+        confirms what actually happened, and that close goes through.
         """
         ref = self._open()
         card = self._card(ref, "still open work", "conflict-card")
@@ -3594,61 +3596,77 @@ class SprintCloseDecisionTests(SprintFixture):
             reference="issue:second", reason="duplicate", actor="another-po",
             request_id="somebody-elses-close",
         )
-        decisions = {
+        stated = {
             "issues": [
                 {"ref": "issue:open", "verdict": "resolved", "reason": "the fix landed"},
                 {"ref": "issue:second", "verdict": "resolved", "reason": "this one landed too"},
             ],
             "cards": [{"ref": card, "verdict": "drop", "reason": "not finished"}],
         }
+        before = len(self.client.calls)
 
-        with mock.patch.object(TaskWriter, "archive", side_effect=OSError("disk full")):
-            with self.assertRaisesRegex(TaskError, "pending repair") as raised:
-                self.writer.close(
-                    role="po", actor="operator", reference=ref, request_id="parent-close",
-                    decisions=decisions,
-                )
-
-        self.assertEqual(raised.exception.code, "audit_pending")
-        # The verdict that was performed is performed, the conflict is settled, and the close
-        # that did both is still there to be continued rather than restated.
-        self.assertTrue(self._store().show_issue("issue:open")["closed"])
-        self.assertEqual(self.writer.transactions.status()["pending"], 1)
-        with self.assertRaisesRegex(TaskError, "staged with other decisions"):
+        with self.assertRaises(TaskError) as raised:
             self.writer.close(
-                role="po", actor="operator", reference=ref, request_id="parent-close",
-                decisions={"issues": [
-                    {"ref": "issue:open", "verdict": "resolved", "reason": "the fix landed"},
-                    {"ref": "issue:second", "verdict": "open", "reason": "somebody else closed it"},
-                ]},
+                role="po", actor="operator", reference=ref, request_id="refused-close",
+                decisions=stated,
             )
 
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertIn("issue:second (duplicate)", raised.exception.message)
+        self.assertIn("already_closed", raised.exception.message)
+        self.assertEqual(self._writes(before), [])
+        self.assertEqual(self.writer.transactions.status(), {"ok": True, "pending": 0})
+        self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "open")  # type: ignore[arg-type]
+        # Neither does a confirmation of something that did not happen go through.
+        for wrong in ({"verdict": "already_closed", "actual": "wont_do"}, {"verdict": "open"}):
+            with self.assertRaises(TaskError) as refused:
+                self.writer.close(
+                    role="po", actor="operator", reference=ref,
+                    decisions={
+                        "issues": [
+                            {"ref": "issue:open", "verdict": "resolved", "reason": "the fix landed"},
+                            {"ref": "issue:second", "reason": "somebody else got there", **wrong},
+                        ],
+                        "cards": list(stated["cards"]),
+                    },
+                )
+            self.assertEqual(refused.exception.code, "validation")
+        self.assertEqual(self._writes(before), [])
+
+        confirmed = dict(stated)
+        confirmed["issues"] = [
+            {"ref": "issue:open", "verdict": "resolved", "reason": "the fix landed"},
+            {
+                "ref": "issue:second", "verdict": "already_closed", "actual": "duplicate",
+                "reason": "another PO closed it as a duplicate while this sprint ran",
+            },
+        ]
         result = self.writer.close(
-            role="po", actor="operator", reference=ref, request_id="parent-close",
-            decisions=decisions,
+            role="po", actor="operator", reference=ref, request_id="confirmed-close",
+            decisions=confirmed,
         )
 
+        # The confirmed issue is not closed again, and it keeps the reason it actually carries.
         self.assertEqual(result["closed_issues"], ["issue:open"])
-        # The divergence between the stated verdict and the reason the issue carries is a
-        # recorded fact of this close, with the request id that closed it.
-        self.assertEqual(result["issues_closed_elsewhere"], [{
-            "ref": "issue:second", "verdict": "resolved", "closed_reason": "duplicate",
-            "closed_by_request_id": "somebody-elses-close",
-        }])
+        self.assertEqual(self._store().show_issue("issue:second")["close_reason"], "duplicate")
+        self.assertEqual(
+            [item for item in result["issue_decisions"] if item["ref"] == "issue:second"],
+            [confirmed["issues"][1]],
+        )
         self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "closed")  # type: ignore[arg-type]
         self.assertEqual(TaskReader(self.client).list(sprint=ref), [])  # type: ignore[arg-type]
         self.assertEqual(self.writer.transactions.status(), {"ok": True, "pending": 0})
-        closes = [
-            event for event in self._events()
-            if event.get("kind") == "issue.closed" and event.get("ref") == "issue:open"
-        ]
-        self.assertEqual(len(closes), 1)
 
-    def test_an_issue_closed_from_elsewhere_mid_close_is_settled_in_the_same_pass(self) -> None:
-        """The conflict is classified before every write, so it is caught in flight too."""
+    def test_an_issue_closed_from_elsewhere_mid_close_stops_and_is_amended(self) -> None:
+        """A conflict the preflight could not see stops the close and is answered by its retry.
+
+        The close is already past its first verdict when somebody else closes the second issue.
+        It does not finish on their reason and it does not become unresolvable: it records the
+        conflict and refuses, the retry of the same request id may amend exactly that ref to
+        the confirmation of what happened - and nothing else - and then it completes.
+        """
         ref = self._open()
-        store = self._store()
-        real_close_issue = type(store).close_issue
+        real_close_issue = ProductIssueStore.close_issue
 
         def closing_the_other_issue_too(self_store, **kwargs):
             answer = real_close_issue(self_store, **kwargs)
@@ -3659,24 +3677,219 @@ class SprintCloseDecisionTests(SprintFixture):
                 )
             return answer
 
-        from secretary.product_issues import ProductIssueStore
+        stated = {"issues": [
+            {"ref": "issue:open", "verdict": "resolved", "reason": "the fix landed"},
+            {"ref": "issue:second", "verdict": "invalid", "reason": "it was never a bug"},
+        ]}
 
         with mock.patch.object(ProductIssueStore, "close_issue", closing_the_other_issue_too):
-            result = self.writer.close(
+            with self.assertRaises(TaskError) as raised:
+                self.writer.close(
+                    role="po", actor="operator", reference=ref, request_id="raced-issue-close",
+                    decisions=stated,
+                )
+
+        self.assertEqual(raised.exception.code, "close_conflict")
+        self.assertIn("issue:second was closed as wont_do by somebody else", raised.exception.message)
+        self.assertIn("already_closed", raised.exception.message)
+        # The sprint is not closed on a verdict nobody stated, and the close is still there.
+        self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "open")  # type: ignore[arg-type]
+        self.assertEqual(self.writer.transactions.status()["pending"], 1)
+        # The amendment is the only difference a retry may carry.
+        with self.assertRaisesRegex(TaskError, "staged with other decisions"):
+            self.writer.close(
+                role="po", actor="operator", reference=ref, request_id="raced-issue-close",
+                decisions={"issues": [
+                    {"ref": "issue:open", "verdict": "invalid", "reason": "restated"},
+                    {
+                        "ref": "issue:second", "verdict": "already_closed", "actual": "wont_do",
+                        "reason": "another PO got there first",
+                    },
+                ]},
+            )
+        with self.assertRaisesRegex(TaskError, "staged with other decisions"):
+            self.writer.close(
                 role="po", actor="operator", reference=ref, request_id="raced-issue-close",
                 decisions={"issues": [
                     {"ref": "issue:open", "verdict": "resolved", "reason": "the fix landed"},
-                    {"ref": "issue:second", "verdict": "invalid", "reason": "it was never a bug"},
+                    {"ref": "issue:second", "verdict": "open", "reason": "leaving it open instead"},
                 ]},
             )
 
+        result = self.writer.close(
+            role="po", actor="operator", reference=ref, request_id="raced-issue-close",
+            decisions={"issues": [
+                {"ref": "issue:open", "verdict": "resolved", "reason": "the fix landed"},
+                {
+                    "ref": "issue:second", "verdict": "already_closed", "actual": "wont_do",
+                    "reason": "another PO got there first",
+                },
+            ]},
+        )
+
         self.assertEqual(result["closed_issues"], ["issue:open"])
-        self.assertEqual(result["issues_closed_elsewhere"], [{
-            "ref": "issue:second", "verdict": "invalid", "closed_reason": "wont_do",
-            "closed_by_request_id": "a-close-that-raced-this-one",
-        }])
         self.assertEqual(self._store().show_issue("issue:second")["close_reason"], "wont_do")
+        self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "closed")  # type: ignore[arg-type]
         self.assertEqual(self.writer.transactions.status(), {"ok": True, "pending": 0})
+        closes = [
+            event for event in self._events()
+            if event.get("kind") == "issue.closed" and event.get("ref") == "issue:open"
+        ]
+        self.assertEqual(len(closes), 1)
+
+    def test_a_card_moved_by_somebody_else_stops_the_close_and_is_confirmed(self) -> None:
+        """A card in the disposition's target state is not proof this close moved it there."""
+        ref = self._open(issues=["issue:open"])
+        card = self._card(ref, "still open work", "raced-move-card")
+        with as_observer(ref):
+            self.tasks.move(
+                role="observer", actor="observer", reference=card, target="blocked",
+                reason="waiting on an answer", request_id="raced-move-block",
+            )
+        stated = drop_cards(card)
+        moved_by_somebody_else = TaskWriter.move
+        move_id = _close_step_request_id("raced-card-close", "dispose-move", card)
+
+        def move_it_first(self_writer, **kwargs):
+            if kwargs.get("request_id") == move_id:
+                with as_observer(ref):
+                    moved_by_somebody_else(
+                        self.tasks, role="observer", actor="observer", reference=card,
+                        target="ready", reason="picked it back up", request_id="somebody-elses-move",
+                    )
+                raise OSError("disk full")
+            return moved_by_somebody_else(self_writer, **kwargs)
+
+        with mock.patch.object(TaskWriter, "move", move_it_first):
+            with self.assertRaisesRegex(TaskError, "pending repair"):
+                self.writer.close(
+                    role="po", actor="operator", reference=ref, request_id="raced-card-close",
+                    decisions=stated,
+                )
+
+        with self.assertRaises(TaskError) as raised:
+            self.writer.close(
+                role="po", actor="operator", reference=ref, request_id="raced-card-close",
+                decisions=stated,
+            )
+
+        self.assertEqual(raised.exception.code, "close_conflict")
+        self.assertIn(f"card {card} was moved to ready by somebody else", raised.exception.message)
+        self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "open")  # type: ignore[arg-type]
+
+        result = self.writer.close(
+            role="po", actor="operator", reference=ref, request_id="raced-card-close",
+            decisions={
+                "issues": list(KEEP_THE_ISSUE_OPEN["issues"]),
+                "cards": [{
+                    "ref": card, "verdict": "already_moved", "actual": "ready",
+                    "reason": "its own head put it back in Ready before the close got to it",
+                }],
+            },
+        )
+
+        self.assertEqual(result["disposed_tasks"], [card])
+        self.assertEqual(TaskReader(self.client).list(sprint=ref), [])  # type: ignore[arg-type]
+        self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "closed")  # type: ignore[arg-type]
+        self.assertEqual(self.writer.transactions.status(), {"ok": True, "pending": 0})
+
+    def test_a_step_whose_event_did_not_commit_is_repaired_not_assumed(self) -> None:
+        """The reviewer's window: the backend effect landed, the journal write did not.
+
+        The card is in the disposition's target state and the step is not done, because being
+        in that state was never what made it done. The retry drives the same derived request id
+        again, and the close does not finish while that id still has a pending event.
+        """
+        ref = self._open(issues=["issue:open"])
+        card = self._card(ref, "still open work", "half-written-card")
+        with as_observer(ref):
+            self.tasks.move(
+                role="observer", actor="observer", reference=card, target="blocked",
+                reason="waiting on an answer", request_id="half-written-block",
+            )
+        move_id = _close_step_request_id("half-written-close", "dispose-move", card)
+        audit = TaskAudit(self.tmp.name)
+        real_append = TaskAudit.append
+
+        def failing_append(self_audit, request_id, event):
+            if request_id == move_id:
+                raise OSError("disk full")
+            return real_append(self_audit, request_id, event)
+
+        with mock.patch.object(TaskAudit, "append", failing_append):
+            with self.assertRaisesRegex(TaskError, "pending repair"):
+                self.writer.close(
+                    role="po", actor="operator", reference=ref, request_id="half-written-close",
+                    decisions=drop_cards(card),
+                )
+
+        # The backend effect landed and the event did not: exactly the window that used to be
+        # read as "already in the target state, nothing to do".
+        self.assertEqual(TaskReader(self.client).show(card)["state"], "ready")  # type: ignore[arg-type]
+        self.assertIsNotNone(audit.pending_event(move_id))
+
+        result = self.writer.close(
+            role="po", actor="operator", reference=ref, request_id="half-written-close",
+            decisions=drop_cards(card),
+        )
+
+        self.assertEqual(result["disposed_tasks"], [card])
+        self.assertIsNone(audit.pending_event(move_id))
+        self.assertIsNotNone(audit.committed_event(move_id))
+        self.assertEqual(TaskReader(self.client).list(sprint=ref), [])  # type: ignore[arg-type]
+        self.assertEqual(self.writer.transactions.status(), {"ok": True, "pending": 0})
+
+    def test_no_step_of_a_close_ends_on_anything_but_its_own_committed_event(self) -> None:
+        """One classification, three kinds of step: issue verdict, archive, disposition."""
+        for step, request_id_of in (
+            ("issue", lambda ref, card: _close_step_request_id(ref, "issue", "issue:open")),
+            ("archive", lambda ref, card: _close_archive_request_id(ref, card[0])),
+            ("dispose", lambda ref, card: _close_step_request_id(ref, "dispose-archive", card[1])),
+        ):
+            with self.subTest(step=step):
+                self.setUp()
+                sprint = self._open(issues=["issue:open"])
+                done = self._card(sprint, "already done", f"{step}-done")
+                self.tasks.claim(
+                    role="dispatcher", actor="dispatcher", reference=done, worker="worker",
+                    request_id=f"{step}-claim",
+                )
+                for target in ("validate", "done"):
+                    self.tasks.move(
+                        role="dispatcher", actor="dispatcher", reference=done, target=target,
+                        reason="", request_id=f"{step}-move-{target}",
+                    )
+                open_card = self._card(sprint, "still open work", f"{step}-open")
+                decisions = {
+                    "issues": [{"ref": "issue:open", "verdict": "resolved", "reason": "landed"}],
+                    "cards": [{"ref": open_card, "verdict": "drop", "reason": "not finished"}],
+                }
+                step_id = request_id_of(f"{step}-audit-close", (done, open_card))
+                audit = TaskAudit(self.tmp.name)
+                real_append = TaskAudit.append
+
+                def failing_append(self_audit, request_id, event, _id=step_id):
+                    if request_id == _id:
+                        raise OSError("disk full")
+                    return real_append(self_audit, request_id, event)
+
+                with mock.patch.object(TaskAudit, "append", failing_append):
+                    with self.assertRaisesRegex(TaskError, "pending repair"):
+                        self.writer.close(
+                            role="po", actor="operator", reference=sprint,
+                            request_id=f"{step}-audit-close", decisions=decisions,
+                        )
+
+                self.assertIsNotNone(audit.pending_event(step_id))
+
+                self.writer.close(
+                    role="po", actor="operator", reference=sprint,
+                    request_id=f"{step}-audit-close", decisions=decisions,
+                )
+
+                self.assertIsNone(audit.pending_event(step_id))
+                self.assertIsNotNone(audit.committed_event(step_id))
+                self.assertEqual(self.writer.transactions.status(), {"ok": True, "pending": 0})
 
     def test_a_successor_is_refused_until_an_interrupted_close_is_finished(self) -> None:
         """An interrupted close keeps its sprint open, and an open sprint keeps its projects.
@@ -3916,6 +4129,16 @@ class CloseDecisionFileTests(unittest.TestCase):
             # That is a refusal by name, not a TypeError out of the parser.
             ("1: x\nunknown: x", "non-string key"),
             ("issues: [{1: x, unknown: x}]", "non-string key"),
+            # A confirmation has to name the fact it confirms, and only a confirmation may.
+            ("issues: [{ref: issue:a, verdict: already_closed, reason: why}]", "must name it in 'actual'"),
+            ("issues: [{ref: issue:a, verdict: already_closed, reason: why, actual: ready}]",
+             "must name it in 'actual'"),
+            ("cards: [{ref: c-1, verdict: already_moved, reason: why, actual: blocked}]",
+             "must name it in 'actual'"),
+            ("issues: [{ref: issue:a, verdict: resolved, reason: why, actual: duplicate}]",
+             "only a already_closed decision carries"),
+            ("cards: [{ref: c-1, verdict: drop, reason: why, actual: ready}]",
+             "only a already_moved decision carries"),
         ]
         for text, message in cases:
             with self.subTest(text=text):

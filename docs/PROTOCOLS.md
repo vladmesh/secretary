@@ -448,7 +448,8 @@ durable audit event. Only the PO may close an issue, using exactly one of `resol
 `duplicate` or `wont_do`; closure archives the backend record but leaves its comments and audit
 history available through `issue show --ref` and checkpoint recovery. `sprint close` closes an issue
 through this same lifecycle when its decisions file gives one of those four verdicts, with the same role
-and the same reasons; it never closes an issue because a sprint that declared it ended. `issue list --closed` includes
+and the same reasons; it never closes an issue because a sprint that declared it ended, and it never
+records an issue somebody else closed as a verdict of its own. `issue list --closed` includes
 both open and closed issues; without it the list contains only open issues.
 
 A Product and an Issue are not execution tasks and never enter the execution columns: `move` and `claim`
@@ -625,10 +626,18 @@ issues:
   - ref: issue:e6e8c24e9de7a7cad54b
     verdict: resolved          # resolved | invalid | duplicate | wont_do close the issue; open keeps it
     reason: the nudge fix landed in this sprint
+  - ref: issue:32a78b7822bb013ef99a
+    verdict: already_closed    # somebody else closed it; name what they closed it as
+    actual: duplicate
+    reason: another PO closed it as a duplicate while this sprint ran
 cards:
   - ref: secretary-1400
     verdict: drop              # done | drop
     reason: superseded by the next sprint's cut
+  - ref: secretary-1401
+    verdict: already_moved     # somebody else took it there; name the state it is in
+    actual: ready
+    reason: its own head put it back in Ready before the close got to it
 ```
 
 Both sections are optional in the file and neither is optional in the close. Every declared issue needs
@@ -636,7 +645,8 @@ a verdict and every card that is not Done needs a disposition; a close short of 
 `validation` before the transaction is opened, naming the issues without a decision and the cards with
 their states, and writing nothing at all. An unknown ref, a ref decided twice, an unknown verdict, an
 empty reason, an unknown field or section, a key that is not a name at all (`1: x`, which YAML reads as
-an integer key) and an unparsable file are refused the same way.
+an integer key) and an unparsable file are refused the same way. `actual` is required by the two
+confirmations below and refused on every other decision.
 
 A closing verdict closes the issue through the same lifecycle as `issue close`, with that reason and no
 new role. `open` writes nothing to the issue: the sprint's close event carries the basis, which is where
@@ -666,14 +676,36 @@ while nothing has been written; from the first issue write onwards — the marke
 write, as it is before the status change — the refusal is `audit_pending` and the staged plan stays on
 the record, and a retry that states other decisions is still refused.
 
-No step of a close can be left unresolvable. Before every issue write the close reads the issue and
-resolves one of three cases, alike on the first pass and on a retry: an open issue is closed with the
-stated verdict; an issue already closed under this close's own derived request id is a step already done;
-and an issue closed by somebody else — `issue close` does not ask whether an open sprint declared it — is
-settled as closed elsewhere and never written again. The third case is recorded rather than
-reinterpreted: the stated verdict, the reason the issue actually carries and the request id that closed it
-go into `issues_closed_elsewhere` on the close event and in the command's answer, so a divergence between
-the verdict and the issue is visible instead of being fitted away.
+No step of a close can be left unresolvable, and no step ends on anything but its own committed event.
+Every step — an issue verdict, an archival, a disposition's move and its archival — runs under a request
+id derived from the close's, and that id is the only proof the step happened. A pending event under it is
+a step whose backend effect landed and whose journal write did not: the close drives the same id again
+and does not finish while it is still pending. The state an object is observed in is never proof: a card
+sitting in the state a disposition wanted is as easily somebody else's move as this close's. Whether a
+disposition needs its move at all is read from the state this close froze into its plan, not from the
+board as it stands now.
+
+An object that changed under a close, with no committed step of this close's to account for it, is
+somebody else's change, and it is settled by an explicit decision rather than adopted:
+
+- **Before any write.** The preflight reads every declared issue. A closing verdict for an issue somebody
+  else has already closed is refused with `validation`, naming each ref and the reason it carries, before
+  the transaction is opened; so is a decision to leave such an issue open. The closer rewrites the file,
+  confirming what happened with `already_closed` and naming that reason in `actual`. A confirmation of an
+  issue that is open, or one naming a reason the issue does not carry, is refused the same way. The set of
+  issue *close reasons* is unchanged; what gains a value is the set of decisions the file may state.
+- **In flight, once the preflight has passed and writes have begun.** The close neither finishes nor
+  invents a verdict: it stops with `close_conflict`, naming the ref, the stated verdict and the fact that
+  actually holds, and records the conflict on its own transaction. The retry of the same request id may
+  amend exactly those refs, to exactly the confirmation of what happened (`already_closed` with the
+  issue's reason, `already_moved` with the card's state), and nothing else; every other change is refused
+  as a restated file, as before. So the step stays resolvable, and the closer resolves it.
+
+A confirmation writes nothing to the object it confirms. `already_closed` leaves the issue with the reason
+it carries; `already_moved` skips the disposition's move and archives the card where it stands, and it is
+accepted only for the states a disposition of this close would have produced (`done`, `ready`), so a
+confirmation cannot take a card off the contract while it is still in a working state. Both are recorded
+in the close event with their prose, which is where the audit keeps why the sprint accepted them.
 
 Installation config may set `sprint_budget.signal` and `sprint_budget.hard`; defaults are 3 and 6. The
 schema resolves omitted values to those defaults before rejecting a hard limit below the signal limit.

@@ -23,18 +23,33 @@ from secretary.tasks import TaskError
 # The verdict that leaves an issue open. The four closing verdicts are the released close
 # reasons and this card does not add to them.
 KEEP_OPEN = "open"
-ISSUE_VERDICTS = tuple(sorted(ISSUE_CLOSE_REASONS)) + (KEEP_OPEN,)
+# The confirmations. Neither is a new way to close anything: each one states that somebody
+# else already did it, names the fact it is confirming, and is checked against reality before
+# the close writes anything. They exist because the alternative to confirming a conflict is
+# either a silent agreement with somebody else's verdict or a step nobody can resolve.
+ALREADY_CLOSED = "already_closed"
+ALREADY_MOVED = "already_moved"
+ISSUE_VERDICTS = tuple(sorted(ISSUE_CLOSE_REASONS)) + (KEEP_OPEN, ALREADY_CLOSED)
 # What a disposition says about a card that is not done: the work landed, or it will not be
 # done under this contract. Both end with the card archived; they differ in the state the
 # board records before that.
-CARD_DISPOSITIONS = ("done", "drop")
+CARD_DISPOSITIONS = ("done", "drop", ALREADY_MOVED)
 # Where a disposition sends the card before the close archives it. `drop` goes through Ready
 # and not through Blocked because Ready is the released edge that releases a retained worker,
 # and archiving a card that still holds a claim is refused.
 DISPOSITION_TARGETS = {"done": "done", "drop": "ready"}
+# The states a card somebody else moved may be confirmed in: the ends a disposition of this
+# close would have taken it to, and no others, so a confirmation cannot archive a card that is
+# still in a working state.
+CONFIRMABLE_CARD_STATES = tuple(sorted(set(DISPOSITION_TARGETS.values())))
+# Which fact each confirmation has to name in its `actual` field.
+CONFIRMATIONS = {
+    "issue": (ALREADY_CLOSED, tuple(sorted(ISSUE_CLOSE_REASONS))),
+    "card": (ALREADY_MOVED, CONFIRMABLE_CARD_STATES),
+}
 
 _SECTIONS = ("issues", "cards")
-_ENTRY_FIELDS = {"ref", "verdict", "reason"}
+_ENTRY_FIELDS = {"ref", "verdict", "reason", "actual"}
 _SHAPE = (
     "sprint close decisions file must be a mapping with the optional keys 'issues' and 'cards', "
     "each a list of {ref, verdict, reason} entries"
@@ -118,7 +133,27 @@ def _entries(raw: Any, kind: str, verdicts: tuple[str, ...]) -> list[dict[str, s
             raise TaskError(
                 "validation", f"{kind} decision for {reference} requires a non-empty reason", 2,
             )
-        entries.append({"ref": reference, "verdict": verdict, "reason": reason.strip()})
+        confirmation, facts = CONFIRMATIONS[kind]
+        actual = entry.get("actual")
+        if verdict == confirmation:
+            if not isinstance(actual, str) or actual not in facts:
+                raise TaskError(
+                    "validation",
+                    f"{kind} decision for {reference} confirms what somebody else did, so it must "
+                    f"name it in 'actual', one of: " + ", ".join(facts),
+                    2,
+                )
+        elif actual is not None:
+            raise TaskError(
+                "validation",
+                f"{kind} decision for {reference} states 'actual', which only a {confirmation} "
+                "decision carries",
+                2,
+            )
+        decided = {"ref": reference, "verdict": verdict, "reason": reason.strip()}
+        if verdict == confirmation:
+            decided["actual"] = str(actual)
+        entries.append(decided)
     return entries
 
 
@@ -128,6 +163,7 @@ def plan_close_decisions(
     declared_issues: list[str],
     remaining: list[str],
     states: dict[str, str],
+    issue_states: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, list[dict[str, str]]]:
     """Match the decisions against what this sprint actually declared and holds.
 
@@ -135,6 +171,13 @@ def plan_close_decisions(
     disposition per card that is not done, each with the prose that justifies it.  A missing,
     unknown or contradictory decision is a `validation` refusal, and this runs before the
     transaction is opened, so a refused close writes nothing at all.
+
+    A decision is also matched against the issue it decides.  A closing verdict for an issue
+    somebody else has already closed is not this sprint's verdict — the issue carries their
+    reason, not the stated one — so it is refused here, before the transaction, and the closer
+    either confirms what happened with `already_closed` naming that reason or writes a
+    different decision.  The same holds the other way: `already_closed` for an issue that is
+    open, or naming a reason the issue does not carry, is refused too.
     """
     parsed = decisions or {"issues": [], "cards": []}
     issues = list(parsed.get("issues") or [])
@@ -172,7 +215,62 @@ def plan_close_decisions(
             + ", ".join(f"{reference} ({states.get(reference, 'unknown')})" for reference in undisposed),
             2,
         )
+    _check_issue_decisions_match_reality(issues, issue_states or {})
+    _check_card_confirmations_match_reality(cards, states)
     return {
         "issues": sorted(issues, key=lambda entry: entry["ref"]),
         "cards": sorted(cards, key=lambda entry: entry["ref"]),
     }
+
+
+def _check_issue_decisions_match_reality(
+    issues: list[dict[str, str]], issue_states: dict[str, dict[str, Any]],
+) -> None:
+    """Refuse a decision the issue itself contradicts, before the transaction is opened."""
+    conflicting: list[str] = []
+    for entry in issues:
+        state = issue_states.get(entry["ref"])
+        if not isinstance(state, dict):
+            continue
+        closed = bool(state.get("closed"))
+        carried = str(state.get("close_reason") or "")
+        if entry["verdict"] == ALREADY_CLOSED:
+            if not closed:
+                raise TaskError(
+                    "validation",
+                    f"issue {entry['ref']} is open, so there is nothing to confirm; decide it "
+                    "with a closing verdict or leave it open",
+                    2,
+                )
+            if entry["actual"] != carried:
+                raise TaskError(
+                    "validation",
+                    f"issue {entry['ref']} is closed as {carried or 'unknown'}, not as "
+                    f"{entry['actual']}",
+                    2,
+                )
+        elif closed:
+            conflicting.append(f"{entry['ref']} ({carried or 'unknown'})")
+    if conflicting:
+        raise TaskError(
+            "validation",
+            "sprint close cannot decide issue(s) somebody else has already closed; confirm each "
+            "with already_closed naming the reason it carries: " + ", ".join(sorted(conflicting)),
+            2,
+        )
+
+
+def _check_card_confirmations_match_reality(
+    cards: list[dict[str, str]], states: dict[str, str],
+) -> None:
+    """A card confirmation names the state the card actually carries, or it is refused."""
+    for entry in cards:
+        if entry["verdict"] != ALREADY_MOVED:
+            continue
+        carried = states.get(entry["ref"], "unknown")
+        if entry["actual"] != carried:
+            raise TaskError(
+                "validation",
+                f"card {entry['ref']} is in {carried}, not in {entry['actual']}",
+                2,
+            )
