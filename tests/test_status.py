@@ -192,6 +192,47 @@ class StatusCliTests(unittest.TestCase):
         self.assertIn("Secretary status:", output.getvalue())
         self.assertTrue(snapshot["dispatcher"]["active_attempts"][0]["watchdogs"]["worker"]["panel"]["live"])
 
+    def test_status_probes_an_active_attempt_through_its_read_only_terminal_host(self):
+        """The status-only host can inventory panes without becoming a dispatcher runtime."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            (data_dir / "dispatcher").mkdir(parents=True)
+            (data_dir / "dispatcher" / "production-state.json").write_text(
+                json.dumps({"records": {
+                    "secretary-727": {"workspace": "/work", "handle": "term:1"}
+                }}),
+                encoding="utf-8",
+            )
+            instance = root / "instance.yaml"
+            instance.write_text(
+                "version: 1\nname: test\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n  instance_remote: git@example.invalid:x/y.git\n"
+                "host:\n  unit_prefix: secretary-\n",
+                encoding="utf-8",
+            )
+            report = validate_instance(instance)
+            inventory = HostInventory(units=set(), unit_states={})
+            terminal_list = json.dumps({"terminals": [{"handle": "term:1", "connected": True}]})
+            with mock.patch(
+                "secretary.status.LiveHostSource.collect", return_value=CollectResult(inventory)
+            ), mock.patch(
+                "secretary.status._proc.run",
+                return_value=subprocess.CompletedProcess([], 0, terminal_list, ""),
+            ) as run, mock.patch(
+                "secretary.dispatcher_review._head_run_process_status", return_value={"known": False}
+            ), mock.patch(
+                "secretary.status.checkpoint_snapshot", return_value={"lag_minutes": 4}
+            ):
+                snapshot = collect_status(report)
+
+        self.assertTrue(snapshot["dispatcher"]["active_attempts"][0]["watchdogs"]["worker"]["panel"]["live"])
+        self.assertIn(
+            mock.call(["orca", "terminal", "list", "--worktree", "path:/work", "--json"], timeout=10),
+            run.call_args_list,
+        )
+
     def test_status_json_includes_stopped_sprint_and_its_frozen_resume(self):
         """A stopped sprint reports the freshness of its own record, not of later events."""
         with tempfile.TemporaryDirectory() as tmp:

@@ -49,6 +49,7 @@ from secretary.dispatcher_watchdog import (
     review_launch_abort_stuck_ticks as _review_launch_abort_stuck_ticks,
     wait_cycle_token as _wait_cycle_token,
 )
+from triggered_agents.runtime.pane_host import OrcaSessionHost, PaneHostError
 
 
 def candidate_sha(record: DispatcherRecord) -> str:
@@ -159,14 +160,18 @@ def command_terminal_status(
     """Return the tracked pane's liveness and its last output time.
 
     A failed inventory raises instead of looking like a missing pane, so the wait watchdog can report
-    a degraded runtime without restarting a head on a transport failure. The inventory is the session
-    host's, not an argument vector assembled here.
+    a degraded runtime without restarting a head on a transport failure. The public Orca session
+    adapter owns the inventory call, so this read path only requires the host's JSON transport; it
+    does not make a read-only status adapter pretend to be a dispatcher runtime.
     """
     if host.mode == "noop":
         return {"known": True, "live": True, "reason": "noop"}
     if not record.workspace:
         raise HostError(f"{kind} workspace is unavailable")
-    terminals = host._worktree_terminals_or_raise(record.workspace)
+    try:
+        terminals = OrcaSessionHost(host._run_json).panes(record.workspace)
+    except PaneHostError as exc:
+        raise HostError(str(exc)) from None
     if kind == "review":
         label = review_pane_label(task["ref"])
         if record.review_leaf:
