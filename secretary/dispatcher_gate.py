@@ -520,31 +520,23 @@ def _pr_section(text: object) -> str:
     return cleaned[:PR_BODY_SECTION_CHARS].rstrip() + "\n\n… (truncated; the full text is on the card)"
 
 
-def _canonical_text(text: object) -> str:
-    """PR text as a reader sees it, free of what a round trip through GitHub changes.
-
-    GitHub hands a body back with CRLF line endings and its own idea of trailing whitespace, so a
-    byte comparison against the text the gate just sent would differ every time: it would turn
-    "nothing changed" into an edit call per tick, and — since the recorded digest is taken over
-    this same canonical form — it would make the gate disown its own writing the moment it read it
-    back. Any difference that survives this is a real difference in what a reader sees.
-    """
-    lines = str(text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    return "\n".join(line.rstrip() for line in lines).strip()
-
-
 def _pr_digest(title: str, body: str) -> str:
-    """Digest over the exact pair the gate sends to `gh pr edit`/`gh pr create`.
+    """Digest over a title and body exactly as given, byte for byte.
 
     Both, not just the body: the gate writes the title too, and a person who retitles a PR has
-    written something automation must not throw away either. Taken over the canonical form so the
-    gate still recognises its own text after GitHub has handed it back.
+    written something automation must not throw away either.
 
-    This is what the gate writes into its own durable record (`_remember_pr`); it is never read
-    back out of the pull request, and nothing in the body identifies the gate. Text under review
-    cannot say who wrote it.
+    Deliberately no canonicalisation. An earlier form normalised line endings and stripped trailing
+    whitespace before digesting, to survive whatever GitHub does to text on a round trip. That
+    guess is what reopened the defect this predicate exists to close: two trailing spaces are a
+    Markdown hard line break, so a reviewer could add one, the digest would not notice, and the
+    gate would overwrite the edit. Any normalisation is an assumption about a backend nobody
+    measured, and every such assumption widens what the gate will silently replace.
+
+    The round-trip problem is solved by digesting what GitHub itself returns rather than by
+    guessing what it changes — see `_remember_pr`.
     """
-    payload = f"{_canonical_text(title)}\n\n{_canonical_text(body)}"
+    payload = f"{title}\n\n{body}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -587,19 +579,39 @@ def _pr_authorship(record) -> dict:
     return entry if isinstance(entry, dict) else {}
 
 
-def _remember_pr(host, record, number: int, title: str, body: str) -> None:
-    """Record that the gate wrote exactly this title and body on exactly this pull request.
+def _remember_pr(host, workspace: str, record, number: int, title: str, body: str) -> None:
+    """Record that the gate wrote this pull request, digesting what GitHub hands back.
+
+    Two digests, because two different questions are asked later and only one of them is about
+    GitHub's rendering:
+
+    - `digest` is taken over the title and body **read back from GitHub** immediately after the
+      accepted write. Ownership is decided against this, byte for byte, so no assumption is needed
+      about what a round trip changes: whatever GitHub stored is what the gate recorded, and the
+      first byte of difference on a later tick means a person touched it. Guessing the
+      normalisation instead is what let a Markdown hard break slip through an earlier form.
+    - `sent` is taken over the text the gate sent. That is what a later tick compares its freshly
+      assembled rendering against to decide whether anything needs re-sending, a question about
+      the gate's own output that GitHub's rendering has no part in.
 
     Written after the backend confirmed the write, never before: a record for text that never
-    reached GitHub would claim ownership of whatever is actually there. The other order is the
-    unsafe one, and the cost of this one is only a description that stops being refreshed if the
-    process dies between the accepted write and this line.
+    reached GitHub would claim ownership of whatever is actually there. If the read-back fails,
+    nothing is recorded at all — the pull request is simply not the gate's from then on, and keeps
+    the text it has. That costs a description that stops being refreshed, which is the cheap way to
+    be wrong.
 
     The runtime flushes it to the production state at once when the tick lent it one, exactly as a
     head-run transition is flushed; without that it still reaches disk with the tick's records,
     because it is written onto the record the tick is holding.
     """
-    host.commit_gate_pr_authorship(record, {"number": int(number), "digest": _pr_digest(title, body)})
+    stored = _pr_view(host, workspace, number)
+    if stored is None:
+        return
+    host.commit_gate_pr_authorship(record, {
+        "number": int(number),
+        "digest": _pr_digest(str(stored.get("title") or ""), str(stored.get("body") or "")),
+        "sent": _pr_digest(title, body),
+    })
 
 
 def _gate_owns_pr(record, number: int, title: str, body: str) -> bool:
@@ -624,6 +636,9 @@ def _gate_owns_pr(record, number: int, title: str, body: str) -> bool:
     blank), a record about a different pull request, or a record whose digest no longer describes
     what GitHub returns, which means somebody changed it. A stale description costs a reader some
     context; overwriting a person's text costs them their words, so every ambiguity resolves here.
+
+    The comparison is byte for byte against what GitHub returns, and it can be, because the record
+    was taken over GitHub's own read-back of the write rather than over the text the gate sent.
     """
     entry = _pr_authorship(record)
     digest = str(entry.get("digest") or "")
@@ -672,9 +687,10 @@ def _refresh_pr(host, workspace: str, record, number: int, title: str, body: str
     - a pull request whose current title and body no longer reproduce the recorded digest was
       changed by somebody, and from then on it is theirs — the record is left as it is, so it
       keeps failing to reproduce and the pull request is never reclaimed;
-    - text already identical to what the gate would write is not re-sent, so a repeat tick on
-      unchanged data makes no backend call: the recorded digest is the digest of what is on
-      GitHub, so comparing the new rendering against the record answers both questions at once.
+    - text already identical to what the gate last sent is not re-sent, so a repeat tick on
+      unchanged data makes no further backend call. That comparison uses the record's `sent`
+      digest, not its ownership digest: the latter describes GitHub's rendering of the write, and
+      comparing a freshly assembled rendering against it would answer a different question.
 
     Every failure here is swallowed: the description is not a condition on the code, and a card
     whose CI is green must not be bounced, retried or blocked because GitHub would not accept an
@@ -685,12 +701,12 @@ def _refresh_pr(host, workspace: str, record, number: int, title: str, body: str
     recorded = str(entry.get("digest") or "")
     if not recorded or int(entry.get("number") or 0) != int(number):
         return
+    if _pr_digest(title, body) == str(entry.get("sent") or ""):
+        return
     current = _pr_view(host, workspace, number)
     if current is None:
         return
     if not _gate_owns_pr(record, number, str(current.get("title") or ""), str(current.get("body") or "")):
-        return
-    if _pr_digest(title, body) == recorded:
         return
     try:
         completed = _backend_call(
@@ -705,7 +721,7 @@ def _refresh_pr(host, workspace: str, record, number: int, title: str, body: str
         # GitHub refused the edit, so the pull request still carries the recorded text and the
         # record still describes it: the next tick tries again rather than disowning the PR.
         return
-    _remember_pr(host, record, number, title, body)
+    _remember_pr(host, workspace, record, number, title, body)
 
 
 def _ensure_pr(host, workspace: str, task: dict, record, branch: str, base: str) -> None:
@@ -771,7 +787,7 @@ def _remember_created_pr(host, workspace: str, record, branch: str, title: str, 
         return
     if number is None:
         return
-    _remember_pr(host, record, number, title, body)
+    _remember_pr(host, workspace, record, number, title, body)
 
 
 def _open_pr_number(host, workspace: str, branch: str) -> int | None:

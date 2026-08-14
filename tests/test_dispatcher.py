@@ -12065,7 +12065,9 @@ class DispatcherGateTests(unittest.TestCase):
 
     def test_the_pr_the_gate_opens_is_recorded_as_its_own(self) -> None:
         """Authorship is established when the gate writes, not when it reads. The record names the
-        pull request and digests the exact pair that was sent to it."""
+        pull request, digests what GitHub hands back as `digest` — that is what ownership is later
+        decided against, byte for byte, so no assumption about the round trip is needed — and
+        digests what was sent as `sent`, which is what a later tick compares a fresh rendering to."""
         with tempfile.TemporaryDirectory() as tmp:
             ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
             host = GithubGateHost(
@@ -12075,13 +12077,14 @@ class DispatcherGateTests(unittest.TestCase):
             record = self._record(ws)
             host.gate_check(self._described_task(), record)
         create = self._pr_calls(host, "create")[0]
+        sent_title = self._pr_argument(create, "--title")
+        sent_body = self._pr_argument(create, "--body")
         self.assertEqual(
             record.gate_pr_authorship,
             {
                 "number": 42,
-                "digest": _pr_digest(
-                    self._pr_argument(create, "--title"), self._pr_argument(create, "--body")
-                ),
+                "digest": _pr_digest(host.pr_title, host.pr_body),
+                "sent": _pr_digest(sent_title, sent_body),
             },
         )
         self.assertNotIn(
@@ -12132,7 +12135,13 @@ class DispatcherGateTests(unittest.TestCase):
         self.assertEqual(len(self._pr_calls(host, "create")), 1, "an open PR is edited, not reopened")
         self.assertEqual(
             record.gate_pr_authorship,
-            {"number": 42, "digest": _pr_digest(host.pr_title, host.pr_body)},
+            {
+                "number": 42,
+                "digest": _pr_digest(host.pr_title, host.pr_body),
+                "sent": _pr_digest(
+                    self._pr_argument(edits[0], "--title"), self._pr_argument(edits[0], "--body")
+                ),
+            },
             "the record follows the write it describes",
         )
         self.assertNotEqual(record.gate_pr_authorship, first)
@@ -12152,11 +12161,48 @@ class DispatcherGateTests(unittest.TestCase):
             self.assertEqual(len(self._pr_calls(host, "edit")), 1, "the first tick writes it")
             host.gate_check(task, record)
             self.assertEqual(len(self._pr_calls(host, "edit")), 1, "the second tick must not")
-            # What GitHub actually hands back: the same text with CRLF line endings. A byte
-            # comparison would call that a change and edit the PR on every tick forever.
+            # Whatever GitHub does to the text on the way in, the record was taken over what it
+            # handed back, so the next read reproduces it and the repeat tick is still a no-op —
+            # no guess about line endings is involved. Text that changes *after* that read-back is
+            # a different matter and is covered by the ownership tests: it is indistinguishable
+            # from a person's edit, and is treated as one.
             host.pr_body = host.pr_body.replace("\n", "\r\n")
             host.gate_check(task, record)
-            self.assertEqual(len(self._pr_calls(host, "edit")), 1, "a CRLF round trip is not a change")
+            self.assertEqual(len(self._pr_calls(host, "edit")), 1, "and it is still not re-sent")
+
+    def test_a_markdown_hard_break_added_by_a_reader_is_not_overwritten(self) -> None:
+        """This was BLOCKER-markdown-trailing-space-overwrite, and it is the third time the same
+        mistake was made in a different disguise.
+
+        An earlier form canonicalised the text before digesting it — line endings normalised,
+        trailing whitespace stripped — so that the gate would still recognise its own writing after
+        a round trip through GitHub. But two trailing spaces are a Markdown hard line break: a
+        reviewer who adds one changes what every reader sees, and the digest, having stripped it,
+        said nothing had changed. The gate then replaced their edit.
+
+        The repair is not a better guess about what GitHub normalises. It is to stop guessing: the
+        record is taken over what GitHub hands back after the write, so ownership compares byte for
+        byte and any difference at all — hard break, invisible whitespace, a whole rewrite — means
+        somebody else has been here."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=True, check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+            )
+            record = self._record(ws, wrote=host)
+            host.gate_check(self._described_task(report=False), record)
+            self.assertEqual(len(self._pr_calls(host, "edit")), 1, "the gate wrote it")
+            # A reviewer adds a hard break to an interior line and changes nothing else.
+            lines = host.pr_body.split("\n")
+            interior = next(i for i, line in enumerate(lines) if line.strip())
+            lines[interior] = lines[interior] + "  "
+            host.pr_body = "\n".join(lines)
+            edited = host.pr_body
+            result = host.gate_check(self._described_task(), record)
+        self.assertEqual(result.status, "green", "a description is never a reason to fail a card")
+        self.assertEqual(len(self._pr_calls(host, "edit")), 1, "the reviewer's line break survives")
+        self.assertEqual(host.pr_body, edited)
 
     def test_a_hand_written_pr_body_is_never_overwritten(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -12494,6 +12540,7 @@ class DispatcherGateTests(unittest.TestCase):
                 "gate pr list",          # gh pr list (is a PR already open?)
                 "gate pr create",        # gh pr create
                 "gate pr list",          # gh pr list (which number did it get, to record it?)
+                "gate pr view",          # gh pr view (what did GitHub store? that is what is digested)
                 "gate repo view",        # gh repo view --json nameWithOwner
                 "gate gh api",           # gh api .../check-runs
                 "gate gh api",           # gh api .../status
