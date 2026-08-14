@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+import secretary.sprints as sprints
 from secretary.cli import main
 from secretary.board import Actor, BoardEventPending, EntityKind, RelatedRefs, SprintState, TransitionRequest
 from secretary.config import load_config
@@ -361,6 +362,20 @@ class SprintOwnershipTests(SprintFixture):
         ensure_sprint_board(self.client)  # type: ignore[arg-type]
         started = threading.Barrier(3)
         outcomes: dict[str, Any] = {}
+        waiting_at_gate = threading.Event()
+        arrivals_lock = threading.Lock()
+        arrivals = 0
+        real_admission_lock = sprint_admission_lock
+
+        @contextlib.contextmanager
+        def observed_admission_lock(data_dir: str | Path):
+            nonlocal arrivals
+            with arrivals_lock:
+                arrivals += 1
+                if arrivals == 2:
+                    waiting_at_gate.set()
+            with real_admission_lock(data_dir):
+                yield
 
         def deliver(name: str) -> None:
             writer = SprintWriter(  # type: ignore[arg-type]
@@ -377,12 +392,13 @@ class SprintOwnershipTests(SprintFixture):
                 outcomes[name] = exc
 
         threads = [threading.Thread(target=deliver, args=(name,)) for name in ("first", "second")]
-        with sprint_admission_lock(self.tmp.name):
+        with sprint_admission_lock(self.tmp.name), \
+             mock.patch.object(sprints, "sprint_admission_lock", observed_admission_lock):
             for thread in threads:
                 thread.start()
             # Both are inside `create` and waiting for the gate before it is released.
             started.wait(timeout=5)
-            time.sleep(0.2)
+            self.assertTrue(waiting_at_gate.wait(timeout=5), "both creates reached the admission gate")
         for thread in threads:
             thread.join(timeout=10)
             self.assertFalse(thread.is_alive())
