@@ -6,107 +6,62 @@ its worktree, reused across ticks. On a trigger (after precheck passes, under th
   * no agent terminal          -> create one running the agent's resolved head profile
   * one idle agent terminal    -> `/clear` it and re-send <skill> (warm reuse, kills nothing)
   * ...unless its head is red  -> stop it, start a fresh one on the resolved fallback instead
-  * ...unless agent is ephemeral -> stop + tear down instead, start a fresh one (see below)
+  * ...unless agent is ephemeral -> stop + tear down instead, start a fresh one
   * it's busy and fresh        -> leave it working, dispatch nothing
   * it's busy but stuck        -> watchdog: stop the workspace and start one fresh
 
-Why warm reuse and not stop+create every run: Orca retains a dead pty as a ghost tab in the
-workspace session after the process exits, so churning a terminal each tick piles up ghost tabs.
-Reuse never kills the process, so no ghost is born — steady state stays at one terminal. The rare
-kill paths (watchdog, a red idle head, closing legacy duplicates) do leave ghosts, so every run
-first reaps them via `session.tabs.close` (`_reap_ghosts`) — the one lever that reaches the
-session store; the `terminal` CLI can't. Together: steady state creates none, and any stray gets
-swept next tick.
+Warm reuse rather than stop+create every run: Orca retains a dead pty as a ghost tab in the
+workspace session after the process exits. Reuse never kills the process, so no ghost is born;
+the kill paths do leave ghosts, so every run first reaps them via `session.tabs.close`
+(`_reap_ghosts`) — the one lever that reaches the session store, which the `terminal` CLI cannot.
 
-An agent whose automation.toml sets `ephemeral = true` (curator, triggered-agents-445) opts out
-of warm reuse entirely: `_is_ephemeral` gates the idle branch above `_reuse_head_is_red`, so an
-idle terminal is always stopped and replaced rather than `/clear`-ed, and a stuck one is already
-stopped+replaced by the watchdog branch regardless of this flag. Both kill paths now reap their
-own ghost tab immediately (not just at the top of the next run), so a completed/stuck/errored
-ephemeral run never leaves its PTY or tab behind for someone else to notice. This matters for
-curator specifically: its skill writes to shared memory canon off what it reads from its own
-session, so a stale warm session risks carrying forward context (or a half-finished write) from a
-prior tick into the next one's judgment.
+An agent whose automation.toml sets `ephemeral = true` opts out of warm reuse entirely, so a stale
+session cannot carry a half-finished write from a prior tick into the next one's judgment. Both
+kill paths reap their own ghost tab immediately, and `_create_terminal` appends a `; `-separated
+launcher trailer that starts a detached `finalize()` helper (`dispatch --finalize`) on head exit,
+so teardown does not wait for a future tick's poll. `run()`'s cleanup-only/watchdog/stray-sweep
+paths remain the backstop for a terminal that never reaches its trailer at all.
 
-Every one of those kill paths is still only ever REACHED by a future tick's poll, a dispatch.run()
-call noticing after the fact that the terminal has gone idle or stuck. For an ephemeral agent that
-isn't good enough on its own: `_create_terminal` appends a `; `-separated launcher trailer to the
-head's command. On head exit it starts a detached `finalize()` helper (`dispatch --finalize`) that
-survives the PTY it stops, then confirms terminal removal and closes the parent tab without a poll.
-`run()`'s cleanup-only/watchdog/stray-sweep paths remain the backstop for a terminal that never
-reaches its trailer at all (a hard kill, host reboot, Orca itself restarting).
+"Busy vs idle" is Orca's tui-idle condition; "stuck" is busy with no output for WATCHDOG_SECONDS.
+Orca's agent status is known to wedge on 'working' after a silent exit, so a bare busy check would
+freeze the agent forever — the watchdog makes "skip when busy" safe.
 
-Why not `orca automations run`: it dispatches trigger=manual and spawns a NEW head every tick
-(reuse only kicks in for scheduled runs, which don't tick headless), so heads piled up.
+Invariants this module holds:
 
-"Busy vs idle" is Orca's tui-idle condition; "stuck" is busy with no output for
-WATCHDOG_SECONDS. Orca's agent status is known to wedge on 'working' after a silent exit, so a
-bare busy check would freeze the agent forever — the watchdog makes "skip when busy" safe.
-Dispatch only sends the skill and returns; the head reaches `advance` (same lock) minutes later,
-so there's no deadlock.
-
-Every fresh spawn (create, watchdog-restart) prepares the workspace for its head's own runtime
-first, via `_ensure_head_ready`, before any pane is created: a head that lands on a first-run
-dialog hangs on stdin nobody sends, and never renames its tab away from the shell default —
-invisible to the `Claude`-in-title match above, so it's neither reused nor reaped and just sits
-there as a silent orphan (found live in the curator workspace: a terminal stuck at "choose the
-text style" that `_agent_terminals` couldn't see). For a `claude` head that is folder trust and the
-onboarding theme picker, best-effort; for an interactive `codex` head it is the directory-trust
-entry `codex_preflight` writes, and that one is a hard precondition — it fails the spawn before a
-pane exists rather than leaving one sitting on a dialog forever.
-
-A live terminal never re-resolves its head profile on its own, so every spawn that resolves one
-(create, watchdog-restart, red-fallback) records it via `AgentState.save_head_profile` — the only
-place idle-reuse can learn which resource the warm terminal is actually running against, since
-that can already be a fallback and differ from the agent's static preferred head
-(triggered-agents-275).
-
-More invariants, all from PR #95 review rounds (triggered-agents-445):
-
-  * `run(..., cleanup_only=True)` — `ta-gate.sh`'s call on a precheck skip (no new work). Never
-    dispatches a skill; for an ephemeral agent it still runs `_cleanup_only` on a finished/stuck
-    terminal, because `dispatch` (and thus every kill path above) is otherwise never invoked at
-    all on a skip tick — a finished ephemeral run could sit until the next tick that happens to
-    have real work, unbounded if that never comes (round 1 review B1). It bails immediately for a
-    non-ephemeral agent (retro/steward) — before even constructing `AgentState` or taking
-    `state.lock()`, let alone any Orca/board call: their lifecycle is out of scope, so their
-    precheck-skip stays the exact zero-side-effect no-op it always was, and a shared gate calling
-    `--cleanup-only` on every skip can never turn their quiet tick into a lock-contention
-    `SystemExit` (round 2 review B2, hardened round 5 review B1).
-  * Every "stop, then create" path (watchdog-restart, ephemeral-restart, red-fallback) verifies
-    the stop actually worked via `_stop_and_confirm` — re-listing terminals rather than trusting
-    `terminal stop`'s exit code — before spawning the replacement, and bails without creating if
-    it can't confirm. Otherwise a silently-failed stop plus an unconditional create risks two live
-    sessions for one singleton agent (round 1 review B3).
+  * Every fresh spawn prepares the workspace for its head's own runtime first, via
+    `_ensure_head_ready`, before any pane is created: a head that lands on a first-run dialog hangs
+    on stdin nobody sends and never renames its tab away from the shell default, so it is invisible
+    to `_agent_terminals` and is neither reused nor reaped. Best-effort for `claude`; for an
+    interactive `codex` head the directory-trust entry is a hard precondition that fails the spawn.
+  * A live terminal never re-resolves its head profile, so every spawn that resolves one records it
+    via `AgentState.save_head_profile` — the only place idle-reuse can learn which resource the warm
+    terminal actually runs against, which may be a fallback rather than the static preferred head.
+  * `run(..., cleanup_only=True)` never dispatches a skill. For an ephemeral agent it still runs
+    `_cleanup_only`, because otherwise a finished ephemeral run sits until a tick with real work.
+    It bails immediately for a non-ephemeral agent, before constructing `AgentState` or taking
+    `state.lock()`, so a precheck skip stays a zero-side-effect no-op and cannot contend the lock.
+  * Every "stop, then create" path verifies the stop through `_stop_and_confirm` — re-listing
+    terminals rather than trusting `terminal stop`'s exit code — and bails without creating if it
+    cannot confirm; otherwise a silently-failed stop yields two live sessions for one singleton.
   * The "no terminal" branch checks `AgentState.load_terminal_created_at()` against
-    `CREATE_VISIBILITY_GRACE_S` before creating: a terminal this same agent just created may not
-    be visible in `terminal list` yet, and a second dispatch landing in that gap must not read
-    that as "nothing was ever spawned" and create a duplicate (round 1 review B2).
-  * Both the "no terminal" branch and `_cleanup_only`, when `_agent_terminals` recognizes nothing,
-    still check `_raw_terminal_count` — Orca's unfiltered terminal list for the workspace — and
-    sweep (`_stop_and_confirm_workspace_empty` + `_reap_ghosts`) before creating or declaring the
-    workspace clean. `_agent_terminals`'s title/handle filter can miss a genuinely live stray (an
-    orphan stuck on the shell's default title), which would otherwise survive every tick forever —
-    recognized as "empty" and either left alone (cleanup) or piled on top of with a fresh terminal
-    (create). `_stop_and_confirm_workspace_empty` (not the narrower `_stop_and_confirm`) verifies
-    via the same unfiltered `_raw_terminal_count`, since the filtered view would "confirm" success
-    on a stray it could never recognize either way, stopped or not (round 2 review B3).
+    `CREATE_VISIBILITY_GRACE_S` first: a terminal this agent just created may not be visible in
+    `terminal list` yet, and a second dispatch in that gap must not create a duplicate.
+  * When `_agent_terminals` recognizes nothing, both that branch and `_cleanup_only` still check
+    `_raw_terminal_count` — Orca's unfiltered list — and sweep before creating or declaring the
+    workspace clean, because the title/handle filter can miss a genuinely live stray.
+    `_stop_and_confirm_workspace_empty` verifies through the same unfiltered count, since the
+    filtered view would "confirm" success on a stray it could never recognize either way.
 
-Every terminal this scheduler drives it drives through `SessionHost` (secretary-1416). The pane
-verbs — create, list, read, send, stop, close, the tui-idle probe — live in `pane_host` and nowhere
-else, and this module holds only what is actually its own: which pane is the survivor, when idle
-means reuse and when it means teardown, what a stuck terminal is, and how many kinds of failure a
-stop has. `_run_json` is the one subprocess left here, and it runs the argument vectors the host
-hands it rather than building any: which words an `orca terminal` call is made of is a fact about
-that CLI, and this file has no opinion about it. That is what makes the sprint's grep invariant
-(`tests/test_head_command.py`) an assertion about the whole tree with no exceptions in it.
+Every terminal this scheduler drives it drives through `SessionHost`. The pane verbs live in
+`pane_host`; this module holds only which pane is the survivor, when idle means reuse and when it
+means teardown, what a stuck terminal is, and how many kinds of failure a stop has. `_run_json`
+runs the argument vectors the host hands it rather than building any.
 
-What did NOT move is the reading of those answers. A pane that answers `tui-idle` within
-`IDLE_PROBE_MS` is idle here and a probe that times out is busy — two states, not the three the
-interactive delivery path classifies, because this scheduler acts on "may I send into it" and not
-on why it may not. Likewise the calls whose outcome this module has never checked (`/clear`, the
-warm-reuse send, the by-worktree stop, closing a legacy duplicate) still ignore a refusal, and the
-ones that gate a spawn still raise: moving a call behind the host changed neither.
+A pane that answers `tui-idle` within `IDLE_PROBE_MS` is idle here and a probe that times out is
+busy — two states, not the three the interactive delivery path classifies, because this scheduler
+acts on "may I send into it" and not on why it may not. The calls whose outcome this module has
+never checked (`/clear`, the warm-reuse send, the by-worktree stop, closing a legacy duplicate)
+still ignore a refusal, and the ones that gate a spawn still raise.
 """
 from __future__ import annotations
 
@@ -191,23 +146,11 @@ class DispatchCommand:
 
 
 class ReuseDeliveryError(TuiDeliveryError):
-    """A warm terminal did not visibly accept its next skill command.
-
-    A kind of the delivery failure the shared interactive path raises, not a second one: a caller
-    catching either sees the same thing, a head that was not proven to have taken its prompt.
-    """
+    """A warm terminal did not visibly accept its next skill command."""
 
 
 def _run_json(args: list[str]) -> dict:
-    """Run one of `pane_host`'s argument vectors and hand back Orca's result payload.
-
-    The vector arrives complete, binary and `--json` included, and is executed verbatim: the words
-    of an `orca terminal` call belong to the module that spells them, and a runner that edited them
-    would be a second opinion about the CLI. What stays this scheduler's own is the bound — a tick
-    holds the agent's run lock across every one of these calls, so a hung Orca has to fail rather
-    than wedge the lock — and the redaction, which happens before the process starts because a
-    failure outlives the pane it names.
-    """
+    """Run one of `pane_host`'s argument vectors and hand back Orca's result payload."""
     p = subprocess.run(args, capture_output=True, text=True, timeout=ORCA_TIMEOUT_S)
     if p.returncode != 0:
         raise RuntimeError(f"{safe_command_label(args)} failed: {(p.stderr or p.stdout).strip()}")
@@ -218,16 +161,10 @@ def _run_json(args: list[str]) -> dict:
 def _unchecked(work: Callable[[], Any]) -> None:
     """Perform a host call this scheduler has never looked at the outcome of.
 
-    Four calls are like this and were like this before they went behind the host: the `/clear` that
-    precedes a warm reuse, the warm-reuse send itself, the by-worktree stop (whose success is
-    proven by re-listing, never by its own exit code) and the close of a legacy duplicate. Their
-    refusals were dropped by the fire-and-forget runner that issued them, and dropping them here
-    keeps that: a `/clear` Orca declined must not become an exception that skips the dispatch it
-    was clearing for, and a stop must still be judged by the inventory that follows it.
-
-    A refusal and an answer that cannot be read are both ignored, which is exactly what a runner
-    that never parsed the output did. A call that hangs is not: `_run_json`'s timeout still reaches
-    the caller, so a wedged Orca fails the tick instead of being waited on inside the run lock.
+    The `/clear` before a warm reuse, the warm-reuse send, the by-worktree stop (proven by
+    re-listing, never by its own exit code) and the close of a legacy duplicate. A refusal and an
+    unreadable answer are both ignored; a call that hangs is not, so `_run_json`'s timeout still
+    reaches the caller and a wedged Orca fails the tick instead of being waited on inside the lock.
     """
     try:
         work()
@@ -238,14 +175,10 @@ def _unchecked(work: Callable[[], Any]) -> None:
 def _terminal_screen(handle: str, *, host: SessionHost) -> str:
     """Rendered terminal text, or an empty string when Orca cannot provide it.
 
-    This deliberately reads the panel instead of inferring liveness from the terminal record.
-    A completed agent leaves a perfectly live PTY behind, now owned by bash.
-
-    The read, the tail-or-text shapes Orca answers it in and the ANSI stripping are the delivery
-    path's `read_pane_text`, not a second reading of them here. The window stays this caller's:
-    200 lines is what "is an agent REPL on screen" has always been decided on, and a whole
-    retained scrollback would let a marker from a session that ended hours ago answer for the
-    pane as it is now.
+    Reads the panel rather than inferring liveness from the terminal record: a completed agent
+    leaves a perfectly live PTY behind, now owned by bash. The 200-line window is this caller's —
+    a whole retained scrollback would let a marker from a session that ended hours ago answer for
+    the pane as it is now.
     """
     return read_pane_text(handle, host=host, limit=_SCREEN_READ_LINES)
 
@@ -253,9 +186,8 @@ def _terminal_screen(handle: str, *, host: SessionHost) -> str:
 def _agent_repl_visible(handle: str, *, host: SessionHost) -> bool:
     """Whether the observed panel is an agent REPL, not the shell it may have returned to.
 
-    The prompt glyphs cover the supported interactive runtimes.  We require a positive REPL
-    marker as well as the absence of a shell prompt at the bottom of the panel: unknown or
-    unreadable screens are unsafe to receive a slash command and therefore take the
+    A positive REPL marker is required as well as the absence of a shell prompt at the bottom of
+    the panel: unknown or unreadable screens are unsafe to receive a slash command and take the
     fresh-terminal path. Tool output can legitimately contain a shell prompt, so it must not
     classify the whole scrollback as a shell.
     """
@@ -279,11 +211,7 @@ def _claude_projects_root() -> Path:
 
 
 def _claude_session_paths_for(workspace: str):
-    """Yield Claude session logs for one workspace without scanning other projects.
-
-    The directory name is Claude Code's, not ours: see `runtime/claude_sessions`, which owns the
-    one reading of that convention both this driver and the dispatcher's delivery boundary use.
-    """
+    """Yield Claude session logs for one workspace without scanning other projects."""
     return claude_session_paths(workspace, root=_claude_projects_root())
 
 
@@ -316,12 +244,7 @@ def _claude_user_turn_after(workspace: str, since: float) -> bool:
 
 
 def _codex_turn_after(workspace: str, since: float) -> bool:
-    """Whether the Codex session for this workspace wrote anything after ``since``.
-
-    Codex persists its turns as rollout JSONL under CODEX_HOME, so the file moving after the send
-    boundary is the same kind of durable proof `_claude_user_turn_after` reads for Claude — it is
-    the head having taken the prompt into a turn, not the terminal having accepted keystrokes.
-    """
+    """Whether the Codex session for this workspace wrote anything after ``since``."""
     try:
         from ..agents.pipeline import codex_sessions
         latest = codex_sessions.latest_activity_for(workspace)
@@ -331,12 +254,7 @@ def _codex_turn_after(workspace: str, since: float) -> bool:
 
 
 def _confirm_delivery(handle: str, workspace: str, sent_at: float, *, host: SessionHost) -> None:
-    """Wait until the head durably records the command just sent into its live session.
-
-    For a head whose launch command seeds its own prompt, which is a Claude or Hermes one. An
-    interactive head is delivered to — and confirmed — through the shared interactive path
-    instead, so nothing here decides between two providers' records any more.
-    """
+    """Wait until the head durably records the command just sent into its live session."""
     deadline = time.monotonic() + REUSE_DELIVERY_TIMEOUT_S
     last_reason = "no-user-turn"
     while time.monotonic() < deadline:
@@ -391,19 +309,10 @@ def _pipeline_paused() -> bool:
 def _preferred_head(agent: str, spec: dict) -> str | None:
     """The head this agent launches on: the selected registry's role default for it.
 
-    Role routing belongs to the installation, not to the product's automation spec — the same
-    `[role_defaults]` table the dispatcher routes worker, reviewer and observer through also names
-    curator's, retro's and steward's head, so one registry generation decides all six. The spec's
-    own `head` stays as the last resort for a registry that routes this role nowhere.
-
-    That last resort is a head id written down in the product, not in the registry it has to be
-    found in, so it goes through the registry's own resolution: an agent pinned to a Codex id from
-    before every Codex head became interactive still reaches the equivalent profile the
-    installation publishes now, instead of falling back to a bare `claude` invocation nobody chose.
-
-    Resolution refusing that id reaches the caller rather than becoming the bare invocation: a
-    Codex-pinned service agent whose registry has no interactive Codex head left for that name is
-    a dispatch that must not happen, not one to quietly run on another family.
+    The spec's own `head` is the last resort for a registry that routes this role nowhere, and it
+    goes through the registry's own resolution. A resolution refusal reaches the caller rather than
+    becoming a bare `claude` invocation: a Codex-pinned service agent whose registry has no
+    interactive Codex head left for that name is a dispatch that must not happen.
     """
     try:
         from ..agents.pipeline import heads as pipeline_heads
@@ -422,19 +331,6 @@ def _reuse_head_is_red(agent: str, state: AgentState) -> bool:
     red resource — the check idle-reuse needs before sending into an already-warm terminal, since
     that terminal keeps whatever profile it was spawned with and never re-resolves on its own
     (only a fresh spawn does, via `_launch_cmd`).
-
-    Reads the profile `state` recorded at the terminal's last create/restart/red-fallback
-    (`AgentState.load_head_profile`) rather than re-reading `agent`'s static preferred head from
-    automation.toml: the two can diverge (the terminal may already be running on a fallback), and
-    checking the wrong one either misses a genuinely dead terminal (preferred head recovered while
-    the terminal's actual fallback profile went red) or diverts needlessly (preferred head still
-    red while the terminal is already happily running its fallback). Falls back to the static
-    preferred head when nothing was recorded yet (state predates this tracking).
-
-    Best-effort and defaults to green, matching `_launch_cmd`'s own fallback reasoning: a spec
-    with no head, a broken heads.toml, or any resolution failure all mean "nothing to divert
-    from", so idle-reuse only ever skips the warm terminal when a red resource is actually
-    confirmed (triggered-agents-274, triggered-agents-275).
     """
     try:
         head = _preferred_head(agent, _load_spec(agent))
@@ -451,39 +347,24 @@ def _reuse_head_is_red(agent: str, state: AgentState) -> bool:
 
 def _launch_cmd(agent: str, variant: str | None = None,
                 card_ref: str | None = None) -> tuple[str, str, str | None, bool, dict | None]:
-    """(skill, full launch command, resolved head profile, prompt-after-start, profile data) from
-    the agent's automation.toml. The third element is the profile id actually rendered into the launch
-    command (None for a spec with no `head`, or when resolution raised) — the caller records it
-    via `AgentState.save_head_profile` so a later idle-reuse tick can check the resource this very
-    terminal is running against instead of just the agent's static preferred head
-    (triggered-agents-275).
+    """(skill, full launch command, resolved head profile, prompt-after-start, profile data) from the
+    agent's automation.toml.
 
-    The head comes from `_preferred_head` — the selected registry's role default for this agent,
-    else the spec's own `head` — and launches through that same registry: same adapter/model/
-    fallback machinery a worker/reviewer head gets, resolved against this run's live resource
-    health so a red claude-sub falls back instead of launching on a rate-limited account. An agent
-    routed nowhere at all keeps the bare default-model `claude` invocation. Any failure to resolve
-    (a broken registry is itself the kind of anomaly the steward exists to catch) falls back to
-    the same bare invocation rather than leaving the agent undispatched for the whole tick.
+    The head comes from `_preferred_head` and launches through the same registry machinery a
+    worker or reviewer head gets, resolved against this run's live resource health. The caller
+    records the third element via `AgentState.save_head_profile`, so a later idle-reuse tick can
+    check the resource this very terminal runs against rather than the agent's static preferred
+    head. Any resolution failure falls back to the bare default-model `claude` invocation rather
+    than leaving the agent undispatched for the whole tick.
 
-    `variant` (e.g. the steward's "deep-sweep", triggered-agents-254) reads `skill` from
-    `spec["variants"][variant]` instead of the top-level one — a second, differently-scheduled
-    mode of the same agent, same worktree/workspace/head, just a different prompt sent into it.
+    `variant` reads `skill` from `spec["variants"][variant]` instead of the top-level one.
+    `card_ref` appends `--card <ref>` to the skill text BEFORE it is handed to the head, so the
+    augmented text is what actually gets sent rather than landing outside the quoted prompt.
 
-    `card_ref` (triggered-agents-255) appends `--card <ref>` to the skill text BEFORE it is handed
-    to the head, the same way a hand-typed `/steward --card ...` would read — so the augmented text
-    is what actually gets sent (or embedded, for a head whose command seeds its own prompt), not
-    just tacked onto the rendered command afterward where it could land outside the quoted prompt.
-
-    The fourth element is that distinction: a Codex head is an interactive session whose command
-    carries no prompt, so the caller types `skill` into it once the pane is up.
-
-    The fifth is the resolved profile's own data, carried for exactly one reason: an interactive
-    head has to have its workspace prepared before its pane exists, and the preflight that does it
-    reads the CODEX_HOME from the profile the command was rendered from. Resolving it a second time
-    at the call site could answer differently — this run's resource health has already chosen a
-    fallback here — and a preflight run against a different home than the launch names would write
-    trust the head never reads.
+    The fifth element is the resolved profile's own data: an interactive head has its workspace
+    prepared before its pane exists, and the preflight reads CODEX_HOME from the profile the
+    command was rendered from. Resolving it a second time at the call site could answer differently
+    and write trust into a home the head never reads.
     """
     spec = _load_spec(agent)
     skill = spec["variants"][variant]["skill"] if variant else spec["skill"]
@@ -579,11 +460,10 @@ def _fresh_steward_report_in_progress(agent: str, now: float, ws: str, state: Ag
                                       host: SessionHost) -> dict | None:
     """A secondary run guard for steward dispatch.
 
-    Orca terminal creation is not immediately visible in `terminal list` on every host. If two
-    timers fire close together, the second dispatch can miss the first terminal and create a
-    second report card/head. The report card is already the durable "this run exists" marker, so
-    use it as a short-circuit while it is still younger than the steward stale threshold. Once it
-    is stale, a later steward run must be allowed through to investigate and close/escalate it.
+    Orca terminal creation is not immediately visible in `terminal list` on every host, so two
+    timers firing close together can create a second report card and head. The report card is
+    already the durable "this run exists" marker, so it short-circuits while it is younger than the
+    steward stale threshold; once stale, a later run is allowed through to close or escalate it.
     """
     if agent != "steward":
         return None
@@ -614,19 +494,11 @@ def _fresh_steward_report_in_progress(agent: str, now: float, ws: str, state: Ag
 def _ensure_head_ready(ws: str, cmd: DispatchCommand, *, role: str = "service") -> None:
     """Prepare `ws` for the head about to be spawned into it, on that head's own runtime.
 
-    A service head is a head like a pipeline worker is, and the first-run question its runtime asks
-    is the one thing that can make a fresh pane never come up at all. Which question that is
-    depends on the runtime: a `claude` head is asked about folder trust and the theme picker, an
-    interactive `codex` head about directory trust. So this is the one place that branches on it,
-    right before `_create_terminal`, which is the ordering `codex_preflight` states for every
-    interactive Codex head and the Secretary dispatcher keeps too.
-
-    The two failure modes are deliberately not the same. Claude's preparation stays best-effort:
-    it has always been, a config hiccup there risks the hang it prevents but does not guarantee
-    one, and nothing in this module has ever gated a tick on it. The Codex preflight is a hard
-    precondition — without the trust entry the pane cannot reach readiness, so spawning one anyway
-    would create exactly the wedged head this exists to prevent — and it raises, before any pane
-    is created.
+    The first-run question a runtime asks is the one thing that can make a fresh pane never come up
+    at all, and which question it is depends on the runtime, so this is the one place that branches
+    on it, right before `_create_terminal`. The two failure modes differ deliberately: Claude's
+    preparation stays best-effort, while the Codex preflight is a hard precondition — without the
+    trust entry the pane cannot reach readiness — and it raises before any pane is created.
     """
     if cmd.prompt_after_start and str((cmd.head_profile or {}).get("adapter") or "") == "codex":
         # This service path does not own a dispatcher record, but it still crosses the shared
@@ -651,11 +523,9 @@ def _ensure_head_ready(ws: str, cmd: DispatchCommand, *, role: str = "service") 
 def _ensure_claude_ready(ws: str) -> None:
     """Pre-answer folder trust + the onboarding theme picker before a fresh `claude` spawns.
 
-    Without this a head can land on an interactive prompt, wait forever for input nobody sends,
-    and never rename its terminal tab away from the shell default — invisible to
-    `_agent_terminals`'s title match, so it's reused by nothing and reaped by nothing: an orphan
-    every run creates that never dies (seen live in the curator workspace). Best-effort: a config
-    hiccup here shouldn't block the tick, just risks the same hang it's meant to prevent.
+    Without this a head can land on an interactive prompt, wait forever for input nobody sends, and
+    never rename its terminal tab away from the shell default — invisible to `_agent_terminals`'s
+    title match, so it is reused by nothing and reaped by nothing. Best-effort.
     """
     try:
         claude_env.ensure_trust(CLAUDE_JSON, ws)
@@ -669,11 +539,9 @@ def _agent_terminals(ws: str, state: AgentState | None = None, *,
     """Live terminals in the workspace running this singleton agent.
 
     New spawns get an explicit `triggered-agent:<name>` title. The legacy `Claude` match keeps
-    already-warm Claude terminals reusable until they are naturally restarted. Codex may rename
-    its tab back to the shell cwd after startup, so the latest saved Orca handle is also accepted.
-
-    The inventory arrives as `Pane`s, so the title this recognises by and the last-output clock the
-    watchdog reads are fields of the pane rather than keys this module knows the spelling of."""
+    already-warm Claude terminals reusable until they are naturally restarted. Codex may rename its
+    tab back to the shell cwd after startup, so the latest saved Orca handle is also accepted.
+    """
     try:
         panes = host.panes(ws)
     except Exception as exc:
@@ -691,22 +559,18 @@ def _agent_terminals(ws: str, state: AgentState | None = None, *,
 
 
 def _raw_terminal_count(ws: str, *, host: SessionHost) -> int | None:
-    """Every live terminal Orca reports for `ws`, unfiltered by title/handle — unlike
-    `_agent_terminals`, this also counts a stray terminal the recognition filter would otherwise
-    miss entirely: an orphan stuck on the shell's default title from a past incident (found live
-    in the curator workspace once already, see `_ensure_claude_ready`'s docstring), or one that
-    simply predates this agent's `triggered-agent:<name>` title convention. An ephemeral agent's
-    "no terminal" branch and `_cleanup_only` both need this to actually converge accumulated live
-    orphans to zero instead of quietly creating a new terminal alongside one they can't see
-    (triggered-agents-445, PR #95 review B3).
+    """Every live terminal Orca reports for `ws`, unfiltered by title/handle.
 
-    Returns None — "unknown", NOT zero — when the list call itself fails or times out
-    (triggered-agents-445, PR #95 review B1, round 4). A confirmation path
-    (`_stop_and_confirm_workspace_empty`) must never read an Orca hiccup as "confirmed empty" and
-    log a healthy teardown over a terminal/tab that is actually still there; a pre-create/cleanup
-    check must not create on top of, or declare clean, a workspace whose real contents it couldn't
-    read. Every caller distinguishes the three cases (0 / >0 / None) explicitly. An inventory the
-    host cannot parse refuses rather than answering none, which lands here as the same "unknown"."""
+    Unlike `_agent_terminals` this also counts a stray the recognition filter would miss entirely —
+    an orphan stuck on the shell's default title, or one predating the `triggered-agent:<name>`
+    convention — so the stray-sweep paths converge to zero instead of creating a new terminal
+    alongside one they cannot see.
+
+    Returns None — "unknown", NOT zero — when the list call fails, times out or cannot be parsed. A
+    confirmation path must never read an Orca hiccup as "confirmed empty", and a pre-create check
+    must not create on top of a workspace whose real contents it could not read. Every caller
+    distinguishes the three cases (0 / >0 / None) explicitly.
+    """
     try:
         return len(host.panes(ws))
     except (RuntimeError, subprocess.TimeoutExpired):
@@ -722,11 +586,9 @@ def _create_terminal(agent: str, ws: str, launch: str, state: AgentState,
                      profile: str | None, *, host: SessionHost) -> str:
     """Open this agent's pane and record what was opened.
 
-    The pane comes back named: `open_pane` refuses a create Orca answered without a handle instead
-    of returning one, so a spawn that could not be addressed fails here rather than being recorded
-    under a null handle and then delivered to. That is the one place this move made a swallow into
-    a refusal, and it is the right way round — a handle nothing can address is not a terminal this
-    tick may claim to have created (secretary-1416)."""
+    `open_pane` refuses a create Orca answered without a handle, so a spawn that could not be
+    addressed fails here rather than being recorded under a null handle and then delivered to.
+    """
     generation = None
     if _is_ephemeral(agent):
         # Stamp a fresh monotonic generation and bake it into the terminal's own self-teardown
@@ -745,12 +607,7 @@ def _create_terminal(agent: str, ws: str, launch: str, state: AgentState,
 
 def _recover_steward_dispatch_failure(state: AgentState, event: str, cmd: DispatchCommand,
                                       failure: BaseException) -> None:
-    """Close out a steward report card whose head was brought up but never took the run.
-
-    Only for a failure after the pane exists. A workspace that could not be prepared at all is
-    escalated instead, by `_escalate_steward_preflight_failure`: nothing ran, so there is nothing
-    to close.
-    """
+    """Close out a steward report card whose head was brought up but never took the run."""
     if not cmd.card_ref:
         return
     state.clear_active_report(cmd.card_ref)
@@ -769,17 +626,11 @@ def _escalate_steward_preflight_failure(state: AgentState, event: str, cmd: Disp
                                         failure: BaseException) -> None:
     """Put a steward report card in front of a human when its workspace could not be prepared.
 
-    The preflight fails before any pane is created, so no head has seen this card and no sweep has
-    happened. Closing it as Done — what a post-pane dispatch failure does — would record a sweep
-    that never ran and consume the card that says one was due, and the condition is not one a
-    later tick heals on its own: an untrusted repository root or a codex config the launcher may
-    not rewrite stays that way until somebody changes it. Blocked is the board's own "give up,
-    wait for a human" state and the steward's own escape hatch, so the card lands there with the
-    preflight's reason attached, visible rather than silently swallowed.
-
-    A card that cannot even be moved leaves its reason in the run log, the same fallback the
-    close-out path takes: the tick is failing either way, and a recovery that raises on its own
-    would replace the real cause with its own.
+    The preflight fails before any pane is created, so no head has seen this card. Closing it as
+    Done would record a sweep that never ran, and the condition — an untrusted repository root, a
+    codex config the launcher may not rewrite — does not heal on its own, so the card goes to
+    Blocked with the preflight's reason. A card that cannot even be moved leaves its reason in the
+    run log rather than raising over the real cause.
     """
     if not cmd.card_ref:
         return
@@ -801,17 +652,11 @@ def _deliver_interactive_skill(handle: str, workspace: str, skill: str, *,
                                host: SessionHost) -> None:
     """Put a service head's skill in front of it, on the product's one interactive delivery path.
 
-    A Codex head starts with an empty composer, fresh or warm: nothing has been asked of it until
-    this lands, so the dispatch is not finished when `terminal create` (or `/clear`) returns. The
-    delivery itself — waiting for the pane to answer Orca's readiness probe, sending, re-entering
-    a prompt a dialog swallowed, and failing when the pane cannot be probed at all — is the same
-    primitive a worker, a reviewer and an observer are given their prompt through. The criterion
-    this side proves it with stays this side's: Codex having durably recorded the turn for this
-    workspace after the send boundary.
-
-    A failure raises, exactly like a warm reuse that was never taken: the terminal stays up and
-    idle, so the next tick recognises it and re-sends the skill through the reuse path rather than
-    piling a second head beside a silent one.
+    A Codex head starts with an empty composer, fresh or warm, so the dispatch is not finished when
+    `terminal create` (or `/clear`) returns. The confirmation criterion stays this side's: Codex
+    having durably recorded the turn for this workspace after the send boundary. A failure raises
+    and leaves the terminal up and idle, so the next tick re-sends through the reuse path rather
+    than piling a second head beside a silent one.
     """
     deliver_interactive_prompt(
         handle,
@@ -826,10 +671,9 @@ def _spawn_fresh_terminal(agent: str, variant: str | None, ws: str, state: Agent
                           event: str, *, host: SessionHost) -> DispatchCommand:
     """Bring a fresh head up in `ws`: prepare the workspace, create the pane, deliver the skill.
 
-    The preparation is deliberately outside the recovery below. Once a pane exists the head may
-    have started work, so a failure after that point is a run that has to be closed out; a failure
-    before it started nothing at all, and closing a report card for it would record a sweep that
-    never happened.
+    The preparation is deliberately outside the recovery below: once a pane exists the head may
+    have started work, so a failure after that point is a run that has to be closed out, while a
+    failure before it started nothing at all.
     """
     cmd = _dispatch_command(agent, variant)
     try:
@@ -870,22 +714,18 @@ def _send_reuse_dispatch(agent: str, variant: str | None, terminal_handle: str, 
 
 
 def _stop_and_confirm(ws: str, state: AgentState, *, host: SessionHost) -> bool:
-    """Stop every live terminal in `ws` and verify the workspace actually went quiet before the
-    caller treats the stop as done. `terminal stop`'s own exit code is not trustworthy enough to
-    gate a fresh spawn on (triggered-agents-445, PR #95 review B3): the stop is issued through
-    `_unchecked` for exactly that reason, and Orca itself can report success while a pty lingers.
-    The stop is by worktree, not by pane — it is the whole workspace going quiet that the
-    confirmation below then reads, and stopping the survivor alone would leave the others.
-    `terminal list` (via
-    `_agent_terminals`) is the ground truth every other check in this module already trusts, so
-    re-list and require it to come back empty instead. A caller that gets False back must NOT
-    proceed to `_create_terminal` — that would risk two live sessions for one singleton agent.
+    """Stop every live terminal in `ws` and verify the workspace actually went quiet.
 
-    Only correct for a terminal `_agent_terminals` actually recognized in the first place (every
-    call site here is stopping the terminal that branch just matched as the survivor). For a
-    stray `_agent_terminals` never recognized to begin with, use `_stop_and_confirm_workspace_
-    empty` instead — the filtered view here would "confirm" success on a stray it could never see
-    either way, stop or no stop."""
+    `terminal stop`'s own exit code is not trustworthy enough to gate a fresh spawn on — Orca can
+    report success while a pty lingers — so the stop is issued through `_unchecked` and the
+    workspace is re-listed through `_agent_terminals` instead. The stop is by worktree, not by pane:
+    stopping the survivor alone would leave the others. A caller that gets False back must NOT
+    proceed to `_create_terminal`, or one singleton agent ends up with two live sessions.
+
+    Only correct for a terminal `_agent_terminals` actually recognized. For a stray it never
+    recognized, use `_stop_and_confirm_workspace_empty`: the filtered view would "confirm" success
+    on a stray it could not see either way.
+    """
     try:
         _unchecked(lambda: host.stop_workspace(ws))
         time.sleep(1.0)
@@ -897,16 +737,13 @@ def _stop_and_confirm(ws: str, state: AgentState, *, host: SessionHost) -> bool:
 
 
 def _stop_and_confirm_workspace_empty(ws: str, *, host: SessionHost) -> bool:
-    """Stop every live terminal in `ws` and verify via Orca's UNFILTERED terminal list
-    (`_raw_terminal_count`) that the workspace is truly empty — for the stray-sweep paths only
-    (triggered-agents-445, PR #95 review B3, round 2). `_stop_and_confirm`'s own re-check goes
-    through `_agent_terminals`'s title/handle recognition filter, which would trivially read as
-    "confirmed empty" for a stray it could never recognize in the first place, stopped or not.
+    """Stop every live terminal in `ws` and verify through Orca's UNFILTERED terminal list
+    (`_raw_terminal_count`) that the workspace is truly empty — for the stray-sweep paths only.
 
-    Only True when the raw list came back AND was empty. A list failure (`_raw_terminal_count`
-    returns None, not 0) is NOT a confirmation: the caller must treat it as "could not confirm the
-    stop worked" and leave the terminal for the next tick, never log a healthy teardown over a pty
-    that may still be live (triggered-agents-445, PR #95 review B1, round 4)."""
+    True only when the raw list came back AND was empty. A list failure (None, not 0) is not a
+    confirmation: the caller must read it as "could not confirm the stop worked" and leave the
+    terminal for the next tick.
+    """
     try:
         _unchecked(lambda: host.stop_workspace(ws))
         time.sleep(1.0)
@@ -919,12 +756,10 @@ def _stop_and_confirm_workspace_empty(ws: str, *, host: SessionHost) -> bool:
 def _is_idle(handle: str, *, host: SessionHost) -> bool:
     """Whether the pane will take input now, in the two states this scheduler acts on.
 
-    The probe is the host's `tui-idle` wait with this module's own `IDLE_PROBE_MS` budget, and the
-    reading is unchanged: an answer that says satisfied is idle, and everything else — a refusal,
-    the probe timing out, an answer that says anything else — is busy. Deliberately not the three
-    states `tui_delivery.terminal_readiness` classifies for a delivery: a tick that cannot ask the
-    question and a tick looking at a working head both do the same thing here, which is leave the
-    terminal alone, so a third state would be a distinction with no branch behind it.
+    The host's `tui-idle` wait with this module's `IDLE_PROBE_MS` budget: an answer that says
+    satisfied is idle, and everything else — a refusal, a timeout, any other answer — is busy. A
+    tick that cannot ask the question and a tick looking at a working head both leave the terminal
+    alone, so the third state `tui_delivery.terminal_readiness` classifies has no branch here.
     """
     try:
         res = host.wait_idle(handle, timeout_ms=IDLE_PROBE_MS)
@@ -941,19 +776,14 @@ def _quiet_seconds(pane: Pane, now: float) -> float:
 def _reap_ghosts(ws: str) -> tuple[int, bool]:
     """Close ghost tabs — ones whose pty died but linger in the workspace session store.
 
-    Returns `(closed, ok)`: `closed` is how many ghost tabs were pruned this call; `ok` is True
-    ONLY when the listing succeeded AND every non-ready tab in this workspace closed cleanly. `ok`
-    is False when `session.tabs.listAll` was unavailable (Orca restarting) or any individual
-    `session.tabs.close` raised — in either case a `pending-handle` artifact may still linger in
-    `session.tabs.listAll`. A teardown caller must NOT log a healthy self-teardown/cleanup/restart
-    action while `ok` is False: that would claim "zero tabs after completion" over a ghost it never
-    actually closed (triggered-agents-445, PR #95 review B1, round 6). The top-of-run opportunistic
-    prune ignores `ok` (it just re-reaps next tick); the real teardown paths gate their success
-    action on it and record a `*-tab-failed` action instead when it's False.
+    `terminal list/stop/close` cannot touch these (they only reach live ptys); the persisted
+    `tabsByWorktree` keeps them until `session.tabs.close` prunes them. Live tabs are status
+    'ready'; a dead pty leaves 'pending-handle'.
 
-    `terminal list/stop/close` can't touch these (they only reach live ptys); the persisted
-    `tabsByWorktree` keeps them as clutter until `session.tabs.close` prunes them (what the GUI
-    tab-× does). Live tabs are status 'ready'; a dead pty leaves 'pending-handle'.
+    Returns `(closed, ok)`. `ok` is True ONLY when the listing succeeded AND every non-ready tab
+    closed cleanly, so a teardown caller must not log a healthy self-teardown while it is False —
+    that would claim "zero tabs after completion" over a ghost it never closed. The top-of-run
+    opportunistic prune ignores `ok`; the real teardown paths gate their success action on it.
     """
     try:
         snaps = (orca_rpc.call("session.tabs.listAll").get("result") or {}).get("snapshots", []) or []
@@ -1079,19 +909,16 @@ def _cleanup_only(agent: str, ws: str, state: AgentState, event: str, terms: lis
 
 def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
         host: SessionHost | None = None) -> int:
-    """`variant` selects a differently-scheduled mode of the same agent (e.g. the steward's
-    "deep-sweep", triggered-agents-254): a different prompt from `_launch_cmd`, and its own
-    runs.jsonl event name (instead of the plain "dispatch" every hourly tick logs) so the two
-    wake-up kinds stay distinguishable in the agent's own telemetry.
+    """`variant` selects a differently-scheduled mode of the same agent: a different prompt from
+    `_launch_cmd`, and its own runs.jsonl event name so the two wake-up kinds stay distinguishable
+    in the agent's own telemetry.
 
-    `cleanup_only` (triggered-agents-445) is `ta-gate.sh`'s call on a precheck skip: no new work,
-    so never dispatch a skill, but still let an ephemeral agent's finished/stuck terminal go
-    through `_cleanup_only` instead of sitting untouched until a tick that has real work.
+    `cleanup_only` is `ta-gate.sh`'s call on a precheck skip: never dispatch a skill, but still let
+    an ephemeral agent's finished or stuck terminal go through `_cleanup_only`.
 
-    `_dispatch_command` (not `_launch_cmd` directly) runs only in the three branches below that
-    actually put the skill in front of a head (fresh create, watchdog restart, idle reuse) — never
-    on a busy-skip, so a tick that dispatches nothing never creates the steward's report card
-    either (triggered-agents-255)."""
+    `_dispatch_command` runs only in the three branches that actually put the skill in front of a
+    head, never on a busy-skip, so a tick that dispatches nothing never creates a report card.
+    """
     if cleanup_only and not _is_ephemeral(agent):
         # A non-ephemeral agent (retro/steward) has no terminal/PTY lifecycle for this pass to
         # clean up -- their warm-reuse lifecycle is out of scope for triggered-agents-445. Bail
