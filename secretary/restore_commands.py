@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
+from secretary.cli_output import print_json
 from secretary.restore import (
     RestoreError,
     _target,
@@ -195,4 +195,4 @@ def run_memory_reindex(args: argparse.Namespace) -> int:
 
 
 def _print_json(payload: dict) -> None:
-    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    print_json(payload)

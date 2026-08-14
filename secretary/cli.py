@@ -1139,7 +1139,9 @@ def _print_memory_error(op: str, exc: Exception) -> int:
 
 
 def _print_json(payload: dict) -> None:
-    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    from secretary.cli_output import print_json
+
+    print_json(payload)
 
 
 def _split_csv(value: str) -> list[str]:

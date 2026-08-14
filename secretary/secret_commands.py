@@ -11,7 +11,7 @@ store is not created until the user has typed some of it back.
 from __future__ import annotations
 
 import argparse
-import json
+from functools import wraps
 import os
 import secrets as pysecrets
 import sys
@@ -36,6 +36,7 @@ from secretary.secret_store import (
     set_secret,
 )
 from secretary.state_repo import StateRepoError
+from secretary.cli_output import print_json
 
 SECRET_EXIT_VALIDATION = 2
 SECRET_EXIT_STATE = 3
@@ -151,6 +152,25 @@ def _usage(parser: argparse.ArgumentParser) -> int:
     return 2
 
 
+def _secret_command(operation: str):
+    def decorate(command):
+        @wraps(command)
+        def run(args: argparse.Namespace) -> int:
+            try:
+                return command(args)
+            except SecretStoreValidationError as exc:
+                return _fail(operation, "validation", str(exc))
+            except SecretStoreStateError as exc:
+                return _fail(operation, "state", str(exc))
+            except (SecretStoreError, StateRepoError) as exc:
+                return _fail(operation, "runtime", str(exc))
+
+        return run
+
+    return decorate
+
+
+@_secret_command("init")
 def run_secret_init(args: argparse.Namespace) -> int:
     if not _stdin_and_stderr_are_interactive():
         return _fail(
@@ -168,10 +188,7 @@ def run_secret_init(args: argparse.Namespace) -> int:
             "secret store is already initialized; init will not overwrite it",
         )
     words = args.words or 16
-    try:
-        phrase = generate_recovery_phrase(words)
-    except SecretStoreValidationError as exc:
-        return _fail("init", "validation", str(exc))
+    phrase = generate_recovery_phrase(words)
 
     _show_phrase(phrase)
     if not _acknowledge_written_down():
@@ -193,14 +210,7 @@ def run_secret_init(args: argparse.Namespace) -> int:
             "validation",
             "recovery phrase not confirmed; the store was not initialized",
         )
-    try:
-        result = initialize_store(instance_dir, phrase=phrase, actor=args.actor)
-    except SecretStoreValidationError as exc:
-        return _fail("init", "validation", str(exc))
-    except SecretStoreStateError as exc:
-        return _fail("init", "state", str(exc))
-    except (SecretStoreError, StateRepoError) as exc:
-        return _fail("init", "runtime", str(exc))
+    result = initialize_store(instance_dir, phrase=phrase, actor=args.actor)
     _print_json(
         {
             "ok": True,
@@ -213,29 +223,20 @@ def run_secret_init(args: argparse.Namespace) -> int:
     return 0
 
 
+@_secret_command("set")
 def run_secret_set(args: argparse.Namespace) -> int:
-    try:
-        value = _read_value(args)
-        materialize = _materialize_spec(args)
-    except SecretStoreValidationError as exc:
-        return _fail("set", "validation", str(exc))
-    try:
-        result = set_secret(
-            _instance_dir(args.instance),
-            secret_id=args.secret_id,
-            value=value,
-            scope=args.scope,
-            purpose=args.purpose,
-            environment=args.environment,
-            materialize=materialize,
-            actor=args.actor,
-        )
-    except SecretStoreValidationError as exc:
-        return _fail("set", "validation", str(exc))
-    except SecretStoreStateError as exc:
-        return _fail("set", "state", str(exc))
-    except (SecretStoreError, StateRepoError) as exc:
-        return _fail("set", "runtime", str(exc))
+    value = _read_value(args)
+    materialize = _materialize_spec(args)
+    result = set_secret(
+        _instance_dir(args.instance),
+        secret_id=args.secret_id,
+        value=value,
+        scope=args.scope,
+        purpose=args.purpose,
+        environment=args.environment,
+        materialize=materialize,
+        actor=args.actor,
+    )
     _print_json(
         {
             "ok": True,
@@ -250,34 +251,24 @@ def run_secret_set(args: argparse.Namespace) -> int:
     return 0
 
 
+@_secret_command("list")
 def run_secret_list(args: argparse.Namespace) -> int:
-    try:
-        entries = list_secrets(_instance_dir(args.instance))
-    except SecretStoreStateError as exc:
-        return _fail("list", "state", str(exc))
-    except (SecretStoreError, StateRepoError) as exc:
-        return _fail("list", "runtime", str(exc))
+    entries = list_secrets(_instance_dir(args.instance))
     _print_json({"ok": True, "op": "list", "secrets": [dict(entry) for entry in entries]})
     return 0
 
 
+@_secret_command("import")
 def run_secret_import(args: argparse.Namespace) -> int:
-    try:
-        materialize = _materialize_spec(args)
-        result = import_env_file(
-            _instance_dir(args.instance),
-            source=Path(args.file).expanduser(),
-            scope=args.scope,
-            purpose=args.purpose,
-            materialize=materialize,
-            actor=args.actor,
-        )
-    except SecretStoreValidationError as exc:
-        return _fail("import", "validation", str(exc))
-    except SecretStoreStateError as exc:
-        return _fail("import", "state", str(exc))
-    except (SecretStoreError, StateRepoError) as exc:
-        return _fail("import", "runtime", str(exc))
+    materialize = _materialize_spec(args)
+    result = import_env_file(
+        _instance_dir(args.instance),
+        source=Path(args.file).expanduser(),
+        scope=args.scope,
+        purpose=args.purpose,
+        materialize=materialize,
+        actor=args.actor,
+    )
     _print_json(
         {
             "ok": True,
@@ -291,32 +282,18 @@ def run_secret_import(args: argparse.Namespace) -> int:
     return 0
 
 
+@_secret_command("remove")
 def run_secret_remove(args: argparse.Namespace) -> int:
-    try:
-        result = remove_secret(
-            _instance_dir(args.instance), secret_id=args.secret_id, actor=args.actor
-        )
-    except SecretStoreValidationError as exc:
-        return _fail("remove", "validation", str(exc))
-    except SecretStoreStateError as exc:
-        return _fail("remove", "state", str(exc))
-    except (SecretStoreError, StateRepoError) as exc:
-        return _fail("remove", "runtime", str(exc))
+    result = remove_secret(_instance_dir(args.instance), secret_id=args.secret_id, actor=args.actor)
     _print_json(
         {"ok": True, "op": "remove", "id": result.secret_id, "commit": result.commit}
     )
     return 0
 
 
+@_secret_command("materialize")
 def run_secret_materialize(args: argparse.Namespace) -> int:
-    try:
-        results = materialize_secrets(_instance_dir(args.instance), target=args.target)
-    except SecretStoreValidationError as exc:
-        return _fail("materialize", "validation", str(exc))
-    except SecretStoreStateError as exc:
-        return _fail("materialize", "state", str(exc))
-    except (SecretStoreError, StateRepoError) as exc:
-        return _fail("materialize", "runtime", str(exc))
+    results = materialize_secrets(_instance_dir(args.instance), target=args.target)
     _print_json(
         {
             "ok": True,
@@ -491,7 +468,7 @@ def _fail(operation: str, error: str, message: str) -> int:
 
 
 def _print_json(payload: dict[str, object]) -> None:
-    print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    print_json(payload, indent=2)
 
 
 __all__ = [
