@@ -426,6 +426,19 @@ def _named_swimlane(client: KanboardClient, board_id: int, name: str) -> int | N
     return None
 
 
+def product_lane_name(product: str) -> str:
+    """The name of the lane a Product or Issue row belongs in: its product id.
+
+    This is the naming half of the product lane rule, split out so a reader that must not write -
+    the reconcile plan - names the same lane the writer would create, instead of restating the
+    rule in a second place.
+    """
+    identifier = str(product).removeprefix("product:").strip()
+    if not identifier:
+        raise TaskError("validation", "a Product/Issue row needs its product to choose a lane", 2)
+    return identifier
+
+
 def product_swimlane_id(client: KanboardClient, board_id: int, product: str) -> int:
     """The lane a Product or Issue row belongs in: the one named after its product.
 
@@ -437,12 +450,10 @@ def product_swimlane_id(client: KanboardClient, board_id: int, product: str) -> 
     several projects (`codegen`, `secretary`) is not ambiguous here: `issue_product`, and for a
     Product its own id, stay the single source of truth about what a record belongs to.
 
-    This is the one implementation of that rule; both secretarial writers call it.
+    This is the one implementation of that rule; both secretarial writers call it, and the
+    reconcile command that repairs an existing row's placement takes its destination from here.
     """
-    identifier = str(product).removeprefix("product:").strip()
-    if not identifier:
-        raise TaskError("validation", "a Product/Issue row needs its product to choose a lane", 2)
-    return ensure_swimlane(client, board_id, identifier)
+    return ensure_swimlane(client, board_id, product_lane_name(product))
 
 
 class ProductIssueStore:
@@ -547,6 +558,12 @@ class ProductIssueStore:
         view = self._view(card, meta)
         view["history"] = {"comments": history, "audit": audit}
         return view
+
+    def reconcile_lanes(self, *, apply: bool = False) -> dict[str, Any]:
+        """Report, and with ``apply`` perform, the lane repair of existing Product/Issue rows."""
+        from secretary.product_lanes import reconcile_product_lanes
+
+        return reconcile_product_lanes(self, apply=apply)
 
     def _transaction_event(self, *, kind: str, actor: str, reference: str, request_id: str, intent: dict[str, Any]) -> dict[str, Any]:
         return self._event(

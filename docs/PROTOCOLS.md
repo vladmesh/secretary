@@ -463,6 +463,29 @@ ambiguous: the lane is named after the product, never after one of its projects,
 second source of truth about what a record belongs to. Execution cards are unaffected: they stay in the
 lane of their project.
 
+The rule binds every write, but not the rows that predate it, and a restore puts a record back into the
+lane its checkpoint recorded, so a board can hold rows the rule would place elsewhere. Their supported
+repair is one idempotent command, which plans by default and writes only when told to:
+
+```bash
+python3 -P -m secretary product reconcile-lanes
+python3 -P -m secretary product reconcile-lanes --apply
+```
+
+The plan writes nothing: it reports every row that is out of place with the lane it sits in and the lane
+it belongs in, the lanes that have to be created, and a per-product summary. `--apply` performs exactly
+those moves. The destination is the same `product_swimlane_id` every writer uses, so the command has no
+second opinion about where a record belongs. A move is one `moveTaskPosition` into another lane of the
+same column, so the row keeps its reference, metadata, comments, column and open or closed state, and the
+rows that travel together arrive after whatever the destination lane already holds, in the order the plan
+lists them. A run on a board already in order moves nothing and says so, and a run interrupted halfway is
+simply continued by the next one, which re-reads the board and plans only what is still out of place.
+Closed records are not moved, only counted, and a record whose product is unstated or is not a registered
+Product is never guessed at: it is listed in the output so a human decides what it belongs to. A row that
+is both is both: it is counted among the closed records whether or not its product can be resolved, and
+still listed as unresolved, because the closed count is the visible half of that decision and must not
+depend on anyone being able to tell what the row belongs to.
+
 Every Product and Issue write is staged before it touches the backend, and a staged write that is neither
 finished nor dropped blocks checkpoint and board export. A refusal that a retry cannot turn into a success
 therefore has to end the transaction rather than leave it: a `createTask` the backend declines is reported
