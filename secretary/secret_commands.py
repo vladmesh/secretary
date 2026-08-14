@@ -157,13 +157,17 @@ def _secret_command(operation: str):
         @wraps(command)
         def run(args: argparse.Namespace) -> int:
             try:
-                return command(args)
+                payload = command(args)
             except SecretStoreValidationError as exc:
                 return _fail(operation, "validation", str(exc))
             except SecretStoreStateError as exc:
                 return _fail(operation, "state", str(exc))
             except (SecretStoreError, StateRepoError) as exc:
                 return _fail(operation, "runtime", str(exc))
+            if isinstance(payload, int):
+                return payload
+            _print_json(payload)
+            return 0
 
         return run
 
@@ -211,16 +215,13 @@ def run_secret_init(args: argparse.Namespace) -> int:
             "recovery phrase not confirmed; the store was not initialized",
         )
     result = initialize_store(instance_dir, phrase=phrase, actor=args.actor)
-    _print_json(
-        {
-            "ok": True,
-            "op": "init",
-            "key": str(result.key_path),
-            "catalog": str(result.catalog_path),
-            "commit": result.commit,
-        }
-    )
-    return 0
+    return {
+        "ok": True,
+        "op": "init",
+        "key": str(result.key_path),
+        "catalog": str(result.catalog_path),
+        "commit": result.commit,
+    }
 
 
 @_secret_command("set")
@@ -237,25 +238,21 @@ def run_secret_set(args: argparse.Namespace) -> int:
         materialize=materialize,
         actor=args.actor,
     )
-    _print_json(
-        {
-            "ok": True,
-            "op": "set",
-            "id": result.secret_id,
-            "scope": result.scope,
-            "bytes": len(value),
-            "created": result.created,
-            "commit": result.commit,
-        }
-    )
-    return 0
+    return {
+        "ok": True,
+        "op": "set",
+        "id": result.secret_id,
+        "scope": result.scope,
+        "bytes": len(value),
+        "created": result.created,
+        "commit": result.commit,
+    }
 
 
 @_secret_command("list")
 def run_secret_list(args: argparse.Namespace) -> int:
     entries = list_secrets(_instance_dir(args.instance))
-    _print_json({"ok": True, "op": "list", "secrets": [dict(entry) for entry in entries]})
-    return 0
+    return {"ok": True, "op": "list", "secrets": [dict(entry) for entry in entries]}
 
 
 @_secret_command("import")
@@ -269,47 +266,38 @@ def run_secret_import(args: argparse.Namespace) -> int:
         materialize=materialize,
         actor=args.actor,
     )
-    _print_json(
-        {
-            "ok": True,
-            "op": "import",
-            "created": list(result.created),
-            "updated": list(result.updated),
-            "unchanged": list(result.unchanged),
-            "commit": result.commit,
-        }
-    )
-    return 0
+    return {
+        "ok": True,
+        "op": "import",
+        "created": list(result.created),
+        "updated": list(result.updated),
+        "unchanged": list(result.unchanged),
+        "commit": result.commit,
+    }
 
 
 @_secret_command("remove")
 def run_secret_remove(args: argparse.Namespace) -> int:
     result = remove_secret(_instance_dir(args.instance), secret_id=args.secret_id, actor=args.actor)
-    _print_json(
-        {"ok": True, "op": "remove", "id": result.secret_id, "commit": result.commit}
-    )
-    return 0
+    return {"ok": True, "op": "remove", "id": result.secret_id, "commit": result.commit}
 
 
 @_secret_command("materialize")
 def run_secret_materialize(args: argparse.Namespace) -> int:
     results = materialize_secrets(_instance_dir(args.instance), target=args.target)
-    _print_json(
-        {
-            "ok": True,
-            "op": "materialize",
-            "targets": [
-                {
-                    "target": result.target,
-                    "path": str(result.path),
-                    "variables": list(result.variables),
-                    "changed": result.changed,
-                }
-                for result in results
-            ],
-        }
-    )
-    return 0
+    return {
+        "ok": True,
+        "op": "materialize",
+        "targets": [
+            {
+                "target": result.target,
+                "path": str(result.path),
+                "variables": list(result.variables),
+                "changed": result.changed,
+            }
+            for result in results
+        ],
+    }
 
 
 def _materialize_spec(args: argparse.Namespace) -> dict[str, str] | None:
