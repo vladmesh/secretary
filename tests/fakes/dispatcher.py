@@ -27,7 +27,7 @@ from secretary.dispatcher_types import HeadLaunchAborted, ReviewLaunch
 from secretary.dispatcher_watchdog import pid_file_path
 from secretary.dispatcher_worker_lifecycle import head_run_binding
 from secretary.routing_journal import HeadRun, head_run_from_profile
-from secretary.sprints import SPRINT_BOARD_NAME, instance_open_sprint_limit
+from secretary.sprints import SPRINT_BOARD_NAME
 from secretary.tasks import TaskError
 from tests.head_registry import write_installed_pair
 from triggered_agents.runtime.head import operations as head_ops

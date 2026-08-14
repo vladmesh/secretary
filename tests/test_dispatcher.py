@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import inspect
 import json
 import os
@@ -12,7 +11,6 @@ import tempfile
 import time
 import tomllib
 import unittest
-from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -30,7 +28,6 @@ from secretary.dispatcher import (
     LaunchedHead,
     HostError,
     InstanceCatalog,
-    STOPPED_BY_DISPATCHER,
     STOPPED_BY_OPERATOR,
     STOPPED_BY_RECONCILIATION,
     STOPPED_BY_REPLACEMENT,
@@ -60,7 +57,6 @@ from secretary.dispatcher_helpers import (
 )
 from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_identity
 from secretary.dispatcher_observer import (
-    OBSERVER_HEAD_FALLBACK,
     ObserverRecord,
 )
 from secretary.dispatcher_launcher import (
@@ -68,7 +64,6 @@ from secretary.dispatcher_launcher import (
     claude_launch_model,
     ensure_claude_workspace_ready,
     ensure_codex_workspace_trusted,
-    role_launch_env,
 )
 from triggered_agents.runtime.head import (
     render_head_command,
@@ -105,18 +100,14 @@ from secretary.dispatcher_types import (
     GateTransportError,
     HeadLaunchAborted,
     HeadPaneNotReady,
-    ReviewLaunch,
     review_pane_label,
 )
 from secretary.head_registry import canonical_heads
-from tests.head_registry import write_installed_pair
 from secretary.routing_journal import (
-    HeadRun,
     attempts as routing_attempts,
-    head_run_from_profile,
 )
 from secretary.head_health import HeadReadiness
-from secretary.sprints import SPRINT_BOARD_NAME, instance_open_sprint_limit
+from secretary.sprints import instance_open_sprint_limit
 from secretary.dispatcher_watchdog import (
     BRING_UP_DEFER_ATTEMPTS_DEFAULT,
     IDLE_STALL_DEFAULT,
@@ -150,7 +141,7 @@ from tests.fanout_fixtures import accepted_transport_run
 from tests.observer_identity import bind_observer
 from tests.fakes.dispatcher import (
     FakeCatalog, FakeCheckpoint, FakeHost, FakeKanboard, FakePusher, FakeSprints,
-    TwoOpenSprintAdmission, _configure_production_shaped_codex_relaunch, _legacy_unbound_v1_run,
+    _configure_production_shaped_codex_relaunch, _legacy_unbound_v1_run,
 )
 
 class LegacyDispatcherRecordTests(unittest.TestCase):
