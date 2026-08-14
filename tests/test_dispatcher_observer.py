@@ -69,7 +69,7 @@ from secretary.dispatcher_worker_lifecycle import head_run_binding
 from tests.observer_identity import as_observer, bind_observer
 from tests.fanout_fixtures import accepted_transport_run
 from tests.sprint_close_fixtures import close_decisions, settle_dispatcher_work
-from tests.test_dispatcher import (
+from tests.fakes.dispatcher import (
     FakeCatalog,
     FakeHost,
     FakeKanboard,

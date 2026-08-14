@@ -27,7 +27,7 @@ from unittest import mock
 
 from triggered_agents.agents.pipeline import pause as pipeline_pause
 from triggered_agents.agents.pipeline import state as pipeline_state
-from tests.test_triggered_dispatch import FakeSessionHost
+from tests.fakes.triggered_dispatch import FakeSessionHost
 from triggered_agents.runtime import dispatch
 from triggered_agents.runtime.pane_host import Pane
 from triggered_agents.runtime import shared_state

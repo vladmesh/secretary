@@ -33,7 +33,7 @@ from secretary.dispatcher_tui import (
 )
 from secretary.dispatcher_worker_lifecycle import ContinuationProviderCondition
 from triggered_agents.runtime.codex_preflight import codex_provider_source_descriptor
-from tests.test_dispatcher_observer import (
+from tests.fakes.observer import (
     BLOCKED_PANE_WAIT_BODY,
     STALE_HANDLE_WAIT_FAILURE,
     TIMEOUT_WAIT_FAILURE,

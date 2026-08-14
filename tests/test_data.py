@@ -39,7 +39,7 @@ from secretary.memory_write import (
 )
 from secretary.sprints import SPRINT_BOARD_NAME
 from secretary.tasks import TaskError
-from tests.test_sprints import SprintKanboard
+from tests.fakes.sprints import SprintKanboard
 
 
 class DataLayoutTests(unittest.TestCase):

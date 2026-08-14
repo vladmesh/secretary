@@ -44,14 +44,14 @@ from secretary.dispatcher_production import _reconcile_production
 from secretary.sprints import SprintWriter
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 
-from tests.test_dispatcher import (
+from tests.fakes.dispatcher import (
     FakeCatalog,
     FakeHost,
     FakeKanboard,
     TwoOpenSprintAdmission,
 )
-from tests.test_dispatcher_observer import DEAD_PID, install_skill_registry
-from tests.test_sprints import SprintFixture
+from tests.fakes.observer import DEAD_PID, install_skill_registry
+from tests.fakes.sprints import SprintFixture
 from tests.sprint_close_fixtures import close_decisions
 
 

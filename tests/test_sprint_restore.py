@@ -29,7 +29,7 @@ from secretary.sprints import (
 from secretary.tasks import TaskWriter
 
 from tests.restore_fixtures import _EmptyBoardsKanboard
-from tests.test_sprints import ProductSprintKanboard, _write_project_registry
+from tests.fakes.sprints import ProductSprintKanboard, _write_project_registry
 from tests.observer_identity import as_observer
 from tests.sprint_close_fixtures import close_decisions
 
