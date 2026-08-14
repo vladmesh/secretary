@@ -1523,18 +1523,6 @@ class CommandHostRuntime:
             return ""
         return completed.stdout.strip()
 
-    def is_ancestor(self, record: DispatcherRecord, ancestor: str, descendant: str) -> bool:
-        if self.mode == "noop" or not record.workspace:
-            return False
-        try:
-            self._run(
-                ["git", "-C", record.workspace, "merge-base", "--is-ancestor", ancestor, descendant],
-                "review head ancestry",
-            )
-        except HostError:
-            return False
-        return True
-
     def is_instance_publish_recovery(
         self,
         task: dict[str, Any],

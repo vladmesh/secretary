@@ -71,7 +71,6 @@ __all__ = [
     "RunJson",
     "TuiDeliveryError",
     "claude_project_dir_name",
-    "close_terminal",
     "close_terminal_strict",
     "composer_fingerprint",
     "deliver_interactive_prompt",
@@ -198,13 +197,6 @@ def terminal_turn_started(
     return _screen_started_turn(
         read_terminal_text(handle, run_json=run_json, host=host), adapter=adapter
     )
-
-
-def close_terminal(handle: str, *, run_json: RunJson) -> None:
-    try:
-        close_terminal_strict(handle, run_json=run_json)
-    except Exception:
-        pass
 
 
 def close_terminal_strict(handle: str, *, run_json: RunJson) -> None:

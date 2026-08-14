@@ -670,10 +670,6 @@ class WorkerContinuation:
         return self.session_held and self.stage != WorkerContinuationStage.NONE
 
     @property
-    def awaiting_continuation(self) -> bool:
-        return self.stage == WorkerContinuationStage.RETAINED
-
-    @property
     def validation_move_pending(self) -> bool:
         return self.stage == WorkerContinuationStage.VALIDATION_MOVE_PENDING
 
