@@ -1,17 +1,13 @@
 """The product's one way to put a prompt in front of a live interactive head.
 
-Every head that runs as a TUI — a pipeline worker, a reviewer, an observer, and the curator, retro
-and steward service heads — is brought up with a command that carries no prompt, so something has
-to type it into the pane afterwards. That "afterwards" is the whole problem: `terminal send`
-succeeding only means Orca accepted keystrokes, a pane can still be painting, working, or holding
-a dialog that swallows what it was given. The answer is one readiness classification, one resend
-policy, one confirmation boundary and one failure, here — not one per caller.
+Every head that runs as a TUI is brought up with a command that carries no prompt, so something
+has to type it into the pane afterwards. `terminal send` succeeding only means Orca accepted
+keystrokes: a pane can still be painting, working, or holding a dialog that swallows what it was
+given. One readiness classification, one resend policy, one confirmation boundary, one failure.
 
-It lives in `runtime` rather than next to either caller because both sides need it and only one of
-them may import the other: the dispatcher (`secretary`) already reads this package, and the
-triggered-agents tick cannot read `secretary` back. Nothing here knows about boards, roles or
-sessions; a caller passes the way it runs Orca and the criterion that proves its own head took the
-prompt.
+It lives in `runtime` because both sides need it and only one may import the other: the
+dispatcher already reads this package, and the triggered-agents tick cannot read `secretary`
+back. Nothing here knows about boards, roles or sessions.
 """
 
 from __future__ import annotations
@@ -110,10 +106,8 @@ READINESS_STALE_HANDLE = "stale_handle"
 class DeliveryEvidence:
     """What one delivery attempt saw, in a form that can be persisted beside the head.
 
-    Everything here is either an identifier, a bounded classification or a digest. The prompt
-    itself is represented by its size and its hash and never by its text: these records outlive
-    the head they were taken on, and a sprint's durable telemetry is not a place to keep the
-    contents of a prompt.
+    Everything here is an identifier, a bounded classification or a digest. The prompt is represented
+    by its size and its hash and never by its text: these records outlive the head they were taken on.
     """
 
     handle: str = ""
@@ -231,12 +225,7 @@ class DeliveryEvidence:
 
 
 class DeliveryOutcome(str):
-    """The delivery verdict a caller compares, carrying the evidence that produced it.
-
-    It is a string because that is what every caller of this path already reads, and the verdict
-    is the only thing most of them want. A caller that has durable telemetry to write reads
-    `.evidence` off the same value instead of asking the pane a second time.
-    """
+    """The delivery verdict a caller compares, carrying the evidence that produced it."""
 
     evidence: DeliveryEvidence
 
@@ -258,11 +247,10 @@ class TuiDeliveryError(RuntimeError):
 class PaneRead:
     """One `terminal read`: the retained tail, and the backend's own position in the output.
 
-    The cursor is Orca's `nextCursor` — the opaque token it gives a reader to ask for "only what
-    came after this". It is the authority on whether the pane printed anything, and the tail is
-    not: the retained window is bounded, so a quick turn can append output and leave the tail it
-    returns identical, and repaint-heavy TUI output does the same. `cursor_known` is false only
-    when the runtime answered without one, and then, and only then, a digest of the tail stands in.
+    The cursor is Orca's `nextCursor` and it is the authority on whether the pane printed anything;
+    the tail is not, because the retained window is bounded and repaint-heavy TUI output can leave
+    it identical across a turn. `cursor_known` is false only when the runtime answered without one,
+    and then a digest of the tail stands in.
     """
 
     text: str = ""
@@ -304,13 +292,9 @@ def read_pane(
 ) -> PaneRead:
     """One pane read: the tail, ANSI stripped, and the session manager's output cursor with it.
 
-    A pane that cannot be read is not a failure here: it costs the delivery its composer and
-    cursor evidence and leaves it on readiness alone, which is strictly what it had before.
-
-    `limit` bounds the retained output asked for, for a caller that reads a panel rather than a
-    position: the scheduler decides "is an agent REPL on screen" on the last screenful and would
-    answer differently off a whole scrollback. Delivery itself passes none — its evidence is the
-    cursor, and a bounded window would only cost it composer text.
+    A pane that cannot be read is not a failure here: it costs the delivery its composer and cursor
+    evidence and leaves it on readiness alone. `limit` bounds the retained output for a caller that
+    reads a panel rather than a position; delivery itself passes none.
     """
     try:
         data = resolve_pane_host(run_json, host=host).read(handle, limit=limit)
@@ -356,10 +340,9 @@ def strip_ansi(text: str) -> str:
 def composer_fingerprint(screen: str) -> str:
     """What the composer is holding, as a classification, a length and a digest.
 
-    The composer is the region after the last prompt marker a TUI paints — Codex's `›`, Claude's
-    `❯`. A pane that pasted the payload and never entered it shows exactly that: a composer whose
-    fingerprint changed across the send and is not empty. The text itself is hashed, never kept,
-    and the region is bounded before it is hashed.
+    The composer is the region after the last prompt marker a TUI paints — Codex's `›`, Claude's `❯`.
+    A pane that pasted the payload and never entered it shows a composer whose fingerprint changed
+    across the send and is not empty. The text is hashed, never kept.
     """
     if not screen:
         return COMPOSER_UNKNOWN
@@ -376,10 +359,9 @@ def composer_fingerprint(screen: str) -> str:
 def output_cursor(read: PaneRead) -> tuple[str, bool]:
     """Where the pane's output has got to, and whether that came from the backend.
 
-    Orca's own cursor is used whenever it answers with one, opaque and unparsed: it advances when
-    the pane printed, which a retained tail does not have to. Comparing a digest of that tail
-    instead would miss a turn whose output fell outside the window or repainted over itself, and
-    it is only what stands in when the runtime returns no cursor at all.
+    Orca's own cursor is used whenever it answers with one, opaque and unparsed: it advances when the
+    pane printed, which a retained tail does not have to. A digest of that tail is only what stands
+    in when the runtime returns no cursor at all.
     """
     if read.cursor_known:
         return f"orca:{read.cursor}", True
@@ -418,9 +400,8 @@ def wait_for_tui_idle(
 ) -> None:
     """Wait until the session manager reports the pane ready for input; a refusal reaches the caller.
 
-    This is also what a freshly created head is given to come up in: a TUI paints, reads its
-    config and answers the readiness probe well after the pty exists, and the wait for that is
-    the same wait as for a pane that is merely busy.
+    This is also what a freshly created head is given to come up in: a TUI paints, reads its config
+    and answers the readiness probe well after the pty exists.
     """
     resolve_pane_host(run_json, host=host).wait_idle(
         handle, timeout_ms=TUI_IDLE_TIMEOUT_MS if timeout_ms is None else timeout_ms
@@ -433,16 +414,11 @@ def terminal_readiness(
 ) -> str:
     """Ask whether the pane is ready for input, and answer in three states, not two.
 
-    This is the one readiness question the product asks about an interactive head, whatever
-    provider runs in it: the runtime derives it from the pane's own agent status and falls back to
-    a quiescence window, so no screen is read here.
-
-    `READINESS_BUSY` is the condition not being met by a pane that is working, which Orca reports
-    as a satisfied-false answer or as a failed command carrying `code: timeout`. A pane it names a
-    `blockedReason` for is `READINESS_BLOCKED`: also not ready, but held in a dialog rather than
-    working, so a prompt sent to it went nowhere. `READINESS_UNKNOWN` is the probe itself failing,
-    and it must not be read as an ordinary busy head: a caller that cannot ask the question is not
-    looking at a working observer, it is looking at nothing.
+    The runtime derives it from the pane's own agent status and falls back to a quiescence window, so
+    no screen is read here. `READINESS_BUSY` is a pane that is working, which Orca reports as a
+    satisfied-false answer or a failed command carrying `code: timeout`. A pane it names a
+    `blockedReason` for is `READINESS_BLOCKED` — held in a dialog, so a prompt sent to it went
+    nowhere. `READINESS_UNKNOWN` is the probe itself failing and must not be read as a busy head.
     """
     try:
         data = resolve_pane_host(run_json, host=host).wait_idle(
@@ -459,9 +435,9 @@ def terminal_readiness(
 def delivery_readiness_state(carrier: Any) -> str:
     """Return the typed readiness state carried by a failed delivery, conservatively.
 
-    A persisted evidence record predating `readiness_state` did not observe this refusal.  It is
-    therefore unknown rather than busy: only a current failed `tui-idle` wait that parsed one of
-    Orca's working answers earns the no-replacement treatment.
+    A persisted evidence record predating `readiness_state` did not observe this refusal, so it is
+    unknown rather than busy: only a current failed `tui-idle` wait that parsed one of Orca's working
+    answers earns the no-replacement treatment.
     """
     evidence = getattr(carrier, "evidence", carrier)
     if hasattr(evidence, "to_json"):
@@ -478,14 +454,13 @@ def delivery_readiness_state(carrier: Any) -> str:
 def _refused_wait_readiness(exc: Exception) -> str:
     """Classify a `terminal wait` the host refused, from the body Orca printed with it.
 
-    The CLI exits non-zero both for a condition it could not satisfy and for a failure, and the
-    host turns the two into the same exception, so the answer is in the text rather than in the
-    outcome. It prints that text as JSON, and the host carries it into the failure it raises:
+    The CLI exits non-zero both for a condition it could not satisfy and for a failure, and the host
+    turns the two into the same exception, so the answer is in the text rather than in the outcome:
 
-      * a `wait` object saying `satisfied: false` is a pane Orca has looked at and found working
-        or blocked behind a dialog. That is busy, and busy waits for readiness;
-      * `code: timeout` is the same condition not being met before the probe's own deadline;
-      * anything else, a body that cannot be read included, is a probe that was never answered.
+          * a `wait` object saying `satisfied: false` is a pane Orca found working or blocked behind
+            a dialog. That is busy, and busy waits for readiness;
+          * `code: timeout` is the same condition not being met before the probe's own deadline;
+          * anything else, an unreadable body included, is a probe that was never answered.
     """
     body = _json_object(str(exc))
     result = body.get("result") if isinstance(body.get("result"), dict) else body
@@ -555,35 +530,28 @@ def deliver_interactive_prompt(
 
     Delivery is four things, and every one of them is observed separately:
 
-      1. the payload is written into the pane — `terminal send` answering `accepted` with a byte
-         count, and nothing more than that;
-      2. the Enter is taken — the composer no longer holds what the send put there;
-      3. a turn is observed — the pane went to work, or it printed output it had not printed
-         before, which is the same evidence for a turn that ended between two probes;
-      4. the caller's own criterion acknowledges it.
+          1. the payload is written into the pane — `terminal send` answering `accepted` with a byte
+             count, and nothing more than that;
+          2. the Enter is taken — the composer no longer holds what the send put there;
+          3. a turn is observed — the pane went to work, or it printed output it had not printed
+             before, which is the same evidence for a turn that ended between two probes;
+          4. the caller's own criterion acknowledges it.
 
     The failure this boundary exists for lives between 1 and 2: Codex answers `accepted: true` with
     the byte count, leaves the payload in its composer under a paste placeholder, and answers
-    `tui-idle` satisfied the whole time, because a pane holding a composer really is idle. So a
-    send that reports bytes and a pane that reports idle are not delivery, here or anywhere else
-    in the product; the pre/post fingerprints of the composer and of the output are.
+    `tui-idle` satisfied the whole time, because a pane holding a composer really is idle. So a send
+    that reports bytes and a pane that reports idle are not delivery; the pre/post fingerprints of
+    the composer and of the output are.
 
-    `document_path` says the prompt being delivered is a nudge at a task document rather than the
-    task itself. It changes nothing about how the four stages are observed — a short line is
-    delivered and confirmed exactly like a long one — and everything about what the evidence means:
-    the payload fingerprint below is then the fingerprint of a pointer, so the record names the mode
-    and the document it pointed at rather than looking like a task that shrank to one line.
+    `document_path` says the prompt is a nudge at a task document rather than the task itself. It
+    changes nothing about how the four stages are observed and everything about what the evidence
+    means: the payload fingerprint is then the fingerprint of a pointer.
 
-    Callers pass `confirm`, the criterion they always had: their head's turn having visibly
-    started, which is stage 4. A caller whose proof arrives later sets `ack_out_of_band` and passes
-    no callback at all; it gets `DELIVERY_ACCEPTED` once stage 3 is evidenced, which is the same
-    rule with only the last step left out, not a weaker one.
+    Callers pass `confirm`, their own criterion for stage 4. A caller whose proof arrives later sets
+    `ack_out_of_band` and gets `DELIVERY_ACCEPTED` once stage 3 is evidenced.
 
-    The verdict comes back with the evidence of the attempt attached, and so does the failure —
-    including a failure of the transport itself. Once this call has an evidence record, every way
-    out of it carries that record: a `terminal wait` or `terminal send` the host refuses is a
-    delivery that did not happen, and it is reported with the terminal, the payload fingerprint and
-    the stage reached rather than as a bare host error a caller would have to persist as prose.
+    The verdict comes back with the evidence of the attempt attached, and so does the failure,
+    including a failure of the transport itself.
     """
     if ack_out_of_band and confirm is not None:
         raise ValueError("out-of-band delivery cannot use a synchronous confirmation callback")
@@ -644,13 +612,9 @@ def deliver_interactive_prompt(
 def _transport_evidence(evidence: DeliveryEvidence, step: str):
     """Turn a refused Orca call inside the delivery into an evidence-carrying delivery failure.
 
-    A `terminal wait` or `terminal send` the host will not perform is exactly as much a delivery
-    that did not happen as a pane that swallowed the prompt, and the caller persists both the same
-    way. Without this the host's own exception escapes with nothing attached and the record keeps a
-    count and a sentence — and, worse, whatever evidence an earlier failure happened to leave.
-
-    `ValueError` is not caught: the two argument refusals this path raises are programming errors
-    in the caller, not deliveries.
+    A `terminal wait` or `terminal send` the host will not perform is exactly as much a delivery that
+    did not happen as a pane that swallowed the prompt. `ValueError` is not caught: the two argument
+    refusals this path raises are programming errors in the caller, not deliveries.
     """
     try:
         yield
@@ -800,8 +764,8 @@ def _record_probe(evidence: DeliveryEvidence, before: PaneProbe, probe: PaneProb
     """Fold one post-send probe into the attempt's evidence.
 
     The composer is compared against what it held before the send rather than against emptiness: a
-    TUI paints its own hint text into an empty composer, and only a fingerprint that changed says
-    the payload is the thing sitting there.
+    TUI paints its own hint text into an empty composer, and only a changed fingerprint says the
+    payload is the thing sitting there.
     """
     evidence.readiness_after = probe.readiness
     evidence.composer_after = probe.composer

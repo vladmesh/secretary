@@ -47,13 +47,9 @@ RED_REVIEW_CEILING = 3
 def red_review_count(task: dict[str, Any]) -> int:
     """The card's own count of substantive red reviews.
 
-    A reviewer's red verdict is one comment marked `review:red` and the board keeps it for the
-    life of the card, so the count is durable, needs no sprint to live in, and is idempotent
-    without any bookkeeping: a replayed verdict write dedupes on its request id and creates no
-    second comment, and a replayed dispatcher tick reads the same comments and gets the same
-    number. A red mechanical gate and a red CI rollup leave dispatcher comments with no verdict
-    marker and are not counted, which is the separation the sprint budget already makes between
-    `red_review` and `red_ci`.
+    A reviewer's red verdict is one comment marked `review:red` and the board keeps it for the life
+    of the card, so the count is durable and idempotent without bookkeeping. A red mechanical gate
+    and a red CI rollup leave dispatcher comments with no verdict marker and are not counted.
     """
     return sum(
         1 for comment in (task.get("comments") or []) if comment.get("marker") == "review:red"
@@ -109,11 +105,10 @@ def _round_record_line(generation: int, request_ids: Iterable[str]) -> str:
 def _task_doc_round_record(workspace: str) -> tuple[int, set[str]]:
     """The round this checkout's `TASK.md` names, as `(generation, request ids)`.
 
-    The last record in the file wins, and the dispatcher writes its own last, after every section a
-    card description or an observer decision can write into. So a forged line earlier in the
-    document is outranked, and the line is written on every worker document, empty round included:
-    the absence of a record has to read as absence rather than as whatever the description happens
-    to contain.
+    The last record in the file wins and the dispatcher writes its own last, after every section a
+    card description or an observer decision can write into, so a forged line earlier in the document
+    is outranked. Written on every worker document, empty round included: the absence of a record has
+    to read as absence rather than as whatever the description happens to contain.
     """
     if not workspace:
         return 0, set()
@@ -141,12 +136,7 @@ _GATE_FINGERPRINT_PREFIX = "<!-- gate-fingerprint: "
 
 
 def _last_gate_red_body(task: dict[str, Any]) -> str | None:
-    """Most recent mechanical-gate-red bounce comment, for delivery to the rework worker.
-
-    Mirrors `_last_review_red_body`: without this the rework prompt never explains why the
-    mechanical gate (CI or local validation) failed, so the worker re-reports the same red
-    commit or edits code at random (secretary-766).
-    """
+    """Most recent mechanical-gate-red bounce comment, for delivery to the rework worker."""
     body = None
     for comment in task.get("comments") or []:
         if comment.get("marker") == "dispatcher" and _GATE_RED_PREFIX in (comment.get("body") or ""):
@@ -163,11 +153,9 @@ def _last_gate_red_body(task: dict[str, Any]) -> str | None:
 def _gate_red_repeat_count(task: dict[str, Any], fingerprint: str) -> int:
     """How many times this exact gate-failure fingerprint has already bounced this card.
 
-    A worker stuck reproducing the same failure needs to see that the reason did not change
-    since last time, or an identical silent bounce reads as the rework round having done
-    nothing at all. Keyed on the fingerprint rather than the rendered detail text: a GitHub
-    `detail` always carries the head SHA, which changes on every rework commit, so matching on
-    detail text alone would never recognise a repeat (secretary-766).
+    Keyed on the fingerprint rather than the rendered detail text: a GitHub `detail` always carries
+    the head SHA, which changes on every rework commit, so matching on detail text would never
+    recognise a repeat.
     """
     if not fingerprint:
         return 0
@@ -192,22 +180,14 @@ _REPORT_ACTIONS = (
 def _round_report_ids(workspace: str, attempt_id: str, reference: str, generation: int) -> set[str]:
     """The report request ids this round issued: the exact commands its worker was handed.
 
-    Every one of them is unique to the round. The attempt is in there, so a later attempt on the
-    same card never inherits an earlier one's reports, and so is the generation, so a later round of
-    one attempt never inherits an earlier round's.
+    Every one is unique to the round: the attempt is in there, so a later attempt never inherits an
+    earlier one's reports, and so is the generation.
 
     The checkout answers first, because the document is what the live worker is holding and the
-    dispatcher's own attempt id may have moved under it: a record that was lost and re-adopted gets
-    a fresh attempt id while the worker keeps reporting through the commands it was given. Only ids
-    that name the open generation are taken from it, so a document that is a round behind, a
-    generation persisted and the tick that rewrites the document lost, cannot hand back the previous
-    round's ids. What the dispatcher would issue itself is the fallback for a checkout it cannot
-    read.
-
-    The checkout answers through the dispatcher's own record line, never by scanning the document
-    for report commands: the card description is rendered into the same file, so a `--request-id`
-    token in ordinary prose would otherwise be admitted as an id this round issued, and a report
-    committed under it would end a round the dispatcher never handed it to (secretary-1065).
+    dispatcher's own attempt id may have moved under it. Only ids that name the open generation are
+    taken from it. It answers through the dispatcher's own record line, never by scanning the
+    document for report commands: the card description is rendered into the same file, so a
+    `--request-id` token in ordinary prose would otherwise be admitted as an id this round issued.
     """
     recorded_generation, recorded_ids = _task_doc_round_record(workspace)
     from_document = {
@@ -226,18 +206,13 @@ def _round_report_ids(workspace: str, attempt_id: str, reference: str, generatio
 def _round_report_marker(audit: Any, reference: str, round_ids: set[str]) -> str | None:
     """The marker of a report that belongs to this round, or None if the round has none yet.
 
-    A round ends only on a marker for the round that is open, and the marker on the board cannot
-    answer which round that is: the comment is `[report:done]` whoever wrote it and for whichever
-    round. What names the round is the request id its command carried, and the audit keeps that
-    beside the marker, so the round is read from there rather than from the card's comments. A
-    report filed under any other id records nothing of this round: not a command from a round that
-    is over, not one from an earlier attempt on this card, and not an id a head invented for itself.
+    The comment is `[report:done]` whoever wrote it and for whichever round; what names the round is
+    the request id its command carried, which the audit keeps beside the marker. A report filed under
+    any other id records nothing of this round.
 
     Committed events only. `TaskWriter` stages its event before it writes the comment, so a staged
-    event is a report that may not be on the board at all yet; consuming one would end the round on
-    a call that had not happened. A report whose audit append failed after its comment landed is
-    repaired by retrying the same command or by `reconcile`, and until then the round is unreported,
-    which is a state the wait watchdog already bounds.
+    event is a report that may not be on the board at all yet, and consuming one would end the round
+    on a call that had not happened.
     """
     marker = None
     for event in audit.events(reference, kind="reported"):
@@ -265,11 +240,7 @@ def _last_marker_body(task: dict[str, Any], marker: str) -> str | None:
 
 
 def _last_review_red_body(task: dict[str, Any]) -> str | None:
-    """Findings from the most recent review:red verdict, for delivery to the rework worker.
-
-    The rework prompt otherwise carries only the card description, so without this the worker
-    reworks blind and re-reports the same commit, looping red forever.
-    """
+    """Findings from the most recent review:red verdict, for delivery to the rework worker."""
     return _last_marker_body(task, "review:red")
 
 
@@ -284,11 +255,9 @@ def _review_adoption_baseline(task: dict[str, Any]) -> int:
 def _task_doc_report_generation(workspace: str) -> int:
     """The report generation the worker in this checkout was actually handed, or 0.
 
-    A dispatcher record can be lost at any point, and the generation is dispatcher state. What is
-    not lost is the document the live worker is working from: its record line names the round it
-    was given, so the checkout answers the question the state file no longer can. Read from the
-    record and not from the report commands rendered beside it, for the reason in
-    `_task_doc_round_record`.
+    A dispatcher record can be lost at any point and the generation is dispatcher state; the document
+    the live worker is working from is not. Read from the record line and not from the report commands
+    rendered beside it, for the reason in `_task_doc_round_record`.
     """
     return _task_doc_round_record(workspace)[0]
 
@@ -296,10 +265,8 @@ def _task_doc_report_generation(workspace: str) -> int:
 def _task_doc_decision(workspace: str) -> str:
     """The observer decision the worker in this checkout was actually handed, or "".
 
-    The same recovery as `_task_doc_report_generation`, for the same reason and from the same file:
-    the decision is frozen in dispatcher state, that state can be lost, and the document the live
-    worker is following is what still names the adjudication its round was opened on. Re-reading
-    the card's newest decision comment instead would be the defect this record exists to close.
+    The same recovery as `_task_doc_report_generation`, from the same file. Re-reading the card's
+    newest decision comment instead would be the defect this record exists to close.
     """
     if not workspace:
         return ""
@@ -320,15 +287,10 @@ def _task_doc_decision(workspace: str) -> str:
 def _spent_report_generations(task: dict[str, Any]) -> int:
     """A floor under the generations this card has already spent, from its report markers.
 
-    Only for recovery, and only as a floor: a round whose report the dispatcher has consumed is
-    over, so the round running now is past all of them. Undershooting would hand a new round an id
-    an earlier one already committed.
-
-    Only consumed reports count, which is the same boundary `_report_adoption_baseline` reads. A
-    report that is still waiting to be read belongs to the round that is running: stepping over it
-    would leave the adopted record holding a generation no report on the board names, and a report
-    is attributed to its round by the id its command carried (`_round_report_marker`). The document
-    in the checkout usually answers this on its own; this is the floor for when it cannot.
+    Only for recovery, and only as a floor: undershooting would hand a new round an id an earlier one
+    already committed. Only consumed reports count — a report still waiting to be read belongs to the
+    round that is running, and stepping over it would leave the adopted record holding a generation
+    no report on the board names.
     """
     return sum(
         1
@@ -340,15 +302,12 @@ def _spent_report_generations(task: dict[str, Any]) -> int:
 def _report_adoption_baseline(task: dict[str, Any]) -> int:
     """Where to start looking for worker report markers on an adopted card.
 
-    `len(comments)` would hide a `report:done` the worker already posted: the dispatcher can lose
-    its record at any point (restart, state reset, any `records.pop`), and re-adoption then blinds
-    it to the finished report. It used to cost one extra tick; with the wait watchdog it burns the
-    whole worker ceiling, respawns the head to redo work that is already on the board, and tells
-    the operator "no worker report within Ns", which is false.
+    `len(comments)` would hide a `report:done` the worker already posted: the dispatcher can lose its
+    record at any point, and re-adoption then blinds it to the finished report, burning the whole
+    worker ceiling and respawning the head to redo work already on the board.
 
-    Every report the dispatcher has consumed is followed by the dispatcher's own comment (the move
-    to Validate, the review:red bounce, the gate-red bounce), so the last dispatcher comment is the
-    boundary: markers after it are unconsumed.
+    Every report the dispatcher has consumed is followed by the dispatcher's own comment, so the last
+    dispatcher comment is the boundary: markers after it are unconsumed.
     """
     baseline = 0
     for index, comment in enumerate(task.get("comments") or []):
@@ -365,10 +324,9 @@ def scrub_host_output(text: str) -> str:
 def safe_one_line(text: object, *, limit: int = 500) -> str:
     """Redact and flatten untrusted host/board text before it enters a role prompt or board artifact.
 
-    GitHub check names, URLs and verdict bodies are remote/user-controlled text.  A receipt is
-    evidence, not an instruction channel, so control characters and Markdown-shaped newlines must
-    not be able to create a second prompt section or command.  Keep the result bounded as well:
-    a check title is an identifier, not a log transport.
+    GitHub check names, URLs and verdict bodies are remote-controlled text. A receipt is evidence,
+    not an instruction channel, so control characters and Markdown-shaped newlines must not be able
+    to create a second prompt section or command. Bounded as well: a check title is an identifier.
     """
     flattened = "".join(
         " " if ord(char) < 32 or ord(char) == 127 else char for char in scrub_host_output(str(text))

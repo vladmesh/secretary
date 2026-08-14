@@ -1,37 +1,23 @@
 """The three operations a head's whole life is made of: `spawn`, `nudge`, `stop`.
 
-The package docstring has promised these since `HeadSpec` landed. What they are is small — open a
-pane and point the head at its task, point a running head at something new, end it — and what
+Open a pane and point the head at its task, point a running head at something new, end it. What
 matters is where they reach:
 
-  * **they reach the session manager only through `SessionHost`.** There is no `subprocess` here and
-    no `orca` argument vector; opening, addressing, re-finding and closing a pane are all methods on
-    the host that is passed in. That is not tidiness: it is what makes a contract suite for these
-    three operations runnable on a fake host with no Orca installed, which is the first piece of the
-    backend-independent suite Milestone 5 needs. The verbs themselves were not invented here
-    either — they moved out of the dispatcher's `_create_terminal` / `_split_pane` /
-    terminal-inventory methods into `pane_host`, so there is one set of pane commands, not two;
+  * **they reach the session manager only through `SessionHost`.** There is no `subprocess` here
+    and no `orca` argument vector; opening, addressing, re-finding and closing a pane are all
+    methods on the host that is passed in, which is what makes the contract suite for these three
+    operations runnable on a fake host with no Orca installed;
   * **the pane is not the head.** `spawn` returns a `HeadRun` whose identity outlives the handle,
     and `stop` re-finds the pane by its stable leaf before closing anything, because a session
     manager that aliased a handle must not be able to make a stop close somebody else's pane;
   * **what to run is passed in, and how a prompt is delivered stays behind the host.** `command`
-    is a string these operations never build: the head that is being spawned decided what it runs
-    before anything was opened, and an operation that re-derived it could open a pane running
-    something other than what its caller recorded. It comes from `command.render_head_command`,
-    which is in this package but beside these operations rather than inside them — one renderer for
-    the dispatcher, a tick and an operator shell alike, fed a registry profile as data by whoever
-    owns the registry. Delivery and pane-closing semantics a product has of its own — the provider
-    transcript that proves a turn started, a close whose refusal only matters when no heartbeat
-    can be read — arrive as a `HeadTransport`, which is handed the host and reaches the session
-    manager through it. That is deliberately not a callback the caller closes over its own backend
-    runner with: an operation whose delivery went around the host would put the product's only
-    real path back outside the seam these three exist to hold, while the contract suite went on
-    passing on a fake;
+    is a string these operations never build: an operation that re-derived it could open a pane
+    running something other than what its caller recorded. Delivery and pane-closing semantics a
+    product has of its own arrive as a `HeadTransport`, which is handed the host and reaches the
+    session manager through it rather than closing over a backend runner of its own;
   * **a failure says what it left running.** `HeadSpawnAborted` means a pane exists and may be
     holding a live head, so the caller keeps its launch intent; `HeadSpawnFailed` means nothing of
-    the bring-up survived and the caller may treat it as a launch that did not happen. That
-    distinction is the whole reason a bring-up failure is not one exception: the product has killed
-    live heads by treating the first as the second.
+    the bring-up survived. Treating the first as the second is how live heads get killed.
 """
 from __future__ import annotations
 
@@ -85,8 +71,8 @@ class HeadOperationError(RuntimeError):
 class HeadSpawnFailed(HeadOperationError):
     """A bring-up that left nothing running.
 
-    The caller may treat it as a launch that did not happen: block the work, drop the record, open
-    a replacement. That is only safe because the pane was closed and the close was confirmed.
+    The caller may treat it as a launch that did not happen. That is only safe because the pane was
+    closed and the close was confirmed.
     """
 
 
@@ -94,8 +80,7 @@ class HeadSpawnAborted(HeadOperationError):
     """A bring-up whose pane exists and may be holding a live head.
 
     The run travels with it — identity, pane and pid heartbeat — because that is what the caller
-    needs to either adopt or stop this head on a later tick. Blocking the work and forgetting the
-    record here is how a live head ends up on a checkout nothing points at.
+    needs to either adopt or stop this head on a later tick.
     """
 
     def __init__(self, message: str, *, run: HeadRun, evidence: Any = None) -> None:
@@ -105,8 +90,8 @@ class HeadSpawnAborted(HeadOperationError):
 class HeadPaneBusy(HeadOperationError):
     """The pane was working, or held in a dialog, and never took its prompt.
 
-    Not a failed bring-up: it is a bring-up worth making again, and the caller defers rather than
-    blocking the work. The pane it names has already been closed.
+    Not a failed bring-up: it is worth making again, so the caller defers rather than blocking the
+    work. The pane it names has already been closed.
     """
 
     def __init__(self, message: str, *, readiness: str, pane: str, evidence: Any = None) -> None:
@@ -132,9 +117,8 @@ class NudgePointer:
     """What a pane is sent: one bounded line, and the document it points at when there is one.
 
     A pointer at a document is the protocol's rule (`prompt_document`): the task never enters the
-    terminal, only its path does, and the evidence then records the mode and the document rather
-    than looking like a task that shrank to one line. A pointer without a document is the other
-    legitimate case — "report now", "here is your continuation" — where the line *is* the message.
+    terminal, only its path does. A pointer without a document is the other legitimate case, where
+    the line *is* the message.
     """
 
     text: str
@@ -144,13 +128,10 @@ class NudgePointer:
     def at_document(cls, path: str, note: str = "") -> "NudgePointer":
         """The nudge for a task document already written to disk.
 
-        `note` is the discriminating tail a caller may need in the delivered line itself — which
-        round this document is, what inside it outranks what — for a head whose scrollback holds
-        an earlier round's instructions and could otherwise act on them. It is built into the same
-        line through `nudge_for`, so the path is still absolute and the ceiling is still checked
-        over path and note together; a caller that assembled its own text beside the pointer would
-        be delivering a line nothing validated, which is how a pointer stopped carrying its
-        document at all (secretary-1413).
+        `note` is the discriminating tail a caller may need in the delivered line itself, for a head
+        whose scrollback holds an earlier round's instructions. It is built into the same line through
+        `nudge_for`, so the path stays absolute and the ceiling is checked over path and note together;
+        a caller assembling its own text beside the pointer would deliver a line nothing validated.
         """
         return cls(text=nudge_for(path, note), document=str(path))
 
@@ -172,9 +153,8 @@ class HeadOutcome:
 class HeadDelivery:
     """The transport receipt together with the run authoritative after pre-send work.
 
-    Delivery can persist a provider-source binding after the pane was created but immediately
-    before the prompt is sent.  The operation cannot keep returning its earlier local copy in
-    that case: every following launcher and launch intent must receive this handoff value.
+    Delivery can persist a provider-source binding after the pane was created but immediately before
+    the prompt is sent, so the operation cannot keep returning its earlier local copy.
     """
 
     run: HeadRun
@@ -185,11 +165,8 @@ class HeadTransport(Protocol):
     """A product's own delivery and pane-close semantics, performed against the host it is given.
 
     The two verbs an operation cannot decide for a product: what counts as a prompt this head
-    received, and what a refused close means over this head's heartbeat. Both are policy, and both
-    are given the `SessionHost` the operation is running on rather than reaching a session manager
-    of their own. That is the difference between a seam and a hole — an implementation that
-    ignored `host` and called a backend directly would be exactly the bypass this shape exists to
-    prevent, and the contract suite pins it by running the production transport against a fake.
+    received, and what a refused close means over this head's heartbeat. Both are given the
+    `SessionHost` the operation is running on rather than reaching a session manager of their own.
     """
 
     def deliver(
@@ -205,10 +182,8 @@ class HeadTransport(Protocol):
 class HostTransport:
     """Delivery and close as a session manager alone can promise them.
 
-    The default, and what a caller with no confirmation criterion of its own gets: the shared
-    interactive delivery path through the host, and a plain pane close. `confirm` is the caller's
-    proof that a turn started when it has one; without it the send is acknowledged out of band,
-    because the last thing this package can observe by itself is the pane having gone to work.
+    What a caller with no confirmation criterion of its own gets. `confirm` is the caller's proof
+    that a turn started; without it the send is acknowledged out of band.
     """
 
     confirm: Confirm | None = None
@@ -257,15 +232,10 @@ def spawn(
 ) -> HeadOutcome:
     """Bring one head up in its own pane and, when a pointer is given, point it at its task.
 
-    `command` is what the pane runs, and it is decided before this is called — by
-    `command.render_head_command`, from the profile the caller resolved. This operation renders
-    nothing itself: a bring-up that re-derived its own command could open a pane running something
-    other than what its caller recorded, which is the second opinion `HeadSpec` exists to prevent.
-
-    `transport` is how this product delivers a prompt and how its cleanup proves a pane it opened
-    left no head behind — a pid heartbeat, in the production dispatcher. It performs both through
-    the same host this operation was given; without one the pane is written into and closed through
-    the host directly, which is all a session manager can promise on its own.
+    `command` is decided before this is called, by `command.render_head_command`: a bring-up that
+    re-derived its own command could open a pane running something other than what its caller
+    recorded. `transport` is how this product delivers a prompt and proves a pane it opened left no
+    head behind; without one the pane is written into and closed through the host directly.
     """
     transport = transport or HostTransport()
     if run is None:
@@ -324,8 +294,7 @@ def nudge(
     """Point a running head at something: its task document, or one line of instruction.
 
     The pane is re-found by the run's own leaf first, so a head whose handle the session manager
-    aliased is nudged rather than reported missing. A run that has been asked to stop is refused:
-    handing more work to a head somebody is ending is how a stop turns into a race.
+    aliased is nudged rather than reported missing. A run that has been asked to stop is refused.
     """
     if not run.running:
         raise HeadNudgeFailed(f"a head in {run.lifecycle} is not nudged")
@@ -350,22 +319,18 @@ def stop(
 ) -> HeadOutcome:
     """End one head and record who ended it.
 
-    The initiator is positional and typed, so there is no way to call this without one — the record
-    of a stopped head names its initiator by construction rather than by a check inside a body that
-    a later caller could route around.
+    The initiator is positional and typed, so the record of a stopped head names its initiator by
+    construction.
 
     The order is the invariant, and this is the one place that holds it: the run enters `finishing`
-    with its initiator and is handed to `commit` *before* a single host call is made. A stop is the
-    operation most likely to be interrupted — the pane refuses, the heartbeat will not confirm, the
-    dispatcher is restarted mid-way — and every one of those interruptions has to leave behind a
-    durable run that says which head is being ended and by whom. A caller that commits afterwards
-    is a caller whose crash loses both, and whose next tick then opens a second stop of a head it
-    can no longer name. `finishing` is idempotent by initiator, so a retry through another path
-    re-commits the same run rather than renaming the actor that began this.
+    with its initiator and is handed to `commit` *before* a single host call is made, so an
+    interrupted stop still leaves a durable run saying which head is being ended and by whom.
+    `finishing` is idempotent by initiator, so a retry through another path re-commits the same run
+    rather than renaming the actor that began this.
 
-    The pane is re-found by leaf before it is closed: closing a stale handle is closing whatever
-    the session manager has since put there. A run with neither pane nor heartbeat cannot be
-    promised gone, and says so.
+    The pane is re-found by leaf before it is closed: closing a stale handle is closing whatever the
+    session manager has since put there. A run with neither pane nor heartbeat cannot be promised
+    gone, and says so.
     """
     if run.lifecycle == EXITED:
         return HeadOutcome(run)
@@ -425,9 +390,8 @@ def _open_pane(
     """The pane this head will live in, split off a sibling when the caller named one.
 
     A split is labelled afterwards because the session manager's split takes no title, and a label
-    that will not stick is a failed bring-up rather than an unlabelled pane: an operator has no
-    other way to tell two panes of one worktree apart. The head is already running by then, so the
-    cleanup decides which kind of failure it is — see `_cleanup`.
+    that will not stick is a failed bring-up rather than an unlabelled pane. The head is already
+    running by then, so `_cleanup` decides which kind of failure it is.
     """
     if not split_from:
         return host.open_pane(workspace, title, command)
@@ -464,10 +428,8 @@ def _cleanup(
 ) -> HeadOperationError:
     """Close a pane this bring-up opened, and say which kind of failure that leaves.
 
-    A close the caller can confirm leaves nothing of the bring-up: the failure is ordinary and the
-    caller may act as though no head exists. A close that is refused says nothing about the head,
-    so it goes back as `HeadSpawnAborted` carrying the pane — the caller keeps its intent and the
-    next tick settles that head instead of opening a second one beside it.
+    A confirmed close leaves nothing of the bring-up, so the failure is ordinary. A refused close
+    says nothing about the head and goes back as `HeadSpawnAborted` carrying the pane.
     """
     try:
         transport.close(run, host=host)
@@ -488,16 +450,10 @@ def _spawn_delivery_failure(
     """What an unconfirmed launch prompt means, which depends on what was sent.
 
     A *nudge at a document* that was not confirmed says nothing about the head: the line is short
-    enough that no provider has been seen to lose one, the task is on disk either way, and the
-    classification that would decide otherwise is the one that killed six live Claude heads in
-    eight minutes on the worker path (2026-08-11). So the pane is not closed over it — the bring-up
-    hands it back as the ambiguity it is.
-
-    A prompt that carried its own content is different: without it the head has nothing at all, so
-    the pane's state is asked before anything is closed, because afterwards there is nothing left to
-    ask. A pane that is working or held in a dialog is a bring-up worth making again; a pane nothing
-    can ask about is not a busy pane, it is a pane nothing can wait for, and it takes the ordinary
-    failure path.
+    enough that no provider has been seen to lose one and the task is on disk either way, so the
+    pane is not closed over it. A prompt that carried its own content is different — without it the
+    head has nothing at all — so the pane's state is asked before anything is closed. A pane nothing
+    can ask about is not a busy pane and takes the ordinary failure path.
     """
     # `HeadDelivery` makes a successful pre-send mutation authoritative on the success path.
     # A later transport refusal takes the same handoff: an aborted launch must retain the bound
@@ -538,8 +494,7 @@ def _deliver(
     """One delivery into this head's pane, performed by the transport against this host.
 
     A delivery boundary failure is re-raised as this package's own, evidence and all, whichever
-    transport produced it: what the caller reads is the same refusal whether the product's
-    confirmation criterion or the plain host path made it.
+    transport produced it.
     """
     try:
         delivery = transport.deliver(run, pointer, host=host, subject=subject)
@@ -553,8 +508,8 @@ def _deliver(
 def post_delivery_run(before: HeadRun, after: HeadRun) -> HeadRun:
     """Merge the exact pre-send handoff with pane facts this operation has proved.
 
-    A provider callback owns its newly persisted source.  `spawn` and `nudge` own only the pane
-    address they just used and the lifecycle transition they can prove.  Keeping those writers
+    A provider callback owns its newly persisted source; `spawn` and `nudge` own only the pane
+    address they just used and the lifecycle transition they can prove. Keeping those writers
     separate makes a stale launch result unable to erase a newer source binding.
     """
     if not isinstance(after, HeadRun) or not before.same_run(after):
@@ -578,9 +533,8 @@ def post_delivery_run(before: HeadRun, after: HeadRun) -> HeadRun:
 def _relocated(host: SessionHost, run: HeadRun) -> HeadRun:
     """The run addressed at the pane it is in now.
 
-    The leaf is the stable token; the handle is not. An inventory that cannot be read leaves the
-    run exactly as it was rather than blanking a handle a caller could still have used: an
-    unreadable inventory is not evidence that a pane is gone.
+    The leaf is the stable token; the handle is not. An inventory that cannot be read leaves the run
+    exactly as it was: an unreadable inventory is not evidence that a pane is gone.
     """
     if not run.leaf or not run.workspace:
         return run

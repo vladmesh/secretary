@@ -1,8 +1,7 @@
 """Recoverable secret store: envelope format, installation key, open catalog.
 
-Contract: docs/RECOVERY.md, "Secrets" — a recoverable secret store. The store lives
-in the private instance repo, so it rides the same recovery chain as the board,
-the runs and the knowledge plane:
+Contract: docs/RECOVERY.md, "Secrets". The store lives in the private instance repo, so it rides
+the same recovery chain as the board, the runs and the knowledge plane:
 
     secretary-instance/
       .gitignore              secrets/installation.key
@@ -12,34 +11,27 @@ the runs and the knowledge plane:
         installation.key      raw key, mode 0600, never committed
         values/<id>.enc.json  one versioned envelope per secret
 
-Two keys, two jobs. The installation key opens the values after a reboot without
-a human. The recovery phrase exists only to rebuild that key on a clean host: it
-is generated here, shown once and never stored. `installation-key.json` holds the
-KDF id and its parameters in the open, so a future version of the product can
-still derive today's key, and a verifier so a mistyped phrase fails loudly
-instead of producing a plausible-looking wrong key.
+Two keys, two jobs. The installation key opens the values after a reboot without a human. The
+recovery phrase exists only to rebuild that key on a clean host: it is generated here, shown once
+and never stored. `installation-key.json` holds the KDF id and its parameters in the open, plus a
+verifier so a mistyped phrase fails loudly instead of producing a plausible-looking wrong key.
 
-Every envelope carries its own format version, KDF id, KDF parameters and AEAD id
-in the clear next to the ciphertext. Nothing about how a value was sealed lives
-only in this module's constants. The primitives are `cryptography`'s (Scrypt,
-HKDF, ChaCha20-Poly1305); there is no cryptographic math of our own here.
+Every envelope carries its own format version, KDF id, KDF parameters and AEAD id in the clear
+next to the ciphertext; nothing about how a value was sealed lives only in this module's
+constants. The primitives are `cryptography`'s (Scrypt, HKDF, ChaCha20-Poly1305).
 
-Store writes go through `state_repo.state_repo_lock` and land atomically in one
-store commit, so the catalog and the values it names can never diverge in history.
-The prior ignore-lifecycle commit is deliberately separate and happens before a
-local installation key can be written.
+Store writes go through `state_repo.state_repo_lock` and land atomically in one store commit, so
+the catalog and the values it names can never diverge in history. The prior ignore-lifecycle
+commit is deliberately separate and happens before a local installation key can be written.
 
-A secret that some process reads as an environment variable also carries a
-`materialize` record: the variable name, which file it belongs to and which line
-of that file it is. That record is what lets a recovered installation put its env
-files back without a human listing paths. `materialize_secrets` writes each file
-whole and by rename, because the one file this exists for, `runtime.env`, is read
-by systemd on every unit start and may never be seen missing or half-written.
+A secret read as an environment variable also carries a `materialize` record — variable name,
+file, line — which is what lets a recovered installation put its env files back without a human
+listing paths. `materialize_secrets` writes each file whole and by rename, because `runtime.env`
+is read by systemd on every unit start and may never be seen missing or half-written.
 
-The env-file format the store round-trips is `KEY=VALUE` lines, LF, one variable
-per line, nothing else: no comments, no blank lines, no padding, and a final
-newline. `import` refuses anything outside it rather than take in a file it would
-hand back as different bytes.
+The env-file format the store round-trips is `KEY=VALUE` lines, LF, one variable per line,
+nothing else: no comments, no blank lines, no padding, and a final newline. `import` refuses
+anything outside it rather than take in a file it would hand back as different bytes.
 """
 
 from __future__ import annotations
@@ -209,11 +201,8 @@ def is_initialized(instance_dir: Path) -> bool:
 def _store_exists(instance_dir: Path) -> bool:
     """Whether `secrets/` holds any trace of a store, complete or not.
 
-    `is_initialized` requires the catalog and the key params together, so a
-    store missing just one of those files reads as fully absent to it. Health
-    and findings need to tell that apart from a directory that was never
-    touched, so this checks each file that `init` can produce independently,
-    plus a non-empty values directory.
+    `is_initialized` requires the catalog and the key params together; health and findings need to
+    tell a partial store apart from a directory that was never touched.
     """
     if (
         catalog_path(instance_dir).exists()
@@ -230,11 +219,7 @@ def _store_exists(instance_dir: Path) -> bool:
 
 
 def generate_recovery_phrase(words: int = PHRASE_WORDS) -> str:
-    """A fresh phrase with `words` * 8 bits of entropy, chosen by the product.
-
-    The user never invents this. `pysecrets.choice` is the system CSPRNG, and the
-    wordlist is exactly 256 long, so the entropy is the word count times eight.
-    """
+    """A fresh phrase with `words` * 8 bits of entropy, chosen by the product."""
     if words < 8:
         raise SecretStoreValidationError("a recovery phrase needs at least 8 words")
     return " ".join(pysecrets.choice(RECOVERY_WORDS) for _ in range(words))
@@ -336,12 +321,7 @@ def load_installation_key(instance_dir: Path) -> bytes:
 
 
 def verify_recovery_phrase(instance_dir: Path, phrase: str) -> None:
-    """Answer whether the phrase opens this store, touching no file.
-
-    A preview run has to say what a real run would do without doing it, and the
-    only honest way to promise the store would open is to derive the key and put
-    it against the verifier. The derived key is dropped here; nothing is written.
-    """
+    """Answer whether the phrase opens this store, touching no file."""
     params = _read_key_params(instance_dir)
     _check_verifier(_derive_key(phrase, params), params)
 
@@ -467,8 +447,8 @@ def _derive_value_key(key: bytes, header: dict[str, Any]) -> bytes:
 def _header_bytes(header: dict[str, Any]) -> bytes:
     """The open part of the envelope, bound into the AEAD tag.
 
-    Serialized with sorted keys and no spaces so the bytes are the same whether
-    the header was just built or parsed back from the file.
+    Serialized with sorted keys and no spaces so the bytes are the same whether the header was just
+    built or parsed back from the file.
     """
     return json.dumps(header, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
@@ -505,12 +485,7 @@ def list_secrets(instance_dir: Path) -> tuple[dict[str, Any], ...]:
 
 
 def store_divergence(instance_dir: Path) -> tuple[str, ...]:
-    """Names the catalog and the values directory disagree about.
-
-    A consistent store has exactly one envelope per catalog entry and no envelope
-    without one. Used by the tests that interrupt a write, and by whatever
-    reports store health later.
-    """
+    """Names the catalog and the values directory disagree about."""
     catalogued = {entry["id"] for entry in list_secrets(instance_dir)}
     root = secrets_dir(instance_dir) / VALUES_DIRNAME
     stored = set()
@@ -545,11 +520,9 @@ def _catalog_text(catalog: dict[str, Any]) -> str:
 def store_health(instance_dir: Path) -> dict[str, Any]:
     """Non-secret snapshot of the store for `secretary status --json`.
 
-    A `secrets/` directory holding none of catalog, key params or key file
-    reports as absent rather than raising: an installation with no secrets in
-    it yet is a valid state, not a defect. Any other partial shape reports as
-    present, with `initialized` reflecting whether catalog and key params are
-    both there.
+    A `secrets/` directory holding none of catalog, key params or key file reports as absent rather
+    than raising: an installation with no secrets yet is a valid state. Any other partial shape
+    reports as present.
     """
     instance_dir = Path(instance_dir)
     if not _store_exists(instance_dir):
@@ -579,12 +552,9 @@ def store_health(instance_dir: Path) -> dict[str, Any]:
 def store_findings(instance_dir: Path) -> tuple[str, ...]:
     """Everything wrong with the store on disk, for `secretary doctor`.
 
-    An empty `secrets/` directory gives no findings: absence is a valid state.
-    Any other shape, including a partial one where only some of catalog, key
-    params or key file exist, is checked against the four ways it can be
-    unhealthy: a divergence between the catalog and the values directory, an
-    installation key with permissions wider than 0600, and an installation key
-    that is missing or does not open the store while the catalog is not empty.
+    An empty `secrets/` directory gives no findings: absence is a valid state. Any other shape is
+    checked against a catalog/values divergence, an installation key with permissions wider than
+    0600, and a key that is missing or does not open a non-empty store.
     """
     instance_dir = Path(instance_dir)
     if not _store_exists(instance_dir):
@@ -621,8 +591,8 @@ def store_findings(instance_dir: Path) -> tuple[str, ...]:
 def _key_presence(instance_dir: Path) -> tuple[bool, bool | None]:
     """Whether a key file is there, and whether it opens this store.
 
-    `usable` is `None` when there is no key file to judge, so a status reader
-    cannot mistake "absent" for "present but broken".
+    `usable` is `None` when there is no key file to judge, so a status reader cannot mistake
+    "absent" for "present but broken".
     """
     try:
         path = key_path(instance_dir)
@@ -657,11 +627,7 @@ def _materialize_summary(secrets: tuple[dict[str, Any], ...]) -> list[dict[str, 
 
 
 def initialize_store(instance_dir: Path, *, phrase: str, actor: str) -> InitResult:
-    """Create the key, the key parameters and an empty catalog. Never overwrites.
-
-    The caller owns showing the phrase and confirming it; by the time this runs
-    the user has already proved they wrote it down.
-    """
+    """Create the key, the key parameters and an empty catalog. Never overwrites."""
     actor = _clean_actor(actor)
     instance_dir = state_repo.require_repo(instance_dir)
     params = _new_key_params()
@@ -790,17 +756,13 @@ def read_secret(instance_dir: Path, secret_id: str) -> bytes:
 def redaction_values(instance_dir: Path) -> tuple[str, ...]:
     """Return plaintext values that an instance's writers must redact.
 
-    An old runtime import recorded every line as a secret, including ordinary
-    paths and configuration.  Include an entry only when the canonical runtime
-    name marks it sensitive or its plaintext independently looks like a known
-    credential (including URL userinfo).  That protects custom credential
-    names without turning SECRETARY_DATA_DIR or TA_SECRETARY_REPO into an
-    over-broad exact-value redaction rule.
+    An entry is included only when the canonical runtime name marks it sensitive or its plaintext
+    independently looks like a known credential (URL userinfo included), so custom credential names
+    are protected without turning SECRETARY_DATA_DIR into an over-broad exact-value rule.
 
-    A locked or partial store contributes no plaintext values.  It remains a
-    separate doctor finding; treating it as a checkpoint gate would turn a
-    recovery that deliberately left stale encrypted credentials locked into a
-    permanent durability outage.  Runtime-file and pattern scanning still run.
+    A locked or partial store contributes no plaintext values. It stays a separate doctor finding;
+    treating it as a checkpoint gate would turn a recovery that deliberately left stale encrypted
+    credentials locked into a permanent durability outage.
     """
     instance_dir = Path(instance_dir).expanduser()
     values: list[str] = []
@@ -843,8 +805,7 @@ def redaction_values(instance_dir: Path) -> tuple[str, ...]:
 def remove_secret(instance_dir: Path, *, secret_id: str, actor: str) -> RemoveResult:
     """Drop the catalog entry and its envelope in one commit.
 
-    A missing id is an error, not a quiet success: the caller asked for a state
-    that never existed, and hiding that turns a typo into a secret nobody knows
+    A missing id is an error, not a quiet success: hiding it turns a typo into a secret nobody knows
     is still stored under its real name.
     """
     actor = _clean_actor(actor)
@@ -882,13 +843,9 @@ def import_env_file(
 ) -> ImportResult:
     """Take an existing env file into the store, one secret per variable.
 
-    The file's own line order is what the catalog records, so `materialize` puts
-    the same bytes back; a variable that already materializes into the same file
-    but is not in this import keeps its value and moves after the imported block.
-
-    Idempotent by content: a variable whose sealed value and metadata already
-    match is left alone, envelope bytes included, so re-importing the same file
-    adds no duplicates and no commit. The report says which ids moved.
+    The file's own line order is what the catalog records, so `materialize` puts the same bytes back.
+    Idempotent by content: a variable whose sealed value and metadata already match is left alone,
+    envelope bytes included, so re-importing the same file adds no duplicates and no commit.
     """
     actor = _clean_actor(actor)
     scope = _clean_scope(scope)
@@ -992,16 +949,10 @@ def materialize_secrets(
 ) -> tuple[MaterializeResult, ...]:
     """Write every materializing secret into its env file.
 
-    One file per target, written whole: the values that belong there are the
-    values that end up there, and a variable dropped from the catalog is gone
-    from the file. Callers that only want one file pass `target`, and a caller
-    that already knows which files it may write whole passes `paths`; recovery
-    uses that to leave a file alone when one of its secrets is unreadable, rather
-    than publish an env file with a line missing.
-
-    Line order is the catalog's `materialize.order`, so a file that `import`
-    took in comes back byte for byte, and two runs over an unchanged store write
-    the same bytes.
+    One file per target, written whole, so a variable dropped from the catalog is gone from the file.
+    `target` narrows to one file; `paths` lets recovery leave a file alone when one of its secrets is
+    unreadable rather than publish an env file with a line missing. Line order is the catalog's
+    `materialize.order`, so an imported file comes back byte for byte.
     """
     if target is not None and target not in MATERIALIZE_TARGETS:
         raise SecretStoreValidationError(
@@ -1053,9 +1004,8 @@ def materialize_secrets(
 def materialize_path(instance_dir: Path, entry: dict[str, Any]) -> Path:
     """Resolve one catalog entry's materialization target to a path.
 
-    `runtime-env` never carries a path of its own: the installation's env file is
-    whatever `role_env` says it is, override included, so the store and a
-    launched head always mean the same file.
+    `runtime-env` never carries a path of its own: the installation's env file is whatever `role_env`
+    says it is, override included, so the store and a launched head always mean the same file.
     """
     instruction = entry.get("materialize") or {}
     target = instruction.get("target")
@@ -1076,14 +1026,10 @@ def materialize_path(instance_dir: Path, entry: dict[str, Any]) -> Path:
 def parse_env_file(text: str, *, source: str = "env file") -> dict[str, str]:
     """Read the env-file format the store can hand back byte for byte.
 
-    That is the whole point of being strict here. The store keeps variable names,
-    values and line order, and nothing else; a comment, a blank line, a stray
-    space or a CR would be dropped on the way in and could not be put back on the
-    way out, so a file carrying one is refused instead of round-tripped into a
-    different file. Values are taken literally, with no unquoting: whatever stood
-    to the right of the first `=` is the value.
-
-    Returns the variables in file order.
+    The store keeps variable names, values and line order and nothing else, so a comment, a blank
+    line, a stray space or a CR would be dropped on the way in and could not be put back: a file
+    carrying one is refused rather than round-tripped into a different file. Values are taken
+    literally, with no unquoting. Returns the variables in file order.
     """
     if not text:
         return {}
@@ -1189,9 +1135,8 @@ def _stored_value(instance_dir: Path, secret_id: str, key: bytes) -> bytes | Non
 def _env_value(entry: dict[str, Any], value: bytes) -> str:
     """The right-hand side of one env line, or a refusal.
 
-    An env file has no escaping this format can rely on: `installation` reads the
-    rest of the line literally, so a value with a newline in it would silently
-    become a different variable, or a truncated one.
+    An env file has no escaping this format can rely on: `installation` reads the rest of the line
+    literally, so a value with a newline in it would silently become a different variable.
     """
     try:
         text = value.decode("utf-8")
@@ -1209,11 +1154,8 @@ def _env_value(entry: dict[str, Any], value: bytes) -> str:
 def _assert_distinct_secret_ids(variables: dict[str, str], *, source: str) -> None:
     """Refuse a file whose variables would share one secret id.
 
-    Ids are lower case, so `FOO` and `foo` are two variables but one id: importing
-    both would leave the second one's value under the first one's name and hand
-    back a file with one line where the source had two. The store cannot keep
-    such a file, so it does not take it in, and it says so before writing
-    anything.
+    Ids are lower case, so `FOO` and `foo` are two variables but one id: importing both would leave
+    the second one's value under the first one's name. Refused before writing anything.
     """
     seen: dict[str, str] = {}
     for name in variables:
@@ -1285,10 +1227,9 @@ def _assert_writable_target(instance_dir: Path, path: Path) -> None:
 def _publish_env_file(path: Path, text: str) -> bool:
     """Replace the env file in one step, or leave it exactly as it was.
 
-    systemd reads this file on every unit start, so there is no moment it may be
-    missing, empty or half-written: the content is written to a neighbour, given
-    its mode there, and only then renamed over the target. A rename is the whole
-    swap; a crash before it leaves the old file untouched.
+    systemd reads this file on every unit start, so there is no moment it may be missing, empty or
+    half-written: the content is written to a neighbour, given its mode there, and only then renamed
+    over the target. A crash before the rename leaves the old file untouched.
     """
     desired = text.encode("utf-8")
     try:
@@ -1332,9 +1273,8 @@ def _publish(writes: list[tuple[Path, str]]) -> None:
 def _scan_open_file(name: str, text: str) -> None:
     """The open half of the store leaves the host, so it passes the same gate.
 
-    `checkpoint.py` blocks a commit when `redact()` changes `state/`; the catalog
-    is tracked plaintext with the same reach, so a value pasted into a purpose
-    field stops here rather than in the history.
+    `checkpoint.py` blocks a commit when `redact()` changes `state/`; the catalog is tracked
+    plaintext with the same reach, so a value pasted into a purpose field stops here.
     """
     if redact(text) != text:
         raise SecretStoreValidationError(f"secret detected in {name}")
@@ -1457,12 +1397,7 @@ def _clean_materialize(materialize: dict[str, Any] | None) -> dict[str, Any] | N
 
 
 def _materialize_slot(materialize: dict[str, Any]) -> tuple[str, str]:
-    """The file an instruction writes into, as far as the catalog can tell.
-
-    Two instructions with the same slot land in the same file, so they compete
-    for line numbers; `runtime-env` resolves to one path per host, `file` to its
-    own written path.
-    """
+    """The file an instruction writes into, as far as the catalog can tell."""
     return (str(materialize.get("target", "")), str(materialize.get("path", "")))
 
 
@@ -1475,9 +1410,8 @@ def _shift_foreign_lines(
 ) -> None:
     """Move whatever else writes into this file below the imported block.
 
-    An import owns the top of the file it came from, line for line. Anything a
-    `set` had already put there stays in the file and keeps its relative order,
-    just after, so no two secrets end up claiming the same line.
+    An import owns the top of the file it came from, line for line, so no two secrets end up
+    claiming the same line.
     """
     slot = _materialize_slot(materialize)
     foreign = [
@@ -1503,9 +1437,8 @@ def _assign_order(
 ) -> dict[str, Any] | None:
     """Give a materializing secret its line number in the target file.
 
-    A caller that names no order keeps the one it already had, or takes the next
-    free line at the end of the file. Nothing an existing entry holds moves, so a
-    file that came in through `import` keeps the order it came in with.
+    A caller that names no order keeps the one it already had, or takes the next free line. Nothing
+    an existing entry holds moves, so a file that came in through `import` keeps its order.
     """
     if materialize is None:
         return None

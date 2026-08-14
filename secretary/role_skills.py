@@ -1,19 +1,15 @@
 #!/usr/bin/env python3
 """Audit and sync role-owned skills into shell-owned skill directories.
 
-Two registries, layered. The product manifest is the portable one: the roles and skills every
-installation gets, read from whichever checkout the caller names, because an upgrade can
-materialize a host from a checkout other than the one running this module. An installation may own
-a second manifest at ``<instance>/skills/manifest.toml``
-naming skills that belong to this host alone, and its ``roles/`` tree sits beside it in the private
-instance repository. A skill is always read from the tree beside the manifest that declared it, so
-the two never have to agree about where sources live, and an installation without an overlay is a
-complete, supported installation.
+Two registries, layered. The product manifest is the portable one, read from whichever checkout
+the caller names, because an upgrade can materialize a host from a checkout other than the one
+running this module. An installation may own a second manifest at
+``<instance>/skills/manifest.toml`` naming skills that belong to this host alone. A skill is
+always read from the tree beside the manifest that declared it, so the two never have to agree
+about where sources live.
 
-A skill may also ship one command: an executable ``<skill>.sh`` beside its ``SKILL.md``. Delivering
-the skill links that script into the operator's ``bin`` directory under the skill's own name, so a
-skill that moves between the product and an installation keeps the entry point its prose documents,
-with nobody editing a link by hand.
+A skill may also ship one command: an executable ``<skill>.sh`` beside its ``SKILL.md``, linked
+into the operator's ``bin`` directory under the skill's own name.
 """
 from __future__ import annotations
 
@@ -66,21 +62,15 @@ IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 
 
 class RegistryError(ValueError):
-    """A manifest that cannot be read or does not have the shape a registry needs.
-
-    Carries the offending file in its message: the operator has two manifests and the only useful
-    error is the one that says which of them to open.
-    """
+    """A manifest that cannot be read or does not have the shape a registry needs."""
 
 
 def _absolute(value: Path | str) -> Path:
     """A path that means the same thing from anywhere.
 
-    Every source here ends up either compared against a link target or written into one, and a
-    symlink resolves its own text against the directory it sits in, not against the working
-    directory of whoever ran the sync. A relative ``--instance`` would otherwise materialize a
-    command pointing at a path below ``bin``. Symlinks in the path itself are left alone: the
-    operator named these directories and the error messages have to name them back.
+    A symlink resolves its own text against the directory it sits in, not against the working
+    directory of whoever ran the sync, so a relative ``--instance`` would materialize a command
+    pointing at a path below ``bin``. Symlinks in the path itself are left alone.
     """
     return Path(os.path.abspath(os.path.expanduser(str(value))))
 
@@ -89,15 +79,9 @@ def manifest_path(product_manifest: Path | str | None = None) -> Path:
     """The product manifest: the one the caller named, the one under test, or the configured one.
 
     A named manifest wins over the environment because the caller that names one is installing a
-    particular checkout. ``secretary upgrade --product-root`` materializes a host from a checkout
-    that need not be the one running this module, and reading the running module's manifest there
-    would report a host in sync with a registry the upgrade is not installing.
-
-    With neither, the answer is the configured product checkout — ``TA_SECRETARY_REPO``, else
-    ``~/secretary`` — and never the checkout containing this file. A candidate checkout is a normal
-    place to run ``role-skills`` from, so letting the running module decide would audit and deliver
-    whatever the caller's working directory happened to be instead of the product the host is
-    configured with.
+    particular checkout. With neither, the answer is the configured product checkout —
+    ``TA_SECRETARY_REPO``, else ``~/secretary`` — and never the checkout containing this file, since a
+    candidate checkout is a normal place to run ``role-skills`` from.
     """
     if product_manifest is not None:
         return _absolute(product_manifest)
@@ -125,11 +109,9 @@ def configured_instance_path() -> Path:
 def _expand_home(value: Path | str, home: Path | str | None) -> Path:
     """A manifest path with ``~`` read as the installation's home, not the caller's.
 
-    A manifest writes ``~/shells/codex/skills`` because the product ships no absolute path. Which
-    home that is belongs to the installation being materialized: an upgrade repairing another
-    account's installation, or one running as root, would otherwise deliver every skill under the
-    invoking process's home while the units it renders name the owner's. When no home is named the
-    process's own is the right answer, which is the operator running ``role-skills sync`` by hand.
+    Which home that is belongs to the installation being materialized: an upgrade repairing another
+    account's installation would otherwise deliver every skill under the invoking process's home
+    while the units it renders name the owner's. With no home named, the process's own is right.
     """
     if home is None:
         return Path(os.path.expanduser(str(value)))
@@ -238,10 +220,8 @@ def manifest_sources(
 ) -> list[ManifestSource]:
     """The manifests that make up this installation's registry, product first.
 
-    A missing instance manifest is not an error and not a warning: a portable installation simply
-    has nothing to layer. Something at that path that is not a readable file is the opposite case,
-    an installation that meant to own an overlay and has a broken one, and reading past it would
-    call a damaged configuration portable.
+    A missing instance manifest is not an error: a portable installation has nothing to layer.
+    Something at that path that is not a readable file is the opposite case and refuses.
     """
     sources = [ManifestSource(PRODUCT_ORIGIN, manifest_path(product_manifest))]
     overlay = instance_manifest_path(instance_path)
@@ -298,9 +278,8 @@ def load_registry(
 ) -> SkillRegistry:
     """Read every manifest and layer them in order.
 
-    Roles accumulate: an instance adds skills to a product role rather than replacing the role, so
-    an upgrade that ships a new product skill still delivers it. A target is replaced whole by a
-    later manifest, because a target is one shell root and merging two of them means nothing.
+    Roles accumulate: an instance adds skills to a product role rather than replacing the role. A
+    target is replaced whole by a later manifest, because a target is one shell root.
     """
     sources = manifest_sources(instance_path, product_manifest=product_manifest)
     roles: dict[str, list[tuple[str, ManifestSource]]] = {}
@@ -366,12 +345,7 @@ def find_overlapping_target_roots(
 
 
 def iter_expected(registry: SkillRegistry, home: Path | str | None = None) -> list[ExpectedSkill]:
-    """Every skill the registry expects in a shell, with both ends of the copy checked.
-
-    Names are validated when the manifests are read, so containment here is the second lock rather
-    than the first: whatever a name turns out to be, a skill is read from inside the ``roles/`` tree
-    that declared it and written inside the shell root that asked for it, or the registry is refused.
-    """
+    """Every skill the registry expects in a shell, with both ends of the copy checked."""
     expected: list[ExpectedSkill] = []
     for target_name, (target, source_of_target) in sorted(registry.targets.items()):
         root = _expand_home(target["root"], home)
@@ -405,8 +379,7 @@ def find_conflicting_destinations(expected: list[ExpectedSkill]) -> list[dict[st
     """Two different sources copied into one directory: the second silently buries the first.
 
     Skill directories are flat under a shell root, so a product skill and an installation skill of
-    the same name land on the same path. Delivering both is impossible and delivering one of them
-    is not what either manifest asked for, so the pair is reported instead of resolved.
+    the same name land on the same path. The pair is reported instead of resolved.
     """
     first_by_dest: dict[Path, ExpectedSkill] = {}
     conflicts: list[dict[str, str]] = []
@@ -434,9 +407,8 @@ def find_conflicting_destinations(expected: list[ExpectedSkill]) -> list[dict[st
 def command_script(role: str, skill: str, source: ManifestSource) -> Path | None:
     """The one command a skill may ship: ``<skill>.sh`` beside its ``SKILL.md``.
 
-    Discovered from the tree rather than declared in the manifest, so a skill carries its entry
-    point with it when it moves out of the product and into an installation. Nothing has to be
-    added to the private manifest for the command to keep working.
+    Discovered from the tree rather than declared in the manifest, so a skill carries its entry point
+    with it when it moves out of the product and into an installation.
     """
     script = source.roles_root / role / skill / f"{skill}.sh"
     return script if script.is_file() else None
@@ -447,10 +419,9 @@ def iter_expected_commands(
 ) -> list[ExpectedCommand]:
     """Every command the registry ships, keyed by the name the operator types.
 
-    A command belongs to the skill, not to a shell: however many targets a skill is copied into,
-    the link points at the canonical script beside the manifest that declared it. Two skills of the
-    same name would want the same link, and that is an operator configuration nothing can satisfy,
-    so it is refused here, before an audit reads the filesystem or a sync writes to it.
+    A command belongs to the skill, not to a shell: however many targets a skill is copied into, the
+    link points at the canonical script. Two skills of the same name would want the same link, and
+    that is refused here, before an audit reads the filesystem or a sync writes to it.
     """
     root = bin_dir(home)
     by_name: dict[str, ExpectedCommand] = {}
@@ -488,16 +459,9 @@ def _link_target(link: Path) -> Path:
 def _entry_point_is_owned(link_target: Path, owned_roots: tuple[Path, ...]) -> bool:
     """Whether a link we did not write is one of ours to repoint, or somebody else's.
 
-    Ownership is a location this registry reads skills from, not a path that looks like one. A link
-    into a ``roles/`` tree of one of our manifests is an entry point of an older layout of the same
-    registry: a skill that changed role, or one that moved between the product and the installation
-    and left the link behind pointing at the tree it used to live in. That the target no longer
-    exists says nothing either way, so the tree decides and existence is not consulted.
-
-    Everything else stays somebody else's, however much its path resembles a skill source. A
-    dangling link is the case where a suffix match is most tempting and least safe: nothing on disk
-    can contradict the guess, and the command it would take over may be the one that reaches the
-    operator's private browser session.
+    Ownership is a location this registry reads skills from, not a path that looks like one. That the
+    target no longer exists says nothing either way, so the tree decides and existence is not
+    consulted. Everything else stays somebody else's, however much its path resembles a skill source.
     """
     return any(link_target == root or root in link_target.parents for root in owned_roots)
 
@@ -537,11 +501,8 @@ def _entry_point_state(command: ExpectedCommand, owned_roots: tuple[Path, ...]) 
 def _write_entry_point(command: ExpectedCommand, state: dict[str, str]) -> None:
     """Point the link at the source and make what it points at executable.
 
-    An entry point that is already right is left exactly as it is: unlinking and relinking it would
-    take the operator's command off PATH for as long as that takes, for no change.
-
-    A symlink has no mode of its own, so the exec bit has to be on the script itself or the
-    materialized command is not a command.
+    An entry point that is already right is left exactly as it is. A symlink has no mode of its own,
+    so the exec bit has to be on the script itself.
     """
     if state["status"] != "ok":
         command.dest.parent.mkdir(parents=True, exist_ok=True)
@@ -573,10 +534,9 @@ def skill_delivery(
 ) -> dict[str, Any]:
     """Whether one role skill is materialized in one shell, and where it is expected.
 
-    A head is launched into a shell, not into this repository: the canonical skill being present
-    here says nothing about the head being able to open it. `delivered` is what a caller acts on,
-    `reason` is what it shows when it refuses; both are filled for a manifest that cannot be read
-    at all, because an unreadable registry is not evidence that the skill is there.
+    A head is launched into a shell, not into this repository. Both `delivered` and `reason` are
+    filled for a manifest that cannot be read at all, because an unreadable registry is not evidence
+    that the skill is there.
     """
     result: dict[str, Any] = {
         "role": role,
@@ -701,11 +661,8 @@ def unmaterializable(
 ) -> list[str]:
     """Every reason this registry cannot be delivered as written, decided without writing.
 
-    Nothing here reads a destination's contents, so the answer is the same before and after a
-    sync: these are the registry's own faults, not work left to do. A caller that has to refuse
-    before its first write — `secretary upgrade` writes the head snapshot two steps ahead of the
-    skills — asks this, and `sync` asks the same question so the two cannot come to different
-    conclusions about the same manifest.
+    Nothing here reads a destination's contents, so the answer is the same before and after a sync.
+    `sync` asks the same question, so the two cannot come to different conclusions.
     """
     problems = [
         f"overlapping skill target roots: {error}"
@@ -744,8 +701,7 @@ def sync(
 ) -> dict[str, Any]:
     """Deliver every expected skill and entry point, or refuse before writing anything.
 
-    Everything that can be decided from the manifests and the filesystem is decided first: a
-    registry that is half applied is worse than one that was not applied at all, because the next
+    A registry that is half applied is worse than one that was not applied at all, because the next
     audit cannot tell the two apart.
     """
     registry = load_registry(instance_path, product_manifest=product_manifest)

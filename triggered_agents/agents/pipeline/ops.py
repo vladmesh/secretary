@@ -1,18 +1,13 @@
 """Pipeline Kanboard operations — the deterministic board side of the task pipeline.
 
-One Kanboard project (model.BOARD_NAME) is the board, model.COLUMNS its columns, one
-swimlane per source project. Cards are keyed by a board-wide unique `reference`
-(`<project>-<task_id>` when the PO does not supply one). Card state that the dispatcher
-reasons over (type, project, predecessor, model, claim owner) lives in task metadata, a
-flat str->str dict, so a reader needs only getTaskByReference + getTaskMetadata.
+One Kanboard project (model.BOARD_NAME) is the board, model.COLUMNS its columns, one swimlane
+per source project. Cards are keyed by a board-wide unique `reference`. Card state the dispatcher
+reasons over lives in task metadata, a flat str->str dict, so a reader needs only
+getTaskByReference + getTaskMetadata.
 
-Guards live here, not in prompts. `move_card` defers to model.check_move; `claim_card` is
-the only way into "In progress" and runs the entry guards (Ready, unclaimed, predecessor
-Done, one code task per project, global cap) under a host-local lock — Kanboard has no
+Guards live here, not in prompts. `move_card` defers to model.check_move; `claim_card` is the
+only way into "In progress" and runs the entry guards under a host-local lock — Kanboard has no
 compare-and-swap, so a single dispatcher plus the lock is what serializes claims.
-
-Metadata is fetched per task (N+1) in the list/guards; the board is small, so this stays
-cheap and keeps each helper self-contained.
 """
 from __future__ import annotations
 
@@ -47,11 +42,7 @@ def _all_cards(pid: int) -> list[dict]:
 
 
 def board_id() -> int:
-    """Kanboard project id of the board, creating it if absent.
-
-    model.BOARD_NAME is read lazily (it comes from env at import) and no id is cached across
-    names, so the e2e can flip TA_PIPELINE_BOARD to a throwaway board within one process.
-    """
+    """Kanboard project id of the board, creating it if absent."""
     name = model.BOARD_NAME
     for p in call("getAllProjects") or []:
         if p["name"] == name:
@@ -62,11 +53,8 @@ def board_id() -> int:
 def _ensure_admin_member(pid: int) -> str | None:
     """Add the admin user as project manager so the board shows on their Kanboard dashboard.
 
-    A project created via the API has no members; Kanboard's dashboard ("My projects" / "My
-    tasks") only lists projects the logged-in user belongs to, so without this the board looks
-    empty in the UI even though it exists. Idempotent; skipped if KANBOARD_ADMIN_USER is unset.
-    Copied from the legacy board agent on purpose — that showcase will be removed and this must
-    not depend on it.
+    A project created via the API has no members, and Kanboard's dashboard only lists projects the
+    logged-in user belongs to. Idempotent; skipped if KANBOARD_ADMIN_USER is unset.
     """
     admin = os.environ.get("KANBOARD_ADMIN_USER")
     if not admin:
@@ -102,11 +90,8 @@ def _column_title(pid: int, column_id: int) -> str:
 def _proposal_column(pid: int) -> str:
     """Return the column an agent proposal goes into, or raise if the board has none.
 
-    The PO decision (2026-07-31) puts a proposal in the board's first column, the Product backlog
-    `Issues`. A proposal is still not a Product issue, and the card carries that distinction
-    itself: it is stamped record_type=task, so a PO reads it as an execution card awaiting triage,
-    while `issue create` (which needs product, kind and priority) stays closed to every agent.
-    Only the first column counts, so a same-named column further along the order is not a target.
+    The board's first column, the Product backlog `Issues`. The card is stamped record_type=task, so
+    a PO reads it as an execution card awaiting triage. Only the first column counts.
     """
     columns = sorted(call("getColumns", project_id=pid) or [], key=lambda c: int(c.get("position") or 0))
     first = str(columns[0]["title"]) if columns else ""
@@ -142,14 +127,11 @@ def _board_holds_cards(pid: int) -> bool:
 def ensure_structure() -> dict:
     """Idempotently reconcile the board's columns with model.COLUMNS.
 
-    Rename in place, append missing, drop extras beyond len(COLUMNS). Swimlanes are left alone here — a card gets its project swimlane created on
-    demand at create time, and the default swimlane stays.
+    Rename in place, append missing, drop extras beyond len(COLUMNS). Swimlanes are left alone.
 
-    It reshapes an empty board only. Reconciling by index on a board that holds cards would rename
-    a column under the cards standing in it (`Blocked` becoming `Assessment`, once a column is
-    inserted ahead of it) and trash whatever stands in a dropped extra, so a populated board is
-    accepted when its layout already matches and refused otherwise: reshaping it is a migration
-    with its own command, not a reconcile.
+    It reshapes an empty board only: reconciling by index on a populated board would rename a column
+    under the cards standing in it and trash whatever stands in a dropped extra, so a populated board
+    is accepted when its layout already matches and refused otherwise.
     """
     pid = board_id()
     current = sorted(call("getColumns", project_id=pid) or [], key=lambda c: c["position"])
@@ -307,8 +289,8 @@ def _get_by_ref(reference: str) -> dict:
 def _is_done(task: dict, pid: int) -> bool:
     """A card counts as done only if its last board column is Done.
 
-    Retention closes old Done cards in Kanboard. PO archive may close cards from other columns,
-    but that is not task completion and must not unblock successors.
+    Retention closes old Done cards in Kanboard, and PO archive may close cards from other columns,
+    which is not task completion and must not unblock successors.
     """
     return _column_title(pid, int(task["column_id"])) == "Done"
 
@@ -370,30 +352,19 @@ def create_card(project: str, task_type: str, title: str, description: str = "",
                 own_ref: str | None = None) -> dict:
     """PO/steward/worker: create a spec card in Ready, keyed by reference, with metadata.
 
-    Ready is the only default column. A PO may explicitly create a task in the board's first
-    column; _proposal_column resolves it. Such a card is an untriaged proposal, not a Product
-    issue. The agent proposal helpers are the only other
-    callers that may create outside Ready.
+    Ready is the only default column; a PO may explicitly create in the board's first column, which
+    `_proposal_column` resolves. `role="worker"` may only reach Ready via `_check_worker_continuation`
+    with `own_ref`.
 
-    `role="worker"` may only reach Ready via its own chain — see _check_worker_continuation
-    (triggered-agents-261); `own_ref` is the worker's own card reference, required (and only
-    meaningful) for that Ready path.
+    `slug` names the card's future workspace (`<reference>-<slug>`). `head` and `review_head`, when
+    given, must name a profile in heads.toml, checked before anything is written; `review_head=none`
+    is the reserved PO-only value that disables Validate layer 3. `base_branch` overrides the
+    project's manifest base_branch for this card only.
 
-    `slug` names the card's future worker/reviewer workspace (`<reference>-<slug>`); a card
-    created without one carries no slug metadata. `head`, when given, must name a profile in
-    heads.toml (checked before anything is written); omitted, the card gets heads.DEFAULT_PROFILE
-    at bring-up. `review_head`, when given, must name a profile, except the reserved PO-only
-    value `none`, which disables Validate layer 3 for this card. Omitted means Validate uses
-    heads.reviewer_head(). `base_branch`, when given, overrides the project's manifest base_branch
-    for this card only; omitted, bring-up falls back to the manifest lookup exactly as before
-    this field existed.
-
-    `role="steward"` scrubs title/description the same way add_comment does for steward — the
-    escalation/idea path SKILL.md sends steward through (create in Ready, or file an Idea then move to
-    Blocked) is exactly where a quoted transcript/journalctl/env line could carry a raw secret
-    (2026-07-04 review, triggered-agents-244 blocker B1 third round). Every other caller (po, and
-    the proposal helpers, which scrub themselves before _create_proposal_card) passes no role
-    and stays verbatim, unchanged from before."""
+    `role="steward"` scrubs title/description the same way add_comment does: the escalation path is
+    exactly where a quoted transcript or journalctl line could carry a raw secret. Every other caller
+    passes no role and stays verbatim.
+    """
     proposal = role == "po" and column == model.PROPOSAL_COLUMN
     if proposal:
         column = _proposal_column(board_id())
@@ -407,10 +378,8 @@ def _create_proposal_card(project: str, task_type: str, title: str, description:
                           ref: str | None, head: str | None, slug: str | None) -> dict:
     """The agent-proposal exception to the Ready-only rule, private on purpose.
 
-    It takes no column and no proposal flag from its caller: the column comes from
-    _proposal_column, so the only way to write outside Ready is through the proposal helpers.
-    The card is stamped record_type=task so a PO reads it as an execution task awaiting triage,
-    not as a Product issue.
+    It takes no column and no proposal flag from its caller, so the only way to write outside Ready
+    is through the proposal helpers. The card is stamped record_type=task.
     """
     return _create_card(project=project, task_type=task_type, title=title,
                         description=description, ref=ref, column=_proposal_column(board_id()),
@@ -566,24 +535,17 @@ def _move_position(pid: int, task_id: int, column_id: int, swimlane_id: int) -> 
 def move_card(role: str, reference: str, to_column: str, reason: str = "") -> dict:
     """Move a card per the role/transition matrix (never into In progress; that is claim).
 
-    The claim persists across In progress<->Validate rework (the worker session still owns
-    the card) and resets on arrival in Ready — from Blocked (a human's manual recovery) or from
-    In progress (a watchdog auto-retry requeue, model TRANSITIONS["dispatcher"]) — to the
-    unclaimed/fresh-retry-budget defaults (empty string; every guard that reads these checks
-    truthiness, so empty means "unset"). A human recovering a Blocked card this way gets a full
-    watchdog retry budget again, same as a brand new card; a watchdog requeue's own caller is
-    expected to restate the real counters right after, so the reset is never the last write for
-    that path.
+    The claim persists across In progress<->Validate rework and resets on arrival in Ready to the
+    unclaimed/fresh-retry-budget defaults (empty string; every guard reads truthiness). A watchdog
+    requeue's caller restates the real counters right after, so the reset is never its last write.
 
-    A non-empty `reason` is posted as a comment after any successful move. The Blocked->Done
-    override keeps its [steward:blocked-done] marker and still requires a reason. Steward's manual
-    escalations into Blocked also require a reason, so a card never reaches a human-only state
-    without the intent recorded. A rejected empty-reason call moves nothing.
+    A non-empty `reason` is posted as a comment after any successful move; the Blocked->Done override
+    and steward's manual escalations into Blocked require one, so a card never reaches a human-only
+    state without the intent recorded. A rejected empty-reason call moves nothing.
 
-    model.STEWARD_REPORT_DONE (In progress -> Done) needs its own check beyond role/column: the
-    card must actually carry META_STEWARD_REPORT (set only by create_report_card) — otherwise any
-    steward could close an ordinary code/research card straight out of In progress, skipping
-    Validate/review entirely.
+    model.STEWARD_REPORT_DONE (In progress -> Done) needs its own check beyond role/column: the card
+    must actually carry META_STEWARD_REPORT, or any steward could close an ordinary card straight out
+    of In progress, skipping Validate entirely.
     """
     pid = board_id()
     task = _get_by_ref(reference)
@@ -640,19 +602,14 @@ def move_card(role: str, reference: str, to_column: str, reason: str = "") -> di
 def claim_card(reference: str, worker: str, cap: int = 3, resolved_head: str | None = None) -> dict:
     """Dispatcher-only entry into In progress: guard, stamp claim, then move.
 
-    Guards (each its own message): the card is Ready; it is unclaimed; its head, if set, names a
-    real profile in heads.toml (a stale reference — the profile was renamed/removed after the
-    card was created — must GuardError here, not blow up bring-up mid-tick); its blocked_by
-    predecessor, if any, is Done; if it is a code card, no other active code card for the
-    same project sits in In progress, Validate or Assessment (a Validate card still owns its
-    worker session for rework, and a parked card owns it and the project checkout until the
-    observer decides, so both count); and fewer than `cap` cards sit in those three columns
-    (each holds a live worker session — a steward report card doesn't and is excluded from
-    this count, same as it is excluded from the per-project code guard).
+    Guards, each with its own message: the card is Ready; it is unclaimed; its head, if set, names a
+    real profile in heads.toml (a stale reference must GuardError here, not blow up bring-up
+    mid-tick); its blocked_by predecessor is Done; for a code card, no other active code card for the
+    same project sits in In progress, Validate or Assessment; and fewer than `cap` cards sit in those
+    three columns, steward report cards excluded.
 
-    The whole thing runs under AgentState("pipeline").lock(): Kanboard offers no
-    compare-and-swap, so with a single dispatcher the host-local lock is what closes the
-    read-check-write race between two overlapping claims.
+    The whole thing runs under AgentState("pipeline").lock(): Kanboard offers no compare-and-swap, so
+    with a single dispatcher the host-local lock is what closes the read-check-write race.
     """
     if not reference:
         raise model.GuardError("claim needs non-empty card reference")
@@ -747,11 +704,9 @@ def add_comment(role: str, reference: str, body: str, marker: str | None = None)
 def report(reference: str, kind: str, body: str = "") -> dict:
     """Worker-only: post a `[report:done]` comment. A blocked report belongs to `secretary.tasks`.
 
-    A blocked report now carries a classification of the blocker, and `secretary.tasks` owns that
-    vocabulary. This path cannot write one, so a blocked report through here would be a record the
-    protocol owner refuses: the classification silently missing, and no audit event behind it.
-    Copying the two values into this module instead would give the protocol two definitions to
-    drift apart, so this refuses and names the writer that owns it. `done` is unchanged.
+    A blocked report carries a classification of the blocker and `secretary.tasks` owns that
+    vocabulary, so this path refuses rather than writing a record with the classification silently
+    missing and no audit event behind it.
     """
     if kind not in ("done", "blocked"):
         raise model.GuardError(f"report kind must be 'done' or 'blocked', not {kind!r}")
@@ -813,9 +768,8 @@ def steward_idea(project: str, title: str, description: str = "", task_type: str
                  slug: str | None = None) -> dict:
     """Steward-only: file a discovered anomaly as a proposal card before escalating it.
 
-    Steward reads raw system output, so redact title and description before the shared proposal
-    route creates the task record. The card is stamped record_type=task, which is also what lets
-    steward move it on to Blocked or Ready afterwards.
+    Steward reads raw system output, so title and description are redacted before the shared proposal
+    route creates the task record.
     """
     return _create_proposal_card(project=project, task_type=task_type,
                                  title=scrub_secrets(title),
@@ -884,13 +838,7 @@ def list_cards(column: str | None = None, project: str | None = None) -> list[di
 
 
 def export_cards() -> list[dict]:
-    """Every active card in one pass: the list view plus description, metadata and comments.
-
-    Same per-card surface as `show_card`, but for the whole board. The checkpoint writer needs
-    all of it on every dispatcher tick, and a `show_card` per card costs five API round trips
-    (plus an interpreter start, when the caller drives the CLI). Here the board-wide reads
-    happen once and the per-task metadata and comments go out as a single batched request.
-    """
+    """Every active card in one pass: the list view plus description, metadata and comments."""
     pid = board_id()
     cols = {int(c["id"]): c["title"] for c in call("getColumns", project_id=pid) or []}
     lanes = {int(s["id"]): s["name"] for s in call("getActiveSwimlanes", project_id=pid) or []}
