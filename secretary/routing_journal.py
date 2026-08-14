@@ -1,15 +1,13 @@
 """Per-attempt routing telemetry: which head ran as worker and as reviewer on each attempt.
 
-Contract: docs/PROTOCOLS.md, "Routing telemetry per attempt". The card's own metadata cannot answer
-"who reviewed attempt 2": `resolved_review_head` is cleared when the card leaves Validate and the
-whole routing block is reset on the way back to Ready, so the board keeps at most the last worker
-head. The append-only task journal keeps every launch instead, one `routing` event per head
-bring-up plus one per verdict, so a finished card still yields its worker/reviewer pairs.
+Contract: docs/PROTOCOLS.md, "Routing telemetry per attempt". The card's own metadata cannot
+answer "who reviewed attempt 2": `resolved_review_head` is cleared when the card leaves Validate
+and the whole routing block is reset on the way back to Ready. The append-only task journal keeps
+every launch instead, one `routing` event per head bring-up plus one per verdict.
 
-A profile id alone is not a historical key: `codex`, `codex-terra`, `codex-high` and `codex-extra`
-all resolve to one model with different effort, `claude-default` pins no model at all, and profiles
-get re-pinned over time. So every event carries the launch configuration itself (adapter, model,
-effort, codex launch mode, resource and account) snapshotted at bring-up, never re-read from
+A profile id alone is not a historical key: several profiles resolve to one model with different
+effort, `claude-default` pins no model at all, and profiles get re-pinned over time. So every
+event carries the launch configuration itself, snapshotted at bring-up and never re-read from
 `heads.toml` afterwards.
 """
 
@@ -47,14 +45,12 @@ RUNTIME_MODEL_SOURCES = (MODEL_FROM_CLI_DEFAULT, MODEL_UNKNOWN)
 class HeadRun:
     """One head as it was actually launched.
 
-    There is one head per role per bring-up and no substitution between the decision and the
-    launch: `head` is what started, and it is what the claim decided. `head_source` says where that
-    id came from: the card's own override, the role default, the dispatcher record of a card
-    claimed earlier, or the canon's fallback chain when the claim had to walk it because the
-    preferred head's resource was red or spent.
+    There is one head per role per bring-up and no substitution between the decision and the launch.
+    `head_source` says where that id came from: the card's own override, the role default, the
+    dispatcher record of a card claimed earlier, or the canon's fallback chain.
 
     `model` may be empty only under a `model_source` that says the CLI resolved it at startup, so a
-    profile that pins no model (`claude-default`) can never be recorded as a silent blank.
+    profile that pins no model can never be recorded as a silent blank.
     """
 
     role: str
@@ -125,16 +121,13 @@ def head_run_from_profile(
 ) -> HeadRun:
     """Snapshot the profile that was launched.
 
-    A Codex head is recorded under the one launch mode the product has, and it is written here
-    rather than copied from the profile or from the card: `codex_launch_mode` on a card is retired
-    routing data that selects nothing, and a legacy `exec` in either place would put a mode in the
-    journal that no head of this bring-up could have run in.
+    A Codex head is recorded under the one launch mode the product has, written here rather than
+    copied from the profile or the card, since a legacy `exec` in either place would put a mode in
+    the journal that no head of this bring-up could have run in.
 
-    `model` overrides the profile's own field for a head whose model the profile does not decide: a
-    claude profile without `model` renders a command without `--model` and the CLI resolves one at
-    startup, so the caller passes what it will resolve to, with `model_source` naming where it read
-    it. Without an override the profile is the source, and a profile that pins nothing is recorded
-    as resolved by the CLI rather than as an empty field.
+    `model` overrides the profile's own field for a head whose model the profile does not decide, with
+    `model_source` naming where it was read; a profile that pins nothing is recorded as resolved by
+    the CLI rather than as an empty field.
     """
     adapter = str(profile.get("adapter") or "")
     resource = str(profile.get("resource") or "")
@@ -169,11 +162,10 @@ def head_run_from_profile(
 def run_key(run: HeadRun | dict[str, Any] | None) -> str:
     """Short digest of one launch configuration.
 
-    A round can bring the same role up more than once (a respawn after a silent head, a recovery
-    restart, a rework relaunch), and the relaunched head is not necessarily configured like the one
-    that started the round: a `heads.toml` repin lands a different model or effort. The digest is
-    what tells "the same head came back" from "a different configuration now serves this round", so
-    the journal can stay idempotent on the former and still append an event for the latter.
+    A round can bring the same role up more than once, and the relaunched head is not necessarily
+    configured like the one that started the round. The digest tells "the same head came back" from
+    "a different configuration now serves this round", so the journal stays idempotent on the former
+    and still appends an event for the latter.
     """
     payload = run.to_json() if isinstance(run, HeadRun) else dict(run or {})
     material = json.dumps(payload, sort_keys=True, ensure_ascii=False)
@@ -240,9 +232,6 @@ def routing_events(events: Iterable[dict[str, Any]], reference: str = "") -> lis
 
 def attempts(events: Iterable[dict[str, Any]], reference: str = "") -> list[AttemptRecord]:
     """The card's attempt sequence in journal order: who worked it, who reviewed it, how it ended.
-
-    This is the read side of the contract — a finished card's history comes from here, not from
-    board metadata, which no longer holds it.
     """
     found: dict[int, AttemptRecord] = {}
     order: list[int] = []

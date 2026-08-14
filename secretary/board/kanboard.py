@@ -26,13 +26,7 @@ from secretary.tasks import (
 
 
 class KanboardBoardHost:
-    """Translate current Kanboard readers and migrated lifecycle edges at the host seam.
-
-    Card, Sprint and the released Product/Issue writer are migrated: each
-    is the one authority for its backend mutation and owns a typed event
-    transaction.  Other mutations remain unavailable until their migration can
-    preserve the established writer's durable retry and audit semantics.
-    """
+    """Translate current Kanboard readers and migrated lifecycle edges at the host seam."""
 
     def __init__(
         self, client: KanboardClient, *, data_dir: str | None = None, instance: str | None = None,
@@ -222,20 +216,15 @@ class KanboardBoardHost:
     ) -> MutationResult:
         """Move one Card along a declared, role-authorized lifecycle edge.
 
-        The order is the contract: validate the live Card and the caller's authority for its
-        edge, stage the exact event this occurrence will publish, perform the single column
-        operation, confirm it on the board, then commit that event.  Only a failure before the
-        column operation is issued owes the journal nothing; once it has returned, every later
-        failure - the confirming read, ``finish``, the commit - owes the caller a repair and
-        keeps the pending event that names it.  ``MutationEventTransaction`` is what enforces
-        that, for every path through this method.
+        The order is the contract: validate the live Card and the caller's authority for its edge, stage
+        the exact event this occurrence will publish, perform the single column operation, confirm it on
+        the board, then commit that event. Only a failure before the column operation owes the journal
+        nothing; once it has returned, every later failure owes the caller a repair and keeps the pending
+        event that names it.
 
-        ``finish`` is the caller's own idempotent board work for this same edge - the card
-        fields the state change resets or fills in.  The adapter still maps exactly one column
-        operation; it only guarantees that a caller's remaining writes are inside this
-        transaction, so an incomplete one keeps the pending event rather than reporting a clean
-        journal over a half-written card.  It runs once the target is proven, never on a replay
-        of an already committed occurrence, and never before the column effect.
+        ``finish`` is the caller's own idempotent board work for this same edge. It runs once the target
+        is proven, never on a replay of an already committed occurrence, and never before the column
+        effect.
         """
         if operation.kind is EntityKind.SPRINT:
             return self._transition_sprint(operation)
@@ -304,13 +293,7 @@ class KanboardBoardHost:
         return MutationResult(entity, event)
 
     def marker_comment(self, operation: MarkerComment) -> MutationResult:
-        """Render one staged control-plane Card event as its Kanboard marker.
-
-        This is intentionally separate from the generic ``TaskWriter.comment``
-        path.  A report, verdict, or decision has a complete typed owner before
-        the one comment write starts, and a recovery can prove that exact
-        rendering without issuing another write.
-        """
+        """Render one staged control-plane Card event as its Kanboard marker."""
         if self.canon is None:
             raise BoardProtocolError("Card marker comments require a configured data directory")
         with self.canon.audit.marker_comment_lock(operation.ref):
@@ -415,13 +398,7 @@ class KanboardBoardHost:
             return MutationResult(entity, event)
 
     def _transition_sprint(self, operation: TransitionRequest) -> MutationResult:
-        """Apply one checked Sprint status edge through the typed event canon.
-
-        The explicit Sprint supplement is a small allow-list: an observer on a
-        reopen or a computed budget on a hard stop.  It is never a backend
-        metadata bag.  The adapter remains the sole owner of the Kanboard
-        status mutation and its storage spelling.
-        """
+        """Apply one checked Sprint status edge through the typed event canon."""
         if self.canon is None:
             raise BoardProtocolError("Sprint transitions require a configured data directory")
         if not isinstance(operation.target, SprintState):
@@ -524,8 +501,8 @@ class KanboardBoardHost:
     def recover_transition(self, request_id: str) -> MutationResult:
         """Commit a pending Card event only after its exact target is live.
 
-        This deliberately never calls ``moveTaskPosition``.  A pending event is
-        evidence of an attempted effect, not authority to attempt it again.
+        This deliberately never calls ``moveTaskPosition``: a pending event is evidence of an attempted
+        effect, not authority to attempt it again.
         """
         if self.canon is None:
             raise BoardProtocolError("Card transition recovery requires a configured data directory")
@@ -650,14 +627,7 @@ class KanboardBoardHost:
 
     @classmethod
     def _sprint_event_data(cls, operation: TransitionRequest) -> dict[str, object]:
-        """Keep the caller's immutable link payload with the occurrence.
-
-        ``related_refs`` also contains links the adapter adds from the Sprint at
-        staging time.  Those links are useful event evidence, but they cannot
-        identify the caller's request on replay because the live card set can
-        change afterwards.  Store the supplied portion in the typed occurrence
-        itself, rather than deriving it again during recovery.
-        """
+        """Keep the caller's immutable link payload with the occurrence."""
         data = cls._sprint_data(operation)
         data["request_related_refs"] = list(operation.related_refs.refs)
         return data
@@ -804,11 +774,7 @@ class KanboardBoardHost:
         return board["id"], first["id"]
 
     def _issues_swimlane(self, board_id: int, entity: Product | Issue) -> int:
-        """The product lane of this record, by the one rule both secretarial writers share.
-
-        A Product takes its own id, an Issue the product it belongs to; nothing else about the
-        board or its project bindings takes part.  See :func:`product_swimlane_id`.
-        """
+        """The product lane of this record, by the one rule both secretarial writers share."""
         return product_swimlane_id(
             self.client, board_id, entity.ref if isinstance(entity, Product) else entity.product_ref,
         )
@@ -901,9 +867,8 @@ class KanboardBoardHost:
     def _marker_is_proven(event: Event, task: dict[str, Any]) -> bool:
         """Whether the board has the precise marker occurrence event staged.
 
-        Earlier protocol events did not retain an occurrence witness.  Keep
-        them readable and recoverable as historical records, while every new
-        occurrence requires its staged matching-row ordinal.
+        Earlier protocol events did not retain an occurrence witness; they stay readable as historical
+        records, while every new occurrence requires its staged matching-row ordinal.
         """
         content = KanboardBoardHost.render_marker(event)
         matching = sum(
@@ -992,8 +957,8 @@ class KanboardBoardHost:
     ) -> Event:
         """Build the one complete occurrence this request publishes.
 
-        The id is derived from the request and its exact payload, so a retry of the same request
-        names the same occurrence and a different payload can never borrow it.
+        The id is derived from the request and its exact payload, so a retry of the same request names
+        the same occurrence and a different payload can never borrow it.
         """
         payload = json.dumps({
             "request_id": request_id, "kind": kind.value, "ref": card.ref,

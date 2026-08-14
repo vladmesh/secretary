@@ -2,16 +2,15 @@
 
 `waiting-worker-report` and `waiting-review-verdict` watch the persisted terminal identity on
 every tick. A missing pane is restarted immediately. A pane whose head process has exited while
-the pane itself is still connected — a shell left behind, `secretary-751` — is caught the same
-tick via `head_process_status`. When Orca supplies `lastOutputAt`, a head must also produce its
-first output shortly after launch; later output renews the ordinary, generous silence ceiling. A
-runtime that cannot supply activity timestamps, or cannot expose the pid heartbeat (a raw
-`SECRETARY_DISPATCHER_*_COMMAND` override), uses that ceiling as its fallback.
+the pane itself is still connected is caught the same tick via `head_process_status`. When Orca
+supplies `lastOutputAt`, a head must also produce its first output shortly after launch; later
+output renews the ordinary, generous silence ceiling. A runtime that cannot supply activity
+timestamps, or cannot expose the pid heartbeat, uses that ceiling as its fallback.
 
-A confirmed pid answers whether the process runs, not whether it is doing anything. A head that is
-ready for input has stopped working, and if nothing lands for the round being waited on while it
-stays that way, that ends the wait too (`secretary-1063`).  The destructive outcome requires two
-separate ticks that observe the same aged idle episode; the first is a degraded pending signal.
+A confirmed pid answers whether the process runs, not whether it is doing anything. A head that
+is ready for input has stopped working, and if nothing lands for the round being waited on while
+it stays that way, that ends the wait too. The destructive outcome requires two separate ticks
+that observe the same aged idle episode; the first is a degraded pending signal.
 """
 
 from __future__ import annotations
@@ -102,9 +101,7 @@ def review_infra_retry_attempts() -> int:
 class IdleOutcome(NamedTuple):
     """One role's idle verdict plus whether reaching it changed the record.
 
-    ``changed`` exists so a caller persists state only on a real transition.  A wait that
-    observes the same head in the same idle episode is the common case, once a minute for as
-    long as a head works, and it has nothing new to write.
+    ``changed`` exists so a caller persists state only on a real transition.
     """
     state: str
     changed: bool
@@ -121,8 +118,8 @@ def _fence(record, name: str, value: float | int) -> bool:
 def idle_outcome(record, status: dict[str, Any], *, kind: str, now: float) -> IdleOutcome:
     """Advance one role's idle fence: ``wait``, ``pending`` or ``act``.
 
-    This is the sole owner of the continuous-idle window and its two-tick confirmation.
-    A busy pane clears both values; repaint activity intentionally does not.
+    The sole owner of the continuous-idle window and its two-tick confirmation. A busy pane clears
+    both values; repaint activity intentionally does not.
     """
     idle_name = f"{kind}_idle_since"
     confirmation_name = f"{kind}_idle_confirmations"
@@ -149,10 +146,9 @@ def reset_idle(record, kind: str) -> None:
 def pid_file_path(kind: str, reference: str) -> str:
     """Where a launched head's pid-heartbeat file lives.
 
-    Outside the workspace, like the report and verdict bodies (`_body_file_path`), so it never
-    dirties `git status` for the done-report check. Keyed on kind and reference only: a respawn in
-    the same workspace reuses the same path on purpose, since the dispatcher clears it before every
-    fresh launch and the new head overwrites it with its own pid the moment it starts.
+    Outside the workspace, like the report and verdict bodies, so it never dirties `git status` for
+    the done-report check. Keyed on kind and reference only: a respawn in the same workspace reuses
+    the same path on purpose, since the dispatcher clears it before every fresh launch.
     """
     root = os.environ.get("SECRETARY_DISPATCHER_BODY_DIR", "/tmp").rstrip("/") or "/tmp"
     return f"{root}/secretary-{kind}-pid-{request_token(reference)}.pid"
@@ -191,9 +187,9 @@ def head_run_process_status(
 ) -> dict[str, Any]:
     """Classify one pid file against the durable HeadRun expected to own it.
 
-    This is the dispatcher boundary for every lifecycle and recovery consumer.  It builds the
-    expected identity from the recorded run rather than leaving each caller to combine a PID probe
-    with an unrelated liveness boolean.
+    The dispatcher boundary for every lifecycle and recovery consumer: it builds the expected
+    identity from the recorded run rather than leaving each caller to combine a PID probe with an
+    unrelated liveness boolean.
     """
     return head_process_status(
         pid_file,
@@ -220,8 +216,8 @@ def _proc_starttime_ticks(pid: int) -> str:
     """Linux's process-creation discriminator for a live PID.
 
     ``comm`` may contain spaces and parentheses, so splitting the complete ``stat`` line on
-    whitespace is not safe.  The final closing parenthesis ends it; field 22 is then token 19 of
-    the remaining fields (which begin at field 3).
+    whitespace is not safe. The final closing parenthesis ends it; field 22 is then token 19 of the
+    remaining fields (which begin at field 3).
     """
     stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     close = stat.rfind(")")
@@ -311,9 +307,8 @@ def head_process_status(
 ) -> dict[str, Any]:
     """Classify a launch-identity heartbeat without trusting PID reuse.
 
-    A readable record has one of ``live-match``, ``dead`` or ``identity-mismatch``.  Missing,
-    partially written, malformed and legacy PID-only files retain their distinct inconclusive
-    states.  In particular, a raw command override has no synthetic compatibility identity.
+    A readable record has one of ``live-match``, ``dead`` or ``identity-mismatch``. Missing,
+    partially written, malformed and legacy PID-only files retain their distinct inconclusive states.
     """
     record, failure = _read_record(pid_file)
     if failure is not None:
@@ -377,8 +372,7 @@ def _heartbeat_handoff_path(pid_file: str) -> Path:
     """The launcher's durable leaf handoff beside its heartbeat.
 
     A terminal create may answer with its leaf before the shell running inside that terminal has
-    reached the heartbeat writer.  The handoff covers that ordering without asking a reader to
-    accept a record whose declared leaf disagrees with its HeadRun.
+    reached the heartbeat writer, and the handoff covers that ordering.
     """
     return Path(f"{pid_file}.leaf")
 
@@ -418,11 +412,10 @@ def bind_head_heartbeat(
 ) -> bool:
     """Durably hand a pane leaf to the heartbeat writer and bind an existing record.
 
-    The shell and terminal-create reply have no ordering guarantee.  First write the handoff, so
-    a writer that has not reached its base record yet incorporates the leaf itself.  If its base
-    record already exists, re-read and match it before the guarded second replace.  The shell also
-    rechecks this handoff after its base replace, covering the narrow interleaving where it looked
-    before this caller wrote the handoff.
+    The shell and terminal-create reply have no ordering guarantee. First write the handoff, so a
+    writer that has not reached its base record yet incorporates the leaf itself; if its base record
+    already exists, re-read and match it before the guarded second replace. The shell also rechecks
+    the handoff after its base replace.
     """
     handoff = {
         "version": HEARTBEAT_VERSION,
@@ -468,14 +461,10 @@ def reset_wait(record, kind: str) -> None:
 def wait_cycle_token(record) -> str:
     """Per-cycle discriminator for every request-id the watchdog path can emit.
 
-    attempt_id outlives the card (production adopts under a constant `production-adopt-<ref>`)
-    and the record is dropped whenever the card lands in Blocked, so a bare attempt-scoped id
-    repeats on the next stall. TaskWriter answers a repeated request-id with success and no
-    mutation, so the tick reports "blocked" while the card stays put and the next tick re-adopts
-    it: the card hangs forever, which is the failure this whole watchdog exists to end.
-
-    comment_baseline is re-read from the board on adoption and every cycle leaves at least one
-    comment behind, so it is stable within a cycle and distinct across them. The respawn counters
-    separate the request-ids emitted before and after a respawn inside one cycle.
+    attempt_id outlives the card and the record is dropped whenever the card lands in Blocked, so a
+    bare attempt-scoped id repeats on the next stall. TaskWriter answers a repeated request-id with
+    success and no mutation, so the tick would report "blocked" while the card stays put and the next
+    tick re-adopts it. comment_baseline is re-read on adoption and every cycle leaves at least one
+    comment behind, so it is stable within a cycle and distinct across them.
     """
     return f"{record.comment_baseline}-{record.worker_respawns}-{record.review_respawns}"

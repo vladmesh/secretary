@@ -1,12 +1,5 @@
 """What a dispatcher-launched head needs around its command: workspace preflight, and the model
 and environment its bring-up is journalled with.
-
-The command itself is not built here any more. `triggered_agents.runtime.head.command` renders
-every head of this product from a registry profile — the dispatcher's, a tick's, an operator
-shell's — so the questions left in this module are the ones that are about *this* launcher rather
-than about the head: has the CLI's first-run dialog been answered for the workspace this pane will
-open in, which model will a `claude` bring-up actually run under, and what environment will the
-role wrapper hand it.
 """
 
 from __future__ import annotations
@@ -40,10 +33,6 @@ CLAUDE_MODEL_ENV = "ANTHROPIC_MODEL"
 
 class HeadLaunchError(RuntimeError):
     """A head that cannot be brought up in this workspace: its CLI's first-run state is unwritable.
-
-    The command's own refusals (an unknown effort, an adapter nothing renders) are
-    `HeadCommandError` from the renderer. A dispatcher catches both, because either one is the same
-    thing to its caller: this head is not going to start.
     """
 
 
@@ -67,15 +56,7 @@ def ensure_codex_workspace_trusted(
     workspace: str,
     config: Path | None = None,
 ) -> None:
-    """The dispatcher's way in to the shared Codex interactive preflight.
-
-    The preflight itself lives in `triggered_agents.runtime.codex_preflight`, beside the delivery
-    primitive and for the same reason: the triggered-agents service launcher brings up interactive
-    Codex heads too and cannot import `secretary`. One implementation of "make this workspace fit
-    for a Codex pane" therefore has to sit where both callers can reach it, and this is the seam
-    that turns its failure into the `HeadLaunchError` every other bring-up step here raises — so
-    a dispatcher caller still has one exception type to catch for a head that cannot be launched.
-    """
+    """The dispatcher's way in to the shared Codex interactive preflight."""
     try:
         _preflight_codex_workspace(profile, workspace, config)
     except CodexPreflightError as exc:
@@ -90,19 +71,15 @@ def claude_launch_model(
 ) -> tuple[str, str]:
     """The model a `claude` bring-up will run under, and where that value came from.
 
-    A profile without `model` (`claude-default`) renders a command without `--model`, so the CLI
-    picks the model itself. The routing journal has to name that model as of the bring-up rather
-    than record an empty field, so this reads the same sources the CLI reads, in the CLI's own
-    precedence: enterprise policy over the command line, the command line over the environment,
-    then the workspace's settings, then the user's. When nothing pins a model anywhere the value
-    stays empty under a `cli_default` source, which says the CLI's built-in default applied instead
-    of guessing which model that is.
+    A profile without `model` renders a command without `--model`, so the CLI picks the model itself.
+    The routing journal has to name that model as of the bring-up, so this reads the same sources the
+    CLI reads, in the CLI's own precedence. When nothing pins a model anywhere the value stays empty
+    under a `cli_default` source.
 
-    `env` is the environment the head itself will run with, which is not the dispatcher's own:
-    heads are executed through the role env wrapper, and `role_env.runtime_env` drops every
-    `runtime.env` variable that is not role-allowlisted. Reading `os.environ` here would journal an
-    `ANTHROPIC_MODEL` or a `CLAUDE_CONFIG_DIR` that the CLI never receives. Callers that are not
-    launching a head can leave it unset and get the current process environment.
+    `env` is the environment the head itself will run with, which is not the dispatcher's own: heads
+    run through the role env wrapper, and `role_env.runtime_env` drops every `runtime.env` variable
+    that is not role-allowlisted, so reading `os.environ` here would journal a variable the CLI never
+    receives.
     """
     environ = os.environ if env is None else env
     managed = _settings_model(
@@ -218,9 +195,8 @@ def _reject_symlinked_claude_config(config: Path) -> None:
 def role_launch_env(role: str) -> dict[str, str]:
     """The environment the role env wrapper will actually hand a head of `role`.
 
-    Same call the wrapper makes, so a snapshot taken here sees what the head sees rather than what
-    the dispatcher happens to carry. A role the allowlist does not know is not launchable through
-    the wrapper at all; the dispatcher's own environment is the closest honest answer there.
+    Same call the wrapper makes, so a snapshot taken here sees what the head sees. A role the
+    allowlist does not know is not launchable through the wrapper at all.
     """
     try:
         return runtime_env(role)

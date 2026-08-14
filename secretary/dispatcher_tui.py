@@ -1,9 +1,4 @@
-"""Codex TUI prompt delivery for dispatcher-launched heads.
-
-What to send and how to prove this role's head took it lives here; the delivery itself — readiness
-classification, send, resend, failure — is `triggered_agents.runtime.tui_delivery`, the one path
-every interactive head in the product goes through, service heads included.
-"""
+"""Codex TUI prompt delivery for dispatcher-launched heads."""
 
 from __future__ import annotations
 
@@ -126,19 +121,7 @@ def deliver_tui_prompt(
     document_path: str = "",
     before_send: Callable[[], None] | None = None,
 ) -> DeliveryOutcome:
-    """Deliver one provider TUI prompt through the shared transport and confirmation path.
-
-    Nothing here is a second delivery path. It resolves what to send, which is the caller's
-    business, and hands the same criterion worker and reviewer use on any other head: their head's
-    turn having visibly started.
-
-    A caller that has already written its task to a document passes that document's path with the
-    nudge it wants sent, so the evidence records which of the two the pane received.
-
-    The pane is reached through `host` when the caller has one and through its own runner when it
-    does not. A head operation always has one: that is what keeps the product's delivery — this
-    criterion included — inside the session-manager seam instead of beside it.
-    """
+    """Deliver one provider TUI prompt through the shared transport and confirmation path."""
     if prompt_text is not None:
         prompt = prompt_text
     else:
@@ -170,13 +153,7 @@ def turn_started_confirm(
     host: PaneHost | None = None,
     session_root: Path | None = None,
 ) -> Callable[[float], bool]:
-    """The worker and reviewer delivery criterion, on whichever head that role was given.
-
-    Their providers persist a user turn locally, and that record after the send boundary is the
-    first proof; a pane showing a turn underway is the second. This is the criterion the roles
-    have always used, expressed as something a caller passes rather than something the delivery
-    path decides for them.
-    """
+    """The worker and reviewer delivery criterion, on whichever head that role was given."""
     def confirm(sent_at: float) -> bool:
         if terminal_turn_started(
             handle,
@@ -205,15 +182,13 @@ def terminal_turn_started(
 ) -> bool:
     """Whether an interactive provider pane already accepted a prompt into a turn.
 
-    Claude and Codex both persist their user turns locally. When recovery knows the delivery
-    boundary, that durable record is the proof; the screen remains a secondary hint for old
-    records that predate the boundary or for terminal-only recovery.
+    Claude and Codex both persist their user turns locally, and when recovery knows the delivery
+    boundary that durable record is the proof; the screen is a secondary hint.
 
-    Secondary in both directions. A screen that shows a turn underway is worth believing, and a
-    screen that shows nothing is worth nothing: a repainting TUI read through a pane snapshot can
-    be between frames, in an alternate-screen overlay, or drawing a status line this pattern has
-    never seen. No caller may take the `False` this returns as proof that a head did not get its
-    prompt, and none does — an unproven delivery hands its pane back instead of closing it.
+    Secondary in both directions. A screen showing a turn underway is worth believing, and a screen
+    showing nothing is worth nothing: a repainting TUI read through a pane snapshot can be between
+    frames or in an alternate-screen overlay. No caller may take the `False` this returns as proof
+    that a head did not get its prompt.
     """
     if workspace and since:
         if adapter == "claude":
@@ -235,11 +210,8 @@ def close_terminal(handle: str, *, run_json: RunJson) -> None:
 def close_terminal_strict(handle: str, *, run_json: RunJson) -> None:
     """Close a terminal and let a refusal reach the caller.
 
-    Cleanup paths swallow the failure because they already have one to report. A caller whose
-    record is the only pointer to the pane cannot: a refused close leaves the head alive.
-
-    The reviewer's lifecycle paths are the callers left here; the worker's close is the head
-    operation's, through the session host it was given (secretary-1412).
+    Cleanup paths swallow the failure because they already have one to report. A caller whose record
+    is the only pointer to the pane cannot: a refused close leaves the head alive.
     """
     OrcaSessionHost(run_json).close_pane(handle)
 
@@ -304,9 +276,9 @@ def latest_claude_user_turn_for(workspace: str, since: float) -> float | None:
 def prepare_claude_provider_progress_source(run: HeadRun) -> HeadRun:
     """Persist the pre-pane Claude baseline for this exact HeadRun.
 
-    The provider journal does not carry a Secretary run id.  Selecting a transcript therefore has
-    to start with the files that existed before this run's pane was opened.  A missing root is
-    still a durable unavailable source, rather than permission to inspect the workspace later.
+    The provider journal does not carry a Secretary run id, so selecting a transcript has to start
+    with the files that existed before this run's pane was opened. A missing root is a durable
+    unavailable source, not permission to inspect the workspace later.
     """
     if run.spec.adapter != "claude":
         return run
@@ -536,9 +508,9 @@ def _observed(
 def _legacy_unbound_v1_codex_source(source: dict[str, Any], run: HeadRun) -> bool:
     """Whether ``source`` is the exact v1 preflight descriptor left unbound on a legacy run.
 
-    This deliberately checks structure and the HeadRun fence rather than a diagnostic string.  An
-    unbound descriptor whose baseline is malformed, or whose immutable fields belong to another
-    run, remains ordinary unavailable/identity evidence and cannot start a replacement.
+    Checks structure and the HeadRun fence rather than a diagnostic string: an unbound descriptor
+    whose baseline is malformed, or whose immutable fields belong to another run, cannot start a
+    replacement.
     """
     root = source.get("root")
     baseline = source.get("baseline")

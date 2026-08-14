@@ -1,9 +1,5 @@
 """Pause, resume and pause-status for the production dispatcher.
 
-The contract is the legacy `dispatcher.pause()` docstring, now carried out over the records the
-production dispatcher actually keeps (`<data_dir>/dispatcher/production-state.json`) instead of the
-legacy `cards.json`, which has been empty since 2026-07-21.
-
 Head transitions live here rather than in the tick because pause and resume are operator commands
 that run between ticks: they take the production tick lock, so a tick in flight finishes before a
 freeze stops its heads, and the next tick sees a settled flag.
@@ -70,11 +66,8 @@ def pause(
 
     Idempotent in the same mode. Pausing in the other mode while already paused is refused: a drain
     quietly upgraded to a freeze would stop a head whose card the caller still expects to be riding
-    its cycle unattended. Resume first, then pause in the new mode.
-
-    `exclude_workspaces` is the narrow initiator exception a freeze needs when the caller is itself
-    a head: `secretary backup create` runs from a worker workspace and must keep it alive while
-    everything else is stopped. An excluded head is neither stopped nor relaunched on resume.
+    its cycle. `exclude_workspaces` is the narrow initiator exception a freeze needs when the caller
+    is itself a head; an excluded head is neither stopped nor relaunched on resume.
     """
     resolved = normalize_pause_mode(mode)
     if not resolved:
@@ -162,12 +155,10 @@ def pause(
 def resume(runtime: Any, *, actor: str) -> dict[str, Any]:
     """Clear the pause and put back what a freeze stopped.
 
-    A drain never stopped anything, so lifting it is just dropping the flag. A freeze relaunches the
-    stopped worker and reviewer heads in their existing workspaces and hands every wait watchdog a
-    fresh window, so the frozen stretch does not read afterwards as a head that went silent.
-
-    Report-first, like the legacy resume: a card whose head reported while frozen is left for the
-    next tick to move instead of getting a fresh head launched into work that is already finished.
+    A drain never stopped anything. A freeze relaunches the stopped worker and reviewer heads in
+    their existing workspaces and hands every wait watchdog a fresh window. Report-first: a card
+    whose head reported while frozen is left for the next tick to move instead of getting a fresh
+    head launched into work that is already finished.
     """
     with file_lock(runtime.production_state.tick_lock):
         return resume_locked(runtime, actor=actor)
@@ -176,13 +167,9 @@ def resume(runtime: Any, *, actor: str) -> dict[str, Any]:
 def auto_resume_expired_freeze(runtime: Any, *, source: str) -> dict[str, Any] | None:
     """Lift an automation-owned freeze that outlived its TTL. None when there is nothing to lift.
 
-    The legacy `dispatcher.pause()` contract: a freeze set by automation (`secretary-backup` above
-    all) expires, a freeze set by a person does not. `secretary backup create` resumes in a `finally`,
-    so a backup that is killed, or that runs longer than the TTL, would otherwise leave the
-    dispatcher frozen forever — stopped heads, no watchdog recovery, and no tick to notice.
-
-    Called by the tick, which already holds the tick lock, so this takes no lock of its own and
-    resume runs in the same critical section as the check.
+    A freeze set by automation expires, a freeze set by a person does not. `secretary backup create`
+    resumes in a `finally`, so a backup that is killed would otherwise leave the dispatcher frozen
+    forever. Called by the tick, which already holds the tick lock, so this takes no lock of its own.
     """
     decision = auto_resume_status(runtime.pause.load())
     if not decision.get("eligible"):
@@ -327,20 +314,15 @@ def _freeze_heads(
 ) -> tuple[list[str], list[str], list[str]]:
     """Stop the live heads a freeze must stop, and mark why they are gone.
 
-    `stop` only, never `teardown`: the worktree and everything uncommitted in it stays exactly as
-    the head left it. The reviewer's pane is closed through its own lifecycle helper first, so
-    stopping the worktree's terminals cannot be mistaken later for a reviewer that vanished.
+    `stop` only, never `teardown`: the worktree and everything uncommitted in it stays exactly as the
+    head left it. The reviewer's pane is closed through its own lifecycle helper first.
 
-    A head is here whenever anything still names it, the pid heartbeat included: a head adopted
-    from a launch intent has no pane handle, and a freeze that skipped it for want of one would
-    report the pipeline as stopped while that head kept working. A stop the host will not confirm
-    leaves the record pointing at its head and its `paused_*` stamp unset, so the head is not
-    counted as stopped and resume will not relaunch a second one beside it.
+    A head is here whenever anything still names it, the pid heartbeat included: a head adopted from
+    a launch intent has no pane handle. A stop the host will not confirm leaves the record pointing
+    at its head and its `paused_*` stamp unset, so resume will not relaunch a second one beside it.
 
-    An unresolved launch intent is stopped first and on its own terms. Between the host call and
-    the record's save the intent is the only thing that names that head — the worker has no handle
-    yet, the reviewer neither handle nor pid on the record — so a freeze that read only those
-    fields would declare the pipeline stopped over a head still working in the checkout.
+    An unresolved launch intent is stopped first and on its own terms: between the host call and the
+    record's save the intent is the only thing that names that head.
     """
     stopped_worker: list[str] = []
     stopped_reviewer: list[str] = []
@@ -509,10 +491,9 @@ def _resume_heads(
 def _refresh_watchdog_windows(records: dict[str, DispatcherRecord]) -> None:
     """Restart every open wait clock at resume.
 
-    A freeze advances nothing, so the ceilings kept running against a pipeline that was stopped on
-    purpose. Without this the first tick after a long freeze reads the pause as silence and starts
-    respawning and blocking cards whose heads were fine. A head seen idle before the freeze is
-    forgotten for the same reason: it is given its window again from the resume.
+    A freeze advances nothing, so the ceilings kept running against a pipeline stopped on purpose.
+    Without this the first tick after a long freeze reads the pause as silence and starts respawning
+    and blocking cards whose heads were fine.
     """
     now = time.time()
     for record in records.values():

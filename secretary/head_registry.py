@@ -1,20 +1,15 @@
 """The installation head registry: materialized from a TOML canon, read by the tick.
 
 Two files live side by side under the installation's ``heads/`` directory. ``heads.yaml`` is the
-registry the running installation uses; ``source.yaml`` records which canonical file, which product
-checkout and which revision ``secretary upgrade`` generated it from. The pin also fingerprints the
-snapshot, so a live tick accepts only a matching installed pair. It reads no product checkout: a
-branch, an uncommitted edit or a half-finished refactor cannot change or stop a running installation.
-Only an upgrade moves the installation, and it durably publishes the pair before reporting success.
+registry the running installation uses; ``source.yaml`` records which canonical file, product
+checkout and revision ``secretary upgrade`` generated it from, and fingerprints the snapshot, so
+a live tick accepts only a matching installed pair. It reads no product checkout: only an upgrade
+moves the installation, and it durably publishes the pair before reporting success.
 
-Which heads exist is installation configuration, not product code: the accounts, models and
-fallback chains one host pays for are not the ones another host has. So an installation may own
-``heads/heads.toml`` in its instance directory, and that file is then the canon. An installation
-that owns no such file falls back to the product's small default registry, which is enough to bring
-a host up on a Claude or an OpenAI subscription and nothing more. A canon that is *there* but
-unusable — malformed, unreadable, a directory, a dangling symlink — is a broken installation, not a
-portable one: it stops the upgrade by name rather than quietly reverting the host to product heads
-the operator never chose.
+An installation may own ``heads/heads.toml`` in its instance directory, and that file is then the
+canon; one that owns no such file falls back to the product's small default registry. A canon
+that is *there* but unusable is a broken installation, not a portable one: it stops the upgrade
+by name rather than quietly reverting the host to product heads the operator never chose.
 """
 
 from __future__ import annotations
@@ -68,10 +63,9 @@ class HeadRegistryConfigError(RuntimeError):
 def _validated_registry(data: dict[str, Any], origin: Path) -> dict[str, Any]:
     """The three registry tables, checked the same way wherever they came from.
 
-    The shared validators check the nested shapes too, and every failure they raise is turned into
-    one bounded error naming ``origin``. Nothing malformed may leave this function as a raw
-    AttributeError or TypeError: an upgrade step and `secretary status` both report on what they
-    find at a path, so a broken registry has to arrive as a message about that path.
+    Nothing malformed may leave this function as a raw AttributeError or TypeError: an upgrade step
+    and `secretary status` both report on what they find at a path, so a broken registry has to
+    arrive as a message about that path.
     """
     tables: dict[str, Any] = {}
     for key in ("resources", "profiles", "role_defaults"):
@@ -91,8 +85,7 @@ def _instance_dir(instance_path: Path) -> Path:
     """The instance directory, whether the caller named it or its ``instance.yaml``.
 
     A path that cannot even be stat'd still has to yield a directory, because the caller's job is
-    then to raise a bounded error naming a file under it. So an unreadable path falls back to its
-    own shape instead of letting a raw ``PermissionError`` out of a probe.
+    then to raise a bounded error naming a file under it.
     """
     try:
         is_dir = instance_path.is_dir()
@@ -105,15 +98,13 @@ def _instance_dir(instance_path: Path) -> Path:
 def canonical_path(product_root: Path, instance_path: Path | None = None) -> tuple[Path, str]:
     """The registry that wins, and which side of the boundary owns it.
 
-    An installation that ships ``heads/heads.toml`` has decided what its own heads are; the product
-    default is only for one that has not. "Has not" means the file is genuinely absent — anything
-    else at that path is a canon the operator meant to have, so it fails here by name rather than
-    letting the host silently run product heads.
+    An installation that ships ``heads/heads.toml`` has decided what its own heads are. "Has not"
+    means the file is genuinely absent — anything else at that path is a canon the operator meant to
+    have, so it fails here by name.
 
-    Every probe goes through one ``lstat``, and every way it can fail is answered here. A
+    Every probe goes through one ``lstat``, and every way it can fail is answered here: a
     ``Path.is_file()`` would raise a bare ``PermissionError`` out of an unreadable ``heads/``
-    directory, past the ``HeadRegistryConfigError`` an upgrade step knows how to report, and the
-    operator would get a traceback instead of the path that is wrong.
+    directory, past the ``HeadRegistryConfigError`` an upgrade step knows how to report.
     """
     if instance_path is None:
         return product_root / HEADS_RELATIVE, PRODUCT_ORIGIN
@@ -184,11 +175,7 @@ def source_path(instance_path: Path) -> Path:
 
 
 def product_revision(product_root: Path) -> str:
-    """The commit the checkout is on, or ``unknown`` when it cannot be read.
-
-    A checkout with no git — a fixture, an unpacked tarball — is still a legitimate source; the pin
-    then records the path alone rather than refusing to be written.
-    """
+    """The commit the checkout is on, or ``unknown`` when it cannot be read."""
     try:
         result = _proc.run(
             ["git", "-c", f"safe.directory={product_root}", "-C", str(product_root), "rev-parse", "HEAD"],
@@ -222,11 +209,8 @@ def _snapshot_sha256(snapshot: str) -> str:
 def _validated_source_pair(instance_path: Path, snapshot: str) -> dict[str, Any]:
     """Validate the source pin that makes an installed snapshot recoverable.
 
-    A snapshot is intentionally self-contained at runtime, but it is not a
-    recovery-canon update on its own.  The pin records the exact source checkout
-    and fingerprint of the generated file, so a restore cannot combine a new
-    snapshot with an old pin (or silently accept a snapshot copied from some
-    unrelated checkout).
+    The pin records the exact source checkout and fingerprint of the generated file, so a restore
+    cannot combine a new snapshot with an old pin or accept one copied from an unrelated checkout.
     """
     path = source_path(instance_path)
     source = read_source(instance_path)
@@ -264,10 +248,9 @@ def _validated_source_pair(instance_path: Path, snapshot: str) -> dict[str, Any]
 def pinned_product_root(instance_path: Path) -> Path:
     """Which checkout this installation runs: the recorded pin, else the configured one.
 
-    An installation materialized from an alternate checkout keeps that path in its pin, and it is
-    the only durable record of it: nothing else on the host says which product a read-only command
-    should describe. An unreadable or absent pin is not worth failing a read-only view over, so the
-    answer falls back to what this process is configured with.
+    An installation materialized from an alternate checkout keeps that path in its pin, and it is the
+    only durable record of it. An unreadable or absent pin falls back to what this process is
+    configured with rather than failing a read-only view.
     """
     try:
         source = read_source(instance_path)
@@ -281,9 +264,6 @@ def pinned_product_root(instance_path: Path) -> Path:
 
 def record_source(instance_path: Path, product_root: Path, *, dry_run: bool = False) -> bool:
     """Write which canon, checkout and revision the snapshot came from. Returns whether it moved.
-
-    ``canonical`` and ``canonical_owner`` are the point of the pin now that two files can be the
-    canon: reading ``revision`` alone would credit the product for a registry the instance owns.
     """
     target = source_path(instance_path)
     canonical, origin = canonical_path(product_root, instance_path)
@@ -321,9 +301,8 @@ def installed_heads(instance_path: Path) -> dict[str, Any]:
     """The registry this installation runs off, validated as a recovery pair.
 
     This is what a live tick reads. It deliberately does not compare against any checkout's
-    ``heads.toml``: the installation moves when `secretary upgrade` moves it and at no other time.
-    A snapshot that is itself broken — missing a table, naming an unknown resource or adapter,
-    routing a role to a head that does not exist — still stops the caller, by name.
+    ``heads.toml``: the installation moves when `secretary upgrade` moves it and at no other time. A
+    snapshot that is itself broken still stops the caller, by name.
     """
     path = snapshot_path(instance_path)
     try:

@@ -1,21 +1,12 @@
 """``secretary upgrade``: pull a new product version and re-materialize the host.
 
-Self-deploy used to mean one ``git merge --ff-only`` of the dispatcher's own
-checkout. That moves the dispatcher's code and nothing else, so every other part
-of a release — role skills, the role worktrees, systemd units, Orca automations,
-the memory service — had to be finished by hand. Three ways to install the same
-system is how they drift apart.
+One materializer and three entry points into it: ``upgrade`` pulls the new version and then runs
+it, a fresh install runs it against an empty host, recovery runs it against a half-built one.
+Nothing about a step knows which of the three called it, which is what makes them stay identical.
 
-So there is one materializer and three entry points into it. ``upgrade`` pulls
-the new version and then runs it; a fresh install runs it against an empty host;
-recovery runs it against a half-built one. Nothing about a step knows which of
-the three called it, which is what makes the three stay identical.
-
-Every step is idempotent and reports one of ``changed``/``unchanged``/
-``skipped``/``failed``. A failed step stops the run: later steps assume the
-earlier ones landed, and a half-upgraded host that keeps going is harder to
-reason about than one that stopped at a named step. ``--dry-run`` runs the same
-decisions and performs no writes.
+Every step is idempotent and reports one of ``changed``/``unchanged``/``skipped``/``failed``. A
+failed step stops the run: later steps assume the earlier ones landed. ``--dry-run`` runs the
+same decisions and performs no writes.
 """
 
 from __future__ import annotations
@@ -159,9 +150,8 @@ def _git(root: Path, args: list[str], timeout: int = 120) -> str:
 def fast_forward(root: Path, base_branch: str) -> tuple[str, str]:
     """Fetch and fast-forward one checkout. Returns ``(before, after)``.
 
-    Strictly ``--ff-only``: a checkout with local commits or a diverged history
-    is left exactly as found and the caller hears why. Nothing in an upgrade is
-    allowed to discard work that is only on this host.
+    Strictly ``--ff-only``: a checkout with local commits or a diverged history is left exactly as
+    found and the caller hears why. Nothing in an upgrade may discard work that is only on this host.
     """
     before = _git(root, ["rev-parse", "HEAD"])
     _git(root, ["fetch", "--quiet", "origin", base_branch])
@@ -207,13 +197,9 @@ def _snapshot_install(venv_python: Path) -> bool:
     """Is the product installed into this venv as a copy rather than as the checkout itself?
 
     A snapshot install is a silent liability: nothing that follows moves it, so the venv keeps
-    answering with whatever the code looked like when it was taken, however far the checkout has
-    since travelled. That is not academic. On 2026-08-05 this installation ran `step_board_transport`,
-    which retired the legacy `KANBOARD_*` tuple from `runtime.env` because the new resolver reads
-    `board-transport.env` — while the dispatcher on this venv was a copy from the day before that
-    still read `runtime.env` only. Every production tick failed `backend_unavailable` for 26 hours
-    and no checkpoint was written. An editable install cannot drift that way, so finding a snapshot
-    is itself a reason to reinstall, whether or not a dependency manifest moved.
+    answering with whatever the code looked like when it was taken. An editable install cannot drift
+    that way, so finding a snapshot is itself a reason to reinstall, whether or not a dependency
+    manifest moved.
     """
     for dist_info in (venv_python.parent.parent / "lib").glob("python*/site-packages/secretary-*.dist-info"):
         try:
@@ -256,17 +242,12 @@ def _role_skills_manifest(context: UpgradeContext) -> Path:
 def step_registries(context: UpgradeContext) -> StepResult:
     """Read every registry this upgrade materializes from, before anything is written.
 
-    The steps that follow write in order: the head snapshot, then role worktrees, then skills and
-    their entry points, then the host. Each of them reads operator-written configuration that can
-    be malformed, and finding that out at the third write leaves a host half-moved onto a version
-    it never finished installing. So both registries are parsed here, where a refusal costs
-    nothing, and every way they can fail arrives as one message naming the file to open.
-
-    Parsing is not enough for the skill registry: a manifest whose declared ``SKILL.md`` is absent,
-    whose target roots overlap, or whose entry point collides with a file this registry does not
-    own parses cleanly and is refused by `sync` — after the head snapshot has been written. The
-    whole plan is therefore decided here, against the same manifests and the same home the later
-    steps use, so every one of those refusals lands before the first write.
+    The steps that follow write in order — head snapshot, role worktrees, skills and entry points,
+    host — and each reads operator-written configuration that can be malformed, so finding that out
+    at the third write leaves a host half-moved. Parsing is not enough for the skill registry: a
+    manifest whose declared ``SKILL.md`` is absent, whose target roots overlap, or whose entry point
+    collides parses cleanly and is refused by `sync` after the head snapshot has been written, so the
+    whole plan is decided here against the same manifests and home the later steps use.
     """
     manifest = _role_skills_manifest(context)
     try:
@@ -324,10 +305,9 @@ def step_role_skills(context: UpgradeContext) -> StepResult:
 def step_head_registry(context: UpgradeContext) -> StepResult:
     """Keep the installation snapshot derived from whichever registry is this host's canon.
 
-    That is the installation's own ``heads/heads.toml`` when it owns one, else the product's
-    portable default. The pin next to the snapshot records which of the two won, plus the checkout
-    and revision. The live tick validates the pin against the snapshot, so the two generated files
-    move and publish as one recovery-canon pair.
+    The installation's own ``heads/heads.toml`` when it owns one, else the product's portable
+    default. The pin next to the snapshot records which of the two won, plus the checkout and
+    revision, and the live tick validates the pin against the snapshot.
     """
     target = snapshot_path(context.instance_path)
     try:
@@ -354,13 +334,7 @@ def step_head_registry(context: UpgradeContext) -> StepResult:
 
 
 def step_publish_head_registry(context: UpgradeContext) -> StepResult:
-    """Commit and publish the installed head pair as one recovery-canon update.
-
-    The files themselves are generated by :func:`step_head_registry`; this
-    step is their durability boundary.  It uses the shared instance-repository
-    lock and only the pair's pathspec, then reuses the normal ff-only checkpoint
-    pusher for an immediate publication rather than waiting for the next tick.
-    """
+    """Commit and publish the installed head pair as one recovery-canon update."""
     if context.dry_run:
         return StepResult("head-registry-checkpoint", "skipped", "--dry-run made no recovery publication")
     try:
@@ -745,9 +719,8 @@ def run_steps(context: UpgradeContext, steps=STEPS) -> UpgradeResult:
 def running_product_root() -> Path:
     """The checkout this module was imported from.
 
-    For reading what this process itself ships, which is what `doctor` compares a live host
-    against. Never for deciding what to install: that is `default_product_root`, and the two are
-    different paths exactly when an alternate checkout is running the command.
+    For reading what this process itself ships. Never for deciding what to install: that is
+    `default_product_root`.
     """
     return Path(__file__).resolve().parents[1]
 
@@ -755,11 +728,10 @@ def running_product_root() -> Path:
 def default_product_root() -> Path:
     """The checkout an install or upgrade materializes when nothing names one.
 
-    The configured one, or ``~/secretary`` — never the checkout the running module happens to sit
-    in. A candidate checkout is a normal place to run ``secretary upgrade`` from, and installing
-    whatever executed the command would make the caller's working directory decide which product
-    version a host ends up on. ``--product-root`` and ``TA_SECRETARY_REPO`` still win, in that
-    order.
+    The configured one, or ``~/secretary`` — never the checkout the running module happens to sit in.
+    A candidate checkout is a normal place to run ``secretary upgrade`` from, and installing whatever
+    executed the command would make the caller's working directory decide the product version.
+    ``--product-root`` and ``TA_SECRETARY_REPO`` still win, in that order.
     """
     return configured_product_root()
 
