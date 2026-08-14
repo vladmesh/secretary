@@ -17,7 +17,7 @@ from secretary.config import load_config, validate
 from secretary.cli import main
 from secretary.onboarding import project_add
 from secretary.provision import apply_provision_result, start_provision
-from tests.test_onboarding import git, make_repo
+from tests.support.git import git, make_repo
 
 
 class ProvisionTests(unittest.TestCase):
