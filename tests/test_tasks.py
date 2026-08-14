@@ -369,12 +369,27 @@ class WriteKanboard(FakeKanboard):
         self.comments: dict[int, list[dict[str, object]]] = {
             int(task["id"]): [] for task in self.tasks
         }
+        # Свимлейны борда, а не константа ответа: их создают по требованию, как живой Kanboard.
+        self.swimlanes: list[dict[str, object]] = [{"id": 4, "name": "Secretary", "position": 1}]
         self._unavailable_next_call = False
 
     def call(self, method: str, **params: object) -> object:
         if self._unavailable_next_call:
             self._unavailable_next_call = False
             raise TaskError("backend_unavailable", "Kanboard backend is unavailable", 1)
+        if method == "getActiveSwimlanes":
+            self.calls.append((method, params))
+            return [dict(lane) for lane in self.swimlanes]
+        if method == "addSwimlane":
+            self.calls.append((method, params))
+            # Kanboard отвечает на дубликат имени false, а не идентификатором существующего.
+            if any(lane["name"] == params["name"] for lane in self.swimlanes):
+                return False
+            identifier = max((int(lane["id"]) for lane in self.swimlanes), default=0) + 1
+            self.swimlanes.append(
+                {"id": identifier, "name": params["name"], "position": len(self.swimlanes) + 1}
+            )
+            return identifier
         if method == "getColumns":
             return [
                 {"id": 1, "title": "Issues"}, {"id": 2, "title": "Ready"},

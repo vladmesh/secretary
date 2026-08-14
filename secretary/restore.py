@@ -48,7 +48,12 @@ from secretary.tasks import (
     _positive_int,
     all_project_cards,
 )
-from secretary.product_issues import ProductIssueValidationError, registered_projects, validate_product_issue_records
+from secretary.product_issues import (
+    ProductIssueValidationError,
+    ensure_swimlane,
+    registered_projects,
+    validate_product_issue_records,
+)
 from triggered_agents.runtime.head import CODEX_LAUNCH_MODES
 
 
@@ -729,10 +734,16 @@ def _create_restored_non_task(writer: TaskWriter, card: dict[str, Any]) -> None:
         "description": card["description"],
         "column_id": column_id,
     }
-    # Свимлейн берётся из экспорта, как и на пути обычных карточек. Kanboard отвергает
-    # swimlane_id=0 (createTask возвращает false), поэтому при отсутствии совпадения
-    # параметр не передаём вовсе и запись уходит в свимлейн по умолчанию.
-    swimlane_id = _matching_swimlane(swimlanes, str(card.get("swimlane") or ""))
+    # Свимлейн берётся из экспорта, как и на пути обычных карточек: восстановление
+    # возвращает запись туда, где она была, и ничего не переносит. Дорожка продукта на
+    # чистом борде ещё не заведена, поэтому недостающая создаётся по имени из экспорта —
+    # иначе запись, созданную по продуктовому правилу, восстановление уронило бы в чужую
+    # дорожку. Kanboard отвергает swimlane_id=0 (createTask возвращает false), поэтому
+    # безымянный свимлейн экспорта параметром не передаётся вовсе.
+    exported_lane = str(card.get("swimlane") or "")
+    swimlane_id = _matching_swimlane(swimlanes, exported_lane)
+    if swimlane_id is None and exported_lane.strip():
+        swimlane_id = ensure_swimlane(writer.client, board_id, exported_lane)
     if swimlane_id is not None:
         payload["swimlane_id"] = swimlane_id
     # _positive_int, а не isinstance(..., int): bool наследует int, поэтому false от

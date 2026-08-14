@@ -23,7 +23,6 @@ from secretary.tasks import (
     TaskAudit,
     TaskError,
     all_project_cards,
-    _nonnegative_int,
     _now,
     _positive_int,
 )
@@ -390,6 +389,62 @@ class ProductIssueTransaction:
         return document
 
 
+def ensure_swimlane(client: KanboardClient, board_id: int, name: str) -> int:
+    """The id of the board's active swimlane called ``name``, created when the board has none.
+
+    The name is matched exactly, so a lane is the same lane for every caller and no near-name
+    ever stands in for it.  Kanboard answers an ``addSwimlane`` for a name the board already
+    carries with a false-ish reply rather than the existing id, so a refused create is read back
+    once: a lane another writer added between the two calls is that answer, and only a board that
+    still has no such lane is an error.
+    """
+    wanted = name.strip()
+    if not wanted:
+        raise TaskError("validation", "a swimlane needs a name", 2)
+    identifier = _named_swimlane(client, board_id, wanted)
+    if identifier is not None:
+        return identifier
+    created = _positive_int(client.call("addSwimlane", project_id=board_id, name=wanted))
+    if created is not None:
+        return created
+    identifier = _named_swimlane(client, board_id, wanted)
+    if identifier is None:
+        raise TaskError("backend_error", f"Kanboard refused the {wanted!r} swimlane", 1)
+    return identifier
+
+
+def _named_swimlane(client: KanboardClient, board_id: int, name: str) -> int | None:
+    lanes = client.call("getActiveSwimlanes", project_id=board_id) or []
+    if not isinstance(lanes, list):
+        raise TaskError("backend_error", "Kanboard returned invalid swimlanes", 1)
+    for lane in lanes:
+        if not isinstance(lane, dict) or str(lane.get("name") or "") != name:
+            continue
+        identifier = _positive_int(lane.get("id"))
+        if identifier is not None:
+            return identifier
+    return None
+
+
+def product_swimlane_id(client: KanboardClient, board_id: int, product: str) -> int:
+    """The lane a Product or Issue row belongs in: the one named after its product.
+
+    A record belongs to its product, so the lane is the active swimlane whose name is exactly the
+    product id, created on demand when the board has none.  Nothing about the board takes part in
+    the choice - not the order of the lanes, not which lane happens to be first, not whether a
+    `Default swimlane` exists - so every writer, every retry and every restore of the same record
+    choose the same lane.  Project bindings take no part either, which is why a product bound to
+    several projects (`codegen`, `secretary`) is not ambiguous here: `issue_product`, and for a
+    Product its own id, stay the single source of truth about what a record belongs to.
+
+    This is the one implementation of that rule; both secretarial writers call it.
+    """
+    identifier = str(product).removeprefix("product:").strip()
+    if not identifier:
+        raise TaskError("validation", "a Product/Issue row needs its product to choose a lane", 2)
+    return ensure_swimlane(client, board_id, identifier)
+
+
 class ProductIssueStore:
     def __init__(self, client: KanboardClient, *, data_dir: str | Path, instance: str | Path) -> None:
         self.client = client
@@ -407,28 +462,6 @@ class ProductIssueStore:
         if isinstance(first, dict) and first.get("title") == ISSUES_COLUMN and isinstance(first.get("id"), int):
             return board["id"], first["id"]
         raise TaskError("legacy_layout", "Pipeline first column is not Issues; run the supported board migration", 2)
-
-    def _swimlane(self, board_id: int) -> int:
-        """The lane a new Product or Issue row is created in.
-
-        A record belongs to the board, not to one project, so all records share a single lane
-        instead of being spread over the per-project lanes.  A board may have no default lane at
-        all, and Kanboard then refuses `swimlane_id=0`, so the lane is the board's first active
-        one in the board's own order: position first, task id as the tie-break.  That order is a
-        property of the board rather than of this call, so every writer and every retry pick the
-        same lane.  A board with no named lane keeps 0, its implicit default.
-        """
-        lanes = self.client.call("getActiveSwimlanes", project_id=board_id) or []
-        if not isinstance(lanes, list):
-            raise TaskError("backend_error", "Kanboard returned invalid swimlanes", 1)
-        candidates = []
-        for lane in lanes:
-            if not isinstance(lane, dict):
-                continue
-            identifier = _positive_int(lane.get("id"))
-            if identifier is not None:
-                candidates.append((_nonnegative_int(lane.get("position")), identifier))
-        return min(candidates)[1] if candidates else 0
 
     def _cards(self) -> list[dict[str, Any]]:
         board_id, _ = self._board()
@@ -567,7 +600,7 @@ class ProductIssueStore:
         digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
         return f"[secretary-product-issue-transaction:{digest}]"
 
-    def _ensure_created(self, document: dict[str, Any], *, title: str, description: str) -> tuple[dict[str, Any], int]:
+    def _ensure_created(self, document: dict[str, Any], *, title: str, description: str, product: str) -> tuple[dict[str, Any], int]:
         try:
             card = self._transaction_card(document)
         except TaskError:
@@ -576,7 +609,11 @@ class ProductIssueStore:
             if not reference:
                 raise
             board_id, column_id = self._board()
-            swimlane_id = self._swimlane(board_id)
+            # The lane is provisioned before this attempt claims the uncertain write window, in
+            # the same order the typed writer keeps it: the transaction is staged and retryable
+            # already, and this writer's retry re-runs the whole step, so a death right here costs
+            # at most an empty lane the next attempt reuses.
+            swimlane_id = product_swimlane_id(self.client, board_id, product)
             document.setdefault("progress", {})["create_started"] = True
             self.transactions.save(document)
             task_id = _positive_int(self.client.call(
@@ -641,8 +678,15 @@ class ProductIssueStore:
 
     def _finish_create(self, document: dict[str, Any]) -> None:
         intent = document["intent"]
-        card, task_id = self._ensure_created(document, title=str(intent["title"]), description=str(intent["description"]))
-        if intent["record_type"] == PRODUCT_TYPE:
+        # The lane comes from the record's own product: a Product's id, an Issue's `issue_product`.
+        # The staged intent already carries it, so a retry of this transaction resolves the same
+        # lane as its first attempt did.
+        is_product = intent["record_type"] == PRODUCT_TYPE
+        card, task_id = self._ensure_created(
+            document, title=str(intent["title"]), description=str(intent["description"]),
+            product=str(intent["product_id"] if is_product else intent["product"]),
+        )
+        if is_product:
             values = {
                 META_RECORD_TYPE: PRODUCT_TYPE, META_PRODUCT_ID: str(intent["product_id"]),
                 META_PRODUCT_PROJECTS: str(intent["product_projects"]),

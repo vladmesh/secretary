@@ -453,10 +453,15 @@ A Product and an Issue are not execution tasks and never enter the execution col
 both reject one before any write, whatever column it currently sits in. Work on an issue is a separate
 card the PO creates in Ready.
 
-A record belongs to the board rather than to one project, so every Product and Issue row is created in a
-single lane: the board's first active swimlane in the board's own order, position first and the swimlane
-id as the tie-break. The order is a property of the board, so concurrent writers and retries choose the
-same lane, and a board without named swimlanes keeps Kanboard's implicit default lane.
+A record belongs to its product, so every Product and Issue row is created in the lane of that product:
+the active swimlane whose name is exactly the product id, created on demand when the board has none. An
+Issue takes it from `issue_product`, a Product from its own id. Nothing about the board takes part in the
+choice - not the order of the lanes, not which lane is first, not whether a `Default swimlane` exists -
+so every writer, every retry and every restore of the same record choose the same lane. The project
+bindings of a product take no part either, which is why a product bound to several projects is not
+ambiguous: the lane is named after the product, never after one of its projects, and it never becomes a
+second source of truth about what a record belongs to. Execution cards are unaffected: they stay in the
+lane of their project.
 
 Every Product and Issue write is staged before it touches the backend, and a staged write that is neither
 finished nor dropped blocks checkpoint and board export. A refusal that a retry cannot turn into a success

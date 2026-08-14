@@ -17,7 +17,7 @@ from secretary.board.models import (
     ProductState, RelatedRefs, Sprint, SprintState,
 )
 from secretary.board.transitions import BoardProtocolError, transition, transition_for
-from secretary.product_issues import ProductIssueStore
+from secretary.product_issues import ProductIssueStore, product_swimlane_id
 from secretary.sprints import SprintReader
 from secretary.tasks import (
     KanboardClient, TaskReader, _positive_int, _target_column_id, all_project_cards,
@@ -89,15 +89,22 @@ class KanboardBoardHost:
         if existing is None:
             self._validate_create(entity)
         event = existing or self._entity_event(EventKind.ENTITY_CREATED, entity, operation.actor, operation.reason, related, request_id)
+        # The record's lane is resolved, and provisioned when the board has none, before the
+        # occurrence is staged.  Provisioning is a persistent backend write, and `effect` may hold
+        # no write but the create itself: a process that dies between the two would leave a staged
+        # occurrence whose retry may only confirm, never write.  Here a death costs at most an
+        # empty lane, which is not an occurrence and which the next attempt reuses.  The board
+        # lookup joins it because a read that can move earlier belongs before the staging point
+        # too.
+        board_id, column_id = self._issues_board()
+        swimlane_id = self._issues_swimlane(board_id, entity)
 
         def effect() -> None:
             if self._raw_by_ref(entity.ref) is not None:
                 raise BoardProtocolError(f"{entity.kind.value} already exists")
-            board_id, column_id = self._issues_board()
             # This is preparatory evidence, not part of the uncertain write
             # window.  A failure here proves that createTask was never issued,
             # so MutationEventTransaction must discard the staged occurrence.
-            swimlane_id = self._issues_swimlane(board_id)
             try:
                 reply = self.client.call(
                     "createTask", project_id=board_id, title=entity.title,
@@ -796,12 +803,15 @@ class KanboardBoardHost:
             raise BoardProtocolError("Pipeline first column is not Issues")
         return board["id"], first["id"]
 
-    def _issues_swimlane(self, board_id: int) -> int:
-        lanes = self.client.call("getActiveSwimlanes", project_id=board_id) or []
-        if not isinstance(lanes, list):
-            raise BoardProtocolError("Kanboard returned invalid swimlanes")
-        candidates = [(_nonnegative(lane.get("position")), identifier) for lane in lanes if isinstance(lane, dict) and (identifier := _positive_int(lane.get("id"))) is not None]
-        return min(candidates)[1] if candidates else 0
+    def _issues_swimlane(self, board_id: int, entity: Product | Issue) -> int:
+        """The product lane of this record, by the one rule both secretarial writers share.
+
+        A Product takes its own id, an Issue the product it belongs to; nothing else about the
+        board or its project bindings takes part.  See :func:`product_swimlane_id`.
+        """
+        return product_swimlane_id(
+            self.client, board_id, entity.ref if isinstance(entity, Product) else entity.product_ref,
+        )
 
     def _raw_by_ref(self, ref: str) -> dict[str, Any] | None:
         board_id, _ = self._issues_board()
@@ -1066,10 +1076,6 @@ def _card(record: dict[str, Any]) -> Card:
 
 def _comment_saved(result: Any) -> bool:
     return result is True or (isinstance(result, int) and not isinstance(result, bool) and result > 0)
-
-
-def _nonnegative(value: Any) -> int:
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
 def _entity_payload(entity: Product | Issue) -> dict[str, Any]:

@@ -759,6 +759,41 @@ class RestoredNonTaskSwimlaneTests(unittest.TestCase):
             # 4 — идентификатор свимлейна "Secretary" в фикстуре борда
             self.assertEqual([task["swimlane_id"] for task in client.tasks], [4, 4])
 
+    def test_a_product_lane_the_board_lacks_is_created_by_the_restore(self) -> None:
+        """Запись возвращается в свою продуктовую дорожку, даже если борд её ещё не завёл.
+
+        Запись создаётся в дорожке своего продукта, а чистый борд после bootstrap знает только
+        дорожки проектов. Без создания по имени восстановление уронило бы обе записи в чужую
+        дорожку — то есть перенесло бы их, чего восстановление делать не должно.
+        """
+        class ProjectLanesOnlyBoard(_EmptyWriteKanboard):
+            def __init__(self) -> None:
+                super().__init__()
+                self.swimlanes = [{"id": 1, "name": "Default swimlane", "position": 1}]
+
+            def call(self, method: str, **params: object) -> object:
+                if method == "getColumns":
+                    return RestoredNonTaskSwimlaneTests.COLUMNS
+                if method == "createTask" and params.get("swimlane_id") == 0:
+                    return False
+                return super().call(method, **params)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = Path(tmpdir) / "secretary-data"
+            self._seed(data_dir)
+            cards = json.loads((data_dir / "board" / "cards.json").read_text(encoding="utf-8"))
+            for card in cards["cards"]:
+                card["swimlane"] = "secretary"
+            (data_dir / "board" / "cards.json").write_text(json.dumps(cards), encoding="utf-8")
+            client = ProjectLanesOnlyBoard()
+
+            self.assertEqual(import_normalized_board(data_dir, client=client), 2)
+
+            created = [params["name"] for method, params in client.calls if method == "addSwimlane"]
+            self.assertEqual(created, ["secretary"])
+            lanes = {int(lane["id"]): str(lane["name"]) for lane in client.swimlanes}
+            self.assertEqual([lanes[int(task["swimlane_id"])] for task in client.tasks], ["secretary"] * 2)
+
     def test_a_refused_create_is_reported_as_a_create_failure(self) -> None:
         class RefusingBoard(_EmptyWriteKanboard):
             def call(self, method: str, **params: object) -> object:
