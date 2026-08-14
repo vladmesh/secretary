@@ -196,6 +196,12 @@ class ObserverDelivery:
     delivery_id: str = ""
     method: str = ""
     through_event: str = ""
+    # The newest resume event known when the intent was persisted.  An empty cursor is meaningful:
+    # it says there was no resume yet, so the first one appended afterwards can acknowledge this
+    # delivery.  Legacy records set `resume_cursor_known` false and fail closed until the
+    # acknowledgement deadline.
+    resume_cursor: str = ""
+    resume_cursor_known: bool = True
     sent_at: float = 0.0
     # When this batch started being held by a head that has not been seen ready for input.  The
     # turn ceiling is measured from here, so a batch waiting on a head that never goes idle is
@@ -238,6 +244,8 @@ class ObserverDelivery:
             "delivery_id": self.delivery_id,
             "method": self.method,
             "through_event": self.through_event,
+            "resume_cursor": self.resume_cursor,
+            "resume_cursor_known": self.resume_cursor_known,
             "sent_at": self.sent_at,
             "held_since": self.held_since,
             "deadline": self.deadline,
@@ -271,6 +279,8 @@ class ObserverDelivery:
             delivery_id=str(payload.get("delivery_id") or ""),
             method=str(payload.get("method") or ""),
             through_event=str(payload.get("through_event") or ""),
+            resume_cursor=str(payload.get("resume_cursor") or ""),
+            resume_cursor_known=bool(payload.get("resume_cursor_known", True)),
             sent_at=_float(payload.get("sent_at")),
             held_since=_float(payload.get("held_since")),
             deadline=_float(payload.get("deadline")),
@@ -897,6 +907,7 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
         "pending_from": _event_id(significant[0]),
         "occurred_at": str(latest.get("occurred_at") or ""),
         "age_seconds": _event_age_seconds(str(latest.get("occurred_at") or "")),
+        "latest_resume_id": _event_id(resumes[-1]) if resumes else "",
         "reason": "latest significant linked-card event is not acknowledged",
     }
 
@@ -946,6 +957,8 @@ def _reset_delivery_to_idle(
     delivery.delivery_id = ""
     delivery.method = ""
     delivery.through_event = ""
+    delivery.resume_cursor = ""
+    delivery.resume_cursor_known = True
     delivery.sent_at = 0.0
     delivery.held_since = 0.0
     delivery.deadline = 0.0
@@ -1000,6 +1013,7 @@ def _new_delivery_intent(
     *,
     method: str,
     through_event: str,
+    resume_cursor: str,
     now: float,
     delivery_id: str = "",
 ) -> None:
@@ -1010,6 +1024,8 @@ def _new_delivery_intent(
     delivery.delivery_id = delivery_id or "delivery-" + uuid.uuid4().hex
     delivery.method = method
     delivery.through_event = through_event
+    delivery.resume_cursor = resume_cursor
+    delivery.resume_cursor_known = True
     delivery.sent_at = now
     # A fresh send is a fresh turn: the head is being asked again, so the ceiling on how long it
     # may hold this batch without going idle starts over here too.
@@ -1030,6 +1046,7 @@ def _prepare_launch_delivery(record: ObserverRecord, event: dict[str, Any]) -> s
         delivery,
         method="launch",
         through_event=(delivery.through_event if active or retrying else str(event["event_id"])),
+        resume_cursor=str(event.get("latest_resume_id") or ""),
         now=now,
         delivery_id=delivery.delivery_id if active or retrying else "",
     )
@@ -1426,6 +1443,7 @@ def _adopt_precontract_unbound_observer(
         record.delivery,
         method="replacement",
         through_event=str(event["event_id"]),
+        resume_cursor=str(event.get("latest_resume_id") or ""),
         now=now,
         delivery_id=record.delivery.delivery_id,
     )
@@ -1552,6 +1570,7 @@ def _wake_for_event(
                 delivery,
                 method="nudge",
                 through_event=event_id,
+                resume_cursor=str(event.get("latest_resume_id") or ""),
                 now=now,
             )
         return _fail_delivery(
@@ -1630,6 +1649,7 @@ def _wake_for_event(
             delivery,
             method="nudge",
             through_event=delivery.through_event,
+            resume_cursor=str(event.get("latest_resume_id") or ""),
             now=now,
         )
     elif delivery.stage == DeliveryStage.RETRY_DEFERRED:
@@ -1637,6 +1657,7 @@ def _wake_for_event(
             delivery,
             method="nudge",
             through_event=delivery.through_event or event_id,
+            resume_cursor=str(event.get("latest_resume_id") or ""),
             now=now,
             delivery_id=delivery.delivery_id,
         )
@@ -1648,6 +1669,7 @@ def _wake_for_event(
             delivery,
             method="nudge",
             through_event=delivery.through_event or event_id,
+            resume_cursor=str(event.get("latest_resume_id") or ""),
             now=now,
             delivery_id=delivery.delivery_id,
         )
@@ -1656,6 +1678,7 @@ def _wake_for_event(
             delivery,
             method="nudge",
             through_event=event_id,
+            resume_cursor=str(event.get("latest_resume_id") or ""),
             now=now,
         )
     observers[ref] = record
