@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from secretary._fsutil import directory_lock, write_text_atomic
+from secretary import _proc
 from secretary.host import (
     HostInventory,
     PackagedUnit,
@@ -135,7 +136,7 @@ class SystemdUnitInstaller(UnitInstaller):
     def _run(self, cmd: list[str], label: str) -> subprocess.CompletedProcess[str]:
         argv = (["sudo", "-n"] if self.sudo else []) + cmd
         try:
-            result = subprocess.run(argv, capture_output=True, text=True, timeout=self.timeout_seconds)
+            result = _proc.run(argv, timeout=self.timeout_seconds)
         except FileNotFoundError:
             raise HostCommandError(f"{label}: {cmd[0]} not found") from None
         except subprocess.TimeoutExpired:
@@ -157,7 +158,7 @@ class SystemdUnitInstaller(UnitInstaller):
             "install", "-m", "0644", "-o", "root", "-g", "root", "/dev/stdin", str(self.unit_dir / unit.name),
         ]
         try:
-            result = subprocess.run(argv, input=unit.content, capture_output=True, timeout=self.timeout_seconds)
+            result = _proc.run(argv, input=unit.content, text=False, timeout=self.timeout_seconds)
         except FileNotFoundError:
             raise HostCommandError(f"install {unit.name}: install not found") from None
         except subprocess.TimeoutExpired:
@@ -185,7 +186,7 @@ class SystemdUnitInstaller(UnitInstaller):
     def is_active(self, name: str) -> bool:
         argv = ["systemctl", "is-active", name]
         try:
-            result = subprocess.run(argv, capture_output=True, text=True, timeout=self.timeout_seconds)
+            result = _proc.run(argv, timeout=self.timeout_seconds)
         except (OSError, subprocess.TimeoutExpired):
             return False
         return result.stdout.strip() == "active"
@@ -208,7 +209,7 @@ class LiveOrcaRegistrar(OrcaRegistrar):
         if self.user:
             argv = ["runuser", "--user", self.user, "--", *argv]
         try:
-            result = subprocess.run(argv, capture_output=True, text=True, timeout=self.timeout_seconds)
+            result = _proc.run(argv, timeout=self.timeout_seconds)
         except FileNotFoundError:
             raise HostCommandError(f"register {name}: orca not found") from None
         except subprocess.TimeoutExpired:

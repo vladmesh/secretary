@@ -27,6 +27,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 from secretary.observer_root import observer_root_repo
+from secretary import _proc
 from triggered_agents.runtime.paths import configured_product_root
 
 KINDS = ("projects", "units", "orca repos")
@@ -977,13 +978,7 @@ class LiveHostSource(HostSource):
     def _run(self, cmd: list[str]) -> _CmdResult:
         tool = cmd[0]
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=self.timeout_seconds,
-            )
+            result = _proc.run(cmd, timeout=self.timeout_seconds)
         except FileNotFoundError:
             return _CmdResult(False, -1, "", "", f"{tool} not found")
         except subprocess.TimeoutExpired:

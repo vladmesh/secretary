@@ -65,7 +65,7 @@ from secretary.head_registry import (
     source_path,
 )
 from secretary.checkpoint import CheckpointPusher
-from secretary import state_repo
+from secretary import _proc, state_repo
 from triggered_agents.runtime.paths import configured_product_root
 
 MEMORY_COMPONENT = "memory"
@@ -141,9 +141,8 @@ class GitError(RuntimeError):
 
 def _git(root: Path, args: list[str], timeout: int = 120) -> str:
     try:
-        result = subprocess.run(
-            ["git", "-c", f"safe.directory={root}", "-C", str(root), *args],
-            capture_output=True, text=True, timeout=timeout,
+        result = _proc.run(
+            ["git", "-c", f"safe.directory={root}", "-C", str(root), *args], timeout=timeout
         )
     except FileNotFoundError:
         raise GitError("git not found") from None
@@ -236,10 +235,8 @@ def step_dependencies(context: UpgradeContext) -> StepResult:
     if context.dry_run:
         return StepResult("dependencies", "changed", f"would reinstall the product into .venv: {reason}")
     try:
-        subprocess.run(
+        _proc.run(
             [str(venv_python), "-m", "pip", "install", "--quiet", "-e", str(context.product_root)],
-            capture_output=True,
-            text=True,
             timeout=900,
             check=True,
         )
