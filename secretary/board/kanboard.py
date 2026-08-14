@@ -89,18 +89,22 @@ class KanboardBoardHost:
         if existing is None:
             self._validate_create(entity)
         event = existing or self._entity_event(EventKind.ENTITY_CREATED, entity, operation.actor, operation.reason, related, request_id)
+        # The record's lane is resolved, and provisioned when the board has none, before the
+        # occurrence is staged.  Provisioning is a persistent backend write, and `effect` may hold
+        # no write but the create itself: a process that dies between the two would leave a staged
+        # occurrence whose retry may only confirm, never write.  Here a death costs at most an
+        # empty lane, which is not an occurrence and which the next attempt reuses.  The board
+        # lookup joins it because a read that can move earlier belongs before the staging point
+        # too.
+        board_id, column_id = self._issues_board()
+        swimlane_id = self._issues_swimlane(board_id, entity)
 
         def effect() -> None:
             if self._raw_by_ref(entity.ref) is not None:
                 raise BoardProtocolError(f"{entity.kind.value} already exists")
-            board_id, column_id = self._issues_board()
             # This is preparatory evidence, not part of the uncertain write
             # window.  A failure here proves that createTask was never issued,
             # so MutationEventTransaction must discard the staged occurrence.
-            # Provisioning the product lane is the one write this step may do,
-            # and it is not the occurrence: an empty lane left behind by a
-            # discarded create is what the next attempt reuses.
-            swimlane_id = self._issues_swimlane(board_id, entity)
             try:
                 reply = self.client.call(
                     "createTask", project_id=board_id, title=entity.title,

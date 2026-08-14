@@ -609,6 +609,10 @@ class ProductIssueStore:
             if not reference:
                 raise
             board_id, column_id = self._board()
+            # The lane is provisioned before this attempt claims the uncertain write window, in
+            # the same order the typed writer keeps it: the transaction is staged and retryable
+            # already, and this writer's retry re-runs the whole step, so a death right here costs
+            # at most an empty lane the next attempt reuses.
             swimlane_id = product_swimlane_id(self.client, board_id, product)
             document.setdefault("progress", {})["create_started"] = True
             self.transactions.save(document)

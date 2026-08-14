@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.cli import main
+from secretary.board.events import BoardEventCanon
 from secretary.board.kanboard import KanboardBoardHost
 from secretary.board.transitions import BoardProtocolError
 from secretary.product_issues import ProductIssueStore
@@ -245,6 +246,101 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
 
         self.assertEqual(self._created(client, "product:secretary")["swimlane_id"], 21)
         self.assertEqual([lane["name"] for lane in client.swimlanes], ["secretary"])
+
+    _READ_METHODS = {
+        "getProjectByName", "getColumns", "getAllTasks", "getTaskByReference", "getTaskMetadata",
+        "getActiveSwimlanes", "getAllComments",
+    }
+
+    def _staging_trace(self, client) -> list[str]:
+        """Every backend call and the moment the occurrence is staged, in order."""
+        trace: list[str] = []
+        original_call = client.call
+
+        def record(method: str, **params: object) -> object:
+            trace.append(method)
+            return original_call(method, **params)
+
+        original_stage = BoardEventCanon.stage
+
+        def staged(self_canon, request_id, event):  # type: ignore[no-untyped-def]
+            trace.append("stage")
+            return original_stage(self_canon, request_id, event)
+
+        client.call = record  # type: ignore[method-assign]
+        self._patched = mock.patch.object(BoardEventCanon, "stage", staged)
+        self._patched.start()
+        self.addCleanup(self._patched.stop)
+        return trace
+
+    def test_the_lane_is_provisioned_before_the_occurrence_is_staged(self) -> None:
+        """Between staging and `createTask` the writer may only read.
+
+        A persistent write in that window is unrecoverable: a process that dies after it leaves a
+        staged occurrence whose retry is allowed to confirm and never to write, so the record can
+        no longer be created under its own request id.  Creating the product lane is such a write,
+        so it happens before the occurrence is staged.
+        """
+        client = LiveSwimlaneBoard()
+        store = self._store(client)
+        trace = self._staging_trace(client)
+
+        store.create_product(
+            product_id="butler", projects=["secretary"], title="Butler", description="",
+            actor="po", request_id="provisioned-first",
+        )
+
+        self.assertIn("addSwimlane", trace)
+        self.assertLess(trace.index("addSwimlane"), trace.index("stage"))
+        window = trace[trace.index("stage") + 1:trace.index("createTask")]
+        self.assertEqual([method for method in window if method not in self._READ_METHODS], [])
+        self.assertEqual(self._lane_names(client)[int(self._created(client, "product:butler")["swimlane_id"])], "butler")
+
+    def test_a_death_after_the_lane_is_created_leaves_the_record_creatable(self) -> None:
+        """The reviewed failure, as a test: the lane is added, then the writer dies.
+
+        Death is modelled as the failure plus the cleanup that never ran: `TaskAudit.discard` is a
+        no-op for that attempt, so whatever was staged stays staged, as it would after a kill.
+        With the lane provisioned before staging nothing is staged at all, and the same request id
+        still creates the record; staged first, it would be a pending occurrence that only
+        confirmation may resolve, and the record could never be created under that id.
+        """
+        client = LiveSwimlaneBoard()
+        store = self._store(client)
+        original_call = client.call
+        die = True
+
+        def die_after_the_lane(method: str, **params: object) -> object:
+            nonlocal die
+            result = original_call(method, **params)
+            if method == "addSwimlane" and die:
+                die = False
+                raise RuntimeError("the writer stopped here")
+            return result
+
+        client.call = die_after_the_lane  # type: ignore[method-assign]
+        with mock.patch.object(TaskAudit, "discard", lambda *args, **kwargs: None):
+            with self.assertRaises(TaskError):
+                store.create_product(
+                    product_id="butler", projects=["secretary"], title="Butler", description="",
+                    actor="po", request_id="died-after-the-lane",
+                )
+
+        # The lane survives the failed attempt and is reused, not added a second time.
+        self.assertEqual([lane["name"] for lane in client.swimlanes][-1], "butler")
+        self.assertEqual(store.list_transactions(), [])
+        self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
+
+        product = store.create_product(
+            product_id="butler", projects=["secretary"], title="Butler", description="",
+            actor="po", request_id="died-after-the-lane",
+        )
+
+        self.assertEqual(product["id"], "butler")
+        added = [params["name"] for method, params in client.calls if method == "addSwimlane"]
+        self.assertEqual(added, ["butler"])
+        self.assertEqual(self._lane_names(client)[int(self._created(client, "product:butler")["swimlane_id"])], "butler")
+        self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
 
     def test_a_repeated_delivery_lands_in_the_lane_the_first_one_chose(self) -> None:
         """The lane is a function of the record, so a redelivered create cannot move it.
