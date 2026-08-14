@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -83,7 +84,7 @@ def _excluded(cwd: str) -> bool:
 
 
 def _dirname_for_cwd(cwd: str) -> str:
-    return "-" + cwd.strip("/").replace("/", "-")
+    return re.sub(r"[^A-Za-z0-9]", "-", cwd)
 
 
 # Same lossy '/'->'-' encoding as _cwd_from_claude_dir, applied to the known exclude paths
