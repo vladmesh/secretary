@@ -127,11 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = subparsers.add_parser("doctor", help="inspect an instance without changing the host")
     doctor.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
-    doctor.add_argument(
-        "--instance",
-        required=True,
-        help="path to an instance dir or instance.yaml",
-    )
+    _add_instance(doctor, help="path to an instance dir or instance.yaml")
     doctor.add_argument(
         "--offline",
         action="store_true",
@@ -152,7 +148,7 @@ def build_parser() -> argparse.ArgumentParser:
     doctor.set_defaults(handler=run_doctor)
 
     status = subparsers.add_parser("status", help="show the current installation state")
-    status.add_argument("--instance", required=True, help="path to an instance dir or instance.yaml")
+    _add_instance(status, help="path to an instance dir or instance.yaml")
     status.add_argument("--json", action="store_true", help="print the stable JSON status schema")
     status.add_argument("--offline", action="store_true", help="do not inspect the live host")
     status.add_argument("--host-fixture", metavar="DIR", help="read a fixture host inventory")
@@ -172,14 +168,11 @@ def build_parser() -> argparse.ArgumentParser:
     data_subcommands = data.add_subparsers(dest="data_command")
 
     data_init = data_subcommands.add_parser("init", help="create secretary-data and its manifest")
-    data_init.add_argument(
-        "--instance",
-        required=True,
+    _add_instance(
+        data_init,
+        data_dir=True,
         help="path to an instance dir or instance.yaml",
-    )
-    data_init.add_argument(
-        "--data-dir",
-        help="override instance.yaml data_dir",
+        data_dir_help="override instance.yaml data_dir",
     )
     data_init.set_defaults(handler=run_data_init)
 
@@ -187,14 +180,11 @@ def build_parser() -> argparse.ArgumentParser:
         "raw-kanboard-dump",
         help="copy the live Kanboard storage into secretary-data/board",
     )
-    raw_dump.add_argument(
-        "--instance",
-        required=True,
+    _add_instance(
+        raw_dump,
+        data_dir=True,
         help="path to an instance dir or instance.yaml",
-    )
-    raw_dump.add_argument(
-        "--data-dir",
-        help="override instance.yaml data_dir",
+        data_dir_help="override instance.yaml data_dir",
     )
     raw_dump.add_argument("--container", default="cp-kanboard")
     raw_dump.add_argument("--source-path", default=KANBOARD_DATA_PATH)
@@ -204,8 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
         "export",
         help="write board, memory, runs and transcript exports into secretary-data",
     )
-    export.add_argument("--instance", required=True)
-    export.add_argument("--data-dir")
+    _add_instance(export, data_dir=True)
     export.add_argument(
         "--copy-transcripts",
         action="store_true",
@@ -217,24 +206,21 @@ def build_parser() -> argparse.ArgumentParser:
         "export-board",
         help="write secretary-data/board normalized cards",
     )
-    export_board_command.add_argument("--instance", required=True)
-    export_board_command.add_argument("--data-dir")
+    _add_instance(export_board_command, data_dir=True)
     export_board_command.set_defaults(handler=run_export_board)
 
     export_memory_command = data_subcommands.add_parser(
         "export-memory",
         help="write secretary-data/memory facts and export.ndjson",
     )
-    export_memory_command.add_argument("--instance", required=True)
-    export_memory_command.add_argument("--data-dir")
+    _add_instance(export_memory_command, data_dir=True)
     export_memory_command.set_defaults(handler=run_export_memory)
 
     export_runs_command = data_subcommands.add_parser(
         "export-runs",
         help="write secretary-data/runs state exports",
     )
-    export_runs_command.add_argument("--instance", required=True)
-    export_runs_command.add_argument("--data-dir")
+    _add_instance(export_runs_command, data_dir=True)
     export_runs_command.add_argument(
         "--state-dir",
         default=str(
@@ -253,8 +239,7 @@ def build_parser() -> argparse.ArgumentParser:
         "export-transcripts",
         help="write secretary-data/transcripts inventory",
     )
-    export_transcripts_command.add_argument("--instance", required=True)
-    export_transcripts_command.add_argument("--data-dir")
+    _add_instance(export_transcripts_command, data_dir=True)
     export_transcripts_command.add_argument("--root", action="append", dest="roots")
     export_transcripts_command.add_argument("--copy", action="store_true")
     export_transcripts_command.set_defaults(handler=run_export_transcripts)
@@ -263,8 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
         "export-artifacts",
         help="write secretary-data/artifacts inventory and task docs",
     )
-    export_artifacts_command.add_argument("--instance", required=True)
-    export_artifacts_command.add_argument("--data-dir")
+    _add_instance(export_artifacts_command, data_dir=True)
     export_artifacts_command.set_defaults(handler=run_export_artifacts)
     data.set_defaults(handler=not_implemented("data"))
 
@@ -272,8 +256,7 @@ def build_parser() -> argparse.ArgumentParser:
     backup_subcommands = backup.add_subparsers(dest="backup_command")
 
     backup_create = backup_subcommands.add_parser("create")
-    backup_create.add_argument("--instance", required=True)
-    backup_create.add_argument("--data-dir")
+    _add_instance(backup_create, data_dir=True)
     backup_create.add_argument(
         "--kind",
         choices=("full", "core", "both"),
@@ -317,32 +300,29 @@ def build_parser() -> argparse.ArgumentParser:
             "and orca_binding, drop the canonical adapter, and require provision and gate again"
         ),
     )
-    project_add.add_argument(
-        "--instance",
-        default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
+    _add_env_instance(
+        project_add,
         help=f"instance directory (default: SECRETARY_INSTANCE or {DEFAULT_INSTANCE})",
     )
     project_add.set_defaults(handler=run_project_add)
     provision_start = project_subcommands.add_parser("provision-start")
     provision_start.add_argument("project_id")
-    provision_start.add_argument(
-        "--instance",
-        default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
+    _add_env_instance(
+        provision_start,
         help=f"instance directory (default: SECRETARY_INSTANCE or {DEFAULT_INSTANCE})",
     )
     provision_start.set_defaults(handler=run_project_provision_start)
     provision_apply = project_subcommands.add_parser("provision-apply")
     provision_apply.add_argument("project_id")
     provision_apply.add_argument("--result")
-    provision_apply.add_argument(
-        "--instance",
-        default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
+    _add_env_instance(
+        provision_apply,
         help=f"instance directory (default: SECRETARY_INSTANCE or {DEFAULT_INSTANCE})",
     )
     provision_apply.set_defaults(handler=run_project_provision_apply)
     gate = project_subcommands.add_parser("gate")
     gate.add_argument("project_id")
-    gate.add_argument("--instance", default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE))
+    _add_env_instance(gate)
     gate.set_defaults(handler=run_project_gate)
     project.set_defaults(handler=not_implemented("project"))
 
@@ -384,14 +364,13 @@ def build_parser() -> argparse.ArgumentParser:
         "verify",
         help="verify instance memory canon, derived export and index parity",
     )
-    memory_verify.add_argument("--instance", required=True)
-    memory_verify.add_argument("--data-dir")
+    _add_instance(memory_verify, data_dir=True)
     memory_verify.set_defaults(handler=run_memory_verify)
 
     memory_reindex = memory_subcommands.add_parser(
         "reindex", help="rebuild the derived memory index from the local journal"
     )
-    memory_reindex.add_argument("--instance", required=True)
+    _add_instance(memory_reindex)
     memory_reindex.set_defaults(handler=run_memory_reindex)
 
     memory_propose = memory_subcommands.add_parser("propose")
@@ -430,7 +409,7 @@ def build_parser() -> argparse.ArgumentParser:
         "write",
         help="commit one markdown document into state/knowledge under the writer lock",
     )
-    knowledge_write.add_argument("--instance", required=True)
+    _add_instance(knowledge_write)
     knowledge_write.add_argument("--actor", required=True)
     knowledge_write.add_argument(
         "--path", required=True, help="document path relative to state/knowledge"
@@ -442,7 +421,7 @@ def build_parser() -> argparse.ArgumentParser:
     knowledge_list = knowledge_subcommands.add_parser(
         "list", help="list documents currently in state/knowledge"
     )
-    knowledge_list.add_argument("--instance", required=True)
+    _add_instance(knowledge_list)
     knowledge_list.set_defaults(handler=run_knowledge_list)
     knowledge.set_defaults(handler=not_implemented("knowledge"))
 
@@ -452,9 +431,28 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def add_memory_write_common(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--instance", required=True)
-    parser.add_argument("--data-dir")
+    _add_instance(parser, data_dir=True)
     parser.add_argument("--actor", required=True)
+
+
+def _add_instance(
+    parser: argparse.ArgumentParser,
+    *,
+    data_dir: bool = False,
+    help: str | None = None,
+    data_dir_help: str | None = None,
+) -> None:
+    parser.add_argument("--instance", required=True, help=help)
+    if data_dir:
+        parser.add_argument("--data-dir", help=data_dir_help)
+
+
+def _add_env_instance(parser: argparse.ArgumentParser, *, help: str | None = None) -> None:
+    parser.add_argument(
+        "--instance",
+        default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
+        help=help,
+    )
 
 
 def run_doctor(args: argparse.Namespace) -> int:
