@@ -19,7 +19,6 @@ from ...runtime.redact import scrub_secrets
 from . import heads, model, naming
 from .state import STATE
 
-
 DONE_RETENTION_DAYS = 5
 
 
@@ -865,7 +864,7 @@ def export_cards() -> list[dict]:
     return out
 
 
-def close_old_done_cards(now: int | float | None = None,
+def close_old_done_cards(now: float | None = None,
                          retention_days: int = DONE_RETENTION_DAYS) -> dict:
     """Close active Done cards that have spent more than `retention_days` full days there.
 

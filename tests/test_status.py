@@ -11,11 +11,19 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.cli import main
-from secretary.config import validate
-from secretary.host import CollectResult, HostInventory, build_doctor_expectations, packaging_root
-from secretary.head_registry import materialize_snapshot, product_revision, record_source
+from secretary.config import validate, validate_instance
+from secretary.head_registry import (
+    materialize_snapshot,
+    product_revision,
+    record_source,
+)
+from secretary.host import (
+    CollectResult,
+    HostInventory,
+    build_doctor_expectations,
+    packaging_root,
+)
 from secretary.host_apply import resolve_packaged
-from secretary.config import validate_instance
 from secretary.secret_store import initialize_store, set_secret
 from secretary.status import collect_status
 from secretary.tasks import TaskAudit

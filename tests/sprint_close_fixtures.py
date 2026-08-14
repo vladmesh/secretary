@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 KEEP_OPEN_REASON = "the sprint closed with this issue unfinished"
 DROP_REASON = "unfinished when the sprint closed"
 

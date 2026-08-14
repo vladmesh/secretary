@@ -13,11 +13,6 @@ from typing import Any
 
 from secretary._fsutil import file_lock
 from secretary.dispatcher_helpers import _last_marker
-from secretary.dispatcher_observer import (
-    freeze_observers,
-    observer_snapshot,
-    resume_observers,
-)
 from secretary.dispatcher_launch import (
     REVIEW_ROLE,
     WORKER_ROLE,
@@ -30,6 +25,11 @@ from secretary.dispatcher_launch import (
     mark_launch_aborted,
     stop_launch_intent,
     write_launch_intent,
+)
+from secretary.dispatcher_observer import (
+    freeze_observers,
+    observer_snapshot,
+    resume_observers,
 )
 from secretary.dispatcher_pause import (
     PAUSE_MODES,

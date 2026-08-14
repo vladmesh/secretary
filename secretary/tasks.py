@@ -14,18 +14,28 @@ import threading
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from secretary.board.card_transitions import CardTransitionForbidden, card_transition
 from secretary.board.events import BoardEventPending
 from secretary.board.host import MarkerComment, MutationResult, TransitionRequest
-from secretary.board.models import Actor, CardState, EntityKind, Event, EventKind, RelatedRefs
+from secretary.board.models import (
+    Actor,
+    CardState,
+    EntityKind,
+    Event,
+    EventKind,
+    RelatedRefs,
+)
 from secretary.board.transitions import BoardProtocolError
 from secretary.board_transport import (
-    BoardTransport, BoardTransportError, resolve, transport_path,
+    BoardTransport,
+    BoardTransportError,
+    resolve,
+    transport_path,
 )
 from secretary.role_env import RUNTIME_ENV_FILE_ENVS, runtime_env_path
 from triggered_agents.runtime.head import CODEX_LAUNCH_MODES
@@ -316,7 +326,7 @@ class KanboardClient:
         self._transport = transport
 
     @classmethod
-    def for_instance(cls, instance: str | Path) -> "KanboardClient":
+    def for_instance(cls, instance: str | Path) -> KanboardClient:
         try:
             root = normalize_instance_dir(instance).resolve()
             return cls(resolve(root), root)
@@ -2604,7 +2614,7 @@ class TaskWriter:
                 return False
             rendered = str(comment.get("body") or "")
             prefix = f"[{marker}]\n"
-            body = rendered[len(prefix):] if rendered.startswith(prefix) else rendered
+            body = rendered.removeprefix(prefix)
             return _digest(body) == expected
 
         task = self.reader.show(ref)

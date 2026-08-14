@@ -7,6 +7,17 @@ from functools import wraps
 from pathlib import Path
 
 from secretary.cli_output import print_json
+from secretary.config import validate_instance
+from secretary.host import (
+    LiveHostSource,
+    build_expectations,
+    build_plan,
+    foreign_units,
+    load_managed_manifest,
+    plan_changes,
+    plan_input_errors,
+)
+from secretary.host_apply import resolve_installed_packaged
 from secretary.restore import (
     RestoreError,
     _target,
@@ -18,17 +29,6 @@ from secretary.restore import (
     restore_backup,
     restore_state,
 )
-from secretary.host_apply import resolve_installed_packaged
-from secretary.host import (
-    LiveHostSource,
-    build_expectations,
-    build_plan,
-    foreign_units,
-    load_managed_manifest,
-    plan_changes,
-    plan_input_errors,
-)
-from secretary.config import validate_instance
 
 
 def add_restore_subcommands(subparsers) -> None:

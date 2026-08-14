@@ -37,7 +37,7 @@ import os
 import sys
 
 from . import pause as pause_flag
-from .model import GuardError, ROLES
+from .model import ROLES, GuardError
 
 
 def _emit(obj) -> int:

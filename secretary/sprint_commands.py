@@ -5,15 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
+from secretary.config import ConfigError, load_config
+from secretary.dispatcher_observer import observer_snapshot
 from secretary.sprint_observer import observer_choice
 from secretary.sprints import BUDGET_EVENT_TYPES, SprintReader, SprintWriter
 from secretary.task_commands import _add_data_dir_args, _read_body, resolve_data_dir
 from secretary.tasks import KanboardClient, TaskError
-from secretary.dispatcher_observer import observer_snapshot
-from secretary.config import ConfigError, load_config
 
 
 def add_sprint_subcommands(subparsers) -> None:

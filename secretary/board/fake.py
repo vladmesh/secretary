@@ -13,8 +13,11 @@ from typing import TypeVar
 from secretary.board.events import BoardEventCanon, MutationEventTransaction
 from secretary.board.host import Create, MutationResult, Replace, TransitionRequest
 from secretary.board.models import BoardEntity, EntityKind, Event, EventKind
-from secretary.board.transitions import BoardProtocolError, InvalidTransition, transition
-
+from secretary.board.transitions import (
+    BoardProtocolError,
+    InvalidTransition,
+    transition,
+)
 
 T = TypeVar("T", bound=BoardEntity)
 

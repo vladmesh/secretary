@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 import unittest
 import urllib.error
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -175,7 +175,7 @@ class HealthTests(unittest.TestCase):
     """A deferred run is not an answered tick, so it must not set the freshness clock."""
 
     def runs_status(self, results: list[str]) -> tuple[list[str], str]:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         records = [{"ts": (now - timedelta(minutes=len(results) - i)).isoformat(),
                     "event": "precheck", "result": r} for i, r in enumerate(results)]
         with mock.patch.object(health, "_runs", return_value=records):

@@ -16,8 +16,9 @@ it does not cover is worktree registration and removal, which belongs to a works
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Protocol, Sequence
+from typing import Any, Protocol
 
 from .tui_delivery_types import RunJson
 

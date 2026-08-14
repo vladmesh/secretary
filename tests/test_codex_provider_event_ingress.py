@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-import json
-import hashlib
 import copy
+import hashlib
+import json
 import os
 import subprocess
 import tempfile
@@ -25,23 +25,25 @@ from secretary.dispatcher_launch import (
     resolve_launch_intent,
     write_launch_intent,
 )
-from secretary.dispatcher_state import DispatcherRecord
-from secretary.dispatcher_tui import provider_progress_for_run
-from secretary.dispatcher_types import HostError
 from secretary.dispatcher_observer import (
     OBSERVER_ROLE,
     ObserverRecord,
-    _adopt_launch_intent as adopt_observer_launch_intent,
     _bind_codex_provider_ingress,
+)
+from secretary.dispatcher_observer import (
+    _adopt_launch_intent as adopt_observer_launch_intent,
+)
+from secretary.dispatcher_observer import (
     _write_launch_intent as write_observer_launch_intent,
 )
-from secretary.head_health import HeadReadiness
-from secretary.tasks import TaskAudit
+from secretary.dispatcher_state import DispatcherRecord
+from secretary.dispatcher_tui import provider_progress_for_run
+from secretary.dispatcher_types import HostError
 from secretary.dispatcher_worker_lifecycle import WorkerContinuationLiveness
+from secretary.head_health import HeadReadiness
+from tests.fakes.host import FakeSessionHost
 from triggered_agents.runtime import codex_preflight
 from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
-
-from tests.fakes.host import FakeSessionHost
 
 
 class CodexProviderEventIngressTests(unittest.TestCase):
@@ -764,7 +766,7 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
             return {"terminal": {"tail": ["working", "› "], "nextCursor": "turn-started"}}
 
     class Catalog:
-        def __init__(self, fixture: "ProductionPostDeliveryHandoffContractTests") -> None:
+        def __init__(self, fixture: ProductionPostDeliveryHandoffContractTests) -> None:
             self.fixture = fixture
 
         def head_profile(self, _head: str) -> dict[str, str]:

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import cache
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -50,7 +50,7 @@ class SchemaError:
         return f"{self.source}: {self.path}: {self.message}"
 
 
-@lru_cache(maxsize=None)
+@cache
 def load_schema(name: str) -> dict[str, Any]:
     try:
         filename = SCHEMAS[name]

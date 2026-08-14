@@ -1,43 +1,34 @@
 from __future__ import annotations
 
-import json
 import io
+import json
 import os
 import shutil
 import subprocess
-import sys
 import tarfile
 import tempfile
-import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.cli import main
+import secretary.backup_verify as backup_verify_module
 from secretary.backup import verify_backup
 from secretary.backup_policy import ARCHIVE_ROOT
-from secretary._fsutil import sha256_file
-from secretary.data import DataExport, export_memory, init_layout, normalize_board_card
-from secretary.host import CollectResult, HostInventory, build_plan
-import secretary.restore_commands as restore_commands
-import secretary.restore as restore_module
-import secretary.backup_verify as backup_verify_module
+from secretary.cli import main
 from secretary.restore import (
     RestoreError,
     bootstrap_empty,
-    import_normalized_board,
-    mark_reconcile_applied,
-    rebuild_memory_index,
     restore_backup,
-    restore_findings,
-    restore_state,
 )
-from tests.fakes.tasks import WriteKanboard
-
-
 from tests.restore_fixtures import (
-    _core_archive, _full_archive, _git_history, _prepare_producer_data,
-    _producer_exports, _write_checksums, _write_instance, _write_instance_to,
+    _core_archive,
+    _full_archive,
+    _git_history,
+    _prepare_producer_data,
+    _producer_exports,
+    _write_checksums,
+    _write_instance,
+    _write_instance_to,
     create_backup,
 )
 

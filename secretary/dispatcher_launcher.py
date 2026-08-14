@@ -7,8 +7,9 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from secretary.role_env import (
     RoleEnvError,
@@ -16,10 +17,12 @@ from secretary.role_env import (
 )
 from triggered_agents.runtime.codex_preflight import (
     CodexPreflightError,
-    reject_symlinked_config as _reject_symlinked_config,
 )
 from triggered_agents.runtime.codex_preflight import (
     ensure_codex_workspace_trusted as _preflight_codex_workspace,
+)
+from triggered_agents.runtime.codex_preflight import (
+    reject_symlinked_config as _reject_symlinked_config,
 )
 
 CLAUDE_JSON_DEFAULT = str(Path.home() / ".claude.json")

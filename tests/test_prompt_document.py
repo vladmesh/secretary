@@ -15,7 +15,6 @@ from triggered_agents.runtime.prompt_document import (
     write_prompt_document,
 )
 
-
 # What a card description can carry into a prompt and what the composer failures were made of: an
 # escape, a bracketed-paste terminator, and the CRLF the board's own web form submits.
 HOSTILE_PROMPT = (

@@ -5,13 +5,13 @@ from __future__ import annotations
 import json
 import subprocess
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any
 
 from secretary._fsutil import write_json
 from secretary.dispatcher_types import HostError
-
 
 PROBE_TTL_SECONDS = 300
 PROBE_TIMEOUT_SECONDS = 20

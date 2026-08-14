@@ -12,6 +12,7 @@ from unittest import mock
 import yaml
 
 from secretary import installation, secret_commands, secret_store, state_repo
+from secretary.board_transport import ensure as ensure_board_transport
 from secretary.cli import main
 from secretary.config import validate
 from secretary.secret_store import (
@@ -35,7 +36,6 @@ from secretary.secret_store import (
     set_secret,
     store_divergence,
 )
-from secretary.board_transport import ensure as ensure_board_transport
 from secretary.secret_words import RECOVERY_WORDS
 
 
@@ -238,8 +238,8 @@ class RoundTripCase(SecretStoreCase):
 
     def test_multiline_and_binary_values_survive_unchanged(self) -> None:
         multiline = (
-            "-----BEGIN CERTIFICATE-----\nline one\r\nline two\n\n  trailing spaces   \n"
-        ).encode("utf-8")
+            b"-----BEGIN CERTIFICATE-----\nline one\r\nline two\n\n  trailing spaces   \n"
+        )
         binary = bytes(range(256)) * 4
         set_secret(
             self.instance_dir,

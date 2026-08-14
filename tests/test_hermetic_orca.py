@@ -72,20 +72,19 @@ class HermeticOrcaDiscoveryTests(unittest.TestCase):
             root = Path(tmp)
             instance_path = root / "instance"
             instance_path.mkdir()
-            with legacy_orca_runtime(root) as discoverable:
-                with (
-                    mock.patch(
-                        "secretary.host_apply.find_orca_executable",
-                        side_effect=real_find_orca_executable,
-                    ),
-                    mock.patch(
-                        "secretary.host_apply._is_executable",
-                        side_effect=_is_executable_without_pinned_candidate,
-                    ),
-                ):
-                    layout = resolve_systemd_layout(
-                        {}, instance_path=instance_path, runtime_user="operator",
-                    )
+            with (
+                legacy_orca_runtime(root) as discoverable, mock.patch(
+                    "secretary.host_apply.find_orca_executable",
+                    side_effect=real_find_orca_executable,
+                ),
+                mock.patch(
+                    "secretary.host_apply._is_executable",
+                    side_effect=_is_executable_without_pinned_candidate,
+                ),
+            ):
+                layout = resolve_systemd_layout(
+                    {}, instance_path=instance_path, runtime_user="operator",
+                )
 
             self.assertEqual(layout.orca_executable, discoverable)
 

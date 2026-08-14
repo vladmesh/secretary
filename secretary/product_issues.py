@@ -17,11 +17,10 @@ from secretary.tasks import (
     KanboardClient,
     TaskAudit,
     TaskError,
-    all_project_cards,
     _now,
     _positive_int,
+    all_project_cards,
 )
-
 
 ISSUES_COLUMN = "Issues"
 PRODUCT_TYPE = "product"
@@ -1025,7 +1024,13 @@ class ProductIssueStore:
             try:
                 self._reject_other_pending_reference_operation(reference, request_id)
                 self._reject_other_pending_typed_operation(reference, request_id)
-                from secretary.board import Actor, EntityKind, Issue, IssueState, TransitionRequest
+                from secretary.board import (
+                    Actor,
+                    EntityKind,
+                    Issue,
+                    IssueState,
+                    TransitionRequest,
+                )
                 current = self._host().read(EntityKind.ISSUE, reference)
                 if isinstance(current, Issue) and current.state is IssueState.CLOSED:
                     try:

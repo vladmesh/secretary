@@ -4,7 +4,7 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 
-from secretary.backup_policy import BackupKind, POLICIES
+from secretary.backup_policy import POLICIES, BackupKind
 
 
 def apply_retention(backups_dir: Path, *, keep: set[Path], now: datetime) -> None:

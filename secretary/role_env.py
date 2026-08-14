@@ -5,8 +5,8 @@ from __future__ import annotations
 from triggered_agents.runtime.role_env import (
     BOARD_ROLES,
     BOARD_TRANSPORT_ROLES,
-    LAUNCHER_ONLY_ENV,
     LAUNCH_BOUND_ENV,
+    LAUNCHER_ONLY_ENV,
     NONSECRET_ENV,
     OBSERVER_GENERATION_ENV,
     OBSERVER_SPRINT_ENV,
@@ -20,12 +20,14 @@ from triggered_agents.runtime.role_env import (
     RoleEnvError,
     allowlist,
     declared_observer_sprint,
-    load_env_file,
     is_sensitive_env_name,
-    main as _shared_main,
+    load_env_file,
     observer_binding,
     runtime_env,
     runtime_env_path,
+)
+from triggered_agents.runtime.role_env import (
+    main as _shared_main,
 )
 
 __all__ = [
@@ -46,8 +48,8 @@ __all__ = [
     "RoleEnvError",
     "allowlist",
     "declared_observer_sprint",
-    "load_env_file",
     "is_sensitive_env_name",
+    "load_env_file",
     "main",
     "observer_binding",
     "runtime_env",

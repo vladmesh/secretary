@@ -5,7 +5,7 @@ import threading
 import unittest
 from unittest import mock
 
-from triggered_agents.runtime.pane_host import safe_command_label
+from triggered_agents.runtime import dispatch
 from triggered_agents.runtime.agent_prompt_transport import (
     AGENT_PROMPT_MAX_BYTES,
     BRACKETED_PASTE_END,
@@ -14,7 +14,7 @@ from triggered_agents.runtime.agent_prompt_transport import (
     prepare_agent_prompt,
     send_agent_prompt,
 )
-from triggered_agents.runtime import dispatch
+from triggered_agents.runtime.pane_host import safe_command_label
 from triggered_agents.runtime.tui_delivery import read_pane, wait_for_tui_idle
 
 

@@ -7,9 +7,9 @@ being masked and, just as important, what must not be: a git sha in a CI-failure
 """
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
-import tempfile
 from unittest import mock
 
 from triggered_agents.runtime.redact import REDACTED, redact, scrub_secrets

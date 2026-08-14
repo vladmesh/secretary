@@ -15,7 +15,6 @@ from secretary.dispatcher_worker_lifecycle import (
     WorkerReportNudge,
 )
 
-
 # Every way a claim can answer "not this card". A claim-skip is about the card in front of the
 # scan and says nothing about the ones behind it, so the Ready pass records it and moves on to the
 # next card — halting the pass would let one unclaimable card stop work that has somewhere to go,
@@ -322,7 +321,7 @@ class DispatcherRecord:
         }
 
     @classmethod
-    def from_json(cls, payload: dict[str, Any]) -> "DispatcherRecord":
+    def from_json(cls, payload: dict[str, Any]) -> DispatcherRecord:
         # A record written before the continuation became one object carried the retention as flat
         # fields. Nothing reads them any more, so loading such a record would report "no
         # continuation" for a worker that is in fact frozen with a delivery pending: the lifecycle

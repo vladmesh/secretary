@@ -15,23 +15,24 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
-from secretary.cli import main
 from secretary.board.card_transitions import CARD_TRANSITIONS
-from secretary.board.kanboard import KanboardBoardHost
 from secretary.board.host import TransitionRequest
+from secretary.board.kanboard import KanboardBoardHost
 from secretary.board.models import Actor, CardState, EntityKind, Event, RelatedRefs
 from secretary.board.transitions import TRANSITIONS, transition_for
 from secretary.board_transport import BoardTransport
+from secretary.cli import main
 from secretary.data import export_board
 from secretary.dispatcher_state import claim_mismatch
-from secretary.sprints import refresh_active_sprint_projects
 from secretary.routing_journal import (
     HeadRun,
     attempts,
     head_run_from_profile,
     routing_payload,
 )
+from secretary.sprints import refresh_active_sprint_projects
 from secretary.tasks import (
+    _STATE_BY_COLUMN,
     KanboardClient,
     TaskAudit,
     TaskError,
@@ -39,10 +40,8 @@ from secretary.tasks import (
     TaskWriter,
     is_significant_observer_event,
     standing_decision,
-    _STATE_BY_COLUMN,
 )
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
-
 
 CARD_STATES = ("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done")
 
@@ -2766,13 +2765,12 @@ class AssessmentStateTests(unittest.TestCase):
         self.assertEqual(denial["payload"]["code"], "observer_sprint_mismatch")
         self.assertEqual(denial["payload"]["sprint"], "sprint:2000")
 
-        with self.assertRaises(TaskError) as unbound:
-            with unbound_observer():
-                self.writer.decide(
-                    role="observer", actor="observer", reference="secretary-468",
-                    kind="release", body="deciding from a head nobody bound",
-                    request_id="decision-from-an-unbound-head",
-                )
+        with self.assertRaises(TaskError) as unbound, unbound_observer():
+            self.writer.decide(
+                role="observer", actor="observer", reference="secretary-468",
+                kind="release", body="deciding from a head nobody bound",
+                request_id="decision-from-an-unbound-head",
+            )
         self.assertEqual(unbound.exception.code, "observer_identity_unbound")
 
     def test_a_po_override_still_takes_a_parked_card_back_to_ready(self) -> None:

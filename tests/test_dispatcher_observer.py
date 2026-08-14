@@ -20,9 +20,6 @@ from secretary.dispatcher import (
     InstanceCatalog,
 )
 from secretary.dispatcher_heartbeat import heartbeat_identity
-from secretary.dispatcher_observer_fence import EVENT_CLEARED, EVENT_FENCED
-from triggered_agents.runtime.head import HeadCommand, HeadRun
-from secretary.dispatcher_tui import DeliveryEvidence, TuiDeliveryError
 from secretary.dispatcher_observer import (
     EVENT_DEFERRED,
     EVENT_LAUNCHED,
@@ -33,22 +30,27 @@ from secretary.dispatcher_observer import (
     ObserverDelivery,
     ObserverLaunchAborted,
     ObserverRecord,
+    _observer_event_state,
     load_observers,
     observer_alive,
-    _observer_event_state,
+    observer_launch_prompt,
     observer_pid_file,
+    observer_request_id,
     observer_snapshot,
     put_observers,
-    observer_request_id,
-    observer_launch_prompt,
     render_observer_prompt,
     stop_observer_head,
 )
-from secretary.sprints import SprintReader, SprintWriter
+from secretary.dispatcher_observer_fence import EVENT_CLEARED, EVENT_FENCED
+from secretary.dispatcher_production import (
+    _budget_event_type,
+    _production_claim_ready,
+    _reconcile_sprint_budget,
+)
+from secretary.dispatcher_tui import DeliveryEvidence, TuiDeliveryError
 from secretary.dispatcher_types import HostError
-from secretary.sprint_observer import encode_observer, head_choice
-from secretary.dispatcher_production import _budget_event_type, _production_claim_ready, _reconcile_sprint_budget
 from secretary.dispatcher_watchdog import initial_output_stall_seconds
+from secretary.dispatcher_worker_lifecycle import head_run_binding
 from secretary.head_health import HeadReadiness
 from secretary.head_registry import canonical_heads
 from secretary.role_env import (
@@ -59,16 +61,10 @@ from secretary.role_env import (
     observer_binding,
     runtime_env,
 )
+from secretary.sprint_observer import encode_observer, head_choice
+from secretary.sprints import SprintReader, SprintWriter
 from secretary.status import _observers as status_observers
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter, _now
-from triggered_agents.runtime.agent_prompt_transport import BRACKETED_PASTE_END, BRACKETED_PASTE_START
-from triggered_agents.runtime import codex_preflight
-from triggered_agents.runtime.codex_preflight import ensure_codex_workspace_trusted
-from secretary.dispatcher_worker_lifecycle import head_run_binding
-
-from tests.observer_identity import as_observer, bind_observer
-from tests.fanout_fixtures import accepted_transport_run
-from tests.sprint_close_fixtures import close_decisions, settle_dispatcher_work
 from tests.fakes.dispatcher import (
     FakeCatalog,
     FakeHost,
@@ -76,10 +72,22 @@ from tests.fakes.dispatcher import (
     TwoOpenSprintAdmission,
 )
 from tests.fakes.observer import (
-    BLOCKED_PANE_WAIT_BODY, DEAD_PID, STALE_HANDLE_WAIT_FAILURE, TIMEOUT_WAIT_FAILURE,
+    BLOCKED_PANE_WAIT_BODY,
+    DEAD_PID,
+    STALE_HANDLE_WAIT_FAILURE,
+    TIMEOUT_WAIT_FAILURE,
     install_skill_registry,
 )
-
+from tests.fanout_fixtures import accepted_transport_run
+from tests.observer_identity import as_observer, bind_observer
+from tests.sprint_close_fixtures import close_decisions, settle_dispatcher_work
+from triggered_agents.runtime import codex_preflight
+from triggered_agents.runtime.agent_prompt_transport import (
+    BRACKETED_PASTE_END,
+    BRACKETED_PASTE_START,
+)
+from triggered_agents.runtime.codex_preflight import ensure_codex_workspace_trusted
+from triggered_agents.runtime.head import HeadCommand, HeadRun
 
 
 class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
@@ -1035,9 +1043,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         """
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
-        with self.failing_state_save(after=1):
-            with self.assertRaises(OSError):
-                self.runtime.production_tick()
+        with self.failing_state_save(after=1), self.assertRaises(OSError):
+            self.runtime.production_tick()
         adopted = self.runtime.production_tick()
         self.assertEqual([row["action"] for row in self.actions(adopted)], ["observer-adopted"])
         record = self.observers()["sprint:1"]
@@ -2830,9 +2837,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.open_sprint()
         # The fence raises on the first tick of a declared row and writes that once. This test is
         # about the launch's own audit write, so the fence has already said its piece by here.
-        with self.failing_state_save(after=0):
-            with self.assertRaises(OSError):
-                self.runtime.production_tick()
+        with self.failing_state_save(after=0), self.assertRaises(OSError):
+            self.runtime.production_tick()
 
         with self.broken_stage():
             result = self.runtime.production_tick()
@@ -2933,9 +2939,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_state_that_cannot_be_written_launches_no_head_at_all(self) -> None:
         self.open_sprint()
 
-        with self.failing_state_save():
-            with self.assertRaises(OSError):
-                self.runtime.production_tick()
+        with self.failing_state_save(), self.assertRaises(OSError):
+            self.runtime.production_tick()
 
         self.assertEqual(self.host.observers, [])
         self.assertEqual(self.observers(), {})
@@ -2948,9 +2953,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_a_launch_intent_that_outlived_its_tick_is_adopted_not_doubled(self) -> None:
         self.open_sprint()
-        with self.failing_state_save(after=1):
-            with self.assertRaises(OSError):
-                self.runtime.production_tick()
+        with self.failing_state_save(after=1), self.assertRaises(OSError):
+            self.runtime.production_tick()
 
         intent = self.observers()["sprint:1"]
         self.assertEqual((intent.state, intent.pending_launch, intent.handle), ("launching", 1, ""))
@@ -2978,9 +2982,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_a_live_foreign_observer_heartbeat_is_fenced_without_a_stop_or_relaunch(self) -> None:
         self.open_sprint()
-        with self.failing_state_save(after=1):
-            with self.assertRaises(OSError):
-                self.runtime.production_tick()
+        with self.failing_state_save(after=1), self.assertRaises(OSError):
+            self.runtime.production_tick()
         record = self.observers()["sprint:1"]
         path = Path(record.pid_file)
         heartbeat = json.loads(path.read_text(encoding="utf-8"))
@@ -3001,9 +3004,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_an_observer_launch_persists_its_returned_leaf_before_outcome_commit(self) -> None:
         """A crash after `terminal create` retains the leaf that identifies its alias pane."""
         self.open_sprint()
-        with self.failing_state_save(after=2):
-            with self.assertRaises(OSError):
-                self.runtime.production_tick()
+        with self.failing_state_save(after=2), self.assertRaises(OSError):
+            self.runtime.production_tick()
 
         intent = self.observers()["sprint:1"]
         self.assertEqual(
@@ -3023,9 +3025,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         not only the first, has to resolve the intent to the head that is already running.
         """
         self.open_sprint()
-        with self.failing_state_save(after=1):
-            with self.assertRaises(OSError):
-                self.runtime.production_tick()
+        with self.failing_state_save(after=1), self.assertRaises(OSError):
+            self.runtime.production_tick()
 
         self.assertEqual(self.host.observers, ["sprint:1"])
         self.assertEqual(self.observers()["sprint:1"].state, "launching")
@@ -3041,9 +3042,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_an_adopted_head_is_stopped_through_its_workspace(self) -> None:
         self.open_sprint()
-        with self.failing_state_save(after=1):
-            with self.assertRaises(OSError):
-                self.runtime.production_tick()
+        with self.failing_state_save(after=1), self.assertRaises(OSError):
+            self.runtime.production_tick()
         self.runtime.production_tick()
         self.close_sprint()
 
@@ -3055,9 +3055,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_a_freeze_takes_an_adopted_head_down_too(self) -> None:
         self.open_sprint()
-        with self.failing_state_save(after=1):
-            with self.assertRaises(OSError):
-                self.runtime.production_tick()
+        with self.failing_state_save(after=1), self.assertRaises(OSError):
+            self.runtime.production_tick()
         self.runtime.production_tick()
 
         status = self.runtime.pause_pipeline(
@@ -3072,9 +3071,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.open_sprint()
         # The heartbeat writes a pid nobody is running under, so the head of the lost tick is dead.
         self.host.observer_pid = DEAD_PID
-        with self.failing_state_save(after=1):
-            with self.assertRaises(OSError):
-                self.runtime.production_tick()
+        with self.failing_state_save(after=1), self.assertRaises(OSError):
+            self.runtime.production_tick()
 
         self.host.observer_pid = os.getpid()
         result = self.runtime.production_tick()
@@ -3148,9 +3146,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_a_waiting_intent_whose_head_appears_is_adopted(self) -> None:
         self.open_sprint()
-        with self.failing_state_save(after=1):
-            with self.assertRaises(OSError):
-                self.runtime.production_tick()
+        with self.failing_state_save(after=1), self.assertRaises(OSError):
+            self.runtime.production_tick()
         pid_file = Path(self.observers()["sprint:1"].pid_file)
         written = pid_file.read_text(encoding="utf-8")
         pid_file.unlink()

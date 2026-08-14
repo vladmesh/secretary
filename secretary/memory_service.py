@@ -4,17 +4,17 @@ SQLite + sqlite-vec for storage/ANN, fastembed (bge-m3, multilingual) for embedd
 exposed over streamable-HTTP so Claude / Codex / Hermes all share ONE warm instance.
 """
 
+import datetime
 import hashlib
 import json
 import os
 import sqlite3
-import datetime
 import subprocess
+import tempfile
 import threading
 import time
-import tempfile
-from typing import Any
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import sqlite_vec

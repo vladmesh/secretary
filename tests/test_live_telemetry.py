@@ -19,30 +19,28 @@ import os
 import tempfile
 import time
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
 from secretary import host
 from secretary.cli import build_parser
-from secretary.dispatcher import DispatcherRuntime, runtime_from_args
-from secretary.dispatcher_production import (
-    TICK_TELEMETRY_DEGRADATIONS_KEPT,
-    TICK_TELEMETRY_UNHEALTHY_KEPT,
-    record_tick_telemetry,
-)
-from secretary.dispatcher import default_data_dir
+from secretary.dispatcher import DispatcherRuntime, default_data_dir, runtime_from_args
 from secretary.dispatcher_observer import (
     STATE_PAUSE_STOP_PENDING,
     ObserverRecord,
     put_observers,
+)
+from secretary.dispatcher_production import (
+    TICK_TELEMETRY_DEGRADATIONS_KEPT,
+    TICK_TELEMETRY_UNHEALTHY_KEPT,
+    record_tick_telemetry,
 )
 from secretary.dispatcher_watchdog import idle_stall_seconds
 from secretary.head_health import HeadHealth
 from secretary.head_registry import materialize_snapshot, record_source
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 from tests.fakes.dispatcher import FakeCatalog, FakeHost, FakeKanboard
-
 from triggered_agents.agents.steward import cli as steward_cli
 from triggered_agents.agents.steward import signals as steward_signals
 from triggered_agents.runtime import health, production_telemetry, role_env
@@ -50,7 +48,7 @@ from triggered_agents.runtime.state import PRECHECK_SKIP, AgentState
 
 
 def _ts(minutes_ago: float) -> str:
-    return (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat()
+    return (datetime.now(UTC) - timedelta(minutes=minutes_ago)).isoformat()
 
 
 def _instance(root: Path, data_dir: Path) -> Path:
@@ -363,9 +361,8 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         with mock.patch(
             "secretary.dispatcher_production._production_tasks",
             side_effect=TaskError("backend_unavailable", "board is down", 1),
-        ):
-            with self.assertRaises(TaskError):
-                self.runtime.production_tick()
+        ), self.assertRaises(TaskError):
+            self.runtime.production_tick()
 
         telemetry = self.read_through_the_agent_reader()
         self.assertFalse(telemetry.last["healthy"])
@@ -468,9 +465,8 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         with mock.patch(
             "secretary.dispatcher_production._reconcile_production",
             side_effect=RuntimeError("host is gone"),
-        ):
-            with self.assertRaises(RuntimeError):
-                self.runtime.production_tick()
+        ), self.assertRaises(RuntimeError):
+            self.runtime.production_tick()
 
         after = json.loads(self.runtime.production_state.path.read_text(encoding="utf-8"))
         self.assertEqual(

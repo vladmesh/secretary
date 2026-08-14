@@ -25,7 +25,6 @@ import stat
 import tempfile
 from pathlib import Path
 
-
 # A ceiling in bytes, because bytes are what the terminal receives. 256 is far below any length
 # that has ever been mishandled and far above any path this product produces, so a nudge that does
 # not fit is a caller with a pathological path rather than a limit worth tuning.

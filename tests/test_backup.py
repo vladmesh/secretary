@@ -3,7 +3,6 @@ from __future__ import annotations
 import fcntl
 import json
 import os
-import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -14,10 +13,9 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary.backup import create_backups, verify_backup
-from tests.restore_fixtures import create_backup
 from secretary.backup_policy import POLICIES, should_skip_data_entry
-from secretary._fsutil import sha256_file
 from secretary.data import DataExport
+from tests.restore_fixtures import create_backup
 
 
 class BackupTests(unittest.TestCase):
@@ -425,10 +423,9 @@ class BackupTests(unittest.TestCase):
                 mock.patch(
                     "secretary.backup._pipeline_action",
                     side_effect=AssertionError("pause action should not run"),
-                ),
+                ),self.assertRaisesRegex(RuntimeError, "already paused")
             ):
-                with self.assertRaisesRegex(RuntimeError, "already paused"):
-                    create_backup(instance)
+                create_backup(instance)
 
     def test_create_releases_lock_when_preexisting_freeze_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -526,7 +523,7 @@ class BackupTests(unittest.TestCase):
                     side_effect=lambda data_dir_arg, _instance_dir, **_kwargs: _fake_exports(data_dir_arg),
                 ),
             ):
-                from datetime import datetime, UTC
+                from datetime import UTC, datetime
 
                 fake_datetime.now.return_value = datetime(2026, 7, 10, tzinfo=UTC)
                 fake_datetime.strptime.side_effect = datetime.strptime

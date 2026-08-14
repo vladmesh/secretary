@@ -18,7 +18,7 @@ from __future__ import annotations
 import os
 import tomllib
 from collections.abc import Mapping
-from functools import lru_cache
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -327,7 +327,7 @@ def load_registry(path: Path | None = None) -> Registry:
     return _load_registry(path if path is not None else registry_path())
 
 
-@lru_cache(maxsize=None)
+@cache
 def _load_registry(path: Path) -> Registry:
     """The registry file, parsed and validated. Cached per (process, path) — every dispatcher tick
     is a fresh `python3 -m triggered_agents pipeline tick` process, so this only dedupes the 2+

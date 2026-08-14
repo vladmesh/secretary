@@ -87,8 +87,8 @@ def _runs(agent: str) -> list[dict]:
 def _age_s(ts: str) -> float:
     then = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00"))
     if then.tzinfo is None:
-        then = then.replace(tzinfo=datetime.timezone.utc)
-    return (datetime.datetime.now(datetime.timezone.utc) - then).total_seconds()
+        then = then.replace(tzinfo=datetime.UTC)
+    return (datetime.datetime.now(datetime.UTC) - then).total_seconds()
 
 
 def _stale(ts: str, agent: str) -> str | None:

@@ -13,7 +13,6 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary import status, upgrade
-from triggered_agents.agents.pipeline import health, heads
 from secretary.automations import (
     AutomationSpec,
     create_argv,
@@ -22,17 +21,6 @@ from secretary.automations import (
     plan_automations,
     repoint_argv,
 )
-from secretary.host import (
-    HostInventory,
-    build_plan,
-    component_enabled,
-    load_packaged_units,
-    plan_changes,
-    strict_manifest,
-    SystemdLayout,
-)
-from secretary.host_apply import ApplyInputs, apply_host
-from tests.fakes.upgrade import FakeRegistrar, FakeUnitInstaller
 from secretary.head_registry import (
     INSTANCE_ORIGIN,
     PRODUCT_ORIGIN,
@@ -46,6 +34,18 @@ from secretary.head_registry import (
     read_source,
     snapshot_path,
 )
+from secretary.host import (
+    HostInventory,
+    SystemdLayout,
+    build_plan,
+    component_enabled,
+    load_packaged_units,
+    plan_changes,
+    strict_manifest,
+)
+from secretary.host_apply import ApplyInputs, apply_host
+from tests.fakes.upgrade import FakeRegistrar, FakeUnitInstaller
+from triggered_agents.agents.pipeline import heads, health
 
 UNIT_PREFIX = "secretary-"
 

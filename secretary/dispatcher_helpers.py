@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import base64
 import re
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from secretary.dispatcher_state import attempt_request_id, request_token
 

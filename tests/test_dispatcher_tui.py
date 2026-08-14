@@ -8,7 +8,6 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.dispatcher import CommandHostRuntime, HostError
-from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
 from secretary.dispatcher_tui import (
     DELIVERY_ACCEPTED,
     DELIVERY_CONFIRMED,
@@ -16,14 +15,14 @@ from secretary.dispatcher_tui import (
     READINESS_BUSY,
     READINESS_READY,
     READINESS_STALE_HANDLE,
-    READINESS_UNKNOWN,
     READINESS_UNAVAILABLE,
+    READINESS_UNKNOWN,
     TuiDeliveryError,
+    bind_claude_provider_progress_source,
     claude_project_dir_name,
     deliver_interactive_prompt,
     delivery_readiness_state,
     latest_claude_user_turn_for,
-    bind_claude_provider_progress_source,
     prepare_claude_provider_progress_source,
     provider_progress_for_run,
     terminal_readiness,
@@ -31,13 +30,14 @@ from secretary.dispatcher_tui import (
     turn_started_confirm,
 )
 from secretary.dispatcher_worker_lifecycle import ContinuationProviderCondition
-from triggered_agents.runtime.codex_preflight import codex_provider_source_descriptor
 from tests.fakes.observer import (
     BLOCKED_PANE_WAIT_BODY,
     STALE_HANDLE_WAIT_FAILURE,
     TIMEOUT_WAIT_FAILURE,
 )
 from tests.fanout_fixtures import accepted_transport_run
+from triggered_agents.runtime.codex_preflight import codex_provider_source_descriptor
+from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
 
 
 class DispatcherTuiLaunchTests(unittest.TestCase):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import shutil
@@ -7,23 +8,15 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator
-
-import fcntl
+from typing import Any
 
 from secretary import _proc
-from secretary.config import ConfigError, load_config, validate
 from secretary._fsutil import sha256_file
-from secretary.data import (
-    DataExport,
-    export_all,
-    init_layout,
-    raw_kanboard_dump,
-)
 from secretary.backup_policy import (
     ARCHIVE_ROOT,
     BACKUP_KINDS,
@@ -35,10 +28,17 @@ from secretary.backup_policy import (
 )
 from secretary.backup_retention import (
     apply_retention as _apply_retention,
+)
+from secretary.backup_retention import (
     remove_path_quietly as _remove_path_quietly,
 )
-from secretary.backup_verify import verify_backup
-
+from secretary.config import ConfigError, load_config, validate
+from secretary.data import (
+    DataExport,
+    export_all,
+    init_layout,
+    raw_kanboard_dump,
+)
 
 ORCA_STATE_DIRS = (Path.home() / ".orca", Path.home() / ".config" / "orca")
 PIPELINE_PAUSE_REASON = "secretary backup create"

@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from collections.abc import Callable
-from typing import Protocol, Sequence
+from typing import Protocol
 
-from secretary.board.models import Actor, BoardEntity, EntityKind, EntityRef, Event, EventKind, RelatedRefs
+from secretary.board.models import (
+    Actor,
+    BoardEntity,
+    EntityKind,
+    EntityRef,
+    Event,
+    EventKind,
+    RelatedRefs,
+)
 from secretary.board.transitions import LifecycleState
 
 

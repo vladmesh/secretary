@@ -17,11 +17,10 @@ import tempfile
 import unittest
 from io import StringIO
 from pathlib import Path
+from signal import NSIG
 from unittest import mock
 
 from secretary import broad_check
-from signal import NSIG
-
 from secretary.broad_check import (
     BroadCheckError,
     CheckSpec,

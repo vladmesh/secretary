@@ -19,12 +19,12 @@ from pathlib import Path
 from typing import NamedTuple
 from unittest import mock
 
+from secretary import restore_commands
 from secretary.backup_policy import ARCHIVE_ROOT
 from secretary.cli import main as cli_main
 from secretary.data import export_memory, init_layout
 from secretary.host import CollectResult, HostInventory, build_plan
 from secretary.host_apply import resolve_packaged
-import secretary.restore_commands as restore_commands
 from secretary.restore import (
     RestoreError,
     import_normalized_board,
@@ -32,17 +32,16 @@ from secretary.restore import (
     restore_findings,
     restore_state,
 )
+from tests.orca_fixtures import legacy_orca_runtime
 from tests.restore_fixtures import (
     _EmptyWriteKanboard,
-    create_backup,
     _producer_exports,
     _restore_card,
     _seed_instance_facts,
     _write_checksums,
     _write_instance_to,
+    create_backup,
 )
-from tests.orca_fixtures import legacy_orca_runtime
-
 
 _UNSET = object()
 

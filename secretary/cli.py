@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from secretary.backup import create_backups, verify_backup
+from secretary.board_transport import findings as _board_transport_findings
+from secretary.check_commands import add_check_subcommands
 from secretary.checkpoint import (
     PUSH_INTERVAL_SECONDS,
     checkpoint_snapshot,
@@ -24,9 +26,9 @@ from secretary.data import (
     init_layout,
     raw_kanboard_dump,
 )
-from secretary.check_commands import add_check_subcommands
 from secretary.dispatcher_commands import add_dispatcher_subcommands, add_pause_commands
 from secretary.dispatcher_pause import ProductionPause
+from secretary.gate import run_gate
 from secretary.host import (
     CollectResult,
     FixtureHostSource,
@@ -38,9 +40,9 @@ from secretary.host import (
     load_managed_manifest,
     plan_changes,
 )
-from secretary.host_commands import add_reconcile_subcommands
 from secretary.host_apply import resolve_installed_packaged
-from secretary.gate import run_gate
+from secretary.host_commands import add_reconcile_subcommands
+from secretary.installation import add_install_commands
 from secretary.knowledge_write import (
     KnowledgeError,
     KnowledgeValidationError,
@@ -58,22 +60,19 @@ from secretary.memory_write import (
     supersede_memory_fact,
 )
 from secretary.onboarding import DEFAULT_INSTANCE, project_add, render_artifact
+from secretary.product_issue_commands import add_product_issue_subcommands
 from secretary.provision import apply_provision_result, render_result, start_provision
+from secretary.restore import RestoreError, _target, restore_findings
 from secretary.restore_commands import add_restore_subcommands, run_memory_reindex
+from secretary.role_skills import add_role_skills_subcommands
 from secretary.secret_commands import add_secret_subcommands
 from secretary.secret_store import store_findings as _secret_store_findings
-from secretary.board_transport import findings as _board_transport_findings
-from secretary.restore import RestoreError, _target, restore_findings
 from secretary.session import run_shell
-from secretary.state_repo import StateRepoError
-from secretary.task_commands import add_task_subcommands
-from secretary.product_issue_commands import add_product_issue_subcommands
 from secretary.sprint_commands import add_sprint_subcommands
-from secretary.role_skills import add_role_skills_subcommands
-from secretary.upgrade import add_upgrade_command
-from secretary.installation import add_install_commands
+from secretary.state_repo import StateRepoError
 from secretary.status import collect_status
-
+from secretary.task_commands import add_task_subcommands
+from secretary.upgrade import add_upgrade_command
 
 PUSH_INTERVAL_MINUTES = int(PUSH_INTERVAL_SECONDS // 60)
 NOT_IMPLEMENTED = "not implemented in Phase 1 skeleton"
@@ -699,7 +698,7 @@ def print_dispatcher_status(
     owner_state = "production-owner" if production_owner else "unowned"
 
     findings = dispatcher_findings(report, collected_host, inspect_live=inspect_live) if findings is None else findings
-    print("")
+    print()
     print("dispatcher ownership: read-only")
     print(f"  state: {owner_state}")
     print(f"  production phase: {production_phase}")
@@ -775,7 +774,7 @@ def print_checkpoint_status(report, *, findings: list[str] | None = None) -> lis
         write_state=production.get("checkpoint"),
         push_state=production.get("checkpoint_push"),
     )
-    print("")
+    print()
     print("checkpoint freshness: read-only")
     for line in render_checkpoint_lines(snapshot):
         print(f"  {line}")
@@ -811,7 +810,7 @@ def print_secret_store_status(report, *, findings: list[str] | None = None) -> l
     """Secret store health: catalog/values consistency and installation key health."""
     findings = secret_store_findings(report) if findings is None else findings
     if findings:
-        print("")
+        print()
         print("secret store findings:")
         for finding in findings:
             print(f"  {finding}")
@@ -1257,7 +1256,7 @@ def print_host_inventory(
     if expected is None or collected is None or diffs is None:
         expected, collected, diffs = collect_host_inventory(report, args)
 
-    print("")
+    print()
     print("host inventory: read-only")
     for kind in ("projects", "units", "orca repos"):
         reason = collected.errors.get(kind)
@@ -1361,6 +1360,7 @@ def print_background_automations(*, inspect: bool) -> None:
         load_specs,
         plan_automations,
     )
+
     # The automations this process ships, not the ones a configured checkout would: doctor
     # reports on the code it is running.
     from secretary.upgrade import running_product_root
@@ -1368,7 +1368,7 @@ def print_background_automations(*, inspect: bool) -> None:
     specs = load_specs(running_product_root())
     if not specs:
         return
-    print("")
+    print()
     print("background automations: read-only")
     if not inspect:
         print("  not inspected")

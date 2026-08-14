@@ -2,11 +2,21 @@ import contextlib
 import json
 import subprocess
 import tempfile
-from types import SimpleNamespace
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
+from secretary import secret_store
+from secretary.board import (
+    Actor,
+    BoardEventCanon,
+    Card,
+    CardState,
+    Create,
+    FakeBoardHost,
+)
+from secretary.board_transport import ensure as ensure_board_transport
 from secretary.checkpoint import (
     PUSH_INTERVAL_SECONDS,
     CheckpointPusher,
@@ -14,14 +24,11 @@ from secretary.checkpoint import (
     checkpoint_snapshot,
     render_checkpoint_lines,
 )
-from secretary import secret_store
-from secretary.board_transport import ensure as ensure_board_transport
-from secretary.secret_store import import_env_file, initialize_store, set_secret
-from secretary.secret_words import RECOVERY_WORDS
 from secretary.data import DataExport
 from secretary.routing_journal import attempts
+from secretary.secret_store import import_env_file, initialize_store, set_secret
+from secretary.secret_words import RECOVERY_WORDS
 from secretary.tasks import TaskAudit
-from secretary.board import Actor, BoardEventCanon, Card, CardState, Create, FakeBoardHost
 
 
 def git(repo: Path, *args: str) -> str:

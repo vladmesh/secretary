@@ -28,11 +28,11 @@ from typing import Any
 
 from secretary.dispatcher_observer import (
     ObserverRecord,
+    commit_event,
     load_observers,
     observer_alive,
     observer_decision,
     stage_event,
-    commit_event,
 )
 from secretary.dispatcher_state import now_rfc3339
 from secretary.dispatcher_types import HostError
@@ -381,7 +381,7 @@ def _episode_stamp(since: str, episode: Any) -> str:
 
 def _fence_request_id(ref: str, reason: str, stamp: str) -> str:
     """`stamp` is `_episode_stamp`'s answer, never a raw clock reading: see why there."""
-    digest = hashlib.sha256(f"{ref}\n{reason}\n{stamp}".encode("utf-8")).hexdigest()[:32]
+    digest = hashlib.sha256(f"{ref}\n{reason}\n{stamp}".encode()).hexdigest()[:32]
     return f"dispatcher-observer-fence-{digest}"
 
 

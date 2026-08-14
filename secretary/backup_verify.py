@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from secretary._fsutil import sha256_stream
 from secretary.backup_policy import (
     ARCHIVE_ROOT,
     BACKUP_KINDS,
@@ -17,7 +18,6 @@ from secretary.backup_policy import (
     policy_for,
     should_skip_data_entry,
 )
-from secretary._fsutil import sha256_stream
 
 
 @dataclass(frozen=True)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import tempfile
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace

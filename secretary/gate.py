@@ -15,7 +15,12 @@ import yaml
 
 from secretary._fsutil import file_lock, publish_state_atomic
 from secretary.config import ConfigError, load_config, validate
-from secretary.onboarding import IDENTITY_FIELDS, ScannerError, project_lock_path, scan_repo
+from secretary.onboarding import (
+    IDENTITY_FIELDS,
+    ScannerError,
+    project_lock_path,
+    scan_repo,
+)
 from secretary.provision import _instance_dir, _load_inputs, _run_id
 
 _SECRET = re.compile(

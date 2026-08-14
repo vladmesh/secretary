@@ -9,15 +9,25 @@ action, never a silent repair.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Mapping
 
-from secretary._fsutil import write_text_atomic
 from secretary import state_repo
+from secretary._fsutil import write_text_atomic
 from triggered_agents.runtime.board_transport import (
-    BoardTransport, BoardTransportError, DEFAULT_TOKEN, DEFAULT_TRANSPORT,
-    TRANSPORT_ENV, TRANSPORT_FILE, parse as _parse, resolve, resolve_for_environ, transport_path,
+    DEFAULT_TOKEN,
+    DEFAULT_TRANSPORT,
+    TRANSPORT_ENV,
+    TRANSPORT_FILE,
+    BoardTransport,
+    BoardTransportError,
+    resolve,
+    resolve_for_environ,
+    transport_path,
+)
+from triggered_agents.runtime.board_transport import (
+    parse as _parse,
 )
 
 
@@ -184,6 +194,15 @@ def findings(instance_dir: Path | str) -> list[str]:
 
 
 __all__ = [
-    "BoardTransport", "BoardTransportError", "DEFAULT_TOKEN", "DEFAULT_TRANSPORT", "TransportOutcome", "ensure",
-    "ensure_from_runtime_values", "findings", "resolve", "resolve_for_environ", "transport_path",
+    "DEFAULT_TOKEN",
+    "DEFAULT_TRANSPORT",
+    "BoardTransport",
+    "BoardTransportError",
+    "TransportOutcome",
+    "ensure",
+    "ensure_from_runtime_values",
+    "findings",
+    "resolve",
+    "resolve_for_environ",
+    "transport_path",
 ]

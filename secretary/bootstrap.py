@@ -19,8 +19,8 @@ from typing import Any
 
 import yaml
 
-from secretary._fsutil import write_text_atomic
 from secretary import _proc
+from secretary._fsutil import write_text_atomic
 from secretary.board_transport import ensure_from_runtime_values, transport_path
 from secretary.host_apply import pinned_orca_executable
 from secretary.installation import (
@@ -32,7 +32,6 @@ from secretary.installation import (
 )
 from secretary.runtime_env import RuntimeEnvMissing, read_runtime_env
 from secretary.tasks import KanboardClient, TaskError, all_project_cards
-
 
 KANBOARD_IMAGE = "kanboard/kanboard:v1.2.46"
 ORCA_VERSION = "v1.4.152"

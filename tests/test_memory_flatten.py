@@ -10,15 +10,14 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from secretary import memory_journal, state_repo
 from secretary.checkpoint import CheckpointWriter
-from secretary.data import DataExport
 from secretary.memory_errors import MemoryProtocolError
 from secretary.memory_journal import verify_memory_journal
 from secretary.memory_write import commit_memory_proposal, propose_memory_fact
 from secretary.tasks import TaskAudit
-from unittest import mock
 
 
 def git(repo: Path, *args: str) -> str:

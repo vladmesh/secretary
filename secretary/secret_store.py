@@ -45,7 +45,7 @@ import stat
 import tempfile
 from collections.abc import Container
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -57,14 +57,13 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from secretary import role_env, state_repo
-from secretary.board_transport import DEFAULT_TOKEN, BoardTransportError, resolve as resolve_board_transport, transport_path
 from secretary._fsutil import publish_state_atomic
+from secretary.board_transport import DEFAULT_TOKEN, BoardTransportError, transport_path
+from secretary.board_transport import resolve as resolve_board_transport
 from secretary.config import _safe_yaml_error, validate
 from secretary.secret_words import RECOVERY_WORDS
 from secretary.state_repo import SECRETS_PATHSPEC
-
 from triggered_agents.runtime.redact import looks_like_credential, redact
-
 
 LEGACY_BOARD_SECRET_IDS = frozenset({"kanboard_url", "kanboard_api_user", "kanboard_api_token"})
 
@@ -437,7 +436,7 @@ def _derive_value_key(key: bytes, header: dict[str, Any]) -> bytes:
             algorithm=SHA256(),
             length=int(kdf["length"]),
             salt=_unb64(kdf["salt"], "envelope salt"),
-            info=f"{kdf['info']}:{header.get('id')}".encode("utf-8"),
+            info=f"{kdf['info']}:{header.get('id')}".encode(),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise SecretStoreStateError(f"envelope parameters are unusable: {exc}") from None
@@ -1478,7 +1477,7 @@ def _commit_message(operation: str, subject: str, actor: str) -> str:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _mtime(path: Path) -> str | None:
@@ -1486,7 +1485,7 @@ def _mtime(path: Path) -> str | None:
         stamp = path.stat().st_mtime
     except OSError:
         return None
-    return datetime.fromtimestamp(stamp, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.fromtimestamp(stamp, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _b64(raw: bytes) -> str:

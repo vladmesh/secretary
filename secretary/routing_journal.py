@@ -15,11 +15,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
 from triggered_agents.runtime.head import CODEX_TUI_MODE
-
 
 ROUTING_KIND = "routing"
 WORKER = "worker"
@@ -88,7 +88,7 @@ class HeadRun:
         }
 
     @classmethod
-    def from_json(cls, payload: dict[str, Any]) -> "HeadRun":
+    def from_json(cls, payload: dict[str, Any]) -> HeadRun:
         model = str(payload.get("model") or "")
         source = str(payload.get("model_source") or "")
         if not source or (not model and source not in RUNTIME_MODEL_SOURCES):

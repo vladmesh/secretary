@@ -6,8 +6,17 @@ from dataclasses import dataclass
 from typing import TypeAlias
 
 from secretary.board.models import (
-    BoardEntity, Card, CardState, EntityKind, Issue, IssueState, Product,
-    EventKind, ProductState, Sprint, SprintState,
+    BoardEntity,
+    Card,
+    CardState,
+    EntityKind,
+    EventKind,
+    Issue,
+    IssueState,
+    Product,
+    ProductState,
+    Sprint,
+    SprintState,
 )
 
 

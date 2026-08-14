@@ -28,7 +28,13 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from secretary.candidate_history import Commit, ai_attributions, parse_shas, repair_message
+from secretary.candidate_history import (
+    Commit,
+    ai_attributions,
+    parse_shas,
+    repair_message,
+)
+from secretary.dispatcher_gate_receipt import is_exact_sha, mint_gate_receipt
 from secretary.dispatcher_helpers import (
     _last_marker_body,
     _legacy_worker_branch,
@@ -36,7 +42,6 @@ from secretary.dispatcher_helpers import (
     safe_one_line,
     scrub_host_output,
 )
-from secretary.dispatcher_gate_receipt import is_exact_sha, mint_gate_receipt
 from secretary.dispatcher_types import GateTransportError, HostError
 
 # How long a github CI rollup may sit non-terminal (PENDING/NONE) before the pending watchdog

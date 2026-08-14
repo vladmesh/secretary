@@ -6,10 +6,11 @@ import fcntl
 import hashlib
 import json
 import uuid
+from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from secretary.sprint_observer import (
     KIND_HEAD,
@@ -27,14 +28,13 @@ from secretary.tasks import (
     TaskError,
     TaskReader,
     TaskWriter,
-    is_significant_observer_event,
     _digest,
     _now,
     _positive_int,
     _rfc3339,
     _text,
+    is_significant_observer_event,
 )
-
 
 SPRINT_BOARD_NAME = "Secretary sprints"
 SPRINT_REFERENCE_PREFIX = "sprint:"
@@ -360,7 +360,7 @@ def _refuse_shared_resources(candidate: dict[str, Any], others: list[dict[str, A
         raise TaskError(
             "resource_conflict",
             "this sprint declares no product, so it cannot be proven disjoint from "
-            f"open sprint {str(ordered[0]['ref'])}",
+            f"open sprint {ordered[0]['ref']!s}",
             2,
         )
     roots = _scanned_roots(
@@ -495,7 +495,7 @@ class SprintReader:
 
     def show(
         self, reference: str, *, include_cards: bool = True, include_resume_freshness: bool = True,
-        audit: "_AuditOnce | None" = None,
+        audit: _AuditOnce | None = None,
     ) -> dict[str, Any]:
         board_id = ensure_sprint_board(self.client)
         raw = self.client.call("getTaskByReference", project_id=board_id, reference=reference)
@@ -579,7 +579,7 @@ class SprintReader:
 
     def status(
         self, reference: str, *, observer: dict[str, Any] | None = None,
-        audit: "_AuditOnce | None" = None,
+        audit: _AuditOnce | None = None,
     ) -> dict[str, Any]:
         sprint = self.show(reference, audit=audit)
         cards = sprint.get("cards") or []
@@ -597,7 +597,7 @@ class SprintReader:
         }
 
     def _resume_freshness(
-        self, sprint: dict[str, Any], resume: dict[str, Any] | None, *, audit: "_AuditOnce | None" = None,
+        self, sprint: dict[str, Any], resume: dict[str, Any] | None, *, audit: _AuditOnce | None = None,
     ) -> dict[str, Any]:
         """The freshness of a sprint's resume, read here and nowhere else.
 
@@ -683,7 +683,14 @@ class SprintWriter:
         self, *, role: str, actor: str, reference: str, target: str, reason: str,
         request_id: str, observer: str | None = None, budget_by_type: tuple[tuple[str, int], ...] = (),
     ) -> None:
-        from secretary.board import Actor, EntityKind, RelatedRefs, SprintState, SprintSupplement, TransitionRequest
+        from secretary.board import (
+            Actor,
+            EntityKind,
+            RelatedRefs,
+            SprintState,
+            SprintSupplement,
+            TransitionRequest,
+        )
         try:
             host = self._host()
             supplement = SprintSupplement(observer=observer, budget_by_type=budget_by_type)
@@ -1299,7 +1306,7 @@ class SprintWriter:
                 reason="budget hard limit reached", request_id=request_id + ":typed-hard-stop",
                 budget_by_type=counts,
             )
-        except TaskError as exc:
+        except TaskError:
             # A generic charge may wait only on the exact typed occurrence
             # that owns the state effect.  If staging/effect admission failed
             # before that occurrence survived, retain neither record: the

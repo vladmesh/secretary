@@ -13,8 +13,8 @@ from unittest import mock
 import yaml
 
 from secretary._fsutil import publish_pair_atomic
-from secretary.config import load_config, validate
 from secretary.cli import main
+from secretary.config import load_config, validate
 from secretary.onboarding import project_add
 from secretary.provision import apply_provision_result, start_provision
 from tests.support.git import git, make_repo

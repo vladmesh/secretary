@@ -1,61 +1,50 @@
 from __future__ import annotations
 
 import json
-import io
 import os
-import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.cli import main as cli_main
-from secretary.backup import verify_backup
-from secretary.backup_policy import ARCHIVE_ROOT
-from secretary._fsutil import sha256_file
+import secretary.restore as restore_module
+from secretary import restore_commands
 from secretary.checkpoint import _validate_board
+from secretary.cli import main as cli_main
 from secretary.data import (
-    DataExport,
     export_board,
-    export_memory,
     init_layout,
     normalize_board_card,
 )
 from secretary.host import CollectResult, HostInventory, build_plan
 from secretary.host_apply import resolve_packaged
-import secretary.restore_commands as restore_commands
-import secretary.restore as restore_module
-import secretary.backup_verify as backup_verify_module
+from secretary.product_issues import (
+    ProductIssueValidationError,
+    validate_product_issue_records,
+)
 from secretary.restore import (
     RestoreError,
+    _normalized_cards,
+    _restored_order_mismatch,
     bootstrap_empty,
     import_normalized_board,
     mark_reconcile_applied,
     rebuild_memory_index,
-    restore_backup,
     restore_findings,
     restore_state,
 )
-from secretary.restore import _normalized_cards, _restored_order_mismatch
-from secretary.product_issues import ProductIssueValidationError, validate_product_issue_records
 from secretary.tasks import TaskReader
 from tests.fakes.sprints import SprintKanboard
-from tests.fakes.tasks import WriteKanboard
-
-
+from tests.orca_fixtures import legacy_orca_runtime
 from tests.restore_fixtures import (
     _EmptyWriteKanboard,
-    create_backup,
     _restore_card,
     _seed_instance_facts,
     _write_instance_to,
 )
-from tests.orca_fixtures import legacy_orca_runtime
-
 
 _UNSET = object()
 

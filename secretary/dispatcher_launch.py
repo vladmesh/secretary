@@ -49,8 +49,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from secretary.dispatcher_helpers import scrub_host_output
 from secretary.dispatcher_heartbeat import intent_heartbeat_identity
+from secretary.dispatcher_helpers import scrub_host_output
 from secretary.dispatcher_state import DispatcherRecord
 from secretary.dispatcher_tui import READINESS_BLOCKED, READINESS_BUSY
 from secretary.dispatcher_types import (

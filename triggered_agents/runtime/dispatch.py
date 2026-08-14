@@ -71,12 +71,12 @@ import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Callable
-
 import tomllib
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
 
 from . import claude_env, finalizer, orca_rpc
 from .claude_sessions import claude_session_paths
@@ -84,7 +84,14 @@ from .codex_preflight import (
     CodexPreflightError,
     preflight_codex_launch,
 )
-from .head import HeadRun, HeadSpec, RUNTIME_ROLE_ENV, TaskRef, new_run_id, render_head_command
+from .head import (
+    RUNTIME_ROLE_ENV,
+    HeadRun,
+    HeadSpec,
+    TaskRef,
+    new_run_id,
+    render_head_command,
+)
 from .pane_host import Pane, SessionHost, safe_command_label, session_host
 from .state import AgentState
 from .tui_delivery import (
@@ -382,8 +389,8 @@ def _launch_cmd(agent: str, variant: str | None = None,
     if not head:
         return skill, bare_claude, None, False, None
     try:
-        from ..agents.pipeline import health as pipeline_health
         from ..agents.pipeline import heads as pipeline_heads
+        from ..agents.pipeline import health as pipeline_health
         statuses = pipeline_health.refresh()
         resolved = pipeline_health.resolve_head(head, statuses) or head
         registry = pipeline_heads.load_registry()
@@ -406,7 +413,7 @@ def _steward_report_card(agent: str, variant: str | None) -> str | None:
     if agent != "steward":
         return None
     from ..agents.pipeline import ops as pipeline_ops
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     kind = variant or "hourly"
     slug = f"steward-sweep-{now:%Y%m%d-%H%M%S}"
     card = pipeline_ops.create_report_card(

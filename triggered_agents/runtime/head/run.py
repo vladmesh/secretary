@@ -77,7 +77,7 @@ class StopInitiator:
         return {"actor": self.actor, "reason": self.reason}
 
     @classmethod
-    def from_json(cls, payload: Any) -> "StopInitiator | None":
+    def from_json(cls, payload: Any) -> StopInitiator | None:
         if not isinstance(payload, dict):
             return None
         actor = str(payload.get("actor") or "")
@@ -151,7 +151,7 @@ class HeadRun:
         """
         return self.lifecycle == EXITED
 
-    def same_run(self, other: "HeadRun") -> bool:
+    def same_run(self, other: HeadRun) -> bool:
         """Whether two values name the same head, whatever pane handle each of them is holding."""
         return self.run_id == other.run_id
 
@@ -172,11 +172,11 @@ class HeadRun:
             and policy.get("model") == (self.spec.model or "")
         )
 
-    def with_fanout_policy(self, policy: Any) -> "HeadRun":
+    def with_fanout_policy(self, policy: Any) -> HeadRun:
         """Return this run with a conservatively serialisable policy attestation."""
         return replace(self, fanout_policy=_fanout_policy_json(policy))
 
-    def rebound(self, handle: str, *, leaf: str = "") -> "HeadRun":
+    def rebound(self, handle: str, *, leaf: str = "") -> HeadRun:
         """The same run, addressed at the pane handle it has now.
 
         Deliberately does not touch `run_id` or the lifecycle: a session manager that renamed a pane has
@@ -184,13 +184,13 @@ class HeadRun:
         """
         return replace(self, handle=handle, leaf=leaf or self.leaf)
 
-    def working(self) -> "HeadRun":
+    def working(self) -> HeadRun:
         """This head has been given its task."""
         if self.lifecycle in (FINISHING, EXITED):
             raise HeadRunError(f"a head in {self.lifecycle} is not given more work")
         return replace(self, lifecycle=WORKING)
 
-    def finishing(self, initiator: StopInitiator) -> "HeadRun":
+    def finishing(self, initiator: StopInitiator) -> HeadRun:
         """Somebody has asked this head to stop, and this is who.
 
         Recorded before the stop is attempted, so a stop that is refused or that outlives the dispatcher
@@ -204,7 +204,7 @@ class HeadRun:
             return self
         return replace(self, lifecycle=FINISHING, stopped_by=initiator)
 
-    def exited(self) -> "HeadRun":
+    def exited(self) -> HeadRun:
         """The stop was confirmed. Only reachable from `finishing`, which carries the initiator."""
         if self.lifecycle != FINISHING:
             raise HeadRunError(
@@ -228,7 +228,7 @@ class HeadRun:
         }
 
     @classmethod
-    def from_json(cls, payload: Any) -> "HeadRun":
+    def from_json(cls, payload: Any) -> HeadRun:
         if not isinstance(payload, dict):
             raise HeadRunError("a head run is read from an object, and this is not one")
         return cls(

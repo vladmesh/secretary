@@ -17,7 +17,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from ...runtime import production_telemetry, shared_state
 from ...runtime.state import AgentState
@@ -383,7 +383,7 @@ def render_markdown(batch: dict) -> str:
     if s["stale"]:
         lines.append(f"## Stuck in a column longer than {STALE_HOURS:g}h ({len(s['stale'])})")
         for hit in s["stale"]:
-            since = datetime.fromtimestamp(hit["since"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            since = datetime.fromtimestamp(hit["since"], tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
             lines.append(f"- {hit['reference']} in {hit['column']!r} since {since}")
         lines.append("")
     if s["resource_flip"]:

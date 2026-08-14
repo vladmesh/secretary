@@ -5,11 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
-from secretary.config import ConfigError, load_config
 from secretary.cli_output import print_json
+from secretary.config import ConfigError, load_config
 from secretary.onboarding import DEFAULT_INSTANCE
 from secretary.tasks import (
     _BLOCK_CLASSIFICATIONS,

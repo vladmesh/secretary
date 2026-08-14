@@ -5,9 +5,9 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterator, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from secretary.board.models import Event, EventKind
 

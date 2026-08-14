@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import StrEnum
 import hashlib
 import json
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
-
 
 BUSY_RETRY_INITIAL_SECONDS = 30
 BUSY_RETRY_MAX_SECONDS = 5 * 60
@@ -131,7 +130,7 @@ class WorkerContinuationLiveness:
     @classmethod
     def unknown(
         cls, reason: str = "missing", *, legacy_busy_attempts: int = 0,
-    ) -> "WorkerContinuationLiveness":
+    ) -> WorkerContinuationLiveness:
         return cls(
             state=ContinuationLivenessState.UNKNOWN,
             reason=reason[:240],
@@ -139,7 +138,7 @@ class WorkerContinuationLiveness:
         )
 
     @classmethod
-    def begin(cls, head_run: Any) -> "WorkerContinuationLiveness":
+    def begin(cls, head_run: Any) -> WorkerContinuationLiveness:
         """Open the only kind of episode which is allowed to acquire a source baseline."""
         run_id, fingerprint = head_run_binding(head_run)
         if not run_id:
@@ -337,7 +336,7 @@ class WorkerContinuationLiveness:
         }
 
     @classmethod
-    def from_json(cls, value: Any) -> "WorkerContinuationLiveness":
+    def from_json(cls, value: Any) -> WorkerContinuationLiveness:
         if value is None:
             return cls.unknown("missing")
         if not isinstance(value, dict):
@@ -587,7 +586,7 @@ class WorkerReportNudge:
         }
 
     @classmethod
-    def from_json(cls, value: Any) -> "WorkerReportNudge":
+    def from_json(cls, value: Any) -> WorkerReportNudge:
         if not isinstance(value, dict) or not value:
             return cls()
         return cls(
@@ -859,7 +858,7 @@ class WorkerContinuation:
         }
 
     @classmethod
-    def from_json(cls, value: Any) -> "WorkerContinuation":
+    def from_json(cls, value: Any) -> WorkerContinuation:
         if not isinstance(value, dict) or not value:
             return cls()
         stage = WorkerContinuationStage(str(value.get("stage") or "none"))

@@ -68,17 +68,17 @@ class TaskRef:
             )
 
     @classmethod
-    def card(cls, ref: str, *, document: str = "") -> "TaskRef":
+    def card(cls, ref: str, *, document: str = "") -> TaskRef:
         """One Pipeline card, the kind of work the production dispatcher runs."""
         return cls(kind=TASK_CARD, ref=ref, document=document)
 
     @classmethod
-    def sprint(cls, ref: str, *, document: str = "") -> "TaskRef":
+    def sprint(cls, ref: str, *, document: str = "") -> TaskRef:
         """A sprint entity: what an observer head is pointed at, and no card at all."""
         return cls(kind=TASK_SPRINT, ref=ref, document=document)
 
     @classmethod
-    def standing(cls, role: str, *, document: str = "") -> "TaskRef":
+    def standing(cls, role: str, *, document: str = "") -> TaskRef:
         """A role's standing instruction, for a head whose task is its role rather than a unit."""
         return cls(kind=TASK_STANDING, ref=role, document=document)
 
@@ -86,7 +86,7 @@ class TaskRef:
         return {"kind": self.kind, "ref": self.ref, "document": self.document}
 
     @classmethod
-    def from_json(cls, payload: Any) -> "TaskRef":
+    def from_json(cls, payload: Any) -> TaskRef:
         if not isinstance(payload, dict):
             raise TaskRefError("a task pointer is read from an object, and this is not one")
         return cls(

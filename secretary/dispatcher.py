@@ -9,143 +9,223 @@ import shutil
 import signal
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import yaml
 
+from secretary import state_repo
 from secretary._fsutil import write_text_atomic
 from secretary.checkpoint import CheckpointPusher, CheckpointWriter
-from secretary.config import validate_instance
-from secretary import state_repo
-from secretary.dispatcher_launcher import (
-    HeadLaunchError,
-    claude_launch_model as _claude_launch_model,
-    ensure_claude_workspace_ready as _ensure_claude_workspace_ready,
-    ensure_codex_workspace_trusted as _ensure_codex_workspace_trusted,
-    role_launch_env as _role_launch_env,
+from secretary.codex_provider_events import (
+    CodexProviderEventIngress,
+    CodexProviderSourceError,
 )
+from secretary.config import validate_instance
+from secretary.dispatcher_gate import (
+    GATE_PENDING_STALL_SECONDS,
+    GATE_TRANSPORT_MAX_ATTEMPTS,
+    GateResult,
+)
+from secretary.dispatcher_gate import (
+    _fingerprint as _gate_fingerprint,
+)
+from secretary.dispatcher_gate import (
+    gate_check as _gate_check,
+)
+from secretary.dispatcher_gate import (
+    validation_ci as _validation_ci,
+)
+from secretary.dispatcher_gate_receipt import (
+    AcceptedGreenGate,
+    render_receipt,
+)
+from secretary.dispatcher_gate_receipt import (
+    accepted_receipt as _accepted_gate_receipt,
+)
+from secretary.dispatcher_gate_receipt import (
+    is_exact_sha as _is_exact_sha,
+)
+from secretary.dispatcher_heartbeat import heartbeat_identity
 from secretary.dispatcher_helpers import (
     RED_REVIEW_CEILING,
     _decision_record_line,
     _gate_red_repeat_count,
     _last_gate_red_body,
     _last_marker,
-    _round_record_line,
-    _round_report_ids,
-    _round_report_marker,
     _last_marker_body,
     _last_review_red_body,
     _legacy_worker_branch,
     _report_adoption_baseline,
     _review_adoption_baseline,
+    _round_record_line,
+    _round_report_ids,
+    _round_report_marker,
     _spent_report_generations,
+    _tail,
     _task_doc_decision,
     _task_doc_report_generation,
-    _tail,
     _worker_id,
-    red_review_count as _red_review_count,
-    safe_one_line as _safe_one_line,
     scrub_host_output,
 )
-from secretary.dispatcher_gate import (
-    GATE_PENDING_STALL_SECONDS,
-    GATE_TRANSPORT_MAX_ATTEMPTS,
-    GateResult,
-    _fingerprint as _gate_fingerprint,
-    gate_check as _gate_check,
-    validation_ci as _validation_ci,
+from secretary.dispatcher_helpers import (
+    red_review_count as _red_review_count,
 )
-from secretary.dispatcher_gate_receipt import (
-    AcceptedGreenGate,
-    accepted_receipt as _accepted_gate_receipt,
-    is_exact_sha as _is_exact_sha,
-    render_receipt,
+from secretary.dispatcher_helpers import (
+    safe_one_line as _safe_one_line,
 )
-from secretary.dispatcher_heartbeat import heartbeat_identity
+from secretary.dispatcher_launch import (
+    REVIEW_ROLE,
+    WORKER_ROLE,
+)
+from secretary.dispatcher_launch import (
+    bring_up_blocked_reason as _bring_up_blocked_reason,
+)
+from secretary.dispatcher_launch import (
+    clear_launch_intent as _clear_launch_intent,
+)
+from secretary.dispatcher_launch import (
+    confirm_launch_intent as _confirm_launch_intent,
+)
+from secretary.dispatcher_launch import (
+    forget_role_head as _forget_role_head,
+)
+from secretary.dispatcher_launch import (
+    head_stop_unconfirmed as _head_stop_unconfirmed,
+)
+from secretary.dispatcher_launch import (
+    keep_reserved_round as _keep_reserved_round,
+)
+from secretary.dispatcher_launch import (
+    launch_aborted as _launch_aborted,
+)
+from secretary.dispatcher_launch import (
+    launch_deferred as _launch_deferred,
+)
+from secretary.dispatcher_launch import (
+    launch_intent as _launch_intent,
+)
+from secretary.dispatcher_launch import (
+    launch_intent_unwritable as _launch_intent_unwritable,
+)
+from secretary.dispatcher_launch import (
+    launch_left_a_head as _launch_left_a_head,
+)
+from secretary.dispatcher_launch import (
+    launch_pid_file as _launch_pid_file,
+)
+from secretary.dispatcher_launch import (
+    mark_launch_aborted as _mark_launch_aborted,
+)
+from secretary.dispatcher_launch import (
+    merge_launch_head_run as _merge_launch_head_run,
+)
+from secretary.dispatcher_launch import (
+    pane_state_label as _pane_state_label,
+)
+from secretary.dispatcher_launch import (
+    reset_launch_attempts as _reset_launch_attempts,
+)
+from secretary.dispatcher_launch import (
+    resolve_launch_intent as _resolve_launch_intent,
+)
+from secretary.dispatcher_launch import (
+    write_launch_intent as _write_launch_intent,
+)
+from secretary.dispatcher_launcher import (
+    HeadLaunchError,
+)
+from secretary.dispatcher_launcher import (
+    claude_launch_model as _claude_launch_model,
+)
+from secretary.dispatcher_launcher import (
+    ensure_claude_workspace_ready as _ensure_claude_workspace_ready,
+)
+from secretary.dispatcher_launcher import (
+    ensure_codex_workspace_trusted as _ensure_codex_workspace_trusted,
+)
+from secretary.dispatcher_launcher import (
+    role_launch_env as _role_launch_env,
+)
 from secretary.dispatcher_observer import (
     OBSERVER_HEAD_FALLBACK,
     OBSERVER_PROMPT_FILE,
     OBSERVER_ROLE,
     ObserverLaunchAborted,
-    delivery_evidence_summary as _observer_delivery_evidence_summary,
-    observer_launch_prompt as _observer_launch_prompt,
-    observer_pid_file as _observer_pid_file,
 )
-from secretary.observer_root import OBSERVER_REPO_NAME, observer_root_repo
-from secretary.dispatcher_launch import (
-    REVIEW_ROLE,
-    WORKER_ROLE,
-    bring_up_blocked_reason as _bring_up_blocked_reason,
-    clear_launch_intent as _clear_launch_intent,
-    confirm_launch_intent as _confirm_launch_intent,
-    forget_role_head as _forget_role_head,
-    head_stop_unconfirmed as _head_stop_unconfirmed,
-    keep_reserved_round as _keep_reserved_round,
-    launch_aborted as _launch_aborted,
-    launch_deferred as _launch_deferred,
-    launch_intent as _launch_intent,
-    launch_intent_unwritable as _launch_intent_unwritable,
-    launch_left_a_head as _launch_left_a_head,
-    launch_pid_file as _launch_pid_file,
-    mark_launch_aborted as _mark_launch_aborted,
-    merge_launch_head_run as _merge_launch_head_run,
-    pane_state_label as _pane_state_label,
-    reset_launch_attempts as _reset_launch_attempts,
-    resolve_launch_intent as _resolve_launch_intent,
-    write_launch_intent as _write_launch_intent,
+from secretary.dispatcher_observer import (
+    delivery_evidence_summary as _observer_delivery_evidence_summary,
+)
+from secretary.dispatcher_observer import (
+    observer_launch_prompt as _observer_launch_prompt,
+)
+from secretary.dispatcher_observer import (
+    observer_pid_file as _observer_pid_file,
 )
 from secretary.dispatcher_pause import ProductionPause
 from secretary.dispatcher_pause_ops import (
     pause as _pause_pipeline,
+)
+from secretary.dispatcher_pause_ops import (
     pause_status as _pause_status,
+)
+from secretary.dispatcher_pause_ops import (
     resume as _resume_pipeline,
 )
 from secretary.dispatcher_production import (
     ProductionState,
+)
+from secretary.dispatcher_production import (
     production_observe as _production_observe,
+)
+from secretary.dispatcher_production import (
     production_probe as _production_probe,
+)
+from secretary.dispatcher_production import (
     production_run as _production_run,
+)
+from secretary.dispatcher_production import (
     production_tick as _production_tick,
 )
 from secretary.dispatcher_review import (
     command_terminal_status as _command_terminal_status,
-    end_review_pane as _end_review_pane,
-    recover_review_launch as _recover_review_launch,
-    start_review as _start_review,
 )
-from secretary.dispatcher_watchdog import (
-    bind_head_heartbeat as _bind_head_heartbeat,
-    clear_head_heartbeat as _clear_head_heartbeat,
-    guard_head_run_identity as _guard_head_run_identity,
-    head_run_process_status as _head_run_process_status,
-    HeadRunIdentityMismatch as _HeadRunIdentityMismatch,
-    heartbeat_is_dead as _heartbeat_is_dead,
-    heartbeat_is_live_match as _heartbeat_is_live_match,
-    heartbeat_is_mismatch as _heartbeat_is_mismatch,
-    head_process_status as _head_process_status,
-    idle_stall_seconds as _idle_stall_seconds,
-    idle_outcome as _idle_outcome,
-    initial_output_stall_seconds as _initial_output_stall_seconds,
-    pid_file_path as _pid_file_path,
-    reset_wait as _reset_wait,
-    reset_idle as _reset_idle,
-    stall_seconds as _stall_seconds,
-    wait_cycle_token as _wait_cycle_token,
-    wait_outcome as _wait_outcome,
+from secretary.dispatcher_review import (
+    end_review_pane as _end_review_pane,
+)
+from secretary.dispatcher_review import (
+    recover_review_launch as _recover_review_launch,
+)
+from secretary.dispatcher_review import (
+    start_review as _start_review,
 )
 from secretary.dispatcher_state import (
     CLAIM_SKIP_FAILOVER_COLLAPSE,
     CLAIM_SKIP_RESOURCE_NOT_READY,
     DispatcherRecord,
-    attempt_request_id as _attempt_request_id,
-    claim_actual as _claim_actual,
-    claim_mismatch as _claim_mismatch,
-    new_attempt_id as _new_attempt_id,
     now_rfc3339,
+)
+from secretary.dispatcher_state import (
+    attempt_request_id as _attempt_request_id,
+)
+from secretary.dispatcher_state import (
+    claim_actual as _claim_actual,
+)
+from secretary.dispatcher_state import (
+    claim_mismatch as _claim_mismatch,
+)
+from secretary.dispatcher_state import (
+    new_attempt_id as _new_attempt_id,
+)
+from secretary.dispatcher_state import (
     record_attempt as _record_attempt,
+)
+from secretary.dispatcher_state import (
     record_divergence as _record_divergence,
+)
+from secretary.dispatcher_state import (
     request_token as _request_token,
 )
 from secretary.dispatcher_tui import (
@@ -156,27 +236,31 @@ from secretary.dispatcher_tui import (
     READINESS_READY,
     READINESS_UNKNOWN,
     TuiDeliveryError,
-    close_terminal_strict as _close_tui_terminal_strict,
-    deliver_interactive_prompt as _deliver_interactive_prompt,
-    delivery_readiness_state as _delivery_readiness_state,
-    terminal_readiness as _terminal_readiness,
-    terminal_turn_started as _terminal_turn_started,
-    prepare_claude_provider_progress_source as _prepare_claude_provider_progress_source,
+)
+from secretary.dispatcher_tui import (
     bind_claude_provider_progress_source as _bind_claude_provider_progress_source,
-    provider_progress_for_run as _provider_progress_for_run,
+)
+from secretary.dispatcher_tui import (
+    close_terminal_strict as _close_tui_terminal_strict,
+)
+from secretary.dispatcher_tui import (
+    deliver_interactive_prompt as _deliver_interactive_prompt,
 )
 from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
-from secretary.dispatcher_worker_lifecycle import (
-    BUSY_RETRY_INITIAL_SECONDS,
-    CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS,
-    ContinuationLivenessState,
-    ContinuationProviderCondition,
-    ContinuationRecoveryRung,
-    WorkerContinuationLiveness,
+from secretary.dispatcher_tui import (
+    delivery_readiness_state as _delivery_readiness_state,
 )
-from secretary.codex_provider_events import (
-    CodexProviderEventIngress,
-    CodexProviderSourceError,
+from secretary.dispatcher_tui import (
+    prepare_claude_provider_progress_source as _prepare_claude_provider_progress_source,
+)
+from secretary.dispatcher_tui import (
+    provider_progress_for_run as _provider_progress_for_run,
+)
+from secretary.dispatcher_tui import (
+    terminal_readiness as _terminal_readiness,
+)
+from secretary.dispatcher_tui import (
+    terminal_turn_started as _terminal_turn_started,
 )
 from secretary.dispatcher_types import (
     # Who a stop is recorded as having been initiated by. Every stop the dispatcher performs has an
@@ -184,8 +268,6 @@ from secretary.dispatcher_types import (
     # a head that stopped answering, a replacement opening, an operator pausing the pipeline,
     # reconciliation settling a record — and both heads' runs now say which.
     STOPPED_BY_DISPATCHER,
-    STOPPED_BY_OPERATOR,
-    STOPPED_BY_RECONCILIATION,
     STOPPED_BY_REPLACEMENT,
     STOPPED_BY_REVIEW_FREEZE,
     STOPPED_BY_REVIEW_VERDICT,
@@ -198,7 +280,76 @@ from secretary.dispatcher_types import (
     ReviewLaunch,
     review_pane_label,
 )
+from secretary.dispatcher_watchdog import (
+    HeadRunIdentityMismatch as _HeadRunIdentityMismatch,
+)
+from secretary.dispatcher_watchdog import (
+    bind_head_heartbeat as _bind_head_heartbeat,
+)
+from secretary.dispatcher_watchdog import (
+    clear_head_heartbeat as _clear_head_heartbeat,
+)
+from secretary.dispatcher_watchdog import (
+    guard_head_run_identity as _guard_head_run_identity,
+)
+from secretary.dispatcher_watchdog import (
+    head_process_status as _head_process_status,
+)
+from secretary.dispatcher_watchdog import (
+    head_run_process_status as _head_run_process_status,
+)
+from secretary.dispatcher_watchdog import (
+    heartbeat_is_dead as _heartbeat_is_dead,
+)
+from secretary.dispatcher_watchdog import (
+    heartbeat_is_live_match as _heartbeat_is_live_match,
+)
+from secretary.dispatcher_watchdog import (
+    heartbeat_is_mismatch as _heartbeat_is_mismatch,
+)
+from secretary.dispatcher_watchdog import (
+    idle_outcome as _idle_outcome,
+)
+from secretary.dispatcher_watchdog import (
+    idle_stall_seconds as _idle_stall_seconds,
+)
+from secretary.dispatcher_watchdog import (
+    initial_output_stall_seconds as _initial_output_stall_seconds,
+)
+from secretary.dispatcher_watchdog import (
+    pid_file_path as _pid_file_path,
+)
+from secretary.dispatcher_watchdog import (
+    reset_idle as _reset_idle,
+)
+from secretary.dispatcher_watchdog import (
+    reset_wait as _reset_wait,
+)
+from secretary.dispatcher_watchdog import (
+    stall_seconds as _stall_seconds,
+)
+from secretary.dispatcher_watchdog import (
+    wait_cycle_token as _wait_cycle_token,
+)
+from secretary.dispatcher_watchdog import (
+    wait_outcome as _wait_outcome,
+)
+from secretary.dispatcher_worker_lifecycle import (
+    BUSY_RETRY_INITIAL_SECONDS,
+    CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS,
+    ContinuationLivenessState,
+    ContinuationProviderCondition,
+    ContinuationRecoveryRung,
+    WorkerContinuationLiveness,
+)
+from secretary.head_health import (
+    HeadChoice,
+    HeadHealth,
+    HeadReadiness,
+    resolve_head_chain,
+)
 from secretary.head_registry import HeadRegistryConfigError, installed_heads
+from secretary.observer_root import OBSERVER_REPO_NAME, observer_root_repo
 from secretary.routing_journal import (
     HEAD_FROM_CARD,
     HEAD_FROM_FALLBACK,
@@ -206,12 +357,17 @@ from secretary.routing_journal import (
     HEAD_FROM_ROLE_DEFAULT,
     MODEL_UNKNOWN,
     HeadRun,
-    attempts as _routing_attempts,
     head_run_from_profile,
+)
+from secretary.routing_journal import (
+    attempts as _routing_attempts,
+)
+from secretary.routing_journal import (
     routing_payload as _routing_payload,
+)
+from secretary.routing_journal import (
     run_key as _run_key,
 )
-from secretary.head_health import HeadChoice, HeadHealth, HeadReadiness, resolve_head_chain
 from secretary.sprints import SprintReader, budget_thresholds
 from secretary.tasks import (
     KanboardClient,
@@ -224,9 +380,10 @@ from secretary.tasks import (
 )
 from triggered_agents.agents.pipeline.heads import (
     HeadRegistryError,
+)
+from triggered_agents.agents.pipeline.heads import (
     resolve_head_id as _resolve_head_id,
 )
-from triggered_agents.runtime.launch_prefix import pythonpath_prefix
 from triggered_agents.runtime import head as head_ops
 from triggered_agents.runtime.codex_preflight import (
     CodexFanoutPolicyError,
@@ -235,24 +392,37 @@ from triggered_agents.runtime.codex_preflight import (
 )
 from triggered_agents.runtime.head import (
     CODEX_TUI_MODE,
-    PYTHON_SAFE_PATH_FLAG as _PYTHON_SAFE_PATH_FLAG,
     HeadCommand,
     HeadCommandError,
     HeadSpec,
     HeadSpecError,
+)
+from triggered_agents.runtime.head import (
+    PYTHON_SAFE_PATH_FLAG as _PYTHON_SAFE_PATH_FLAG,
+)
+from triggered_agents.runtime.head import (
     render_head_command as _render_head_command,
+)
+from triggered_agents.runtime.head import (
     with_pid_heartbeat as _with_pid_heartbeat,
 )
+from triggered_agents.runtime.launch_prefix import pythonpath_prefix
 from triggered_agents.runtime.pane_host import (
     OrcaSessionHost,
     Pane,
     PaneHostError,
     SessionHost,
+)
+from triggered_agents.runtime.pane_host import (
     safe_command_label as _safe_command_label,
 )
 from triggered_agents.runtime.prompt_document import (
     PromptDocumentError,
+)
+from triggered_agents.runtime.prompt_document import (
     nudge_for as _nudge_for,
+)
+from triggered_agents.runtime.prompt_document import (
     write_prompt_document as _write_prompt_document,
 )
 
@@ -591,7 +761,7 @@ class DispatcherHeadTransport:
     """How this dispatcher delivers to a head and closes its pane, against whatever host it is on.
     """
 
-    runtime: "CommandHostRuntime"
+    runtime: CommandHostRuntime
     workspace: str = ""
     prompt_file: str = ""
     adapter: str = ""
@@ -636,7 +806,7 @@ class DispatcherHeadTransport:
             # A source may already have been durably bound when a later delivery stage refuses.
             # The abort path receives this exact run so its intent cannot write the old unbound
             # copy back over the source recovery has to read.
-            setattr(exc, "head_run", post_delivery)
+            exc.head_run = post_delivery
             raise
         return head_ops.HeadDelivery(run=post_delivery, outcome=outcome)
 
@@ -1504,7 +1674,7 @@ class CommandHostRuntime:
             repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
         except (KeyError, HostError):
             return False
-        if not _same_repo(repo, Path(getattr(self.catalog, "instance_dir"))):
+        if not _same_repo(repo, Path(self.catalog.instance_dir)):
             return False
         base = self.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
         try:
@@ -1601,7 +1771,7 @@ class CommandHostRuntime:
             self._merge_github_pr(task, record, branch, base)
             return
         repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
-        if _same_repo(repo, Path(getattr(self.catalog, "instance_dir"))):
+        if _same_repo(repo, Path(self.catalog.instance_dir)):
             self._complete_green_instance_repo(record, branch, base, repo)
             return
         # Publish the reviewed branch as main (a non-fast-forward push is rejected, never
@@ -2342,7 +2512,7 @@ class CommandHostRuntime:
         adapter: str = "",
         role: str = "",
         before_send: Callable[[], head_ops.HeadRun | None] | None = None,
-    ) -> "DispatcherHeadTransport":
+    ) -> DispatcherHeadTransport:
         """This product's delivery and close semantics, for the operation to perform through
         the host it is running on.
         """

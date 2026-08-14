@@ -11,7 +11,6 @@ from unittest import mock
 
 from triggered_agents.agents.pipeline import model, ops
 
-
 CURRENT_COLUMNS = [
     {"id": index, "title": title, "position": index}
     for index, title in enumerate(model.COLUMNS, 1)

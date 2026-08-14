@@ -19,7 +19,6 @@ import yaml
 from secretary.product_issues import ISSUE_CLOSE_REASONS
 from secretary.tasks import TaskError
 
-
 # The verdict that leaves an issue open. The four closing verdicts are the released close
 # reasons and this card does not add to them.
 KEEP_OPEN = "open"

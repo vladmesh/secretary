@@ -12,7 +12,6 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, ClassVar, TypeAlias
 
-
 EntityRef: TypeAlias = str
 
 
@@ -280,7 +279,7 @@ class Event:
         return record
 
     @classmethod
-    def from_record(cls, record: dict[str, Any]) -> "Event":
+    def from_record(cls, record: dict[str, Any]) -> Event:
         """Read and validate one protocol record, rejecting generic audit rows."""
         if not isinstance(record, dict):
             raise ValueError("board event record must be an object")
