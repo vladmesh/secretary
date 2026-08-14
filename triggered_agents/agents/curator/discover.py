@@ -17,7 +17,7 @@ import re
 import sqlite3
 from pathlib import Path
 
-# Claude project-dir naming: cwd path with every "/" turned into "-", leading "-".
+# Claude project-dir naming: every non-alphanumeric cwd character becomes "-".
 # Overridable via TA_CLAUDE_PROJECTS_DIR so a run (e.g. an e2e on fixtures) can point the
 # scan at a synthetic tree instead of the live ~/.claude/projects.
 CLAUDE_PROJECTS = Path(os.environ.get("TA_CLAUDE_PROJECTS_DIR", str(Path.home() / ".claude" / "projects")))
