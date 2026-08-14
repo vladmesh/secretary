@@ -1,10 +1,4 @@
-"""Typed board events stored through the released TaskAudit journal.
-
-This module owns the new protocol shape only.  TaskAudit remains the owner of
-the append-only file, request-id index, pending-record layout, lock and atomic
-file operations.  Consequently released generic records remain untouched and
-their existing consumers can continue to read them as before.
-"""
+"""Typed board events stored through the released TaskAudit journal."""
 
 from __future__ import annotations
 
@@ -28,9 +22,8 @@ T = TypeVar("T")
 def marker_comment_lock(data_dir: str | Path, ref: str) -> Iterator[None]:
     """Serialize one Card marker occurrence from its witness through commit.
 
-    Marker prose intentionally has no request id.  The per-Card lock makes the
-    staged matching-row ordinal a real occurrence witness even when two writers
-    choose identical public marker text at the same time.
+    Marker prose intentionally has no request id, so the per-Card lock makes the staged matching-row
+    ordinal a real occurrence witness even when two writers choose identical marker text at once.
     """
     directory = Path(data_dir) / "board" / "marker-comments"
     directory.mkdir(parents=True, exist_ok=True)
@@ -83,9 +76,8 @@ class BoardEventPending(RuntimeError):
 class BoardEventCanon:
     """The one typed-event facade over ``board/events.ndjson``.
 
-    Generic TaskAudit records have no ``record_type`` discriminator and are
-    deliberately ignored by :meth:`events`.  They are still read by TaskAudit
-    itself, which is the compatibility reader for released record versions.
+    Generic TaskAudit records have no ``record_type`` discriminator and are deliberately ignored by
+    :meth:`events`; TaskAudit itself remains the compatibility reader for released record versions.
     """
 
     def __init__(self, data_dir: str | Path, *, audit: TaskAudit | None = None) -> None:
@@ -99,12 +91,10 @@ class BoardEventCanon:
     def stage(self, request_id: str, event: Event) -> Event:
         """Durably stage the exact event before a backend mutation begins.
 
-        This is the one staging route of the typed canon, and it owns same-request
-        idempotency itself: reading the committed record, reading the pending record,
-        checking event-id identity and writing the new pending record all happen inside a
-        single TaskAudit lock hold.  A second caller reusing the request id therefore either
-        gets the event that already owns it or fails; it can never replace a pending event a
-        backend effect is already running against.
+        The one staging route of the typed canon, and it owns same-request idempotency itself: reading
+        the committed record, reading the pending record, checking event-id identity and writing the new
+        pending record all happen inside a single TaskAudit lock hold. A second caller reusing the
+        request id either gets the event that already owns it or fails.
         """
         record = event.to_record(request_id)
         existing = self._claim(request_id, record)
@@ -152,8 +142,8 @@ class BoardEventCanon:
     def _require_unclaimed_event_id(self, record: dict[str, Any]) -> None:
         """An event id names one occurrence, so refuse to publish a second one under it.
 
-        This runs inside TaskAudit's lock, which is what makes it a real precondition of
-        the write rather than an advisory check some other writer can race past.
+        Runs inside TaskAudit's lock, which is what makes it a real precondition of the write rather
+        than an advisory check some other writer can race past.
         """
         event_id = record.get("event_id")
         owner = self.audit.event_id_owner(str(event_id))
@@ -170,33 +160,22 @@ class BoardEventCanon:
 class MutationEventTransaction:
     """Stage, effect, then commit one protocol mutation with fail-closed audit.
 
-    This is the single enforcement point for a staged occurrence: once the
-    record is staged, nothing outside this class decides whether it survives.
-    The window in which the staged record may be discarded is exactly the
-    ``effect`` call and nothing else.  Everything after it - the confirming
-    read, the caller's ``finish`` work and the commit - is fail-closed: it
-    raises :class:`BoardEventPending` and leaves the exact pending record for
-    recovery.  This is the reusable seam future KanboardBoardHost writers need:
-    no caller can report the effect as successful after ``commit`` fails, and
-    none can report a completed effect as if it had never happened.
+    The single enforcement point for a staged occurrence. The window in which the staged record may
+    be discarded is exactly the ``effect`` call and nothing else; everything after it — the
+    confirming read, the caller's ``finish`` work and the commit — raises :class:`BoardEventPending`
+    and leaves the exact pending record for recovery.
 
-    ``effect`` issues the single backend effect and nothing else.  Its return
-    value is ignored, and its contract is the discard rule above: it may raise
-    only while no effect has been applied.  A verification read belongs in
-    ``confirm``, never inside ``effect``, because a read that fails after a
-    completed write is not evidence that the write did not happen.
+    ``effect`` issues the single backend effect and nothing else. Its return value is ignored, and it
+    may raise only while no effect has been applied. A verification read belongs in ``confirm``,
+    never inside ``effect``, because a read that fails after a completed write is not evidence that
+    the write did not happen.
 
-    ``confirm`` reads the confirmed backend result without repeating the
-    effect.  It answers a committed request-id replay, a pending record whose
-    backend effect already happened, and the confirmation of an effect this
-    call just issued.
+    ``confirm`` reads the confirmed backend result without repeating the effect.
 
-    ``finish`` is the writer's remaining idempotent backend work for the same
-    occurrence: board fields a state edge resets or fills in, which are not the
-    state edge itself but must not survive it half-applied.  It runs after the
-    effect is confirmed and *before* the event commits, so an incomplete one
-    leaves the exact pending record the caller and :meth:`reconcile` need
-    instead of a clean journal over a half-written card.
+    ``finish`` is the writer's remaining idempotent backend work for the same occurrence. It runs
+    after the effect is confirmed and *before* the event commits, so an incomplete one leaves the
+    exact pending record the caller and :meth:`reconcile` need instead of a clean journal over a
+    half-written card.
     """
 
     def __init__(self, canon: BoardEventCanon, *, request_id: str, event: Event) -> None:

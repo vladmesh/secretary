@@ -1,29 +1,21 @@
 """The document a head is given, and the one short line that points it there.
 
-An interactive head's input channel is a keyboard, and everything the product has ever lost on it
-was large: a ~12 KiB reviewer prompt pasted into a Codex composer that kept the text and consumed
-the Enter, 24 times over on one card (`codegen-orchestrator-1165`, 2026-08-10). Short lines never
-failed — not in any of the six experiments of that investigation and not in any incident before it.
-So the answer is not a better paste. The rule is that the input channel carries no content at all:
-the task lives in a file, and the pane receives a bounded line naming that file's absolute path.
+An interactive head's input channel is a keyboard, and everything the product has lost on it was
+large: a ~12 KiB reviewer prompt pasted into a Codex composer that kept the text and consumed the
+Enter. Short lines never failed. So the input channel carries no content at all: the task lives in
+a file, and the pane receives a bounded line naming that file's absolute path.
 
-Two properties make that reliable by construction rather than by luck, and both are owned here:
+Two properties make that reliable by construction, and both are owned here:
 
-  * **the nudge is bounded and single-line whatever the document says.** Prompt text — a card
-    description with an ESC in it, a CRLF body typed into the board's web form, a bracketed-paste
-    terminator someone pasted into a comment — cannot reach the terminal through it, because the
-    only thing derived from the document is its path. There is nothing left for a composer to
-    swallow;
+  * **the nudge is bounded and single-line whatever the document says.** Prompt text cannot reach
+    the terminal through it, because the only thing derived from the document is its path;
   * **the document lives outside every git worktree.** A workspace's identity is its tracked diff
-    plus its untracked files, and receipts hash exactly that to say "this evidence is for the code
-    in front of me". A prompt written into the checkout would move that identity for a reason that
-    has nothing to do with the candidate, so a caller names the worktree the document describes and
-    a document inside it is refused rather than quietly written.
+    plus its untracked files, and receipts hash exactly that. A prompt written into the checkout
+    would move that identity, so a caller names the worktree the document describes and a document
+    inside it is refused rather than quietly written.
 
-The document is durable on purpose. It outlives the head as the run's own record of what that head
-was asked to do, which is why it is written where run artifacts are kept and not into a temporary
-directory. It is the first form of the protocol's task document, as the nudge is the first form of
-its `nudge(reason)`; worker launch, rework and observer wake take the same seam after the reviewer.
+The document is durable on purpose: it outlives the head as the run's own record of what that head
+was asked to do, which is why it is written where run artifacts are kept.
 """
 
 from __future__ import annotations
@@ -53,21 +45,15 @@ class PromptDocumentError(RuntimeError):
 def nudge_for(path: str | Path, note: str = "") -> str:
     """The one line a pane receives for a head that has a document waiting.
 
-    Absolute, because the head's own working directory is not something the sender knows: a
-    reviewer runs in the candidate worktree, a worker in its own, and a relative path would resolve
-    differently in each. ASCII, because the encoding a terminal will apply to the line is not
-    something delivery can prove, and a path is the one part of the nudge that must survive it
-    byte for byte. Control bytes are refused outright: they are what framing is made of, and a
-    single newline in a path would turn one nudge into two lines and a stray Enter.
+    Absolute, because the head's own working directory is not something the sender knows. ASCII,
+    because the encoding a terminal will apply to the line is not something delivery can prove.
+    Control bytes are refused outright: a single newline in a path would turn one nudge into two
+    lines and a stray Enter.
 
-    `note` is for the caller whose pointer has to discriminate as well as point — the retained
-    worker's continuation names which round it opens and what outranks what inside the document,
-    because that conversation's own scrollback holds the previous round's instructions. It travels
-    through here rather than beside it so that there is still exactly one place where the four
-    guarantees are made, and so the ceiling is checked over the line as it will actually be
-    delivered, path and note together. A line that does not fit is refused whole: a note this
-    function truncated would be a discriminator silently cut to length, which is worse than a
-    caller who is told its nudge is too long.
+    `note` is for the caller whose pointer has to discriminate as well as point. It travels through
+    here so there is still exactly one place where the four guarantees are made, and so the ceiling
+    is checked over the line as it will actually be delivered. A line that does not fit is refused
+    whole: a truncated note would be a discriminator silently cut to length.
     """
     location = str(path)
     if not os.path.isabs(location):
@@ -100,17 +86,12 @@ def write_prompt_document(
 ) -> Path:
     """Put one head's task where it can read it, and where nothing else has to account for it.
 
-    `outside` is the worktree this document describes. Passing it is how a caller states that the
-    document must not become part of that checkout's content; a path inside it is a programming
-    error caught here rather than a receipt digest that moved for no reason.
+    `outside` is the worktree this document describes; a path inside it is a programming error caught
+    here rather than a receipt digest that moved for no reason.
 
-    The write is atomic and the file is private (0600), as is the directory it lives in. A retry
-    that asks for a document it already wrote keeps the file's content and mtime: the reviewer's
-    own retry re-renders the same prompt most of the time, and rewriting it would move a timestamp
-    a reader can otherwise take as "when this head was last given a task". Its mode is still made
-    to hold, because "the document already says the right thing" is not the same promise as "the
-    document is private", and a file that came back from a restore or from an older writer can
-    satisfy the first while failing the second.
+    The write is atomic and the file is private (0600), as is its directory. A retry that asks for a
+    document it already wrote keeps the file's content and mtime, so a reader can still take the
+    timestamp as "when this head was last given a task". Its mode is still made to hold.
     """
     document = Path(path)
     if not document.is_absolute():
@@ -134,11 +115,8 @@ def write_prompt_document(
 def _make_private(document: Path) -> None:
     """Hold the 0600 promise for a document this call did not write.
 
-    The replacement path below creates its file 0600 and swaps it in, so the mode is settled there.
-    A document that is already correct is never rewritten, and its mode is then whatever left it —
-    an archive restored with a permissive umask, a copy an operator made, a predecessor of this
-    module. Fixing the mode rather than rewriting the file keeps the content and the mtime as they
-    were, which is the whole reason the unchanged case exists.
+    A document that is already correct is never rewritten, and its mode is then whatever left it.
+    Fixing the mode rather than rewriting the file keeps the content and the mtime as they were.
     """
     try:
         if stat.S_IMODE(document.stat().st_mode) != _DOCUMENT_MODE:
@@ -162,9 +140,8 @@ def _encoded(text: str) -> bytes:
 def _refuse_inside(document: Path, worktree: Path) -> None:
     """Refuse a document that would land inside the checkout it is about.
 
-    Both sides are resolved through their symlinks first: a workspaces root reached by one name and
-    a document written under another would otherwise compare as unrelated paths while sharing a
-    directory on disk.
+    Both sides are resolved through their symlinks first: a workspaces root reached by one name and a
+    document written under another would otherwise compare as unrelated paths.
     """
     resolved = Path(os.path.realpath(document))
     tree = Path(os.path.realpath(worktree))
@@ -187,8 +164,7 @@ def _replace_atomically(document: Path, text: str) -> None:
 
     Binary mode, so what the head opens is what the caller rendered: a prompt that arrived from the
     board's web form carries CRLF, and text mode would rewrite those line endings on the way in and
-    translate them back out again, which is a document nobody wrote and a comparison that never
-    matches on a retry.
+    translate them back out again.
     """
     temp_path: Path | None = None
     try:

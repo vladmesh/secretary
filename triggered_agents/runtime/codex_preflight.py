@@ -1,20 +1,17 @@
 """The product's one way to make a workspace fit for an interactive Codex head to start in.
 
-Every Codex head is a TUI now, and a TUI asks about directory trust before it will take a prompt.
-That question is asked of whoever is sitting in front of the pane, and in this product nobody is:
-a head whose root codex has never seen sits on the dialog, never answers Orca's readiness probe,
-never receives its prompt, and the tick that created it can only time out. So the answer is
-written before the pane exists rather than waited for afterwards.
+Every Codex head is a TUI, and a TUI asks about directory trust before it will take a prompt.
+Nobody is sitting in front of the pane, so a head whose root codex has never seen sits on the
+dialog, never answers Orca's readiness probe and never receives its prompt. The answer is written
+before the pane exists rather than waited for afterwards.
 
-That makes one ordering the contract for every interactive Codex head, whichever launcher brings it
-up: **ensure trust, create the pane, wait for readiness, deliver the prompt, confirm the turn.**
-The first step is here, the last three are `tui_delivery`. A preflight that fails must fail here,
-with no pane created and nothing for a caller to mistake for a head that ran.
+That makes one ordering the contract for every interactive Codex head, whichever launcher brings
+it up: **ensure trust, create the pane, wait for readiness, deliver the prompt, confirm the
+turn.** The first step is here, the last three are `tui_delivery`. A preflight that fails must
+fail here, with no pane created and nothing for a caller to mistake for a head that ran.
 
-It lives in `runtime` beside `tui_delivery` for the same reason that one does: both callers need it
-and only one of them may import the other. The Secretary dispatcher (`secretary`) reads this
-package; the triggered-agents tick cannot read `secretary` back. Nothing here knows about boards,
-roles or sessions — a caller passes a head profile and the workspace it will run in.
+It lives in `runtime` beside `tui_delivery` because both callers need it and only one of them may
+import the other. Nothing here knows about boards, roles or sessions.
 """
 
 from __future__ import annotations
@@ -73,8 +70,7 @@ KNOWN_COLLABORATION_TOOLS = frozenset({
 class CodexPreflightError(RuntimeError):
     """A workspace could not be made fit for an interactive Codex head to start in.
 
-    Raised only before a pane exists, so a caller that sees it knows nothing was launched and no
-    head has been asked to do anything.
+    Raised only before a pane exists, so a caller that sees it knows nothing was launched.
     """
 
 
@@ -123,9 +119,8 @@ def codex_trust_paths(workspace: str) -> list[str]:
 
     Both the workspace and its repository root, because codex checks the repository root of the
     directory it starts in when that directory is inside a git repo — a worktree inherits the answer
-    given to the repo it was cut from — and the directory itself when it is not, and which of the
-    two applies is not knowable from here. Command-line trust overrides and the config write are
-    rendered from this one list, so the paths a launch states are the paths a preflight recorded.
+    given to the repo it was cut from — and the directory itself when it is not. Trust overrides and
+    the config write are rendered from this one list.
     """
     workspace_path = Path(workspace).resolve(strict=False)
     paths = [workspace_path]
@@ -150,19 +145,14 @@ def ensure_codex_workspace_trusted(
 ) -> None:
     """Answer the codex trust question for one workspace before a head starts in it.
 
-    An interactive codex asks about trust before it takes a prompt, and it asks about the
-    repository root of the directory it starts in rather than that directory: a worktree inherits
-    the answer given to the repo it was cut from. The `-c projects...trust_level` overrides the
-    launch command carries do not reach that check (codex 0.145 still shows the dialog with them
-    in place), so a head whose root codex has never seen sits on the dialog, never goes idle, and
-    never receives its prompt. The answer lives in `config.toml` of the CODEX_HOME the head runs
-    with, which is where codex writes it when a human picks "Yes, continue", so the product writes
-    it there instead of leaving the workspace waiting for that human.
+    The `-c projects...trust_level` overrides the launch command carries do not reach that check
+    (codex 0.145 still shows the dialog with them in place), so the answer has to live in
+    `config.toml` of the CODEX_HOME the head runs with, which is where codex writes it when a human
+    picks "Yes, continue".
 
-    Both the workspace and its repository root are recorded, for the reason `codex_trust_paths`
-    gives. Trust already on file is left alone, and a path the file keeps at another trust level is
-    somebody's decision, so it fails the bring-up with a readable reason instead of being
-    overwritten.
+    Both the workspace and its repository root are recorded. Trust already on file is left alone, and
+    a path the file keeps at another trust level is somebody's decision, so it fails the bring-up
+    with a readable reason instead of being overwritten.
     """
     config_path = config or Path(codex_home(profile)) / CODEX_CONFIG_FILE
     text = _read_codex_config(config_path)
@@ -202,11 +192,9 @@ def preflight_codex_launch(
 ) -> "HeadRun":
     """Prepare one exact Codex ``HeadRun`` and attach advisory fan-out telemetry.
 
-    Provider-schema evidence stays attached when available, but it is not a launch requirement:
-    the current CLI has no accepted isolation proof and the product's low-fan-out policy is an
-    operational preference, not lifecycle authority.  Workspace trust remains the sole hard
-    pre-pane requirement.  The source descriptor is still written whenever its baseline can be
-    enumerated, because it fences later provider progress to this exact HeadRun.
+    Provider-schema evidence stays attached when available but is not a launch requirement; workspace
+    trust is the sole hard pre-pane requirement. The source descriptor is written whenever its
+    baseline can be enumerated, because it fences later provider progress to this exact HeadRun.
     """
     attested = attest_codex_fanout(
         profile, run, schema_attestation=schema_attestation, binary_path=binary_path,
@@ -246,11 +234,10 @@ def attest_codex_fanout(
 ) -> "HeadRun":
     """Build a conservative, run-bound provider-schema attestation without opening a pane.
 
-    ``schema_attestation`` is expected to be a provider-schema capture, not a configuration knob.
-    It carries a canonical ``tools`` list and its digest, the observed binary digest and CLI
-    version, model and role.  The preflight re-reads the binary and version at launch time.  A
-    mapping that merely says a model did not spawn, hides metadata, or mentions a disabled flag is
-    not this shape and is recorded as schema-unknown.
+    ``schema_attestation`` is expected to be a provider-schema capture, not a configuration knob: a
+    canonical ``tools`` list and its digest, the observed binary digest and CLI version, model and
+    role. A mapping that merely says a model did not spawn is not this shape and is recorded as
+    schema-unknown.
     """
     # A head profile is launch configuration, not provider evidence.  In particular, a static
     # profile field must not promote a flag, inventory or a pasted claim into the provider's
@@ -339,9 +326,9 @@ def attest_codex_fanout(
 class CodexProviderEventRecorder:
     """Durably append advisory provider-edge evidence to one exact HeadRun.
 
-    The recorder owns no pane and has no screen/transcript fallback.  Its classifications are
+    The recorder owns no pane and has no screen or transcript fallback. Its classifications are
     diagnostics only: an observed edge or a telemetry-write failure never controls a head's
-    lifecycle, delivery, replacement, or continuation liveness.
+    lifecycle, delivery, replacement or continuation liveness.
     """
 
     def __init__(
@@ -406,9 +393,7 @@ def enforce_provider_event(
 ) -> ProviderEventOutcome:
     """Record provider-edge telemetry without changing the run or board lifecycle.
 
-    ``stop`` and ``block`` remain part of the installed callback shape, but fan-out is advisory:
-    neither observed provider edges nor a telemetry write failure may stop, block, replace, or
-    otherwise control the HeadRun.
+    ``stop`` and ``block`` remain part of the installed callback shape, but fan-out is advisory.
     """
     del stop, block
     prior_run = recorder.run
@@ -430,10 +415,9 @@ def enforce_provider_event(
 def reject_symlinked_config(config: Path, kind: str) -> None:
     """Refuse to treat anything but a regular file as a head runtime's own config.
 
-    A bring-up rewrites installation state shared by every head on the host, so the one thing it
-    must never do is follow a symlink or a device somebody put in that path and replace whatever is
-    on the other end. Public because the Claude side of the same bring-up writes its config under
-    the same rule; there is one answer here about what a launcher may replace, not one per provider.
+    A bring-up rewrites installation state shared by every head on the host, so it must never follow
+    a symlink or a device somebody put in that path. Public because the Claude side of the same
+    bring-up writes its config under the same rule.
     """
     try:
         mode = config.lstat().st_mode
@@ -471,12 +455,10 @@ def _codex_config_projects(text: str, config: Path) -> dict[str, Any]:
 def _save_codex_config(config: Path, text: str) -> None:
     """Replace the codex config with `text`, but only once it parses as the TOML codex will read.
 
-    The new trust tables are appended to the file as it stands rather than re-rendered from a
-    parse, because this file is the installation's own: comments, ordering and everything the
-    dispatcher has no opinion about survive a bring-up untouched. Appending can only produce
-    invalid TOML if the file already declared `projects` in a form a table header cannot extend,
-    so the result is parsed back before it replaces anything: a codex config the dispatcher cannot
-    write safely leaves the bring-up deferred with a reason, not a codex that no longer starts.
+    The new trust tables are appended to the file as it stands rather than re-rendered from a parse,
+    because this file is the installation's own. Appending can produce invalid TOML if the file
+    already declared `projects` in a form a table header cannot extend, so the result is parsed back
+    before it replaces anything.
     """
     _codex_config_projects(text, config)
     temp_path: Path | None = None
@@ -586,9 +568,9 @@ def _policy_run(
 def _with_unbound_provider_source(profile: Mapping[str, Any], run: "HeadRun") -> "HeadRun":
     """Attach the pre-pane source baseline used to bind the new Codex event journal.
 
-    Session JSONL has a provider session id and parent thread id, but no Secretary run id.  The
-    baseline is therefore part of the attestation: a future lifecycle can select exactly one
-    *new* provider journal, never re-label an older same-workspace session as this run.
+    Session JSONL has a provider session id and parent thread id but no Secretary run id, so the
+    baseline is part of the attestation: a later lifecycle can select exactly one *new* provider
+    journal and never re-label an older same-workspace session as this run.
     """
     root = Path(codex_home(profile)) / "sessions"
     if root.exists() and not root.is_dir():
@@ -622,10 +604,9 @@ def _with_unbound_provider_source(profile: Mapping[str, Any], run: "HeadRun") ->
 def codex_provider_source_descriptor(run: "HeadRun") -> dict[str, Any]:
     """The immutable launch facts every Codex provider journal keeps for its entire lifetime.
 
-    A provider journal identifies its own session but cannot name the Secretary head that opened
-    it.  The preflight descriptor supplies that missing fence before the pane exists.  Source
-    binding may append verified journal facts, but it must carry these values byte-for-value into
-    every persisted bound source so later readers can reject a same-workspace foreign journal.
+    A provider journal identifies its own session but cannot name the Secretary head that opened it.
+    Source binding may append verified journal facts, but it must carry these values byte-for-value
+    into every persisted bound source so later readers can reject a foreign same-workspace journal.
     """
     return {
         "run_id": run.run_id,
@@ -668,10 +649,8 @@ def _unknown_run(run: "HeadRun", reason: str) -> "HeadRun":
 def _codex_cli_identity(binary_path: str | None = None) -> tuple[str, str, str]:
     """Hash and query the binary that an ordinary ``codex`` launch resolves to.
 
-    The command renderer invokes ``codex`` by name, so accepting a different configured path
-    here would bind an attestation to a binary the pane does not execute.  ``binary_path`` exists
-    only for a hermetic test or an explicit caller whose launch command uses that same absolute
-    path.
+    The command renderer invokes ``codex`` by name, so accepting a different configured path here
+    would bind an attestation to a binary the pane does not execute.
     """
     candidate = binary_path or shutil.which("codex")
     if not candidate:
@@ -741,7 +720,7 @@ def _typed_provider_event(
 ) -> dict[str, Any]:
     """Reduce untrusted provider input to the four durable event kinds.
 
-    All original bytes are represented only by a canonical digest.  A malformed object is still an
+    All original bytes are represented only by a canonical digest. A malformed object is still an
     event: accepting it as an empty result would be a transcript reconstruction path in disguise.
     """
     captured = captured_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")

@@ -1,29 +1,24 @@
 """The pre-advance observer fence: a sprint's cards stop before they move, not after.
 
-A declared observer is load-bearing.  The tick used to reconcile records and advance every active
-card first and look at observer health afterwards, so a sprint whose observer was dead spent the
-whole tick moving cards past the role that was supposed to be watching them, and only then noticed.
-This runs first and is pure: it reads the sprint board, the head registry and the observer records,
-decides which sprints cannot currently be observed, and returns that set.  It launches nothing,
+A declared observer is load-bearing, so this runs before records are reconciled or cards
+advanced, and it is pure: it reads the sprint board, the head registry and the observer records,
+decides which sprints cannot currently be observed, and returns that set. It launches nothing,
 probes nothing and mutates no card.
 
 What a fence excludes is the affected sprint's own work: its reservations, the projects of its
-linked cards, and the cards themselves.  A silent observer on one sprint must not stop another
-sprint's projects, and a card with no sprint at all is nobody's to fence.
+linked cards, and the cards themselves. A card with no sprint at all is nobody's to fence.
 
-`{kind: none}` passes.  A sprint that declares no observer is not a sprint whose observer is
-missing, and nothing is launched or probed for it.
+`{kind: none}` passes: a sprint that declares no observer is not a sprint whose observer is
+missing.
 
-A sprint board that cannot be read is not a healthy sprint.  The two boards are separate Kanboard
+A sprint board that cannot be read is not a healthy sprint. The two boards are separate Kanboard
 projects and fail separately, so the fence keeps a durable snapshot of each open sprint's
-reservations and falls back to it, rather than letting a blind tick advance the cards of a sprint
-whose declaration nobody could check.
+reservations and falls back to it rather than letting a blind tick advance those cards.
 
-The fence clears on confirmed adoption, and confirmed means confirmed: a record for that sprint,
-naming exactly the declared profile, with a pid on disk that is alive.  A pid that has not been
-written yet is not adoption — the lifecycle grace window that reads it as alive exists to decide
-whether to relaunch a head, not to release another role's cards.  The launch happens later in the
-same tick and the pid lands after that, so the clearing is normally a later tick's.
+The fence clears on confirmed adoption, and confirmed means a record for that sprint naming
+exactly the declared profile, with a pid on disk that is alive. A pid that has not been written
+yet is not adoption — the lifecycle grace window exists to decide whether to relaunch a head, not
+to release another role's cards.
 """
 
 from __future__ import annotations
@@ -83,13 +78,11 @@ def observer_fence(runtime: Any, payload: dict[str, Any]) -> dict[str, Any]:
     Returns the fenced sprint refs, the projects those sprints hold, the card refs to leave alone,
     and the outcomes to report.
 
-    A sprint board that cannot be read fences the sprints it last saw.  The Pipeline board and the
-    sprint board are two Kanboard projects with their own availability, so the tick can perfectly
-    well read the cards of a sprint whose declaration it cannot read — and advancing those cards
-    is exactly "mutating a card whose declared observer is unavailable".  The snapshot below is
-    what makes that fail-closed without guessing: every successful pass records each open sprint's
-    reservations in the durable production state, so the blind tick fences the same projects the
-    last sighted one would have.
+    A sprint board that cannot be read fences the sprints it last saw: the tick can perfectly well
+    read the cards of a sprint whose declaration it cannot read, and advancing those cards is exactly
+    "mutating a card whose declared observer is unavailable". Every successful pass records each open
+    sprint's reservations in the durable production state, so the blind tick fences the same projects
+    the last sighted one would have.
     """
     snapshot = _snapshot(payload)
     try:
@@ -143,14 +136,9 @@ def _blind_fence(
 ) -> dict[str, Any]:
     """Fence every open sprint the last successful pass saw, plus every sprint-linked card.
 
-    Two sources, because neither alone is complete.  The snapshot names the reservations, which is
-    how a card that is merely *in* a held project gets fenced.  The live card metadata names the
-    sprint each card is linked to, which catches a sprint opened since the last snapshot — the
-    Pipeline board is the one that is still readable here, so its `sprint` field is available even
-    though the entity behind it is not.
-
-    A tick that has never seen the board and has no snapshot still fences every sprint-linked card.
-    Cards belonging to no sprint keep running: an unreadable sprint board says nothing about them.
+    Two sources, because neither alone is complete: the snapshot names the reservations, and the live
+    card metadata names the sprint each card is linked to, which catches a sprint opened since. A tick
+    with no snapshot still fences every sprint-linked card; cards belonging to no sprint keep running.
     """
     sprints = set(snapshot)
     projects = {project for projects in snapshot.values() for project in projects}
@@ -183,9 +171,8 @@ def _blind_fence(
 def _sprint_linked_cards(runtime: Any) -> dict[str, str]:
     """Every card that names a sprint, from the Pipeline board. Card ref -> sprint ref.
 
-    Raises rather than answering `{}` for the same reason as `_fenced_card_refs`: this is the blind
-    path's only view of which cards belong to a sprint, and an empty answer would read as "no card
-    belongs to one".
+    Raises rather than answering `{}`: this is the blind path's only view of which cards belong to a
+    sprint, and an empty answer would read as "no card belongs to one".
     """
     cards = runtime.reader.list()
     return {
@@ -381,15 +368,9 @@ def _episode_stamp(since: str, episode: Any) -> str:
     """Identity of one fence episode, for the raise and its matching clear.
 
     The counter alone, without the timestamp beside it. `since` is minted fresh by every pass that
-    raises, so a tick that committed the event and then died before saving its state used to mint a
-    *different* id on the retry as soon as the two passes fell either side of a second boundary —
-    and the retry then wrote a second `observer_fence_raised` for one episode instead of being
-    deduped into the first. That is the one case this id exists to answer, and the timestamp was
-    what broke it. The counter is durable, so it is the same across such a retry and different
-    across two real episodes, which is the whole of what the identity has to say.
-
-    A state entry written before the counter existed carries no episode and keeps the id it was
-    raised under.
+    raises, so a tick that committed the event and then died before saving its state would mint a
+    different id on the retry and write a second `observer_fence_raised` for one episode. The counter
+    is durable, so it is the same across such a retry and different across two real episodes.
     """
     try:
         number = int(episode)
@@ -411,14 +392,9 @@ def _sprint_projects(sprint: dict[str, Any]) -> set[str]:
 def _fenced_card_refs(runtime: Any, sprints: set[str], projects: set[str]) -> set[str]:
     """Every card the fenced sprints hold, by their link and by their reserved projects.
 
-    Read once and in full, rather than per sprint, because the set has to be complete: the tick
-    hands it to reconciliation, which decides whether a record is orphaned, and a card missing from
-    here would have its heads settled while the fence is up.
-
-    A read that fails is therefore not an empty set. Backend reads fail independently, so this one
-    can fail while the tick's later reads recover, and an empty answer here would let reconciliation
-    settle exactly the records the fence exists to hold still. It raises, and the tick ends
-    fail-closed on it like any other fence failure.
+    Read once and in full rather than per sprint, because the set has to be complete: the tick hands
+    it to reconciliation, and a card missing from here would have its heads settled while the fence
+    is up. A read that fails is therefore not an empty set — it raises, and the tick ends fail-closed.
     """
     if not sprints and not projects:
         return set()
@@ -437,9 +413,8 @@ def _fenced_card_refs(runtime: Any, sprints: set[str], projects: set[str]) -> se
 def fenced_task(fence: dict[str, Any], task: dict[str, Any]) -> bool:
     """Whether one card belongs to a fenced sprint.
 
-    Two ways in, because a card can be linked to the sprint by reference or merely sit in one of
-    the projects that sprint reserved. Both are the fenced sprint's work; a card with neither is
-    another sprint's, or nobody's, and keeps running.
+    Two ways in, because a card can be linked to the sprint by reference or merely sit in one of the
+    projects that sprint reserved. Both are the fenced sprint's work.
     """
     if not fence.get("sprints"):
         return False

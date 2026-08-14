@@ -69,22 +69,11 @@ def review_infrastructure_retry(
 ) -> dict[str, Any] | None:
     """Hold a green candidate over a reviewer that could not be started. None past the ceiling.
 
-    A reviewer pane that will not split, or an inventory the runtime will not answer, says nothing
-    about the code: it is a failure of the review stage's machinery, and the candidate behind it is
-    still the one a green exact-SHA gate accepted. Blocking the card on it made the recovery a
-    return to Ready and a fresh worker, which repeated the whole suite and the live benchmark and
-    produced a different SHA from a regenerated packet — the round's evidence thrown away over a
-    split pane (sprint:1300).
-
-    So nothing here decides anything about the candidate. The record stays exactly as the green
-    gate left it — `gate_state`, the receipt, the report generation and its request ids, the
-    reviewed workspace and the held worker session — and the state goes back to `review_starting`,
-    which is the one state whose recovery launches a reviewer and only a reviewer: the tick's gate
-    step is skipped for it, no worker is brought up, the card does not move off Validate, and no
-    board move charges the sprint a budget event.
-
-    Only the count moves, and only it can end this: past the ceiling the caller blocks the card for
-    an operator, naming the candidate this was holding.
+    A reviewer pane that will not split says nothing about the code, and the candidate behind it is
+    still the one a green exact-SHA gate accepted. Nothing here decides anything about the candidate:
+    the record stays exactly as the green gate left it and the state goes back to `review_starting`,
+    which is the one state whose recovery launches a reviewer and only a reviewer. Only the count
+    moves, and past the ceiling the caller blocks the card for an operator.
     """
     ref = task["ref"]
     if record.gate_state != "green":
@@ -169,14 +158,9 @@ def command_terminal_status(
 ) -> dict[str, Any]:
     """Return the tracked pane's liveness and its last output time.
 
-    A failed inventory raises instead of looking like a missing pane.  The wait watchdog can then
-    report a degraded runtime without restarting a head on a transport failure.
-
-    The inventory is the session host's (secretary-1414), not an argument vector assembled here:
-    one set of pane commands serves the head operations and this liveness read alike, so a backend
-    that is not Orca changes one file rather than every place a pane is looked up. What the host
-    cannot read it refuses, and that refusal still arrives here as a `HostError` rather than as an
-    empty inventory — an unreadable inventory has never been allowed to look like a missing pane.
+    A failed inventory raises instead of looking like a missing pane, so the wait watchdog can report
+    a degraded runtime without restarting a head on a transport failure. The inventory is the session
+    host's, not an argument vector assembled here.
     """
     if host.mode == "noop":
         return {"known": True, "live": True, "reason": "noop"}
@@ -317,11 +301,8 @@ def command_terminal_status(
 def _admitted_provider_progress_for_status(value: Any, run: Any) -> dict[str, Any]:
     """Keep shared worker/reviewer liveness inside the same exact-HeadRun admission fence.
 
-    ``CommandHostRuntime.provider_progress`` proves a provider source descriptor before it emits
-    an observation.  The generic status seam still receives a host response as data, though, so
-    it must verify the response's run binding before it lets an opaque cursor renew either role's
-    watchdog.  That prevents a test double, transport regression or foreign same-workspace
-    response from making a reviewer look live longer than its retained run warrants.
+    The generic status seam receives a host response as data, so it must verify the response's run
+    binding before it lets an opaque cursor renew either role's watchdog.
     """
     if not isinstance(value, dict):
         return {"state": "unavailable", "reason": "invalid provider-progress shape"}
@@ -374,18 +355,11 @@ def _admitted_provider_progress_for_status(value: Any, run: Any) -> dict[str, An
 def _pane_work_state(host: Any, handle: str) -> str:
     """Is this pane working on a turn, waiting for input, or held in a dialog? "" if unknowable.
 
-    Orca's `tui-idle`, the same readiness the delivery path waits on before it sends to any head
-    and the same one the observer's lifecycle reads. It comes from the pane's own agent status,
-    falling back to a quiescence window, so it answers for the claude and the codex adapter alike
-    and reads no screen.
-
-    A pane held in a dialog is not working either, and nothing in the pipeline answers a dialog, so
-    it counts as stopped rather than as a busy head.
-
-    The empty answer matters as much as the other three. A probe the runtime refuses, a stale pane
-    binding, a handle Orca no longer knows: none of those is a head that is working, and none is a
-    head that has stopped. The caller must not read it as either, and falls back to the timing
-    ceilings that already serve a runtime which cannot expose a signal at all.
+    Orca's `tui-idle`, from the pane's own agent status falling back to a quiescence window, so it
+    reads no screen and answers for every adapter. A pane held in a dialog counts as stopped rather
+    than busy. The empty answer matters as much as the other three: a refused probe, a stale binding
+    or a handle Orca no longer knows is neither working nor stopped, and the caller falls back to the
+    timing ceilings.
     """
     if not handle:
         return ""
@@ -400,12 +374,11 @@ def _pane_work_state(host: Any, handle: str) -> str:
 def command_review_running(host: Any, task: dict[str, Any], record: DispatcherRecord) -> bool:
     """Is the reviewer pane for this card still up?
 
-    Identity comes from the persisted pane first: the handle the split returned, and the leafId it
-    resolved to (`terminal list` can answer with a different handle alias for the same pty, so the
-    leaf is the token that survives that). The label is only a fallback for a pane whose handle was
-    never persisted — a tick killed between the split and the state write, or a card adopted from a
-    dispatcher that predates persisted reviewer handles. It cannot be the primary check: the
-    reviewer head overwrites its terminal title with its own OSC sequence seconds after launch."""
+    Identity comes from the persisted pane first — the handle the split returned and the leafId it
+    resolved to, since `terminal list` can answer with a different handle alias for the same pty. The
+    label is only a fallback for a pane whose handle was never persisted; it cannot be the primary
+    check, because the reviewer head overwrites its terminal title seconds after launch.
+    """
     status = command_terminal_status(host, task, record, kind="review")
     return bool(status.get("live") and not status.get("identity_mismatch"))
 
@@ -413,20 +386,17 @@ def command_review_running(host: Any, task: dict[str, Any], record: DispatcherRe
 def end_review_pane(
     host: Any, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER
 ) -> None:
-    """Close the reviewer's pane and forget it. Used wherever the reviewer's lifecycle ends on its
-    own — a red verdict, a respawn after a silent reviewer — so the next bring-up cannot mistake a
-    stale handle for a live pane, and so the worker's workspace survives untouched.
+    """Close the reviewer's pane and forget it. Used wherever the reviewer's lifecycle ends on its own
+    — a red verdict, a respawn after a silent reviewer — so the next bring-up cannot mistake a stale
+    handle for a live pane, and so the worker's workspace survives untouched.
 
-    `initiator` is who is ending it, and every caller names one: this is the single place a
-    reviewer stop passes through, so a caller that left it to the default would be a reviewer whose
-    record says only that it went. The pane pointers are dropped afterwards; the run itself stays on
-    the record, because the initiator it carries is what makes the stop readable after the head is
-    gone.
+    `initiator` is who is ending it and every caller names one. The pane pointers are dropped
+    afterwards; the run itself stays on the record, because the initiator it carries is what makes
+    the stop readable after the head is gone.
 
-    A stop the host will not confirm raises, and the record keeps pointing at that reviewer. Every
-    caller of this opens something in the same checkout right after — a rework worker, a
-    replacement reviewer — and a forgotten head that is still running would then be the second
-    process on it."""
+    A stop the host will not confirm raises, and the record keeps pointing at that reviewer: every
+    caller opens something in the same checkout right after.
+    """
     host.stop_review(record, initiator)
     record.review_handle = ""
     record.review_leaf = ""
@@ -499,12 +469,9 @@ def _reviewer_launch_aborted(
 ) -> dict[str, Any]:
     """The ambiguous reviewer bring-up: its pane is open and nothing can say the head is gone.
 
-    The one delivery-evidence sink runs before this branch.  "No reviewer exists" is exactly what
-    cannot be claimed here, so the intent stays on disk with what the failure knew of that head.
-    A pre-send busy document nudge retries that delivery before adoption; other ambiguous launches
-    retain the established adopt-or-stop recovery.  Blocking the card and dropping the record
-    instead would leave a live reviewer with nothing pointing at it, and that still outranks the
-    ordinary infrastructure retry.
+    "No reviewer exists" is exactly what cannot be claimed here, so the intent stays on disk with
+    what the failure knew of that head. Blocking the card and dropping the record instead would leave
+    a live reviewer with nothing pointing at it.
     """
     evidence = getattr(exc, "evidence", None)
     if hasattr(evidence, "to_json"):
@@ -563,11 +530,9 @@ def retry_busy_reviewer_launch_delivery(
 ) -> dict[str, Any] | None:
     """Retry a pre-send busy reviewer nudge before its live launch can be adopted.
 
-    A launch heartbeat only proves that the pane exists.  Until the document nudge is confirmed,
-    it does not permit the reviewer adoption side effects: freezing the worker, recording routing,
-    clearing the intent or setting the review lifecycle.  The intent is also the retry's durable
-    cursor, so a dispatcher restart retains the same pane and its backoff rather than opening a
-    second reviewer.
+    A launch heartbeat only proves that the pane exists. Until the document nudge is confirmed it
+    does not permit the adoption side effects: freezing the worker, recording routing, clearing the
+    intent or setting the review lifecycle. The intent is also the retry's durable cursor.
     """
     delivery = busy_launch_delivery(intent)
     if not delivery:
@@ -708,12 +673,9 @@ def retry_busy_reviewer_launch_delivery(
 def _record_review_delivery_failure(record: DispatcherRecord, exc: Exception) -> None:
     """Keep a reviewer prompt that did not land as durable card telemetry.
 
-    Only a failure the delivery boundary evidenced counts: a split that would not open or an
-    inventory that would not answer is a bring-up failure, not a prompt that was refused, and the
-    infrastructure counter beside this one already carries those. What is kept is what the boundary
-    saw — terminal, payload size and hash, stage, attempts, composer and cursor fingerprints — and
-    it is never reset by a later reviewer, so a card cannot report that every prompt landed once
-    one finally does.
+    Only a failure the delivery boundary evidenced counts: a split that would not open is a bring-up
+    failure, not a prompt that was refused. What is kept is what the boundary saw, and it is never
+    reset by a later reviewer, so a card cannot report that every prompt landed once one finally does.
     """
     evidence = getattr(exc, "evidence", None)
     if hasattr(evidence, "to_json"):
@@ -739,13 +701,9 @@ def _escalate_stuck_review_launch(
 ) -> None:
     """Comment once when a reviewer launch has aborted past the stuck ceiling.
 
-    The abort keeps the record on purpose — the reviewer pane is up and nothing can say what became
-    of the head in it, so nothing here may block or drop the card. That safety is also what makes
-    the loop silent: every tick looks like the last, and only the steward's degraded-health line marks
-    it at all. Past the ceiling this leaves one durable, operator-addressed note on the card so the
-    stall is something a person is pointed at, not just an unhealthy tick that repeats. The request
-    id is stable within the stuck episode and distinct across episodes, so the board carries one
-    such note per episode however long it lasts, never one per tick.
+    The abort keeps the record on purpose, which is also what makes the loop silent. Past the ceiling
+    this leaves one durable, operator-addressed note on the card. The request id is stable within the
+    stuck episode and distinct across episodes, so the board carries one note per episode.
     """
     ceiling = _review_launch_abort_stuck_ticks()
     if record.review_launch_aborts < ceiling:

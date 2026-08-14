@@ -4,27 +4,16 @@
 three operations hand each other. Four things about it are decisions rather than fields:
 
   * **identity is its own value, not the pane handle.** Orca aliases the handle it returned at
-    create time while the pty stays exactly where it was, and a product that identifies a run by
-    its handle reads that reincarnation as a head that vanished and a head that appeared. Every
-    stop path in this dispatcher has had to work around it by carrying a leaf beside the handle.
-    Here the run has a `run_id` that nothing about the pane can move, and `rebound` puts the new
-    handle on the same run;
-  * **the lifecycle is four states and moves one way.** `spawned` is a head that has a pane,
-    `working` one that has been given its task, `finishing` one somebody has asked to stop, and
-    `exited` one whose stop was confirmed. A tick that finds a record in `finishing` knows a stop
-    was begun and not confirmed, which is precisely the state the product used to have no name for
-    and answered by launching a second head beside the first;
-  * **who stopped it is recorded, and it is recorded before the stop happens.** `finishing` cannot
-    be entered without an initiator, so there is no way to end a head and leave the record saying
-    only that it ended. That is what makes "did the watchdog kill this worker, or did the card
-    finish?" a question the record answers rather than one an operator reconstructs from timing.
-    The first initiator is also the one that stays: a stop that was refused is retried by later
-    ticks, often through another path with another actor, and a transition that overwrote the
-    initiator would leave the record naming whoever retried last rather than whoever began. So
-    `finishing` is idempotent — entering it again returns the same run, initiator included;
-  * **it is JSON, so it survives the dispatcher.** A run is durable state: the process that spawned
-    a head is not necessarily the process that stops it, and the initiator has to still be there
-    after a restart, which is the whole point of writing it down.
+    create time while the pty stays exactly where it was, so the run has a `run_id` that nothing
+    about the pane can move, and `rebound` puts the new handle on the same run;
+  * **the lifecycle is four states and moves one way.** `spawned` has a pane, `working` has been
+    given its task, `finishing` is one somebody has asked to stop, and `exited` is one whose stop
+    was confirmed. A record in `finishing` is a stop begun and not confirmed;
+  * **who stopped it is recorded, and before the stop happens.** `finishing` cannot be entered
+    without an initiator. The first initiator is also the one that stays, because a refused stop
+    is retried by later ticks through other paths, so `finishing` is idempotent;
+  * **it is JSON, so it survives the dispatcher.** The process that spawned a head is not
+    necessarily the process that stops it.
 """
 from __future__ import annotations
 
@@ -74,9 +63,7 @@ class StopInitiator:
     """Who ended a head, and why they said they were ending it.
 
     A separate type rather than a string because it is the one fact a stop cannot be performed
-    without: `stop(run, initiator)` takes it positionally, so there is no call that ends a head
-    anonymously and no body-level check that could be forgotten. `actor` is the agent of the stop —
-    a role, a watchdog, an operator — and `reason` is free text for the record.
+    without: `stop(run, initiator)` takes it positionally, so no call ends a head anonymously.
     """
 
     actor: str
@@ -103,10 +90,9 @@ class StopInitiator:
 class HeadRun:
     """One head that was started, as everything after the start has to see it.
 
-    Frozen, and every transition returns a new value: a run is written down between ticks, and a
-    record that could be mutated in place is one whose durable copy and in-memory copy disagree for
-    however long the tick takes. Equality is deliberately structural, so two reads of the same
-    written record compare equal; `same_run` is what asks whether two values are the same *head*.
+    Frozen, and every transition returns a new value: a run is written down between ticks. Equality
+    is deliberately structural, so two reads of the same written record compare equal; `same_run` is
+    what asks whether two values are the same *head*.
     """
 
     run_id: str
@@ -160,11 +146,8 @@ class HeadRun:
     def settled(self) -> bool:
         """Whether this head's end was confirmed, so nothing is owed to it any more.
 
-        Deliberately not `not running`: `finishing` is neither. It is a head whose stop was begun
-        and not confirmed, which is exactly the state a later tick must continue rather than
-        replace — a caller that reads "not running" as "finished with" throws away the identity
-        and the initiator of a stop that is still owed, and the retry then becomes a new stop of a
-        head nothing can name.
+        Deliberately not `not running`: `finishing` is neither, and a caller that reads it as "finished
+        with" throws away the identity and the initiator of a stop that is still owed.
         """
         return self.lifecycle == EXITED
 
@@ -196,8 +179,8 @@ class HeadRun:
     def rebound(self, handle: str, *, leaf: str = "") -> "HeadRun":
         """The same run, addressed at the pane handle it has now.
 
-        This is the reincarnation case and it deliberately does not touch `run_id` or the
-        lifecycle: a session manager that renamed a pane has said nothing about the head in it.
+        Deliberately does not touch `run_id` or the lifecycle: a session manager that renamed a pane has
+        said nothing about the head in it.
         """
         return replace(self, handle=handle, leaf=leaf or self.leaf)
 
@@ -210,15 +193,10 @@ class HeadRun:
     def finishing(self, initiator: StopInitiator) -> "HeadRun":
         """Somebody has asked this head to stop, and this is who.
 
-        Recorded before the stop is attempted, on purpose: a stop that is refused or that outlives
-        the dispatcher must leave the initiator behind, or the head that is still there afterwards
-        is one nothing can say who was ending.
-
-        Idempotent by initiator, and that is the whole of the rule: the first actor to enter this
-        state is the one the record keeps. A refused stop is retried — by the next tick, by
-        reconciliation, by an operator — and each of those arrives with an initiator of its own.
-        Overwriting would make the record name the last retry rather than the decision that ended
-        the head, which is the one question this field exists to answer.
+        Recorded before the stop is attempted, so a stop that is refused or that outlives the dispatcher
+        leaves the initiator behind. Idempotent by initiator: the first actor to enter this state is the
+        one the record keeps, because overwriting would make the record name the last retry rather than
+        the decision that ended the head.
         """
         if not isinstance(initiator, StopInitiator):
             raise HeadRunError("a stop initiator is a StopInitiator")
@@ -276,9 +254,7 @@ def new_run_id() -> str:
 def _spec_json(spec: HeadSpec) -> dict[str, Any]:
     """The launch shape the head started with, written out with the run.
 
-    Written rather than re-resolved: the registry can be edited while a head is running, and a
-    record that answers "what was this head" from today's `heads.toml` describes a head that may
-    never have existed.
+    Written rather than re-resolved: the registry can be edited while a head is running.
     """
     return {
         "profile_id": spec.profile_id,
@@ -315,8 +291,7 @@ def _spec_from_json(payload: Any) -> HeadSpec:
 def _fanout_policy_json(payload: Any) -> dict[str, Any]:
     """Return one safe policy shape, never upgrading unknown history into an allow.
 
-    This function intentionally does not try to recreate an attestation from profile data.  The
-    evidence belongs to the run that was launched, and a recovery process has no authority to
+    The evidence belongs to the run that was launched, and a recovery process has no authority to
     manufacture it from today's registry or a screen transcript.
     """
     if not isinstance(payload, dict):
