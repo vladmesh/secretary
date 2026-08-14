@@ -23,6 +23,7 @@ from pathlib import Path
 from collections.abc import Mapping
 from typing import Any, NamedTuple
 
+from secretary._env import positive_int
 from secretary.dispatcher_heartbeat import HEARTBEAT_VERSION, run_heartbeat_identity
 from secretary.dispatcher_state import request_token
 
@@ -70,64 +71,32 @@ def stall_seconds(kind: str) -> int:
         name, default = "SECRETARY_REVIEW_VERDICT_STALL_SECONDS", REVIEW_VERDICT_STALL_DEFAULT
     else:
         name, default = "SECRETARY_WORKER_REPORT_STALL_SECONDS", WORKER_REPORT_STALL_DEFAULT
-    try:
-        value = int(os.environ.get(name, "") or default)
-    except ValueError:
-        return default
-    return value if value > 0 else default
+    return positive_int(name, default)
 
 
 def initial_output_stall_seconds() -> int:
     """Short grace period for a pane whose activity has never passed its launch timestamp."""
-    try:
-        value = int(os.environ.get("SECRETARY_INITIAL_OUTPUT_STALL_SECONDS", "") or INITIAL_OUTPUT_STALL_DEFAULT)
-    except ValueError:
-        return INITIAL_OUTPUT_STALL_DEFAULT
-    return value if value > 0 else INITIAL_OUTPUT_STALL_DEFAULT
+    return positive_int("SECRETARY_INITIAL_OUTPUT_STALL_SECONDS", INITIAL_OUTPUT_STALL_DEFAULT)
 
 
 def idle_stall_seconds() -> int:
     """How long an idle head with nothing delivered is given before the watchdog acts."""
-    try:
-        value = int(os.environ.get("SECRETARY_HEAD_IDLE_STALL_SECONDS", "") or IDLE_STALL_DEFAULT)
-    except ValueError:
-        return IDLE_STALL_DEFAULT
-    return value if value > 0 else IDLE_STALL_DEFAULT
+    return positive_int("SECRETARY_HEAD_IDLE_STALL_SECONDS", IDLE_STALL_DEFAULT)
 
 
 def bring_up_defer_attempts() -> int:
     """How many deferred bring-ups one role's head gets before its card is blocked."""
-    try:
-        value = int(
-            os.environ.get("SECRETARY_BRINGUP_DEFER_ATTEMPTS", "") or BRING_UP_DEFER_ATTEMPTS_DEFAULT
-        )
-    except ValueError:
-        return BRING_UP_DEFER_ATTEMPTS_DEFAULT
-    return value if value > 0 else BRING_UP_DEFER_ATTEMPTS_DEFAULT
+    return positive_int("SECRETARY_BRINGUP_DEFER_ATTEMPTS", BRING_UP_DEFER_ATTEMPTS_DEFAULT)
 
 
 def review_launch_abort_stuck_ticks() -> int:
     """How many consecutive aborted reviewer launches pass before an operator is escalated to."""
-    try:
-        value = int(
-            os.environ.get("SECRETARY_REVIEW_LAUNCH_ABORT_STUCK", "")
-            or REVIEW_LAUNCH_ABORT_STUCK_DEFAULT
-        )
-    except ValueError:
-        return REVIEW_LAUNCH_ABORT_STUCK_DEFAULT
-    return value if value > 0 else REVIEW_LAUNCH_ABORT_STUCK_DEFAULT
+    return positive_int("SECRETARY_REVIEW_LAUNCH_ABORT_STUCK", REVIEW_LAUNCH_ABORT_STUCK_DEFAULT)
 
 
 def review_infra_retry_attempts() -> int:
     """How many reviewer bring-up failures a green candidate absorbs before the card is blocked."""
-    try:
-        value = int(
-            os.environ.get("SECRETARY_REVIEW_INFRA_RETRY_ATTEMPTS", "")
-            or REVIEW_INFRA_RETRY_ATTEMPTS_DEFAULT
-        )
-    except ValueError:
-        return REVIEW_INFRA_RETRY_ATTEMPTS_DEFAULT
-    return value if value > 0 else REVIEW_INFRA_RETRY_ATTEMPTS_DEFAULT
+    return positive_int("SECRETARY_REVIEW_INFRA_RETRY_ATTEMPTS", REVIEW_INFRA_RETRY_ATTEMPTS_DEFAULT)
 
 
 class IdleOutcome(NamedTuple):
