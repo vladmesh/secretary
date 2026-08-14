@@ -185,8 +185,13 @@ def command_terminal_status(
         return {"known": True, "live": True, "reason": "noop"}
     if not record.workspace:
         raise HostError(f"{kind} workspace is unavailable")
+    inventory = getattr(host, "_worktree_terminals_or_raise", None)
     try:
-        terminals = OrcaSessionHost(host._run_json).panes(record.workspace)
+        terminals = (
+            inventory(record.workspace)
+            if callable(inventory)
+            else OrcaSessionHost(host._run_json).panes(record.workspace)
+        )
     except PaneHostError as exc:
         raise HostError(str(exc)) from None
     if kind == "review":

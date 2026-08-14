@@ -268,6 +268,8 @@ from secretary.dispatcher_types import (
     # a head that stopped answering, a replacement opening, an operator pausing the pipeline,
     # reconciliation settling a record — and both heads' runs now say which.
     STOPPED_BY_DISPATCHER,
+    STOPPED_BY_OPERATOR,  # noqa: F401  # Public compatibility re-export.
+    STOPPED_BY_RECONCILIATION,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_REPLACEMENT,
     STOPPED_BY_REVIEW_FREEZE,
     STOPPED_BY_REVIEW_VERDICT,
@@ -502,6 +504,10 @@ PaneIdentity = Pane
 
 
 class InstanceCatalog:
+    # The runtime consumes this as part of the catalog surface. `__init__` replaces the
+    # declaration with the validated instance directory before a catalog is usable.
+    instance_dir: Path | None = None
+
     def __init__(self, instance_path: Path) -> None:
         report = validate_instance(instance_path)
         if not report.ok:

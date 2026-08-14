@@ -32,6 +32,9 @@ from secretary.backup_retention import (
 from secretary.backup_retention import (
     remove_path_quietly as _remove_path_quietly,
 )
+from secretary.backup_verify import (
+    verify_backup,  # noqa: F401  # Public compatibility re-export.
+)
 from secretary.config import ConfigError, load_config, validate
 from secretary.data import (
     DataExport,

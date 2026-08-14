@@ -25,7 +25,9 @@ from secretary._fsutil import (
 )
 from secretary.memory_errors import (
     MemoryExportPublishError,
+    MemoryLockError,  # noqa: F401  # Public compatibility re-export.
     MemoryPermissionError,
+    MemoryProtocolError,  # noqa: F401  # Public compatibility re-export.
     MemoryValidationError,
 )
 from secretary.memory_journal import (
