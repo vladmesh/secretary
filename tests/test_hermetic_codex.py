@@ -89,9 +89,9 @@ class HermeticCodexHomeTests(unittest.TestCase):
             with mock.patch.object(codex_preflight, "_save_codex_config", recording_save):
                 for role in ("worker", "reviewer"):
                     with self.subTest(role=role):
-                        catalog.head_command(  # type: ignore[attr-defined]
+                        catalog.head_launch(
                             "codex-hermetic", "TASK.md", workspace=str(workspace), role=role,
-                        )
+                        ).command
 
             # Not vacuous: these bring-ups really did answer the trust question.
             self.assertTrue(written)

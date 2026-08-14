@@ -111,7 +111,6 @@ from secretary.dispatcher_production import (
 )
 from secretary.dispatcher_review import (
     command_terminal_status as _command_terminal_status,
-    command_review_running as _command_review_running,
     end_review_pane as _end_review_pane,
     recover_review_launch as _recover_review_launch,
     start_review as _start_review,
@@ -517,9 +516,6 @@ class InstanceCatalog:
             model=model,
             model_source=model_source,
         )
-
-    def head_command(self, head: str, prompt_file: str, *, workspace: str, role: str) -> str:
-        return self.head_launch(head, prompt_file, workspace=workspace, role=role).command
 
     def head_launch(
         self,
@@ -1462,9 +1458,6 @@ class CommandHostRuntime:
             "head_run": outcome.run.to_json(),
             "delivery_evidence": _delivery_evidence_json(outcome.delivery, "reviewer-launch"),
         }
-
-    def review_running(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
-        return _command_review_running(self, task, record)
 
     def worker_status(self, task: dict[str, Any], record: DispatcherRecord) -> dict[str, Any]:
         return _command_terminal_status(self, task, record, kind="worker")

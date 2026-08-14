@@ -4770,7 +4770,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         payload = self.runtime.production_state.load()
         self.runtime.production_state.put_records(payload, {"secretary-510-pilot": record})
         self.runtime.production_state.save(payload)
-        self.host.review_running_result = False
+        self.host.review_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
 
         result = self.tick()
 
@@ -4787,7 +4787,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         payload = self.runtime.production_state.load()
         self.runtime.production_state.put_records(payload, {"secretary-510-pilot": record})
         self.runtime.production_state.save(payload)
-        self.host.review_running_error = HostError("orca terminal list failed")
+        self.host.review_status_error = HostError("orca terminal list failed")
 
         for _ in range(3):
             held = self.tick()
@@ -5361,7 +5361,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         payload = self.runtime.production_state.load()
         payload["records"]["secretary-510-pilot"]["state"] = "review_starting"
         self.runtime.production_state.save(payload)
-        self.host.review_running_result = False
+        self.host.review_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
 
         recovered = self.tick()
 
@@ -8607,12 +8607,12 @@ class DispatcherLauncherTests(unittest.TestCase):
             task = {"routing": {"head_override": "pinned-terra"}}
 
             head = catalog.worker_head(task)  # type: ignore[attr-defined]
-            command = catalog.head_command(  # type: ignore[attr-defined]
+            command = catalog.head_launch(
                 head,
                 "TASK.md",
                 workspace=str(workspace),
                 role="worker",
-            )
+            ).command
 
         self.assertEqual(head, "pinned-terra")
         self.assertIn("-m gpt-5.6-terra", command)
@@ -8655,9 +8655,9 @@ class DispatcherLauncherTests(unittest.TestCase):
                 "claimed-review": catalog.claimed_review_head(  # type: ignore[attr-defined]
                     {"routing": {"resolved_review_head": "codex-terra"}}),
             }
-            command = catalog.head_command(  # type: ignore[attr-defined]
+            command = catalog.head_launch(
                 routes["worker"], "TASK.md", workspace=str(workspace), role="worker"
-            )
+            ).command
 
         for route, head in routes.items():
             with self.subTest(route=route):
@@ -9028,12 +9028,12 @@ class DispatcherLauncherTests(unittest.TestCase):
                 "profiles": {"claude-opus": {"adapter": "claude", "model": "opus"}}
             }
             with mock.patch.dict(os.environ, {"TA_CLAUDE_JSON": str(config)}):
-                command = catalog.head_command(  # type: ignore[attr-defined]
+                command = catalog.head_launch(
                     "claude-opus",
                     "TASK.md",
                     workspace=workspace,
                     role="worker",
-                )
+                ).command
             data = json.loads(config.read_text(encoding="utf-8"))
 
         self.assertTrue(data["projects"][workspace]["hasTrustDialogAccepted"])
@@ -9052,9 +9052,9 @@ class DispatcherLauncherTests(unittest.TestCase):
                     }
                 }
             }
-            command = catalog.head_command(  # type: ignore[attr-defined]
+            command = catalog.head_launch(
                 "claude-opus-medium", "TASK.md", workspace=workspace, role="reviewer"
-            )
+            ).command
 
         self.assertIn("--model opus --effort medium", command)
         self.assertIn("python3 -P -m secretary.role_env exec --role reviewer", command)
@@ -13499,7 +13499,9 @@ class ReviewLivenessTests(unittest.TestCase):
             {"handle": "term-review", "leafId": "leaf-review", "title": "codex", "connected": True},
         ])
 
-        self.assertTrue(host.review_running(self.task, self._record(review_handle="term-review")))
+        status = host.review_status(self.task, self._record(review_handle="term-review"))
+        self.assertTrue(status["live"])
+        self.assertFalse(status.get("identity_mismatch"))
 
     def test_leaf_identifies_the_pane_when_the_handle_alias_changed(self) -> None:
         """`terminal list` can answer with a different handle alias for the same pty, so the leaf
@@ -13509,7 +13511,9 @@ class ReviewLivenessTests(unittest.TestCase):
         ])
 
         record = self._record(review_handle="term-review", review_leaf="leaf-review")
-        self.assertTrue(host.review_running(self.task, record))
+        status = host.review_status(self.task, record)
+        self.assertTrue(status["live"])
+        self.assertFalse(status.get("identity_mismatch"))
 
     def test_worker_leaf_identifies_the_pane_when_the_handle_alias_changed(self) -> None:
         host = self._host([
@@ -13600,7 +13604,8 @@ class ReviewLivenessTests(unittest.TestCase):
             {"handle": "term-review", "leafId": "leaf-review", "connected": False},
         ])
 
-        self.assertFalse(host.review_running(self.task, self._record(review_handle="term-review")))
+        status = host.review_status(self.task, self._record(review_handle="term-review"))
+        self.assertFalse(status["live"])
 
     def test_disconnected_pane_preserves_a_foreign_heartbeat_fence_for_both_roles(self) -> None:
         """The shared status seam reads identity before an inventory result can authorize a
@@ -13638,7 +13643,8 @@ class ReviewLivenessTests(unittest.TestCase):
             {"handle": "term-worker", "leafId": "leaf-worker", "title": "codex", "connected": True},
         ])
 
-        self.assertFalse(host.review_running(self.task, self._record(review_handle="term-review")))
+        status = host.review_status(self.task, self._record(review_handle="term-review"))
+        self.assertFalse(status["live"])
 
     def test_label_finds_an_orphan_pane_when_no_handle_was_persisted(self) -> None:
         """The tick that split the pane died before writing the handle to state, so the label is
@@ -13647,7 +13653,9 @@ class ReviewLivenessTests(unittest.TestCase):
             {"handle": "term-review", "leafId": "leaf-review", "title": "secretary-651 reviewer", "connected": True},
         ])
 
-        self.assertTrue(host.review_running(self.task, self._record()))
+        status = host.review_status(self.task, self._record())
+        self.assertTrue(status["live"])
+        self.assertFalse(status.get("identity_mismatch"))
 
     def test_connected_worker_pane_with_an_exited_head_process_is_not_live(self) -> None:
         """secretary-751: Codex crashed and Orca kept the pane's own workspace shell alive. The
@@ -13700,7 +13708,7 @@ class ReviewLivenessTests(unittest.TestCase):
 
         self.assertTrue(status["live"])
         self.assertTrue(status["identity_mismatch"])
-        self.assertFalse(host.review_running(self.task, record))
+        self.assertFalse(status["live"] and not status.get("identity_mismatch"))
         self.assertEqual(outcome["action"], "review-heartbeat-identity-mismatch")
         self.assertEqual(record.state, "review_starting")
         self.assertEqual(record.review_launch_aborts, 2)
