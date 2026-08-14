@@ -12,7 +12,7 @@ from secretary.config import load_config, validate
 from secretary.gate import _timed_out, run_gate
 from secretary.onboarding import ScannerError, project_add
 from secretary.provision import apply_provision_result, start_provision
-from tests.test_onboarding import git, make_repo
+from tests.support.git import git, make_repo
 
 
 class GateTests(unittest.TestCase):

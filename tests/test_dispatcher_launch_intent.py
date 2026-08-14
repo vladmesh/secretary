@@ -51,7 +51,7 @@ from secretary.routing_journal import attempts as routing_attempts
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 
 from tests.observer_identity import bind_observer
-from tests.test_head_operations import FakeSessionHost as HeadOperationFakeHost
+from tests.fakes.host import FakeSessionHost as HeadOperationFakeHost
 from tests.test_dispatcher import (
     FakeCatalog,
     FakeHost,

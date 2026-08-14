@@ -61,6 +61,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
+from secretary._env import positive_int
 from secretary.dispatcher_state import now_rfc3339, request_token
 from secretary.dispatcher_launch import merge_launch_head_run
 from secretary.dispatcher_tui import (
@@ -553,38 +554,17 @@ def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 def observer_ack_deadline_seconds() -> int:
     """How long one delivery may stay unacknowledged before it is sent again."""
-    try:
-        value = int(
-            os.environ.get("SECRETARY_OBSERVER_ACK_DEADLINE_SECONDS", "")
-            or OBSERVER_ACK_DEADLINE_DEFAULT_SECONDS
-        )
-    except ValueError:
-        return OBSERVER_ACK_DEADLINE_DEFAULT_SECONDS
-    return value if value > 0 else OBSERVER_ACK_DEADLINE_DEFAULT_SECONDS
+    return positive_int("SECRETARY_OBSERVER_ACK_DEADLINE_SECONDS", OBSERVER_ACK_DEADLINE_DEFAULT_SECONDS)
 
 
 def observer_turn_ceiling_seconds() -> int:
     """How long one head may hold a batch while never being seen ready for input."""
-    try:
-        value = int(
-            os.environ.get("SECRETARY_OBSERVER_TURN_CEILING_SECONDS", "")
-            or OBSERVER_TURN_CEILING_DEFAULT_SECONDS
-        )
-    except ValueError:
-        return OBSERVER_TURN_CEILING_DEFAULT_SECONDS
-    return value if value > 0 else OBSERVER_TURN_CEILING_DEFAULT_SECONDS
+    return positive_int("SECRETARY_OBSERVER_TURN_CEILING_SECONDS", OBSERVER_TURN_CEILING_DEFAULT_SECONDS)
 
 
 def observer_wake_max_attempts() -> int:
     """How many refused wake deliveries of one batch are retried before the head is replaced."""
-    try:
-        value = int(
-            os.environ.get("SECRETARY_OBSERVER_WAKE_MAX_ATTEMPTS", "")
-            or OBSERVER_WAKE_MAX_ATTEMPTS_DEFAULT
-        )
-    except ValueError:
-        return OBSERVER_WAKE_MAX_ATTEMPTS_DEFAULT
-    return value if value > 0 else OBSERVER_WAKE_MAX_ATTEMPTS_DEFAULT
+    return positive_int("SECRETARY_OBSERVER_WAKE_MAX_ATTEMPTS", OBSERVER_WAKE_MAX_ATTEMPTS_DEFAULT)
 
 
 def reconcile_observers(
