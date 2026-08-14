@@ -611,6 +611,14 @@ def _gate_owns_pr(record, number: int, title: str, body: str) -> bool:
     ways of trying (a marker the gate looks for, a stamp the gate reads back) each ended up handing
     a person's writing to `gh pr edit`. So the question is asked of the gate's own memory instead.
 
+    A pull request opened before this record existed therefore never becomes the gate's, and that
+    is the decided behaviour rather than a gap: such a pull request keeps the fixed stub the old
+    gate wrote, and is edited by hand if anybody wants it better. There is deliberately no
+    migration, no recognition of the legacy stub text and no operator override — each of those
+    would be authorship inferred from something other than the gate's own write, which is exactly
+    what this predicate exists to stop. Refreshing an already-open pull request is scoped to the
+    pull requests this gate recorded writing.
+
     Three ways to answer no, and all three are the same rule: no record at all (an empty body is
     the ordinary case — a person opened the pull request and left GitHub's optional description
     blank), a record about a different pull request, or a record whose digest no longer describes

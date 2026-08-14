@@ -194,6 +194,12 @@ board. A lost record costs a description that stops being refreshed; the opposit
 cost somebody their words. Text that already matches the record is not re-sent, so a repeat tick
 on unchanged data makes no call at all.
 
+Refreshing is scoped, by decision, to the pull requests the gate recorded writing. A pull request
+opened before this record existed keeps the fixed stub the old gate gave it — it is not read, not
+edited, and updated by hand if anyone cares. There is no migration, no recognition of the legacy
+stub text and no operator override, because each of those would infer authorship from something
+other than the gate's own accepted write.
+
 Authorship is deliberately not readable out of the pull request: a body is supplied by whoever
 edited it last, so no marker, digest or phrasing inside it can say who wrote the text around it.
 The boundary this does not defend is a forgery by someone who can already write to the

@@ -12221,6 +12221,44 @@ class DispatcherGateTests(unittest.TestCase):
                 self.assertEqual(self._pr_calls(host, "view"), [], "an unowned PR is not even read")
                 self.assertEqual(host.pr_body, body)
 
+    def test_a_pull_request_opened_before_this_change_keeps_its_stub_by_decision(self) -> None:
+        """The upgrade case, asserted as the intended behaviour it is (secretary-1439 round 4).
+
+        An in-flight card whose pre-1439 gate already opened the automatic PR carries a record
+        deserialised from a state file written before `gate_pr_authorship` existed, so the field
+        loads empty and the pull request can never become the gate's. The owner decided this is
+        where it ends: such a pull request keeps its stub and is edited by hand if anyone cares —
+        no migration, no recognition of the stub text, no operator override, because every one of
+        those would infer authorship from something other than the gate's own accepted write, and
+        an old stub costs a reader some context while a wrong overwrite costs a person their words.
+
+        So the gate does not merely decline to edit it: it asks the backend nothing about it at
+        all, neither `gh pr view` nor `gh pr edit`.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            stub_title = "secretary-633: pipeline/secretary-633"
+            stub_body = (
+                "Automatic PR for worker branch `pipeline/secretary-633` of task secretary-633. "
+                "Opened by the CI gate so that the pull_request CI runs."
+            )
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=True, check_runs=[{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+                pr_title=stub_title, pr_body=stub_body,
+            )
+            # Exactly what a record saved by the previous release loads as: no authorship key.
+            record = DispatcherRecord.from_json({"workspace": str(ws), "state": "validating"})
+            self.assertEqual(record.gate_pr_authorship, {})
+
+            result = host.gate_check(self._described_task(), record)
+
+        self.assertEqual(result.status, "green", "an unrefreshed description never colours the gate")
+        self.assertEqual(self._pr_calls(host, "view"), [], "an unowned PR is not even read")
+        self.assertEqual(self._pr_calls(host, "edit"), [])
+        self.assertEqual((host.pr_title, host.pr_body), (stub_title, stub_body))
+        self.assertEqual(record.gate_pr_authorship, {}, "and it is not adopted on the way past")
+
     def test_a_record_from_another_pull_request_owns_nothing_here(self) -> None:
         """The record is about one pull request. A PR whose number it does not name — the card's
         first PR was closed and a person opened another from the same branch — is not covered by
