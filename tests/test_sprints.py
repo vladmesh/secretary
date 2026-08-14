@@ -5,7 +5,6 @@ import io
 import json
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 from typing import Any
