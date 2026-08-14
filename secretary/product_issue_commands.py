@@ -37,6 +37,16 @@ def add_product_issue_subcommands(subparsers) -> None:
     _common(show)
     show.add_argument("--id", required=True)
     show.set_defaults(handler=run_product_show)
+    lanes = product_sub.add_parser(
+        "reconcile-lanes",
+        help="move Product and Issue rows into the lane of their product; plans unless --apply",
+    )
+    _common(lanes)
+    lanes.add_argument(
+        "--apply", action="store_true",
+        help="perform the planned moves; without it the command writes nothing",
+    )
+    lanes.set_defaults(handler=run_product_reconcile_lanes)
     # The staged journal is shared by Product and Issue writes, so its repair commands live
     # once, under `product`.
     transaction = product_sub.add_parser("transaction", help="inspect and repair staged Product/Issue writes")
@@ -119,6 +129,7 @@ def run_product_create(args):
     return _run(args, lambda store: store.create_product(product_id=args.id, projects=args.project, title=args.title, description=args.description, actor=args.actor, request_id=args.request_id))
 def run_product_list(args): return _run(args, lambda store: store.list_products())
 def run_product_show(args): return _run(args, lambda store: store.show_product(args.id))
+def run_product_reconcile_lanes(args): return _run(args, lambda store: store.reconcile_lanes(apply=args.apply))
 def run_issue_create(args):
     return _run(args, lambda store: store.create_issue(product=args.product, issue_kind=args.kind, priority=args.priority, title=args.title, description=args.description, actor=args.actor, request_id=args.request_id))
 def run_issue_list(args): return _run(args, lambda store: store.list_issues(product=args.product, include_closed=args.closed))
