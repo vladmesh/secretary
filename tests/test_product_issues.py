@@ -44,7 +44,7 @@ class ProductBoard(WriteKanboard):
 
 
 class LiveSwimlaneBoard(ProductBoard):
-    """The live Pipeline layout: named project lanes, no default lane.
+    """The live Pipeline layout: lanes named after projects, no lane of the product `codegen`.
 
     Kanboard refuses a create into a lane the board does not have and answers that refusal with
     `false` instead of an error, which is what the live board does for `swimlane_id=0`.
@@ -56,10 +56,14 @@ class LiveSwimlaneBoard(ProductBoard):
         {"id": 7, "name": "codegen-orchestrator", "position": 2},
     ]
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.swimlanes = [dict(lane) for lane in self.LANES]
+
     def call(self, method: str, **params: object) -> object:
-        if method == "getActiveSwimlanes":
-            return [dict(lane) for lane in self.LANES]
-        if method == "createTask" and params.get("swimlane_id") not in {lane["id"] for lane in self.LANES}:
+        if method == "createTask" and params.get("swimlane_id") not in {
+            int(lane["id"]) for lane in self.swimlanes
+        }:
             self.calls.append((method, params))
             return False
         return super().call(method, **params)
@@ -68,9 +72,16 @@ class LiveSwimlaneBoard(ProductBoard):
 class NoSwimlaneBoard(ProductBoard):
     """A board with no swimlane at all, the layout the earlier fixtures describe."""
 
+    def __init__(self) -> None:
+        super().__init__()
+        self.swimlanes = []
+
     def call(self, method: str, **params: object) -> object:
-        if method == "getActiveSwimlanes":
-            return []
+        if method == "createTask" and params.get("swimlane_id") not in {
+            int(lane["id"]) for lane in self.swimlanes
+        }:
+            self.calls.append((method, params))
+            return False
         return super().call(method, **params)
 
 
@@ -90,8 +101,22 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
     def _created(self, client, reference: str) -> dict:
         return next(task for task in client.tasks if task.get("reference") == reference)
 
-    def test_named_swimlanes_without_a_default_take_the_first_lane_in_board_order(self) -> None:
+    def _lane_names(self, client) -> dict[int, str]:
+        return {int(lane["id"]): str(lane["name"]) for lane in client.swimlanes}
+
+    def test_a_record_takes_the_lane_named_after_its_product(self) -> None:
+        """Both records land in the `secretary` lane, and that lane is not the board's first.
+
+        The rule this replaces took the board's first active lane, so it answered lane 4 here by
+        coincidence of position rather than by the product.  The board is therefore reordered so
+        that the coincidence cannot hold: the product lane is now last, and still chosen.
+        """
         client = LiveSwimlaneBoard()
+        client.swimlanes = [
+            {"id": 9, "name": "service-template", "position": 1},
+            {"id": 7, "name": "codegen-orchestrator", "position": 2},
+            {"id": 4, "name": "secretary", "position": 3},
+        ]
         store = self._store(client)
 
         product = store.create_product(
@@ -104,14 +129,89 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
         )
 
         self.assertEqual(product["id"], "secretary")
-        # Lane 4 is first by position, not by id or by list order, and both records take it.
         lanes = [params["swimlane_id"] for method, params in client.calls if method == "createTask"]
         self.assertEqual(lanes, [4, 4])
         self.assertEqual(self._created(client, "product:secretary")["swimlane_id"], 4)
         self.assertEqual(self._created(client, issue["ref"])["swimlane_id"], 4)
+        # Nothing was added: the board already had the lane the product names.
+        self.assertNotIn("addSwimlane", [method for method, _ in client.calls])
         self.assertEqual(store.transactions.status(), {"ok": True, "pending": 0})
 
-    def test_board_without_swimlanes_keeps_the_implicit_default_lane(self) -> None:
+    def test_the_lane_does_not_depend_on_swimlane_order_or_on_a_default_lane(self) -> None:
+        """The same product takes the same lane whatever order the board lists, `Default` first.
+
+        The live Pipeline board has lanes named after projects and a `Default swimlane`; the old
+        rule made the record follow whichever of them happened to be first.
+        """
+        chosen = []
+        for order in (
+            [
+                {"id": 1, "name": "Default swimlane", "position": 1},
+                {"id": 4, "name": "secretary", "position": 2},
+                {"id": 9, "name": "service-template", "position": 3},
+            ],
+            [
+                {"id": 9, "name": "service-template", "position": 1},
+                {"id": 4, "name": "secretary", "position": 2},
+                {"id": 1, "name": "Default swimlane", "position": 3},
+            ],
+            # Board order need not agree with the positions the board reports, either.
+            [
+                {"id": 4, "name": "secretary", "position": 7},
+                {"id": 1, "name": "Default swimlane", "position": 0},
+            ],
+        ):
+            with self.subTest(first=order[0]["name"]), tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir)
+                (root / "projects").mkdir()
+                (root / "projects" / "secretary.yaml").write_text("id: secretary\n", encoding="utf-8")
+                client = LiveSwimlaneBoard()
+                client.swimlanes = [dict(lane) for lane in order]
+                store = ProductIssueStore(client, data_dir=root / "data", instance=root)
+
+                store.create_product(
+                    product_id="secretary", projects=["secretary"], title="Secretary",
+                    description="", actor="po", request_id="ordered-product",
+                )
+
+                row = self._created(client, "product:secretary")
+                self.assertEqual(self._lane_names(client)[int(row["swimlane_id"])], "secretary")
+                chosen.append(int(row["swimlane_id"]))
+        self.assertEqual(chosen, [4, 4, 4])
+
+    def test_a_product_without_a_lane_gets_one_named_after_it(self) -> None:
+        """`codegen` is bound to two projects and has no lane of its own on the live board.
+
+        Its lane cannot be derived from those bindings, which is why the rule names the lane after
+        the product and creates it on demand.
+        """
+        (self.root / "projects" / "codegen-orchestrator.yaml").write_text(
+            "id: codegen-orchestrator\n", encoding="utf-8",
+        )
+        (self.root / "projects" / "service-template.yaml").write_text(
+            "id: service-template\n", encoding="utf-8",
+        )
+        client = LiveSwimlaneBoard()
+        store = self._store(client)
+
+        store.create_product(
+            product_id="codegen", projects=["codegen-orchestrator", "service-template"],
+            title="Codegen", description="", actor="po", request_id="codegen-product",
+        )
+        issue = store.create_issue(
+            product="codegen", issue_kind="feature", priority="P2", title="Template drift",
+            description="", actor="po", request_id="codegen-issue",
+        )
+
+        added = [params["name"] for method, params in client.calls if method == "addSwimlane"]
+        self.assertEqual(added, ["codegen"])
+        lane = self._created(client, "product:codegen")["swimlane_id"]
+        self.assertEqual(self._lane_names(client)[int(lane)], "codegen")
+        # The Issue reuses the lane its product created rather than adding a second one.
+        self.assertEqual(self._created(client, issue["ref"])["swimlane_id"], lane)
+        self.assertEqual(store.transactions.status(), {"ok": True, "pending": 0})
+
+    def test_a_board_without_swimlanes_gets_the_product_lane(self) -> None:
         client = NoSwimlaneBoard()
         store = self._store(client)
 
@@ -120,8 +220,89 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
             actor="po", request_id="plain-product",
         )
 
-        lanes = [params["swimlane_id"] for method, params in client.calls if method == "createTask"]
-        self.assertEqual(lanes, [0])
+        lane = self._created(client, "product:secretary")["swimlane_id"]
+        self.assertEqual(self._lane_names(client)[int(lane)], "secretary")
+        self.assertEqual(store.transactions.status(), {"ok": True, "pending": 0})
+
+    def test_a_lane_another_writer_added_between_the_two_calls_is_reused(self) -> None:
+        """A refused `addSwimlane` is read back, not reported: the lane exists, that is the answer."""
+        client = NoSwimlaneBoard()
+
+        original_call = client.call
+
+        def race(method: str, **params: object) -> object:
+            if method == "addSwimlane" and not client.swimlanes:
+                client.swimlanes.append({"id": 21, "name": "secretary", "position": 1})
+            return original_call(method, **params)
+
+        client.call = race  # type: ignore[method-assign]
+        store = self._store(client)
+
+        store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="",
+            actor="po", request_id="raced-product",
+        )
+
+        self.assertEqual(self._created(client, "product:secretary")["swimlane_id"], 21)
+        self.assertEqual([lane["name"] for lane in client.swimlanes], ["secretary"])
+
+    def test_a_repeated_delivery_lands_in_the_lane_the_first_one_chose(self) -> None:
+        """The lane is a function of the record, so a redelivered create cannot move it.
+
+        Between the two deliveries the board gains a `Default swimlane` and puts it first, which
+        under the lane rule this replaces would have been the lane of the second attempt.
+        """
+        client = LiveSwimlaneBoard()
+        store = self._store(client)
+        store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="",
+            actor="po", request_id="redelivered-product",
+        )
+        issue = store.create_issue(
+            product="secretary", issue_kind="bug", priority="P0", title="Crash",
+            description="", actor="po", request_id="redelivered-issue",
+        )
+
+        client.swimlanes.insert(0, {"id": 33, "name": "Default swimlane", "position": 0})
+        again = store.create_issue(
+            product="secretary", issue_kind="bug", priority="P0", title="Crash",
+            description="", actor="po", request_id="redelivered-issue",
+        )
+        product_again = store.create_product(
+            product_id="secretary", projects=["secretary"], title="Secretary", description="",
+            actor="po", request_id="redelivered-product",
+        )
+
+        self.assertEqual(again["ref"], issue["ref"])
+        self.assertEqual(product_again["id"], "secretary")
+        rows = [task for task in client.tasks if task.get("reference") in {issue["ref"], "product:secretary"}]
+        self.assertEqual(sorted(int(row["swimlane_id"]) for row in rows), [4, 4])
+        self.assertEqual(store.transactions.status(), {"ok": True, "pending": 0})
+        self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
+
+    def test_a_retried_staged_create_takes_the_lane_of_its_staged_product(self) -> None:
+        """The staged transaction writer reads the product from its own intent, not from the board.
+
+        A create staged before the board was reordered therefore finishes in the same lane its
+        first attempt would have chosen.
+        """
+        client = LiveSwimlaneBoard()
+        store = self._store(client)
+        intent = {
+            "record_type": "product", "product_id": "secretary", "product_projects": '["secretary"]',
+            "title": "Secretary", "description": "", "actor": "po",
+        }
+        event = store._transaction_event(
+            kind="product_created", actor="po", reference="product:secretary",
+            request_id="staged", intent=intent,
+        )
+        store.transactions.begin("staged", kind="product_created", intent=intent, event=event)
+        client.swimlanes.insert(0, {"id": 33, "name": "Default swimlane", "position": 0})
+
+        product = store.retry_transaction("staged")
+
+        self.assertEqual(product["id"], "secretary")
+        self.assertEqual(self._created(client, "product:secretary")["swimlane_id"], 4)
         self.assertEqual(store.transactions.status(), {"ok": True, "pending": 0})
 
     def test_refused_create_is_terminal_and_leaves_no_transaction_behind(self) -> None:
