@@ -2172,6 +2172,20 @@ class CommandHostRuntime:
         if self.commit_state is not None:
             self.commit_state()
 
+    def commit_gate_pr_authorship(self, record: DispatcherRecord, entry: dict[str, Any]) -> None:
+        """Write down that the github gate wrote a known text on a known pull request.
+
+        Same contract as the head runs above, for the same reason: the record is the durable home
+        of the fact, this runtime does not own the file it lives in, so a caller that lent us
+        `commit_state` gets it on disk at once and one that did not gets it saved with its own
+        records. The gate calls this only after the backend has accepted the write, and reads it
+        back on every later tick as its only evidence that a pull request's text is its own
+        (secretary-1439) — nothing in the pull request itself is evidence of anything.
+        """
+        record.gate_pr_authorship = dict(entry)
+        if self.commit_state is not None:
+            self.commit_state()
+
     def worker_lifecycle_run(self, record: DispatcherRecord) -> head_ops.HeadRun:
         """This card's worker as the head operations see it.
 

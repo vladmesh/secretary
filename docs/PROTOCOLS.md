@@ -169,6 +169,47 @@ receives only a bounded pointer to it. `TASK.md` is likewise a generated, git-ig
 handoff packet. These are operational projections, not repository documentation or candidate
 changes. A receipt is evidence, not permission to skip the pre-merge check or independent review.
 
+### The pull request a GitHub gate opens
+
+A `github` gate opens the pull request the `pull_request` workflow needs, and that pull request is
+also the only description of the change a later reader of `main` gets: its title lands in the merge
+commit. Both title and body are built deterministically from the board — no model is asked anything
+on this path. The title is `<ref>: <card title>`. The body names the card and the branch it merges
+into, quotes the card's statement, and carries the worker's own account of the round from its
+`report:done` comment; each source is bounded, redacted like any other board excerpt, and simply
+omitted when the gate runs before it exists. The gate re-runs on every later tick and once more
+before the merge, and each run brings an already-open pull request up to the better description it
+can now build.
+
+What bounds that is the dispatcher's own record, never the pull request's text. When the gate
+opens or edits a pull request and the backend accepts the write, it records on the card's
+dispatcher record which pull request it wrote and a digest of the exact title and body it sent.
+A later tick may rewrite that pull request only while that record exists, names that pull request,
+and still describes what GitHub returns. Everything else is somebody's writing and is left alone
+for good: a pull request a person opened (an empty description is the ordinary case of this — a
+body is optional on GitHub, and emptiness is not evidence of authorship), one whose body or title
+was edited after the gate wrote it, one opened before this record existed, and every pull request
+belonging to a card whose record was lost to a restore, a reinstallation or a re-adoption from the
+board. A lost record costs a description that stops being refreshed; the opposite default would
+cost somebody their words. Text that already matches the record is not re-sent, so a repeat tick
+on unchanged data makes no call at all.
+
+Refreshing is scoped, by decision, to the pull requests the gate recorded writing. A pull request
+opened before this record existed keeps the fixed stub the old gate gave it — it is not read, not
+edited, and updated by hand if anyone cares. There is no migration, no recognition of the legacy
+stub text and no operator override, because each of those would infer authorship from something
+other than the gate's own accepted write.
+
+Authorship is deliberately not readable out of the pull request: a body is supplied by whoever
+edited it last, so no marker, digest or phrasing inside it can say who wrote the text around it.
+The boundary this does not defend is a forgery by someone who can already write to the
+installation's own state — anyone who can edit the dispatcher's production state can claim any
+pull request. Write access to the repository does not confer that.
+The description is not a condition on the code:
+a backend that refuses the update leaves the pull request as it is and the gate's verdict unchanged,
+while a pull request that cannot be opened at all is still a gate failure, because without it the
+project's CI never runs.
+
 ## Candidate history
 
 Before a gate publishes or validates anything, the dispatcher reads the candidate's own commit
