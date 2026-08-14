@@ -1038,10 +1038,6 @@ class TaskAudit:
         except FileNotFoundError:
             return None
 
-    def _has_request(self, request_id: str) -> bool:
-        self._refresh_committed_index()
-        return request_id in self._committed_offsets
-
     def _product_issue_pending(self, request_id: str) -> bool:
         digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
         return os.path.exists(os.path.join(self.board_dir, "product-issue-transactions", f"v1-{digest}.json"))

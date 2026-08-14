@@ -765,9 +765,6 @@ class ProductIssueStore:
         except (OSError, KeyError, TypeError):
             raise TaskError("audit_pending", "Product/Issue write is pending repair; retry with the same request id", 4) from None
 
-    def _begin(self, request_id: str, *, kind: str, intent: dict[str, Any], event: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        return self.transactions.begin(request_id, kind=kind, intent=intent, event=event)
-
     def _reject_other_pending_reference_operation(self, reference: str, request_id: str) -> None:
         if self.transactions.pending_for_reference(reference, excluding=request_id):
             raise TaskError(
