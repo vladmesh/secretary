@@ -648,19 +648,32 @@ worker — a card still holding a claim cannot be archived. Both moves carry the
 the card's comment, and the archive carries it again. A card whose dispatcher work is still live is not
 disposable at all: the close refuses with `live_work` and names it, and the head is settled first.
 
-The dispositions run after the sprint's status is `closed`, because an open sprint reserves the card's
-project and the reservation guard refuses a PO move into it. So `close` takes the same admission lock
-(`sprints/admission.lock`) that `create` and `reopen` take, and holds it across the whole close: the
-status change, the dispositions and the completion of the transaction. No successor is admitted on those
-projects while a close still has a disposition to write, and an interrupted close finishes its
-dispositions on the retry of its request id under that same gate, before any successor can be opened.
+`closed` is published as the last step of the close. The terminal phase runs in one order — the verdicts
+on the declared issues, the archival of the Done cards, the dispositions, then the status, then the
+reserved-project index and the completion of the transaction — and an interrupted close therefore leaves
+the sprint open. That is what keeps a successor out of an unfinished close: an open sprint still reserves
+its projects, and `create` already refuses a second sprint on a reserved project, so the retry of the
+close finishes its dispositions before any successor can be opened. `close` also takes the admission lock
+(`sprints/admission.lock`) that `create` and `reopen` take, so a concurrent create waits for the answer
+rather than racing the status it depends on; the invariant does not depend on how long that lock is held.
+Because a disposition then moves a card of a sprint that is still open, and the reservation guard refuses
+a PO move into an open sprint's project, the close carries the guard's own `sprint_override` with the
+reason `disposed by the close of <sprint-ref>: <the disposition's reason>`. There is no other way around
+the guard.
 
 A close that has performed a step is never thrown away. A terminal refusal discards the staged close only
 while nothing has been written; from the first issue write onwards — the marker is durable before that
 write, as it is before the status change — the refusal is `audit_pending` and the staged plan stays on
-the record. That covers the issue somebody else closed through `issue close` in the meantime: the verdicts
-already performed stand, the close is repaired by retrying the same request id, and that retry still
-refuses a file that states other decisions.
+the record, and a retry that states other decisions is still refused.
+
+No step of a close can be left unresolvable. Before every issue write the close reads the issue and
+resolves one of three cases, alike on the first pass and on a retry: an open issue is closed with the
+stated verdict; an issue already closed under this close's own derived request id is a step already done;
+and an issue closed by somebody else — `issue close` does not ask whether an open sprint declared it — is
+settled as closed elsewhere and never written again. The third case is recorded rather than
+reinterpreted: the stated verdict, the reason the issue actually carries and the request id that closed it
+go into `issues_closed_elsewhere` on the close event and in the command's answer, so a divergence between
+the verdict and the issue is visible instead of being fitted away.
 
 Installation config may set `sprint_budget.signal` and `sprint_budget.hard`; defaults are 3 and 6. The
 schema resolves omitted values to those defaults before rejecting a hard limit below the signal limit.

@@ -1666,6 +1666,15 @@ class SprintWriter:
                 )
                 archived.append(task_ref)
                 self.transactions.save(document)
+            # `closed` is published last, and that is what keeps a successor out of an
+            # unfinished close: an interrupted close leaves the sprint open, an open sprint
+            # still reserves its projects, and `create` already refuses a second sprint on a
+            # reserved project.  The invariant is the one the board always had, not a lock
+            # whose lifetime the recovery would have to extend.  The dispositions therefore
+            # run against their own open sprint, which the reservation guard would refuse a
+            # PO move into; they carry the guard's existing `sprint_override` with the
+            # reason that authorized them, rather than a new way around it.
+            self._dispose_remaining_cards(document, event, payload, decisions or {})
             sprint = self.reader.show(str(event["ref"]), include_cards=False)
             typed_request_id = str(document["request_id"]) + ":typed-close"
             typed_pending = self.audit.pending_event(typed_request_id)
@@ -1679,13 +1688,6 @@ class SprintWriter:
                     reference=str(event["ref"]), target="closed", reason="Sprint closed",
                     request_id=typed_request_id,
                 )
-                sprint = self.reader.show(str(event["ref"]), include_cards=False)
-            # The dispositions run once the sprint is closed, and for the reason the closed
-            # status itself is: while the sprint is open it reserves the card's project, and
-            # the reservation guard refuses a PO move into it. Closing first removes the
-            # reservation, so the disposition needs no override to bypass a sprint that no
-            # longer holds anything.
-            self._dispose_remaining_cards(document, event, payload, decisions or {})
             document.setdefault("progress", {})["status_done"] = True
             self.transactions.save(document)
             self.transactions.complete(document)
@@ -1709,16 +1711,30 @@ class SprintWriter:
         close's payload, which is the audit record of the decision.  A closing verdict is a
         Product/Issue write, staged under a request id derived from this close's, so a
         retry of the close replays it instead of closing the issue a second time.
+
+        No step of a close may be left unresolvable, so the issue's current state is read
+        before every write and answers with exactly one of three outcomes, the same on the
+        first pass and on a retry: an open issue is closed with the stated verdict; an issue
+        already closed under this close's own derived request id is a step already done; and
+        an issue somebody else closed in the meantime — `issue close` does not ask whether an
+        open sprint declared it — is settled as closed elsewhere and never written again.
+        That last one is recorded, not reinterpreted: the stated verdict, the reason the issue
+        was actually closed with and the request id that closed it all go into this close's
+        payload, so a divergence is a fact somebody can read rather than a silent fit.
         """
         verdicts = decisions.get("issues")
         if not isinstance(verdicts, list):
             return
         closed = payload.setdefault("closed_issues", [])
-        if not isinstance(closed, list):
+        elsewhere = payload.setdefault("issues_closed_elsewhere", [])
+        if not isinstance(closed, list) or not isinstance(elsewhere, list):
             raise TaskError("audit_pending", "sprint close transaction has invalid issue progress", 4)
+        settled = set(closed) | {
+            str(item.get("ref")) for item in elsewhere if isinstance(item, dict)
+        }
         pending = [
             entry for entry in verdicts
-            if isinstance(entry, dict) and entry.get("verdict") != "open" and entry.get("ref") not in closed
+            if isinstance(entry, dict) and entry.get("verdict") != "open" and entry.get("ref") not in settled
         ]
         if not pending:
             return
@@ -1739,14 +1755,37 @@ class SprintWriter:
         self.transactions.save(document)
         for entry in pending:
             reference = str(entry["ref"])
+            step_request_id = _close_step_request_id(str(document["request_id"]), "issue", reference)
+            if store.show_issue(reference).get("closed"):
+                if self.audit.committed_event(step_request_id) is None:
+                    elsewhere.append(self._issue_closed_elsewhere(store, entry, reference))
+                else:
+                    closed.append(reference)
+                self.transactions.save(document)
+                continue
             store.close_issue(
                 reference=reference,
                 reason=str(entry["verdict"]),
                 actor=str(document["intent"]["actor"]),
-                request_id=_close_step_request_id(str(document["request_id"]), "issue", reference),
+                request_id=step_request_id,
             )
             closed.append(reference)
             self.transactions.save(document)
+
+    def _issue_closed_elsewhere(
+        self, store: Any, entry: dict[str, Any], reference: str,
+    ) -> dict[str, str]:
+        """What this close records about a verdict somebody else had already performed."""
+        history = [
+            item for item in self.audit.events(reference)
+            if str(item.get("kind") or "").endswith("closed")
+        ]
+        return {
+            "ref": reference,
+            "verdict": str(entry["verdict"]),
+            "closed_reason": str(store.show_issue(reference).get("close_reason") or ""),
+            "closed_by_request_id": str(history[-1].get("request_id") or "") if history else "",
+        }
 
     def _dispose_remaining_cards(
         self, document: dict[str, Any], event: dict[str, Any], payload: dict[str, Any],
@@ -1786,6 +1825,8 @@ class SprintWriter:
                     writer.move(
                         role="po", actor=actor, reference=reference, target=target,
                         reason=f"{verdict} when sprint {event['ref']} closed: {reason}",
+                        sprint_override=True,
+                        sprint_override_reason=f"disposed by the close of {event['ref']}: {reason}",
                         request_id=_close_step_request_id(str(document["request_id"]), "dispose-move", reference),
                     )
                 moved.append(reference)
@@ -1809,6 +1850,7 @@ class SprintWriter:
             "remaining_tasks": list(payload.get("remaining_tasks") or []),
             "issue_decisions": list(decisions.get("issues") or []),
             "closed_issues": list(payload.get("closed_issues") or []),
+            "issues_closed_elsewhere": list(payload.get("issues_closed_elsewhere") or []),
             "card_dispositions": list(decisions.get("cards") or []),
             "disposed_tasks": list(payload.get("disposed_tasks") or []),
         }
@@ -2173,7 +2215,9 @@ def _close_archive_request_id(request_id: str, reference: str) -> str:
     return f"{request_id}:sprint-close-archive:{digest}"
 
 
-_CLOSE_PROGRESS_STEPS = ("closed_issues", "archived_tasks", "moved_tasks", "disposed_tasks")
+_CLOSE_PROGRESS_STEPS = (
+    "closed_issues", "issues_closed_elsewhere", "archived_tasks", "moved_tasks", "disposed_tasks",
+)
 
 
 def _close_progressed(document: dict[str, Any], payload: dict[str, Any]) -> bool:
