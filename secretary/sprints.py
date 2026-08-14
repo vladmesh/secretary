@@ -1461,7 +1461,20 @@ class SprintWriter:
             payload.update({"delivery_id": delivery_id, "through_event": through_event})
         return self._write("resume_recorded", role, actor, reference, request_id, payload, mutation)
 
-    def close(self, *, role: str, actor: str, reference: str, request_id: str | None = None) -> dict[str, Any]:
+    def close(
+        self, *, role: str, actor: str, reference: str,
+        decisions: dict[str, list[dict[str, str]]] | None = None,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Close a sprint on decisions its caller states, not on decisions inferred here.
+
+        Two things a close was silent about are now part of it: what became of every issue
+        the sprint declared, and what becomes of every card it still holds in a working
+        state.  Neither follows from the close itself — a sprint may close with its
+        Definition of Done only partly reached — so both are stated by the caller and both
+        are checked before the transaction opens.  A close short of a decision writes
+        nothing and names what is missing.
+        """
         self._role(role, {"po"})
         request_id = request_id or str(uuid.uuid4())
         self.audit.require_pending_layout()
@@ -1474,9 +1487,20 @@ class SprintWriter:
                 )
                 if committed is not None:
                     return self._close_result(committed)
+                if document is not None:
+                    self._check_staged_decisions(document, decisions)
                 if document is None:
+                    from secretary.sprint_close import plan_close_decisions
+
                     sprint = self.reader.show(reference, include_cards=False)
                     targets = self._close_targets(sprint)
+                    plan = plan_close_decisions(
+                        decisions,
+                        declared_issues=[str(issue) for issue in sprint.get("issues") or []],
+                        remaining=list(targets["remaining"]),
+                        states=dict(targets["remaining_states"]),
+                    )
+                    self._check_close_decisions_are_writable(plan)
                     event = self._event(
                         SPRINT_CLOSED, role, actor, reference, request_id,
                         {
@@ -1484,6 +1508,10 @@ class SprintWriter:
                             "targets": targets,
                             "archived_tasks": [],
                             "remaining_tasks": list(targets["remaining"]),
+                            "decisions": plan,
+                            "closed_issues": [],
+                            "moved_tasks": [],
+                            "disposed_tasks": [],
                         },
                         sprint,
                     )
@@ -1498,14 +1526,18 @@ class SprintWriter:
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
-    def _close_targets(self, sprint: dict[str, Any]) -> dict[str, list[str]]:
+    def _close_targets(self, sprint: dict[str, Any]) -> dict[str, Any]:
         """Freeze this close's task set before any archival write.
 
         A sprint that predates reservations is retained for recovery only.  Closing it
         can change its status, but must not retrospectively archive arbitrary cards.
+
+        The record-type filter is about board cards and stays: a Product or an Issue is not
+        executable work, so no verdict of a close archives one.  The states of the cards
+        that are not done travel with the set, because the refusal has to name them.
         """
         if "reservations" not in sprint:
-            return {"archive": [], "remaining": []}
+            return {"archive": [], "remaining": [], "remaining_states": {}}
         cards = TaskReader(self.client).list(sprint=str(sprint["ref"]))
         tasks = [
             card for card in cards
@@ -1514,7 +1546,76 @@ class SprintWriter:
         return {
             "archive": sorted(str(card["ref"]) for card in tasks if card.get("state") == "done"),
             "remaining": sorted(str(card["ref"]) for card in tasks if card.get("state") != "done"),
+            "remaining_states": {
+                str(card["ref"]): str(card.get("state") or "unknown")
+                for card in tasks if card.get("state") != "done"
+            },
         }
+
+    def _check_staged_decisions(
+        self, document: dict[str, Any], decisions: dict[str, list[dict[str, str]]] | None,
+    ) -> None:
+        """A retry of a staged close carries the decisions that close was staged with.
+
+        The staged plan is what the retry performs, so a second delivery under the same
+        request id that states something else is refused rather than silently answered with
+        the first one's verdicts.  A retry that repeats no decisions at all is the ordinary
+        recovery call and continues.
+        """
+        if decisions is None:
+            return
+        payload = (document.get("event") or {}).get("payload") or {}
+        staged = payload.get("decisions")
+        if not isinstance(staged, dict):
+            return
+        offered = {
+            section: sorted(list(decisions.get(section) or []), key=lambda entry: entry.get("ref", ""))
+            for section in ("issues", "cards")
+        }
+        if offered != {section: list(staged.get(section) or []) for section in ("issues", "cards")}:
+            raise TaskError(
+                "validation",
+                "this request id was staged with other decisions; retry it with the same file",
+                2,
+            )
+
+    def _check_close_decisions_are_writable(self, plan: dict[str, list[dict[str, str]]]) -> None:
+        """Refuse a plan this installation cannot perform, before the transaction opens.
+
+        Closing an issue reads and writes durable Product/Issue records, which are addressed
+        through the installation directory.  A close asked to close one without it would
+        fail halfway, with the sprint's own close already staged.
+
+        A disposition ends in an archival, and archiving a card whose head is still running is
+        refused by the archive itself — correctly, since the process would go on writing to an
+        archived card.  Asked here, that refusal names the card and leaves the sprint open;
+        asked halfway through the close, it would be a transaction to repair.
+        """
+        closing = [entry for entry in plan["issues"] if entry["verdict"] != "open"]
+        if closing and self.instance is None:
+            raise TaskError(
+                "validation",
+                "closing an issue with the sprint needs the instance directory; pass --instance",
+                2,
+            )
+        if not plan["cards"]:
+            return
+        writer = TaskWriter(self.client, data_dir=self.data_dir)
+        live = []
+        for entry in plan["cards"]:
+            try:
+                writer._check_dispatcher_archivable(entry["ref"])
+            except TaskError as exc:
+                if exc.code != "live_work":
+                    raise
+                live.append(entry["ref"])
+        if live:
+            raise TaskError(
+                "live_work",
+                "sprint close cannot dispose of card(s) whose dispatcher work is still live; "
+                "settle them first: " + ", ".join(live),
+                3,
+            )
 
     def _run_close(self, document: dict[str, Any]) -> dict[str, Any]:
         event = document.get("event")
@@ -1532,7 +1633,11 @@ class SprintWriter:
         archived = payload.setdefault("archived_tasks", [])
         if not isinstance(archived, list) or not all(isinstance(ref, str) for ref in archived):
             raise TaskError("audit_pending", "sprint close transaction has invalid archival progress", 4)
+        decisions = payload.get("decisions")
+        if decisions is not None and not isinstance(decisions, dict):
+            raise TaskError("audit_pending", "sprint close transaction has invalid decisions", 4)
         try:
+            self._close_declared_issues(document, event, payload, decisions or {})
             writer = TaskWriter(self.client, data_dir=self.data_dir) if archive else None
             for task_ref in archive:
                 if task_ref in archived:
@@ -1561,6 +1666,12 @@ class SprintWriter:
                     request_id=typed_request_id,
                 )
                 sprint = self.reader.show(str(event["ref"]), include_cards=False)
+            # The dispositions run once the sprint is closed, and for the reason the closed
+            # status itself is: while the sprint is open it reserves the card's project, and
+            # the reservation guard refuses a PO move into it. Closing first removes the
+            # reservation, so the disposition needs no override to bypass a sprint that no
+            # longer holds anything.
+            self._dispose_remaining_cards(document, event, payload, decisions or {})
             document.setdefault("progress", {})["status_done"] = True
             self.transactions.save(document)
             self.transactions.complete(document)
@@ -1574,14 +1685,112 @@ class SprintWriter:
         update_active_sprint_projects(self.data_dir, self.reader.show(str(event["ref"]), include_cards=False))
         return self._close_result(event)
 
+    def _close_declared_issues(
+        self, document: dict[str, Any], event: dict[str, Any], payload: dict[str, Any],
+        decisions: dict[str, Any],
+    ) -> None:
+        """Perform the closing verdicts, one issue at a time, through the close's progress.
+
+        An issue left open is performed by doing nothing to it: its basis is already in this
+        close's payload, which is the audit record of the decision.  A closing verdict is a
+        Product/Issue write, staged under a request id derived from this close's, so a
+        retry of the close replays it instead of closing the issue a second time.
+        """
+        verdicts = decisions.get("issues")
+        if not isinstance(verdicts, list):
+            return
+        closed = payload.setdefault("closed_issues", [])
+        if not isinstance(closed, list):
+            raise TaskError("audit_pending", "sprint close transaction has invalid issue progress", 4)
+        pending = [
+            entry for entry in verdicts
+            if isinstance(entry, dict) and entry.get("verdict") != "open" and entry.get("ref") not in closed
+        ]
+        if not pending:
+            return
+        if self.instance is None:
+            raise TaskError(
+                "validation",
+                "closing an issue with the sprint needs the instance directory; pass --instance",
+                2,
+            )
+        from secretary.product_issues import ProductIssueStore
+
+        store = ProductIssueStore(self.client, data_dir=self.data_dir, instance=self.instance)
+        for entry in pending:
+            reference = str(entry["ref"])
+            store.close_issue(
+                reference=reference,
+                reason=str(entry["verdict"]),
+                actor=str(document["intent"]["actor"]),
+                request_id=_close_step_request_id(str(document["request_id"]), "issue", reference),
+            )
+            closed.append(reference)
+            self.transactions.save(document)
+
+    def _dispose_remaining_cards(
+        self, document: dict[str, Any], event: dict[str, Any], payload: dict[str, Any],
+        decisions: dict[str, Any],
+    ) -> None:
+        """Take every card that was not done into the recorded end its disposition names.
+
+        Each disposition is two backend writes — the state the board records, then the
+        archival that takes the card off the closed contract — and each of them is a step of
+        this close's progress under its own derived request id.  A `drop` passes through
+        Ready deliberately: it is the released edge that releases a retained worker, and a
+        card that still holds a claim cannot be archived at all.
+        """
+        from secretary.sprint_close import DISPOSITION_TARGETS
+
+        dispositions = decisions.get("cards")
+        if not isinstance(dispositions, list) or not dispositions:
+            return
+        moved = payload.setdefault("moved_tasks", [])
+        disposed = payload.setdefault("disposed_tasks", [])
+        if not isinstance(moved, list) or not isinstance(disposed, list):
+            raise TaskError("audit_pending", "sprint close transaction has invalid disposition progress", 4)
+        writer = TaskWriter(self.client, data_dir=self.data_dir)
+        reader = TaskReader(self.client)
+        actor = str(document["intent"]["actor"])
+        for entry in dispositions:
+            if not isinstance(entry, dict):
+                raise TaskError("audit_pending", "sprint close transaction has invalid dispositions", 4)
+            reference = str(entry["ref"])
+            if reference in disposed:
+                continue
+            verdict = str(entry["verdict"])
+            reason = str(entry["reason"])
+            target = DISPOSITION_TARGETS[verdict]
+            if reference not in moved:
+                if reader.show(reference)["state"] != target:
+                    writer.move(
+                        role="po", actor=actor, reference=reference, target=target,
+                        reason=f"{verdict} when sprint {event['ref']} closed: {reason}",
+                        request_id=_close_step_request_id(str(document["request_id"]), "dispose-move", reference),
+                    )
+                moved.append(reference)
+                self.transactions.save(document)
+            writer.archive(
+                role="po", actor=actor, reference=reference,
+                reason=f"archived when sprint {event['ref']} closed: {reason}",
+                request_id=_close_step_request_id(str(document["request_id"]), "dispose-archive", reference),
+            )
+            disposed.append(reference)
+            self.transactions.save(document)
+
     def _close_result(self, event: dict[str, Any]) -> dict[str, Any]:
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        decisions = payload.get("decisions") if isinstance(payload.get("decisions"), dict) else {}
         return {
             "action": SPRINT_CLOSED,
             "sprint": self.reader.show(str(event["ref"])),
             "event_id": str(event["event_id"]),
             "archived_tasks": list(payload.get("archived_tasks") or []),
             "remaining_tasks": list(payload.get("remaining_tasks") or []),
+            "issue_decisions": list(decisions.get("issues") or []),
+            "closed_issues": list(payload.get("closed_issues") or []),
+            "card_dispositions": list(decisions.get("cards") or []),
+            "disposed_tasks": list(payload.get("disposed_tasks") or []),
         }
 
     def reopen(
@@ -1942,6 +2151,12 @@ def _create_marker(request_id: str) -> str:
 def _close_archive_request_id(request_id: str, reference: str) -> str:
     digest = hashlib.sha256(reference.encode("utf-8")).hexdigest()
     return f"{request_id}:sprint-close-archive:{digest}"
+
+
+def _close_step_request_id(request_id: str, step: str, reference: str) -> str:
+    """One derived id per step of a close, so a retry replays it instead of repeating it."""
+    digest = hashlib.sha256(reference.encode("utf-8")).hexdigest()
+    return f"{request_id}:sprint-close-{step}:{digest}"
 
 
 def canonical_repository_roots(paths: list[Any]) -> list[str]:

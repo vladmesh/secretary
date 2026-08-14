@@ -31,6 +31,7 @@ from secretary.tasks import TaskWriter
 from tests.restore_fixtures import _EmptyBoardsKanboard
 from tests.test_sprints import ProductSprintKanboard, _write_project_registry
 from tests.observer_identity import as_observer
+from tests.sprint_close_fixtures import close_decisions
 
 
 def _root(name: str) -> str:
@@ -95,7 +96,10 @@ class SprintRestoreTests(unittest.TestCase):
             role="po", actor="operator", reference=ref, task_reference=card["ref"], request_id="seed-current",
         )
         writer.resume(role="po", actor="operator", reference=ref, entry=RESUME, request_id="seed-resume")
-        writer.close(role="po", actor="operator", reference=ref, request_id="seed-close")
+        writer.close(
+            role="po", actor="operator", reference=ref, request_id="seed-close",
+            decisions=close_decisions(writer, ref),
+        )
         return ref
 
     def _pipeline_command(self) -> list[str]:

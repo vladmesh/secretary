@@ -52,6 +52,7 @@ from tests.test_dispatcher import (
 )
 from tests.test_dispatcher_observer import DEAD_PID, install_skill_registry
 from tests.test_sprints import SprintFixture
+from tests.sprint_close_fixtures import close_decisions
 
 
 def mark_observer_heartbeat_dead(record: ObserverRecord) -> None:
@@ -166,7 +167,10 @@ class SprintDeclarationTests(SprintFixture):
 
     def test_reopen_refuses_a_head_the_registry_does_not_have(self) -> None:
         reference = self._create(goal="reopen onto a ghost")["sprint"]["ref"]
-        self.writer.close(role="po", actor="operator", reference=reference, request_id="close")
+        self.writer.close(
+            role="po", actor="operator", reference=reference, request_id="close",
+            decisions=close_decisions(self.writer, reference),
+        )
 
         with self.assertRaisesRegex(TaskError, "not a profile of this installation"):
             self.writer.reopen(
@@ -203,7 +207,10 @@ class SprintDeclarationTests(SprintFixture):
 
     def test_reopen_requires_a_fresh_choice_and_never_inherits_the_closed_one(self) -> None:
         reference = self._create(goal="reopened", observer=head_choice("codex-observer"))["sprint"]["ref"]
-        self.writer.close(role="po", actor="operator", reference=reference, request_id="close")
+        self.writer.close(
+            role="po", actor="operator", reference=reference, request_id="close",
+            decisions=close_decisions(self.writer, reference),
+        )
 
         with self.assertRaisesRegex(TaskError, "requires an explicit observer"):
             self.writer.reopen(role="po", actor="operator", reference=reference)
@@ -217,7 +224,10 @@ class SprintDeclarationTests(SprintFixture):
 
     def test_reopen_writes_the_choice_while_the_sprint_is_still_closed(self) -> None:
         reference = self._create(goal="ordered reopen")["sprint"]["ref"]
-        self.writer.close(role="po", actor="operator", reference=reference, request_id="close")
+        self.writer.close(
+            role="po", actor="operator", reference=reference, request_id="close",
+            decisions=close_decisions(self.writer, reference),
+        )
         self.client.calls.clear()
 
         self.writer.reopen(
@@ -235,7 +245,10 @@ class SprintDeclarationTests(SprintFixture):
 
     def test_a_reopen_repeated_with_another_observer_is_refused(self) -> None:
         reference = self._create(goal="one reopen")["sprint"]["ref"]
-        self.writer.close(role="po", actor="operator", reference=reference, request_id="close")
+        self.writer.close(
+            role="po", actor="operator", reference=reference, request_id="close",
+            decisions=close_decisions(self.writer, reference),
+        )
         first = self.writer.reopen(
             role="po", actor="operator", reference=reference,
             observer=head_choice("codex-observer"), request_id="reopen-once",
