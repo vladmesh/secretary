@@ -123,11 +123,6 @@ _CREATE_ROLES = {"po", "steward", "worker", "reviewer", "retro", "observer"}
 _PROPOSAL_CREATE_ROLES = {"worker", "reviewer", "retro"}
 _EDIT_ROLES = {"po", "dispatcher", "observer"}
 _EDITABLE_STATES = {"ready", "blocked"}
-# `assessment` is a durable wait: a card parked there has no running head and no mechanical
-# gate left to run, and it leaves only when the sprint's observer decides release, rework or
-# reslice. A substantive reviewer verdict parks the card here; the dispatcher then performs the
-# recorded decision, so the effect of a verdict is never the verdict's own tick.
-_STATES = ("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done")
 _READY_RESET_METADATA = {
     "claim": "",
     "resolved_head": "",
