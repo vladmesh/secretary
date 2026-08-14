@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import os
 import subprocess
@@ -133,6 +134,16 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
     def _actions(self, agent: str = "retro") -> list[str]:
         runs = self.state_root / agent / "runs.jsonl"
         return [json.loads(line)["action"] for line in runs.read_text(encoding="utf-8").splitlines()]
+
+    def test_unreadable_pause_state_blocks_dispatch_and_is_reported(self) -> None:
+        output = io.StringIO()
+        with mock.patch(
+            "triggered_agents.agents.pipeline.pause.is_paused",
+            side_effect=OSError("pause.json: input/output error"),
+        ), contextlib.redirect_stderr(output):
+            self.assertTrue(dispatch._pipeline_paused())
+
+        self.assertIn("pipeline pause state is unreadable; refusing dispatch", output.getvalue())
 
     def test_live_agent_repl_is_reused_after_delivery_is_confirmed(self) -> None:
         host = FakeSessionHost(
