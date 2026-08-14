@@ -190,6 +190,43 @@ class ProductLaneReconcileTests(unittest.TestCase):
         self.assertEqual(self._lane_of("issue:done"), "Default swimlane")
         self.assertNotIn("issue:done", [move["ref"] for move in result["moves"]])
 
+    def test_a_closed_record_is_counted_even_when_its_product_is_unresolved(self) -> None:
+        """Both classifications hold of one row, and neither of them lets it move.
+
+        A closed row whose product is unstated, or names no Product record, is exactly what an
+        old checkpoint can leave behind.  Its count is the evidence the closed decision is
+        visible, so it must not depend on whether anybody can tell what the row belongs to.
+        """
+        self.client.record(118, "issue:gone-blank", self.client._issue(""),
+                           swimlane_id=1, position=8, closed=True)
+        self.client.record(119, "issue:gone-ghost", self.client._issue("nowhere"),
+                           swimlane_id=1, position=9, closed=True)
+
+        plan = self._store().reconcile_lanes()
+
+        self.assertEqual(plan["totals"]["closed"], 3)
+        unresolved = [entry["ref"] for entry in plan["unresolved"]]
+        self.assertEqual(unresolved, ["issue:ghost", "issue:blank", "issue:gone-blank", "issue:gone-ghost"])
+        self.assertNotIn("issue:gone-blank", [move["ref"] for move in plan["moves"]])
+        self.assertNotIn("issue:gone-ghost", [move["ref"] for move in plan["moves"]])
+        # No product exists to summarize, so none is invented for them.
+        self.assertEqual([entry["product"] for entry in plan["summary"]],
+                         ["butler", "codegen", "secretary"])
+
+        applied = self._store().reconcile_lanes(apply=True)
+
+        self.assertEqual(applied["totals"]["closed"], 3)
+        self.assertFalse(any(lane["name"] in {"nowhere", ""} for lane in self.client.swimlanes))
+        moved = [
+            int(params["task_id"]) for method, params in self.client.calls
+            if method == "moveTaskPosition"
+        ]
+        self.assertNotIn(118, moved)
+        self.assertNotIn(119, moved)
+        for reference in ("issue:gone-blank", "issue:gone-ghost"):
+            self.assertEqual(self._lane_of(reference), "Default swimlane")
+            self.assertEqual(int(self._row(reference)["is_active"]), 0)
+
     def test_apply_moves_the_lane_and_nothing_else(self) -> None:
         before = self._snapshot()
 

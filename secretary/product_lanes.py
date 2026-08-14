@@ -93,6 +93,11 @@ def _plan(store: Any, board_id: int) -> dict[str, Any]:
     in_place = 0
     for card, kind, product, closed in records:
         reference = str(card.get("reference") or "")
+        if closed:
+            # Counted before anything else is asked about the row.  Whether its product can be
+            # resolved decides who has to look at it, not whether the board holds a closed typed
+            # record, so a row that is both is counted here and listed as unresolved below.
+            closed_count += 1
         if not product or product not in registered:
             unresolved.append({
                 "ref": reference, "record_type": kind, "product": product,
@@ -105,7 +110,6 @@ def _plan(store: Any, board_id: int) -> dict[str, Any]:
             product, {"product": product, "lane": lane_name, "move": 0, "in_place": 0, "closed": 0},
         )
         if closed:
-            closed_count += 1
             entry["closed"] += 1
             continue
         current_id = _nonnegative_int(card.get("swimlane_id"))
