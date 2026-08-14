@@ -41,7 +41,7 @@ from secretary.dispatcher_worker_lifecycle import WorkerContinuationLiveness
 from triggered_agents.runtime import codex_preflight
 from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
 
-from tests.test_head_operations import FakeSessionHost
+from tests.fakes.host import FakeSessionHost
 
 
 class CodexProviderEventIngressTests(unittest.TestCase):
