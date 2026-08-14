@@ -31,7 +31,7 @@ from secretary.host import (
     strict_manifest,
     SystemdLayout,
 )
-from secretary.host_apply import ApplyInputs, HostCommandError, apply_host
+from secretary.host_apply import ApplyInputs, apply_host
 from tests.fakes.upgrade import FakeRegistrar, FakeUnitInstaller
 from secretary.head_registry import (
     INSTANCE_ORIGIN,
