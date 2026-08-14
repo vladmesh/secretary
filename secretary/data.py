@@ -22,7 +22,6 @@ from secretary._fsutil import (
     ensure_dir as _ensure_dir,
     publish_component_entries as _publish_component_entries,
     regular_files_under as _regular_files_under,
-    remove_path as _remove_path,
     write_json as _write_json,
     write_ndjson as _write_ndjson,
 )

@@ -37,7 +37,7 @@ from secretary.backup_retention import (
     apply_retention as _apply_retention,
     remove_path_quietly as _remove_path_quietly,
 )
-from secretary.backup_verify import VerifyResult, verify_backup
+from secretary.backup_verify import verify_backup
 
 
 ORCA_STATE_DIRS = (Path.home() / ".orca", Path.home() / ".config" / "orca")

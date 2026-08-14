@@ -1589,7 +1589,7 @@ class LaunchIntentTests(unittest.TestCase):
 
         self.host.head_pid = os.getpid()
         # The reviewer of the lost tick is gone, so the card is back to needing one.
-        self.host.review_running_result = False
+        self.host.review_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
         restarted = self.tick()
 
         self.assertEqual(restarted["step"], "review")
@@ -1839,7 +1839,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.host.calls.clear()
 
         self.host.head_pid = os.getpid()
-        self.host.review_running_result = False
+        self.host.review_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
         restarted = self.tick()
 
         self.assertEqual(restarted["step"], "review")
@@ -2203,7 +2203,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.host.fail_freeze_worker_reason = ""
         Path(pid_file_path("review", REF)).unlink(missing_ok=True)
         self.age_intent(initial_output_stall_seconds() + 60)
-        self.host.review_running_result = False
+        self.host.review_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
 
     def test_a_reviewer_whose_worker_vanished_launches_review_instead_of_looping(self) -> None:
         """A retained worker that is provably gone leaves nothing to freeze: review goes ahead.
@@ -2241,7 +2241,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.host.worker_retained_gone = True
         self.assertEqual(self.tick()["action"], "review-restarted")  # review over the gone worker
 
-        self.host.review_running_result = True
+        self.host.review_status_result = {"known": True, "live": True, "reason": "live"}
         self.verdict("red", "needs work", "verdict-red-vanished")
         self.tick()  # the verdict parks the card in Assessment
         self.decide("rework")
@@ -2283,7 +2283,7 @@ class LaunchIntentTests(unittest.TestCase):
             for _ in range(4):
                 Path(pid_file_path("review", REF)).unlink(missing_ok=True)
                 self.age_intent(initial_output_stall_seconds() + 60)
-                self.host.review_running_result = False
+                self.host.review_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
                 self.assertEqual(self.tick()["action"], "review-launch-aborted")
 
         notes = [

@@ -25,7 +25,6 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -168,7 +167,6 @@ class _LogFragment:
     """What `_failed_log` recovered from a failed CI job, or why it couldn't."""
 
     available: bool
-    job: str = ""
     step: str = ""
     text: str = ""
     infra: bool = False
@@ -869,4 +867,4 @@ def _failed_log(host, repo: str, item: dict, lines: int = GATE_LOG_FRAGMENT_LINE
     text = "\n".join(entry[2] for entry in tail).strip()
     if not text:
         return _LogFragment(available=False, reason="the gate received an empty log")
-    return _LogFragment(available=True, job=job_name, step=step, text=text, infra=bool(_INFRA_MARK_RE.search(text)))
+    return _LogFragment(available=True, step=step, text=text, infra=bool(_INFRA_MARK_RE.search(text)))

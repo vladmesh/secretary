@@ -218,13 +218,6 @@ def preflight_codex_launch(
     return attested
 
 
-def ensure_codex_launch_allowed(
-    profile: Mapping[str, Any], workspace: str, run: "HeadRun", **kwargs: Any
-) -> "HeadRun":
-    """Compatibility alias; fan-out evidence is advisory and trust is the hard allow gate."""
-    return preflight_codex_launch(profile, workspace, run, **kwargs)
-
-
 def attest_codex_fanout(
     profile: Mapping[str, Any],
     run: "HeadRun",

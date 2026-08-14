@@ -73,7 +73,6 @@ class StepResult:
     name: str
     status: str
     detail: str = ""
-    facts: dict[str, Any] = field(default_factory=dict)
 
     @property
     def failed(self) -> bool:
@@ -190,7 +189,7 @@ def step_pull(context: UpgradeContext) -> StepResult:
         return StepResult("pull", "unchanged", after[:12])
     context.changed_paths = _changed_paths(context.product_root, before, after)
     context.code_changed = _touches(context.changed_paths, MEMORY_CODE_PATHS)
-    return StepResult("pull", "changed", f"{before[:12]} -> {after[:12]}", {"paths": len(context.changed_paths)})
+    return StepResult("pull", "changed", f"{before[:12]} -> {after[:12]}")
 
 
 def _snapshot_install(venv_python: Path) -> bool:
@@ -260,7 +259,6 @@ def step_registries(context: UpgradeContext) -> StepResult:
             "registries",
             "failed",
             f"skill registry: {problems[0]}",
-            {"problems": len(problems)},
         )
     try:
         canonical, _ = canonical_path(context.product_root, context.instance_path)
@@ -589,7 +587,7 @@ def _memory_unit_prefix(report: Any) -> str:
 def step_automations(context: UpgradeContext) -> StepResult:
     try:
         specs = load_specs(context.product_root, home=context.runtime_home)
-        changes, applied = apply_automations(specs, context.automations, dry_run=context.dry_run)
+        changes, _ = apply_automations(specs, context.automations, dry_run=context.dry_run)
     except AutomationError as exc:
         return StepResult("automations", "failed", str(exc))
     pending = [change for change in changes if change.action != "unchanged"]
@@ -599,7 +597,7 @@ def step_automations(context: UpgradeContext) -> StepResult:
         f"{change.action} {change.name}" + (f" ({', '.join(change.drifted)})" if change.drifted else "")
         for change in pending
     )
-    return StepResult("automations", "changed", detail, {"applied": applied})
+    return StepResult("automations", "changed", detail)
 
 
 def step_memory(context: UpgradeContext) -> StepResult:

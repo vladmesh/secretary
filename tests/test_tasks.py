@@ -40,9 +40,11 @@ from secretary.tasks import (
     is_significant_observer_event,
     standing_decision,
     _STATE_BY_COLUMN,
-    _STATES,
 )
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
+
+
+CARD_STATES = ("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done")
 
 
 @contextlib.contextmanager
@@ -2143,10 +2145,6 @@ class AssessmentStateTests(unittest.TestCase):
         refresh_active_sprint_projects(data_dir or self.tmpdir.name, reader)
 
     def test_column_order_and_state_map(self) -> None:
-        self.assertEqual(
-            _STATES,
-            ("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done"),
-        )
         self.assertEqual(_STATE_BY_COLUMN["Assessment"], "assessment")
         self.assertEqual(
             list(_STATE_BY_COLUMN),
@@ -2223,8 +2221,8 @@ class AssessmentStateTests(unittest.TestCase):
 
         with as_observer(SPRINT), mock.patch.object(self.writer, "_sprint_holds_project", return_value=True):
             for role in ("po", "dispatcher", "observer", "steward", "worker", "reviewer", "retro"):
-                for source in _STATES:
-                    for target in _STATES:
+                for source in CARD_STATES:
+                    for target in CARD_STATES:
                         card = next(task for task in self.client.tasks if task["reference"] == "secretary-468")
                         card["column_id"] = column_by_state[source]
                         try:

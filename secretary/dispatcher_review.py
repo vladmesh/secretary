@@ -371,18 +371,6 @@ def _pane_work_state(host: Any, handle: str) -> str:
     return "working" if readiness == READINESS_BUSY else ""
 
 
-def command_review_running(host: Any, task: dict[str, Any], record: DispatcherRecord) -> bool:
-    """Is the reviewer pane for this card still up?
-
-    Identity comes from the persisted pane first — the handle the split returned and the leafId it
-    resolved to, since `terminal list` can answer with a different handle alias for the same pty. The
-    label is only a fallback for a pane whose handle was never persisted; it cannot be the primary
-    check, because the reviewer head overwrites its terminal title seconds after launch.
-    """
-    status = command_terminal_status(host, task, record, kind="review")
-    return bool(status.get("live") and not status.get("identity_mismatch"))
-
-
 def end_review_pane(
     host: Any, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER
 ) -> None:

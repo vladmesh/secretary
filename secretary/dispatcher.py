@@ -111,7 +111,6 @@ from secretary.dispatcher_production import (
 )
 from secretary.dispatcher_review import (
     command_terminal_status as _command_terminal_status,
-    command_review_running as _command_review_running,
     end_review_pane as _end_review_pane,
     recover_review_launch as _recover_review_launch,
     start_review as _start_review,
@@ -153,19 +152,15 @@ from secretary.dispatcher_tui import (
     COMPOSER_EMPTY,
     COMPOSER_UNKNOWN,
     DELIVERY_ACCEPTED,
-    DELIVERY_CONFIRMED,
-    READINESS_BLOCKED,
     READINESS_BUSY,
     READINESS_READY,
     READINESS_UNKNOWN,
-    DeliveryOutcome,
     TuiDeliveryError,
     close_terminal_strict as _close_tui_terminal_strict,
     deliver_interactive_prompt as _deliver_interactive_prompt,
     delivery_readiness_state as _delivery_readiness_state,
     terminal_readiness as _terminal_readiness,
     terminal_turn_started as _terminal_turn_started,
-    turn_started_confirm as _turn_started_confirm,
     prepare_claude_provider_progress_source as _prepare_claude_provider_progress_source,
     bind_claude_provider_progress_source as _bind_claude_provider_progress_source,
     provider_progress_for_run as _provider_progress_for_run,
@@ -521,9 +516,6 @@ class InstanceCatalog:
             model=model,
             model_source=model_source,
         )
-
-    def head_command(self, head: str, prompt_file: str, *, workspace: str, role: str) -> str:
-        return self.head_launch(head, prompt_file, workspace=workspace, role=role).command
 
     def head_launch(
         self,
@@ -1290,27 +1282,6 @@ class CommandHostRuntime:
                 role=OBSERVER_ROLE, head=head, adapter="unknown", model_source=MODEL_UNKNOWN
             ).to_json()
 
-    def codex_tui_activity(
-        self, task: dict[str, Any], record: DispatcherRecord, kind: str
-    ) -> float | None:
-        """Return Codex TUI rollout activity without reading the session contents."""
-        if not isinstance(getattr(self.catalog, "_heads", None), dict):
-            return None
-        head = record.review_head if kind == "review" else record.head
-        try:
-            profile = self.catalog._head_profile(head)
-        except HostError:
-            # Head snapshots can change while a card is waiting.  That makes the optional TUI
-            # supplement unavailable, not the terminal inventory itself unavailable.
-            return None
-        # Every Codex head is one interactive session, so the rollout supplement applies to all of
-        # them. Neither the card's retired `codex_launch_mode` nor the profile's own mode is
-        # consulted: there is no second launch shape left for either to select.
-        if profile.get("adapter") != "codex" or not record.workspace:
-            return None
-        from triggered_agents.agents.pipeline.codex_sessions import latest_activity_for
-        return latest_activity_for(record.workspace)
-
     def provider_progress(
         self, task: dict[str, Any], record: DispatcherRecord, kind: str
     ) -> dict[str, str]:
@@ -1488,9 +1459,6 @@ class CommandHostRuntime:
             "delivery_evidence": _delivery_evidence_json(outcome.delivery, "reviewer-launch"),
         }
 
-    def review_running(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
-        return _command_review_running(self, task, record)
-
     def worker_status(self, task: dict[str, Any], record: DispatcherRecord) -> dict[str, Any]:
         return _command_terminal_status(self, task, record, kind="worker")
 
@@ -1522,18 +1490,6 @@ class CommandHostRuntime:
         except HostError:
             return ""
         return completed.stdout.strip()
-
-    def is_ancestor(self, record: DispatcherRecord, ancestor: str, descendant: str) -> bool:
-        if self.mode == "noop" or not record.workspace:
-            return False
-        try:
-            self._run(
-                ["git", "-C", record.workspace, "merge-base", "--is-ancestor", ancestor, descendant],
-                "review head ancestry",
-            )
-        except HostError:
-            return False
-        return True
 
     def is_instance_publish_recovery(
         self,

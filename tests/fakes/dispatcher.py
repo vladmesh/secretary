@@ -634,10 +634,6 @@ class FakeHost:
         # caller has to read for more than its message, e.g. a head pane that was not ready.
         self.fail_restart_error: Exception | None = None
         self.fail_complete_reason = ""
-        self.review_running_error: Exception | None = None
-        # None keeps the default "a review started in this process is live"; set a bool to model a
-        # reviewer terminal that died after launch, which is what recovery actually has to detect.
-        self.review_running_result: bool | None = None
         self.worker_status_result: dict | None = None
         self.review_status_result: dict | None = None
         self.worker_status_error: Exception | None = None
@@ -1078,14 +1074,6 @@ class FakeHost:
             pid_file=pid_file_path("review" if role == "reviewer" else "worker", task["ref"]),
         ).to_json()
 
-    def review_running(self, task: dict, record) -> bool:
-        self.calls.append("review_running")
-        if self.review_running_error is not None:
-            raise self.review_running_error
-        if self.review_running_result is not None:
-            return self.review_running_result
-        return task["ref"] in self.reviews
-
     def worker_status(self, task: dict, record) -> dict:
         self.calls.append("worker_status")
         if self.worker_status_error is not None:
@@ -1096,8 +1084,8 @@ class FakeHost:
         self.calls.append("review_status")
         if self.review_status_error is not None:
             raise self.review_status_error
-        running = self.review_running(task, record)
-        return self.review_status_result or {"known": True, "live": running, "reason": "live" if running else "missing-terminal"}
+        live = task["ref"] in self.reviews
+        return self.review_status_result or {"known": True, "live": live, "reason": "live" if live else "missing-terminal"}
 
     def verify_worker_result(self, task: dict, record) -> None:
         self.calls.append("verify_worker_result")

@@ -45,7 +45,6 @@ from secretary.host import (
     packaging_root,
     plan_changes,
     plan_input_errors,
-    strict_manifest,
 )
 from secretary.head_registry import pinned_product_root
 

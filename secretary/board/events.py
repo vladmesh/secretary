@@ -9,7 +9,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, TypeVar
 
-from secretary.board.models import EntityKind, Event, EventKind
+from secretary.board.models import Event, EventKind
 
 if TYPE_CHECKING:
     from secretary.tasks import TaskAudit
