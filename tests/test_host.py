@@ -341,7 +341,7 @@ class ReconcilePlanTests(unittest.TestCase):
         # The host under test runs this checkout, and says so the way a real one does: the
         # rendered units come from the product an installation is configured with, never from
         # whichever copy of the code is executing the command.
-        with tempfile.TemporaryDirectory(dir=REPO_ROOT) as tmp, contextlib.chdir(tmp), \
+        with tempfile.TemporaryDirectory() as tmp, contextlib.chdir(tmp), \
              unittest.mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(REPO_ROOT)}):
             root = Path(tmp)
             instance = root / "instance"

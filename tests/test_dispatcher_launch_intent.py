@@ -66,6 +66,20 @@ REF = "secretary-510-pilot"
 DEAD_PID = 999999
 
 
+def _wait_for_process_stop(pid: int, *, timeout: float = 1.0) -> None:
+    deadline = time.monotonic() + timeout
+    status = ""
+    while time.monotonic() < deadline:
+        try:
+            status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
+        except FileNotFoundError:
+            break
+        if "State:\tT" in status:
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"process {pid} did not enter stopped state within {timeout}s: {status!r}")
+
+
 def _transport_only_preflight(
     head: str,
     *,
@@ -3240,7 +3254,7 @@ class HostLaunchContourTests(unittest.TestCase):
         )
         self.track_worker(record)
         os.kill(head.pid, signal.SIGSTOP)
-        time.sleep(0.05)
+        _wait_for_process_stop(head.pid)
         calls: list[list[str]] = []
         task_at_delivery: list[str] = []
         prompt_at_delivery: list[str] = []
@@ -3302,7 +3316,7 @@ class HostLaunchContourTests(unittest.TestCase):
         )
         self.track_worker(record)
         os.kill(head.pid, signal.SIGSTOP)
-        time.sleep(0.05)
+        _wait_for_process_stop(head.pid)
         real_signal = self.host._signal_head
 
         class DispatcherDied(BaseException):
@@ -3366,7 +3380,7 @@ class HostLaunchContourTests(unittest.TestCase):
         )
         self.track_worker(record)
         os.kill(head.pid, signal.SIGSTOP)
-        time.sleep(0.05)
+        _wait_for_process_stop(head.pid)
         calls: list[list[str]] = []
         sent = False
 
@@ -3485,7 +3499,7 @@ class HostLaunchContourTests(unittest.TestCase):
         )
         self.track_worker(record)
         os.kill(head.pid, signal.SIGSTOP)
-        time.sleep(0.05)
+        _wait_for_process_stop(head.pid)
 
         with self.assertRaisesRegex(HostError, "workspace is missing"):
             self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)

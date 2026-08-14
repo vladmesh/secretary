@@ -345,7 +345,7 @@ def stop(
     host: SessionHost,
     transport: HeadTransport | None = None,
     commit: Commit | None = None,
-    preflight: Preflight | None = None,
+    preflight: LaunchPreflight | None = None,
     confirm_gone: Callable[[str], None] | None = None,
 ) -> HeadOutcome:
     """End one head and record who ended it.

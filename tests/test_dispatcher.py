@@ -15330,6 +15330,17 @@ class ProductionPauseTests(unittest.TestCase):
         self.assertEqual(self.host.prepared, [])
         self.assertEqual(self.runtime.production_state.load().get("records") or {}, {})
 
+    def test_unreadable_pause_file_freezes_dispatch(self) -> None:
+        self.runtime.pause.path.parent.mkdir(parents=True, exist_ok=True)
+        self.runtime.pause.path.write_text("{not-json", encoding="utf-8")
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(result["status"], "skipped")
+        self.assertEqual(result["pause"]["mode"], "freeze")
+        self.assertIn("pause file is unreadable and read as frozen", result["pause"]["warnings"][0])
+        self.assertEqual(self.reader.show(self.ref)["state"], "ready")
+
     def test_paused_tick_does_not_claim_a_new_card(self) -> None:
         """Regression for the reported bug: pause, tick, and the card must still be Ready."""
         for mode in ("drain", "freeze"):

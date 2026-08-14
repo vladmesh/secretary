@@ -373,13 +373,19 @@ def _pipeline_paused() -> bool:
     finish its cycle" case here in either mode, soft or hard. Lazy import, same reason as
     _reuse_head_is_red's own agents.pipeline.health import just below — this module is imported at
     process start by every agent, so a top-level import back into agents.pipeline would risk a
-    circular import the first time either side changes its own imports. Best-effort: any failure
-    (pause.py itself broken) defaults to not-paused rather than silently wedging every agent."""
+    circular import the first time either side changes its own imports. Any failure is a pause:
+    dispatching while an operator's stop condition cannot be read is worse than deferring one tick.
+    The warning goes to the service log every affected tick until the state is repaired."""
     try:
         from ..agents.pipeline import pause as pipeline_pause
         return pipeline_pause.is_paused()
-    except Exception:
-        return False
+    except Exception as exc:
+        print(
+            "dispatch: pipeline pause state is unreadable; refusing dispatch "
+            f"({type(exc).__name__}: {exc})",
+            file=sys.stderr,
+        )
+        return True
 
 
 def _preferred_head(agent: str, spec: dict) -> str | None:
@@ -536,13 +542,16 @@ def _is_ephemeral(agent: str) -> bool:
     watchdog, tears the whole workspace down and starts a brand new `claude` process instead of
     `/clear`-ing the live one — no provider session or transcript ever survives past the tick
     that produced it. Best-effort like every other spec read in this module: a spec with no
-    `ephemeral` field, a missing automation.toml (e.g. a test's synthetic agent name), or any
-    parse failure all default to the existing warm-reuse behavior rather than breaking dispatch.
+    `ephemeral` field or a missing automation.toml (e.g. a test's synthetic agent name) retain
+    the existing warm-reuse behavior. A spec that exists but cannot be read is fail-closed: it
+    never grants a warm session that may retain curator material across ticks.
     """
     try:
         return bool(_load_spec(agent).get("ephemeral"))
-    except Exception:
+    except FileNotFoundError:
         return False
+    except Exception:
+        return True
 
 
 def _dispatch_command(agent: str, variant: str | None) -> DispatchCommand:
