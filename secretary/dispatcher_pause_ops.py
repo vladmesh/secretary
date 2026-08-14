@@ -255,7 +255,7 @@ def pause_status(runtime: Any) -> dict[str, Any]:
     excluded_worker = list(state.get("excluded_worker") or [])
     warnings: list[str] = []
     if state.get("corrupt"):
-        warnings.append(f"pause file is unreadable and read as not paused: {runtime.pause.path}")
+        warnings.append(f"pause file is unreadable and read as frozen: {runtime.pause.path}")
     out: dict[str, Any] = {
         "status": "ok",
         "step": "pause-status",

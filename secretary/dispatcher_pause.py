@@ -123,18 +123,18 @@ class ProductionPause:
     def load(self) -> dict[str, Any]:
         """State, or {} when the pause is not set.
 
-        A corrupt file reads as "not paused" rather than wedging every tick, the same fail-open the
-        legacy flag chose. It is not silent: `mode()` still returns "" but `status()` carries the
-        warning, so an operator asking why the pipeline is running gets an answer.
+        A corrupt file is read as a freeze. Continuing a dispatch while an operator's stop state
+        cannot be read is worse than deferring it until the file is repaired. `summary()` and
+        `status()` carry an explicit warning so the condition is visible in the tick log.
         """
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return {}
         except (OSError, ValueError, UnicodeError):
-            return {"corrupt": True}
+            return {"corrupt": True, "mode": "freeze"}
         if not isinstance(payload, dict):
-            return {"corrupt": True}
+            return {"corrupt": True, "mode": "freeze"}
         return payload
 
     def mode(self) -> str:
@@ -159,7 +159,7 @@ class ProductionPause:
             "pause_file": str(self.path),
         }
         if state.get("corrupt"):
-            out["warnings"] = [f"pause file is unreadable and read as not paused: {self.path}"]
+            out["warnings"] = [f"pause file is unreadable and read as frozen: {self.path}"]
         if not mode:
             return out
         out.update(
