@@ -55,6 +55,7 @@ def parse_close_decisions(text: str) -> dict[str, list[dict[str, str]]]:
         document = {}
     if not isinstance(document, dict):
         raise TaskError("validation", _SHAPE, 2)
+    _check_names(document, "sprint close decisions file")
     unknown = sorted(key for key in document if key not in _SECTIONS)
     if unknown:
         raise TaskError(
@@ -64,6 +65,22 @@ def parse_close_decisions(text: str) -> dict[str, list[dict[str, str]]]:
         "issues": _entries(document.get("issues"), "issue", ISSUE_VERDICTS),
         "cards": _entries(document.get("cards"), "card", CARD_DISPOSITIONS),
     }
+
+
+def _check_names(mapping: dict[Any, Any], what: str) -> None:
+    """A key that is not a name is a refusal, and it is one before anything sorts the keys.
+
+    YAML types its scalars, so `1: x` is an integer key sitting next to string ones.  Naming
+    the offending keys is the documented `validation` refusal; sorting them together first
+    would be a `TypeError` out of the parser instead, which is not an answer at all.
+    """
+    unnamed = [key for key in mapping if not isinstance(key, str)]
+    if unnamed:
+        raise TaskError(
+            "validation",
+            f"{what} has non-string key(s): " + ", ".join(sorted(repr(key) for key in unnamed)),
+            2,
+        )
 
 
 def _entries(raw: Any, kind: str, verdicts: tuple[str, ...]) -> list[dict[str, str]]:
@@ -76,6 +93,7 @@ def _entries(raw: Any, kind: str, verdicts: tuple[str, ...]) -> list[dict[str, s
     for entry in raw:
         if not isinstance(entry, dict):
             raise TaskError("validation", _SHAPE, 2)
+        _check_names(entry, f"{kind} decision")
         extra = sorted(key for key in entry if key not in _ENTRY_FIELDS)
         if extra:
             raise TaskError(

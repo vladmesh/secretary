@@ -3522,6 +3522,107 @@ class SprintCloseDecisionTests(SprintFixture):
         self.assertEqual(TaskReader(self.client).list(sprint=ref), [])  # type: ignore[arg-type]
         self.assertEqual(self.writer.transactions.status(), {"ok": True, "pending": 0})
 
+    def test_no_successor_is_admitted_while_a_close_is_still_disposing_of_a_card(self) -> None:
+        """The window between the closed status and the last disposition belongs to the close.
+
+        A disposition can only run once the sprint is closed — an open sprint reserves the
+        card's project and the reservation guard refuses the PO move into it — so the window
+        is real and cannot be ordered away.  What closes it is the admission gate: a
+        concurrent `sprint create` waits there until this close has nothing left to do, so
+        no successor re-reserves the project under a disposition still in flight.
+        """
+        ref = self._open(issues=["issue:open"])
+        card = self._card(ref, "still open work", "raced-card")
+        with as_observer(ref):
+            self.tasks.move(
+                role="observer", actor="observer", reference=card, target="blocked",
+                reason="waiting on an answer", request_id="raced-block",
+            )
+        disposing = threading.Event()
+        successor: dict[str, Any] = {}
+
+        def open_successor() -> None:
+            disposing.wait(5)
+            try:
+                successor["ref"] = self.writer.create(
+                    role="po", actor="operator", goal="the successor sprint",
+                    product="secretary", issues=["issue:second"], projects=["secretary"],
+                    observer=head_choice("codex-observer"), request_id="successor-create",
+                )["sprint"]["ref"]
+            except TaskError as exc:
+                successor["error"] = exc
+
+        thread = threading.Thread(target=open_successor)
+        real_move = TaskWriter.move
+
+        def racing_move(self_writer, **kwargs):
+            disposing.set()
+            # The successor create is trying to be admitted right here. It has to still be
+            # trying when this disposition is written.
+            thread.join(0.5)
+            successor["waiting_at_the_disposition"] = thread.is_alive()
+            return real_move(self_writer, **kwargs)
+
+        thread.start()
+        self.addCleanup(thread.join, 5)
+        with mock.patch.object(TaskWriter, "move", racing_move):
+            result = self.writer.close(
+                role="po", actor="operator", reference=ref, request_id="raced-close",
+                decisions=drop_cards(card),
+            )
+        thread.join(5)
+
+        self.assertTrue(successor["waiting_at_the_disposition"])
+        self.assertEqual(result["disposed_tasks"], [card])
+        # The close finished the card it had, and only then was the successor admitted.
+        self.assertEqual(TaskReader(self.client).list(sprint=ref), [])  # type: ignore[arg-type]
+        self.assertEqual(SprintReader(self.client).show(ref, include_cards=False)["status"], "closed")  # type: ignore[arg-type]
+        self.assertNotIn("error", successor)
+        self.assertNotEqual(successor["ref"], ref)
+
+    def test_an_issue_closed_from_elsewhere_leaves_the_close_recoverable(self) -> None:
+        """A refusal that arrives after a step is not a reason to throw the close away.
+
+        `issue close` does not ask whether an open sprint declared the issue, so a close can
+        find its second verdict already performed by somebody else.  The first verdict is
+        done by then, so the close stays on the record with its plan: it is repaired by a
+        retry of the same request id, and that retry still refuses other decisions.
+        """
+        ref = self._open()
+        self._store().close_issue(
+            reference="issue:second", reason="duplicate", actor="another-po",
+            request_id="somebody-elses-close",
+        )
+        decisions = {"issues": [
+            {"ref": "issue:open", "verdict": "resolved", "reason": "the fix landed"},
+            {"ref": "issue:second", "verdict": "resolved", "reason": "this one landed too"},
+        ]}
+
+        with self.assertRaisesRegex(TaskError, "pending repair") as raised:
+            self.writer.close(
+                role="po", actor="operator", reference=ref, request_id="parent-close",
+                decisions=decisions,
+            )
+
+        self.assertEqual(raised.exception.code, "audit_pending")
+        # The verdict that was performed is performed, and the close that performed it is
+        # still there to be continued rather than restated.
+        self.assertTrue(self._store().show_issue("issue:open")["closed"])
+        self.assertEqual(self.writer.transactions.status()["pending"], 1)
+        with self.assertRaisesRegex(TaskError, "staged with other decisions"):
+            self.writer.close(
+                role="po", actor="operator", reference=ref, request_id="parent-close",
+                decisions={"issues": [
+                    {"ref": "issue:open", "verdict": "resolved", "reason": "the fix landed"},
+                    {"ref": "issue:second", "verdict": "open", "reason": "somebody else closed it"},
+                ]},
+            )
+        closes = [
+            event for event in self._events()
+            if event.get("kind") == "issue.closed" and event.get("ref") == "issue:open"
+        ]
+        self.assertEqual(len(closes), 1)
+
     def test_a_retry_that_states_other_decisions_is_refused(self) -> None:
         ref = self._open(issues=["issue:open"])
         card = self._card(ref, "disposed once", "restated-card")
@@ -3644,6 +3745,10 @@ class CloseDecisionFileTests(unittest.TestCase):
             ("- issue:a", "must be a mapping"),
             ("issues: 3", "must be a mapping"),
             ("issues: [\n", "not valid YAML"),
+            # YAML types its scalars, so a key can be an integer sitting next to string ones.
+            # That is a refusal by name, not a TypeError out of the parser.
+            ("1: x\nunknown: x", "non-string key"),
+            ("issues: [{1: x, unknown: x}]", "non-string key"),
         ]
         for text, message in cases:
             with self.subTest(text=text):

@@ -1474,12 +1474,26 @@ class SprintWriter:
         Definition of Done only partly reached — so both are stated by the caller and both
         are checked before the transaction opens.  A close short of a decision writes
         nothing and names what is missing.
+
+        The whole close runs under the admission gate every opening of a sprint takes, and
+        that is the invariant it exists for here: between the moment this sprint is
+        published `closed` and the moment its last disposition is written, no `sprint
+        create` may be admitted on the projects this sprint reserved.  The dispositions
+        have to follow the closed status — while the sprint is open it reserves the card's
+        project and the reservation guard refuses the PO move — so without the gate a
+        successor admitted in that window would re-reserve the project and its guard would
+        refuse a disposition of the sprint that is already closed.  Every path through the
+        close holds it: the successful one, the one that refuses halfway, and the retry
+        that finishes the dispositions of an interrupted one, which is why a successor can
+        only be opened once this close has no work left to do.  It is taken outside the
+        sprint's reference lock, in the order `create` and `reopen` take too: admission
+        first, then anything narrower.
         """
         self._role(role, {"po"})
         request_id = request_id or str(uuid.uuid4())
         self.audit.require_pending_layout()
         intent = {"role": role, "actor": actor, "reference": reference}
-        with self.transactions.reference_lock(reference) as lock:
+        with sprint_admission_lock(self.data_dir), self.transactions.reference_lock(reference) as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
                 document, committed = self.transactions.existing(
@@ -1676,7 +1690,7 @@ class SprintWriter:
             self.transactions.save(document)
             self.transactions.complete(document)
         except TaskError as exc:
-            if exc.code in {"validation", "closed", "not_found", "transition_forbidden", "live_work", "role_forbidden"} and not document.get("progress"):
+            if exc.code in {"validation", "closed", "not_found", "transition_forbidden", "live_work", "role_forbidden"} and not _close_progressed(document, payload):
                 self.transactions.discard(document)
                 raise
             raise TaskError("audit_pending", "sprint close is pending repair; retry with the same request id", 4) from None
@@ -1717,6 +1731,12 @@ class SprintWriter:
         from secretary.product_issues import ProductIssueStore
 
         store = ProductIssueStore(self.client, data_dir=self.data_dir, instance=self.instance)
+        # Durable before the first issue write, exactly as `status_started` is durable before
+        # the status changes: from here on this close has done something a retry has to
+        # continue rather than replay, so its plan may not be thrown away by a refusal that
+        # arrives later — including one from an issue somebody else closed in the meantime.
+        document.setdefault("progress", {})["issues_started"] = True
+        self.transactions.save(document)
         for entry in pending:
             reference = str(entry["ref"])
             store.close_issue(
@@ -2151,6 +2171,23 @@ def _create_marker(request_id: str) -> str:
 def _close_archive_request_id(request_id: str, reference: str) -> str:
     digest = hashlib.sha256(reference.encode("utf-8")).hexdigest()
     return f"{request_id}:sprint-close-archive:{digest}"
+
+
+_CLOSE_PROGRESS_STEPS = ("closed_issues", "archived_tasks", "moved_tasks", "disposed_tasks")
+
+
+def _close_progressed(document: dict[str, Any], payload: dict[str, Any]) -> bool:
+    """Whether this close has already performed a step its retry has to continue.
+
+    A close that has done nothing yet is discarded on a terminal refusal, so its caller can
+    state other decisions.  Once any step is on the record — the durable marker a phase sets
+    before its first write, or a step already appended to the payload — the document is what
+    the retry recovers from, and discarding it would lose both the work already done and the
+    plan that says what is left to do.
+    """
+    if document.get("progress"):
+        return True
+    return any(payload.get(step) for step in _CLOSE_PROGRESS_STEPS)
 
 
 def _close_step_request_id(request_id: str, step: str, reference: str) -> str:

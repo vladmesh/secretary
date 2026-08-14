@@ -635,7 +635,8 @@ Both sections are optional in the file and neither is optional in the close. Eve
 a verdict and every card that is not Done needs a disposition; a close short of one is refused with
 `validation` before the transaction is opened, naming the issues without a decision and the cards with
 their states, and writing nothing at all. An unknown ref, a ref decided twice, an unknown verdict, an
-empty reason, an unknown field or section and an unparsable file are refused the same way.
+empty reason, an unknown field or section, a key that is not a name at all (`1: x`, which YAML reads as
+an integer key) and an unparsable file are refused the same way.
 
 A closing verdict closes the issue through the same lifecycle as `issue close`, with that reason and no
 new role. `open` writes nothing to the issue: the sprint's close event carries the basis, which is where
@@ -646,6 +647,20 @@ moves it to Done, `drop` moves it through Ready, which is the released edge that
 worker — a card still holding a claim cannot be archived. Both moves carry the disposition's reason as
 the card's comment, and the archive carries it again. A card whose dispatcher work is still live is not
 disposable at all: the close refuses with `live_work` and names it, and the head is settled first.
+
+The dispositions run after the sprint's status is `closed`, because an open sprint reserves the card's
+project and the reservation guard refuses a PO move into it. So `close` takes the same admission lock
+(`sprints/admission.lock`) that `create` and `reopen` take, and holds it across the whole close: the
+status change, the dispositions and the completion of the transaction. No successor is admitted on those
+projects while a close still has a disposition to write, and an interrupted close finishes its
+dispositions on the retry of its request id under that same gate, before any successor can be opened.
+
+A close that has performed a step is never thrown away. A terminal refusal discards the staged close only
+while nothing has been written; from the first issue write onwards — the marker is durable before that
+write, as it is before the status change — the refusal is `audit_pending` and the staged plan stays on
+the record. That covers the issue somebody else closed through `issue close` in the meantime: the verdicts
+already performed stand, the close is repaired by retrying the same request id, and that retry still
+refuses a file that states other decisions.
 
 Installation config may set `sprint_budget.signal` and `sprint_budget.hard`; defaults are 3 and 6. The
 schema resolves omitted values to those defaults before rejecting a hard limit below the signal limit.
