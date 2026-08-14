@@ -9,7 +9,7 @@ from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
-from secretary.board.card_transitions import CardTransitionForbidden, card_transition
+from secretary.board.card_transitions import card_transition
 from secretary.board.events import BoardEventCanon, BoardEventPending, MutationEventTransaction, render_marker_comment
 from secretary.board.host import Create, MarkerComment, MutationResult, Replace, SprintSupplement, TransitionRequest
 from secretary.board.models import (

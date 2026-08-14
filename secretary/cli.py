@@ -12,7 +12,7 @@ from secretary.checkpoint import (
     checkpoint_snapshot,
     render_checkpoint_lines,
 )
-from secretary.config import ConfigError, load_config, validate, validate_instance
+from secretary.config import load_config, validate, validate_instance
 from secretary.data import (
     KANBOARD_DATA_PATH,
     export_all,

@@ -20,7 +20,6 @@ from secretary import state_repo
 from secretary.state_repo import MEMORY_PATHSPEC
 from secretary.memory_journal import (
     _git_status,
-    _journal_head,
     _memory_journal_lock,
     _publish_memory_export,
     _read_memory_facts,
@@ -72,8 +71,6 @@ class MemoryWriteResult:
 @dataclass(frozen=True)
 class MemoryProposalGCResult:
     removed: tuple[str, ...]
-    kept_fresh: tuple[str, ...]
-    kept_active: tuple[str, ...]
 
 
 def propose_memory_fact(
@@ -471,11 +468,9 @@ def _gc_staging_proposals(
 ) -> MemoryProposalGCResult:
     staging_root = memory_dir / ".staging"
     if not staging_root.is_dir():
-        return MemoryProposalGCResult(removed=(), kept_fresh=(), kept_active=())
+        return MemoryProposalGCResult(removed=())
 
     removed: list[str] = []
-    kept_fresh: list[str] = []
-    kept_active: list[str] = []
     for proposal_dir in sorted(staging_root.iterdir()):
         if not proposal_dir.is_dir():
             continue
@@ -486,21 +481,15 @@ def _gc_staging_proposals(
         if (proposal_dir / MEMORY_PROPOSAL_DONE).exists():
             continue
         if _proposal_is_active(proposal_dir, now=now, active_grace_seconds=active_grace_seconds):
-            kept_active.append(proposal_id)
             continue
         created_at = _proposal_created_at(proposal_dir)
         if created_at is None:
             continue
         if now - created_at <= max_age_seconds:
-            kept_fresh.append(proposal_id)
             continue
         _cleanup_staging_dir(proposal_dir)
         removed.append(proposal_id)
-    return MemoryProposalGCResult(
-        removed=tuple(removed),
-        kept_fresh=tuple(kept_fresh),
-        kept_active=tuple(kept_active),
-    )
+    return MemoryProposalGCResult(removed=tuple(removed))
 
 
 def _proposal_is_active(

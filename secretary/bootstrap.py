@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
-import socket
 import subprocess
 import tempfile
 import time
@@ -23,7 +22,6 @@ import yaml
 from secretary._fsutil import write_text_atomic
 from secretary import _proc
 from secretary.board_transport import ensure_from_runtime_values, transport_path
-from secretary.config import validate_instance
 from secretary.host_apply import pinned_orca_executable
 from secretary.installation import (
     InstallError,
