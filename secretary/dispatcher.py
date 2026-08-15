@@ -647,9 +647,8 @@ class InstanceCatalog:
         model: str | None = None
         model_source = ""
         if str(profile.get("adapter") or "") == "claude":
-            # A claude profile need not pin a model (`claude-default` does not), and then the CLI
-            # resolves one from its settings at startup. Read it here, at bring-up, so the record
-            # names the model that ran instead of an empty field.
+            # A claude profile need not pin a model (`claude-default` does not); the CLI resolves one
+            # from its settings at startup. Read it here so the record names the model that ran.
             model, model_source = _claude_launch_model(
                 profile, workspace=workspace, env=_role_launch_env(role)
             )
@@ -782,10 +781,9 @@ class DispatcherHeadTransport:
         host: SessionHost,
         subject: str,
     ) -> head_ops.HeadDelivery:
-        # The framing is the *rendered command's* fact, not the profile's: what is running in that
-        # pane is what the launcher just started, and a registry edited since would frame a prompt
-        # for a head this launch never ran. The run offers its own view of the adapter and this
-        # deliberately keeps the launcher's when there is one.
+        # The framing is the rendered command's fact, not the profile's: a registry edited since the
+        # launch would frame a prompt for a head this launch never ran. The run offers its own view
+        # of the adapter and this deliberately keeps the launcher's.
         post_delivery = run
 
         def handoff_before_send() -> None:
@@ -809,9 +807,8 @@ class DispatcherHeadTransport:
                 before_send=handoff_before_send if self.before_send is not None else None,
             )
         except Exception as exc:
-            # A source may already have been durably bound when a later delivery stage refuses.
-            # The abort path receives this exact run so its intent cannot write the old unbound
-            # copy back over the source recovery has to read.
+            # A source may already have been durably bound when a later delivery stage refuses. The
+            # abort path gets this exact run so its intent cannot write the old unbound copy back.
             exc.head_run = post_delivery
             raise
         return head_ops.HeadDelivery(run=post_delivery, outcome=outcome)
@@ -832,14 +829,11 @@ class CommandHostRuntime:
         self.data_dir = data_dir
         self.mode = mode
         # Where a head run is flushed the moment an operation commits it, ahead of the tick's own
-        # save (secretary-1412). Installed by the owner of the durable state for the span in which
-        # it has that state loaded — `CommandHostRuntime` has a record in hand but not the file it
-        # belongs to. Unset, a run reaches disk with the tick's records, which is all a caller
-        # outside a tick can promise.
+        # save. Installed by the owner of the durable state for the span it holds that state.
+        # Unset, a run reaches disk with the tick's records, all a caller outside a tick can promise.
         self.commit_state: Callable[[], None] | None = None
-        # The owner installs one entry before it asks this host to open a Codex pane.  It is keyed
-        # by the HeadRun id written in that launch intent, rather than by workspace or pane, so a
-        # same-workspace respawn cannot inherit a predecessor's provider event source.
+        # The owner installs one entry before it asks this host to open a Codex pane, keyed by the
+        # HeadRun id in that intent so a same-workspace respawn cannot inherit a predecessor's source.
         self._codex_provider_ingresses: dict[str, CodexProviderEventIngress] = {}
 
     def configure_codex_provider_ingress(
@@ -862,8 +856,7 @@ class CommandHostRuntime:
         """Best-effort read new provider events through the run-bound launch ingress."""
         ingress = self._codex_provider_ingresses.get(run.run_id)
         if ingress is None:
-            # The collector is process-local.  A dispatcher recovery without it must not turn
-            # missing fan-out telemetry into a lifecycle decision about an otherwise valid head.
+            # The collector is process-local: missing fan-out telemetry is not a lifecycle decision.
             return
         ingress.commit_run(run)
         ingress.poll()
@@ -953,8 +946,7 @@ class CommandHostRuntime:
             workspace = self._create_workspace(project, worker_id, base, expected=workspace)
             self._set_worker_branch(workspace, _legacy_worker_branch(task["ref"]))
             self._run_setup(project, workspace)
-        # The caller's generation, not a constant: the first round of a claim is as much a report
-        # round as a rework, and its number is the one already durable in the dispatcher record.
+        # The caller's generation, not a constant: the first round of a claim is a report round too.
         self._clear_report_bodies(task["ref"])
         self._write_prompt(
             Path(workspace) / "TASK.md", self._worker_task_doc(task, base, attempt_id, generation)
@@ -977,12 +969,10 @@ class CommandHostRuntime:
             "handle": launched.handle,
             "leaf": launched.leaf,
             "base_branch": base,
-            # The launch configuration of the head that went up. The caller records this instead of
-            # re-reading the registry, which a later edit would answer differently.
+            # Recorded instead of re-reading the registry, which a later edit would answer differently.
             "run": launched.run,
             "delivery_evidence": dict(launched.delivery_evidence),
-            # The head's own run (secretary-1412): the identity every later nudge and the stop
-            # address this worker by, and where the initiator of that stop is eventually written.
+            # The head's own run: the identity every later nudge and the stop address this worker by.
             "head_run": dict(launched.head_run),
         }
 
@@ -1060,8 +1050,7 @@ class CommandHostRuntime:
                 ],
                 "observer repo commit",
             )
-        # How Orca learns the path. It answers with the same repo when it already knows it, so this
-        # stays a no-op on every bring-up after the first instead of a first-run special case.
+        # How Orca learns the path; it answers with the same repo when it knows it, so this is a no-op.
         self._run_json(["orca", "repo", "add", "--path", str(repo), "--json"])
         return repo
 
@@ -1104,9 +1093,8 @@ class CommandHostRuntime:
         if not isinstance(path, str) or not path:
             raise HostError("orca did not return an observer workspace path")
         if Path(path) != workspace:
-            # The lifecycle wrote `workspace` into the launch intent before this call, and a tick
-            # that dies now can only find the head through it. A workspace somewhere else is a
-            # deferred bring-up with a readable reason, not a head nothing points at.
+            # The launch intent already names `workspace`, and a tick that dies now can only find the
+            # head through it: a workspace elsewhere is a deferred bring-up, not a head nothing names.
             raise HostError(f"orca placed the observer workspace at {path}, not {workspace}")
         return workspace
 
@@ -1159,8 +1147,7 @@ class CommandHostRuntime:
                 "workspace": str(workspace),
                 "handle": f"noop:{head}:{workspace.name}:{OBSERVER_PROMPT_FILE}",
                 "leaf": "",
-                # No pane exists in this mode, so no prompt was put in front of anything: the
-                # lifecycle must count no launch delivery for it.
+                # No pane exists in this mode, so no prompt was put in front of anything.
                 "prompt_delivered": False,
                 "delivery_evidence": {},
                 "pid_file": pid_file,
@@ -1185,9 +1172,8 @@ class CommandHostRuntime:
         lifecycle_run = lifecycle_run.rebound(pane.handle, leaf=pane.leaf)
         ingress = self._codex_provider_ingress(lifecycle_run)
         if ingress is not None:
-            # The returned pane leaf is part of the run identity that the event source is bound
-            # to.  Persist it before the first provider prompt, not in the ordinary post-launch
-            # observer save below.
+            # The returned pane leaf is part of the run identity the event source is bound to:
+            # persist it before the first provider prompt, not in the post-launch save below.
             ingress.commit_run(lifecycle_run)
         _bind_head_heartbeat(pid_file, expected=heartbeat, leaf=pane.leaf)
         delivered = False
@@ -1218,9 +1204,7 @@ class CommandHostRuntime:
                 delivered = True
                 delivery_evidence = _delivery_evidence_json(outcome, "observer-launch")
             except (TuiDeliveryError, HostError) as exc:
-                # Every prompt this bring-up put in front of a head is accounted for, whether or
-                # not the launch was carrying an unacknowledged batch: the first launch of a
-                # sprint delivers a prompt too, and a sprint that lost it must be able to say so.
+                # Every prompt this bring-up put in front of a head is accounted for, batch or not.
                 evidence = _delivery_evidence_json(exc, "observer-launch")
                 try:
                     self._stop_observer_terminals(
@@ -1232,10 +1216,8 @@ class CommandHostRuntime:
                         leaf=pane.leaf,
                     )
                 except Exception as stop_exc:
-                    # The pane is still up. Its handle goes back with the failure, because this
-                    # dict is the only pointer to it: reporting a plain bring-up failure would
-                    # leave the sprint reading as headless and the next tick would open a second
-                    # head beside a head that is already running.
+                    # The pane is still up and this dict is the only pointer to it: reporting a plain
+                    # bring-up failure would leave the sprint headless and open a second head beside it.
                     raise ObserverLaunchAborted(
                         f"{exc}; observer terminal stop failed: {stop_exc}",
                         handle=pane.handle,
@@ -1250,17 +1232,14 @@ class CommandHostRuntime:
             "workspace": str(workspace),
             "handle": pane.handle,
             "leaf": pane.leaf,
-            # Whether this bring-up put a prompt in front of the head, and what the delivery
-            # boundary saw doing it. The lifecycle counts a launch delivery from this rather than
-            # from whether the launch happened to carry a pending batch.
+            # Whether this bring-up put a prompt in front of the head, and what delivery saw doing it.
             "prompt_delivered": delivered,
             "delivery_evidence": delivery_evidence,
             "pid_file": pid_file,
             "run": run,
-            # This mirrors `head_ops.spawn`: delivery owns the source handoff, while this
-            # launcher adds only the pane facts it already proved.  Returning `lifecycle_run`
-            # rather than its pre-send copy keeps observer adoption on the same run the ingress
-            # persisted.
+            # Delivery owns the source handoff; this launcher adds only the pane facts it proved.
+            # Returning `lifecycle_run` rather than its pre-send copy keeps observer adoption on the
+            # run the ingress persisted.
             "head_run": lifecycle_run.to_json(),
         }
 
@@ -1280,8 +1259,7 @@ class CommandHostRuntime:
         )
         workspace = str(getattr(record, "workspace", "") or "")
         if not workspace:
-            # A record written before the launch intent named a workspace: the handle is the only
-            # pointer left to that head.
+            # A record written before the intent named a workspace: the handle is all that is left.
             if record.handle:
                 self._close_observer_pane(record.handle)
             return
@@ -1302,8 +1280,7 @@ class CommandHostRuntime:
             task=f"sprint:{getattr(record, 'sprint', '')}",
             leaf=observer_leaf,
         )
-        # Heartbeat-wrapped heads have their own session, so terminal stop alone cannot prove the
-        # observer died. Do not remove its worktree or forget its record until this confirms it.
+        # Terminal stop alone cannot prove a heartbeat-wrapped head died: confirm before removing it.
         self._confirm_head_process_gone(
             pid_file,
             run=observer_run,
@@ -1337,8 +1314,7 @@ class CommandHostRuntime:
             raise HostError("observer terminal is not connected")
         readiness = _terminal_readiness(terminal.handle, run_json=self._run_json)
         if readiness == READINESS_UNKNOWN:
-            # A probe that failed is not a working observer. Raising puts it on the lifecycle's
-            # bounded failure path, where a busy pane would wait forever instead.
+            # A probe that failed is not a working observer; raising puts it on the bounded failure path.
             raise HostError("observer terminal readiness could not be read")
         status: dict[str, Any] = {"idle": readiness == READINESS_READY}
         if terminal.last_output_at:
@@ -1398,8 +1374,7 @@ class CommandHostRuntime:
                 f"{delivery_id} --through-event {through_event}."
             )
         # The wakes this sprint has already lost travel with the wake that reaches the head, so the
-        # resume or closeout written from this turn reports what actually happened rather than the
-        # nothing a head can see of a prompt that never arrived.
+        # resume written from this turn reports what happened rather than what a head could see.
         evidence_line = _observer_delivery_evidence_summary(delivery) if delivery is not None else ""
         if evidence_line:
             message += f" Sprint delivery evidence to carry into your closing resume: {evidence_line}."
@@ -1416,9 +1391,8 @@ class CommandHostRuntime:
             )
         except TuiDeliveryError as exc:
             failure = HostError(f"observer wake was not delivered: {exc}")
-            # The lifecycle stores this beside the sprint. It is the delivery boundary's own
-            # evidence — terminal identity, payload size and hash, the stage the delivery reached,
-            # the composer and output fingerprints around it — and carries no prompt text.
+            # The lifecycle stores this beside the sprint: the delivery boundary's own evidence
+            # (terminal identity, payload size and hash, stage, fingerprints) and no prompt text.
             failure.evidence = getattr(exc, "evidence", None)
             raise failure from None
 
@@ -1476,11 +1450,9 @@ class CommandHostRuntime:
             or (lifecycle_run.role and lifecycle_run.role != expected_role)
         ):
             return {"state": "identity_mismatch", "reason": "persisted HeadRun binding mismatches role"}
-        # Claude's launch contract records the pre-pane baseline on the HeadRun.  The provider
-        # creates its transcript asynchronously, so the first read may be the first moment a
-        # single new source exists.  Binding still uses only that durable launch baseline and is
-        # persisted before the source can produce a liveness cursor; ambiguity remains typed
-        # unavailable rather than a workspace selection.
+        # Claude's launch contract records the pre-pane baseline on the HeadRun: the provider creates
+        # its transcript asynchronously, so the first read may be the first moment a single new
+        # source exists. Binding uses only that baseline; ambiguity stays typed unavailable.
         if lifecycle_run.spec.adapter == "claude":
             updated = _bind_claude_provider_progress_source(lifecycle_run)
             if updated != lifecycle_run:
