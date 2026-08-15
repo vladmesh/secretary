@@ -353,7 +353,10 @@ outside.
 
 Facts are markdown records under `state/memory/facts` in the instance repository. The curator is the
 writer role and writes through `secretary memory propose/commit/supersede`; the protocol commits only
-`state/memory` under the shared instance-repository writer lock. Other heads read through MCP. The
+`state/memory` under the shared instance-repository writer lock. The butler is a proposer, not a writer:
+it may stage a fact for the curator inbox with `secretary memory propose`, and canonical `commit` and
+`supersede` stay with the curator, secretary and operator roles
+([Protocols](PROTOCOLS.md#memory)). Other heads read through MCP. The
 NDJSON export and the SQLite/vector index in the data directory are rebuilt from the canon. Only one
 index writer may publish derived state at a time.
 
