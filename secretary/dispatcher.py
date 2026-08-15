@@ -250,6 +250,7 @@ from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
 from secretary.dispatcher_tui import (
     delivery_readiness_state as _delivery_readiness_state,
 )
+from secretary.dispatcher_tui import turn_started_confirm as _turn_started_confirm
 from secretary.dispatcher_tui import (
     prepare_claude_provider_progress_source as _prepare_claude_provider_progress_source,
 )
@@ -1441,12 +1442,24 @@ class CommandHostRuntime:
         if evidence_line:
             message += f" Sprint delivery evidence to carry into your closing resume: {evidence_line}."
         try:
+            adapter = self._prompt_adapter(
+                getattr(record, "run", {}), str(getattr(record, "head", ""))
+            )
+            # A wake is confirmed the way a launch is: by the criterion the worker and reviewer
+            # roles already use, checked before any screen heuristic. Waking used to run on the
+            # screen signals alone, and for a Codex pane none of them can say yes — the composer
+            # fingerprint reads the retained pane tail rather than the composer, Orca calls a
+            # working Codex idle, and the cursor branch is gated behind the same broken flag. The
+            # result was a delivered wake reported as a failure every single time, and a head
+            # killed and rebuilt after three of them. What stays out of band is the causal
+            # acknowledgement: the observer still quotes the delivery id in its own resume.
             return _deliver_interactive_prompt(
                 current,
                 message,
                 run_json=self._run_json,
-                adapter=self._prompt_adapter(
-                    getattr(record, "run", {}), str(getattr(record, "head", ""))
+                adapter=adapter,
+                confirm=_turn_started_confirm(
+                    current, workspace, adapter, run_json=self._run_json
                 ),
                 ack_out_of_band=True,
                 subject="observer-wake",

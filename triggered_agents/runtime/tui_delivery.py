@@ -548,13 +548,14 @@ def deliver_interactive_prompt(
     means: the payload fingerprint is then the fingerprint of a pointer.
 
     Callers pass `confirm`, their own criterion for stage 4. A caller whose proof arrives later sets
-    `ack_out_of_band` and gets `DELIVERY_ACCEPTED` once stage 3 is evidenced.
+    `ack_out_of_band` and gets `DELIVERY_ACCEPTED` once stage 3 is evidenced. A caller may set both,
+    and then either one is enough: the two look at different things — `confirm` at what the provider
+    persisted, the stage-3 evidence at what the pane shows — and each is blind exactly where the
+    other sees. Requiring both is what left the observer wake with no reachable way to succeed.
 
     The verdict comes back with the evidence of the attempt attached, and so does the failure,
     including a failure of the transport itself.
     """
-    if ack_out_of_band and confirm is not None:
-        raise ValueError("out-of-band delivery cannot use a synchronous confirmation callback")
     if confirm is None and not ack_out_of_band:
         raise ValueError("interactive delivery requires a confirmation criterion")
     payload_bytes, payload_hash = payload_fingerprint(prompt)

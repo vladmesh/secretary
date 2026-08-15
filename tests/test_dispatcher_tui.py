@@ -196,26 +196,42 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
         self.assertNotIn("continuation_condition", noncanonical_root)
         self.assertNotIn("continuation_condition", outside_baseline)
 
-    def test_out_of_band_delivery_rejects_confirm_before_touching_terminal(self) -> None:
+    def test_delivery_with_no_criterion_at_all_is_refused_before_touching_terminal(self) -> None:
         terminal_calls: list[list[str]] = []
-        callback_calls = [0]
 
         def run_json(command: list[str]) -> dict:
             terminal_calls.append(command)
+            return {}
+
+        with self.assertRaisesRegex(ValueError, "requires a confirmation criterion"):
+            deliver_interactive_prompt("term-observer", "wake", run_json=run_json)
+
+        self.assertEqual(terminal_calls, [])
+
+    def test_out_of_band_delivery_may_also_carry_a_confirmation_callback(self) -> None:
+        """Either criterion is enough, because each is blind where the other sees.
+
+        `confirm` reads what the provider persisted; the stage-3 evidence reads what the pane
+        shows. Requiring both left the observer wake with no reachable way to succeed on a Codex
+        pane, where the composer fingerprint reads the retained tail and Orca calls a working
+        head idle.
+        """
+        callback_calls = [0]
+
+        def run_json(command: list[str]) -> dict:
             return {}
 
         def confirm(_sent_at: float) -> bool:
             callback_calls[0] += 1
             return True
 
-        with self.assertRaisesRegex(ValueError, "out-of-band delivery cannot use"):
-            deliver_interactive_prompt(
-                "term-observer", "wake", run_json=run_json,
-                confirm=confirm, ack_out_of_band=True,
-            )
+        outcome = deliver_interactive_prompt(
+            "term-observer", "wake", run_json=run_json,
+            confirm=confirm, ack_out_of_band=True,
+        )
 
-        self.assertEqual(terminal_calls, [])
-        self.assertEqual(callback_calls[0], 0)
+        self.assertTrue(outcome.evidence.turn_confirmed)
+        self.assertGreaterEqual(callback_calls[0], 1)
 
     def test_claude_turn_detection_accepts_real_status_lines(self) -> None:
         def run_json(command: list[str]) -> dict:

@@ -4176,7 +4176,9 @@ class ObserverConfigurationTests(unittest.TestCase):
         # The pane started a turn, and that alone does not close an observer delivery.
         self.assertEqual(outcome, "accepted")
         # Readiness is asked and the pane is fingerprinted on both sides of the send: the byte
-        # count Orca answers with is one stage of delivery, not the whole of it.
+        # count Orca answers with is one stage of delivery, not the whole of it. The extra read
+        # after the send is the wake's own confirmation criterion, the one a launch already used:
+        # it is asked first, before the pane evidence, and only then does the screen get a say.
         self.assertEqual(
             [call[1:3] for call in calls],
             [
@@ -4186,6 +4188,7 @@ class ObserverConfigurationTests(unittest.TestCase):
                 ["terminal", "read"],
                 ["terminal", "send"],
                 ["terminal", "send"],
+                ["terminal", "read"],
                 ["terminal", "wait"],
                 ["terminal", "read"],
             ],
