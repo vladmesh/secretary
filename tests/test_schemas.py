@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from secretary.config import validate, validate_instance
+from secretary.config import instance_data_dir, validate, validate_instance
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_INSTANCE = REPO_ROOT / "examples" / "instance"
@@ -100,7 +102,7 @@ class SchemaValidTests(unittest.TestCase):
 
 
 class SchemaInvalidTests(unittest.TestCase):
-    def test_instance_rejects_relative_data_dir(self):
+    def test_instance_accepts_and_normalizes_relative_data_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance = Path(tmpdir) / "instance.yaml"
             instance.write_text(
@@ -114,11 +116,32 @@ class SchemaInvalidTests(unittest.TestCase):
 
             report = validate_instance(instance)
 
-        self.assertFalse(report.ok)
-        self.assertTrue(
-            any(error.path == "data_dir" and "pattern" in error.message for error in report.errors),
-            report.errors,
-        )
+            self.assertTrue(report.ok, report.errors)
+            self.assertEqual(report.data_dir, instance.parent / "secretary-data")
+            self.assertEqual(instance_data_dir(instance.parent), instance.parent / "secretary-data")
+
+    def test_instance_expands_home_relative_data_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            home = root / "home"
+            instance = root / "instance.yaml"
+            instance.write_text(
+                "version: 1\n"
+                "name: example\n"
+                "data_dir: ~/secretary-data\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+
+            with mock.patch.dict(os.environ, {"HOME": str(home)}):
+                self.assertEqual(instance_data_dir(instance), home / "secretary-data")
+
+    def test_instance_rejects_non_string_data_dir(self):
+        data = copy.deepcopy(VALID_INSTANCE)
+        data["data_dir"] = 3
+        errors = validate(data, "instance", "instance.yaml")
+        self.assertTrue(any(error.path == "data_dir" and "expected type string" in error.message for error in errors), errors)
 
     def test_instance_missing_offsite_remote(self):
         data = copy.deepcopy(VALID_INSTANCE)

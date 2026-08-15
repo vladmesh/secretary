@@ -541,13 +541,15 @@ def step_worktrees(context: UpgradeContext) -> StepResult:
 
 def step_host(context: UpgradeContext) -> StepResult:
     report = context.report
-    manifest = Path(report.instance["data_dir"]) / "host-managed.json"
+    assert report.data_dir is not None
+    manifest = report.data_dir / "host-managed.json"
     try:
         packaged = resolve_packaged(
             report.instance,
             context.product_root / "packaging" / "systemd",
             product_root=context.product_root,
             instance_path=context.instance_path,
+            data_dir=report.data_dir,
             runtime_user=context.runtime_user,
         )
     except (HostCommandError, ValueError) as exc:

@@ -35,7 +35,7 @@ from secretary.backup_retention import (
 from secretary.backup_verify import (
     verify_backup,  # noqa: F401  # Public compatibility re-export.
 )
-from secretary.config import ConfigError, load_config, validate
+from secretary.config import DataDirError, ConfigError, instance_data_dir, load_config
 from secretary.data import (
     DataExport,
     export_all,
@@ -452,14 +452,9 @@ def _payload_checksums(payload: Path) -> dict[str, str]:
 
 def _load_data_dir(instance_file: Path) -> Path:
     try:
-        instance = load_config(instance_file)
-    except ConfigError as exc:
+        return instance_data_dir(instance_file)
+    except DataDirError as exc:
         raise RuntimeError(str(exc)) from None
-    errors = validate(instance, "instance", instance_file.name)
-    if errors:
-        raise RuntimeError("invalid instance: " + "; ".join(map(str, errors)))
-    data_dir = instance["data_dir"]
-    return Path(data_dir)
 
 
 def _instance_identity(instance_file: Path) -> dict[str, str]:

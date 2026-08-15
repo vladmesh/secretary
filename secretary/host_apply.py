@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary import _proc
+from secretary.config import instance_data_dir
 from secretary._fsutil import directory_lock, write_text_atomic
 from secretary.head_registry import pinned_product_root
 from secretary.host import (
@@ -238,6 +239,7 @@ def resolve_packaged(
     *,
     product_root: Path | None = None,
     instance_path: Path,
+    data_dir: Path | None = None,
     runtime_user: str | None = None,
     orca_executable: Path | None = None,
 ) -> list[PackagedUnit]:
@@ -247,6 +249,7 @@ def resolve_packaged(
         packaging_root=packaging_root,
         product_root=product_root,
         instance_path=instance_path,
+        data_dir=data_dir,
         runtime_user=runtime_user,
         orca_executable=orca_executable,
     )
@@ -257,7 +260,7 @@ def resolve_packaged(
 
 
 def resolve_installed_packaged(
-    instance: dict[str, Any], *, instance_path: Path
+    instance: dict[str, Any], *, instance_path: Path, data_dir: Path | None = None,
 ) -> list[PackagedUnit]:
     """Compile the units of the checkout this installation was installed from.
 
@@ -273,6 +276,7 @@ def resolve_installed_packaged(
         packaging_root(product_root),
         product_root=product_root,
         instance_path=instance_path,
+        data_dir=data_dir,
     )
 
 
@@ -333,6 +337,7 @@ def resolve_systemd_layout(
     *,
     product_root: Path | None = None,
     instance_path: Path,
+    data_dir: Path | None = None,
     runtime_user: str | None = None,
     orca_executable: Path | None = None,
 ) -> SystemdLayout:
@@ -345,10 +350,11 @@ def resolve_systemd_layout(
     user, home = resolve_runtime_owner(target, runtime_user)
     executable = orca_executable or find_orca_executable(user, home) or Path("/usr/local/bin/orca")
     host = instance.get("host", {}) if isinstance(instance.get("host"), dict) else {}
+    configured_data_dir = data_dir if data_dir is not None else instance_data_dir(target)
     return SystemdLayout(
         product_root=(product_root or root.parents[1]).expanduser().resolve(strict=False),
         instance_path=target,
-        data_dir=Path(instance.get("data_dir", home / "secretary-data")).expanduser().resolve(strict=False),
+        data_dir=configured_data_dir.expanduser().resolve(strict=False),
         runtime_user=user,
         runtime_home=home,
         orca_executable=executable,

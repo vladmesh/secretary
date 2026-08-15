@@ -513,7 +513,7 @@ CARD_REF = "secretary-510-pilot"
 
 
 class DispatcherRuntimeTests(unittest.TestCase):
-    def test_default_data_dir_rejects_relative_instance_data_dir(self):
+    def test_default_data_dir_anchors_relative_instance_data_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance = Path(tmpdir) / "instance.yaml"
             instance.write_text(
@@ -525,8 +525,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(DispatcherError, "data_dir: value must match pattern"):
-                default_data_dir(instance)
+            self.assertEqual(default_data_dir(instance), instance.parent / "secretary-data")
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()

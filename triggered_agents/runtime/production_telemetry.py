@@ -25,7 +25,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import yaml
+from secretary.config import DataDirError, instance_data_dir as _configured_data_dir
 
 from triggered_agents.runtime.paths import default_instance_path
 
@@ -55,16 +55,10 @@ def instance_data_dir() -> Path | None:
     None is not an error: the caller falls back to the home default and reports the path it looked
     at. An instance that cannot be parsed must not take down the health command.
     """
-    path = instance_file()
     try:
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, yaml.YAMLError):
+        return _configured_data_dir(instance_file())
+    except DataDirError:
         return None
-    configured = loaded.get("data_dir") if isinstance(loaded, dict) else None
-    if not isinstance(configured, str) or not configured.strip():
-        return None
-    resolved = Path(configured).expanduser()
-    return resolved if resolved.is_absolute() else path.parent / resolved
 
 
 def data_dir() -> Path:

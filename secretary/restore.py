@@ -26,7 +26,7 @@ from secretary.backup_policy import (
     should_skip_data_entry,
 )
 from secretary.backup_verify import _verify_plain_tar
-from secretary.config import ConfigError, load_config, validate_instance
+from secretary.config import ConfigError, DataDirError, instance_data_dir, load_config, validate_instance
 from secretary.data import init_layout
 from secretary.product_issues import (
     ProductIssueValidationError,
@@ -918,24 +918,14 @@ def plan_as_json(plan: RestorePlan, *, action: str, dry_run: bool) -> dict[str, 
 
 
 def _target(instance_path: Path) -> tuple[Path, Path, dict[str, str]]:
-    instance_file = instance_path.expanduser()
-    if instance_file.is_dir():
-        instance_file = instance_file / "instance.yaml"
-    report = validate_instance(instance_file)
+    report = validate_instance(instance_path)
     if report.errors:
         raise RestoreError("invalid target instance: " + "; ".join(map(str, report.errors)))
     try:
-        config = load_config(instance_file)
-    except ConfigError as exc:
+        target = instance_data_dir(report.instance_path)
+    except DataDirError as exc:
         raise RestoreError(str(exc)) from None
-    if not isinstance(config, dict):
-        raise RestoreError("invalid target instance")
-    configured_dir = config.get("data_dir")
-    selected = Path(str(configured_dir)).expanduser()
-    if not selected.is_absolute():
-        raise RestoreError("target data root must be absolute")
-    target = selected.resolve()
-    return instance_file, target, _identity(config)
+    return report.instance_path, target, _identity(report.instance)
 
 
 def _identity(config: dict[str, Any]) -> dict[str, str]:

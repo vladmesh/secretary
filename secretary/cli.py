@@ -14,7 +14,7 @@ from secretary.checkpoint import (
     checkpoint_snapshot,
     render_checkpoint_lines,
 )
-from secretary.config import load_config, validate, validate_instance
+from secretary.config import DataDirError, instance_data_dir, load_config, validate, validate_instance
 from secretary.data import (
     KANBOARD_DATA_PATH,
     export_all,
@@ -477,7 +477,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     print(f"data manifest: {'present' if report.has_manifest else 'absent'}")
     if report.manifest_path:
         print(f"data manifest path: {report.manifest_path}")
-    cache_dir = _memory_cache_dir(report.instance)
+    cache_dir = _memory_cache_dir(report)
     print(f"memory model cache: {cache_dir}")
     if _is_temporary_directory(cache_dir):
         print("warning: memory model cache is in a temporary directory and can be cleaned unexpectedly")
@@ -521,9 +521,10 @@ def run_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
-def _memory_cache_dir(instance: dict[str, object]) -> Path:
+def _memory_cache_dir(report) -> Path:
     """Return the product-owned persistent fastembed cache location."""
-    return Path(str(instance["data_dir"])).expanduser() / "memory" / "fastembed-cache"
+    assert report.data_dir is not None
+    return report.data_dir / "memory" / "fastembed-cache"
 
 
 def _is_temporary_directory(path: Path) -> bool:
@@ -639,8 +640,7 @@ def print_restore_status(report, *, findings: list[str] | None = None) -> list[s
 
 
 def _restore_findings(report) -> list[str]:
-    data_dir_value = report.instance.get("data_dir") if isinstance(report.instance, dict) else None
-    if not isinstance(data_dir_value, str) or not data_dir_value:
+    if report.data_dir is None:
         return []
     try:
         _, data_dir, _ = _target(report.instance_path)
@@ -684,10 +684,9 @@ def print_dispatcher_status(
     inspect_live: bool,
     findings: list[str] | None = None,
 ) -> bool:
-    data_dir_value = report.instance.get("data_dir") if isinstance(report.instance, dict) else None
-    if not isinstance(data_dir_value, str) or not data_dir_value:
+    if report.data_dir is None:
         return False
-    data_dir = Path(data_dir_value).expanduser()
+    data_dir = report.data_dir
     production = _load_dispatcher_state(data_dir / "dispatcher" / "production-state.json")
     production_phase = str(production.get("phase") or "new")
     production_owner = str(production.get("owner") or "")
@@ -717,10 +716,9 @@ def print_dispatcher_status(
 
 
 def dispatcher_findings(report, collected_host: CollectResult | None, *, inspect_live: bool) -> list[str]:
-    data_dir_value = report.instance.get("data_dir") if isinstance(report.instance, dict) else None
-    if not isinstance(data_dir_value, str) or not data_dir_value:
+    if report.data_dir is None:
         return []
-    data_dir = Path(data_dir_value).expanduser()
+    data_dir = report.data_dir
     production = _load_dispatcher_state(data_dir / "dispatcher" / "production-state.json")
     if not production:
         return []
@@ -761,10 +759,9 @@ def print_checkpoint_status(report, *, findings: list[str] | None = None) -> lis
     Last commit, last push, lag, the gate's blocking reason and the
     `remote diverged` alarm.
     """
-    data_dir_value = report.instance.get("data_dir") if isinstance(report.instance, dict) else None
-    if not isinstance(data_dir_value, str) or not data_dir_value:
+    if report.data_dir is None:
         return []
-    data_dir = Path(data_dir_value).expanduser()
+    data_dir = report.data_dir
     production = _load_dispatcher_state(data_dir / "dispatcher" / "production-state.json")
     if "checkpoint" not in production and "checkpoint_push" not in production:
         return []
@@ -788,10 +785,9 @@ def print_checkpoint_status(report, *, findings: list[str] | None = None) -> lis
 
 
 def checkpoint_findings(report) -> list[str]:
-    data_dir_value = report.instance.get("data_dir") if isinstance(report.instance, dict) else None
-    if not isinstance(data_dir_value, str) or not data_dir_value:
+    if report.data_dir is None:
         return []
-    production = _load_dispatcher_state(Path(data_dir_value).expanduser() / "dispatcher" / "production-state.json")
+    production = _load_dispatcher_state(report.data_dir / "dispatcher" / "production-state.json")
     if "checkpoint" not in production and "checkpoint_push" not in production:
         return []
     snapshot = checkpoint_snapshot(report.instance_path.parent, write_state=production.get("checkpoint"), push_state=production.get("checkpoint_push"))
@@ -834,7 +830,10 @@ def _production_host_findings(report, data_dir: Path, collected_host: CollectRes
         return []
     prefix = report.host.get("unit_prefix", "") if isinstance(report.host, dict) else ""
     prefix = prefix if isinstance(prefix, str) else ""
-    packaged = resolve_installed_packaged(report.instance, instance_path=report.instance_path.parent)
+    assert report.data_dir is not None
+    packaged = resolve_installed_packaged(
+        report.instance, instance_path=report.instance_path.parent, data_dir=report.data_dir,
+    )
     desired = build_plan(report.instance, report.bindings, packaged=packaged)
     managed = load_managed_manifest(data_dir / "host-managed.json")
     changes = plan_changes(desired, collected_host.inventory, managed, prefix)
@@ -1276,8 +1275,13 @@ def print_host_inventory(
 
 def collect_host_inventory(report, args: argparse.Namespace):
     source = FixtureHostSource(Path(args.host_fixture)) if args.host_fixture else LiveHostSource()
-    packaged = resolve_installed_packaged(report.instance, instance_path=report.instance_path.parent)
-    expected = build_doctor_expectations(report.instance, report.bindings, packaged=packaged)
+    assert report.data_dir is not None
+    packaged = resolve_installed_packaged(
+        report.instance, instance_path=report.instance_path.parent, data_dir=report.data_dir,
+    )
+    expected = build_doctor_expectations(
+        report.instance, report.bindings, packaged=packaged, data_dir=report.data_dir,
+    )
     collected = source.collect(expected)
     return expected, collected, inventory(expected, collected.inventory)
 
@@ -1405,34 +1409,11 @@ def _data_dir_from_args(args: argparse.Namespace, *, validate_tree: bool) -> Pat
     if args.data_dir:
         return Path(args.data_dir).expanduser()
 
-    if validate_tree:
-        report = validate_instance(_instance_path(args.instance))
-        if report.errors:
-            print(f"secretary data: {len(report.errors)} config problem(s):")
-            for error in report.errors:
-                print(f"  {error}")
-            return None
-
-    data_dir = _load_data_dir(_instance_path(args.instance))
-    if data_dir is None:
-        print("secretary data: instance.yaml has no usable data_dir")
-        return None
-    return data_dir
-
-
-def _load_data_dir(instance_path: Path) -> Path | None:
-    from secretary.config import ConfigError
-
     try:
-        instance = load_config(instance_path)
-    except ConfigError:
+        return instance_data_dir(_instance_path(args.instance))
+    except DataDirError as exc:
+        print(f"secretary data: cannot resolve instance data_dir: {exc}")
         return None
-    if not isinstance(instance, dict):
-        return None
-    data_dir = instance.get("data_dir")
-    if not isinstance(data_dir, str) or not data_dir:
-        return None
-    return Path(data_dir).expanduser()
 
 
 def not_implemented(command: str):

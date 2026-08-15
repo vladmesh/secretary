@@ -391,6 +391,7 @@ class PortableInstallationTests(PortableFixture):
                 self.product / "packaging" / "systemd",
                 product_root=self.product,
                 instance_path=self.instance,
+                data_dir=context.report.data_dir,
                 runtime_user="operator",
             )
         )

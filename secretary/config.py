@@ -38,6 +38,10 @@ class ConfigError(Exception):
     """A config file could not be read or parsed (not a schema violation)."""
 
 
+class DataDirError(Exception):
+    """An instance cannot provide a schema-valid configured data directory."""
+
+
 @dataclass(frozen=True)
 class SchemaError:
     """One schema violation, with a human path to the field."""
@@ -181,6 +185,7 @@ class InstanceReport:
     bindings: list[dict[str, Any]]
     host: dict[str, Any]
     instance: dict[str, Any]
+    data_dir: Path | None
 
     @property
     def ok(self) -> bool:
@@ -189,9 +194,41 @@ class InstanceReport:
 
 def _resolve_instance(path: Path) -> Path:
     """Accept either an instance dir or a direct path to instance.yaml."""
-    if path.is_dir():
-        return path / "instance.yaml"
-    return path
+    expanded = path.expanduser()
+    instance_file = expanded / "instance.yaml" if expanded.is_dir() else expanded
+    return instance_file.resolve(strict=False)
+
+
+def _configured_data_dir(instance_file: Path, instance: dict[str, Any]) -> Path:
+    """Canonicalize a schema-valid configured path at the instance boundary."""
+    configured = instance["data_dir"]
+    candidate = Path(configured).expanduser()
+    if not candidate.is_absolute():
+        candidate = instance_file.parent / candidate
+    return candidate.resolve(strict=False)
+
+
+def instance_data_dir(path: Path) -> Path:
+    """Return the canonical data directory configured by an instance.
+
+    ``path`` may name the instance directory or its ``instance.yaml``. The
+    configuration is schema-validated before its value is used, ``~`` is
+    expanded, and a relative value is rooted at the resolved instance file's
+    parent. This is the sole configuration boundary for configured data paths;
+    command-line and environment overrides remain caller-owned paths.
+    """
+    instance_file = _resolve_instance(path)
+    try:
+        instance = load_config(instance_file)
+    except ConfigError as exc:
+        raise DataDirError(str(exc)) from None
+    errors = validate(instance, "instance", instance_file.name)
+    if errors:
+        raise DataDirError(
+            f"invalid instance {instance_file}: " + "; ".join(map(str, errors))
+        )
+    assert isinstance(instance, dict)
+    return _configured_data_dir(instance_file, instance)
 
 
 def validate_instance(path: Path) -> InstanceReport:
@@ -220,9 +257,15 @@ def validate_instance(path: Path) -> InstanceReport:
             bindings=[],
             host={},
             instance={},
+            data_dir=None,
         )
 
     errors += validate(instance, "instance", instance_file.name)
+    data_dir = (
+        _configured_data_dir(instance_file, instance)
+        if isinstance(instance, dict) and not errors
+        else None
+    )
     if isinstance(instance, dict):
         # Resolve omitted values before comparing the limits.  Runtime does the same,
         # so a partial setting cannot pass validation then stop every dispatcher tick.
@@ -251,7 +294,7 @@ def validate_instance(path: Path) -> InstanceReport:
     )
     bindings = _load_bindings(instance_dir / "projects")
 
-    manifest_file = _find_manifest(instance_dir, instance)
+    manifest_file = _find_manifest(instance_dir, data_dir)
     has_manifest = manifest_file is not None
     warnings: list[SchemaError] = []
     if has_manifest:
@@ -283,16 +326,15 @@ def validate_instance(path: Path) -> InstanceReport:
         bindings=bindings,
         host=host,
         instance=instance if isinstance(instance, dict) else {},
+        data_dir=data_dir,
     )
 
 
-def _find_manifest(instance_dir: Path, instance: Any) -> Path | None:
-    if isinstance(instance, dict):
-        data_dir = instance.get("data_dir")
-        if isinstance(data_dir, str) and data_dir:
-            data_manifest = Path(data_dir).expanduser() / "data-manifest.json"
-            if data_manifest.exists():
-                return data_manifest
+def _find_manifest(instance_dir: Path, data_dir: Path | None) -> Path | None:
+    if data_dir is not None:
+        data_manifest = data_dir / "data-manifest.json"
+        if data_manifest.exists():
+            return data_manifest
 
     legacy_manifest = instance_dir / "data-manifest.json"
     if legacy_manifest.exists():

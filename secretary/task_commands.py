@@ -9,7 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from secretary.cli_output import print_json
-from secretary.config import ConfigError, load_config
+from secretary.config import ConfigError, DataDirError, instance_data_dir, load_config
 from secretary.onboarding import DEFAULT_INSTANCE
 from secretary.tasks import (
     _BLOCK_CLASSIFICATIONS,
@@ -54,16 +54,11 @@ def resolve_data_dir(args: argparse.Namespace) -> str:
     if explicit:
         return str(Path(explicit).expanduser())
     instance = Path(getattr(args, "instance", None) or DEFAULT_INSTANCE).expanduser()
-    instance_file = instance / "instance.yaml" if instance.is_dir() else instance
     try:
-        loaded = load_config(instance_file)
-    except ConfigError as exc:
+        return str(instance_data_dir(instance))
+    except DataDirError as exc:
+        instance_file = instance / "instance.yaml" if instance.is_dir() else instance
         raise TaskError("usage", f"cannot resolve data dir from {instance_file}: {exc}; pass --data-dir", 2) from None
-    data_dir = loaded.get("data_dir") if isinstance(loaded, dict) else None
-    if not isinstance(data_dir, str) or not data_dir:
-        raise TaskError("usage", f"{instance_file} has no usable data_dir; pass --data-dir", 2)
-    resolved = Path(data_dir).expanduser()
-    return str(resolved if resolved.is_absolute() else instance_file.parent / resolved)
 
 
 def _instance(args: argparse.Namespace) -> str:

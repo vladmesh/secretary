@@ -171,16 +171,23 @@ class BackupTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "claimed worker"):
                     create_backup(instance)
 
-    def test_create_rejects_relative_instance_data_dir(self):
+    def test_create_anchors_relative_instance_data_dir(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
             _write_instance(instance, Path("secretary-data"))
 
-            with self.assertRaisesRegex(RuntimeError, "data_dir: value must match pattern"):
+            with (
+                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("secretary.backup._pipeline_action", return_value=None),
+                mock.patch("secretary.backup.raw_kanboard_dump") as raw_dump,
+                mock.patch("secretary.backup.export_all", side_effect=lambda data_dir, *_args, **_kwargs: _fake_exports(data_dir)),
+            ):
+                raw_dump.side_effect = lambda data_dir: SimpleNamespace(dump_dir=data_dir / "board" / "raw")
                 create_backup(instance)
 
-        self.assertFalse((root / "secretary-data").exists())
+            self.assertTrue((instance / "secretary-data" / "backups").exists())
+            self.assertFalse((root / "secretary-data").exists())
 
     def test_create_ignores_invalid_project_config(self):
         with tempfile.TemporaryDirectory() as tmpdir:

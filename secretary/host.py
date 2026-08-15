@@ -543,6 +543,7 @@ def build_doctor_expectations(
     bindings: Iterable[dict[str, Any]],
     *,
     packaged: Iterable[PackagedUnit] | None = None,
+    data_dir: Path | None = None,
 ) -> Expectations:
     """Derive doctor parity from reconcile's canonical desired state."""
     bindings = list(bindings)
@@ -581,10 +582,9 @@ def build_doctor_expectations(
             runtime[name] = (True, True)
     runtime["orca-server.service"] = (False, True)
     lazy_orca_repos: dict[str, str] = {}
-    data_dir = instance.get("data_dir") if isinstance(instance, dict) else None
-    if component_enabled(host, "dispatcher-production") and isinstance(data_dir, str) and data_dir:
+    if component_enabled(host, "dispatcher-production") and data_dir is not None:
         try:
-            repo = observer_root_repo(Path(data_dir).expanduser()).resolve(strict=False)
+            repo = observer_root_repo(data_dir).resolve(strict=False)
         except (OSError, RuntimeError):
             # Instance validation normally prevents this. An unreadable path is
             # not evidence that the dispatcher's lazy repo is missing.

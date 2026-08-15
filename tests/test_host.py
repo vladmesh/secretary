@@ -86,7 +86,9 @@ class ExpectationTests(unittest.TestCase):
         bindings = [
             {"id": "outside", "repo": "/opt/checkouts/widget", "enabled": True, "orca_binding": "widget"},
         ]
-        expected = build_doctor_expectations(instance, bindings)
+        expected = build_doctor_expectations(
+            instance, bindings, data_dir=Path("/var/lib/secretary-data"),
+        )
         self.assertEqual(expected.projects, {"/opt/checkouts/widget"})
         self.assertIn("secretary-dispatcher-production.timer", expected.units)
         self.assertEqual(expected.orca_repos, {"widget"})
@@ -100,7 +102,9 @@ class ExpectationTests(unittest.TestCase):
             "data_dir": "/srv/secretary-data",
             "host": {"unit_prefix": "secretary-"},
         }
-        expected = build_doctor_expectations(enabled, [], packaged=[])
+        expected = build_doctor_expectations(
+            enabled, [], packaged=[], data_dir=Path("/srv/secretary-data"),
+        )
         empty = inventory(expected, HostInventory())
         self.assertEqual(empty["orca repos"].missing_on_host, [])
         self.assertEqual(empty["orca repos"].unmanaged_on_host, [])
@@ -146,6 +150,7 @@ class ExpectationTests(unittest.TestCase):
             {"data_dir": "/srv/secretary-data", "host": {"unit_prefix": "secretary-"}},
             [],
             packaged=[],
+            data_dir=Path("/srv/secretary-data"),
         )
         diff = inventory(
             expected,
@@ -331,6 +336,7 @@ class ReconcilePlanTests(unittest.TestCase):
                 packaged = resolve_packaged(
                     {"data_dir": str(root / "data"), "host": {"unit_prefix": "secretary-"}},
                     instance_path=instance,
+                    data_dir=root / "data",
                 )
 
         self.assertNotIn("orca", {unit.component for unit in packaged})
@@ -346,11 +352,10 @@ class ReconcilePlanTests(unittest.TestCase):
             root = Path(tmp)
             instance = root / "instance"
             instance.mkdir()
-            data_dir = root / "data"
-            data_dir.mkdir()
+            data_dir = instance / "relative-data"
             config = instance / "instance.yaml"
             config.write_text(
-                "version: 1\nname: operator\ndata_dir: " + str(data_dir)
+                "version: 1\nname: operator\ndata_dir: relative-data"
                 + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: secretary-\n",
                 encoding="utf-8",
             )
@@ -369,24 +374,28 @@ class ReconcilePlanTests(unittest.TestCase):
                     directory_report.instance,
                     product_root=Path("product"),
                     instance_path=directory_report.instance_path.parent,
+                    data_dir=directory_report.data_dir,
                     runtime_user="operator",
                 )
                 relative = resolve_packaged(
                     relative_report.instance,
                     product_root=Path("product"),
                     instance_path=relative_report.instance_path.parent,
+                    data_dir=relative_report.data_dir,
                     runtime_user="operator",
                 )
                 absolute = resolve_packaged(
                     absolute_report.instance,
                     product_root=product_root,
                     instance_path=absolute_report.instance_path.parent,
+                    data_dir=absolute_report.data_dir,
                     runtime_user="operator",
                 )
                 layout = resolve_systemd_layout(
                     relative_report.instance,
                     product_root=Path("product"),
                     instance_path=relative_report.instance_path.parent,
+                    data_dir=relative_report.data_dir,
                     runtime_user="operator",
                 )
 
@@ -431,7 +440,9 @@ class ReconcilePlanTests(unittest.TestCase):
             ), unittest.mock.patch("secretary.host_apply.find_orca_executable", return_value=Path("/usr/local/bin/orca")), unittest.mock.patch(
                 "secretary.host_apply._is_executable", return_value=True
             ):
-                packaged = resolve_packaged(report_instance, instance_path=instance_path)
+                packaged = resolve_packaged(
+                    report_instance, instance_path=instance_path, data_dir=root / "data",
+                )
                 desired = build_plan(report_instance, [], packaged=packaged)
                 self.assertIn(
                     b"User=operator",
@@ -1300,6 +1311,7 @@ class DoctorHostCliTests(unittest.TestCase):
                     packaged = resolve_packaged(
                         report.instance,
                         instance_path=report.instance_path.parent,
+                        data_dir=report.data_dir,
                         orca_executable=legacy_orca,
                     )
                 find_executable.assert_not_called()

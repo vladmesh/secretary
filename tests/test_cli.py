@@ -366,6 +366,39 @@ class CliTests(unittest.TestCase):
         self.assertEqual(doctor_code, 0, doctor_output)
         self.assertIn("data manifest: present", doctor_output)
 
+    def test_data_init_anchors_relative_data_dir_from_a_foreign_cwd(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            foreign = root / "foreign-workspace"
+            foreign.mkdir()
+            directories = (root / "instance-dir", root / "instance-file")
+            for instance_dir in directories:
+                instance_dir.mkdir()
+                (instance_dir / "instance.yaml").write_text(
+                    "version: 1\n"
+                    "name: example\n"
+                    "data_dir: relative-data\n"
+                    "offsite:\n"
+                    "  instance_remote: git@example.invalid:x/y.git\n",
+                    encoding="utf-8",
+                )
+
+            with contextlib.chdir(foreign):
+                directory_code, directory_output = self.run_cli(
+                    ["data", "init", "--instance", str(directories[0])]
+                )
+                file_code, file_output = self.run_cli(
+                    ["data", "init", "--instance", str(directories[1] / "instance.yaml")]
+                )
+
+            for instance_dir, code, output in (
+                (directories[0], directory_code, directory_output),
+                (directories[1], file_code, file_output),
+            ):
+                self.assertEqual(code, 0, output)
+                self.assertTrue((instance_dir / "relative-data" / "data-manifest.json").is_file())
+            self.assertFalse((foreign / "relative-data").exists())
+
     def test_data_init_overwrites_broken_manifest(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = Path(tmpdir) / "instance"

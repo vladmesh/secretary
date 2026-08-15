@@ -104,7 +104,10 @@ class PackagedUnitTests(unittest.TestCase):
             account = SimpleNamespace(pw_dir=str(root / "operator"))
             with mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account):
                 units = upgrade.resolve_packaged(
-                    instance_config(root / "data"), instance_path=root / "instance", runtime_user="operator"
+                    instance_config(root / "data"),
+                    instance_path=root / "instance",
+                    data_dir=root / "data",
+                    runtime_user="operator",
                 )
 
         self.assertNotIn("secretary-orca.service", {unit.name for unit in units})
@@ -740,6 +743,7 @@ class UpgradeStepTests(unittest.TestCase):
                     context.product_root / "packaging" / "systemd",
                     product_root=context.product_root,
                     instance_path=context.instance_path,
+                    data_dir=context.report.data_dir,
                     runtime_user="operator",
                 )
                 rendered.append({unit.name: unit.content for unit in packaged})
