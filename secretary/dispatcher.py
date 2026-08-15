@@ -1542,26 +1542,21 @@ class CommandHostRuntime:
         )
         try:
             if record.worker_continuation.retained and self.worker_retained_vanished(record):
-                # The retained worker's process is provably gone: orca has no session for it and
-                # its pid heartbeat resolves to a pid the OS no longer knows. A vanished session
-                # cannot touch the checkout the reviewer judges, so there is no second writer to
-                # freeze — the commit it left stands on its own and the reviewer takes it. A red
-                # verdict on this round finds no session to resume and opens a replacement. Taking
-                # the freeze path here instead would raise over a head that will never confirm
-                # suspended and loop `review-launch-aborted` forever (issue:aa9a8ae4).
+                # The retained worker is provably gone: orca has no session and its pid heartbeat
+                # resolves to a pid the OS does not know. There is no second writer to freeze, so
+                # the reviewer takes the commit it left. Taking the freeze path here would raise
+                # over a head that can never confirm suspended and loop `review-launch-aborted`.
                 pass
             elif record.worker_continuation.retained:
-                # A retained worker is already SIGSTOPed: it cannot touch the checkout the reviewer
-                # judges, and its conversation is what a red verdict continues. Confirm that
-                # suspension rather than trusting the record; anything else takes the freeze path.
+                # A retained worker is already SIGSTOPed and its conversation is what a red verdict
+                # continues. Confirm that suspension rather than trusting the record.
                 self.confirm_worker_retained(record)
             else:
                 self._freeze_worker(record)
         except HostError as exc:
-            # The reviewer pane is up and the worker would not stop. Neither head can be reported
-            # as absent, so the bring-up hands the reviewer's pane back with the failure and the
-            # caller keeps its launch intent: dropping the record here would leave a live reviewer
-            # with nothing pointing at it, and the freeze is retried on the recovery path.
+            # The reviewer pane is up and the worker would not stop. Neither head can be reported as
+            # absent, so the bring-up hands the reviewer's pane back with the failure and the caller
+            # keeps its launch intent; the freeze is retried on the recovery path.
             raise HeadLaunchAborted(
                 f"worker freeze failed: {exc}",
                 handle=launched.handle,
@@ -1604,9 +1599,8 @@ class CommandHostRuntime:
         ingress = self._codex_provider_ingress(run)
         if ingress is not None:
             ingress.commit_run(run)
-            # A recovered, already-bound source is consumed before another delivery can act.  An
-            # unbound source belongs to a prior busy pre-send attempt and is bound by the same
-            # before-send boundary as the original launch.
+            # A recovered, already-bound source is consumed before another delivery can act. An
+            # unbound source belongs to a prior busy pre-send and is bound by the same boundary.
             if ingress.source.get("state") == "bound":
                 ingress.poll()
         document, nudge = self._review_document(task, record)
@@ -1781,9 +1775,8 @@ class CommandHostRuntime:
             self._complete_green_instance_repo(record, branch, base, repo)
             return
         # Publish the reviewed branch as main (a non-fast-forward push is rejected, never
-        # force-landed), then fast-forward the project's own checkout. The dispatcher runs
-        # from the secretary checkout, so this is how a merged self-modification reaches the
-        # next oneshot tick; other projects just stay current for the next worktree base.
+        # force-landed), then fast-forward the project's own checkout: that is how a merged
+        # self-modification reaches the next oneshot tick of the dispatcher's own checkout.
         self._run(["git", "-C", record.workspace, "push", "origin", f"{branch}:main"], "merge push")
         self._run(["git", "-C", str(repo), "fetch", "origin", "main"], "post-merge fetch")
         self._run(["git", "-C", str(repo), "merge", "--ff-only", "origin/main"], "post-merge fast-forward")
@@ -1867,10 +1860,9 @@ class CommandHostRuntime:
         self._run(["gh", "pr", "merge", branch, "--merge"], "merge pr", cwd=Path(record.workspace))
         repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
         default_branch = self.catalog.default_branch(task["project"], None)
-        # `gh pr merge` is the irreversible delivery boundary.  Refreshing this checkout afterwards
-        # is only a convenience for future worktree bases; a user's preserved local commit or dirty
-        # branch may legitimately make ff-only impossible.  Never report the already-merged card as
-        # failed because that best-effort cache refresh could not be applied.
+        # `gh pr merge` is the irreversible delivery boundary. Refreshing this checkout afterwards is
+        # only a convenience for future worktree bases, and a preserved local commit can make
+        # ff-only impossible: never report an already-merged card as failed because it did not apply.
         try:
             refresh_branch = base if base == default_branch else default_branch
             self._run(
@@ -1907,9 +1899,8 @@ class CommandHostRuntime:
             pid_file = record.worker_pid_file if kind == "worker" else record.review_pid_file
             leaf = record.worker_leaf if kind == "worker" else record.review_leaf
             heartbeats.append((pid_file, getattr(record, field, {}), kind, leaf))
-        # A workspace stop kills every pane it contains.  Fence every recorded head before the
-        # first destructive call, not afterwards when an unrelated live process may already have
-        # lost its pane.
+        # A workspace stop kills every pane it contains. Fence every recorded head before the first
+        # destructive call, not afterwards when a live process may already have lost its pane.
         for pid_file, run, kind, leaf in heartbeats:
             self._guard_head_run(run, kind, pid_file=pid_file, leaf=leaf)
         try:
@@ -1951,8 +1942,7 @@ class CommandHostRuntime:
                 ),
             )
         except head_ops.HeadStopFailed as exc:
-            # `head_ops.stop` itself commits a proved run before close or signalling. A preflight
-            # mismatch is intentionally uncommitted: that foreign process was never this run.
+            # A preflight mismatch is intentionally uncommitted: that foreign process was never this run.
             raise HostError(str(exc)) from None
         self._commit_review_run(record, outcome.run)
 
@@ -1983,8 +1973,7 @@ class CommandHostRuntime:
                 ),
                 workspace=record.workspace,
                 # The reviewer's own worker id is the card's, as the claim built it: `<ref>-<slug>`.
-                # A pointer that names the head being reconstructed is the truthful one; inventing
-                # a card reference this call never received would not be.
+                # Inventing a card reference this call never received would not be truthful.
                 task_ref=head_ops.TaskRef.card(
                     record.worker or record.review_head or "unknown-reviewer"
                 ),
@@ -2015,8 +2004,7 @@ class CommandHostRuntime:
                 ),
             )
         except head_ops.HeadStopFailed as exc:
-            # A post-attribution stop failure was already committed by `head_ops.stop`; a failed
-            # preflight must leave the persisted HeadRun untouched.
+            # A failed preflight must leave the persisted HeadRun untouched.
             raise HostError(str(exc)) from None
         self._commit_worker_run(record, outcome.run)
 
@@ -2043,10 +2031,9 @@ class CommandHostRuntime:
             except (head_ops.HeadRunError, head_ops.TaskRefError):
                 run = None
             if run is not None and run.settled and record.owns_head(WORKER_ROLE):
-                # The record still names a pane or a heartbeat while the run says that head was
-                # confirmed gone: whatever is there is not the run that ended, so it is not stopped
-                # as that run either. A fresh identity below is what keeps a stop from quietly
-                # skipping a head because a previous one was confirmed.
+                # The record still names a pane while the run says that head was confirmed gone:
+                # whatever is there is not that run, so a fresh identity keeps the stop from
+                # quietly skipping a head because a previous one was confirmed.
                 run = None
         if run is None:
             run = head_ops.HeadRun(
@@ -2056,9 +2043,8 @@ class CommandHostRuntime:
                     adapter=self._prompt_adapter(record.worker_run, record.head),
                 ),
                 workspace=record.workspace,
-                # No card reference reaches this call, and the worker id it does have carries one:
-                # `<ref>-<slug>` is what the claim built it from. A pointer that names the worker
-                # is the truthful reconstruction; inventing a card reference would not be.
+                # No card reference reaches this call, but the worker id carries one: `<ref>-<slug>`
+                # is what the claim built it from. Inventing a card reference would not be truthful.
                 task_ref=head_ops.TaskRef.card(record.worker or record.head or "unknown-worker"),
             )
         return replace(
@@ -2132,9 +2118,8 @@ class CommandHostRuntime:
                 if status.get("known"):
                     _clear_head_heartbeat(pid_file)
                 return
-            # SIGTERM and SIGHUP remain pending for a SIGSTOPed retained worker.  Wake its group
-            # before the graceful signal so green handoff does not wait out the whole grace period
-            # and then kill the worker unconditionally.
+            # SIGTERM and SIGHUP stay pending for a SIGSTOPed retained worker: wake its group before
+            # the graceful signal, or the green handoff waits out the grace period and then kills it.
             if signal_number == signal.SIGTERM:
                 self._signal_head(
                     pid_file, signal.SIGCONT,
@@ -2176,9 +2161,8 @@ class CommandHostRuntime:
         pid = int(status["pid"])
         try:
             # The terminal gives an interactive head its own foreground process group, so this
-            # reaches helpers as well as the provider process without detaching the head from its
-            # controlling terminal. Old launches and focused tests can share our group; do not
-            # turn those compatibility paths into a signal to the dispatcher itself.
+            # reaches helpers without detaching the head from its controlling terminal. Old launches
+            # and focused tests can share our group: never turn that into a signal to the dispatcher.
             group = os.getpgid(pid)
             if group != os.getpgrp():
                 os.killpg(group, signal_number)
@@ -2375,9 +2359,8 @@ class CommandHostRuntime:
         pid_file = _pid_file_path(_watchdog_kind(role), task["ref"]) if task else ""
         task_ref = self._task_ref(task, role, prompt_document)
         run_id = heartbeat_run_id or head_ops.new_run_id()
-        # ``preflight_codex_run`` is deliberately reached even by noop.  A fake/noop transport is
-        # not an exemption from the policy boundary: it is how tests prove a refused attestation
-        # opens no pane and clears no predecessor state.
+        # `preflight_codex_run` is deliberately reached even by noop: a fake transport is not an
+        # exemption from the policy boundary, and a refused attestation must open no pane.
         if self.mode == "noop":
             try:
                 preflight_run = self.preflight_codex_run(
@@ -2398,17 +2381,15 @@ class CommandHostRuntime:
             run_id=run_id, role=role, task_ref=task_ref.to_json(),
         )
         if pid_file:
-            # Drop any pid a previous launch in this same workspace left behind, so a respawn
-            # cannot read a dead predecessor's pid as this launch's liveness signal before the new
-            # head has had a chance to overwrite it (secretary-751).
+            # Drop any pid a previous launch in this workspace left behind, so a respawn cannot read
+            # a dead predecessor's pid as this launch's liveness before the new head overwrites it.
             _clear_head_heartbeat(pid_file)
         command = os.environ.get(env_name)
         launch = HeadCommand(command) if command else None
         if command:
-            # A raw command override bypasses the catalog launcher entirely, so it never gets the
-            # pid heartbeat wrapper below. That is deliberate: this path exists for tests and
-            # manual overrides, not the runtimes the watchdog needs to trust, and it keeps the long
-            # inactivity ceiling as its fallback (documented in docs/OPERATIONS.md).
+            # A raw command override bypasses the catalog launcher, so it never gets the pid
+            # heartbeat wrapper below. That is deliberate: this path is for tests and manual
+            # overrides, and it keeps the long inactivity ceiling as its fallback.
             self.catalog.prepare_head_workspace(head, workspace, role=role)
         else:
             launch = self.catalog.head_launch(
@@ -2437,14 +2418,11 @@ class CommandHostRuntime:
         subject = f"{role or 'head'}-launch"
         pointer = None
         if launch and launch.prompt_after_start:
-            # Which of the two prompt shapes this head is in is decided by the rendered command,
-            # not by the profile: a raw command override runs a provider in a shape no profile
-            # describes. A caller that has already written its task passes the document, and the
-            # pointer is then the bounded line naming it.
-            # An empty pointer text is the legacy shape and not an empty prompt: a caller that
-            # passes no launch prompt is one whose head is sent the prompt file's own contents,
-            # which the delivery below reads. A caller that has written a task document passes the
-            # bounded line naming it, and that line is the whole payload.
+            # Which of the two prompt shapes this head is in is decided by the rendered command, not
+            # the profile: a raw command override runs a provider no profile describes. An empty
+            # pointer text is the legacy shape, not an empty prompt — that head is sent the prompt
+            # file's own contents. A caller that has written a task document passes the bounded
+            # line naming it, and that line is the whole payload.
             pointer = head_ops.NudgePointer(text=launch_prompt or "", document=prompt_document)
         try:
             outcome = head_ops.spawn(
@@ -2470,15 +2448,13 @@ class CommandHostRuntime:
         except head_ops.HeadOperationError as exc:
             failed_run = getattr(exc, "run", None)
             if pid_file and failed_run is not None and failed_run.leaf:
-                # Delivery can refuse with a live pane before ``spawn`` returns normally.  Bind
-                # that pane to the already-written exact heartbeat before persisting the failed
-                # launch intent, so recovery does not mistake our own head for a foreign one.
+                # Delivery can refuse with a live pane before `spawn` returns normally. Bind that
+                # pane to the written heartbeat before persisting the failed launch intent.
                 _bind_head_heartbeat(pid_file, expected=heartbeat, leaf=failed_run.leaf)
             raise self._launch_failure(exc, workspace, pid_file, subject) from None
         if pid_file:
-            # Pane create gives us the leaf after the head has written its base identity.  A best
-            # effort bind is enough for a head still starting; the reader still requires the run,
-            # role and task binding and treats a subsequently declared wrong leaf as a mismatch.
+            # Pane create gives the leaf after the head wrote its base identity. A best-effort bind
+            # is enough: the reader still requires the run, role and task binding to match.
             _bind_head_heartbeat(pid_file, expected=heartbeat, leaf=outcome.run.leaf)
         delivery = outcome.delivery
         return self._launched(
