@@ -294,10 +294,11 @@ writes a workspace-local receipt under the ignored `state/checks/` path: command
 cwd and imported project provenance, start/end/duration, exit code, parsed verdict and counts where the
 runner prints them (scanned off the stream, so cleanup output after a summary cannot erase it), and a
 bounded diagnostic tail. The receipt is evidence about content, not about time: it records the
-checkout's HEAD object id and a digest of the tracked diff and untracked files, so
-`secretary check show` answers whether it still describes the code in front of the role. While a usable
-receipt exists, rerunning the broad suite only because the pane scrolled its output away is prohibited;
-a changed SHA, an edited worktree or a concrete red result being fixed opens a justified new run, named
+content as one git tree object id — the tree this worktree, tracked edits and untracked files included,
+would commit to — so `secretary check show` answers whether it still describes the code in front of the
+role, and committing that content unchanged keeps the receipt usable. While a usable receipt exists,
+rerunning the broad suite only because the pane scrolled its output away is prohibited;
+an edited worktree or a concrete red result being fixed opens a justified new run, named
 in the report. A receipt only ever claims an import it observed from the process that ran the check:
 the `--module` shape runs the suite itself and records what that process imported, while an arbitrary
 `--command` shell — which may change directory or import environment before any interpreter starts —
