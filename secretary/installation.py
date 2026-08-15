@@ -129,9 +129,9 @@ class PipelineStateMaterialization:
 def _run(
     argv: list[str], *, label: str, timeout: int = 120, cwd: Path | None = None,
 ) -> str:
-    environment = dict(os.environ)
-    environment.setdefault("GIT_TERMINAL_PROMPT", "0")
-    environment.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+    # Installation clones before there is an instance checkout to cross into, so it
+    # takes the environment half of the instance-repository boundary on its own.
+    environment = state_repo.git_env()
     try:
         completed = _proc.run(argv, timeout=timeout, env=environment, cwd=cwd)
     except FileNotFoundError:
