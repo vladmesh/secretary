@@ -6169,8 +6169,7 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         """A green review verdict parks the card; it does not merge it."""
         ref = task["ref"]
-        # The verdict is recorded before the gate runs: it is a fact about the head pair of this
-        # round and stays true even when the mechanical re-check bounces the card back afterwards.
+        # Recorded before the gate: this round's head pair is a fact a red re-check cannot undo.
         self._record_verdict_routing(ref, record, "green")
         kind, result, detail = self._merge_readiness(task, record)
         if kind == "transport":
@@ -6185,8 +6184,7 @@ class DispatcherRuntime:
                 action="merge-gate-transport-blocked",
             )
         if kind == "drift":
-            # The gate was never asked here, so nothing about the transport budget is known: the
-            # bounce clears the record's gate state on its own way to In progress.
+            # The gate was never asked here; the bounce clears the record's gate state itself.
             return self._gate_red_to_worker(
                 task, record, records, payload, attempt_id, GateResult("red", detail), phase="review-freeze"
             )
@@ -6223,15 +6221,13 @@ class DispatcherRuntime:
         if blocked is not None:
             return blocked
         if not parks:
-            # No observer to release it: the green verdict merges on its own tick, as it did
-            # before Assessment existed.
+            # No observer to release it, so the green verdict merges on its own tick.
             return self._release_effect(
                 task, record, records, payload, attempt_id, step="review",
                 move_reason="review:green",
             )
-        # The reviewer's round is over whichever way the decision goes, and the checkout must be
-        # quiet while the card waits: a reviewer left alive in it would keep reading a workspace
-        # nobody is watching, for as long as the park lasts. Its commit outlives its pane.
+        # The checkout must be quiet while the card waits, so the reviewer's pane goes here — but
+        # its commit is read first, because ending the reviewer forgets the commit it judged.
         reviewed = record.review_commit or self.host.head_commit(record)
         unconfirmed = self._end_review_pane_confirmed(
             record, records, payload, ref, step="review", attempt_id=attempt_id,
@@ -6267,8 +6263,7 @@ class DispatcherRuntime:
         """
         ref = task["ref"]
         # Re-pinned after the reviewer's pane was forgotten: the merge gate refuses a release for
-        # a checkout that moved off the commit the verdict was given for, and between the park and
-        # the decision is exactly the window in which it can move.
+        # a checkout that moved off the reviewed commit, and the park is exactly that window.
         record.review_commit = reviewed_commit or record.review_commit
         record.worker_continuation.begin_park(
             "review", len(task.get("comments") or []), move_reason, verdict_outcome
@@ -6326,18 +6321,14 @@ class DispatcherRuntime:
             records[ref] = record
         continuation = record.worker_continuation
         if continuation.red_transition_pending:
-            # A rework decision whose board move did not commit. Same rule as Validate: the
-            # transition the card is already owed is finished before any decision is read again.
+            # A rework decision whose move did not commit: finish it before any decision is read.
             return self._complete_red_transition(record, records, payload, attempt_id, ref=ref)
         if continuation.assessment_pending:
-            # The park's move landed and the tick died before the checkpoint. Re-issuing it is a
-            # no-op through the request id, and it is what turns the record into a parked one.
+            # The move landed but the checkpoint did not; re-issuing is a no-op by request id.
             return self._complete_park(record, records, payload, attempt_id, ref=ref)
         if not continuation.parked:
-            # A card whose dispatcher record was lost while parked, or one an operator parked by
-            # hand. The board is the fact; the record is brought to it without a move. A session
-            # this record cannot prove is held is not held, so an adopted park owns no worker and
-            # a rework decision on it opens a replacement through the ordinary confirmed stop.
+            # A record lost while parked, or a card an operator parked by hand: the board is the
+            # fact. A session this record cannot prove is held is not held, so it owns no worker.
             continuation.begin_park(
                 "review", len(task.get("comments") or []), "adopted parked card", "unknown"
             )
@@ -6376,9 +6367,8 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         """A rework decision releases the round the park was holding back."""
         ref = task["ref"]
-        # A parked card should have no reviewer left; an adopted one may still carry the
-        # identity of a pane nobody stopped. Either way nothing is woken beside a head the host
-        # will not confirm gone.
+        # A parked card should have no reviewer left; an adopted one may still name a pane nobody
+        # stopped. Either way nothing is woken beside a head the host will not confirm gone.
         if record.owns_head("review"):
             unconfirmed = self._end_review_pane_confirmed(
                 record, records, payload, ref, step="assessment", attempt_id=attempt_id,
@@ -6386,10 +6376,8 @@ class DispatcherRuntime:
             )
             if unconfirmed is not None:
                 return unconfirmed
-        # The findings themselves are not repeated here: the rework prompt reads the card's last
-        # red verdict directly, and a second copy on the move would drift from it. The decision is
-        # different: it is what the round is for, so it is frozen with the round rather than looked
-        # up again when the document is built.
+        # The findings are not repeated in the move: the rework prompt reads the card's last red
+        # verdict directly. The decision is what the round is for, so it is frozen with the round.
         return self._begin_red_transition(
             task, record, records, payload, attempt_id, phase="review",
             move_reason=f"Observer decision: rework. {reason}".strip(),
@@ -6508,8 +6496,7 @@ class DispatcherRuntime:
         ref = task["ref"]
         kind, result, detail = self._merge_readiness(task, record)
         if kind == "transport":
-            # The decision stands and the card stays parked: a release that could not ask the gate
-            # is not a release that was refused.
+            # A release that could not ask the gate is not a release that was refused.
             retry = self._gate_transport_retry(
                 task, record, records, payload, attempt_id,
                 GateTransportError(detail), step="assessment",
@@ -6571,10 +6558,8 @@ class DispatcherRuntime:
         try:
             self.host.complete_green(task, record)
         except HostError as exc:
-            # A rejected merge (non-fast-forward push, gh refusing on branch protection) must
-            # land the card in Blocked rather than escape the tick: an escaping error leaves the
-            # card where it is with a verdict or a decision already standing, so the next tick
-            # retries the same doomed merge forever while the terminals stay up.
+            # A rejected merge must land the card in Blocked rather than escape the tick: an
+            # escaping error leaves the verdict standing and every later tick retries the merge.
             return self._block_merge_path(
                 task, record, records, payload, attempt_id,
                 action="merge-blocked", reason=f"merge failed: {scrub_host_output(str(exc))}",
@@ -6681,10 +6666,8 @@ class DispatcherRuntime:
         if not heads or not record.attempt_round:
             return
         # The request id carries the launched configurations, not just the round: a repeated
-        # bring-up of the same head writes the same id and commits once, while a bring-up on a
-        # different configuration is a different id and appends. Same for a verdict: it is keyed by
-        # the pair that produced it, so a verdict issued by a relaunched reviewer is not swallowed
-        # by the first reviewer's record.
+        # bring-up of the same head writes the same id and commits once, while one on a different
+        # configuration appends. Same for a verdict, keyed by the pair that produced it.
         parts = [str(record.attempt_round)]
         if outcome:
             parts.append(outcome)
@@ -6728,27 +6711,22 @@ class DispatcherRuntime:
         launched = self._review_launch_recorded(task, review_baseline)
         state = "review_starting" if launched else "adopted"
         if task.get("state") == "assessment":
-            # A parked card has no head to recover: the reviewer was stopped when it parked and
-            # the worker, if one is still suspended in the checkout, is not something this record
-            # can prove. It is adopted as parked and the decision path stops whatever it finds.
+            # A parked card has no head to recover: the reviewer was stopped when it parked, and a
+            # worker still suspended in the checkout is not something this record can prove.
             state = "assessment"
-        # The routing round of a card whose dispatcher record was lost comes back from the journal,
-        # heads included: re-reading the registry would report today's `heads.toml` for a head
-        # launched hours ago. A card claimed before this telemetry existed has no round; it opens
-        # one on its next bring-up rather than inventing history for the round already running.
+        # The routing round of a lost record comes back from the journal, heads included:
+        # re-reading the registry would report today's `heads.toml` for a head launched hours ago.
         resumed = _routing_attempts(self.audit.events(task["ref"], kind="routing"))
         round_record = resumed[-1] if resumed else None
         workspace = self.host.restore_workspace(task, worker)
-        # The report generation is dispatcher state, and this is the path where that state was
-        # lost. The TASK.md in the checkout names the round the live worker is actually in; the
-        # reports already on the board are the floor when there is no readable document. Both are
-        # lower bounds, so the larger one is taken: a generation may skip, never repeat.
+        # The report generation is dispatcher state, lost on this path. The TASK.md names the round
+        # the live worker is in; the board's reports are the floor with no readable document. Both
+        # are lower bounds, so the larger one is taken: a generation may skip, never repeat.
         report_generation = max(
             _task_doc_report_generation(workspace), _spent_report_generations(task) + 1
         )
         # And the decision that round was opened on, from the same document. The card's newest
-        # decision comment is deliberately not consulted here: it answers "what has been decided
-        # since", which is the question that must not reach a running round.
+        # decision comment answers "what was decided since", which must not reach a running round.
         report_decision = _task_doc_decision(workspace)
         record = DispatcherRecord(
             worker=worker,
@@ -6763,17 +6741,15 @@ class DispatcherRuntime:
             report_decision=report_decision,
             state=state,
             claimed_at=time.time(),
-            # A reviewer only launches once the gate is green, so an adopted card already in review
-            # inherits a passed gate rather than re-running it before the recovery path.
+            # A reviewer launches only over a green gate, so a card in review inherits a passed gate.
             gate_state="green" if launched else "",
             attempt_round=round_record.attempt if round_record else 0,
             worker_run=round_record.worker.to_json() if round_record and round_record.worker else {},
             review_run=round_record.reviewer.to_json() if round_record and round_record.reviewer else {},
         )
         # A lost record may be recovered from the worker's own heartbeat, but only after its
-        # self-described run, role and card binding have been promoted into a HeadRun and checked
-        # again.  A legacy pid or a process for another card has no such proof and remains
-        # unbound; the normal claim path then refuses to signal it.
+        # self-described run, role and card binding are promoted into a HeadRun and checked again.
+        # A legacy pid or another card's process stays unbound and is never signalled.
         pid_file = _launch_pid_file(WORKER_ROLE, task["ref"])
         heartbeat = _head_process_status(pid_file) if task.get("state") == "in_progress" else {}
         raw = heartbeat.get("record") if isinstance(heartbeat.get("record"), dict) else {}
