@@ -250,6 +250,7 @@ from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
 from secretary.dispatcher_tui import (
     delivery_readiness_state as _delivery_readiness_state,
 )
+from secretary.dispatcher_tui import turn_started_confirm as _turn_started_confirm
 from secretary.dispatcher_tui import (
     prepare_claude_provider_progress_source as _prepare_claude_provider_progress_source,
 )
@@ -1441,12 +1442,23 @@ class CommandHostRuntime:
         if evidence_line:
             message += f" Sprint delivery evidence to carry into your closing resume: {evidence_line}."
         try:
+            adapter = self._prompt_adapter(
+                getattr(record, "run", {}), str(getattr(record, "head", ""))
+            )
+            # A wake carries both proofs a delivery can have, and either one confirms it. The head
+            # is live and working, so the screen evidence this used to rely on alone is the weaker
+            # of them: Orca reports a working Codex as idle, and the pane the wake is delivered
+            # into is precisely the pane that is printing. The provider's own record of the turn
+            # is what a launch has always been confirmed by, and it says the same thing about a
+            # wake. What stays out of band is the causal acknowledgement, not the delivery: the
+            # observer still quotes the delivery id in the resume it writes from this turn.
             return _deliver_interactive_prompt(
                 current,
                 message,
                 run_json=self._run_json,
-                adapter=self._prompt_adapter(
-                    getattr(record, "run", {}), str(getattr(record, "head", ""))
+                adapter=adapter,
+                confirm=_turn_started_confirm(
+                    current, workspace, adapter, run_json=self._run_json
                 ),
                 ack_out_of_band=True,
                 subject="observer-wake",

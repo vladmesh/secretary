@@ -48,6 +48,18 @@ TUI_DELIVERY_RESEND_GRACE_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_RESEN
 # How much of a pane is fingerprinted. The screen is read for evidence, never for content, so the
 # bound is on the input to the digest rather than on anything that is kept.
 TUI_FINGERPRINT_LIMIT = 4000
+# How many lines of a pane are read when the composer is what is being looked at. `orca terminal
+# read` with no limit answers with the retained *history* — 120 lines of it — and a TUI that
+# repaints its bottom block in place leaves earlier prompt markers stranded in the middle of that
+# window. What follows the last of them is then transcript rather than a composer, and a live
+# observer pane really did answer with the text of an earlier nudge sitting after its last `›`.
+# A read bounded to the bottom is what makes this evidence about the pane's current screen.
+TUI_COMPOSER_READ_LINES = int(os.environ.get("SECRETARY_TUI_COMPOSER_READ_LINES", os.environ.get("TA_TUI_COMPOSER_READ_LINES", "24")))
+# How much of the payload has to be found in the composer for the composer to count as holding it.
+# Short enough to survive the TUI wrapping the line it painted, long enough that no hint text,
+# footer or spinner ever matches it by accident.
+TUI_COMPOSER_PAYLOAD_PROBE = 48
+TUI_COMPOSER_PAYLOAD_PROBE_MIN = 12
 
 
 _WAIT_ERROR_CODE_RE = re.compile(r'"code"\s*:\s*"([a-z_]+)"')
@@ -270,6 +282,9 @@ class PaneProbe:
     # one. Two probes are only comparable when they answered the same way.
     cursor_from_backend: bool = False
     screen_read: bool = False
+    # Whether this probe found the delivery's own payload sitting in the composer. A probe taken
+    # without a payload to look for answers false, which is what it can honestly say.
+    holds_payload: bool = False
 
     @property
     def modal(self) -> bool:
@@ -337,23 +352,57 @@ def strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text or "")
 
 
+def composer_region(screen: str) -> str | None:
+    """The text after the last prompt marker a TUI paints — Codex's `›`, Claude's `❯`.
+
+    Whitespace-collapsed, bounded, and `None` when the screen carries no marker at all. Only a
+    screen read from the bottom of the pane makes this the composer: given the retained history a
+    marker can be anywhere in the window, and what follows it is then the transcript.
+    """
+    if not screen:
+        return None
+    marker = max(screen.rfind(char) for char in COMPOSER_MARKERS)
+    if marker < 0:
+        return None
+    return " ".join(screen[marker + 1:][:TUI_FINGERPRINT_LIMIT].split())
+
+
 def composer_fingerprint(screen: str) -> str:
     """What the composer is holding, as a classification, a length and a digest.
 
-    The composer is the region after the last prompt marker a TUI paints — Codex's `›`, Claude's `❯`.
-    A pane that pasted the payload and never entered it shows a composer whose fingerprint changed
-    across the send and is not empty. The text is hashed, never kept.
+    Evidence for a reader of the record, not a decision: a TUI paints its own hint text, its footer
+    and a ticking spinner into the same region, so this fingerprint differs between two probes of a
+    pane whose composer never changed. The text is hashed, never kept.
     """
-    if not screen:
+    held = composer_region(screen)
+    if held is None:
         return COMPOSER_UNKNOWN
-    marker = max(screen.rfind(char) for char in COMPOSER_MARKERS)
-    if marker < 0:
-        return COMPOSER_UNKNOWN
-    held = " ".join(screen[marker + 1:][:TUI_FINGERPRINT_LIMIT].split())
     if not held:
         return COMPOSER_EMPTY
     kind = "paste" if _PASTE_RE.search(held) else "text"
     return f"{kind}:{len(held)}:{_digest(held)}"
+
+
+def composer_holds_payload(screen: str, payload: str) -> bool:
+    """Whether the composer is still holding this payload, asked as a positive question.
+
+    This is the failure the delivery boundary exists for, so it is looked for rather than inferred:
+    the composer holds the payload when the TUI covered it with a paste placeholder, or when the
+    payload's own opening words are sitting in that region. Both are statements about this prompt.
+
+    It used to be inferred instead — any composer fingerprint that was not empty and differed from
+    the one taken before the send. On a Codex pane that is true of every probe ever taken: the hint
+    text, the model footer and the `Working (12s)` counter all live after the marker and all change
+    between two reads. That inference is what reported 62 delivered observer wakes out of 62 as
+    `payload-left-in-composer` and cost the head 14 replacements in a day.
+    """
+    held = composer_region(screen)
+    if not held:
+        return False
+    if _PASTE_RE.search(held):
+        return True
+    probe = " ".join(strip_ansi(payload or "").split())[:TUI_COMPOSER_PAYLOAD_PROBE]
+    return len(probe) >= TUI_COMPOSER_PAYLOAD_PROBE_MIN and probe in held
 
 
 def output_cursor(read: PaneRead) -> tuple[str, bool]:
@@ -374,11 +423,18 @@ def output_cursor(read: PaneRead) -> tuple[str, bool]:
 
 
 def probe_pane(
-    handle: str, *, run_json: RunJson | None = None, host: PaneHost | None = None
+    handle: str, *, run_json: RunJson | None = None, host: PaneHost | None = None,
+    payload: str = "",
 ) -> PaneProbe:
-    """Readiness, composer and output cursor in one look, for the evidence of one attempt."""
+    """Readiness, composer and output cursor in one look, for the evidence of one attempt.
+
+    The screen is read from the bottom: this look is about what the pane is showing now, and the
+    unbounded read answers with history in which a prompt marker means nothing. `payload` is the
+    prompt this delivery is carrying, and it is only ever compared against the screen — the probe
+    keeps a classification and a digest of it, never its text.
+    """
     readiness = terminal_readiness(handle, run_json=run_json, host=host)
-    read = read_pane(handle, run_json=run_json, host=host)
+    read = read_pane(handle, run_json=run_json, host=host, limit=TUI_COMPOSER_READ_LINES)
     cursor, from_backend = output_cursor(read)
     return PaneProbe(
         readiness=readiness,
@@ -386,6 +442,7 @@ def probe_pane(
         cursor=cursor,
         cursor_from_backend=from_backend,
         screen_read=bool(read.text),
+        holds_payload=composer_holds_payload(read.text, payload),
     )
 
 
@@ -540,21 +597,23 @@ def deliver_interactive_prompt(
     The failure this boundary exists for lives between 1 and 2: Codex answers `accepted: true` with
     the byte count, leaves the payload in its composer under a paste placeholder, and answers
     `tui-idle` satisfied the whole time, because a pane holding a composer really is idle. So a send
-    that reports bytes and a pane that reports idle are not delivery; the pre/post fingerprints of
-    the composer and of the output are.
+    that reports bytes and a pane that reports idle are not delivery; the payload found in the
+    composer and the pane's own output position are.
 
     `document_path` says the prompt is a nudge at a task document rather than the task itself. It
     changes nothing about how the four stages are observed and everything about what the evidence
     means: the payload fingerprint is then the fingerprint of a pointer.
 
     Callers pass `confirm`, their own criterion for stage 4. A caller whose proof arrives later sets
-    `ack_out_of_band` and gets `DELIVERY_ACCEPTED` once stage 3 is evidenced.
+    `ack_out_of_band` and gets `DELIVERY_ACCEPTED` once stage 3 is evidenced. A caller may set both,
+    and then either one is enough. They are not two readings of one thing: `confirm` is what the
+    provider wrote down about the turn, stage 3 is what the pane showed, and either on its own is a
+    prompt that landed. A caller that holds both proofs — the observer wake does — has no reason to
+    be refused because the weaker of them was the one that could not see.
 
     The verdict comes back with the evidence of the attempt attached, and so does the failure,
     including a failure of the transport itself.
     """
-    if ack_out_of_band and confirm is not None:
-        raise ValueError("out-of-band delivery cannot use a synchronous confirmation callback")
     if confirm is None and not ack_out_of_band:
         raise ValueError("interactive delivery requires a confirmation criterion")
     payload_bytes, payload_hash = payload_fingerprint(prompt)
@@ -586,7 +645,7 @@ def deliver_interactive_prompt(
         # recovery; once ready, activation remains immediately before the existing send path.
         with _transport_evidence(evidence, "activate-head"):
             before_send()
-    before = probe_pane(handle, run_json=run_json, host=host)
+    before = probe_pane(handle, run_json=run_json, host=host, payload=prepared.text)
     evidence.readiness_before = before.readiness
     evidence.composer_before = before.composer
     evidence.modal_before = before.modal
@@ -700,13 +759,17 @@ def _confirm_interactive_turn(
     deadline = time.monotonic() + TUI_DELIVERY_TIMEOUT_S
     next_resend_at = time.monotonic() + max(TUI_DELIVERY_RESEND_GRACE_S, 0)
     while time.monotonic() < deadline:
-        if confirm is not None and confirm(sent_at):
+        # A normal caller's criterion has always taken precedence over pane evidence.  Keep that
+        # launch/worker/reviewer contract intact.  An out-of-band acknowledgement is different:
+        # it expressly lets pane evidence accept a delivery, so first reject the one direct,
+        # prompt-specific proof that this payload is still unsent.
+        if not ack_out_of_band and confirm is not None and confirm(sent_at):
             _advance(evidence, STAGE_TURN_OBSERVED)
             _advance(evidence, STAGE_ACKNOWLEDGED)
             evidence.turn_confirmed = True
             evidence.reason = ""
             return DeliveryOutcome(DELIVERY_CONFIRMED, evidence)
-        probe = probe_pane(handle, run_json=run_json, host=host)
+        probe = probe_pane(handle, run_json=run_json, host=host, payload=prompt.text)
         _record_probe(evidence, before, probe)
         if probe.readiness == READINESS_UNKNOWN:
             # Not a swallowed prompt and not a working head: the pane cannot be asked at all.
@@ -717,6 +780,17 @@ def _confirm_interactive_turn(
                 f"(stage={evidence.stage}, resends={evidence.resends})",
                 evidence=evidence,
             )
+        # A provider record proves that *a* turn started after the send boundary.  It cannot
+        # override the direct, prompt-specific proof that this payload is still sitting in the
+        # composer: that record may belong to a concurrent or delayed turn.  Probe first so a
+        # swallowed payload remains a delivery failure even when the journal has unrelated
+        # activity in the same workspace.
+        if not evidence.payload_left_in_composer and confirm is not None and confirm(sent_at):
+            _advance(evidence, STAGE_TURN_OBSERVED)
+            _advance(evidence, STAGE_ACKNOWLEDGED)
+            evidence.turn_confirmed = True
+            evidence.reason = ""
+            return DeliveryOutcome(DELIVERY_CONFIRMED, evidence)
         if probe.readiness == READINESS_BUSY or (
             evidence.cursor_moved and not evidence.payload_left_in_composer
         ):
@@ -740,6 +814,17 @@ def _confirm_interactive_turn(
             # is what carries a prompt past a dialog that swallowed it; a composer that is empty
             # with nothing having happened is a pane the payload never reached, so it is written
             # again. A pane whose screen cannot be read gets the bare Enter it always got.
+            #
+            # Writing it again is the only step here that can put a second copy of the prompt in
+            # front of a head, so it is taken only when the pane accounts for the payload nowhere:
+            # not in the composer, not in output printed since the send, and not in a turn already
+            # observed. Anything less is an Enter, which costs nothing if the pane is working.
+            unaccounted_for = (
+                probe.screen_read
+                and not evidence.payload_left_in_composer
+                and not evidence.cursor_moved
+                and not evidence.turn_confirmed
+            )
             with _transport_evidence(evidence, "resend-payload"):
                 _send_payload(
                     handle,
@@ -747,7 +832,7 @@ def _confirm_interactive_turn(
                     run_json=run_json,
                     host=host,
                     evidence=evidence,
-                    submit_only=evidence.payload_left_in_composer or not probe.screen_read,
+                    submit_only=not unaccounted_for,
                 )
             evidence.resends += 1
             next_resend_at = time.monotonic() + max(TUI_DELIVERY_RESEND_GRACE_S, 0)
@@ -763,18 +848,15 @@ def _confirm_interactive_turn(
 def _record_probe(evidence: DeliveryEvidence, before: PaneProbe, probe: PaneProbe) -> None:
     """Fold one post-send probe into the attempt's evidence.
 
-    The composer is compared against what it held before the send rather than against emptiness: a
-    TUI paints its own hint text into an empty composer, and only a changed fingerprint says the
-    payload is the thing sitting there.
+    Whether the payload is still in the composer is the probe's own positive finding — the payload
+    was looked for and found — and not a difference between two fingerprints. The fingerprints stay
+    in the record for a reader, and `before` is still what the output cursor is compared against.
     """
     evidence.readiness_after = probe.readiness
     evidence.composer_after = probe.composer
     evidence.modal_after = probe.modal
     evidence.cursor_after = probe.cursor
-    evidence.payload_left_in_composer = (
-        probe.composer not in (COMPOSER_UNKNOWN, COMPOSER_EMPTY)
-        and probe.composer != before.composer
-    )
+    evidence.payload_left_in_composer = probe.holds_payload
     if not evidence.payload_left_in_composer and evidence.stage == STAGE_PAYLOAD_WRITTEN and probe.screen_read:
         _advance(evidence, STAGE_ENTER_ACCEPTED)
     evidence.cursor_from_backend = probe.cursor_from_backend

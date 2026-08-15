@@ -82,6 +82,7 @@ __all__ = [
     "output_cursor",
     "prepare_claude_provider_progress_source",
     "provider_progress_for_run",
+    "provider_turn_started",
     "read_terminal_text",
     "strip_ansi",
     "terminal_readiness",
@@ -152,21 +153,50 @@ def turn_started_confirm(
     host: PaneHost | None = None,
     session_root: Path | None = None,
 ) -> Callable[[float], bool]:
-    """The worker and reviewer delivery criterion, on whichever head that role was given."""
+    """The worker and reviewer delivery criterion, on whichever head that role was given.
+
+    The provider's journal answers first and, when it can answer at all, alone. The screen is the
+    fallback for a head whose provider keeps no journal this dispatcher can find, and it has to be:
+    `_screen_started_turn` searches a retained window for the word `Working`, and a pane that has
+    ever worked keeps saying it. Used as a second opinion after a journal that says "not yet", it
+    is not a criterion — it is a yes for every pane that was ever busy.
+    """
     def confirm(sent_at: float) -> bool:
-        if terminal_turn_started(
-            handle,
-            run_json=run_json,
-            host=host,
-            workspace=workspace,
-            since=sent_at,
-            adapter=adapter,
-            session_root=session_root,
-        ):
-            return True
+        recorded = provider_turn_started(
+            workspace, sent_at, adapter=adapter, session_root=session_root
+        )
+        if recorded is not None:
+            return recorded
         return terminal_turn_started(handle, run_json=run_json, host=host, adapter=adapter)
 
     return confirm
+
+
+def provider_turn_started(
+    workspace: str,
+    since: float,
+    *,
+    adapter: str,
+    session_root: Path | None = None,
+) -> bool | None:
+    """Whether the provider itself recorded a user turn in this workspace after ``since``.
+
+    Three answers, because two would have to lie about one of them: ``True`` is a turn the provider
+    wrote down, ``False`` is a journal that exists and does not hold one yet, and ``None`` is no
+    journal to read — an adapter that keeps none, or a head whose sessions are not where this
+    dispatcher looks. Only the third leaves a caller with nothing better than the screen.
+    """
+    if not workspace or not since:
+        return None
+    if adapter == "claude":
+        if not any(_claude_session_paths_for(workspace)):
+            return None
+        return bool(latest_claude_user_turn_for(workspace, since))
+    if adapter == "codex":
+        if not any(_session_paths_for(workspace, session_root=session_root)):
+            return None
+        return bool(latest_user_turn_for(workspace, since, session_root=session_root))
+    return None
 
 
 def terminal_turn_started(
@@ -641,11 +671,29 @@ def _record_timestamp(record: dict[str, Any]) -> float | None:
 
 
 def _is_user_turn(record: dict[str, Any]) -> bool:
+    """Whether one Codex rollout record is a user turn, in either shape Codex writes them.
+
+    `event_msg`/`user_message` is what `codex exec` writes. The interactive `codex-tui` never
+    writes it: at cli 0.147.0 the same submission is persisted as `response_item`/`message` with
+    `role: "user"`, and only the `originator` in the session header tells the two apart. Reading
+    the first shape alone therefore answered "no user turn" for every interactive head this product
+    runs — checked across the eleven observer sessions of 2026-08-15, where `user_message` appears
+    0 times and the user-role message 5 to 19 times — and left the durable half of the delivery
+    proof dead while the screen fallback quietly carried it.
+
+    A user-role message is written when a turn begins, so it is proof of a submission and not of a
+    session merely existing: a rollout whose head was never prompted holds developer records and
+    nothing else.
+    """
     payload = record.get("payload")
+    if not isinstance(payload, dict):
+        return False
+    if record.get("type") == "event_msg":
+        return payload.get("type") == "user_message"
     return (
-        isinstance(payload, dict)
-        and record.get("type") == "event_msg"
-        and payload.get("type") == "user_message"
+        record.get("type") == "response_item"
+        and payload.get("type") == "message"
+        and payload.get("role") == "user"
     )
 
 
