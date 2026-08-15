@@ -750,6 +750,294 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self.assertEqual(ingress.run.fanout_policy["events"], [])
 
 
+class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
+    """One launch preflights twice; only one of the two descriptors may reach the handoff.
+
+    A bring-up is attested once to fix its intent on disk and once inside the host call that opens
+    the pane. Both attestations enumerate the Codex session root, so any head that opened a session
+    in between makes the second baseline legitimately differ from the first. `secretary-1445` hit
+    exactly that on an approved rework: its relaunch never reached a worker because the two unbound
+    descriptors for its one `HeadRun` were refused as a provider-source conflict.
+    """
+
+    class Catalog:
+        def __init__(self, home: Path) -> None:
+            self.home = home
+
+        def head_profile(self, _head: str) -> dict[str, str]:
+            return {
+                "adapter": "codex",
+                "model": "gpt-5.6-terra",
+                "effort": "medium",
+                "codex_mode": "tui",
+                "codex_home": str(self.home),
+            }
+
+    class Runtime:
+        def save_records(self, _payload: dict, _records: dict) -> None:
+            return None
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.workspace = self.root / "workspace"
+        self.workspace.mkdir()
+        self.sessions = self.root / "sessions" / "2026" / "08" / "15"
+        self.sessions.mkdir(parents=True)
+        self.host = CommandHostRuntime(self.Catalog(self.root), self.root / "data", mode="noop")  # type: ignore[arg-type]
+        self.persisted: list[HeadRun] = []
+
+    @property
+    def _launch_identity(self) -> dict[str, object]:
+        return {
+            "role": WORKER_ROLE,
+            "workspace": str(self.workspace),
+            "task_ref": TaskRef.card("secretary-1445", document=str(self.workspace / "TASK.md")),
+            "pid_file": str(self.root / "worker.pid"),
+            "run_id": "rework-run-1",
+        }
+
+    def _prepare_intent_run(self) -> HeadRun:
+        """The pre-pane attestation `write_launch_intent` fixes on disk, with its ingress bound."""
+        run = self.host.preflight_codex_run("codex-extra", **self._launch_identity)  # type: ignore[arg-type]
+        self._install_ingress(run)
+        return run
+
+    def _install_ingress(self, run: HeadRun) -> None:
+        self.host.configure_codex_provider_ingress(
+            run,
+            persist=self.persisted.append,
+            stop=lambda _run, _reason: None,
+            block=lambda _evidence: None,
+        )
+
+    def _open_another_session(self, name: str = "another-head.jsonl") -> Path:
+        """A session journal a different head opened after the intent was written."""
+        path = self.sessions / name
+        path.write_text(
+            json.dumps({"type": "session_meta", "payload": {"session_id": "other", "cwd": "/elsewhere"}})
+            + "\n",
+            encoding="utf-8",
+        )
+        return path
+
+    def _record(self, prepared: HeadRun) -> DispatcherRecord:
+        record = DispatcherRecord(
+            worker="worker-1",
+            workspace=str(self.workspace),
+            handle="",
+            head="codex-extra",
+            review_head="codex-extra",
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="claimed",
+            claimed_at=0.0,
+        )
+        record.launch_intent = {
+            "role": WORKER_ROLE, "head_run": prepared.to_json(), "run_id": prepared.run_id,
+        }
+        record.worker_head_run = prepared.to_json()
+        return record
+
+    def _confirm(self, record: DispatcherRecord, launched: HeadRun) -> dict:
+        confirm_launch_intent(
+            self.Runtime(), {}, {"secretary-1445": record}, "secretary-1445", record,
+            handle=launched.handle, leaf=launched.leaf, head_run=launched.to_json(),
+        )
+        return record.worker_head_run
+
+    @staticmethod
+    def _source(run: HeadRun | dict) -> dict:
+        policy = run["fanout_policy"] if isinstance(run, dict) else run.fanout_policy
+        return dict(policy["provider_source"])
+
+    def test_a_rework_relaunch_keeps_the_source_its_intent_was_prepared_with(self) -> None:
+        prepared = self._prepare_intent_run()
+        record = self._record(prepared)
+        self._open_another_session()
+
+        launched = self.host._preflight_launch_run(  # noqa: SLF001 — the launch path under test
+            "codex-extra", **self._launch_identity,  # type: ignore[arg-type]
+        ).rebound("pane-1", leaf="leaf-1").working()
+        stored = self._confirm(record, launched)
+
+        source = self._source(stored)
+        self.assertEqual(source, self._source(prepared))
+        self.assertEqual(source["state"], "unbound")
+        self.assertEqual(stored["run_id"], prepared.run_id, "a retained run is never re-minted")
+        self.assertEqual(stored["handle"], "pane-1")
+        self.assertEqual(stored["lifecycle"], "working")
+        self.assertEqual(record.launch_intent["head_run"], stored)
+
+    def test_the_worker_bring_up_itself_hands_on_the_prepared_source(self) -> None:
+        """Which host call routes through the repair, read off the launch that opens the pane."""
+        reference = "secretary-1445"
+        pid_file = dispatcher_launch.launch_pid_file(WORKER_ROLE, reference)
+        identity = {
+            **self._launch_identity, "pid_file": pid_file, "run_id": "rework-run-2",
+        }
+        prepared = self.host.preflight_codex_run("codex-extra", **identity)  # type: ignore[arg-type]
+        self._install_ingress(prepared)
+        self._open_another_session()
+
+        launched = self.host._launch(  # noqa: SLF001 — the worker/reviewer launch path under test
+            str(self.workspace),
+            f"{reference} worker rework",
+            "codex-extra",
+            "TASK.md",
+            role=WORKER_ROLE,
+            env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
+            prompt_document=str(self.workspace / "TASK.md"),
+            task={"ref": reference},
+            heartbeat_run_id="rework-run-2",
+        )
+
+        self.assertEqual(self._source(launched.head_run), self._source(prepared))
+
+    def test_an_observer_bring_up_still_enumerates_its_own_source(self) -> None:
+        """The observer keeps its own preflight: this repair is the worker/reviewer handoff only."""
+        sprint = "sprint:1089"
+        workspace = Path(self.host.observer_workspace(sprint))
+        prepared = self.host.preflight_codex_run(
+            "codex-extra",
+            role=OBSERVER_ROLE,
+            workspace=str(workspace),
+            task_ref=TaskRef.sprint(sprint),
+            pid_file=dispatcher_observer.observer_pid_file(sprint),
+            run_id="observer-run-1",
+        )
+        self._install_ingress(prepared)
+        opened = self._open_another_session()
+
+        launched = self.host.prepare_observer(
+            {"ref": sprint}, "codex-extra", prompt="observe", heartbeat_run_id="observer-run-1",
+        )
+
+        source = self._source(launched["head_run"])
+        self.assertEqual(source["baseline"], [str(opened)])
+        self.assertNotEqual(source, self._source(prepared))
+        self.assertEqual(self._source(prepared)["baseline"], [])
+
+    def test_the_second_attestations_own_baseline_is_still_refused_as_a_conflict(self) -> None:
+        """The fence the repair works within: nothing admits a divergent unbound descriptor."""
+        prepared = self._prepare_intent_run()
+        record = self._record(prepared)
+        self._open_another_session()
+
+        unprepared = self.host.preflight_codex_run("codex-extra", **self._launch_identity)  # type: ignore[arg-type]
+        self.assertNotEqual(
+            self._source(unprepared)["baseline"], self._source(prepared)["baseline"],
+        )
+
+        with self.assertRaisesRegex(HostError, "preflight provider source conflicts"):
+            self._confirm(record, unprepared.rebound("pane-1", leaf="leaf-1").working())
+
+        self.assertEqual(record.worker_head_run, prepared.to_json())
+
+    def _bind_this_runs_session(self, prepared: HeadRun) -> tuple[HeadRun, Path]:
+        """Let the pane's own journal appear and bind it through this run's ingress."""
+        journal = self.sessions / "worker.jsonl"
+        journal.write_text(
+            "\n".join(
+                json.dumps(value) for value in (
+                    {"type": "session_meta",
+                     "payload": {"session_id": "session-1", "cwd": str(self.workspace)}},
+                    {"type": "thread.started", "thread_id": "parent-1"},
+                )
+            ) + "\n",
+            encoding="utf-8",
+        )
+        ingress = self.host._codex_provider_ingresses[prepared.run_id]  # noqa: SLF001
+        ingress.bind_before_delivery()
+        return ingress.run, journal
+
+    def test_a_source_already_bound_to_its_session_is_not_replaced_by_a_new_attestation(self) -> None:
+        prepared = self._prepare_intent_run()
+        record = self._record(prepared)
+        bound_run, journal = self._bind_this_runs_session(prepared)
+        record.worker_head_run = bound_run.to_json()
+        record.launch_intent["head_run"] = bound_run.to_json()
+        self._open_another_session()
+
+        launched = self.host._preflight_launch_run(  # noqa: SLF001
+            "codex-extra", **self._launch_identity,  # type: ignore[arg-type]
+        ).rebound("pane-1", leaf="leaf-1").working()
+
+        self.assertEqual(self._source(launched), self._source(bound_run))
+        stored = self._confirm(record, launched)
+        source = self._source(stored)
+        self.assertEqual(source["state"], "bound")
+        self.assertEqual(source["session_id"], "session-1")
+        self.assertEqual(source["path"], str(journal))
+        self.assertEqual(source["cursor"], self._source(bound_run)["cursor"])
+
+    def test_a_prepared_source_from_another_session_root_is_never_retained(self) -> None:
+        prepared = self._prepare_intent_run()
+        foreign_root = self.root / "other-home" / "sessions"
+        foreign_root.mkdir(parents=True)
+        foreign = prepared.with_fanout_policy({
+            **prepared.fanout_policy,
+            "provider_source": {**self._source(prepared), "root": str(foreign_root)},
+        })
+        self._install_ingress(foreign)
+        record = self._record(foreign)
+        self._open_another_session()
+
+        launched = self.host._preflight_launch_run(  # noqa: SLF001
+            "codex-extra", **self._launch_identity,  # type: ignore[arg-type]
+        )
+
+        self.assertEqual(self._source(launched)["root"], str(self.root / "sessions"))
+        with self.assertRaisesRegex(HostError, "preflight provider source conflicts"):
+            self._confirm(record, launched.rebound("pane-1", leaf="leaf-1").working())
+
+    def test_a_prepared_run_naming_another_head_is_never_retained(self) -> None:
+        prepared = self._prepare_intent_run()
+        baseline = self._source(prepared)["baseline"]
+        self._open_another_session()
+        foreign_ref = TaskRef.card("secretary-1444", document=str(self.workspace / "TASK.md"))
+        for field, value in (
+            ("workspace", str(self.root / "other-workspace")),
+            ("role", REVIEW_ROLE),
+            ("task_ref", foreign_ref),
+            ("pid_file", str(self.root / "review.pid")),
+            ("spec", HeadSpec(profile_id="codex-other", adapter="codex", model="gpt-5.6-terra")),
+        ):
+            with self.subTest(field=field):
+                self._install_ingress(prepared.__class__(**{
+                    **{name: getattr(prepared, name) for name in (
+                        "run_id", "spec", "workspace", "task_ref", "role", "pid_file",
+                        "fanout_policy",
+                    )},
+                    field: value,
+                }))
+
+                launched = self.host._preflight_launch_run(  # noqa: SLF001
+                    "codex-extra", **self._launch_identity,  # type: ignore[arg-type]
+                )
+
+                self.assertNotEqual(self._source(launched)["baseline"], baseline)
+
+    def test_two_bound_writers_disagreeing_at_one_cursor_line_stay_refused(self) -> None:
+        prepared = self._prepare_intent_run()
+        bound_run, _journal = self._bind_this_runs_session(prepared)
+        source = self._source(bound_run)
+        conflicting = bound_run.with_fanout_policy({
+            **bound_run.fanout_policy,
+            "provider_source": {
+                **source,
+                # A well-formed digest for the same line: the fence is the disagreement itself,
+                # not a malformed record.
+                "cursor": {"line": source["cursor"]["line"], "digest": "f" * 64},
+            },
+        })
+
+        with self.assertRaisesRegex(HostError, "cursor conflicts"):
+            dispatcher_launch.merge_launch_head_run(bound_run.to_json(), conflicting.to_json())
+
+
 class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
     """Drive the dispatcher routes that own the post-delivery write, not their merge helpers."""
 
