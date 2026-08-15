@@ -3395,8 +3395,7 @@ class DispatcherRuntime:
         self.checkpoint = checkpoint
         self.checkpoint_push = checkpoint_push
         self.head_health = HeadHealth(catalog, data_dir)
-        # Sprint entities live on their own board, so the observer pass reads them through their
-        # own reader rather than the card reader.
+        # Sprint entities live on their own board, so they need their own reader, not the card one.
         instance = getattr(catalog, "instance", {})
         limits = budget_thresholds(instance if isinstance(instance, dict) else None)
         self.sprints = sprints if sprints is not None else SprintReader(
@@ -3489,9 +3488,8 @@ class DispatcherRuntime:
             self.save_records(payload, records)
 
         def stop(updated: head_ops.HeadRun, reason: str) -> None:
-            # The head operation re-reads the heartbeat identity before it commits ``finishing``
-            # or signals anything.  A mismatch is intentionally swallowed here: the block still
-            # records the unknown source, while no foreign process is signalled.
+            # The head operation re-reads the heartbeat identity before signalling. A mismatch is
+            # swallowed here: the block still records the unknown source, no foreign process is hit.
             try:
                 with self.host.committing(lambda: self.save_records(payload, records)):
                     self.host.stop_head(record, "worker" if role == WORKER_ROLE else "review")
@@ -3599,9 +3597,8 @@ class DispatcherRuntime:
         attempt_id: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
-        # A launch intent can outlive its tick.  Re-establish the exact provider source before
-        # launch adoption/recovery reads a heartbeat or delivers another prompt, not afterwards
-        # when an unbound/mismatched session might already have been attributed to this card.
+        # A launch intent can outlive its tick. Re-establish the exact provider source before
+        # adoption reads a heartbeat, not after a mismatched session was attributed to this card.
         record = records.get(ref)
         if record is not None:
             fanout = self.poll_codex_provider_ingress(record, records, payload, reference=ref)
@@ -3609,8 +3606,7 @@ class DispatcherRuntime:
                 return fanout
         # A record carrying a launch intent is a bring-up whose tick did not live to record its
         # outcome. It is settled before anything else: until it is, neither "this card has a head"
-        # nor "this card is headless" is known, and acting on the wrong answer is how a card ends
-        # up with two heads on one workspace.
+        # nor "this card is headless" is known, and the wrong answer gives one workspace two heads.
         pending_launch = _resolve_launch_intent(self, task, records, payload)
         if pending_launch is not None:
             return pending_launch
@@ -3696,9 +3692,8 @@ class DispatcherRuntime:
     ) -> dict[str, Any]:
         ref = task["ref"]
         # Both heads are decided here, before anything is claimed, and both may be decided against
-        # the card's preference: a dead resource sends the walk down the canon's chain onto another
-        # family. Nothing launchable at the end of either walk is a claim-skip — the card stays in
-        # Ready and the outcome below names the dead resource.
+        # the card's preference. Nothing launchable at the end of either walk is a claim-skip: the
+        # card stays in Ready and the outcome below names the dead resource.
         worker_choice = self.resolve_head(self.catalog.worker_head(task))
         if not worker_choice.resolved:
             return {
@@ -3711,9 +3706,8 @@ class DispatcherRuntime:
                 "reason": worker_choice.reason,
                 "failover": {"worker": worker_choice.to_json()},
             }
-        # The reviewer is resolved at claim too, because the claim is what writes its head onto the
-        # card. A reviewer chain that is entirely dead does not stop the work: the preferred head
-        # stays recorded and the reviewer's own preflight waits for its resource, exactly as before.
+        # The reviewer is resolved at claim too, because the claim writes its head onto the card. A
+        # wholly dead reviewer chain does not stop the work: its own preflight waits for the resource.
         review_choice = self.resolve_head(self.catalog.review_head(task))
         collapse = self._failover_collapse(worker_choice, review_choice)
         if collapse is not None:
@@ -3721,13 +3715,10 @@ class DispatcherRuntime:
         head = worker_choice.head
         review_head = review_choice.head or review_choice.preferred
         # A card the dispatcher still holds a record for, back in Ready with its claim already
-        # committed under the current attempt, is a re-run: an operator-approved retry after
-        # Blocked, or a plain preempt/requeue out of in_progress or validate. An attempt id
-        # otherwise lives as long as the record does, so the claim would replay idempotently,
-        # return the old event and leave the card Ready. Give every re-run a fresh identity before
-        # claiming, so it claims the card for real, its worker report command cannot collide with
-        # the old report, and the journal gets a second attempt instead of nothing. A committed
-        # claim without a record is a genuine board divergence and still fails closed below.
+        # committed under the current attempt, is a re-run. An attempt id otherwise lives as long as
+        # the record, so the claim would replay idempotently, return the old event and leave the card
+        # Ready: every re-run gets a fresh identity before claiming. A committed claim with no record
+        # is a genuine board divergence and still fails closed below.
         active = records.get(ref)
         requeued = active is not None
         retry_after_block = resume_workspace or any(
@@ -3745,9 +3736,7 @@ class DispatcherRuntime:
                 "merge-gate-blocked",
                 "merge-gate-red-blocked",
                 "merge-blocked",
-                # The release the pre-merge re-check refused: a card blocked from Assessment
-                # comes back to Ready the same way, and a re-run that kept the old attempt id
-                # would replay its claim idempotently and leave the card sitting in Ready.
+                # A card blocked from Assessment comes back to Ready the same way as the rest.
                 "release-drift-blocked",
                 "release-failed-blocked",
                 "review-blocked",
@@ -3757,14 +3746,12 @@ class DispatcherRuntime:
             )
         )
         if requeued and active is not None:
-            # The preempted head can still be sitting in the workspace the next round claims. The
-            # workspace is what it is stopped through, not the handle: a head adopted from a launch
-            # intent is running with no handle on record, and skipping it here would leave it in
-            # the checkout the new round is about to hand a second head.
+            # The preempted head can still be in the workspace the next round claims, and it is
+            # stopped through the workspace, not the handle: a head adopted from a launch intent
+            # runs with no handle on record.
             if active.owns_head("review"):
-                # A preempt out of Validate leaves the worker pane already closed by
-                # `start_review` but the reviewer still up. Left alone it keeps reading the same
-                # checkout the new worker gets, and its verdict would land on the new attempt.
+                # A preempt out of Validate leaves the worker pane closed by `start_review` but the
+                # reviewer up; left alone its verdict would land on the new attempt.
                 unconfirmed = self._end_review_pane_confirmed(
                     active, records, payload, ref, step="claim", attempt_id=attempt_id,
                     initiator=STOPPED_BY_REPLACEMENT,
@@ -3795,8 +3782,7 @@ class DispatcherRuntime:
             request_id=claim_request_id,
         )
         # Before the card is read back, so the comment is inside the baseline the record takes: a
-        # head chosen by failover is written onto the card itself, where the reviewer and the
-        # observer read it, rather than living only in this tick's stdout.
+        # failover head is written onto the card, where the reviewer and the observer read it.
         self._comment_head_failover(ref, attempt_id, worker_choice, review_choice)
         claimed = self.reader.show(ref)
         record = DispatcherRecord(
@@ -3808,21 +3794,18 @@ class DispatcherRuntime:
             attempt_id=attempt_id,
             comment_baseline=len(claimed.get("comments") or []),
             review_baseline=0,
-            # The claim opens the attempt's first report round. It is durable in the record below
-            # before `prepare_worker` writes the TASK.md that names it.
+            # The claim opens the attempt's first report round, durable before the TASK.md names it.
             report_generation=1,
             state="claim_verified",
             claimed_at=time.time(),
-            # Empty unless the walk had to leave the card's preference behind. The pair is what
-            # lets the review document name the head that actually did the work without
-            # re-resolving a role default that may have moved since the claim.
+            # Empty unless the walk left the card's preference behind. The pair lets the review
+            # document name the head that did the work without re-resolving a moved role default.
             preferred_head=worker_choice.preferred if worker_choice.substituted else "",
             preferred_review_head=(
                 review_choice.preferred if review_choice.substituted else ""
             ),
         )
-        # A re-claimed card continues its own round numbering: the journal, not the board, knows
-        # how many rounds it has had, so a return to Ready adds a round instead of resetting.
+        # The journal, not the board, knows how many rounds a card has had: a return to Ready adds one.
         self.open_worker_round(record, round_number=self._journal_round(ref) + 1)
         records[ref] = record
         self.save_records(payload, records)
@@ -3871,11 +3854,9 @@ class DispatcherRuntime:
             }
         live_head = _head_process_status(_launch_pid_file(WORKER_ROLE, ref))
         if live_head.get("known") and live_head.get("alive"):
-            # This record belongs to the claim being opened now, so it has no HeadRun that can
-            # prove the pre-existing file belongs to it.  A versioned heartbeat may name a real
-            # process from an earlier or foreign launch; signalling its workspace here would turn
-            # an absence of ownership into permission to stop it.  Keep the claim fixed and make
-            # the ambiguity visible until an operator resolves the unbound process.
+            # This record belongs to the claim being opened now, so it has no HeadRun that can prove
+            # the pre-existing heartbeat is its own. Signalling that workspace would turn an absence
+            # of ownership into permission to stop it: keep the claim and make the ambiguity visible.
             return {
                 "status": "degraded",
                 "step": "claim",
@@ -3885,9 +3866,8 @@ class DispatcherRuntime:
                 "reason": "a live worker heartbeat has no durable HeadRun binding for this claim",
             }
         # The workspace is asked of the host rather than taken from its answer: `prepare_worker`
-        # resolves the same path itself, and the answer is exactly what a tick that dies mid-launch
-        # never sees. With it and the pid file in the record, the next tick can read the head's
-        # liveness and close its terminal without ever having held its handle.
+        # resolves the same path itself, and the answer is what a tick dying mid-launch never sees.
+        # With it and the pid file, the next tick can stop the head without ever holding its handle.
         failure = _write_launch_intent(
             self,
             payload,
@@ -3901,10 +3881,8 @@ class DispatcherRuntime:
         )
         if failure is not None:
             if failure.startswith("codex-fanout-policy:"):
-                # No terminal was created.  This is policy evidence, not a transient state-plane
-                # failure worth retrying around: a later tick with the same schema would be the
-                # same prohibited launch.  The board gets a typed, operator-readable block before
-                # this record is released for a future, independently attested retry.
+                # No terminal was created. This is policy evidence, not a transient failure worth
+                # retrying: a later tick with the same schema is the same prohibited launch.
                 self.writer.move(
                     role="dispatcher",
                     actor=self.owner,
@@ -3923,14 +3901,12 @@ class DispatcherRuntime:
                     "policy_evidence": {"kind": "codex_provider_fanout", "state": "unknown"},
                     "reason": failure,
                 }
-            # A launch nobody can record is exactly how a card ends up with two heads, so the host
-            # is not touched at all. The card keeps its claim and the next tick launches again.
+            # A launch nobody can record is how a card ends up with two heads, so the host is untouched.
             return _launch_intent_unwritable(
                 step="claim", ref=ref, attempt_id=record.attempt_id, role=WORKER_ROLE, reason=failure
             )
-        # The launch intent already contains the exact preflight HeadRun.  Bind its provider
-        # source before ``prepare_worker`` can create a pane; the transport will establish the
-        # new session identity and cursor before it delivers TASK.md.
+        # The launch intent already contains the exact preflight HeadRun. Bind its provider source
+        # before `prepare_worker` can create a pane, not after TASK.md has been delivered.
         self.bind_codex_provider_ingress(
             record, records, payload, role=WORKER_ROLE, reference=ref,
         )
@@ -3961,9 +3937,8 @@ class DispatcherRuntime:
                 role=WORKER_ROLE,
             )
             if deferred is not None:
-                # The head did not come up, and nothing of it is running. The card keeps its claim
-                # and its record: `claim_verified` is what makes the next tick launch it again,
-                # which is the whole of the retry.
+                # The head did not come up and nothing of it is running. The card keeps its claim and
+                # its record: `claim_verified` is what makes the next tick launch it again.
                 records[ref] = record
                 self.save_records(payload, records)
                 return deferred
@@ -3983,8 +3958,7 @@ class DispatcherRuntime:
         record.workspace = prepared["workspace"]
         _record_worker_delivery_evidence(record, prepared.get("delivery_evidence"))
         # The intent carries the pane, the launch snapshot and this head's own run before the record
-        # is told anything else about it: from here on every failure is one over a worker that is
-        # already running, and one that survives a tick dying carries the run it launched with.
+        # is told anything else: from here every failure is one over a worker that is already running.
         _confirm_launch_intent(
             self,
             payload,
@@ -4015,11 +3989,9 @@ class DispatcherRuntime:
             resume_workspaces.pop(ref, None)
         records[ref] = record
         self.save_records(payload, records)
-        # The worker is up: record the head running it, from the launcher's own snapshot. An adopted
-        # card whose claim predates this telemetry has no round yet, so record_worker_routing opens
-        # one from the journal rather than leaving the round unrecorded. The intent is spent only
-        # once that has landed: a journal that refuses here leaves the head adoptable, and the
-        # adoption writes the routing event this round would otherwise never get.
+        # The worker is up: record the head running it from the launcher's own snapshot. The intent
+        # is spent only once that has landed — a journal that refuses here leaves the head adoptable,
+        # and the adoption writes the routing event this round would otherwise never get.
         self.record_worker_routing(claimed, record, prepared.get("run"))
         _clear_launch_intent(record)
         self.save_records(payload, records)
@@ -4044,9 +4016,8 @@ class DispatcherRuntime:
             "review_head": record.review_head,
         }
         if record.preferred_head or record.preferred_review_head:
-            # The tick says a head was substituted, in the same line that says the card was
-            # claimed. An operator reading the tick must not have to open the card to find out
-            # that the work is running somewhere other than where the card asked for it.
+            # The tick says a head was substituted in the same line that says the card was claimed:
+            # an operator must not have to open the card to see the work runs elsewhere.
             outcome["preferred_head"] = record.preferred_head
             outcome["preferred_review_head"] = record.preferred_review_head
         return outcome
@@ -4090,8 +4061,7 @@ class DispatcherRuntime:
                 self.host.stop_head(record, "worker", STOPPED_BY_REPLACEMENT)
             else:
                 # A preempted head can lose its own identity with a dispatcher crash while the
-                # workspace is still known. Sweep that workspace before opening a replacement;
-                # an unnamed writer is ambiguity, never evidence that nothing is running.
+                # workspace is still known. An unnamed writer is ambiguity, never evidence.
                 self.host.stop_workspace(record)
         except HostError as exc:
             return _head_stop_unconfirmed(
@@ -4102,8 +4072,7 @@ class DispatcherRuntime:
                 reason=scrub_host_output(str(exc)),
             )
         _forget_role_head(record, WORKER_ROLE)
-        # The session is gone; a red transition already opened over it is not. Dropping that here
-        # would leave the card In progress with nothing durable owing it a replacement.
+        # The session is gone; a red transition already opened over it is not, and is not dropped.
         record.worker_continuation.drop_session()
         return None
 
@@ -4202,12 +4171,9 @@ class DispatcherRuntime:
             )
             if deferred is not None:
                 # A rework reserved its round before the host call, and that round is over whether
-                # or not its head lived. Carrying it onto the record is what the intent's own
-                # resolution does when a launch leaves nothing running, and the deferred relaunch
-                # then belongs to the round the rework opened rather than the one it replaced.
+                # or not its head lived: the deferred relaunch belongs to the round the rework opened.
                 _keep_reserved_round(self, record, intent)
-                # Nothing of this launch is running and the record still names no head, so the next
-                # tick reads the card as one whose worker pane is missing and brings it up again.
+                # Nothing of this launch is running and the record names no head, so the next tick retries.
                 records[ref] = record
                 self.save_records(payload, records)
                 return None, deferred
@@ -4222,9 +4188,8 @@ class DispatcherRuntime:
                 request_id=blocked_request_id,
                 error=exc,
             )
-        # The head is up. Its pane, its launch configuration and its own run go into the intent
-        # before anything else is attempted with them, so an adoption gets the run that actually
-        # launched rather than a fresh identity for the same process.
+        # The head is up. Its pane, launch configuration and own run go into the intent before
+        # anything else, so an adoption gets the run that launched rather than a fresh identity.
         _confirm_launch_intent(
             self, payload, records, ref, record,
             handle=launched.handle, leaf=launched.leaf, run=launched.run,
@@ -4280,12 +4245,9 @@ class DispatcherRuntime:
                 return self._block_unresumable(task, records, payload, attempt_id, "advance", exc)
             records[ref] = record
             if record.worker_head_run:
-                # A lost dispatcher record can recover the live worker only from that worker's
-                # own launch identity.  It is already bound and re-checked by `_adopt`, so this
-                # is a continuation of its HeadRun, not a fresh claim over an unknown process.
-                # Continue into the ordinary report path: a report written before the dispatcher
-                # lost its record still belongs to this run and must advance the card on this
-                # reconciliation rather than wait for another tick.
+                # A lost record can recover the live worker only from that worker's own launch
+                # identity, already bound and re-checked by `_adopt`: this is a continuation of its
+                # HeadRun, so a report written before the record was lost still advances the card here.
                 record.state = "claimed"
             else:
                 current_claim = _attempt_request_id(attempt_id, "claim", ref)
@@ -4296,9 +4258,8 @@ class DispatcherRuntime:
                         self.save_records(payload, records)
                         return self._launch_worker_after_claim(task, record, records, payload)
         if record.worker_continuation.red_transition_pending:
-            # An open red transition outranks everything else this card could be doing. The board
-            # move may or may not have committed before the tick that opened it died, so the
-            # transition is finished against the board as it is now, ahead of any report marker.
+            # An open red transition outranks everything else. The board move may or may not have
+            # committed before its tick died, so it is finished against the board as it is now.
             return self._complete_red_transition(record, records, payload, attempt_id, ref=ref)
         if record.state == "claim_verified":
             return self._launch_worker_after_claim(task, record, records, payload)
