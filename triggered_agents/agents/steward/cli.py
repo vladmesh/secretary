@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from ...runtime.kanboard import KanboardUnreachable
@@ -184,7 +184,7 @@ def cmd_role_skills(as_json: bool) -> int:
 def cmd_deep_sweep_advance() -> int:
     """Stamp now() as the last unconditional sweep. Independent of `advance` above (signals.py's
     per-kind watermark) on purpose — see module docstring."""
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     with STATE.lock():
         STATE.ensure_dir()
         _deep_sweep_file().write_text(json.dumps({"last_run": now}, ensure_ascii=False), encoding="utf-8")

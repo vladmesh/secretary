@@ -8,15 +8,16 @@ import subprocess
 import tempfile
 import time
 import unittest
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
-from triggered_agents.runtime import dispatch
-from triggered_agents.runtime import codex_preflight
+from triggered_agents.runtime import codex_preflight, dispatch, tui_delivery
 from triggered_agents.runtime import state as runtime_state
-from triggered_agents.runtime import tui_delivery
-from triggered_agents.runtime.agent_prompt_transport import BRACKETED_PASTE_END, BRACKETED_PASTE_START
+from triggered_agents.runtime.agent_prompt_transport import (
+    BRACKETED_PASTE_END,
+    BRACKETED_PASTE_START,
+)
 from triggered_agents.runtime.claude_sessions import claude_project_dir_name
 from triggered_agents.runtime.pane_host import Pane, PaneHostError
 
@@ -315,7 +316,7 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
         session.write_text(
             json.dumps({
                 "type": "user",
-                "timestamp": datetime.fromtimestamp(since + 1, timezone.utc).isoformat(),
+                "timestamp": datetime.fromtimestamp(since + 1, UTC).isoformat(),
             }) + "\n",
             encoding="utf-8",
         )
@@ -370,8 +371,8 @@ class TriggeredCodexHeadTests(unittest.TestCase):
         )
 
     def test_a_codex_service_head_is_launched_without_its_skill(self) -> None:
-        from triggered_agents.agents.pipeline import health as pipeline_health
         from triggered_agents.agents.pipeline import heads as pipeline_heads
+        from triggered_agents.agents.pipeline import health as pipeline_health
 
         with mock.patch.object(dispatch, "_load_spec", return_value={"skill": "/retro"}), \
              mock.patch.object(dispatch, "_workspace", return_value=self.workspace), \

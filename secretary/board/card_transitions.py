@@ -11,7 +11,6 @@ from typing import TypeAlias
 from secretary.board.models import CardState, EntityKind
 from secretary.board.transitions import BoardProtocolError, Transition, transition_for
 
-
 CardTransitionKey: TypeAlias = tuple[CardState, CardState]
 
 

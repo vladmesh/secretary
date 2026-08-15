@@ -10,14 +10,26 @@ from typing import Any
 
 import yaml
 
+from secretary import state_repo
 from secretary._fsutil import (
     cleanup_staging_dir as _cleanup_staging_dir,
+)
+from secretary._fsutil import (
     remove_path as _remove_path,
+)
+from secretary._fsutil import (
     write_json as _write_json,
+)
+from secretary._fsutil import (
     write_text_atomic as _write_text_atomic,
 )
-from secretary import state_repo
-from secretary.state_repo import MEMORY_PATHSPEC
+from secretary.memory_errors import (
+    MemoryExportPublishError,
+    MemoryLockError,  # noqa: F401  # Public compatibility re-export.
+    MemoryPermissionError,
+    MemoryProtocolError,  # noqa: F401  # Public compatibility re-export.
+    MemoryValidationError,
+)
 from secretary.memory_journal import (
     _git_status,
     _memory_journal_lock,
@@ -27,16 +39,8 @@ from secretary.memory_journal import (
     init_memory_journal,
     reject_legacy_memory_journal,
 )
+from secretary.state_repo import MEMORY_PATHSPEC
 from triggered_agents.runtime.redact import redact
-
-from secretary.memory_errors import (
-    MemoryExportPublishError,
-    MemoryLockError,
-    MemoryPermissionError,
-    MemoryProtocolError,
-    MemoryValidationError,
-)
-
 
 MEMORY_PROPOSAL_TTL_SECONDS = 7 * 24 * 60 * 60
 MEMORY_PROPOSAL_ACTIVE_SECONDS = 60 * 60
@@ -259,8 +263,7 @@ def _scope_dir(scope: str) -> str:
 
 def _clean_slug(slug: str) -> str:
     value = slug.strip()
-    if value.endswith(".md"):
-        value = value[:-3]
+    value = value.removesuffix(".md")
     return _clean_path_part(value, "slug")
 
 

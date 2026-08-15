@@ -17,37 +17,44 @@ import json
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
+from secretary import state_repo
 from secretary._fsutil import (
     cleanup_staging_dir as _cleanup_staging_dir,
+)
+from secretary._fsutil import (
     ensure_dir as _ensure_dir,
+)
+from secretary._fsutil import (
     publish_component_entries as _publish_component_entries,
+)
+from secretary._fsutil import (
     remove_path as _remove_path,
+)
+from secretary._fsutil import (
     write_text_atomic as _write_text_atomic,
 )
+from secretary.board.models import Event
 from secretary.data import (
     PIPELINE_STATE_DIR,
     PIPELINE_WORKTREE,
     export_board,
     export_runs,
 )
-from secretary import state_repo
-from secretary.state_repo import BOARD_RUNS_PATHSPEC
-from secretary.tasks import TaskAudit, TaskError
-from secretary.board.models import Event
 from secretary.product_issues import (
     ProductIssueTransaction,
     ProductIssueValidationError,
     registered_projects,
     validate_product_issue_records,
 )
-
+from secretary.state_repo import BOARD_RUNS_PATHSPEC
+from secretary.tasks import TaskAudit, TaskError
 from triggered_agents.runtime.redact import redact
-
 
 # Canonical checkpoint entries per component. `events.ndjson` is optional: an
 # instance that has never appended a task event has no audit log yet.
@@ -620,7 +627,7 @@ def _age_minutes(stamp: str, now: float) -> int | None:
     except ValueError:
         return None
     if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
+        moment = moment.replace(tzinfo=UTC)
     return max(0, int((now - moment.timestamp()) // 60))
 
 

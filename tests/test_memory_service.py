@@ -6,6 +6,7 @@ from unittest import mock
 
 try:
     import numpy as np
+
     from secretary import memory_reindex, memory_service
 except ImportError:  # The base install deliberately excludes the heavy memory extra.
     np = None

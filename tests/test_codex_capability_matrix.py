@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from pathlib import Path
 import unittest
-
+from pathlib import Path
 
 _SCRIPT = Path(__file__).parents[1] / "scripts" / "codex_capability_matrix.py"
 _EVIDENCE = Path(__file__).parents[1] / "docs" / "evidence" / "codex-provider-fanout-2026-08-13.json"

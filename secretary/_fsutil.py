@@ -8,8 +8,9 @@ import os
 import shutil
 import stat as stat_module
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, BinaryIO, Iterator
+from typing import Any, BinaryIO
 
 
 def write_json(path: Path, payload: Any) -> None:

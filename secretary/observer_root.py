@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 OBSERVER_REPO_NAME = "observers"
 
 

@@ -12,12 +12,6 @@ from typing import Any
 from secretary._fsutil import try_file_lock, write_json
 from secretary.board.models import Event, EventKind
 from secretary.checkpoint import checkpoint_snapshot
-from secretary.dispatcher_observer import (
-    observer_snapshot,
-    reconcile_observers,
-    retry_pending_observer_stops,
-)
-from secretary.dispatcher_observer_fence import fenced_task, observer_fence
 from secretary.dispatcher_launch import (
     REVIEW_ROLE,
     WORKER_ROLE,
@@ -25,10 +19,15 @@ from secretary.dispatcher_launch import (
     launch_intent,
     stop_launch_intent,
 )
+from secretary.dispatcher_observer import (
+    observer_snapshot,
+    reconcile_observers,
+    retry_pending_observer_stops,
+)
+from secretary.dispatcher_observer_fence import fenced_task, observer_fence
 from secretary.dispatcher_pause_ops import auto_resume_expired_freeze
 from secretary.dispatcher_state import (
     DispatcherRecord,
-    attempt_request_id as _attempt_request_id,
     close_divergence,
     divergence_is_open,
     is_claim_skip,
@@ -37,10 +36,12 @@ from secretary.dispatcher_state import (
     record_divergence,
     request_token,
 )
+from secretary.dispatcher_state import (
+    attempt_request_id as _attempt_request_id,
+)
 from secretary.dispatcher_types import STOPPED_BY_RECONCILIATION, HostError
-from secretary.tasks import ACTIVE_STATES, TaskError
 from secretary.sprints import SprintWriter, budget_thresholds
-
+from secretary.tasks import ACTIVE_STATES, TaskError
 
 # Durable telemetry of terminal production ticks, written into production-state.json under
 # `tick_telemetry` (secretary-833). It is the only current record of how a tick ENDED: the
@@ -303,7 +304,7 @@ def production_observe(runtime: Any) -> dict[str, Any]:
         "records": list((payload.get("records") or {}).keys()),
         "observers": observer_snapshot(payload),
         "resource_health": runtime.head_health.snapshot(),
-        "divergences": list((payload.get("controlled_divergences") or [])),
+        "divergences": list(payload.get("controlled_divergences") or []),
         "open_divergences": [
             divergence
             for divergence in (payload.get("controlled_divergences") or [])

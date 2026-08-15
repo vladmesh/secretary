@@ -8,17 +8,41 @@ import sys
 import tempfile
 import threading
 import unittest
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
 from secretary.board import (
-    Actor, BoardEventCanon, BoardEventPending, BoardProtocolError, Card, CardState,
-    Create, EntityKind, Event, EventKind, FakeBoardHost, InvalidTransition, Issue, IssueState, Product,
-    KanboardBoardHost, MutationEventTransaction, RelatedRefs, Replace, Sprint, SprintState, SprintSupplement, TRANSITIONS,
+    TRANSITIONS,
+    Actor,
+    BoardEventCanon,
+    BoardEventPending,
+    BoardProtocolError,
+    Card,
+    CardState,
+    Create,
+    EntityKind,
+    Event,
+    EventKind,
+    FakeBoardHost,
+    InvalidTransition,
+    Issue,
+    IssueState,
+    KanboardBoardHost,
+    MutationEventTransaction,
+    Product,
+    RelatedRefs,
+    Replace,
+    Sprint,
+    SprintState,
+    SprintSupplement,
     TransitionRequest,
 )
-from secretary.board.card_transitions import CARD_TRANSITIONS, CardTransitionForbidden, card_transition
+from secretary.board.card_transitions import (
+    CARD_TRANSITIONS,
+    CardTransitionForbidden,
+    card_transition,
+)
 from secretary.tasks import TaskAudit, TaskError
 
 
@@ -205,7 +229,7 @@ class BoardHostContractTests(unittest.TestCase):
     def test_event_round_trip_preserves_fractional_occurrence_and_canonicalizes_timezone(self) -> None:
         event = Event(
             "event-precise", EventKind.CARD_STARTED, EntityKind.CARD, "secretary-1419",
-            self.actor, "worker started", datetime(2026, 8, 11, 20, 0, 0, 123456, tzinfo=timezone.utc),
+            self.actor, "worker started", datetime(2026, 8, 11, 20, 0, 0, 123456, tzinfo=UTC),
         )
 
         record = event.to_record("start-precise")
@@ -266,7 +290,11 @@ class BoardHostContractTests(unittest.TestCase):
         # The concrete lifecycle values differ by entity type, but this test's
         # contract is intentionally registry-driven: every declared edge gets a
         # completed fake mutation and exactly its declared kind in the canon.
-        from secretary.board import Issue, IssueState, Product, ProductState, Sprint, SprintState
+        from secretary.board import (
+            Issue,
+            Product,
+            Sprint,
+        )
 
         factories = {
             EntityKind.PRODUCT: lambda state, index: Product(f"product:{index}", "Product", state),

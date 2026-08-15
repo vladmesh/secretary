@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import os
 import subprocess
 import tempfile
@@ -8,7 +7,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.board_transport import BoardTransportError, ensure, ensure_from_runtime_values, findings, resolve, transport_path
+from secretary.board_transport import (
+    BoardTransportError,
+    ensure,
+    ensure_from_runtime_values,
+    findings,
+    resolve,
+    transport_path,
+)
 from secretary.runtime_env import RuntimeEnvError, read_runtime_env
 from secretary.tasks import KanboardClient, TaskError, TaskWriter
 from triggered_agents.runtime import kanboard
@@ -164,15 +170,14 @@ class BoardTransportTests(unittest.TestCase):
                 self.migrate(Path(tmp), runtime)
 
     def test_normal_client_does_not_use_ambient_legacy_values(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch.dict(os.environ, {
-                "SECRETARY_INSTANCE": str(Path(tmp) / "missing-instance"),
-                "KANBOARD_URL": "http://legacy/jsonrpc.php",
-                "KANBOARD_API_USER": "jsonrpc",
-                "KANBOARD_API_TOKEN": "legacy-token",
-            }, clear=True):
-                with self.assertRaisesRegex(TaskError, "configuration is unavailable"):
-                    KanboardClient.for_instance(Path(tmp))
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {
+            "SECRETARY_INSTANCE": str(Path(tmp) / "missing-instance"),
+            "KANBOARD_URL": "http://legacy/jsonrpc.php",
+            "KANBOARD_API_USER": "jsonrpc",
+            "KANBOARD_API_TOKEN": "legacy-token",
+        }, clear=True):
+            with self.assertRaisesRegex(TaskError, "configuration is unavailable"):
+                KanboardClient.for_instance(Path(tmp))
 
     def test_existing_instance_without_transport_or_complete_legacy_tuple_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

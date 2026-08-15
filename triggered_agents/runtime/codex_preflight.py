@@ -25,10 +25,11 @@ import stat
 import subprocess
 import tempfile
 import tomllib
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # importing head.command imports this module, so keep the edge type-only
     from .head.run import HeadRun
@@ -77,7 +78,7 @@ class CodexPreflightError(RuntimeError):
 class CodexFanoutPolicyError(CodexPreflightError):
     """The exact Codex run has no independently acceptable no-fan-out attestation."""
 
-    def __init__(self, message: str, *, run: "HeadRun") -> None:
+    def __init__(self, message: str, *, run: HeadRun) -> None:
         super().__init__(message)
         self.run = run
 
@@ -85,7 +86,7 @@ class CodexFanoutPolicyError(CodexPreflightError):
 class CodexFanoutRecordingError(CodexPreflightError):
     """A provider-edge result could not be durably written before a consequential action."""
 
-    def __init__(self, message: str, *, run: "HeadRun", event: dict[str, Any]) -> None:
+    def __init__(self, message: str, *, run: HeadRun, event: dict[str, Any]) -> None:
         super().__init__(message)
         self.run = run
         self.event = dict(event)
@@ -95,7 +96,7 @@ class CodexFanoutRecordingError(CodexPreflightError):
 class ProviderEventOutcome:
     """One typed provider event and the run state written before its caller acts."""
 
-    run: "HeadRun"
+    run: HeadRun
     event: dict[str, Any]
 
     @property
@@ -184,12 +185,12 @@ def ensure_codex_workspace_trusted(
 def preflight_codex_launch(
     profile: Mapping[str, Any],
     workspace: str,
-    run: "HeadRun",
+    run: HeadRun,
     *,
     schema_attestation: Mapping[str, Any] | None = None,
     binary_path: str | None = None,
     config: Path | None = None,
-) -> "HeadRun":
+) -> HeadRun:
     """Prepare one exact Codex ``HeadRun`` and attach advisory fan-out telemetry.
 
     Provider-schema evidence stays attached when available but is not a launch requirement; workspace
@@ -220,11 +221,11 @@ def preflight_codex_launch(
 
 def attest_codex_fanout(
     profile: Mapping[str, Any],
-    run: "HeadRun",
+    run: HeadRun,
     *,
     schema_attestation: Mapping[str, Any] | None = None,
     binary_path: str | None = None,
-) -> "HeadRun":
+) -> HeadRun:
     """Build a conservative, run-bound provider-schema attestation without opening a pane.
 
     ``schema_attestation`` is expected to be a provider-schema capture, not a configuration knob: a
@@ -326,8 +327,8 @@ class CodexProviderEventRecorder:
 
     def __init__(
         self,
-        run: "HeadRun",
-        persist: Callable[["HeadRun"], None],
+        run: HeadRun,
+        persist: Callable[[HeadRun], None],
         *,
         expected_parent_thread_id: str = "",
     ) -> None:
@@ -380,7 +381,7 @@ def enforce_provider_event(
     *,
     source_sequence: int | str | None,
     source_location: str,
-    stop: Callable[["HeadRun", str], None],
+    stop: Callable[[HeadRun, str], None],
     block: Callable[[dict[str, Any]], None],
     captured_at: str | None = None,
 ) -> ProviderEventOutcome:
@@ -530,7 +531,7 @@ def _codex_repository_trust_root(workspace_path: Path) -> Path | None:
 
 
 def _policy_run(
-    run: "HeadRun",
+    run: HeadRun,
     *,
     state: str,
     terminal_state: str,
@@ -540,7 +541,7 @@ def _policy_run(
     cli_version: str = "",
     tool_schema_digest: str = "",
     provider_schema_verdict: str = "",
-) -> "HeadRun":
+) -> HeadRun:
     return run.with_fanout_policy({
         "version": FANOUT_ATTESTATION_VERSION,
         "state": state,
@@ -558,7 +559,7 @@ def _policy_run(
     })
 
 
-def _with_unbound_provider_source(profile: Mapping[str, Any], run: "HeadRun") -> "HeadRun":
+def _with_unbound_provider_source(profile: Mapping[str, Any], run: HeadRun) -> HeadRun:
     """Attach the pre-pane source baseline used to bind the new Codex event journal.
 
     Session JSONL has a provider session id and parent thread id but no Secretary run id, so the
@@ -594,7 +595,7 @@ def _with_unbound_provider_source(profile: Mapping[str, Any], run: "HeadRun") ->
     return run.with_fanout_policy(policy)
 
 
-def codex_provider_source_descriptor(run: "HeadRun") -> dict[str, Any]:
+def codex_provider_source_descriptor(run: HeadRun) -> dict[str, Any]:
     """The immutable launch facts every Codex provider journal keeps for its entire lifetime.
 
     A provider journal identifies its own session but cannot name the Secretary head that opened it.
@@ -610,7 +611,7 @@ def codex_provider_source_descriptor(run: "HeadRun") -> dict[str, Any]:
     }
 
 
-def _head_run_fingerprint(run: "HeadRun") -> str:
+def _head_run_fingerprint(run: HeadRun) -> str:
     stable = {
         "run_id": run.run_id,
         "workspace": run.workspace,
@@ -630,7 +631,7 @@ def _head_run_fingerprint(run: "HeadRun") -> str:
     return hashlib.sha256(encoded.encode("ascii")).hexdigest()[:32]
 
 
-def _unknown_run(run: "HeadRun", reason: str) -> "HeadRun":
+def _unknown_run(run: HeadRun, reason: str) -> HeadRun:
     return _policy_run(
         run,
         state=FANOUT_SCHEMA_UNKNOWN,
@@ -716,7 +717,7 @@ def _typed_provider_event(
     All original bytes are represented only by a canonical digest. A malformed object is still an
     event: accepting it as an empty result would be a transcript reconstruction path in disguise.
     """
-    captured = captured_at or datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    captured = captured_at or datetime.now(UTC).isoformat().replace("+00:00", "Z")
     supplied_digest = (
         str(raw_event.get("_secretary_raw_event_digest") or "")
         if isinstance(raw_event, Mapping) else ""

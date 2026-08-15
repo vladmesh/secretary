@@ -31,7 +31,6 @@ from secretary.head_registry import (
     read_source,
     snapshot_path,
 )
-
 from tests.fakes.upgrade import FakeRegistrar, FakeUnitInstaller
 
 UNIT_PREFIX = "secretary-"

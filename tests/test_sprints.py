@@ -10,16 +10,32 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-import secretary.sprints as sprints
+from secretary import sprints
+from secretary.board import (
+    Actor,
+    BoardEventPending,
+    EntityKind,
+    RelatedRefs,
+    SprintState,
+    TransitionRequest,
+)
 from secretary.cli import main
-from secretary.board import Actor, BoardEventPending, EntityKind, RelatedRefs, SprintState, TransitionRequest
 from secretary.config import load_config
 from secretary.data import normalize_sprint_entity
-from secretary.sprint_observer import OBSERVER_FIELD, encode_observer, head_choice, none_choice
+from secretary.product_issues import ProductIssueStore
+from secretary.sprint_close import parse_close_decisions
+from secretary.sprint_observer import (
+    OBSERVER_FIELD,
+    encode_observer,
+    head_choice,
+    none_choice,
+)
 from secretary.sprints import (
     BUDGET_EVENT_TYPES,
     SprintReader,
     SprintWriter,
+    _close_archive_request_id,
+    _close_step_request_id,
     active_sprint_projects,
     budget_thresholds,
     ensure_sprint_board,
@@ -29,14 +45,10 @@ from secretary.sprints import (
     refresh_active_sprint_projects,
     sprint_admission_lock,
 )
-from secretary.sprints import _close_archive_request_id, _close_step_request_id
-from secretary.product_issues import ProductIssueStore
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 from tests.head_registry import write_installed_pair
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
-from secretary.sprint_close import parse_close_decisions
 from tests.sprint_close_fixtures import DROP_REASON, KEEP_OPEN_REASON, close_decisions
-
 
 # A close states a verdict on every issue its sprint declared, and every sprint this fixture
 # opens declares `issue:open`. The tests below are about the rest of the close, so they give
@@ -575,12 +587,11 @@ class SprintOwnershipTests(SprintFixture):
         row and its staged intent are both still there. It is repairable under the same
         request id until the removal goes through.
         """
-        with self._reject_removal():
-            with self._refuse_metadata("sprint_goal"):
-                with self.assertRaisesRegex(TaskError, "pending repair"):
-                    self._create(
-                        goal="kept row", reference="sprint:kept", request_id="kept",
-                    )
+        with self._reject_removal(), self._refuse_metadata("sprint_goal"):
+            with self.assertRaisesRegex(TaskError, "pending repair"):
+                self._create(
+                    goal="kept row", reference="sprint:kept", request_id="kept",
+                )
         self.assertEqual(len(self._sprint_rows()), 1)
         staged = self._transactions()
         self.assertEqual(len(staged), 1)

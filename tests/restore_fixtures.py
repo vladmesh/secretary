@@ -14,6 +14,7 @@ from secretary.data import DataExport, export_memory, init_layout, normalize_boa
 from tests.test_sprints import SprintKanboard
 from tests.test_tasks import WriteKanboard
 
+
 def create_backup(instance_path: Path, *, backup_kind: str = "full", **kwargs) -> BackupResult:
     """One backup of one kind.
 

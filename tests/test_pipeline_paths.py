@@ -14,9 +14,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from secretary import dispatcher_pause
+from secretary import role_env as secretary_role_env
 from triggered_agents.agents.pipeline import health
-from triggered_agents.runtime import paths, role_env as runtime_role_env
-from secretary import dispatcher_pause, role_env as secretary_role_env
+from triggered_agents.runtime import paths
+from triggered_agents.runtime import role_env as runtime_role_env
 
 
 class PortableDefaultTests(unittest.TestCase):

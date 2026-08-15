@@ -16,9 +16,13 @@ from secretary.host import (
     build_plan,
     foreign_units,
     load_managed_manifest,
-    manifest_text as _manifest_text,
     plan_changes,
     plan_input_errors,
+)
+from secretary.host import (
+    manifest_text as _manifest_text,
+)
+from secretary.host import (
     strict_manifest as _strict_manifest,
 )
 from secretary.host_apply import resolve_installed_packaged

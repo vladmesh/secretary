@@ -11,8 +11,8 @@ from unittest import mock
 
 import yaml
 
-from secretary.config import load_config, validate, validate_instance
 from secretary.cli import main
+from secretary.config import load_config, validate, validate_instance
 from secretary.onboarding import ScannerError, project_add
 from tests.support.git import git, make_repo
 

@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import base64
 import stat
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
 
 from .paths import instance_dir as normalize_instance_dir
 
@@ -30,7 +30,7 @@ class BoardTransport:
         return dict(zip(TRANSPORT_ENV, (self.url, self.user, self.token)))
 
     def authorization_header(self) -> str:
-        encoded = base64.b64encode(f"{self.user}:{self.token}".encode("utf-8")).decode("ascii")
+        encoded = base64.b64encode(f"{self.user}:{self.token}".encode()).decode("ascii")
         return f"Basic {encoded}"
 
 

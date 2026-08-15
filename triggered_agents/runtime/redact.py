@@ -45,7 +45,7 @@ PATTERNS = [
     (re.compile(r"AKIA[0-9A-Z]{16}"), "aws-access-key-id"),
     (re.compile(r"AIza[0-9A-Za-z_-]{35}"), "google-api-key"),
     (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{20,}"), "bearer-token"),
-    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S), "private-key-block"),
+    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL), "private-key-block"),
 ]
 
 # `runtime.env` is an environment *configuration* file, not a list of secret

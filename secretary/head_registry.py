@@ -25,14 +25,13 @@ import yaml
 
 from secretary import _proc
 from secretary._fsutil import write_text_atomic
-from triggered_agents.runtime.paths import configured_product_root
 from triggered_agents.agents.pipeline.heads import (
     HeadRegistryError,
     load_registry,
     validate_registry,
     validate_role_defaults,
 )
-
+from triggered_agents.runtime.paths import configured_product_root
 
 HEADS_RELATIVE = Path("triggered_agents") / "agents" / "pipeline" / "heads.toml"
 INSTANCE_HEADS_RELATIVE = Path("heads") / "heads.toml"

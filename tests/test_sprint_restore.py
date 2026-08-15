@@ -18,7 +18,12 @@ from pathlib import Path
 from unittest import mock
 
 from secretary.data import export_board, init_layout, normalize_sprint_entity
-from secretary.restore import RestoreError, import_normalized_board, restore_findings, restore_state
+from secretary.restore import (
+    RestoreError,
+    import_normalized_board,
+    restore_findings,
+    restore_state,
+)
 from secretary.sprint_observer import head_choice, none_choice
 from secretary.sprints import (
     SprintReader,
@@ -27,10 +32,9 @@ from secretary.sprints import (
     sprint_admission_lock,
 )
 from secretary.tasks import TaskWriter
-
-from tests.restore_fixtures import _EmptyBoardsKanboard
 from tests.fakes.sprints import ProductSprintKanboard, _write_project_registry
 from tests.observer_identity import as_observer
+from tests.restore_fixtures import _EmptyBoardsKanboard
 from tests.sprint_close_fixtures import close_decisions
 
 
@@ -498,7 +502,7 @@ class SprintRestoreTests(unittest.TestCase):
             ["sprint:collision", "sprint:entity"],
         )
         # And it is released again: the installation is not left unable to admit anything.
-        for thread in list(contenders):
+        for thread in contenders:
             thread.join(5)
         self.assertFalse(contender_blocked())
 

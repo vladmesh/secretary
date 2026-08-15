@@ -11,12 +11,13 @@ store is not created until the user has typed some of it back.
 from __future__ import annotations
 
 import argparse
-from functools import wraps
 import os
 import secrets as pysecrets
 import sys
+from functools import wraps
 from pathlib import Path
 
+from secretary.cli_output import print_json
 from secretary.secret_store import (
     CONFIRM_WORDS,
     MATERIALIZE_FILE,
@@ -36,7 +37,6 @@ from secretary.secret_store import (
     set_secret,
 )
 from secretary.state_repo import StateRepoError
-from secretary.cli_output import print_json
 
 SECRET_EXIT_VALIDATION = 2
 SECRET_EXIT_STATE = 3

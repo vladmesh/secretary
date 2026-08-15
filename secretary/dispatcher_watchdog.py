@@ -18,8 +18,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from pathlib import Path
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, NamedTuple
 
 from secretary._env import positive_int
@@ -107,7 +107,7 @@ class IdleOutcome(NamedTuple):
     changed: bool
 
 
-def _fence(record, name: str, value: float | int) -> bool:
+def _fence(record, name: str, value: float) -> bool:
     """Write one fence field, reporting whether it actually moved."""
     if getattr(record, name) == value:
         return False

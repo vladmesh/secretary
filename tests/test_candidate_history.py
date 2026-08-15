@@ -12,7 +12,12 @@ import unittest
 from pathlib import Path
 
 import secretary
-from secretary.candidate_history import Commit, ai_attributions, parse_shas, repair_message
+from secretary.candidate_history import (
+    Commit,
+    ai_attributions,
+    parse_shas,
+    repair_message,
+)
 
 
 def _commit(message: str, sha: str = "a" * 40) -> Commit:

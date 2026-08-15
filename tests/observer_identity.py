@@ -9,8 +9,8 @@ refuse a head nobody bound.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator
 from unittest import mock
 
 from secretary.role_env import OBSERVER_GENERATION_ENV, OBSERVER_SPRINT_ENV

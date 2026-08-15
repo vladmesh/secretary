@@ -15,12 +15,11 @@ from __future__ import annotations
 import os
 import pwd
 import subprocess
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 from secretary._fsutil import file_lock, write_text_atomic
-
 
 STATE_LOCK_NAME = "secretary-state-writer.lock"
 

@@ -15,7 +15,12 @@ def restore_card(
     request_id: str | None,
 ) -> dict[str, Any]:
     """Apply an audited restore-only metadata and placement update."""
-    from secretary.tasks import _CommittedWriteError, _STATE_BY_COLUMN, TaskError, _task_number
+    from secretary.tasks import (
+        _STATE_BY_COLUMN,
+        TaskError,
+        _CommittedWriteError,
+        _task_number,
+    )
 
     if target not in _STATE_BY_COLUMN.values():
         raise TaskError("validation", "restore target is invalid", 2)
@@ -68,7 +73,7 @@ def restore_comment(
     writer: Any, reference: str, body: str, occurrence: int, request_id: str | None
 ) -> dict[str, Any]:
     """Append one comment and retain pending state when its reply is lost."""
-    from secretary.tasks import _CommittedWriteError, TaskError, _digest, _task_number
+    from secretary.tasks import TaskError, _CommittedWriteError, _digest, _task_number
 
     payload: dict[str, Any] = {
         "body_sha256": _digest(body),

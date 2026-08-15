@@ -23,6 +23,7 @@ The main areas are:
 python3 -m pip install .
 python3 -m pip install '.[memory]'
 python3 -m unittest
+ruff check .
 ```
 
 The first form installs the CLI, and the second adds the memory runtime. Host bootstrap currently

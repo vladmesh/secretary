@@ -31,10 +31,10 @@ from .agent_prompt_transport import (
     prepare_agent_prompt,
     send_agent_prompt,
 )
-from .pane_host import PaneHost, pane_host as resolve_pane_host
+from .pane_host import PaneHost
+from .pane_host import pane_host as resolve_pane_host
 from .prompt_document import NUDGE_FILE_MODE
 from .tui_delivery_types import RunJson
-
 
 TUI_IDLE_TIMEOUT_MS = int(os.environ.get("SECRETARY_TUI_IDLE_TIMEOUT_MS", os.environ.get("TA_TUI_IDLE_TIMEOUT_MS", "60000")))
 # Orca decides `tui-idle` from the pane's agent status and, failing that, from a quiescence window
@@ -204,7 +204,7 @@ class DeliveryEvidence:
         }
 
     @classmethod
-    def from_json(cls, payload: Any) -> "DeliveryEvidence":
+    def from_json(cls, payload: Any) -> DeliveryEvidence:
         if not isinstance(payload, dict):
             return cls()
         fields = cls()
@@ -229,7 +229,7 @@ class DeliveryOutcome(str):
 
     evidence: DeliveryEvidence
 
-    def __new__(cls, value: str, evidence: DeliveryEvidence) -> "DeliveryOutcome":
+    def __new__(cls, value: str, evidence: DeliveryEvidence) -> DeliveryOutcome:
         outcome = super().__new__(cls, value)
         outcome.evidence = evidence
         return outcome

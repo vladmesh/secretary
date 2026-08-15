@@ -28,9 +28,9 @@ from typing import Any, Protocol
 from ..pane_host import Pane, SessionHost
 from ..prompt_document import nudge_for
 from ..tui_delivery import (
-    DeliveryOutcome,
     READINESS_BLOCKED,
     READINESS_BUSY,
+    DeliveryOutcome,
     TuiDeliveryError,
     deliver_interactive_prompt,
     terminal_readiness,
@@ -58,7 +58,7 @@ class HeadOperationError(RuntimeError):
     """Any refusal from one of the three operations, with the delivery evidence there was."""
 
     def __init__(
-        self, message: str, *, evidence: Any = None, run: "HeadRun | None" = None,
+        self, message: str, *, evidence: Any = None, run: HeadRun | None = None,
     ) -> None:
         super().__init__(message)
         self.evidence = evidence
@@ -125,7 +125,7 @@ class NudgePointer:
     document: str = ""
 
     @classmethod
-    def at_document(cls, path: str, note: str = "") -> "NudgePointer":
+    def at_document(cls, path: str, note: str = "") -> NudgePointer:
         """The nudge for a task document already written to disk.
 
         `note` is the discriminating tail a caller may need in the delivered line itself, for a head
@@ -136,7 +136,7 @@ class NudgePointer:
         return cls(text=nudge_for(path, note), document=str(path))
 
     @classmethod
-    def line(cls, text: str) -> "NudgePointer":
+    def line(cls, text: str) -> NudgePointer:
         """A short instruction that carries its own content."""
         return cls(text=text)
 

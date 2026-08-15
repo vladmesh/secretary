@@ -32,11 +32,12 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from signal import NSIG
 from pathlib import Path
-from typing import IO, Any, Iterable, Mapping
+from signal import NSIG
+from typing import IO, Any
 
 from secretary._fsutil import write_text_atomic
 
@@ -92,7 +93,7 @@ class ContentIdentity:
     def as_dict(self) -> dict[str, str]:
         return {"head_sha": self.head_sha, "worktree_digest": self.worktree_digest}
 
-    def matches(self, other: "ContentIdentity") -> bool:
+    def matches(self, other: ContentIdentity) -> bool:
         return self.resolved and other.resolved and self.as_dict() == other.as_dict()
 
 
@@ -147,14 +148,14 @@ class CheckSpec:
     command: str = ""
 
     @classmethod
-    def for_module(cls, module: str, args: Iterable[str] = ()) -> "CheckSpec":
+    def for_module(cls, module: str, args: Iterable[str] = ()) -> CheckSpec:
         module = module.strip()
         if not module or module.startswith("-"):
             raise BroadCheckError("empty_module", "a module check needs a module name")
         return cls(_SHAPE_MODULE, module, tuple(args))
 
     @classmethod
-    def for_shell(cls, command: str) -> "CheckSpec":
+    def for_shell(cls, command: str) -> CheckSpec:
         if not command.strip():
             raise BroadCheckError("empty_command", "a broad check needs a command")
         return cls(_SHAPE_SHELL, command=command)
@@ -209,7 +210,7 @@ class CheckSpec:
         return ["bash", "-lc", self.command]
 
 
-def as_spec(check: "CheckSpec | str") -> CheckSpec:
+def as_spec(check: CheckSpec | str) -> CheckSpec:
     return check if isinstance(check, CheckSpec) else CheckSpec.for_shell(check)
 
 
@@ -225,7 +226,7 @@ def check_set_digest(check_set: Mapping[str, object]) -> str:
     return hashlib.sha256(canonical.encode("utf-8", "surrogateescape")).hexdigest()
 
 
-def receipt_path(root: Path, check: "CheckSpec | str") -> Path:
+def receipt_path(root: Path, check: CheckSpec | str) -> Path:
     return receipt_dir(root) / f"broad-{as_spec(check).digest[:16]}.json"
 
 
@@ -439,7 +440,7 @@ def _assert_ignored(root: Path, path: Path) -> None:
 
 
 def run_broad_check(
-    check: "CheckSpec | str",
+    check: CheckSpec | str,
     *,
     root: Path,
     stream: IO[str] | None = None,
@@ -492,7 +493,7 @@ def _run_and_record(
     incomplete_reason = ""
     # stdout and stderr share one pipe on purpose: two pipes would reorder a failing test's
     # traceback against the dots that located it, and the tail is exactly where that matters.
-    process = subprocess.Popen(  # noqa: S603 - the command is the worker's own documented check
+    process = subprocess.Popen(
         spec.argv(record),
         cwd=str(root),
         stdout=subprocess.PIPE,
@@ -623,7 +624,7 @@ class RunResult:
     incomplete_reason: str
 
     @classmethod
-    def observe(cls, exit_code: object, incomplete_reason: object) -> "RunResult | None":
+    def observe(cls, exit_code: object, incomplete_reason: object) -> RunResult | None:
         """Build the model from a raw process result, or refuse a result nothing could produce."""
         if not isinstance(exit_code, int) or isinstance(exit_code, bool):
             return None
@@ -670,7 +671,7 @@ class RunResult:
         }
 
     @classmethod
-    def restore(cls, payload: Mapping[str, object]) -> "RunResult | None":
+    def restore(cls, payload: Mapping[str, object]) -> RunResult | None:
         """Reconstruct the model from stored fields, and insist the store agrees with it exactly."""
         result = cls.observe(payload.get("exit_code"), payload.get("incomplete_reason"))
         if result is None:
@@ -819,7 +820,7 @@ def candidate_import_refusal(receipt: Mapping[str, object], root: Path) -> str:
     return ""
 
 
-def usable_receipt(root: Path, check: "CheckSpec | str") -> ReceiptLookup:
+def usable_receipt(root: Path, check: CheckSpec | str) -> ReceiptLookup:
     """Answer the only question a scrolled-away pane raises: has this run already happened here?
 
     Usable means the artifact is intact, the run finished, the check process imported this candidate

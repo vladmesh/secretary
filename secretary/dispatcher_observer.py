@@ -48,13 +48,22 @@ from enum import Enum
 from typing import Any
 
 from secretary._env import positive_int
-from secretary.dispatcher_state import now_rfc3339, request_token
+from secretary.codex_provider_events import CodexProviderSourceError
 from secretary.dispatcher_launch import merge_launch_head_run
+from secretary.dispatcher_state import now_rfc3339, request_token
 from secretary.dispatcher_tui import (
     COMPOSER_EMPTY,
     COMPOSER_UNKNOWN,
     READINESS_BUSY,
     delivery_readiness_state,
+)
+from secretary.dispatcher_types import HostError
+from secretary.dispatcher_watchdog import (
+    head_run_process_status,
+    heartbeat_is_live_match,
+    heartbeat_is_mismatch,
+    initial_output_stall_seconds,
+    pid_file_path,
 )
 from secretary.dispatcher_worker_lifecycle import (
     CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS,
@@ -62,15 +71,6 @@ from secretary.dispatcher_worker_lifecycle import (
     WorkerContinuationLiveness,
     head_run_binding,
 )
-from secretary.dispatcher_watchdog import (
-    heartbeat_is_live_match,
-    heartbeat_is_mismatch,
-    head_run_process_status,
-    initial_output_stall_seconds,
-    pid_file_path,
-)
-from secretary.dispatcher_types import HostError
-from secretary.codex_provider_events import CodexProviderSourceError
 from secretary.role_env import observer_binding
 from secretary.role_skills import skill_delivery
 from secretary.sprint_observer import (
@@ -263,7 +263,7 @@ class ObserverDelivery:
         }
 
     @classmethod
-    def from_json(cls, payload: Any) -> "ObserverDelivery":
+    def from_json(cls, payload: Any) -> ObserverDelivery:
         if not isinstance(payload, dict):
             return cls()
         try:
@@ -404,7 +404,7 @@ class ObserverRecord:
         }
 
     @classmethod
-    def from_json(cls, payload: dict[str, Any]) -> "ObserverRecord":
+    def from_json(cls, payload: dict[str, Any]) -> ObserverRecord:
         run = payload.get("run")
         delivery = ObserverDelivery.from_json(payload.get("delivery"))
         return cls(

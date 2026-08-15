@@ -18,12 +18,16 @@ from secretary.dispatcher_pause import ProductionPause
 from secretary.dispatcher_review import command_terminal_status
 from secretary.dispatcher_state import DispatcherRecord
 from secretary.dispatcher_types import HostError
-from secretary.host import CollectResult, FixtureHostSource, LiveHostSource, build_doctor_expectations
+from secretary.host import (
+    CollectResult,
+    FixtureHostSource,
+    LiveHostSource,
+    build_doctor_expectations,
+)
 from secretary.host_apply import resolve_installed_packaged
 from secretary.secret_store import store_health
 from secretary.sprints import SprintReader, budget_thresholds
 from secretary.tasks import KanboardClient, TaskError
-
 
 STATUS_SCHEMA_VERSION = 1
 

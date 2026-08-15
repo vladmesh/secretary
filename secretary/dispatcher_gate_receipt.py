@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Iterable, Mapping
 
 from secretary.dispatcher_helpers import safe_one_line
 

@@ -7,7 +7,6 @@ from pathlib import Path
 
 from .paths import PRODUCT_DIRNAME, configured_product_root
 
-
 SECRETARY_REPO_ENV = "TA_SECRETARY_REPO"
 # The same fallback written as a shell expression: the prefixes below are rendered into card text
 # and run by a head in its own shell, so the home has to be the one that head runs as rather than

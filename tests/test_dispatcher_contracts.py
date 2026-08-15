@@ -32,35 +32,41 @@ from unittest import mock
 
 from secretary import dispatcher as dispatcher_module
 from secretary import (
+    dispatcher_launcher,
     dispatcher_observer,
     dispatcher_production,
     dispatcher_review,
+    upgrade,
+)
+from secretary import role_env as head_role_env
+from secretary import (
     tasks as tasks_module,
 )
+from secretary.board_transport import ensure as ensure_board_transport
 from secretary.dispatcher import CommandHostRuntime, DispatcherRuntime, InstanceCatalog
 from secretary.dispatcher_gate import GateResult
-from secretary import dispatcher_launcher
-from secretary.dispatcher_launcher import HeadLaunchError
+from secretary.dispatcher_state import DispatcherRecord
+from secretary.head_registry import (
+    canonical_heads,
+    installed_heads,
+    materialize_snapshot,
+    record_source,
+    snapshot_header,
+)
+from secretary.host import SHIPPED_PACKAGING_ROOT, SystemdLayout, render_systemd_unit
+from secretary.host_apply import resolve_packaged
+from secretary.role_env import observer_binding
+from secretary.tasks import KanboardClient
+from tests.fakes.dispatcher import FakeCatalog, FakeHost, FakeKanboard
+from tests.fanout_fixtures import accepted_transport_run
+from triggered_agents.agents.pipeline import heads
+from triggered_agents.runtime import dispatch, role_env
 from triggered_agents.runtime.head import (
     RUNTIME_ROLE_ENV,
     HeadCommandError,
     render_head_command,
     wrap_role_command,
 )
-from secretary.role_env import observer_binding
-from secretary import role_env as head_role_env
-from secretary.dispatcher_state import DispatcherRecord
-from secretary import upgrade
-from secretary.head_registry import canonical_heads, installed_heads, materialize_snapshot, record_source, snapshot_header
-from secretary.host import SHIPPED_PACKAGING_ROOT, SystemdLayout, render_systemd_unit
-from secretary.host_apply import resolve_packaged
-from triggered_agents.agents.pipeline import heads
-from triggered_agents.runtime import dispatch, role_env
-from secretary.tasks import KanboardClient
-from secretary.board_transport import ensure as ensure_board_transport
-
-from tests.fakes.dispatcher import FakeCatalog, FakeHost, FakeKanboard
-from tests.fanout_fixtures import accepted_transport_run
 
 # Modules that reach through a runtime into the host/catalog collaborators.
 _RUNTIME_MODULES = (
@@ -1043,7 +1049,8 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
     def test_the_preflight_is_shared_with_the_triggered_agents_launcher(self) -> None:
         """One implementation reachable from both sides, and the dependency direction that forces
         where it lives: `triggered_agents` may not import `secretary` back."""
-        from triggered_agents.runtime import codex_preflight, dispatch as ta_dispatch
+        from triggered_agents.runtime import codex_preflight
+        from triggered_agents.runtime import dispatch as ta_dispatch
 
         self.assertIs(dispatcher_launcher._preflight_codex_workspace,
                       codex_preflight.ensure_codex_workspace_trusted)

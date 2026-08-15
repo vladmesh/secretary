@@ -24,7 +24,6 @@ capped before logging so telemetry stays useful without storing secrets or whole
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import os
 import shlex
@@ -32,6 +31,7 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 
 from ...runtime.redact import redact
@@ -367,7 +367,7 @@ def probe_openrouter_result() -> ProbeResult:
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
     )
     try:
-        with urllib.request.urlopen(req, timeout=PROBE_TIMEOUT_S) as resp:  # noqa: S310 (fixed host)
+        with urllib.request.urlopen(req, timeout=PROBE_TIMEOUT_S) as resp:
             status = getattr(resp, "status", None)
             if status is not None and 200 <= status < 300:
                 return ProbeResult(True, "builtin:openrouter", command=command)

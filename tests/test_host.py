@@ -5,36 +5,36 @@ import hashlib
 import io
 import json
 import os
-from types import SimpleNamespace
 import unittest
 import unittest.mock
 from pathlib import Path
+from types import SimpleNamespace
 
-import secretary.cli as cli
-import secretary.host_commands as host_commands
+from secretary import cli, host_commands
 from secretary.cli import main
+from secretary.config import validate_instance
 from secretary.host import (
-    CollectResult,
     SHIPPED_PACKAGING_ROOT,
+    CollectResult,
     Expectations,
     FixtureHostSource,
     HostInventory,
     LiveHostSource,
-    _CmdResult as CmdResult,
-    build_expectations,
+    SystemdLayout,
     build_doctor_expectations,
+    build_expectations,
     build_plan,
     inventory,
-    plan_input_errors,
-    plan_changes,
-    SystemdLayout,
     load_packaged_units,
     manifest_text,
+    plan_changes,
+    plan_input_errors,
+)
+from secretary.host import (
+    _CmdResult as CmdResult,
 )
 from secretary.host_apply import resolve_packaged, resolve_systemd_layout
-from secretary.config import validate_instance
 from tests.orca_fixtures import legacy_orca_runtime
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 # The units this checkout ships. A plan or a doctor run reads the checkout its host is configured

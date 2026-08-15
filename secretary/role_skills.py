@@ -29,7 +29,6 @@ from typing import Any
 from secretary.onboarding import DEFAULT_INSTANCE
 from triggered_agents.runtime.paths import configured_product_root
 
-
 ROOT = Path(__file__).resolve().parents[1]
 # The manifest of the checkout this module was imported from. It is what the product ships and what
 # tests about the shipped canon read, and it is deliberately *not* the fallback any caller lands on:

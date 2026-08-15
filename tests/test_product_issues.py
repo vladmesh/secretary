@@ -9,10 +9,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.cli import main
 from secretary.board.events import BoardEventCanon
 from secretary.board.kanboard import KanboardBoardHost
 from secretary.board.transitions import BoardProtocolError
+from secretary.cli import main
 from secretary.product_issues import ProductIssueStore
 from secretary.tasks import TaskAudit, TaskError, TaskWriter
 from tests.fakes.tasks import WriteKanboard

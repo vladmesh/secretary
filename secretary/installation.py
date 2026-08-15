@@ -24,29 +24,44 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterator
 
-from secretary._fsutil import publish_component_entries, publish_state_atomic, write_json, write_text_atomic
+from secretary import _proc, state_repo
+from secretary._fsutil import (
+    publish_component_entries,
+    publish_state_atomic,
+    write_json,
+    write_text_atomic,
+)
+from secretary.automations import OrcaAutomationClient, workspaces_root
 from secretary.board_transport import (
     BoardTransport,
     BoardTransportError,
     ensure_from_runtime_values,
     transport_path,
 )
-from secretary.runtime_env import RuntimeEnvError, RuntimeEnvMissing, instance_runtime_env_path, read_runtime_env
-from secretary.automations import OrcaAutomationClient, workspaces_root
 from secretary.config import validate_instance
 from secretary.data import init_layout, manifest_for
-from secretary.host_apply import LiveOrcaRegistrar, SystemdUnitInstaller, resolve_runtime_owner
+from secretary.host_apply import (
+    LiveOrcaRegistrar,
+    SystemdUnitInstaller,
+    resolve_runtime_owner,
+)
 from secretary.restore import (
     RestoreError,
     import_normalized_board,
     mark_reconcile_applied,
     rebuild_memory_index,
     restore_findings,
+)
+from secretary.runtime_env import (
+    RuntimeEnvError,
+    RuntimeEnvMissing,
+    instance_runtime_env_path,
+    read_runtime_env,
 )
 from secretary.secret_recover import SecretRecovery, recover_secrets
 from secretary.secret_store import (
@@ -55,7 +70,6 @@ from secretary.secret_store import (
     key_path,
     normalize_phrase,
 )
-from secretary import _proc, state_repo
 from secretary.state_repo import StateRepoError
 from secretary.tasks import KanboardClient, TaskError, TaskReader
 from secretary.upgrade import (
@@ -68,9 +82,8 @@ from secretary.upgrade import (
     run_steps,
     step_host,
 )
-from triggered_agents.runtime.shared_state import resolve_pipeline_state_dir
 from triggered_agents.runtime.paths import PRODUCT_DIRNAME, PRODUCT_ENV
-
+from triggered_agents.runtime.shared_state import resolve_pipeline_state_dir
 
 CHECKPOINT_BOARD = ("cards.ndjson", "sprints.ndjson", "events.ndjson", "export.json")
 CHECKPOINT_RUNS = ("runs.ndjson", "claims.json", "watermarks.json", "export.json")

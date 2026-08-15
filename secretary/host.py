@@ -18,12 +18,13 @@ import os
 import stat
 import subprocess
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable
+from typing import Any
 
-from secretary.observer_root import observer_root_repo
 from secretary import _proc
+from secretary.observer_root import observer_root_repo
 from triggered_agents.runtime.paths import configured_product_root
 
 KINDS = ("projects", "units", "orca repos")
@@ -507,8 +508,7 @@ def _project_name(binding: dict[str, Any]) -> str:
     repo = binding.get("repo")
     if isinstance(repo, str) and "/" in repo:
         name = PurePosixPath(repo).name
-        if name.endswith(".git"):
-            name = name[: -len(".git")]
+        name = name.removesuffix(".git")
         if name:
             return name
     identifier = binding.get("id")

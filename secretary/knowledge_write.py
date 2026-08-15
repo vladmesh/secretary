@@ -17,10 +17,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from secretary._fsutil import write_text_atomic as _write_text_atomic
 from secretary import state_repo
+from secretary._fsutil import write_text_atomic as _write_text_atomic
 from secretary.state_repo import KNOWLEDGE_PATHSPEC
-
 from triggered_agents.runtime.redact import redact
 
 

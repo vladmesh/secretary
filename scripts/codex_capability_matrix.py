@@ -21,13 +21,13 @@ import datetime as dt
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import shutil
 import subprocess
 import tempfile
-from typing import Any, Iterable
-
+from collections.abc import Iterable
+from pathlib import Path
+from typing import Any
 
 MODEL = "gpt-5.6-terra"
 PROMPT = (

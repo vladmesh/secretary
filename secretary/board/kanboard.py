@@ -10,17 +10,44 @@ from datetime import UTC, datetime
 from typing import Any
 
 from secretary.board.card_transitions import card_transition
-from secretary.board.events import BoardEventCanon, BoardEventPending, MutationEventTransaction, render_marker_comment
-from secretary.board.host import Create, MarkerComment, MutationResult, Replace, SprintSupplement, TransitionRequest
+from secretary.board.events import (
+    BoardEventCanon,
+    BoardEventPending,
+    MutationEventTransaction,
+    render_marker_comment,
+)
+from secretary.board.host import (
+    Create,
+    MarkerComment,
+    MutationResult,
+    Replace,
+    SprintSupplement,
+    TransitionRequest,
+)
 from secretary.board.models import (
-    BoardEntity, Card, CardState, EntityKind, Event, EventKind, Issue, IssueState, Product,
-    ProductState, RelatedRefs, Sprint, SprintState,
+    BoardEntity,
+    Card,
+    CardState,
+    EntityKind,
+    Event,
+    EventKind,
+    Issue,
+    IssueState,
+    Product,
+    ProductState,
+    RelatedRefs,
+    Sprint,
+    SprintState,
 )
 from secretary.board.transitions import BoardProtocolError, transition, transition_for
 from secretary.product_issues import ProductIssueStore, product_swimlane_id
 from secretary.sprints import SprintReader
 from secretary.tasks import (
-    KanboardClient, TaskReader, _positive_int, _target_column_id, all_project_cards,
+    KanboardClient,
+    TaskReader,
+    _positive_int,
+    _target_column_id,
+    all_project_cards,
     project_card_by_reference,
 )
 

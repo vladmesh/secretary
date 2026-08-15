@@ -13,8 +13,8 @@ configured a path keeps it.
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Mapping
 
 PRODUCT_ENV = "TA_SECRETARY_REPO"
 INSTANCE_DIRNAME = "secretary-instance"

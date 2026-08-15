@@ -23,8 +23,8 @@ bounced back to a worker over a colleague's name.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 # A git trailer, as `git interpret-trailers` writes it and as every runtime here emits it. Matched
 # per line and case-insensitively: `Co-authored-by`, `CO-AUTHORED-BY` and a leading-space variant

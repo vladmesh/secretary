@@ -11,24 +11,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any
 
 from triggered_agents.runtime.codex_preflight import (
-    CodexFanoutPolicyError,
-    CodexProviderEventRecorder,
     EVENT_CHILD_THREAD_EDGE,
     EVENT_COLLABORATION_CALL,
     EVENT_UNKNOWN_THREAD_EDGE,
     EVENT_UNPARSEABLE_PROVIDER_EVENT,
     FANOUT_TERMINAL_UNKNOWN,
+    CodexFanoutPolicyError,
+    CodexProviderEventRecorder,
     codex_provider_source_descriptor,
     enforce_provider_event,
 )
 from triggered_agents.runtime.head import HeadRun
-
 
 SOURCE_VERSION = 1
 SOURCE_KIND = "codex_session_event_jsonl"
@@ -552,4 +552,4 @@ def _collaboration_shaped(item_type: str) -> bool:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")

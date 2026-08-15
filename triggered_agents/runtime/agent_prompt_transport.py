@@ -19,9 +19,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .pane_host import PaneHost, pane_host as resolve_pane_host
+from .pane_host import PaneHost
+from .pane_host import pane_host as resolve_pane_host
 from .tui_delivery_types import RunJson
-
 
 AGENT_PROMPT_TRANSPORT_VERSION = "agent-prompt-v2"
 # ``orca terminal send --text`` receives the body as one argv element.  Linux restricts one

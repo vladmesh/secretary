@@ -33,7 +33,7 @@ if TYPE_CHECKING:  # pragma: no cover - the registry is data this module is hand
 # that imported it back at import time would close the loop.
 
 
-def _load_registry() -> "Registry":
+def _load_registry() -> Registry:
     from ...agents.pipeline.heads import load_registry
 
     return load_registry()
@@ -102,7 +102,7 @@ class HeadSpec:
         )
 
 
-def load_head_specs(registry: "Registry | None" = None) -> dict[str, HeadSpec]:
+def load_head_specs(registry: Registry | None = None) -> dict[str, HeadSpec]:
     """Every profile of the selected registry as a `HeadSpec`, keyed by profile id.
 
     All of them, not the worker/reviewer subset: every role is launched, nudged and stopped by the
@@ -113,7 +113,7 @@ def load_head_specs(registry: "Registry | None" = None) -> dict[str, HeadSpec]:
     return {pid: HeadSpec.from_profile(pid, prof) for pid, prof in reg.profiles.items()}
 
 
-def head_spec(profile_id: str, registry: "Registry | None" = None) -> HeadSpec:
+def head_spec(profile_id: str, registry: Registry | None = None) -> HeadSpec:
     """One head of the selected registry, resolved through its compatibility ids."""
     reg = registry if registry is not None else _load_registry()
     resolved = reg.resolve(profile_id)

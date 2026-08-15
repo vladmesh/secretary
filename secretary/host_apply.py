@@ -25,28 +25,29 @@ import json
 import pwd
 import subprocess
 from abc import ABC, abstractmethod
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
-from secretary._fsutil import directory_lock, write_text_atomic
 from secretary import _proc
+from secretary._fsutil import directory_lock, write_text_atomic
+from secretary.head_registry import pinned_product_root
 from secretary.host import (
     HostInventory,
     PackagedUnit,
     PlanChange,
     PlannedResource,
+    SystemdLayout,
     build_plan,
     default_packaging_root,
     foreign_units,
     load_packaged_units,
-    SystemdLayout,
     manifest_text,
     packaging_root,
     plan_changes,
     plan_input_errors,
 )
-from secretary.head_registry import pinned_product_root
 
 SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
 

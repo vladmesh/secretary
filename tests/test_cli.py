@@ -8,12 +8,10 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
-from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
 from secretary.cli import build_parser, main
-
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_INSTANCE = REPO_ROOT / "examples" / "instance"

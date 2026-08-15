@@ -2,25 +2,25 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
-import hashlib
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from triggered_agents.runtime.codex_preflight import CODEX_HOME_DEFAULT
-from triggered_agents.runtime.claude_sessions import (
-    claude_project_dir_name,
-    claude_session_paths,
-)
-from triggered_agents.runtime.head import HeadRun
 from secretary.dispatcher_worker_lifecycle import (
     ContinuationProviderCondition,
     head_run_binding,
 )
+from triggered_agents.runtime.claude_sessions import (
+    claude_project_dir_name,
+    claude_session_paths,
+)
+from triggered_agents.runtime.codex_preflight import CODEX_HOME_DEFAULT
+from triggered_agents.runtime.head import HeadRun
 from triggered_agents.runtime.pane_host import OrcaSessionHost, PaneHost
 from triggered_agents.runtime.tui_delivery import (
     COMPOSER_EMPTY,
@@ -31,8 +31,8 @@ from triggered_agents.runtime.tui_delivery import (
     READINESS_BUSY,
     READINESS_READY,
     READINESS_STALE_HANDLE,
-    READINESS_UNKNOWN,
     READINESS_UNAVAILABLE,
+    READINESS_UNKNOWN,
     STAGE_ACKNOWLEDGED,
     STAGE_ENTER_ACCEPTED,
     STAGE_PAYLOAD_WRITTEN,
@@ -60,8 +60,8 @@ __all__ = [
     "READINESS_BUSY",
     "READINESS_READY",
     "READINESS_STALE_HANDLE",
-    "READINESS_UNKNOWN",
     "READINESS_UNAVAILABLE",
+    "READINESS_UNKNOWN",
     "STAGE_ACKNOWLEDGED",
     "STAGE_ENTER_ACCEPTED",
     "STAGE_PAYLOAD_WRITTEN",
@@ -70,18 +70,18 @@ __all__ = [
     "DeliveryOutcome",
     "RunJson",
     "TuiDeliveryError",
+    "bind_claude_provider_progress_source",
     "claude_project_dir_name",
     "close_terminal_strict",
     "composer_fingerprint",
     "deliver_interactive_prompt",
-    "delivery_readiness_state",
     "deliver_tui_prompt",
+    "delivery_readiness_state",
     "latest_claude_user_turn_for",
-    "bind_claude_provider_progress_source",
-    "prepare_claude_provider_progress_source",
-    "provider_progress_for_run",
     "latest_user_turn_for",
     "output_cursor",
+    "prepare_claude_provider_progress_source",
+    "provider_progress_for_run",
     "read_terminal_text",
     "strip_ansi",
     "terminal_readiness",

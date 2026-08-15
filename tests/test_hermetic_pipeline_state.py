@@ -25,15 +25,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import tests
+from tests.fakes.triggered_dispatch import FakeSessionHost
 from triggered_agents.agents.pipeline import pause as pipeline_pause
 from triggered_agents.agents.pipeline import state as pipeline_state
-from tests.fakes.triggered_dispatch import FakeSessionHost
-from triggered_agents.runtime import dispatch
-from triggered_agents.runtime.pane_host import Pane
-from triggered_agents.runtime import shared_state
+from triggered_agents.runtime import dispatch, shared_state
 from triggered_agents.runtime import state as runtime_state
-
-import tests
+from triggered_agents.runtime.pane_host import Pane
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 

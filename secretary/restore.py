@@ -12,12 +12,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from secretary import _proc, state_repo
+from secretary._fsutil import file_lock, write_text_atomic
 from secretary.backup_policy import (
     ARCHIVE_ROOT,
     BACKUP_KINDS,
     BACKUP_VERSION,
-    BackupPolicy,
     CORE_POLICY,
+    BackupPolicy,
     is_memory_journal_git_runtime_entry,
     policy_for,
     restore_plan_components,
@@ -25,8 +27,13 @@ from secretary.backup_policy import (
 )
 from secretary.backup_verify import _verify_plain_tar
 from secretary.config import ConfigError, load_config, validate_instance
-from secretary import _proc, state_repo
 from secretary.data import init_layout
+from secretary.product_issues import (
+    ProductIssueValidationError,
+    ensure_swimlane,
+    registered_projects,
+    validate_product_issue_records,
+)
 from secretary.sprint_observer import (
     ObserverMetadataError,
     check_observer_profile,
@@ -35,7 +42,6 @@ from secretary.sprint_observer import (
     is_executable,
     parse_observer,
 )
-from secretary._fsutil import file_lock, write_text_atomic
 from secretary.tasks import (
     _STATE_BY_COLUMN,
     KanboardClient,
@@ -43,16 +49,10 @@ from secretary.tasks import (
     TaskError,
     TaskReader,
     TaskWriter,
-    _task_is_active,
     _matching_swimlane,
     _positive_int,
+    _task_is_active,
     all_project_cards,
-)
-from secretary.product_issues import (
-    ProductIssueValidationError,
-    ensure_swimlane,
-    registered_projects,
-    validate_product_issue_records,
 )
 from triggered_agents.runtime.head import CODEX_LAUNCH_MODES
 
@@ -342,7 +342,10 @@ def _check_restored_admission(sprints: list[dict[str, Any]], instance: Path | No
     a reservation, a repository tree or an observer head would otherwise be a way to arrive at
     exactly the pair admission exists to refuse. The limit is the target installation's.
     """
-    from secretary.sprints import instance_open_sprint_limit, open_sprint_admission_error
+    from secretary.sprints import (
+        instance_open_sprint_limit,
+        open_sprint_admission_error,
+    )
 
     rows = [
         {

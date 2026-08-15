@@ -20,17 +20,18 @@ from secretary.dispatcher_observer import (
 )
 from secretary.dispatcher_observer_fence import (
     REASON_DEAD,
-    REASON_NOT_ADOPTED,
     REASON_NO_RECORD,
+    REASON_NOT_ADOPTED,
     fenced_task,
     observer_fence,
 )
+from secretary.dispatcher_production import _reconcile_production
 from secretary.sprint_observer import (
-    ObserverMetadataError,
     REASON_HISTORICAL,
     REASON_MALFORMED,
     REASON_MISSING,
     REASON_UNKNOWN_PROFILE,
+    ObserverMetadataError,
     encode_observer,
     executable_observer,
     head_choice,
@@ -40,10 +41,7 @@ from secretary.sprint_observer import (
     observer_choice,
     parse_observer,
 )
-from secretary.dispatcher_production import _reconcile_production
-from secretary.sprints import SprintWriter
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
-
 from tests.fakes.dispatcher import (
     FakeCatalog,
     FakeHost,

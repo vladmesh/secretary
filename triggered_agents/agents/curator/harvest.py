@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from ...runtime.redact import redact
@@ -112,7 +112,7 @@ def _iso_ts(ts) -> str | None:
     if not ts:
         return None
     try:
-        return datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat()
+        return datetime.fromtimestamp(float(ts), tz=UTC).isoformat()
     except (TypeError, ValueError, OSError):
         return None
 

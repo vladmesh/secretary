@@ -13,9 +13,8 @@ import os
 import subprocess
 import sys
 import tempfile
-from unittest import mock
 from pathlib import Path
-
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -97,8 +96,9 @@ def main() -> int:
     sys.path.insert(0, str(ROOT))
     try:
         import numpy as np
+
         from secretary import memory_service as server
-        from secretary import state_repo
+        from secretary import restore_commands, state_repo
         from secretary.cli import main as secretary_main
         from secretary.config import validate_instance
         from secretary.data import export_memory, normalize_board_card
@@ -110,7 +110,6 @@ def main() -> int:
             restore_findings,
             restore_state,
         )
-        import secretary.restore_commands as restore_commands
     except ImportError as error:
         print(f"secretary memory restore e2e: dependency unavailable: {error}", file=sys.stderr)
         return 2

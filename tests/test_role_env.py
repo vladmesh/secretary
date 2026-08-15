@@ -10,8 +10,7 @@ from unittest import mock
 
 from secretary import role_env as secretary_role_env
 from secretary.board_transport import ensure as ensure_board_transport
-from triggered_agents.runtime import role_env
-from triggered_agents.runtime import kanboard
+from triggered_agents.runtime import kanboard, role_env
 
 
 class RuntimeEnvPathTests(unittest.TestCase):

@@ -11,11 +11,11 @@ from typing import Any
 
 from secretary.checkpoint import CheckpointResult
 from secretary.dispatcher import (
+    STOPPED_BY_DISPATCHER,
+    STOPPED_BY_REVIEW_FREEZE,
     CommandHostRuntime,
     HostError,
     LaunchedHead,
-    STOPPED_BY_DISPATCHER,
-    STOPPED_BY_REVIEW_FREEZE,
     _continuation_note,
     _report_nudge_prompt,
 )
@@ -340,7 +340,11 @@ class TwoOpenSprintAdmission:
 
     def admit_two_open_sprints(self, *, observer: dict, second_observer: dict | None = None):
         from secretary.sprint_observer import none_choice
-        from secretary.sprints import SprintReader, SprintWriter, instance_open_sprint_limit
+        from secretary.sprints import (
+            SprintReader,
+            SprintWriter,
+            instance_open_sprint_limit,
+        )
 
         instance = self.sprint_instance()
         (instance / "projects").mkdir(parents=True, exist_ok=True)
@@ -591,7 +595,7 @@ class FakeCatalog:
 
 
 class FakeHost:
-    def __init__(self, root: Path, catalog: "FakeCatalog | None" = None) -> None:
+    def __init__(self, root: Path, catalog: FakeCatalog | None = None) -> None:
         self.root = root
         # The real host snapshots the head at bring-up and hands the record back; the fake goes
         # through the same catalog so the routing journal sees real configurations here too.

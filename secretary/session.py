@@ -14,14 +14,13 @@ import argparse
 import os
 import sys
 
-from secretary.role_env import load_env_file
 from secretary.board_transport import (
     BoardTransportError,
     resolve_for_environ,
 )
+from secretary.role_env import load_env_file
 from triggered_agents.agents.pipeline import heads as head_registry
 from triggered_agents.runtime.head import HeadCommandError, render_head_command
-
 
 # The operator names a head the way a human thinks about it ("claude", "codex", "hermes"). Map a
 # bare adapter name to a concrete default profile. Any real heads.toml profile id is also accepted

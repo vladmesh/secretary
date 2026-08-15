@@ -15,7 +15,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from secretary import installation
-from secretary.runtime_env import RuntimeEnvError
+from secretary.board_transport import DEFAULT_TRANSPORT
 from secretary.cli import main
 from secretary.data import export_runs
 from secretary.installation import (
@@ -31,9 +31,9 @@ from secretary.installation import (
     provision_codex_home,
     provision_project_checkouts,
 )
-from secretary.board_transport import DEFAULT_TRANSPORT
-from secretary.upgrade import UpgradeResult, step_host
 from secretary.routing_journal import attempts
+from secretary.runtime_env import RuntimeEnvError
+from secretary.upgrade import UpgradeResult, step_host
 
 # The checkout these tests run out of, which is the one they have. Nothing resolves it for them:
 # an install materializes the configured checkout or `~/secretary`, and neither exists on a machine

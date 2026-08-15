@@ -23,35 +23,34 @@ from typing import Any
 from unittest import mock
 
 from secretary import dispatcher as secretary_dispatcher
+from secretary._fsutil import file_lock
 from secretary.dispatcher import (
     CommandHostRuntime,
     DispatcherRuntime,
     LaunchedHead,
 )
-from triggered_agents.runtime.head import HeadCommand
-from triggered_agents.runtime.head.command import with_pid_heartbeat
-from triggered_agents.runtime.head import operations as head_ops
-from triggered_agents.runtime.prompt_document import NUDGE_FILE_MODE, NUDGE_MAX_BYTES
-from secretary.dispatcher_tui import TuiDeliveryError, claude_project_dir_name, provider_progress_for_run
 from secretary.dispatcher_gate import GateResult
 from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_identity
 from secretary.dispatcher_launch import launch_intent_liveness
-from secretary._fsutil import file_lock
 from secretary.dispatcher_state import DispatcherRecord
-from tests.dispatcher_fixtures import ensure_attempt
-from tests.fanout_fixtures import accepted_transport_run
+from secretary.dispatcher_tui import (
+    TuiDeliveryError,
+    claude_project_dir_name,
+    provider_progress_for_run,
+)
 from secretary.dispatcher_types import HeadLaunchAborted, HeadPaneNotReady, HostError
 from secretary.dispatcher_watchdog import (
     head_process_status,
     initial_output_stall_seconds,
     pid_file_path,
 )
-from secretary.dispatcher_worker_lifecycle import WorkerContinuation, WorkerContinuationStage
+from secretary.dispatcher_worker_lifecycle import (
+    WorkerContinuation,
+    WorkerContinuationStage,
+)
 from secretary.routing_journal import attempts as routing_attempts
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
-
-from tests.observer_identity import bind_observer
-from tests.fakes.host import FakeSessionHost as HeadOperationFakeHost
+from tests.dispatcher_fixtures import ensure_attempt
 from tests.fakes.dispatcher import (
     FakeCatalog,
     FakeHost,
@@ -60,6 +59,13 @@ from tests.fakes.dispatcher import (
     _configure_production_shaped_codex_relaunch,
     _legacy_unbound_v1_run,
 )
+from tests.fakes.host import FakeSessionHost as HeadOperationFakeHost
+from tests.fanout_fixtures import accepted_transport_run
+from tests.observer_identity import bind_observer
+from triggered_agents.runtime.head import HeadCommand
+from triggered_agents.runtime.head import operations as head_ops
+from triggered_agents.runtime.head.command import with_pid_heartbeat
+from triggered_agents.runtime.prompt_document import NUDGE_FILE_MODE, NUDGE_MAX_BYTES
 
 REF = "secretary-510-pilot"
 # Above the default pid_max, so `kill(pid, 0)` raises and the heartbeat reads as a head that died.
@@ -782,9 +788,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.run_to_validate()
         self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
 
-        with self.state_dies_after("resume_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("resume_worker"), self.assertRaises(OSError):
+            self.tick()
 
         retained = self.record()
         assert retained is not None
@@ -803,9 +808,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.run_to_validate()
         self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
 
-        with self.state_dies_after("resume_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("resume_worker"), self.assertRaises(OSError):
+            self.tick()
 
         self.report_done()
         recovered = self.tick()
@@ -969,9 +973,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.run_to_validate()
         self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
 
-        with self.fail_the_red_move():
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.fail_the_red_move(), self.assertRaises(OSError):
+            self.tick()
 
         self.assert_red_intent_open_in_validate("gate")
         self.host.gate_results = [GateResult("green", "passed")]
@@ -989,9 +992,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.host.fail_resume_worker_reason = ""
         self.rework_after_red_review()
 
-        with self.fail_the_red_move():
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.fail_the_red_move(), self.assertRaises(OSError):
+            self.tick()
 
         self.assert_red_intent_open_in_validate("review")
 
@@ -1012,9 +1014,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.run_to_validate()
         self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
 
-        with self.fail_the_red_move():
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.fail_the_red_move(), self.assertRaises(OSError):
+            self.tick()
 
         self.assert_red_intent_open_in_validate("gate")
         self.assertEqual(self.host.calls.count("restart_worker"), 0)
@@ -1031,9 +1032,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.without_a_retained_session()
         self.rework_after_red_review()
 
-        with self.fail_the_red_move():
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.fail_the_red_move(), self.assertRaises(OSError):
+            self.tick()
 
         self.assert_red_intent_open_in_validate("review")
         self.assertEqual(self.host.calls.count("restart_worker"), 0)
@@ -1066,9 +1066,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.run_to_validate()
         self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
 
-        with self.die_after_red_move():
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.die_after_red_move(), self.assertRaises(OSError):
+            self.tick()
 
         self.assertEqual(self.reader.show(REF)["state"], "in_progress")
         retained = self.record()
@@ -1094,9 +1093,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.tick()  # the verdict parks the card
         self.decide("rework")
 
-        with self.die_after_red_move():
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.die_after_red_move(), self.assertRaises(OSError):
+            self.tick()
 
         retained = self.record()
         assert retained is not None
@@ -1125,9 +1123,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.run_to_validate()
         self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
 
-        with self.die_before_finishing_the_round():
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.die_before_finishing_the_round(), self.assertRaises(OSError):
+            self.tick()
 
         confirmed = self.record()
         assert confirmed is not None
@@ -1151,9 +1148,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.host.fail_resume_worker_reason = ""
         self.rework_after_red_review()
 
-        with self.die_before_finishing_the_round():
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.die_before_finishing_the_round(), self.assertRaises(OSError):
+            self.tick()
 
         confirmed = self.record()
         assert confirmed is not None
@@ -1281,9 +1277,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.run_to_validate()
         self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
 
-        with self.die_after_red_move():
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.die_after_red_move(), self.assertRaises(OSError):
+            self.tick()
 
         self.assertEqual(self.reader.show(REF)["state"], "in_progress")
         stranded = self.record()
@@ -1305,9 +1300,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.without_a_retained_session()
         self.rework_after_red_review()
 
-        with self.die_after_red_move():
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.die_after_red_move(), self.assertRaises(OSError):
+            self.tick()
 
         stranded = self.record()
         assert stranded is not None
@@ -1462,9 +1456,8 @@ class LaunchIntentTests(unittest.TestCase):
     # worker: a journal that refuses instead of a state plane ------------------
 
     def test_an_audit_that_refuses_the_claim_launches_no_worker_at_all(self) -> None:
-        with self.refuse_audit("-claim-"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.refuse_audit("-claim-"), self.assertRaises(OSError):
+            self.tick()
 
         self.assertEqual(self.host.prepared, [], "no head may exist that no record can find")
         self.assertEqual(self.stored_intent(), {})
@@ -1557,9 +1550,8 @@ class LaunchIntentTests(unittest.TestCase):
 
     def test_a_review_launch_that_outlived_its_tick_is_adopted_not_doubled(self) -> None:
         self.run_to_validate()
-        with self.state_dies_after("start_review"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("start_review"), self.assertRaises(OSError):
+            self.tick()
 
         self.assertEqual(self.host.reviews, [REF])
         self.assertEqual(self.stored_intent()["role"], "review")
@@ -1583,9 +1575,8 @@ class LaunchIntentTests(unittest.TestCase):
     def test_a_review_intent_whose_head_died_starts_exactly_one_replacement(self) -> None:
         self.run_to_validate()
         self.host.head_pid = DEAD_PID
-        with self.state_dies_after("start_review"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("start_review"), self.assertRaises(OSError):
+            self.tick()
 
         self.host.head_pid = os.getpid()
         # The reviewer of the lost tick is gone, so the card is back to needing one.
@@ -1598,9 +1589,8 @@ class LaunchIntentTests(unittest.TestCase):
 
     def test_a_live_foreign_reviewer_heartbeat_is_fenced_without_a_stop_or_replacement(self) -> None:
         self.run_to_validate()
-        with self.state_dies_after("start_review"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("start_review"), self.assertRaises(OSError):
+            self.tick()
         self.replace_intent_heartbeat_run()
 
         fenced = self.tick()
@@ -1612,9 +1602,8 @@ class LaunchIntentTests(unittest.TestCase):
     def test_a_review_intent_without_a_heartbeat_waits_out_its_grace_window(self) -> None:
         self.run_to_validate()
         self.host.head_pid = None
-        with self.state_dies_after("start_review"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("start_review"), self.assertRaises(OSError):
+            self.tick()
 
         pending = self.tick()
 
@@ -1627,9 +1616,8 @@ class LaunchIntentTests(unittest.TestCase):
         """The launch request comment is the reviewer's own pre-launch journal write."""
         self.run_to_validate()
 
-        with self.refuse_audit("start-intent"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.refuse_audit("start-intent"), self.assertRaises(OSError):
+            self.tick()
 
         self.assertEqual(self.host.reviews, [])
         self.assertEqual(self.stored_intent(), {})
@@ -1642,9 +1630,8 @@ class LaunchIntentTests(unittest.TestCase):
     def test_an_audit_that_refuses_after_the_review_launch_adopts_that_reviewer(self) -> None:
         """The reviewer's routing write is before the record's save, so the intent is what survives."""
         self.run_to_validate()
-        with self.audit_dies_after("start_review"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.audit_dies_after("start_review"), self.assertRaises(OSError):
+            self.tick()
 
         self.assertEqual(self.host.reviews, [REF])
         self.assertEqual(self.stored_intent()["role"], "review")
@@ -1700,9 +1687,8 @@ class LaunchIntentTests(unittest.TestCase):
 
     def test_an_adopted_reviewer_is_recorded_as_the_head_that_judged_the_round(self) -> None:
         self.run_to_validate()
-        with self.state_dies_after("start_review"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("start_review"), self.assertRaises(OSError):
+            self.tick()
 
         self.assertEqual(self.tick()["action"], "review-launch-adopted")
 
@@ -1759,9 +1745,8 @@ class LaunchIntentTests(unittest.TestCase):
 
     def adopt_reviewer(self) -> None:
         self.run_to_validate()
-        with self.state_dies_after("start_review"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("start_review"), self.assertRaises(OSError):
+            self.tick()
         self.assertEqual(self.tick()["action"], "review-launch-adopted")
         record = self.record()
         assert record is not None
@@ -1832,9 +1817,8 @@ class LaunchIntentTests(unittest.TestCase):
         """
         self.run_to_validate()
         self.host.head_pid = None
-        with self.state_dies_after("start_review"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("start_review"), self.assertRaises(OSError):
+            self.tick()
         self.age_intent(initial_output_stall_seconds() + 60)
         self.host.calls.clear()
 
@@ -2780,9 +2764,8 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
         known, and the rejection removes it before it is raised."""
         self.created_record = {"repoId": "repo-other", "displayName": "card-1"}
 
-        with self.host_calls():
-            with self.assertRaises(HostError):
-                self.create(expected=self.created_path)
+        with self.host_calls(), self.assertRaises(HostError):
+            self.create(expected=self.created_path)
 
         self.assertNotIn(self.created_path, self.registered)
 
@@ -3121,10 +3104,9 @@ class HostLaunchContourTests(unittest.TestCase):
         answers = self.split_answers(HostError("orca rename failed"))
         answers["terminal close"] = HostError("tab_not_found")
 
-        with self.split_pid_file(None):
-            with self.run_json(answers):
-                with self.assertRaises(HeadLaunchAborted) as caught:
-                    self.split_worker()
+        with self.split_pid_file(None), self.run_json(answers):
+            with self.assertRaises(HeadLaunchAborted) as caught:
+                self.split_worker()
 
         self.assertEqual(caught.exception.handle, "term:review")
         self.assertEqual(caught.exception.workspace, str(self.data_dir))
@@ -3134,10 +3116,9 @@ class HostLaunchContourTests(unittest.TestCase):
         answers = self.split_answers(HostError("orca rename failed"))
         answers["terminal close"] = HostError("tab_not_found")
 
-        with self.split_pid_file(str(DEAD_PID)):
-            with self.run_json(answers):
-                with self.assertRaises(HostError) as caught:
-                    self.split_worker()
+        with self.split_pid_file(str(DEAD_PID)), self.run_json(answers):
+            with self.assertRaises(HostError) as caught:
+                self.split_worker()
 
         self.assertNotIsInstance(caught.exception, HeadLaunchAborted)
 
@@ -3800,9 +3781,8 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         self.tick()
         self.report_done()
         self.tick()
-        with self.state_dies_after("start_review"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("start_review"), self.assertRaises(OSError):
+            self.tick()
         self.assertEqual(self.host.reviews, [REF])
         self.assertEqual(self.stored_intent().get("role"), "review")
 

@@ -31,14 +31,15 @@ import ast
 import unittest
 from pathlib import Path
 
+from tests.fakes.host import FakeSessionHost
 from triggered_agents.runtime.head import (
     EXITED,
     FINISHING,
     SPAWNED,
     WORKING,
-    HeadRun,
     HeadDelivery,
     HeadNudgeFailed,
+    HeadRun,
     HeadSpawnAborted,
     HeadSpawnFailed,
     HeadSpec,
@@ -52,7 +53,6 @@ from triggered_agents.runtime.head import (
     stop,
 )
 from triggered_agents.runtime.head import operations as head_operations
-from tests.fakes.host import FakeSessionHost
 
 HEAD_PACKAGE = Path(head_operations.__file__).parent
 

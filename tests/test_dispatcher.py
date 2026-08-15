@@ -16,24 +16,25 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from secretary import dispatcher as dispatcher_module, role_env
-from secretary.board_transport import ensure as ensure_board_transport
-from secretary.board.models import Actor, EntityKind, Event, EventKind
+from secretary import dispatcher as dispatcher_module
+from secretary import role_env
 from secretary._fsutil import file_lock, try_file_lock
+from secretary.board.models import Actor, EntityKind, Event, EventKind
+from secretary.board_transport import ensure as ensure_board_transport
 from secretary.checkpoint import CheckpointPusher, CheckpointResult, CheckpointWriter
 from secretary.dispatcher import (
-    CommandHostRuntime,
-    DispatcherError,
-    DispatcherRuntime,
-    LaunchedHead,
-    HostError,
-    InstanceCatalog,
     STOPPED_BY_OPERATOR,
     STOPPED_BY_RECONCILIATION,
     STOPPED_BY_REPLACEMENT,
     STOPPED_BY_REVIEW_FREEZE,
     STOPPED_BY_REVIEW_VERDICT,
     STOPPED_BY_WATCHDOG,
+    CommandHostRuntime,
+    DispatcherError,
+    DispatcherRuntime,
+    HostError,
+    InstanceCatalog,
+    LaunchedHead,
     _body_file_path,
     _continuation_note,
     _gate_attestation_for_prompt,
@@ -48,6 +49,7 @@ from secretary.dispatcher_gate import (
     _backend_call,
     _pr_digest,
 )
+from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_identity
 from secretary.dispatcher_helpers import (
     RED_REVIEW_CEILING,
     _decision_record_line,
@@ -55,46 +57,29 @@ from secretary.dispatcher_helpers import (
     _task_doc_decision,
     red_review_count,
 )
-from secretary.dispatcher_heartbeat import heartbeat_identity, run_heartbeat_identity
-from secretary.dispatcher_observer import (
-    ObserverRecord,
-)
 from secretary.dispatcher_launcher import (
-    HeadLaunchError,
     claude_launch_model,
     ensure_claude_workspace_ready,
     ensure_codex_workspace_trusted,
 )
-from triggered_agents.runtime.head import (
-    render_head_command,
-    with_pid_heartbeat,
-    wrap_role_command,
-)
 from secretary.dispatcher_production import _budget_event_type
 from secretary.dispatcher_review import (
     recover_review_launch,
+)
+from secretary.dispatcher_review import (
     start_review as start_reviewer,
+)
+from secretary.dispatcher_state import (
+    DispatcherRecord,
+    now_rfc3339,
+)
+from secretary.dispatcher_state import (
+    attempt_request_id as _attempt_request_id,
 )
 from secretary.dispatcher_tui import (
     DELIVERY_CONFIRMED,
     TuiDeliveryError,
     provider_progress_for_run,
-)
-from triggered_agents.runtime.agent_prompt_transport import (
-    BRACKETED_PASTE_END,
-    BRACKETED_PASTE_START,
-)
-from triggered_agents.runtime.head import operations as head_ops
-from triggered_agents.runtime.prompt_document import (
-    NUDGE_FILE_MODE,
-    NUDGE_MAX_BYTES,
-    PromptDocumentError,
-)
-from triggered_agents.runtime.tui_delivery import TUI_IDLE_PROBE_TIMEOUT_MS
-from secretary.dispatcher_state import (
-    DispatcherRecord,
-    attempt_request_id as _attempt_request_id,
-    now_rfc3339,
 )
 from secretary.dispatcher_types import (
     GateTransportError,
@@ -102,21 +87,15 @@ from secretary.dispatcher_types import (
     HeadPaneNotReady,
     review_pane_label,
 )
-from secretary.head_registry import canonical_heads
-from secretary.routing_journal import (
-    attempts as routing_attempts,
-)
-from secretary.head_health import HeadReadiness
-from secretary.sprints import instance_open_sprint_limit
 from secretary.dispatcher_watchdog import (
     BRING_UP_DEFER_ATTEMPTS_DEFAULT,
     IDLE_STALL_DEFAULT,
     INITIAL_OUTPUT_STALL_DEFAULT,
     REVIEW_VERDICT_STALL_DEFAULT,
     WORKER_REPORT_STALL_DEFAULT,
+    bind_head_heartbeat,
     bring_up_defer_attempts,
     head_process_status,
-    bind_head_heartbeat,
     idle_stall_seconds,
     initial_output_stall_seconds,
     pid_file_path,
@@ -130,19 +109,48 @@ from secretary.dispatcher_worker_lifecycle import (
     ReportNudgeStage,
     WorkerContinuation,
     WorkerContinuationLiveness,
-    head_run_binding,
     WorkerContinuationStage,
     WorkerReportNudge,
+    head_run_binding,
 )
+from secretary.head_health import HeadReadiness
+from secretary.head_registry import canonical_heads
+from secretary.routing_journal import (
+    attempts as routing_attempts,
+)
+from secretary.sprints import instance_open_sprint_limit
 from secretary.task_commands import _read_body
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 from tests.dispatcher_fixtures import ensure_attempt
+from tests.fakes.dispatcher import (
+    FakeCatalog,
+    FakeCheckpoint,
+    FakeHost,
+    FakeKanboard,
+    FakePusher,
+    FakeSprints,
+    _configure_production_shaped_codex_relaunch,
+    _legacy_unbound_v1_run,
+)
 from tests.fanout_fixtures import accepted_transport_run
 from tests.observer_identity import bind_observer
-from tests.fakes.dispatcher import (
-    FakeCatalog, FakeCheckpoint, FakeHost, FakeKanboard, FakePusher, FakeSprints,
-    _configure_production_shaped_codex_relaunch, _legacy_unbound_v1_run,
+from triggered_agents.runtime.agent_prompt_transport import (
+    BRACKETED_PASTE_END,
+    BRACKETED_PASTE_START,
 )
+from triggered_agents.runtime.head import operations as head_ops
+from triggered_agents.runtime.head import (
+    render_head_command,
+    with_pid_heartbeat,
+    wrap_role_command,
+)
+from triggered_agents.runtime.prompt_document import (
+    NUDGE_FILE_MODE,
+    NUDGE_MAX_BYTES,
+    PromptDocumentError,
+)
+from triggered_agents.runtime.tui_delivery import TUI_IDLE_PROBE_TIMEOUT_MS
+
 
 class LegacyDispatcherRecordTests(unittest.TestCase):
     """A record from before the continuation was one object is refused, not read as empty."""
@@ -5739,8 +5747,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
     # failed", and the observer pulled it back out by hand both times.
     def _pane_not_ready(self, readiness: str = "blocked") -> HeadPaneNotReady:
         return HeadPaneNotReady(
-            f"the head pane was held in a dialog and never took its launch prompt: "
-            f'"blockedReason": "codex-update-prompt"',
+            "the head pane was held in a dialog and never took its launch prompt: "
+            '"blockedReason": "codex-update-prompt"',
             readiness=readiness,
             pane="term-head",
         )
@@ -6474,9 +6482,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         with mock.patch.object(
             self.runtime, "_deliver_red_continuation", side_effect=DispatcherDied
-        ):
-            with self.assertRaises(DispatcherDied):
-                self._park_and_decide("rework")
+        ), self.assertRaises(DispatcherDied):
+            self._park_and_decide("rework")
 
         crashed = self._pilot_record()
         self.assertEqual(crashed["worker_continuation"]["stage"], "red_transition_pending")
@@ -6804,9 +6811,8 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         with mock.patch.object(
             self.runtime, "_deliver_red_continuation", side_effect=DispatcherDied
-        ):
-            with self.assertRaises(DispatcherDied):
-                self._park_and_decide("rework", reason="add a live check")
+        ), self.assertRaises(DispatcherDied):
+            self._park_and_decide("rework", reason="add a live check")
 
         crashed = self._pilot_record()
         self.assertEqual(crashed["worker_continuation"]["stage"], "red_transition_pending")
@@ -8397,18 +8403,16 @@ class ReportPromptDeliveryTests(unittest.TestCase):
             lambda path, **kwargs: {
                 "known": True, "alive": True, "stopped": True, "state": "live-match"
             },
-        ):
-            with self.assertRaisesRegex(HostError, "suspended"):
-                self.host.prompt_worker_report(self.task, self.record)
+        ), self.assertRaisesRegex(HostError, "suspended"):
+            self.host.prompt_worker_report(self.task, self.record)
 
     def test_a_dead_head_is_refused(self) -> None:
         self.pid_file.write_text("1", encoding="utf-8")
         with mock.patch.object(
             dispatcher_module, "_head_process_status",
             lambda path, **kwargs: {"known": True, "alive": False},
-        ):
-            with self.assertRaisesRegex(HostError, "worker session exited"):
-                self.host.prompt_worker_report(self.task, self.record)
+        ), self.assertRaisesRegex(HostError, "worker session exited"):
+            self.host.prompt_worker_report(self.task, self.record)
 
     def test_a_delivery_the_pane_never_confirmed_reaches_the_caller(self) -> None:
         """An unconfirmed send is the caller's failure to act on, never a prompt to assume landed."""
@@ -10279,7 +10283,7 @@ def _build_gated_workspace(root: Path, base: str, branch: str) -> Path:
 
 
 class DispatcherGateTests(unittest.TestCase):
-    def _record(self, workspace: Path, *, wrote: "GithubGateHost | None" = None, number: int = 42):
+    def _record(self, workspace: Path, *, wrote: GithubGateHost | None = None, number: int = 42):
         """The durable record the gate is handed, with its PR-authorship field.
 
         Empty is the honest default and the state of every card the gate has not opened a pull
@@ -10657,7 +10661,7 @@ class DispatcherGateTests(unittest.TestCase):
     def _github_adapter(self) -> dict:
         return {"validation": {"ci": "github"}}
 
-    def _pr_calls(self, host: "GithubGateHost", verb: str) -> list:
+    def _pr_calls(self, host: GithubGateHost, verb: str) -> list:
         return [c for c in host.gh if c[1:3] == ["pr", verb]]
 
     def test_github_gate_opens_pr_when_absent_then_green(self) -> None:
@@ -12624,9 +12628,8 @@ class ReviewNudgeDeliveryTests(unittest.TestCase):
         with mock.patch.object(
             dispatcher_module, "_write_prompt_document",
             side_effect=PromptDocumentError("read-only artifacts directory"),
-        ):
-            with self.assertRaises(HostError) as caught:
-                host.start_review(self.task, self._record())
+        ), self.assertRaises(HostError) as caught:
+            host.start_review(self.task, self._record())
 
         self.assertIn("task document could not be prepared", str(caught.exception))
         self.assertEqual(host.ops(), [], "no pane is opened for a head with nothing to read")

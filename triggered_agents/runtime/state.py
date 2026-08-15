@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import os
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 STATE_ROOT = Path(
@@ -223,7 +223,7 @@ class AgentState:
         must never break the run itself, so any error is swallowed."""
         try:
             self.ensure_dir()
-            rec = {"ts": datetime.now(timezone.utc).isoformat(), "event": event, **fields}
+            rec = {"ts": datetime.now(UTC).isoformat(), "event": event, **fields}
             with (self.dir / "runs.jsonl").open("a", encoding="utf-8") as f:
                 f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         except Exception:

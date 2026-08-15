@@ -17,13 +17,12 @@ import os
 import pwd
 import stat
 import subprocess
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
-from secretary import role_skills
-from secretary.board_transport import BoardTransportError, ensure_from_runtime_values, transport_path
-from secretary.runtime_env import RuntimeEnvError, RuntimeEnvMissing, read_runtime_env
+from secretary import _proc, role_skills, state_repo
 from secretary.automations import (
     AutomationError,
     OrcaAutomationClient,
@@ -31,19 +30,13 @@ from secretary.automations import (
     load_specs,
     workspaces_root,
 )
-from secretary.config import validate_instance
-from secretary.host import FixtureHostSource, LiveHostSource, build_expectations, strict_manifest
-from secretary.host_apply import (
-    ApplyInputs,
-    HostCommandError,
-    LiveOrcaRegistrar,
-    OrcaRegistrar,
-    SystemdUnitInstaller,
-    UnitInstaller,
-    apply_host,
-    resolve_packaged,
-    resolve_runtime_owner,
+from secretary.board_transport import (
+    BoardTransportError,
+    ensure_from_runtime_values,
+    transport_path,
 )
+from secretary.checkpoint import CheckpointPusher
+from secretary.config import validate_instance
 from secretary.head_registry import (
     HeadRegistryConfigError,
     assert_snapshot_current,
@@ -55,8 +48,24 @@ from secretary.head_registry import (
     snapshot_path,
     source_path,
 )
-from secretary.checkpoint import CheckpointPusher
-from secretary import _proc, state_repo
+from secretary.host import (
+    FixtureHostSource,
+    LiveHostSource,
+    build_expectations,
+    strict_manifest,
+)
+from secretary.host_apply import (
+    ApplyInputs,
+    HostCommandError,
+    LiveOrcaRegistrar,
+    OrcaRegistrar,
+    SystemdUnitInstaller,
+    UnitInstaller,
+    apply_host,
+    resolve_packaged,
+    resolve_runtime_owner,
+)
+from secretary.runtime_env import RuntimeEnvError, RuntimeEnvMissing, read_runtime_env
 from triggered_agents.runtime.paths import configured_product_root
 
 MEMORY_COMPONENT = "memory"

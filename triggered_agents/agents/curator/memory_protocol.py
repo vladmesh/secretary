@@ -6,9 +6,9 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from ...runtime.paths import configured_product_root, default_instance_path
 from ...runtime.state import AgentState

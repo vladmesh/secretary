@@ -11,11 +11,11 @@ from pathlib import Path
 from unittest import mock
 
 import secretary.data as data_module
-import secretary.memory_journal as memory_journal
+from secretary import memory_journal
 from secretary.data import (
-    export_board,
     export_all,
     export_artifacts,
+    export_board,
     export_memory,
     export_runs,
     export_transcripts,
@@ -122,11 +122,10 @@ class DataLayoutTests(unittest.TestCase):
 
             with mock.patch(
                 "secretary.data.tempfile.mkstemp", side_effect=PermissionError("denied")
+            ), self.assertRaisesRegex(
+                RuntimeError, "could not write data manifest"
             ):
-                with self.assertRaisesRegex(
-                    RuntimeError, "could not write data manifest"
-                ):
-                    init_layout(data_dir)
+                init_layout(data_dir)
 
 
 class RawKanboardDumpTests(unittest.TestCase):
@@ -204,9 +203,8 @@ class RawKanboardDumpTests(unittest.TestCase):
 
             with mock.patch(
                 "secretary.data.tempfile.mkdtemp", side_effect=PermissionError("denied")
-            ):
-                with self.assertRaisesRegex(RuntimeError, "could not create raw dump"):
-                    raw_kanboard_dump(data_dir)
+            ), self.assertRaisesRegex(RuntimeError, "could not create raw dump"):
+                raw_kanboard_dump(data_dir)
 
             self.assertEqual(list((data_dir / "board").iterdir()), [])
 
@@ -661,14 +659,13 @@ class ExportTests(unittest.TestCase):
             with mock.patch(
                 "secretary.memory_write._publish_memory_export",
                 side_effect=RuntimeError("disk full"),
-            ):
-                with self.assertRaises(MemoryExportPublishError) as raised:
-                    commit_memory_proposal(
-                        data_dir,
-                        instance_dir,
-                        actor="curator:claude/session",
-                        propose_id=proposal.propose_id,
-                    )
+            ), self.assertRaises(MemoryExportPublishError) as raised:
+                commit_memory_proposal(
+                    data_dir,
+                    instance_dir,
+                    actor="curator:claude/session",
+                    propose_id=proposal.propose_id,
+                )
 
             failed_result = raised.exception.result
             after_failure_head = memory_head(instance_dir)

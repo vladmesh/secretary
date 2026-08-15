@@ -8,7 +8,6 @@ from pathlib import Path
 
 from secretary.config import validate, validate_instance
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_INSTANCE = REPO_ROOT / "examples" / "instance"
 ONBOARDING_FIXTURES = REPO_ROOT / "tests" / "fixtures" / "onboarding"

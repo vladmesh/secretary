@@ -6,7 +6,6 @@ from typing import Any, Literal
 
 from secretary.data import DataExport
 
-
 ARCHIVE_ROOT = "secretary-backup"
 BACKUP_VERSION = 1
 
