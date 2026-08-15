@@ -23,8 +23,10 @@ from secretary.dispatcher_tui import (
     deliver_interactive_prompt,
     delivery_readiness_state,
     latest_claude_user_turn_for,
+    latest_user_turn_for,
     prepare_claude_provider_progress_source,
     provider_progress_for_run,
+    provider_turn_started,
     terminal_readiness,
     terminal_turn_started,
     turn_started_confirm,
@@ -38,6 +40,7 @@ from tests.fakes.observer import (
 from tests.fanout_fixtures import accepted_transport_run
 from triggered_agents.runtime.codex_preflight import codex_provider_source_descriptor
 from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
+from triggered_agents.runtime.tui_delivery import composer_holds_payload
 
 
 class DispatcherTuiLaunchTests(unittest.TestCase):
@@ -533,6 +536,140 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
         self.assertNotIn(["orca", "terminal", "close", "--terminal", "term-tui", "--json"], host.calls)
 
 
+class CodexUserTurnRecordTests(unittest.TestCase):
+    """What Codex writes down when a prompt is submitted, in both shapes it writes it.
+
+    The records below are the two real ones. `codex exec` persists `event_msg`/`user_message`;
+    the interactive `codex-tui` of cli 0.147.0 persists `response_item`/`message` with
+    `role: "user"` and never the first shape at all — checked against the eleven observer rollouts
+    of 2026-08-15, in which `user_message` appears zero times and the user-role message 5 to 19
+    times per session. Reading only the first shape made the durable half of every interactive
+    delivery proof answer "no turn", for launches as much as for wakes.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.workspace = self.root / "workspace"
+        self.workspace.mkdir()
+        self.sessions = self.root / "sessions"
+        self.sessions.mkdir()
+
+    def write_session(self, *records: dict, name: str = "rollout.jsonl") -> None:
+        lines = [json.dumps({
+            "type": "session_meta",
+            "payload": {"cwd": str(self.workspace.resolve()), "originator": "codex-tui"},
+        })]
+        lines += [json.dumps(record) for record in records]
+        (self.sessions / name).write_text("\n".join(lines), encoding="utf-8")
+
+    @staticmethod
+    def record(kind: str, payload: dict, *, at: str = "2099-01-02T03:04:05Z") -> dict:
+        return {"type": kind, "timestamp": at, "payload": payload}
+
+    def turn_after(self, since: float) -> float | None:
+        return latest_user_turn_for(str(self.workspace), since, session_root=self.sessions)
+
+    def test_both_shapes_of_a_submitted_prompt_are_a_user_turn(self) -> None:
+        for kind, payload in (
+            ("event_msg", {"type": "user_message", "message": "wake"}),
+            ("response_item", {"type": "message", "role": "user", "content": [{"text": "wake"}]}),
+        ):
+            with self.subTest(kind=kind):
+                self.write_session(self.record(kind, payload))
+                self.assertIsNotNone(self.turn_after(0.0))
+
+    def test_what_the_provider_writes_without_a_prompt_is_not_a_turn(self) -> None:
+        """Everything a session holds that is not somebody submitting something."""
+        self.write_session(
+            self.record("response_item", {"type": "message", "role": "developer",
+                                          "content": [{"text": "skills"}]}),
+            self.record("response_item", {"type": "message", "role": "assistant",
+                                          "content": [{"text": "done"}]}),
+            self.record("response_item", {"type": "reasoning"}),
+            self.record("event_msg", {"type": "task_started"}),
+            self.record("event_msg", {"type": "token_count"}),
+        )
+
+        self.assertIsNone(self.turn_after(0.0))
+
+    def test_a_turn_before_the_send_is_not_a_turn_after_it(self) -> None:
+        """The window is what makes this a delivery proof rather than a session history."""
+        self.write_session(self.record(
+            "response_item", {"type": "message", "role": "user", "content": [{"text": "earlier"}]},
+        ))
+        recorded = self.turn_after(0.0)
+
+        self.assertIsNotNone(recorded)
+        self.assertIsNone(self.turn_after(recorded + 1))
+
+    def test_the_journal_answers_yes_no_or_nothing_and_the_three_stay_apart(self) -> None:
+        """A journal that says "not yet" is not a journal that is not there.
+
+        The difference decides who gets to answer: only the absent journal leaves a caller with
+        the screen, and the screen says yes for every pane that has ever worked.
+        """
+        self.write_session(self.record(
+            "response_item", {"type": "message", "role": "user", "content": [{"text": "wake"}]},
+        ))
+        recorded = latest_user_turn_for(
+            str(self.workspace), 0.0, session_root=self.sessions
+        )
+
+        def answer(workspace: Path, since: float) -> bool | None:
+            return provider_turn_started(
+                str(workspace), since, adapter="codex", session_root=self.sessions
+            )
+
+        self.assertIs(answer(self.workspace, recorded - 1), True)
+        self.assertIs(answer(self.workspace, recorded + 1), False)
+        self.assertIsNone(answer(self.root / "elsewhere", 1.0))
+        self.assertIsNone(
+            provider_turn_started(str(self.workspace), 1.0, adapter="shell",
+                                  session_root=self.sessions)
+        )
+
+    def test_a_journal_that_can_answer_is_not_second_guessed_by_the_screen(self) -> None:
+        """`confirm` asks the provider, and the screen only when there is no provider to ask.
+
+        `_screen_started_turn` looks for the word `Working` anywhere in the retained window, so a
+        pane that has worked once keeps saying yes forever. As a fallback for an unknown provider
+        that is the best there is; as a second opinion after a journal that said "not yet" it is a
+        confirmation criterion that confirms everything, which is exactly what a delivery proof
+        must not be.
+        """
+        screen_reads = 0
+
+        def run_json(args: list[str]) -> dict:
+            nonlocal screen_reads
+            if args[1:3] == ["terminal", "read"]:
+                screen_reads += 1
+                return {"terminal": {"tail": ["Working (12s · esc to interrupt)", "›"]}}
+            raise AssertionError(args)
+
+        self.write_session(self.record(
+            "response_item", {"type": "message", "role": "user", "content": [{"text": "wake"}]},
+        ))
+        recorded = latest_user_turn_for(str(self.workspace), 0.0, session_root=self.sessions)
+        confirm = turn_started_confirm(
+            "term-observer", str(self.workspace), "codex",
+            run_json=run_json, session_root=self.sessions,
+        )
+
+        self.assertTrue(confirm(recorded - 1))
+        self.assertFalse(confirm(recorded + 1))
+        self.assertEqual(screen_reads, 0)
+
+        # And with no journal to read, the screen is all there is, so it is asked.
+        blind = turn_started_confirm(
+            "term-observer", str(self.root / "elsewhere"), "codex",
+            run_json=run_json, session_root=self.sessions,
+        )
+        self.assertTrue(blind(recorded + 1))
+        self.assertEqual(screen_reads, 1)
+
+
 class ClaudeTranscriptPathTests(unittest.TestCase):
     """Where Claude Code keeps a workspace's transcripts, checked against where it keeps them.
 
@@ -825,7 +962,12 @@ class ScriptedPane:
             idle = self.idle_after.get(self.submits, True)
             return {"wait": {"condition": "tui-idle", "satisfied": idle}}
         if args[1:3] == ["terminal", "read"]:
-            terminal: dict = {"tail": list(self._screen())}
+            screen = list(self._screen())
+            if "--limit" in args:
+                # Orca answers a limited read from the bottom of the retained output, which is the
+                # only reason a prompt marker in it means anything.
+                screen = screen[-int(args[args.index("--limit") + 1]):]
+            terminal: dict = {"tail": screen}
             cursor = self._at(self.cursors)
             if cursor is not None:
                 terminal["nextCursor"] = cursor
@@ -906,6 +1048,110 @@ class TuiDeliveryStageTests(unittest.TestCase):
         self.assertTrue(outcome.evidence.cursor_moved)
         self.assertEqual(outcome.evidence.readiness_after, READINESS_READY)
         self.assertEqual(pane.sends, ["wake the observer", ""])
+
+    def test_a_repainting_composer_is_not_a_composer_holding_the_payload(self) -> None:
+        """The 62-out-of-62 false failure, in the shape a live Codex pane produced it.
+
+        The composer is empty on both sides of the send. What sits after the prompt marker is the
+        TUI's own furniture: a hint, the model footer, and — once the head starts working — a
+        counter that ticks every frame. So the fingerprint differs between the two probes while the
+        composer never held anything, and the delivery used to read that difference as the payload
+        being stuck. It cost sprint:1089 62 delivered wakes reported as failures and 14 head
+        replacements in one day.
+        """
+        hint = "Improve documentation in @filename gpt-5.6-terra xhigh · ~/observers/sprint-1089"
+        pane = ScriptedPane(
+            {
+                0: ["> read the previous card", f"› {hint}"],
+                1: ["> read the previous card", "· recorded resume", f"› {hint} Working (7s)"],
+            },
+            cursors={0: "566", 1: "588"},
+        )
+
+        outcome = self.deliver(pane, ack_out_of_band=True)
+
+        evidence = outcome.evidence
+        self.assertEqual(outcome, DELIVERY_ACCEPTED)
+        # The fingerprints differ, and that on its own says nothing about where the payload is.
+        self.assertNotEqual(evidence.composer_before, evidence.composer_after)
+        self.assertFalse(evidence.payload_left_in_composer)
+        self.assertTrue(evidence.cursor_moved)
+        self.assertEqual(evidence.stage, "turn_observed")
+        # Nothing was re-entered, so the head was woken exactly once.
+        self.assertEqual(pane.sends, ["wake the observer", ""])
+
+    def test_the_composer_is_the_bottom_of_the_pane_and_not_the_retained_history(self) -> None:
+        """A marker stranded in the history is not a composer, and what follows it is not held.
+
+        `orca terminal read` with no limit answers with 120 lines of retained output. A TUI that
+        repaints its bottom block in place leaves earlier markers inside that window, and on the
+        live observer pane the text sitting after the last of them was the transcript of an earlier
+        wake — the payload itself, quoted back. Read that way, every wake is a payload stuck in a
+        composer forever. The delivery reads a bounded window from the bottom instead.
+        """
+        history = (
+            ["› wake the observer and let it work"]
+            + [f"· step {index}" for index in range(40)]
+        )
+        live_screen = history + ["› Improve documentation in @filename gpt-5.6-terra"]
+        pane = ScriptedPane({0: live_screen, 1: live_screen + ["· recorded resume"]})
+
+        outcome = self.deliver(pane, ack_out_of_band=True)
+
+        self.assertEqual(outcome, DELIVERY_ACCEPTED)
+        self.assertFalse(outcome.evidence.payload_left_in_composer)
+        reads = [call for call in pane.calls if call[1:3] == ["terminal", "read"]]
+        self.assertTrue(reads)
+        for read in reads:
+            self.assertIn("--limit", read)
+        # And the same screen read whole is exactly the trap: the payload does follow the last
+        # marker of the unbounded window, which is why the bound is the fix and not a tidy-up.
+        self.assertTrue(
+            composer_holds_payload("\n".join(live_screen[:1] + history[1:]), "wake the observer")
+        )
+
+    def test_a_composer_showing_the_payload_is_still_a_delivery_that_did_not_land(self) -> None:
+        """The failure this boundary exists for, without a paste placeholder over it.
+
+        Codex hides a large paste behind `[Pasted Content …]`; a smaller one it simply shows. Both
+        are the payload sitting in a composer that never took an Enter, and the positive test has
+        to catch the second as well as the first or the fix would have bought the wake by giving
+        up the thing the boundary is for.
+        """
+        pane = ScriptedPane({0: ["›"], 1: ["› wake the observer"]})
+
+        with self.assertRaises(TuiDeliveryError) as raised:
+            self.deliver(pane, ack_out_of_band=True)
+
+        evidence = raised.exception.evidence
+        self.assertEqual(evidence.reason, "payload-left-in-composer")
+        self.assertTrue(evidence.payload_left_in_composer)
+        # Re-entered, never rewritten: the pane is holding one copy of the prompt already.
+        self.assertEqual(pane.sends, ["wake the observer", "", "", ""])
+
+    def test_a_pane_that_printed_since_the_send_is_never_written_to_twice(self) -> None:
+        """Only a pane that accounts for the payload nowhere gets it written again.
+
+        Rewriting is the one step that can put a second copy of a prompt in front of a head. A pane
+        whose composer is empty because the payload was submitted looks, to the composer alone,
+        exactly like a pane the payload never reached; the output it printed since the send is what
+        tells them apart, so a moved cursor buys an Enter and never a second paste.
+        """
+        pane = ScriptedPane(
+            {0: ["ready", "›"], 1: ["ready", "· working on it", "›"]},
+            cursors={0: "100", 1: "140"},
+        )
+
+        with self.assertRaises(TuiDeliveryError) as raised:
+            # A caller with a criterion of its own that never fires: the loop keeps probing and
+            # resending for the whole deadline, which is when a second write would happen.
+            self.deliver(pane, confirm=lambda _sent_at: False)
+
+        self.assertTrue(raised.exception.evidence.cursor_moved)
+        self.assertEqual(raised.exception.evidence.resends, 2)
+        # Two re-entries, and the prompt itself written exactly once.
+        self.assertEqual(pane.sends, ["wake the observer", "", "", ""])
+        self.assertEqual(pane.sends.count("wake the observer"), 1)
 
     def test_a_pane_that_showed_nothing_for_the_prompt_is_written_again_and_then_refused(self) -> None:
         """A composer that is empty and a pane that printed nothing: the payload is gone.

@@ -1445,14 +1445,13 @@ class CommandHostRuntime:
             adapter = self._prompt_adapter(
                 getattr(record, "run", {}), str(getattr(record, "head", ""))
             )
-            # A wake is confirmed the way a launch is: by the criterion the worker and reviewer
-            # roles already use, checked before any screen heuristic. Waking used to run on the
-            # screen signals alone, and for a Codex pane none of them can say yes — the composer
-            # fingerprint reads the retained pane tail rather than the composer, Orca calls a
-            # working Codex idle, and the cursor branch is gated behind the same broken flag. The
-            # result was a delivered wake reported as a failure every single time, and a head
-            # killed and rebuilt after three of them. What stays out of band is the causal
-            # acknowledgement: the observer still quotes the delivery id in its own resume.
+            # A wake carries both proofs a delivery can have, and either one confirms it. The head
+            # is live and working, so the screen evidence this used to rely on alone is the weaker
+            # of them: Orca reports a working Codex as idle, and the pane the wake is delivered
+            # into is precisely the pane that is printing. The provider's own record of the turn
+            # is what a launch has always been confirmed by, and it says the same thing about a
+            # wake. What stays out of band is the causal acknowledgement, not the delivery: the
+            # observer still quotes the delivery id in the resume it writes from this turn.
             return _deliver_interactive_prompt(
                 current,
                 message,

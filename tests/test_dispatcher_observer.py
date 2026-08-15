@@ -4206,6 +4206,97 @@ class ObserverConfigurationTests(unittest.TestCase):
         self.assertEqual(evidence["payload_bytes"], len(message.encode("utf-8")))
         self.assertNotIn(message[:40], json.dumps(evidence))
 
+    def test_a_wake_a_working_head_took_is_delivered_and_not_a_failure(self) -> None:
+        """sprint:1089: 62 wakes delivered, 62 reported failed, the head replaced 14 times.
+
+        This is that pane. Codex has the wake and is working on it, and every screen signal says
+        otherwise: Orca answers `tui-idle` satisfied for a head that is visibly working, the region
+        after the prompt marker changes between two probes because the TUI repaints its own footer
+        and a running timer into it, and the output cursor does not move while that repaint
+        happens. Under those three the wake had no reachable way to be confirmed. What did happen
+        is that Codex wrote the submitted prompt into its own rollout, which is the proof a launch
+        has always been confirmed by, and the wake now carries it too.
+        """
+        with tempfile.TemporaryDirectory() as root:
+            workspace = Path(root) / "observer-workspace"
+            workspace.mkdir()
+            sessions = Path(root) / "sessions"
+            sessions.mkdir()
+            host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
+            record = ObserverRecord(
+                sprint="sprint:1089",
+                head="codex-observer",
+                workspace=str(workspace),
+                handle="observer:sprint:1089",
+            )
+            footer = "Improve documentation in @filename gpt-5.6-terra xhigh · ~/observers"
+            reads = [0]
+
+            def record_the_turn() -> None:
+                """Codex persists the submitted prompt a few seconds after the send."""
+                (sessions / "rollout.jsonl").write_text("\n".join([
+                    json.dumps({
+                        "type": "session_meta",
+                        "payload": {"cwd": str(workspace.resolve()), "originator": "codex-tui"},
+                    }),
+                    json.dumps({
+                        "type": "response_item",
+                        "timestamp": "2099-01-02T03:04:05Z",
+                        "payload": {
+                            "type": "message", "role": "user",
+                            "content": [{"text": "A linked card changed."}],
+                        },
+                    }),
+                ]), encoding="utf-8")
+
+            def run_json(args: list[str]) -> dict:
+                if args[1:3] == ["terminal", "list"]:
+                    return {"terminals": [
+                        {"handle": "observer:sprint:1089", "connected": True},
+                    ]}
+                if args[1:3] == ["terminal", "send"]:
+                    return {"send": {"accepted": True, "bytesWritten": 858}}
+                if args[1:3] == ["terminal", "wait"]:
+                    # Orca calls this working Codex ready, every single probe.
+                    return {"wait": {"condition": "tui-idle", "satisfied": True}}
+                if args[1:3] == ["terminal", "read"]:
+                    reads[0] += 1
+                    # One read before the send, then a probe per pass of the confirmation loop.
+                    # The timer in the footer moves and nothing else does.
+                    screen = [f"› {footer}"] if reads[0] == 1 else [
+                        f"› {footer} Working ({reads[0]}s · esc to interrupt)"
+                    ]
+                    if reads[0] == 3:
+                        record_the_turn()
+                    # The cursor stands still: repainting the bottom block commits no lines.
+                    return {"terminal": {"tail": screen, "nextCursor": "688"}}
+                raise AssertionError(args)
+
+            environment = {"SECRETARY_CODEX_SESSIONS": str(sessions)}
+            with mock.patch.dict(os.environ, environment), \
+                 mock.patch.object(host, "_run_json", side_effect=run_json), \
+                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01), \
+                 mock.patch(
+                     "triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S",
+                     0,
+                 ):
+                # Two passes of the loop with nothing but the pane to go on, and the pane says
+                # nothing on either. Then Codex writes the turn down and the wake is confirmed.
+                outcome = host.nudge_observer(record)
+
+        evidence = outcome.evidence
+        self.assertEqual(outcome, "confirmed")
+        self.assertEqual(evidence.stage, "acknowledged")
+        self.assertTrue(evidence.turn_confirmed)
+        # Every screen signal stayed exactly as hostile as it was in production.
+        self.assertEqual((evidence.readiness_before, evidence.readiness_after), ("ready", "ready"))
+        self.assertNotEqual(evidence.composer_before, evidence.composer_after)
+        self.assertFalse(evidence.cursor_moved)
+        # The head is not holding the payload: what changed after the marker is the TUI's timer.
+        self.assertFalse(evidence.payload_left_in_composer)
+        self.assertEqual(evidence.reason, "")
+        self.assertEqual(evidence.resends, 0)
+
     def test_real_host_nudge_resolves_an_observer_alias_by_its_saved_leaf(self) -> None:
         """The create-time handle need not occur in inventory after the observer is running."""
         with tempfile.TemporaryDirectory() as root:
