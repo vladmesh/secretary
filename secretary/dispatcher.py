@@ -263,7 +263,8 @@ from secretary.dispatcher_tui import (
     terminal_turn_started as _terminal_turn_started,
 )
 from secretary.dispatcher_types import (
-    # Who a stop is recorded as having been initiated by.
+    # Every dispatcher stop has an initiator (review takeover, verdict, watchdog, replacement,
+    # operator, reconciliation), and both HeadRuns record it.
     STOPPED_BY_DISPATCHER,
     STOPPED_BY_OPERATOR,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_RECONCILIATION,  # noqa: F401  # Public compatibility re-export.
@@ -813,7 +814,8 @@ class CommandHostRuntime:
         self.data_dir = data_dir
         self.mode = mode
         # Where a head run is flushed the moment an operation commits it, ahead of the tick's own
-        # save. Unset, a run reaches disk with the tick's records, all a outside caller can promise.
+        # save. Its durable-state owner installs this only while it holds the record's file: this
+        # host has a record, not that file. Unset, a run reaches disk with the tick's records.
         self.commit_state: Callable[[], None] | None = None
         # The owner installs one entry before it asks this host to open a Codex pane, keyed by the
         # HeadRun id in that intent so a same-workspace respawn cannot inherit a predecessor's source.
@@ -2309,7 +2311,8 @@ class CommandHostRuntime:
         task_ref = self._task_ref(task, role, prompt_document)
         run_id = heartbeat_run_id or head_ops.new_run_id()
         # `preflight_codex_run` is deliberately reached even by noop: a fake transport is not an
-        # exemption from the policy boundary, and a refused attestation must open no pane.
+        # exemption from the policy boundary. A refused attestation opens no pane and clears no
+        # predecessor state.
         if self.mode == "noop":
             try:
                 preflight_run = self.preflight_codex_run(
@@ -2757,7 +2760,8 @@ class CommandHostRuntime:
             return
         base = self.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
         # One generation and one decision, read once: the document the worker is sent back to and
-        # the prompt that sends it there name the same round because they share these values.
+        # the prompt that sends it there name the same round and adjudication because they share
+        # these values, not because separate call sites happen to agree.
         generation = record.report_generation
         decision = record.report_decision
         self._clear_report_bodies(task["ref"])
@@ -3880,9 +3884,9 @@ class DispatcherRuntime:
             resume_workspaces.pop(ref, None)
         records[ref] = record
         self.save_records(payload, records)
-        # The worker is up: record the head running it from the launcher's own snapshot. The intent
-        # is spent only once that has landed — a journal that refuses here leaves the head adoptable,
-        # and the adoption writes the routing event this round would otherwise never get.
+        # The worker is up: record the head running it from the launcher's own snapshot. An adopted
+        # claim predating routing telemetry has no round, so this opens one from the journal. Spend
+        # the intent only once that lands: a refusal leaves the head adoptable and its routing owed.
         self.record_worker_routing(claimed, record, prepared.get("run"))
         _clear_launch_intent(record)
         self.save_records(payload, records)
@@ -5188,13 +5192,15 @@ class DispatcherRuntime:
         record.comment_baseline = max(len(moved.get("comments") or []), baseline)
         # Where the next verdict is scanned from, so the one just acted on is not read again.
         record.review_baseline = record.comment_baseline
-        # The rework's generation is the one this transition reserved before the move: assigned, never
-        # advanced. A transition written before the reservation carries none and falls back.
+        # The rework's generation is the one this transition reserved before the move: assigned,
+        # never advanced. A legacy transition without a reservation falls back to the advance it
+        # was written with.
         record.report_generation = (
             continuation.reserved_generation or record.report_generation + 1
         )
         # And the instruction that round is opened on, from the same transition. Always assigned,
-        # never merged: inheriting the previous round's decision would adjudicate answered code.
+        # never merged: a red gate has no decision, and inheriting the prior round's would hand a
+        # worker an adjudication of review findings its code has already answered.
         record.report_decision = continuation.decision_body
         record.gate_state = ""
         record.gate_pending_since = 0.0
@@ -5367,7 +5373,8 @@ class DispatcherRuntime:
             return self._finish_retained_worker_resume(
                 task, record, records, payload, attempt_id, phase=phase
             )
-        # Same reservation as the retained branch: the rework round is fixed with the intent.
+        # Same reservation as the retained branch: the rework round is fixed on disk with the
+        # intent, so adoption resumes it rather than the round the verdict closed.
         return self._restart_red_worker(
             task, record, records, payload, attempt_id,
             continuation_reason="no retained worker session was available", phase=phase,
@@ -5634,10 +5641,10 @@ class DispatcherRuntime:
             if unconfirmed is not None:
                 return unconfirmed
         rework_round = record.attempt_round + 1
-        # The launch intent takes the transition over from here: it is durable, it reserves the
-        # rework round, and recovery adopts or relaunches exactly one head from it. The handover is
-        # only real once it reaches disk — dropping the held transition on a failed write would
-        # leave the card In progress with nothing durable owing it a worker.
+        # The launch intent takes the transition over from here: it is durable, reserves the rework
+        # round, and recovery adopts or relaunches exactly one head. Hand it over in the same write,
+        # or both can owe this card a worker. The handover is real only on disk: restoring the held
+        # transition after a failed intent write keeps In progress from having no durable worker debt.
         held_transition = replace(record.worker_continuation)
         record.worker_continuation.clear()
         failure = self._worker_relaunch_intent(
