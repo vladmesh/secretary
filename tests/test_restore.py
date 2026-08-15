@@ -655,6 +655,7 @@ class RestoreTests(unittest.TestCase):
                     packaged = resolve_packaged(
                         report.instance,
                         instance_path=report.instance_path.parent,
+                        data_dir=report.data_dir,
                         orca_executable=legacy_orca,
                     )
                 find_executable.assert_not_called()

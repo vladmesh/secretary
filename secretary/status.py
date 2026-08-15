@@ -36,12 +36,16 @@ def collect_status(
     report, *, host_fixture: str | None = None, offline: bool = False, sprint_client: KanboardClient | None = None,
 ) -> dict[str, Any]:
     """Return a stable, non-mutating snapshot for one validated instance."""
-    data_dir = Path(report.instance["data_dir"]).expanduser()
+    assert report.data_dir is not None
+    data_dir = report.data_dir
     instance_dir = report.instance_path.parent
     production = _read_object(data_dir / "dispatcher" / "production-state.json")
     expected = build_doctor_expectations(
         report.instance, report.bindings,
-        packaged=resolve_installed_packaged(report.instance, instance_path=instance_dir),
+        packaged=resolve_installed_packaged(
+            report.instance, instance_path=instance_dir, data_dir=data_dir,
+        ),
+        data_dir=data_dir,
     )
     if offline:
         collected = CollectResult(expected_to_empty_inventory())

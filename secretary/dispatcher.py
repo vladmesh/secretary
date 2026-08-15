@@ -23,7 +23,7 @@ from secretary.codex_provider_events import (
     CodexProviderEventIngress,
     CodexProviderSourceError,
 )
-from secretary.config import validate_instance
+from secretary.config import DataDirError, instance_data_dir, validate_instance
 from secretary.dispatcher_gate import (
     GATE_PENDING_STALL_SECONDS,
     GATE_TRANSPORT_MAX_ATTEMPTS,
@@ -434,17 +434,10 @@ _CONTROL_PLANE_TASK_COMMAND = f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_
 
 
 def default_data_dir(instance_path: Path) -> Path:
-    report = validate_instance(_instance_file(instance_path))
-    if not report.ok:
-        raise DispatcherError(
-            "invalid_instance",
-            "invalid instance: " + "; ".join(map(str, report.errors)),
-            2,
-        )
-    data_dir = report.instance.get("data_dir")
-    if not isinstance(data_dir, str):
-        raise DispatcherError("invalid_instance", "instance data_dir is unavailable", 2)
-    return Path(data_dir)
+    try:
+        return instance_data_dir(_instance_file(instance_path))
+    except DataDirError as exc:
+        raise DispatcherError("invalid_instance", f"invalid instance: {exc}", 2) from None
 
 
 def _instance_file(path: Path) -> Path:

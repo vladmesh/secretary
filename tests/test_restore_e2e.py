@@ -219,6 +219,7 @@ def _apply_reconcile(instance: Path, data_dir: Path, root: Path) -> int:
             packaged = resolve_packaged(
                 report.instance,
                 instance_path=report.instance_path.parent,
+                data_dir=report.data_dir,
                 orca_executable=legacy_orca,
             )
         find_executable.assert_not_called()

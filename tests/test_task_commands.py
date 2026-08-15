@@ -26,7 +26,14 @@ class ResolveDataDirTest(unittest.TestCase):
 
     def write_instance(self, data_dir: str) -> Path:
         path = self.instance_dir / "instance.yaml"
-        path.write_text(f"version: 1\ndata_dir: {data_dir}\n", encoding="utf-8")
+        path.write_text(
+            "version: 1\n"
+            "name: test\n"
+            f"data_dir: {data_dir}\n"
+            "offsite:\n"
+            "  instance_remote: git@example.invalid:x/y.git\n",
+            encoding="utf-8",
+        )
         return path
 
     def test_explicit_data_dir_wins(self) -> None:
@@ -72,7 +79,7 @@ class ResolveDataDirTest(unittest.TestCase):
         args = _args(instance=str(self.instance_dir))
         with self.assertRaises(TaskError) as caught:
             resolve_data_dir(args)
-        self.assertIn("no usable data_dir", caught.exception.message)
+        self.assertIn("data_dir", caught.exception.message)
 
     def test_env_data_dir_is_read_at_parse_time(self) -> None:
         from secretary.cli import build_parser

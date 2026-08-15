@@ -743,7 +743,8 @@ def _restore_without_credentials(
     fails with the secret report.
     """
     report = _validated_instance(target)
-    data_dir = Path(report.instance["data_dir"]).expanduser().resolve()
+    assert report.data_dir is not None
+    data_dir = report.data_dir
     cards, runs = materialize_checkpoint(target, data_dir, dry_run=args.dry_run)
     if args.dry_run:
         result.add(
@@ -876,7 +877,8 @@ def install(args: argparse.Namespace) -> InstallResult:
             check_prerequisites(transport, target, args.installation_user)
             result.add("prerequisites", "unchanged", "Kanboard and Orca are reachable")
             report = _validated_instance(target)
-            data_dir = Path(report.instance["data_dir"]).expanduser().resolve()
+            assert report.data_dir is not None
+            data_dir = report.data_dir
             cards, runs = materialize_checkpoint(target, data_dir, dry_run=args.dry_run)
             if args.dry_run:
                 result.add(

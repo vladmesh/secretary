@@ -33,7 +33,10 @@ def run_reconcile_plan(args) -> int:
     if not report.ok:
         print("secretary reconcile plan: invalid instance config")
         return 2
-    packaged = resolve_installed_packaged(report.instance, instance_path=report.instance_path.parent)
+    assert report.data_dir is not None
+    packaged = resolve_installed_packaged(
+        report.instance, instance_path=report.instance_path.parent, data_dir=report.data_dir,
+    )
     errors = plan_input_errors(report.instance, report.bindings, packaged=packaged)
     if errors:
         print("secretary reconcile plan: " + errors[0])
@@ -67,7 +70,8 @@ def run_reconcile_plan(args) -> int:
 def _manifest_path(args, report) -> Path:
     if getattr(args, "managed_manifest", None):
         return Path(args.managed_manifest)
-    return Path(report.instance["data_dir"]) / "host-managed.json"
+    assert report.data_dir is not None
+    return report.data_dir / "host-managed.json"
 
 
 def _merge_adoption(managed, resource):
@@ -87,7 +91,10 @@ def run_reconcile_adopt(args) -> int:
     if not report.ok:
         print("secretary reconcile adopt: invalid instance config")
         return 2
-    packaged = resolve_installed_packaged(report.instance, instance_path=report.instance_path.parent)
+    assert report.data_dir is not None
+    packaged = resolve_installed_packaged(
+        report.instance, instance_path=report.instance_path.parent, data_dir=report.data_dir,
+    )
     errors = plan_input_errors(report.instance, report.bindings, packaged=packaged)
     if errors:
         print("secretary reconcile adopt: " + errors[0])
@@ -214,7 +221,10 @@ def run_reconcile_apply(args) -> int:
     if not report.ok:
         print("secretary reconcile apply: invalid instance config")
         return 2
-    packaged = resolve_installed_packaged(report.instance, instance_path=report.instance_path.parent)
+    assert report.data_dir is not None
+    packaged = resolve_installed_packaged(
+        report.instance, instance_path=report.instance_path.parent, data_dir=report.data_dir,
+    )
     expected = build_expectations(report.bindings, report.host)
     source = FixtureHostSource(Path(args.host_fixture)) if args.host_fixture else LiveHostSource()
     collected = source.collect(expected)

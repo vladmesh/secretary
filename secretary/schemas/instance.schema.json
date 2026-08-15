@@ -22,8 +22,7 @@
     "data_dir": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^/",
-      "description": "Absolute path to the secretary-data directory on the host."
+      "description": "Nonempty absolute or relative path to the secretary-data directory. Relative paths are resolved from this instance.yaml."
     },
     "offsite": {
       "type": "object",

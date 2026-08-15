@@ -1519,7 +1519,8 @@ Readers resolve the path to dispatcher state exactly as the dispatcher does: an 
 moves both the dispatcher's writes and the health reader onto the same data plane, so a reader cannot look at a file
 nobody writes. The dispatcher's unit takes `runtime.env` wholesale through `EnvironmentFile`, and the variable
 reaches role processes through the role-environment allowlist, since it is the address of the data plane rather than
-a secret.
+a secret. A configured `data_dir` may be absolute or relative; the latter is resolved from the containing
+`instance.yaml`, never from the process working directory. `~` is expanded before either form is used.
 
 A continuous run of unhealthy ticks is one **incident**. An unreachable board fails every tick for as long as it
 lasts, and that is one breakage with one cause and one moment of ending. The dispatcher keeps it in its tick

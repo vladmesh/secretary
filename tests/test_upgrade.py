@@ -21,6 +21,7 @@ from secretary.automations import (
     plan_automations,
     repoint_argv,
 )
+from secretary.config import DataDirError
 from secretary.head_registry import (
     INSTANCE_ORIGIN,
     PRODUCT_ORIGIN,
@@ -104,7 +105,10 @@ class PackagedUnitTests(unittest.TestCase):
             account = SimpleNamespace(pw_dir=str(root / "operator"))
             with mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account):
                 units = upgrade.resolve_packaged(
-                    instance_config(root / "data"), instance_path=root / "instance", runtime_user="operator"
+                    instance_config(root / "data"),
+                    instance_path=root / "instance",
+                    data_dir=root / "data",
+                    runtime_user="operator",
                 )
 
         self.assertNotIn("secretary-orca.service", {unit.name for unit in units})
@@ -446,6 +450,22 @@ class UpgradeStepTests(unittest.TestCase):
         self.assertIn("code or dependencies changed", result.detail)
         self.assertIn(("restart", "secretary-memory.service"), units.calls)
 
+    def test_host_step_reports_a_configured_data_dir_resolution_error(self):
+        report = SimpleNamespace(
+            data_dir=Path("/tmp/data"),
+            instance={"host": {"unit_prefix": UNIT_PREFIX}},
+            bindings=[],
+            host={"unit_prefix": UNIT_PREFIX},
+        )
+        with mock.patch(
+            "secretary.upgrade.resolve_packaged",
+            side_effect=DataDirError("invalid instance data_dir"),
+        ):
+            result = upgrade.step_host(self.context(FakeUnitInstaller(), report=report))
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("invalid instance data_dir", result.detail)
+
     def test_board_transport_step_imports_retires_and_reports_every_action(self):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
@@ -740,6 +760,7 @@ class UpgradeStepTests(unittest.TestCase):
                     context.product_root / "packaging" / "systemd",
                     product_root=context.product_root,
                     instance_path=context.instance_path,
+                    data_dir=context.report.data_dir,
                     runtime_user="operator",
                 )
                 rendered.append({unit.name: unit.content for unit in packaged})

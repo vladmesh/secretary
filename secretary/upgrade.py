@@ -36,7 +36,7 @@ from secretary.board_transport import (
     transport_path,
 )
 from secretary.checkpoint import CheckpointPusher
-from secretary.config import validate_instance
+from secretary.config import DataDirError, validate_instance
 from secretary.head_registry import (
     HeadRegistryConfigError,
     assert_snapshot_current,
@@ -541,16 +541,18 @@ def step_worktrees(context: UpgradeContext) -> StepResult:
 
 def step_host(context: UpgradeContext) -> StepResult:
     report = context.report
-    manifest = Path(report.instance["data_dir"]) / "host-managed.json"
+    assert report.data_dir is not None
+    manifest = report.data_dir / "host-managed.json"
     try:
         packaged = resolve_packaged(
             report.instance,
             context.product_root / "packaging" / "systemd",
             product_root=context.product_root,
             instance_path=context.instance_path,
+            data_dir=report.data_dir,
             runtime_user=context.runtime_user,
         )
-    except (HostCommandError, ValueError) as exc:
+    except (DataDirError, HostCommandError, ValueError) as exc:
         return StepResult("host", "failed", str(exc))
     expected = build_expectations(report.bindings, report.host)
     source = (

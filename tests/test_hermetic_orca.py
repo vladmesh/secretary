@@ -35,7 +35,7 @@ class HermeticOrcaDiscoveryTests(unittest.TestCase):
                 # real executable sitting exactly where real discovery would
                 # find it (operator/.local/bin/orca).
                 layout = resolve_systemd_layout(
-                    {}, instance_path=instance_path, runtime_user="operator",
+                    {}, instance_path=instance_path, data_dir=root / "data", runtime_user="operator",
                 )
 
             self.assertEqual(layout.orca_executable, _FIXTURE_ORCA)
@@ -83,7 +83,7 @@ class HermeticOrcaDiscoveryTests(unittest.TestCase):
                 ),
             ):
                 layout = resolve_systemd_layout(
-                    {}, instance_path=instance_path, runtime_user="operator",
+                    {}, instance_path=instance_path, data_dir=root / "data", runtime_user="operator",
                 )
 
             self.assertEqual(layout.orca_executable, discoverable)

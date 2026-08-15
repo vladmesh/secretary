@@ -157,7 +157,7 @@ class RestoreArchiveTests(unittest.TestCase):
                 )
             self.assertEqual((data_dir / "keep").read_text(encoding="utf-8"), "keep")
 
-    def test_bootstrap_rejects_relative_data_root_before_creating_it(self):
+    def test_bootstrap_anchors_relative_data_root_at_the_instance(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             instance = root / "instance"
@@ -168,8 +168,9 @@ class RestoreArchiveTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(RestoreError, "must match pattern"):
-                bootstrap_empty(instance)
+            bootstrap_empty(instance)
+
+            self.assertTrue((instance / "relative-data" / "data-manifest.json").is_file())
             self.assertFalse((root / "relative-data").exists())
 
     def test_restore_rejects_archive_without_the_memory_component_before_staging(self):

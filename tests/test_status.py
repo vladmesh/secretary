@@ -114,7 +114,14 @@ class StatusCliTests(unittest.TestCase):
             fixture = root / "host"
             fixture.mkdir()
             report = validate_instance(instance)
-            expected = build_doctor_expectations(report.instance, report.bindings, packaged=resolve_packaged(report.instance, instance_path=root))
+            expected = build_doctor_expectations(
+                report.instance,
+                report.bindings,
+                packaged=resolve_packaged(
+                    report.instance, instance_path=root, data_dir=report.data_dir,
+                ),
+                data_dir=report.data_dir,
+            )
             (fixture / "units.txt").write_text("\n".join(sorted(expected.units)), encoding="utf-8")
             (fixture / "projects.txt").write_text("/projects/demo\n", encoding="utf-8")
             (fixture / "orca-repos.txt").write_text("demo\n", encoding="utf-8")
@@ -413,7 +420,14 @@ class StatusCliTests(unittest.TestCase):
             fixture = Path(tmp)
             report = validate_instance(root / "examples" / "instance")
             expected = build_doctor_expectations(
-                report.instance, report.bindings, packaged=resolve_packaged(report.instance, instance_path=root / "examples" / "instance")
+                report.instance,
+                report.bindings,
+                packaged=resolve_packaged(
+                    report.instance,
+                    instance_path=root / "examples" / "instance",
+                    data_dir=report.data_dir,
+                ),
+                data_dir=report.data_dir,
             )
             (fixture / "units.txt").write_text("\n".join(sorted(expected.units)), encoding="utf-8")
             (fixture / "unit-states.txt").write_text(
@@ -444,7 +458,9 @@ class StatusCliTests(unittest.TestCase):
                     packaging_root(root),
                     product_root=root,
                     instance_path=root / "examples" / "instance",
+                    data_dir=report.data_dir,
                 ),
+                data_dir=report.data_dir,
             )
             oneshot = next(
                 name for name, (need_enabled, need_active) in expected.unit_runtime.items()
@@ -483,7 +499,12 @@ class StatusCliTests(unittest.TestCase):
             report = validate_instance(root / "examples" / "instance")
             expected = build_doctor_expectations(
                 report.instance, report.bindings,
-                packaged=resolve_packaged(report.instance, instance_path=root / "examples" / "instance"),
+                packaged=resolve_packaged(
+                    report.instance,
+                    instance_path=root / "examples" / "instance",
+                    data_dir=report.data_dir,
+                ),
+                data_dir=report.data_dir,
             )
             (fixture / "units.txt").write_text("\n".join(sorted(expected.units)), encoding="utf-8")
             (fixture / "unit-states.txt").write_text(
