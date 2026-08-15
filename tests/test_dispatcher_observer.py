@@ -565,7 +565,10 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             slept.append(seconds)
             now[0] += seconds
 
-        delivery_time = mock.Mock(monotonic=lambda: now[0], sleep=sleep, time=time.time)
+        delivery_time = mock.Mock(spec_set=("monotonic", "sleep", "time"))
+        delivery_time.monotonic.side_effect = lambda: now[0]
+        delivery_time.sleep.side_effect = sleep
+        delivery_time.time.side_effect = time.time
 
         with mock.patch.object(real_host, "_run_json", side_effect=run_json), \
              mock.patch.object(tui_delivery, "time", delivery_time), \
@@ -592,7 +595,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             self.assertNotIn("--enter", sends[0])
             self.assertIn("--enter", sends[1])
             self.assertTrue(all("--enter" in send for send in sends[2:]))
+            self.assertGreaterEqual(now[0], 0.3)
             self.assertTrue(slept)
+            self.assertTrue(all(seconds == 0.01 for seconds in slept))
             owed = (delivery.delivery_id, delivery.through_event)
 
             # Retries are bounded: the last one hands the batch to the replacement path instead of
