@@ -767,8 +767,7 @@ class DispatcherHeadTransport:
         subject: str,
     ) -> head_ops.HeadDelivery:
         # The framing is the rendered command's fact, not the profile's: a registry edited since the
-        # launch would frame a prompt for a head this launch never ran. The run offers its own view
-        # of the adapter and this deliberately keeps the launcher's.
+        # launch would frame a prompt for a head this launch never ran, so the launcher's view wins.
         post_delivery = run
 
         def handoff_before_send() -> None:
@@ -814,8 +813,7 @@ class CommandHostRuntime:
         self.data_dir = data_dir
         self.mode = mode
         # Where a head run is flushed the moment an operation commits it, ahead of the tick's own
-        # save. Installed by the owner of the durable state for the span it holds that state.
-        # Unset, a run reaches disk with the tick's records, all a caller outside a tick can promise.
+        # save. Unset, a run reaches disk with the tick's records, all a outside caller can promise.
         self.commit_state: Callable[[], None] | None = None
         # The owner installs one entry before it asks this host to open a Codex pane, keyed by the
         # HeadRun id in that intent so a same-workspace respawn cannot inherit a predecessor's source.
@@ -1222,9 +1220,8 @@ class CommandHostRuntime:
             "delivery_evidence": delivery_evidence,
             "pid_file": pid_file,
             "run": run,
-            # Delivery owns the source handoff; this launcher adds only the pane facts it proved.
-            # Returning `lifecycle_run` rather than its pre-send copy keeps observer adoption on the
-            # run the ingress persisted.
+            # Delivery owns the source handoff; this launcher adds only the pane facts it proved, and
+            # returning `lifecycle_run` keeps observer adoption on the run the ingress persisted.
             "head_run": lifecycle_run.to_json(),
         }
 
@@ -1435,9 +1432,8 @@ class CommandHostRuntime:
             or (lifecycle_run.role and lifecycle_run.role != expected_role)
         ):
             return {"state": "identity_mismatch", "reason": "persisted HeadRun binding mismatches role"}
-        # Claude's launch contract records the pre-pane baseline on the HeadRun: the provider creates
-        # its transcript asynchronously, so the first read may be the first moment a single new
-        # source exists. Binding uses only that baseline; ambiguity stays typed unavailable.
+        # The provider creates its transcript asynchronously, so binding uses only the durable
+        # pre-pane baseline on the HeadRun; ambiguity stays typed unavailable, never a guess.
         if lifecycle_run.spec.adapter == "claude":
             updated = _bind_claude_provider_progress_source(lifecycle_run)
             if updated != lifecycle_run:
@@ -1499,10 +1495,9 @@ class CommandHostRuntime:
         )
         try:
             if record.worker_continuation.retained and self.worker_retained_vanished(record):
-                # The retained worker is provably gone: orca has no session and its pid heartbeat
-                # resolves to a pid the OS does not know. There is no second writer to freeze, so
-                # the reviewer takes the commit it left. Taking the freeze path here would raise
-                # over a head that can never confirm suspended and loop `review-launch-aborted`.
+                # The retained worker is provably gone (no orca session, pid heartbeat resolves to a
+                # dead pid), so there is no second writer to freeze. The freeze path here would loop
+                # `review-launch-aborted` over a head that can never confirm suspended.
                 pass
             elif record.worker_continuation.retained:
                 # A retained worker is already SIGSTOPed and its conversation is what a red verdict
@@ -1511,9 +1506,8 @@ class CommandHostRuntime:
             else:
                 self._freeze_worker(record)
         except HostError as exc:
-            # The reviewer pane is up and the worker would not stop. Neither head can be reported as
-            # absent, so the bring-up hands the reviewer's pane back with the failure and the caller
-            # keeps its launch intent; the freeze is retried on the recovery path.
+            # The reviewer pane is up and the worker would not stop: neither head can be reported as
+            # absent, so the pane goes back with the failure and the caller keeps its launch intent.
             raise HeadLaunchAborted(
                 f"worker freeze failed: {exc}",
                 handle=launched.handle,
@@ -1731,9 +1725,8 @@ class CommandHostRuntime:
         if _same_repo(repo, Path(self.catalog.instance_dir)):
             self._complete_green_instance_repo(record, branch, base, repo)
             return
-        # Publish the reviewed branch as main (a non-fast-forward push is rejected, never
-        # force-landed), then fast-forward the project's own checkout: that is how a merged
-        # self-modification reaches the next oneshot tick of the dispatcher's own checkout.
+        # Publish as main (a non-fast-forward push is rejected, never force-landed), then fast-forward
+        # the checkout: that is how a merged self-modification reaches the next oneshot tick.
         self._run(["git", "-C", record.workspace, "push", "origin", f"{branch}:main"], "merge push")
         self._run(["git", "-C", str(repo), "fetch", "origin", "main"], "post-merge fetch")
         self._run(["git", "-C", str(repo), "merge", "--ff-only", "origin/main"], "post-merge fast-forward")
@@ -1988,9 +1981,8 @@ class CommandHostRuntime:
             except (head_ops.HeadRunError, head_ops.TaskRefError):
                 run = None
             if run is not None and run.settled and record.owns_head(WORKER_ROLE):
-                # The record still names a pane while the run says that head was confirmed gone:
-                # whatever is there is not that run, so a fresh identity keeps the stop from
-                # quietly skipping a head because a previous one was confirmed.
+                # The record still names a pane while the run says that head was confirmed gone: a
+                # fresh identity below keeps the stop from skipping a head already confirmed once.
                 run = None
         if run is None:
             run = head_ops.HeadRun(
@@ -2344,9 +2336,8 @@ class CommandHostRuntime:
         command = os.environ.get(env_name)
         launch = HeadCommand(command) if command else None
         if command:
-            # A raw command override bypasses the catalog launcher, so it never gets the pid
-            # heartbeat wrapper below. That is deliberate: this path is for tests and manual
-            # overrides, and it keeps the long inactivity ceiling as its fallback.
+            # A raw command override bypasses the catalog launcher and its pid heartbeat wrapper:
+            # deliberate for tests and manual overrides, with the inactivity ceiling as the fallback.
             self.catalog.prepare_head_workspace(head, workspace, role=role)
         else:
             launch = self.catalog.head_launch(
@@ -2378,8 +2369,7 @@ class CommandHostRuntime:
             # Which of the two prompt shapes this head is in is decided by the rendered command, not
             # the profile: a raw command override runs a provider no profile describes. An empty
             # pointer text is the legacy shape, not an empty prompt — that head is sent the prompt
-            # file's own contents. A caller that has written a task document passes the bounded
-            # line naming it, and that line is the whole payload.
+            # file's own contents; a caller with a task document passes the bounded line naming it.
             pointer = head_ops.NudgePointer(text=launch_prompt or "", document=prompt_document)
         try:
             outcome = head_ops.spawn(
@@ -3101,7 +3091,7 @@ class CommandHostRuntime:
             f"Base branch: {base}",
             f"Worker branch: {branch}",
             "",
-            # Last, after everything the card description or the decision can write into, so
+            # Last, after anything the card description or decision can write into, so
             # `_task_doc_decision` reads the dispatcher's own record. Written on every document,
             # empty body included: a round with no decision has to read back as none.
             _decision_record_line(generation, decision),
@@ -3116,9 +3106,8 @@ class CommandHostRuntime:
         self, task: dict[str, Any], attempt_id: str, review_round: int,
         *, record: DispatcherRecord | None = None,
     ) -> str:
-        # The round belongs in the key for the same reason it does in the worker report id: a card
-        # that goes red twice within one attempt reuses attempt_id, and a round-less id makes the
-        # second verdict a replay that leaves the card waiting.
+        # The round belongs in the key like it does in the worker report id: a card that goes red
+        # twice in one attempt reuses attempt_id, and a round-less id replays the first verdict.
         green_request = _attempt_request_id(attempt_id, "review-green", task["ref"], str(review_round))
         red_request = _attempt_request_id(attempt_id, "review-red", task["ref"], str(review_round))
         body_file = _body_file_path("verdict", task["ref"], review_round)
@@ -3651,8 +3640,7 @@ class DispatcherRuntime:
         )
         if requeued and active is not None:
             # The preempted head can still be in the workspace the next round claims, and it is
-            # stopped through the workspace, not the handle: a head adopted from a launch intent
-            # runs with no handle on record.
+            # stopped through the workspace, not the handle: an adopted head has no handle on record.
             if active.owns_head("review"):
                 # A preempt out of Validate leaves the worker pane closed by `start_review` but the
                 # reviewer up; left alone its verdict would land on the new attempt.
@@ -3769,9 +3757,8 @@ class DispatcherRuntime:
                 "attempt_id": record.attempt_id,
                 "reason": "a live worker heartbeat has no durable HeadRun binding for this claim",
             }
-        # The workspace is asked of the host rather than taken from its answer: `prepare_worker`
-        # resolves the same path itself, and the answer is what a tick dying mid-launch never sees.
-        # With it and the pid file, the next tick can stop the head without ever holding its handle.
+        # The workspace is asked of the host rather than taken from its answer: with it and the pid
+        # file the next tick can stop a head whose handle a tick dying mid-launch never recorded.
         failure = _write_launch_intent(
             self,
             payload,
@@ -4494,9 +4481,8 @@ class DispatcherRuntime:
         if marker == "review:red":
             # Only the reviewer's lifecycle ends here: a full `stop` would take the worktree's
             # terminals down, and this checkout is about to be parked and is never re-created from
-            # base. An unconfirmed stop ends the tick before the card moves — nothing else may run
-            # here while a reviewer may still be alive. The commit is read before the pane goes,
-            # because ending the reviewer forgets the commit it judged and the park has to keep it.
+            # base. An unconfirmed stop ends the tick before the card moves. The commit is read
+            # first: ending the reviewer forgets the commit it judged and the park has to keep it.
             reviewed = record.review_commit or self.host.head_commit(record)
             unconfirmed = self._end_review_pane_confirmed(
                 record, records, payload, ref, step="review", attempt_id=attempt_id,
@@ -4634,9 +4620,8 @@ class DispatcherRuntime:
         now = time.time()
         pid_confirmed = bool(status.get("pid_confirmed"))
         if pid_confirmed and "idle" in status:
-            # The pid heartbeat proves this exact process is running and the pane says whether it is
-            # doing anything, which beats any clock: the timing ceilings below do not apply here. A
-            # working head waits as long as it needs; one that stopped without delivering ends now.
+            # The pid heartbeat proves this exact process runs and the pane says whether it is doing
+            # anything: that beats any clock, so the timing ceilings below do not apply here.
             idle, fence_moved = _idle_outcome(record, status, kind=kind, now=now)
             if fence_moved:
                 self.save_records(payload, records)
@@ -4658,9 +4643,8 @@ class DispatcherRuntime:
                         "action": f"{kind}-idle-unconfirmed", "reason": idle_trigger,
                     }
                 if kind == "worker":
-                    # The confirmed-idle boundary, and the last point before something destructive
-                    # happens to a head that may simply have finished without reporting. The round
-                    # spends one prompt here; a prompt attempted and failed travels on in the trigger.
+                    # The confirmed-idle boundary: the last point before something destructive happens
+                    # to a head that may simply have finished. A failed prompt travels on in the trigger.
                     prompted, idle_trigger = self._prompt_worker_report(
                         task, record, records, payload, attempt_id, trigger=idle_trigger
                     )
@@ -4673,9 +4657,8 @@ class DispatcherRuntime:
                     trigger=idle_trigger, stall=_idle_stall_seconds(), degraded=True,
                 )
             return unavailable() if runtime_reason else None
-        # Either no heartbeat, or one with nothing that can say what the head is doing: an adopted
-        # head whose pane identity was never persisted, a pane binding Orca lost, a refused probe. A
-        # live pid alone is no reason to wait forever, so those fall back to the ordinary ceilings.
+        # Either no heartbeat, or one that cannot say what the head is doing (adopted head, lost pane
+        # binding, refused probe). A live pid alone is no reason to wait forever: ordinary ceilings.
         stall = _stall_seconds(kind)
         waiting_since = float(getattr(record, f"{kind}_waiting_since") or 0.0)
         started_at = float(getattr(record, f"{kind}_started_at") or 0.0)
@@ -5205,15 +5188,13 @@ class DispatcherRuntime:
         record.comment_baseline = max(len(moved.get("comments") or []), baseline)
         # Where the next verdict is scanned from, so the one just acted on is not read again.
         record.review_baseline = record.comment_baseline
-        # The rework's generation is the one this transition reserved before the move. Assigned,
-        # never advanced: every tick that finishes this transition writes the same number. A
-        # transition written before the reservation carries none and falls back to the advance.
+        # The rework's generation is the one this transition reserved before the move: assigned, never
+        # advanced. A transition written before the reservation carries none and falls back.
         record.report_generation = (
             continuation.reserved_generation or record.report_generation + 1
         )
         # And the instruction that round is opened on, from the same transition. Always assigned,
-        # never merged: a round opened by a red gate carries no decision, and inheriting the last
-        # one would hand a worker an adjudication its own code has already answered.
+        # never merged: inheriting the previous round's decision would adjudicate answered code.
         record.report_decision = continuation.decision_body
         record.gate_state = ""
         record.gate_pending_since = 0.0
@@ -6442,9 +6423,8 @@ class DispatcherRuntime:
         heads = [head for head in heads if head]
         if not heads or not record.attempt_round:
             return
-        # The request id carries the launched configurations, not just the round: a repeated
-        # bring-up of the same head writes the same id and commits once, while one on a different
-        # configuration appends. Same for a verdict, keyed by the pair that produced it.
+        # The request id carries the launched configurations, not just the round: the same head writes
+        # the same id and commits once, a different configuration appends. Same for a verdict's pair.
         parts = [str(record.attempt_round)]
         if outcome:
             parts.append(outcome)
