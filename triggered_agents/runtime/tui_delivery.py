@@ -759,7 +759,11 @@ def _confirm_interactive_turn(
     deadline = time.monotonic() + TUI_DELIVERY_TIMEOUT_S
     next_resend_at = time.monotonic() + max(TUI_DELIVERY_RESEND_GRACE_S, 0)
     while time.monotonic() < deadline:
-        if confirm is not None and confirm(sent_at):
+        # A normal caller's criterion has always taken precedence over pane evidence.  Keep that
+        # launch/worker/reviewer contract intact.  An out-of-band acknowledgement is different:
+        # it expressly lets pane evidence accept a delivery, so first reject the one direct,
+        # prompt-specific proof that this payload is still unsent.
+        if not ack_out_of_band and confirm is not None and confirm(sent_at):
             _advance(evidence, STAGE_TURN_OBSERVED)
             _advance(evidence, STAGE_ACKNOWLEDGED)
             evidence.turn_confirmed = True
@@ -776,6 +780,17 @@ def _confirm_interactive_turn(
                 f"(stage={evidence.stage}, resends={evidence.resends})",
                 evidence=evidence,
             )
+        # A provider record proves that *a* turn started after the send boundary.  It cannot
+        # override the direct, prompt-specific proof that this payload is still sitting in the
+        # composer: that record may belong to a concurrent or delayed turn.  Probe first so a
+        # swallowed payload remains a delivery failure even when the journal has unrelated
+        # activity in the same workspace.
+        if not evidence.payload_left_in_composer and confirm is not None and confirm(sent_at):
+            _advance(evidence, STAGE_TURN_OBSERVED)
+            _advance(evidence, STAGE_ACKNOWLEDGED)
+            evidence.turn_confirmed = True
+            evidence.reason = ""
+            return DeliveryOutcome(DELIVERY_CONFIRMED, evidence)
         if probe.readiness == READINESS_BUSY or (
             evidence.cursor_moved and not evidence.payload_left_in_composer
         ):

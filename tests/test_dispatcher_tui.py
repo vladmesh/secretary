@@ -987,10 +987,17 @@ class TuiDeliveryStageTests(unittest.TestCase):
     """
 
     def deliver(self, pane: ScriptedPane, **kwargs):
+        clock = [0.0]
+
+        def advance_clock(seconds: float) -> None:
+            clock[0] += seconds
+
         with mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3), \
              mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01), \
              mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0), \
              mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2), \
+             mock.patch("triggered_agents.runtime.tui_delivery.time.monotonic", side_effect=lambda: clock[0]), \
+             mock.patch("triggered_agents.runtime.tui_delivery.time.sleep", side_effect=advance_clock), \
              mock.patch("triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0):
             return deliver_interactive_prompt(
                 "term-observer", "wake the observer", run_json=pane.run_json, **kwargs
@@ -1127,6 +1134,27 @@ class TuiDeliveryStageTests(unittest.TestCase):
         self.assertEqual(evidence.reason, "payload-left-in-composer")
         self.assertTrue(evidence.payload_left_in_composer)
         # Re-entered, never rewritten: the pane is holding one copy of the prompt already.
+        self.assertEqual(pane.sends, ["wake the observer", "", "", ""])
+
+    def test_a_provider_turn_does_not_override_the_payload_still_in_the_composer(self) -> None:
+        """A same-workspace turn is not proof that this payload was submitted.
+
+        A journal can gain a user record from another turn while this delivery's bracketed paste is
+        still stuck in the composer.  The direct, prompt-specific negative evidence must win; else
+        the dispatcher arms an acknowledgement deadline for a wake the observer never saw.
+        """
+        pane = ScriptedPane({0: ["›"], 1: ["› [Pasted Content 1315 chars]"]})
+        confirmations = [0]
+
+        def confirm(_sent_at: float) -> bool:
+            confirmations[0] += 1
+            return True
+
+        with self.assertRaises(TuiDeliveryError) as raised:
+            self.deliver(pane, confirm=confirm, ack_out_of_band=True)
+
+        self.assertEqual(confirmations[0], 0)
+        self.assertEqual(raised.exception.evidence.reason, "payload-left-in-composer")
         self.assertEqual(pane.sends, ["wake the observer", "", "", ""])
 
     def test_a_pane_that_printed_since_the_send_is_never_written_to_twice(self) -> None:

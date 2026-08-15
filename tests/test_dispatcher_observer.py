@@ -4176,9 +4176,9 @@ class ObserverConfigurationTests(unittest.TestCase):
         # The pane started a turn, and that alone does not close an observer delivery.
         self.assertEqual(outcome, "accepted")
         # Readiness is asked and the pane is fingerprinted on both sides of the send: the byte
-        # count Orca answers with is one stage of delivery, not the whole of it. The extra read
-        # after the send is the wake's own confirmation criterion, the one a launch already used:
-        # it is asked first, before the pane evidence, and only then does the screen get a say.
+        # count Orca answers with is one stage of delivery, not the whole of it. The post-send
+        # pane probe is first, so a payload still visible in its composer cannot be hidden by a
+        # same-workspace provider turn; only then does the fallback screen get a say.
         self.assertEqual(
             [call[1:3] for call in calls],
             [
@@ -4188,8 +4188,8 @@ class ObserverConfigurationTests(unittest.TestCase):
                 ["terminal", "read"],
                 ["terminal", "send"],
                 ["terminal", "send"],
-                ["terminal", "read"],
                 ["terminal", "wait"],
+                ["terminal", "read"],
                 ["terminal", "read"],
             ],
         )
@@ -4273,9 +4273,16 @@ class ObserverConfigurationTests(unittest.TestCase):
                 raise AssertionError(args)
 
             environment = {"SECRETARY_CODEX_SESSIONS": str(sessions)}
+            clock = [0.0]
+
+            def advance_clock(seconds: float) -> None:
+                clock[0] += seconds
+
             with mock.patch.dict(os.environ, environment), \
                  mock.patch.object(host, "_run_json", side_effect=run_json), \
                  mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01), \
+                 mock.patch("triggered_agents.runtime.tui_delivery.time.monotonic", side_effect=lambda: clock[0]), \
+                 mock.patch("triggered_agents.runtime.tui_delivery.time.sleep", side_effect=advance_clock), \
                  mock.patch(
                      "triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S",
                      0,
