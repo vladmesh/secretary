@@ -263,10 +263,7 @@ from secretary.dispatcher_tui import (
     terminal_turn_started as _terminal_turn_started,
 )
 from secretary.dispatcher_types import (
-    # Who a stop is recorded as having been initiated by. Every stop the dispatcher performs has an
-    # agent — the reviewer taking the checkout, a verdict ending the review round, a watchdog over
-    # a head that stopped answering, a replacement opening, an operator pausing the pipeline,
-    # reconciliation settling a record — and both heads' runs now say which.
+    # Who a stop is recorded as having been initiated by.
     STOPPED_BY_DISPATCHER,
     STOPPED_BY_OPERATOR,  # noqa: F401  # Public compatibility re-export.
     STOPPED_BY_RECONCILIATION,  # noqa: F401  # Public compatibility re-export.
@@ -428,12 +425,10 @@ from triggered_agents.runtime.prompt_document import (
     write_prompt_document as _write_prompt_document,
 )
 
-# The prompts below are read and run by a head in its own shell, so the checkout fallback stays a
-# shell expression rather than a path this process resolved.
+# Head prompts run in the head's own shell, so the checkout fallback stays a shell expression.
 _PYTHONPATH_PREFIX = pythonpath_prefix()
-# A TASK.md runs from the candidate worktree, while task protocol mutations belong to the live
-# dispatcher installation selected above.  ``-P`` keeps Python from prepending that worktree to
-# sys.path and shadowing the explicitly selected control plane package.
+# A TASK.md runs from the candidate worktree, so ``-P`` keeps Python from prepending that worktree
+# to sys.path and shadowing the control plane package selected above.
 _CONTROL_PLANE_TASK_COMMAND = f"{_PYTHONPATH_PREFIX} python3 {_PYTHON_SAFE_PATH_FLAG} -m secretary task"
 
 
@@ -455,17 +450,14 @@ def _instance_file(path: Path) -> Path:
     return path / "instance.yaml" if path.is_dir() else path
 
 
-# Observer workspaces live in this subdirectory of the workspaces root. Orca puts a worktree at
-# <workspaces root>/<repo directory>/<worktree name>, so the observer repo's directory carries the
-# same name and the path the dispatcher fixed in the launch intent is the path Orca hands back.
+# Orca puts a worktree at <workspaces root>/<repo directory>/<worktree name>, so the observer repo's
+# directory carries this name and the path fixed in the launch intent is the path Orca hands back.
 OBSERVER_WORKSPACE_DIR = OBSERVER_REPO_NAME
-# The only branch of the observer repo, named at init so no bring-up has to ask git what a fresh
-# repository calls its first branch.
+# The only branch of the observer repo, fixed at init so no bring-up has to ask git for its name.
 OBSERVER_REPO_BRANCH = "observers"
 
-# How long a confirmed stop waits for a head to leave after each signal, and how often it looks.
-# A head that has been asked to close its pane exits within a moment; the wait exists so a stop is
-# not called unconfirmed over a process that is in the middle of leaving.
+# How long a confirmed stop waits for a head to leave after each signal, and how often it looks: a
+# stop is never called unconfirmed over a process that is in the middle of leaving.
 HEAD_STOP_GRACE_SECONDS = 5.0
 HEAD_STOP_POLL_SECONDS = 0.1
 
@@ -484,28 +476,22 @@ class LaunchedHead:
     handle: str
     head: str = ""
     run: dict[str, Any] = field(default_factory=dict)
-    # `terminal create` / `split` returns paneKey synchronously.  Its leaf survives Orca's handle
-    # aliasing, so launch callers carry it instead of trying to recover it from an inventory keyed
-    # by the already-unstable handle.
+    # `terminal create` / `split` returns paneKey synchronously. Its leaf survives Orca's handle
+    # aliasing, so launch callers carry it instead of recovering it from an inventory.
     leaf: str = ""
-    # The completed launch prompt's bounded transport receipt.  This belongs beside the head
-    # identity so caller recovery never has to infer a successful body/submit pair from the pane.
+    # The launch prompt's bounded transport receipt, so recovery never infers it from the pane.
     delivery_evidence: dict[str, Any] = field(default_factory=dict)
-    # The head's own run, as the three head operations keep it: identity that outlives a pane
-    # handle, lifecycle, and later the initiator that ended it. Empty for a bring-up whose caller
-    # keeps no lifecycle of its own (the in-process host seams, and noop mode).
+    # The head's own run: identity that outlives a pane handle, lifecycle, and the initiator that
+    # ended it. Empty for a bring-up whose caller keeps no lifecycle of its own.
     head_run: dict[str, Any] = field(default_factory=dict)
 
 
-# The identity a session manager returns while creating one pane. It is `pane_host.Pane` now: the
-# pane verbs moved to the host protocol, and a second local copy of "a handle and a leaf" would be
-# a type the head operations and the dispatcher had to translate between for no reason.
+# The identity a session manager returns while creating one pane.
 PaneIdentity = Pane
 
 
 class InstanceCatalog:
-    # The runtime consumes this as part of the catalog surface. `__init__` replaces the
-    # declaration with the validated instance directory before a catalog is usable.
+    # Part of the catalog surface; `__init__` replaces it with the validated instance directory.
     instance_dir: Path | None = None
 
     def __init__(self, instance_path: Path) -> None:
@@ -521,9 +507,8 @@ class InstanceCatalog:
             if isinstance(binding, dict) and binding.get("enabled") is True
         }
         try:
-            # The installation's own snapshot, not the checkout this module was imported from.
-            # The dispatcher runs out of a working tree where development happens; comparing the
-            # live registry against that tree made an unmerged commit stop production ticks.
+            # The installation's own snapshot, not the checkout this module was imported from:
+            # judging the live registry by that tree makes an unmerged commit stop production ticks.
             self._heads = installed_heads(self.instance_path)
         except HeadRegistryConfigError as exc:
             raise DispatcherError("invalid_heads", str(exc), 2) from None
