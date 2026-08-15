@@ -1512,6 +1512,17 @@ Facts are stored flat as `memory/facts/global/<slug>.md` or `memory/facts/<proje
 fact is one distilled markdown record. The curator is the writer role; every other agent reads through
 `memory_search`, `memory_get` and `memory_list`.
 
+Write authority is split in two, because asking for a fact and publishing one are different acts.
+`propose` stages a fact in the curator inbox (`<data_dir>/memory/.staging/<propose-id>`) and touches no
+canon; `commit` and `supersede` write `state/memory` in the instance repository. The **proposer** roles
+are `curator`, `secretary`, `operator` and `butler`; the **canonical writer** roles are `curator`,
+`secretary` and `operator`. A butler may therefore hand the curator a fact it noticed, but its own
+`commit` or `supersede` is refused with a permission error saying butler proposals await curator review,
+not with the generic write refusal an unknown role gets. Every actor may still only use a `source` of its
+own role, so a butler proposal stays visibly butler-sourced through commit. Publication of a proposal
+owned by another actor remains the existing ownership rule: an actor commits its own proposal, and a
+`secretary` or `operator` actor may commit anyone's.
+
 ```bash
 python3 -P -m secretary memory verify --instance INSTANCE
 python3 -P -m secretary memory propose --instance INSTANCE --actor ACTOR \

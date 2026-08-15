@@ -42,6 +42,10 @@ from secretary.memory_journal import (
 from secretary.state_repo import MEMORY_PATHSPEC
 from triggered_agents.runtime.redact import redact
 
+MEMORY_CANONICAL_WRITER_ROLES = frozenset({"curator", "secretary", "operator"})
+MEMORY_PROPOSAL_ONLY_ROLES = frozenset({"butler"})
+MEMORY_PROPOSER_ROLES = MEMORY_CANONICAL_WRITER_ROLES | MEMORY_PROPOSAL_ONLY_ROLES
+
 MEMORY_PROPOSAL_TTL_SECONDS = 7 * 24 * 60 * 60
 MEMORY_PROPOSAL_ACTIVE_SECONDS = 60 * 60
 MEMORY_PROPOSAL_ACTIVE_MARKER = ".active"
@@ -92,7 +96,7 @@ def propose_memory_fact(
     data_dir = data_dir.expanduser().resolve()
     memory_dir = data_dir / "memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
-    _ensure_writer_actor(actor)
+    _ensure_proposer_actor(actor)
     scope_dir = _scope_dir(scope)
     slug = _clean_slug(slug)
     supersede_ids = _normalize_supersedes(scope_dir, supersedes or [])
@@ -152,7 +156,7 @@ def commit_memory_proposal(
     data_dir = data_dir.expanduser().resolve()
     memory_dir = data_dir / "memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
-    _ensure_writer_actor(actor)
+    _ensure_canonical_writer_actor(actor, op="commit")
     propose_id = _clean_proposal_id(propose_id)
     with _memory_journal_lock(memory_dir):
         proposal_dir = memory_dir / ".staging" / propose_id
@@ -192,7 +196,7 @@ def supersede_memory_fact(
     data_dir = data_dir.expanduser().resolve()
     memory_dir = data_dir / "memory"
     memory_dir.mkdir(parents=True, exist_ok=True)
-    _ensure_writer_actor(actor)
+    _ensure_canonical_writer_actor(actor, op="supersede")
     scope_dir = _scope_dir(scope)
     slug = _clean_slug(slug)
     supersede_ids = _normalize_supersedes(scope_dir, supersedes)
@@ -223,10 +227,27 @@ def supersede_memory_fact(
         return result
 
 
-def _ensure_writer_actor(actor: str) -> None:
-    role = _actor_role(actor)
-    if role not in {"curator", "secretary", "operator"}:
+def _ensure_proposer_actor(actor: str) -> None:
+    """Authority to stage a proposal for the curator inbox.
+
+    A proposal is not canonical memory: it only asks the curator to publish one.
+    Roles in `MEMORY_PROPOSAL_ONLY_ROLES` stop here, at the proposal boundary.
+    """
+    if _actor_role(actor) not in MEMORY_PROPOSER_ROLES:
         raise MemoryPermissionError(f"actor is not allowed to write memory: {actor}")
+
+
+def _ensure_canonical_writer_actor(actor: str, *, op: str) -> None:
+    """Authority to publish canonical memory (`commit`, `supersede`)."""
+    role = _actor_role(actor)
+    if role in MEMORY_CANONICAL_WRITER_ROLES:
+        return
+    if role in MEMORY_PROPOSAL_ONLY_ROLES:
+        raise MemoryPermissionError(
+            f"actor {actor} may propose memory facts but cannot {op} canonical memory: "
+            f"{role} proposals await curator review"
+        )
+    raise MemoryPermissionError(f"actor is not allowed to write memory: {actor}")
 
 
 def _ensure_commit_actor(actor: str, proposal_actor: str) -> None:

@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from secretary.cli import build_parser, main
+from secretary.cli import MEMORY_EXIT_PERMISSION, build_parser, main
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_INSTANCE = REPO_ROOT / "examples" / "instance"
@@ -762,6 +762,81 @@ class CliTests(unittest.TestCase):
         self.assertEqual(committed["op"], "commit")
         self.assertEqual(committed["changed_facts"], ["secretary/cli-fact"])
         self.assertTrue(committed["commit"])
+
+    def test_butler_proposes_through_the_cli_but_cannot_commit(self):
+        """The butler reaches the curator inbox and stops there.
+
+        Contract: docs/PROTOCOLS.md, "Memory" — proposing is not publishing.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            instance_dir = root / "instance"
+            data_dir = root / "secretary-data"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                f"data_dir: {data_dir}\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+            self.run_cli(["data", "init", "--instance", str(instance_dir)])
+            init_instance_repo(instance_dir)
+            fact = root / "fact.md"
+            fact.write_text("the owner prefers evening digests\n", encoding="utf-8")
+
+            propose_code, propose_output = self.run_cli(
+                [
+                    "memory",
+                    "propose",
+                    "--instance",
+                    str(instance_dir),
+                    "--actor",
+                    "butler:telegram/session",
+                    "--scope",
+                    "global",
+                    "--slug",
+                    "butler-cli-fact",
+                    "--file",
+                    str(fact),
+                    "--source",
+                    "butler:telegram/session",
+                ]
+            )
+            proposal = json.loads(propose_output)
+            commit_code, commit_output = self.run_cli(
+                [
+                    "memory",
+                    "commit",
+                    "--instance",
+                    str(instance_dir),
+                    "--actor",
+                    "butler:telegram/session",
+                    "--propose-id",
+                    proposal["propose_id"],
+                ]
+            )
+            refusal = json.loads(commit_output)
+            canon_written = (
+                instance_dir / "state" / "memory" / "facts" / "global" / "butler-cli-fact.md"
+            ).exists()
+            staged = (
+                data_dir / "memory" / ".staging" / proposal["propose_id"] / "proposal.json"
+            ).is_file()
+
+        self.assertEqual(propose_code, 0, propose_output)
+        self.assertTrue(proposal["ok"])
+        self.assertEqual(proposal["fact"], "global/butler-cli-fact")
+        self.assertEqual(proposal["actor"], "butler:telegram/session")
+        self.assertEqual(proposal["source"], "butler:telegram/session")
+        self.assertEqual(commit_code, MEMORY_EXIT_PERMISSION)
+        self.assertFalse(refusal["ok"])
+        self.assertEqual(refusal["error"], "permission")
+        self.assertIn("cannot commit canonical memory", refusal["message"])
+        self.assertIn("butler proposals await curator review", refusal["message"])
+        self.assertFalse(canon_written)
+        self.assertTrue(staged)
 
     def test_memory_verify_command_reports_parity(self):
         with tempfile.TemporaryDirectory() as tmpdir:
