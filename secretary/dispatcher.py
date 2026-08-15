@@ -462,6 +462,16 @@ OBSERVER_REPO_BRANCH = "observers"
 HEAD_STOP_GRACE_SECONDS = 5.0
 HEAD_STOP_POLL_SECONDS = 0.1
 
+# What two provider-source descriptors have to agree on before one launch may keep the copy it was
+# already prepared with. These are the facts preflight fixes for the lifetime of the source: its
+# schema, the run it fences, and the session root it selects from. Deliberately not the baseline,
+# which is a moment-in-time listing of that root, nor the binding facts, which only the pane's own
+# session can produce. A difference in any of them is a foreign descriptor, not a stale one, and is
+# left to fail the handoff merge as the identity conflict it is.
+_PREPARED_SOURCE_IDENTITY_KEYS = (
+    "version", "kind", "run_id", "head_run_fingerprint", "workspace", "role", "task_ref", "root",
+)
+
 
 def _same_repo(first: Path, second: Path) -> bool:
     try:
@@ -890,6 +900,73 @@ class CommandHostRuntime:
             return run
         return preflight_codex_launch(profile, workspace, run)
 
+    def _preflight_launch_run(
+        self,
+        head: str,
+        *,
+        role: str,
+        workspace: str,
+        task_ref: head_ops.TaskRef,
+        pid_file: str,
+        run_id: str,
+    ) -> head_ops.HeadRun:
+        """Attest this bring-up's run, then hand it the source its launch was prepared with."""
+        return self._retain_prepared_provider_source(
+            self.preflight_codex_run(
+                head,
+                role=role,
+                workspace=workspace,
+                task_ref=task_ref,
+                pid_file=pid_file,
+                run_id=run_id,
+            )
+        )
+
+    def _retain_prepared_provider_source(self, attested: head_ops.HeadRun) -> head_ops.HeadRun:
+        """Keep the pre-pane provider source this exact run was already prepared with.
+
+        One launch preflights twice: once to fix the intent on disk, and once here, inside the host
+        call that opens the pane.  Both attestations must run — workspace trust is a hard pre-pane
+        requirement and is rechecked by the second — but only the first descriptor is durable. It is
+        the one the ingress binds its session against and the one a recovery reads, while the second
+        enumerates the session root again and legitimately sees whatever journals other heads opened
+        in between.  Handing that second baseline back as this run's source is what made a rework
+        relaunch fail its own handoff with two conflicting unbound descriptors for one HeadRun.
+
+        Retention is fenced on the exact run: the prepared descriptor is kept only when it names this
+        run id, spec, workspace, role, task ref and pid file, and describes the same source identity
+        and root.  Anything else stays the fresh attestation and is refused downstream as the
+        identity conflict it is, and a source already bound to a session is preserved rather than
+        replaced by a new unbound one.
+        """
+        ingress = self._codex_provider_ingresses.get(attested.run_id)
+        if ingress is None:
+            return attested
+        prepared = ingress.run
+        if (
+            not prepared.same_run(attested)
+            or prepared.spec != attested.spec
+            or prepared.workspace != attested.workspace
+            or prepared.task_ref != attested.task_ref
+            or prepared.role != attested.role
+            or prepared.pid_file != attested.pid_file
+        ):
+            return attested
+        prepared_source = prepared.fanout_policy.get("provider_source")
+        fresh_source = attested.fanout_policy.get("provider_source")
+        if not isinstance(prepared_source, dict) or not isinstance(fresh_source, dict):
+            # A fresh attestation that established no source of its own has nothing to hand over,
+            # and never erases the durable one; the handoff merge keeps what is already on disk.
+            return attested
+        if any(
+            prepared_source.get(key) != fresh_source.get(key)
+            for key in _PREPARED_SOURCE_IDENTITY_KEYS
+        ):
+            return attested
+        policy = dict(attested.fanout_policy)
+        policy["provider_source"] = dict(prepared_source)
+        return attested.with_fanout_policy(policy)
+
     def _prompt_adapter(self, run: Any, head: str) -> str:
         """The provider whose framing a prompt for this pane is delivered in."""
         if isinstance(run, dict):
@@ -1116,7 +1193,7 @@ class CommandHostRuntime:
         )
         if lifecycle_run.spec.adapter == "codex":
             try:
-                lifecycle_run = self.preflight_codex_run(
+                lifecycle_run = self._preflight_launch_run(
                     head,
                     role=OBSERVER_ROLE,
                     workspace=str(workspace),
@@ -2315,7 +2392,7 @@ class CommandHostRuntime:
         # predecessor state.
         if self.mode == "noop":
             try:
-                preflight_run = self.preflight_codex_run(
+                preflight_run = self._preflight_launch_run(
                     head,
                     role=role,
                     workspace=workspace,
@@ -2355,7 +2432,7 @@ class CommandHostRuntime:
                 command = _with_pid_heartbeat(command, pid_file, identity=heartbeat)
         adapter = (getattr(launch, "adapter", "") or "codex") if launch else "codex"
         try:
-            preflight_run = self.preflight_codex_run(
+            preflight_run = self._preflight_launch_run(
                 head,
                 role=role,
                 workspace=workspace,
