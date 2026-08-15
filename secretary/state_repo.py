@@ -38,6 +38,17 @@ GITIGNORE_PATHSPEC = (".gitignore",)
 # writer may pick either one up by accident.
 HEADS_PATHSPEC = ("heads/heads.yaml", "heads/source.yaml")
 
+# Variables with which the caller's environment selects a *different* repository than
+# the one named on the command line.  Git honours them ahead of `-C`, so an inherited
+# `GIT_DIR` silently redirects an instance write into whatever repository the caller
+# happened to be working in.  Every Git child this product starts drops them first.
+GIT_SELECTION_VARIABLES = (
+    "GIT_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_WORK_TREE",
+    "GIT_OBJECT_DIRECTORY",
+)
+
 MEMORY_FACTS_RELATIVE = Path("state") / "memory" / "facts"
 KNOWLEDGE_RELATIVE = Path("state") / "knowledge"
 SECRETS_RELATIVE = Path("secrets")
@@ -112,9 +123,22 @@ def git_command(instance_dir: Path, args: list[str]) -> list[str]:
     ]
 
 
-def _noninteractive_git_env() -> dict[str, str]:
-    """Make every instance-repository Git operation bounded and prompt-free."""
-    env = dict(os.environ)
+def git_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """The environment every Git child of this product starts with.
+
+    Two policies, one place.  Noninteractive: no credential prompt and no
+    interactive SSH, so an operation is bounded rather than hanging on a
+    terminal nobody is watching.  Repository-selecting: `GIT_DIR` and its
+    siblings are removed, because Git reads them ahead of the `-C`/path the
+    caller asked for, and an inherited one would silently point a state or
+    journal write at the caller's own repository.
+
+    This is also the pre-checkout helper: a clone has no instance repository to
+    cross into yet, but its child still must not inherit that selection.
+    """
+    env = dict(os.environ if base is None else base)
+    for name in GIT_SELECTION_VARIABLES:
+        env.pop(name, None)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
     return env
@@ -132,7 +156,7 @@ def run_git(
     """
     instance_dir = Path(instance_dir).expanduser().resolve()
     command = git_command(instance_dir, args)
-    env = _noninteractive_git_env()
+    env = git_env()
     # The instance checkout is runtime-user-owned.  Root install/upgrade may need to reconcile
     # it, but Git reads repository configuration before a command (including fsmonitor), so a
     # root Git process would execute runtime-user-controlled configuration.  Cross that boundary
@@ -144,13 +168,15 @@ def run_git(
         try:
             owner = instance_dir.stat()
             if owner.st_uid != 0:
-                # `runuser` resets the calling environment. Pass the two
-                # noninteractive settings as command arguments too, so a root
-                # install cannot regain a credential prompt after the owner
+                # `runuser` rebuilds the calling environment, and what it keeps
+                # depends on its PAM configuration. Restate the whole policy as
+                # command arguments, so neither a credential prompt nor an
+                # inherited repository selection can come back after the owner
                 # crossing.
                 command = [
                     "runuser", "--user", pwd.getpwuid(owner.st_uid).pw_name, "--",
                     "env",
+                    *[argument for name in GIT_SELECTION_VARIABLES for argument in ("--unset", name)],
                     f"GIT_TERMINAL_PROMPT={env['GIT_TERMINAL_PROMPT']}",
                     f"GIT_SSH_COMMAND={env['GIT_SSH_COMMAND']}",
                     *command,

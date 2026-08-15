@@ -327,16 +327,12 @@ class CheckpointWriter:
         return state_repo.commit_identity(self.instance_dir)
 
     def _git(self, args: list[str], label: str) -> subprocess.CompletedProcess[str]:
+        # The instance repository owns command shape, owner crossing and the Git
+        # environment; this writer owns only the semantic failure it reports.
         try:
-            result = subprocess.run(
-                ["git", "-C", str(self.instance_dir), *args],
-                text=True,
-                capture_output=True,
-                timeout=120,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise CheckpointBlocked(f"{label} failed: {exc}") from None
+            result = state_repo.run_git(self.instance_dir, args, label=label)
+        except state_repo.StateRepoError as exc:
+            raise CheckpointBlocked(str(exc)) from None
         if result.returncode != 0:
             detail = (result.stderr or result.stdout or "").strip().splitlines()
             raise CheckpointBlocked(f"{label} failed: {detail[-1] if detail else 'git error'}")
@@ -633,14 +629,8 @@ def _age_minutes(stamp: str, now: float) -> int | None:
 
 def _read_git(instance_dir: Path, args: list[str], *, ok_only: bool = False) -> Any:
     try:
-        result = subprocess.run(
-            ["git", "-C", str(instance_dir), *args],
-            text=True,
-            capture_output=True,
-            timeout=120,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+        result = state_repo.run_git(instance_dir, args, label=f"checkpoint snapshot {args[0]}")
+    except state_repo.StateRepoError:
         return None if ok_only else ""
     if result.returncode != 0:
         return None if ok_only else ""

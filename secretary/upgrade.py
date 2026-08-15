@@ -140,8 +140,13 @@ class GitError(RuntimeError):
 
 def _git(root: Path, args: list[str], timeout: int = 120) -> str:
     try:
+        # `-C root` selects the checkout only if no inherited `GIT_DIR` outranks
+        # it, so an upgrade takes the same scrubbed environment as every other
+        # Git child of this product.
         result = _proc.run(
-            ["git", "-c", f"safe.directory={root}", "-C", str(root), *args], timeout=timeout
+            ["git", "-c", f"safe.directory={root}", "-C", str(root), *args],
+            timeout=timeout,
+            env=state_repo.git_env(),
         )
     except FileNotFoundError:
         raise GitError("git not found") from None
