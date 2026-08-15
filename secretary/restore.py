@@ -26,7 +26,7 @@ from secretary.backup_policy import (
     should_skip_data_entry,
 )
 from secretary.backup_verify import _verify_plain_tar
-from secretary.config import ConfigError, DataDirError, instance_data_dir, load_config, validate_instance
+from secretary.config import DataDirError, instance_data_dir, validate_instance
 from secretary.data import init_layout
 from secretary.product_issues import (
     ProductIssueValidationError,

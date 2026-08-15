@@ -399,6 +399,32 @@ class CliTests(unittest.TestCase):
                 self.assertTrue((instance_dir / "relative-data" / "data-manifest.json").is_file())
             self.assertFalse((foreign / "relative-data").exists())
 
+    def test_data_export_artifacts_refuses_an_invalid_instance_tree(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = Path(tmpdir) / "instance"
+            instance_dir.mkdir()
+            (instance_dir / "instance.yaml").write_text(
+                "version: 1\n"
+                "name: example\n"
+                "data_dir: relative-data\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:x/y.git\n",
+                encoding="utf-8",
+            )
+            projects = instance_dir / "projects"
+            projects.mkdir()
+            (projects / "bad.yaml").write_text("unexpected: value\n", encoding="utf-8")
+
+            code, output = self.run_cli(
+                ["data", "export-artifacts", "--instance", str(instance_dir)]
+            )
+            untouched = not (instance_dir / "relative-data").exists()
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("secretary data: 6 config problem(s):", output)
+        self.assertIn("bad.yaml", output)
+        self.assertTrue(untouched)
+
     def test_data_init_overwrites_broken_manifest(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = Path(tmpdir) / "instance"

@@ -36,7 +36,7 @@ from secretary.board_transport import (
     transport_path,
 )
 from secretary.checkpoint import CheckpointPusher
-from secretary.config import validate_instance
+from secretary.config import DataDirError, validate_instance
 from secretary.head_registry import (
     HeadRegistryConfigError,
     assert_snapshot_current,
@@ -552,7 +552,7 @@ def step_host(context: UpgradeContext) -> StepResult:
             data_dir=report.data_dir,
             runtime_user=context.runtime_user,
         )
-    except (HostCommandError, ValueError) as exc:
+    except (DataDirError, HostCommandError, ValueError) as exc:
         return StepResult("host", "failed", str(exc))
     expected = build_expectations(report.bindings, report.host)
     source = (

@@ -35,7 +35,7 @@ from secretary.backup_retention import (
 from secretary.backup_verify import (
     verify_backup,  # noqa: F401  # Public compatibility re-export.
 )
-from secretary.config import DataDirError, ConfigError, instance_data_dir, load_config
+from secretary.config import ConfigError, DataDirError, instance_data_dir, load_config
 from secretary.data import (
     DataExport,
     export_all,

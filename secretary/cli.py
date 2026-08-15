@@ -1409,6 +1409,14 @@ def _data_dir_from_args(args: argparse.Namespace, *, validate_tree: bool) -> Pat
     if args.data_dir:
         return Path(args.data_dir).expanduser()
 
+    if validate_tree:
+        report = validate_instance(_instance_path(args.instance))
+        if report.errors:
+            print(f"secretary data: {len(report.errors)} config problem(s):")
+            for error in report.errors:
+                print(f"  {error}")
+            return None
+
     try:
         return instance_data_dir(_instance_path(args.instance))
     except DataDirError as exc:
