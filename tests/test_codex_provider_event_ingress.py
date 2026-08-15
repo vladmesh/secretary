@@ -789,7 +789,7 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
         self.persisted: list[HeadRun] = []
 
     @property
-    def _launch(self) -> dict[str, object]:
+    def _launch_identity(self) -> dict[str, object]:
         return {
             "role": WORKER_ROLE,
             "workspace": str(self.workspace),
@@ -800,7 +800,7 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
 
     def _prepare_intent_run(self) -> HeadRun:
         """The pre-pane attestation `write_launch_intent` fixes on disk, with its ingress bound."""
-        run = self.host.preflight_codex_run("codex-extra", **self._launch)  # type: ignore[arg-type]
+        run = self.host.preflight_codex_run("codex-extra", **self._launch_identity)  # type: ignore[arg-type]
         self._install_ingress(run)
         return run
 
@@ -859,7 +859,7 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
         self._open_another_session()
 
         launched = self.host._preflight_launch_run(  # noqa: SLF001 — the launch path under test
-            "codex-extra", **self._launch,  # type: ignore[arg-type]
+            "codex-extra", **self._launch_identity,  # type: ignore[arg-type]
         ).rebound("pane-1", leaf="leaf-1").working()
         stored = self._confirm(record, launched)
 
@@ -871,13 +871,62 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
         self.assertEqual(stored["lifecycle"], "working")
         self.assertEqual(record.launch_intent["head_run"], stored)
 
+    def test_the_worker_bring_up_itself_hands_on_the_prepared_source(self) -> None:
+        """Which host call routes through the repair, read off the launch that opens the pane."""
+        reference = "secretary-1445"
+        pid_file = dispatcher_launch.launch_pid_file(WORKER_ROLE, reference)
+        identity = {
+            **self._launch_identity, "pid_file": pid_file, "run_id": "rework-run-2",
+        }
+        prepared = self.host.preflight_codex_run("codex-extra", **identity)  # type: ignore[arg-type]
+        self._install_ingress(prepared)
+        self._open_another_session()
+
+        launched = self.host._launch(  # noqa: SLF001 — the worker/reviewer launch path under test
+            str(self.workspace),
+            f"{reference} worker rework",
+            "codex-extra",
+            "TASK.md",
+            role=WORKER_ROLE,
+            env_name="SECRETARY_DISPATCHER_WORKER_COMMAND",
+            prompt_document=str(self.workspace / "TASK.md"),
+            task={"ref": reference},
+            heartbeat_run_id="rework-run-2",
+        )
+
+        self.assertEqual(self._source(launched.head_run), self._source(prepared))
+
+    def test_an_observer_bring_up_still_enumerates_its_own_source(self) -> None:
+        """The observer keeps its own preflight: this repair is the worker/reviewer handoff only."""
+        sprint = "sprint:1089"
+        workspace = Path(self.host.observer_workspace(sprint))
+        prepared = self.host.preflight_codex_run(
+            "codex-extra",
+            role=OBSERVER_ROLE,
+            workspace=str(workspace),
+            task_ref=TaskRef.sprint(sprint),
+            pid_file=dispatcher_observer.observer_pid_file(sprint),
+            run_id="observer-run-1",
+        )
+        self._install_ingress(prepared)
+        opened = self._open_another_session()
+
+        launched = self.host.prepare_observer(
+            {"ref": sprint}, "codex-extra", prompt="observe", heartbeat_run_id="observer-run-1",
+        )
+
+        source = self._source(launched["head_run"])
+        self.assertEqual(source["baseline"], [str(opened)])
+        self.assertNotEqual(source, self._source(prepared))
+        self.assertEqual(self._source(prepared)["baseline"], [])
+
     def test_the_second_attestations_own_baseline_is_still_refused_as_a_conflict(self) -> None:
         """The fence the repair works within: nothing admits a divergent unbound descriptor."""
         prepared = self._prepare_intent_run()
         record = self._record(prepared)
         self._open_another_session()
 
-        unprepared = self.host.preflight_codex_run("codex-extra", **self._launch)  # type: ignore[arg-type]
+        unprepared = self.host.preflight_codex_run("codex-extra", **self._launch_identity)  # type: ignore[arg-type]
         self.assertNotEqual(
             self._source(unprepared)["baseline"], self._source(prepared)["baseline"],
         )
@@ -913,7 +962,7 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
         self._open_another_session()
 
         launched = self.host._preflight_launch_run(  # noqa: SLF001
-            "codex-extra", **self._launch,  # type: ignore[arg-type]
+            "codex-extra", **self._launch_identity,  # type: ignore[arg-type]
         ).rebound("pane-1", leaf="leaf-1").working()
 
         self.assertEqual(self._source(launched), self._source(bound_run))
@@ -937,7 +986,7 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
         self._open_another_session()
 
         launched = self.host._preflight_launch_run(  # noqa: SLF001
-            "codex-extra", **self._launch,  # type: ignore[arg-type]
+            "codex-extra", **self._launch_identity,  # type: ignore[arg-type]
         )
 
         self.assertEqual(self._source(launched)["root"], str(self.root / "sessions"))
@@ -966,7 +1015,7 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
                 }))
 
                 launched = self.host._preflight_launch_run(  # noqa: SLF001
-                    "codex-extra", **self._launch,  # type: ignore[arg-type]
+                    "codex-extra", **self._launch_identity,  # type: ignore[arg-type]
                 )
 
                 self.assertNotEqual(self._source(launched)["baseline"], baseline)

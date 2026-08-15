@@ -910,7 +910,12 @@ class CommandHostRuntime:
         pid_file: str,
         run_id: str,
     ) -> head_ops.HeadRun:
-        """Attest this bring-up's run, then hand it the source its launch was prepared with."""
+        """Attest this bring-up's run, then hand it the source its launch was prepared with.
+
+        The worker and reviewer launch path only.  The observer bring-up has its own delivery
+        contour and keeps calling `preflight_codex_run` directly, so this repair cannot change what
+        an observer launch hands its handoff.
+        """
         return self._retain_prepared_provider_source(
             self.preflight_codex_run(
                 head,
@@ -1193,7 +1198,10 @@ class CommandHostRuntime:
         )
         if lifecycle_run.spec.adapter == "codex":
             try:
-                lifecycle_run = self._preflight_launch_run(
+                # Deliberately the plain attestation, not the worker/reviewer launch helper: the
+                # observer's own delivery contour is out of this repair's scope, so its bring-up
+                # keeps handing its handoff the descriptor this call enumerated.
+                lifecycle_run = self.preflight_codex_run(
                     head,
                     role=OBSERVER_ROLE,
                     workspace=str(workspace),
