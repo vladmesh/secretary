@@ -2829,14 +2829,12 @@ class CommandHostRuntime:
             since=continuation.sent_at,
             adapter=adapter,
         ):
-            # The dispatcher may have died after the provider started but before it recorded
-            # that confirmation. Returning lets recovery checkpoint it before finishing, without
-            # touching a TASK.md or report body the resumed worker may already be using.
+            # The dispatcher may have died after the provider started but before it recorded that
+            # confirmation. Returning lets recovery checkpoint it without touching TASK.md.
             return
         base = self.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
         # One generation and one decision, read once: the document the worker is sent back to and
-        # the prompt that sends it there name the same round and the same adjudication because they
-        # are built from the same values, not because two call sites happen to agree.
+        # the prompt that sends it there name the same round because they share these values.
         generation = record.report_generation
         decision = record.report_decision
         self._clear_report_bodies(task["ref"])
@@ -2844,11 +2842,9 @@ class CommandHostRuntime:
             workspace / "TASK.md",
             self._worker_task_doc(task, base, record.attempt_id, generation, decision),
         )
-        # The continuation travels as a pointer at the document just written, not as the round
-        # typed into the composer: that is the delivery shape the product has never lost a prompt
-        # on, and the one this path was still missing (secretary-1413). The pointer is built before
-        # the wake-up, because a nudge that will not fit is a continuation this path cannot make,
-        # and finding that out after SIGCONT leaves a woken head with nothing to read.
+        # The continuation travels as a pointer at the document just written, not as the round typed
+        # into the composer: that is the delivery shape that has never lost a prompt. It is built
+        # before the wake-up, because finding out after SIGCONT leaves a woken head nothing to read.
         try:
             pointer = head_ops.NudgePointer.at_document(
                 str(workspace / "TASK.md"), _continuation_note(generation, decision)
@@ -2857,9 +2853,8 @@ class CommandHostRuntime:
             raise HostError(f"the continuation pointer could not be built: {exc}") from None
         activate = None
         if status.get("stopped"):
-            # The delivery transport waits for `tui-idle` before this callback.  In particular a
-            # readiness timeout that says the pane is busy leaves the retained HeadRun frozen:
-            # it does not become a SIGCONT followed by a replacement recovery.
+            # The delivery transport waits for `tui-idle` before this callback: a readiness timeout
+            # saying the pane is busy leaves the retained HeadRun frozen, never SIGCONT'd.
             activate = lambda: self._signal_head(
                 record.worker_pid_file,
                 signal.SIGCONT,
@@ -2913,8 +2908,7 @@ class CommandHostRuntime:
     def _set_worker_branch(self, workspace: str, branch: str) -> None:
         if self.mode == "noop":
             return
-        # A fresh worktree may start on the base branch, but the target name must never be
-        # force-updated. In particular, a preserved checkout elsewhere can already own it.
+        # Never force-update the target name: a preserved checkout elsewhere can already own it.
         self._run(["git", "-C", workspace, "branch", "-m", branch], "git branch")
 
     def _write_prompt(self, path: Path, body: str) -> None:
@@ -2999,14 +2993,11 @@ class CommandHostRuntime:
         decision: str = "",
     ) -> str:
         branch = _legacy_worker_branch(task["ref"])
-        # The generation keeps the report request-id distinct per report round: a rework reuses the
-        # same attempt_id, so without it the second done-report collides with the first and is
-        # idempotently deduped, leaving the dispatcher waiting forever.
+        # The generation keeps the report request-id distinct per round: a rework reuses the same
+        # attempt_id, so without it the second done-report is deduped and the dispatcher waits on.
         request = _attempt_request_id(attempt_id, "worker-report-done", task["ref"], str(generation))
-        # One id per classification. A worker that restates a block under the other classification
-        # is filing a different report, and since secretary-1060 a request id claims its payload:
-        # one shared id would answer the second call with `validation` / exit 2 instead of
-        # recording it.
+        # One id per classification: a worker restating a block under the other classification is
+        # filing a different report, and a shared id would answer the second call with `validation`.
         blocked_requests = {
             classification: _attempt_request_id(
                 attempt_id, f"worker-report-blocked-{classification}", task["ref"], str(generation)
@@ -3027,10 +3018,7 @@ class CommandHostRuntime:
         ]
         decision = (decision or "").strip()
         if decision:
-            # The decision is rendered above the findings it was made on, and named as the thing to
-            # follow. A round opened by an observer decision that only carried the reviewer's
-            # findings had workers repairing findings the observer had rejected and skipping the
-            # change it asked for (secretary-1064).
+            # Rendered above the findings it was made on, and named as the thing to follow.
             sections += [
                 "## Observer rework decision to follow",
                 "",
@@ -3088,8 +3076,6 @@ class CommandHostRuntime:
             "missing receipt attests no broad suite; do not call it authoritative, and run the appropriate",
             "validation before reporting when this card's acceptance criteria require it.",
             "",
-            # A worker cannot recover a summary from a scrolled pane, so the cheapest repair used
-            # to be another full suite over unchanged code (secretary-1406).
             "Run that broad suite through the receipt wrapper, so its result outlives the pane:",
             "",
             "    python3 -m secretary check broad --module <this project's broad suite module>",
@@ -3132,8 +3118,6 @@ class CommandHostRuntime:
             "the one that matches and run that command line below; a blocked report without one is",
             "refused.",
             "",
-            # A worker once ran a live sync from its workspace and published unmerged skills into
-            # the homes the running agents read, silently reverting a merged safeguard.
             "Your checks read the live installation; they never write to it. Do not run a command",
             "that deploys, syncs, provisions or reconciles live state from this workspace: it would",
             "publish unmerged work into the homes the running agents read. Where a check has a",
@@ -3154,10 +3138,7 @@ class CommandHostRuntime:
             "never hold, is why this paragraph exists (secretary-1161, 2026-08-06). The full suite",
             "takes about 95 seconds in the foreground; that is cheaper than any way of waiting.",
             "",
-            # In sprint:1300 two commits with AI co-author trailers were published before anything
-            # looked at them. The instruction not to write them lived only in one model family's
-            # home file, so it never reached a head of another family; it belongs in the packet
-            # every worker gets, whatever runtime is behind it (secretary-1401).
+            # In the packet every worker gets: a home file reaches only one model family.
             "Do not add AI co-authorship to your commits. No `Co-Authored-By:` trailer naming",
             "Claude, Codex, an assistant or any model or vendor, and no generated-by attribution",
             "line: the dispatcher checks every commit message on your branch before it publishes",
@@ -3187,14 +3168,12 @@ class CommandHostRuntime:
             f"Base branch: {base}",
             f"Worker branch: {branch}",
             "",
-            # Last, after everything the card description or the decision itself can write into, so
-            # the recovery in `_task_doc_decision` reads the dispatcher's own record and not a
-            # decision-shaped string that arrived in somebody's prose. Written on every document,
+            # Last, after everything the card description or the decision can write into, so
+            # `_task_doc_decision` reads the dispatcher's own record. Written on every document,
             # empty body included: a round with no decision has to read back as none.
             _decision_record_line(generation, decision),
-            # And the round's own ids, on the same terms and for the same reason: the report
-            # commands above are prose in a document that also renders the card description, so
-            # they cannot be the authority on which ids this round issued. This line can.
+            # And the round's own ids, on the same terms: the report commands above are prose in a
+            # document that also renders the card description, so they cannot be the authority.
             _round_record_line(generation, [request, *blocked_requests.values()]),
             "",
         ]
@@ -3205,9 +3184,8 @@ class CommandHostRuntime:
         *, record: DispatcherRecord | None = None,
     ) -> str:
         # The round belongs in the key for the same reason it does in the worker report id: a card
-        # that goes red twice within one attempt reuses attempt_id, so a round-less id makes the
-        # second verdict a replay of the first. TaskWriter then skips the mutation, the CLI still
-        # answers "verdict recorded", and the reviewer exits leaving the card waiting (secretary-654).
+        # that goes red twice within one attempt reuses attempt_id, and a round-less id makes the
+        # second verdict a replay that leaves the card waiting.
         green_request = _attempt_request_id(attempt_id, "review-green", task["ref"], str(review_round))
         red_request = _attempt_request_id(attempt_id, "review-red", task["ref"], str(review_round))
         body_file = _body_file_path("verdict", task["ref"], review_round)
@@ -3223,9 +3201,6 @@ class CommandHostRuntime:
             "Perform this review in this head only. Do not spawn, create, delegate to, or manage",
             "subagents or child agents. Use ordinary tools directly when needed.",
             "",
-            # One verdict carries every blocker the reviewer has. Holding some back for a later
-            # round ratchets the card through extra worker attempts, and each of those costs the
-            # sprint a budget event.
             "A red verdict must list every blocker you have found in this round. Prefix each with a",
             "stable `BLOCKER-<short-slug>` id so a re-review can close it without rediscovering it.",
             "Do not hold blockers back for a later round and do not widen the scope on the next one.",
@@ -3236,17 +3211,13 @@ class CommandHostRuntime:
             "architecture, a compatibility promise, a product contract, or a trust boundary. Report",
             "evidence; do not silently widen the supported boundary or decide sprint scope.",
             "",
-            # Defense in depth behind the gate's own deterministic preflight (secretary-1401): the
-            # gate reads the commit messages before it publishes, and the reviewer reads them again
-            # on the checkout, because a check that only ever ran in one place is a check with no
-            # second opinion.
+            # Deliberately duplicates the gate's own deterministic preflight: a check that only
+            # ever runs in one place has no second opinion.
             "Read the commit messages on this branch, not only the diff. AI co-authorship is",
             "forbidden: a `Co-Authored-By:` trailer naming a model or vendor, or a generated-by",
             "attribution line, is a RED blocker. Ordinary human co-authors are not. Say what you",
             "found; do not rewrite history yourself.",
             "",
-            # Two live-breaking defects once shipped under a full green suite because the fixtures
-            # encoded the same wrong assumption about the backend as the code did.
             "When a change depends on how an external backend behaves, a passing fixture is not",
             "evidence: it can encode the same wrong assumption as the code under review. Say which",
             "real behaviour you verified and how. If no end-to-end check against the real backend",
