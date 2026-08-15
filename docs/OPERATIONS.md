@@ -1786,8 +1786,8 @@ different receipt files, and no ability to answer for one another. The receipt s
 so a reader recomputes the digest instead of trusting the file it was found in.
 
 `check show` runs nothing. It answers whether the receipt still describes the checkout, comparing
-the recorded HEAD object id and content digest of the tracked diff and untracked files with the
-current ones, and exits non-zero when it does not. Its answer fails closed: a truncated or edited
+the recorded git tree object id — the tree this worktree, tracked edits and untracked files included,
+would commit to — with the current one, and exits non-zero when it does not. Its answer fails closed: a truncated or edited
 receipt, a run that was killed or timed out, a checkout with no resolvable identity, an import from
 outside the candidate, and a shape that attests no import are all "not usable" rather than a
 summary. Reading goes through one boundary, `load_receipt`, which also refuses a result no run

@@ -7,7 +7,7 @@ when it started and how long it took, the process exit status, the parsed verdic
 a bounded diagnostic tail.
 
 The receipt is evidence about content, not about a wall clock: it records the checkout's content
-identity (HEAD object id plus a digest of the tracked diff and untracked files). Everything else
+identity (the git tree object id the worktree would commit to). Everything else
 fails closed — an incomplete run, a corrupt or truncated artifact, a checkout with no resolvable
 identity, or a receipt for other content is not usable evidence, and the reader is told which.
 
@@ -81,17 +81,20 @@ class BroadCheckError(Exception):
 
 @dataclass(frozen=True)
 class ContentIdentity:
-    """What the receipt is a receipt *about*: the exact content of a checkout."""
+    """What the receipt is a receipt *about*: the exact content of a checkout.
 
-    head_sha: str
-    worktree_digest: str
+    One git tree object id stands for that content. Committing a dirty worktree unchanged moves
+    HEAD but not the tree, so a receipt taken before the commit still describes the checkout.
+    """
+
+    tree_sha: str
 
     @property
     def resolved(self) -> bool:
-        return bool(self.head_sha) and bool(self.worktree_digest)
+        return bool(self.tree_sha)
 
     def as_dict(self) -> dict[str, str]:
-        return {"head_sha": self.head_sha, "worktree_digest": self.worktree_digest}
+        return {"tree_sha": self.tree_sha}
 
     def matches(self, other: ContentIdentity) -> bool:
         return self.resolved and other.resolved and self.as_dict() == other.as_dict()
@@ -230,7 +233,9 @@ def receipt_path(root: Path, check: CheckSpec | str) -> Path:
     return receipt_dir(root) / f"broad-{as_spec(check).digest[:16]}.json"
 
 
-def _git(root: Path, args: list[str]) -> subprocess.CompletedProcess[str] | None:
+def _git(
+    root: Path, args: list[str], env: Mapping[str, str] | None = None
+) -> subprocess.CompletedProcess[str] | None:
     try:
         return subprocess.run(
             ["git", "-C", str(root), *args],
@@ -238,39 +243,44 @@ def _git(root: Path, args: list[str]) -> subprocess.CompletedProcess[str] | None
             stderr=subprocess.PIPE,
             text=True,
             timeout=_GIT_TIMEOUT,
+            env=None if env is None else {**os.environ, **env},
         )
     except (OSError, subprocess.SubprocessError):
         return None
 
 
 def content_identity(root: Path) -> ContentIdentity:
-    """Digest the checkout's content, not merely its commit.
+    """Name the checkout's content by a git tree object id, not by the commit it sits on.
 
-    A worker reports from a dirty worktree far more often than from a clean one, so a HEAD object id
-    alone would match a receipt taken before the last three edits. The digest covers the tracked diff
-    against HEAD and every untracked, non-ignored file's content; ignored paths (the receipt directory
-    among them) are excluded by construction. An unresolvable identity never matches anything.
+    A worker reports from a dirty worktree far more often than from a clean one, and it commits that
+    same content moments later; a HEAD object id would call those two checkouts different when they
+    are byte for byte the same. So the identity is the tree the worktree *would* commit to: every
+    tracked path as it stands on disk plus every untracked, non-ignored file, staged into a scratch
+    index and written out with ``write-tree``. On a clean checkout that is exactly ``HEAD^{tree}``.
+
+    The scratch index starts as a copy of the real one, so a tracked path that also matches an ignore
+    rule keeps counting; ignored *untracked* paths (the receipt directory among them) are excluded by
+    construction. The real index is never touched. An unresolvable identity never matches anything.
     """
-    head = _git(root, ["rev-parse", "HEAD"])
-    if head is None or head.returncode != 0:
-        return ContentIdentity("", "")
-    head_sha = head.stdout.strip()
-    diff = _git(root, ["diff", "HEAD"])
-    others = _git(root, ["ls-files", "--others", "--exclude-standard", "-z"])
-    if diff is None or diff.returncode != 0 or others is None or others.returncode != 0:
-        return ContentIdentity(head_sha, "")
-    digest = hashlib.sha256()
-    digest.update(diff.stdout.encode("utf-8", "surrogateescape"))
-    for name in sorted(part for part in others.stdout.split("\0") if part):
-        digest.update(b"\0")
-        digest.update(name.encode("utf-8", "surrogateescape"))
-        digest.update(b"\0")
+    located = _git(root, ["rev-parse", "--git-path", "index"])
+    if located is None or located.returncode != 0:
+        return ContentIdentity("")
+    real_index = Path(root) / located.stdout.strip()
+    with tempfile.TemporaryDirectory() as scratch_dir:
+        scratch = Path(scratch_dir) / "index"
         try:
-            digest.update(hashlib.sha256((Path(root) / name).read_bytes()).hexdigest().encode())
+            if real_index.exists():
+                scratch.write_bytes(real_index.read_bytes())
         except OSError:
-            # A file that vanished between listing and reading is itself a content fact.
-            digest.update(b"unreadable")
-    return ContentIdentity(head_sha, digest.hexdigest())
+            return ContentIdentity("")
+        env = {"GIT_INDEX_FILE": str(scratch)}
+        staged = _git(root, ["add", "-A"], env=env)
+        if staged is None or staged.returncode != 0:
+            return ContentIdentity("")
+        written = _git(root, ["write-tree"], env=env)
+    if written is None or written.returncode != 0:
+        return ContentIdentity("")
+    return ContentIdentity(written.stdout.strip())
 
 
 def _read_provenance(record: Path | None, root: Path) -> dict[str, object]:
@@ -848,9 +858,10 @@ def usable_receipt(root: Path, check: CheckSpec | str) -> ReceiptLookup:
     recorded = receipt.get("content_identity")
     if not isinstance(recorded, Mapping):
         return ReceiptLookup(False, "receipt records no content identity", receipt, path)
-    stored = ContentIdentity(
-        str(recorded.get("head_sha") or ""), str(recorded.get("worktree_digest") or "")
-    )
+    # A receipt written before the identity became a tree id carries `head_sha`, not `tree_sha`, and
+    # its digest cannot be compared with this one: it is read as unresolved, so it never matches.
+    # An identity nobody can resolve is the safe answer; a false match is not.
+    stored = ContentIdentity(str(recorded.get("tree_sha") or ""))
     current = content_identity(root)
     if not current.resolved:
         return ReceiptLookup(False, "this checkout has no resolvable content identity", receipt, path)
@@ -866,7 +877,7 @@ def summarize(receipt: Mapping[str, Any]) -> str:
     if isinstance(parsed, Mapping) and parsed:
         counts = ", ".join(f"{key}={value}" for key, value in sorted(parsed.items()))
     identity = receipt.get("content_identity")
-    head = identity.get("head_sha", "") if isinstance(identity, Mapping) else ""
+    tree = identity.get("tree_sha", "") if isinstance(identity, Mapping) else ""
     provenance = receipt.get("project_provenance")
     if isinstance(provenance, Mapping):
         imported = str(provenance.get("imported_secretary") or "")
@@ -885,7 +896,7 @@ def summarize(receipt: Mapping[str, Any]) -> str:
         f"- digest: {receipt.get('command_or_check_set_digest', '')}",
         f"- launched in: {receipt.get('cwd', '')}",
         f"- imported project: {imported or '(unresolved)'}",
-        f"- head_sha: {head or '(unresolved)'}",
+        f"- tree_sha: {tree or '(unresolved)'}",
         f"- started_at: {receipt.get('started_at', '')} ({receipt.get('duration_seconds', 0)}s)",
         f"- exit_code: {receipt.get('exit_code', '')} ({receipt.get('status', '')}"
         f"/{receipt.get('verdict', '')})",

@@ -44,6 +44,16 @@ def _git(root: Path, *args: str) -> None:
     )
 
 
+def _git_out(root: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(root), *args],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    ).stdout.strip()
+
+
 def _documents(text: str) -> list[str]:
     """Split the concatenated JSON documents one capture may hold."""
     return [part for part in text.replace("}\n{", "}\n\x00{").split("\x00") if part.strip()]
@@ -213,7 +223,7 @@ class RunAndCaptureTests(BroadCheckTestCase):
         self.assertLessEqual(receipt["started_at"], receipt["ended_at"])
         self.assertGreaterEqual(receipt["duration_seconds"], 0.0)
         self.assertEqual(
-            receipt["content_identity"]["head_sha"], content_identity(self.root).head_sha
+            receipt["content_identity"]["tree_sha"], content_identity(self.root).tree_sha
         )
 
 
@@ -594,14 +604,85 @@ class UnchangedContentReuseTests(BroadCheckTestCase):
         (self.root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
         self.assertTrue(usable_receipt(self.root, self.suite).usable)
 
-    def test_committing_the_same_content_still_changes_the_identity(self) -> None:
+    def test_committing_the_same_content_keeps_the_identity(self) -> None:
+        """secretary-1442: one suite, four runs per generation; this was two of them.
+
+        A worker checks a dirty worktree, then commits exactly what it just checked. The commit
+        moves HEAD but not a byte of content, so the receipt still describes this checkout.
+        """
         (self.root / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
         self._run(self.suite)
         self.assertTrue(usable_receipt(self.root, self.suite).usable)
+        dirty = content_identity(self.root)
 
         _git(self.root, "commit", "-q", "-a", "-m", "second")
-        # A new candidate SHA is precisely the case that opens a justified new run.
-        self.assertFalse(usable_receipt(self.root, self.suite).usable)
+
+        committed = content_identity(self.root)
+        self.assertTrue(committed.resolved)
+        self.assertEqual(committed, dirty)
+        # On a clean checkout the identity is nothing more exotic than HEAD's own tree.
+        self.assertEqual(committed.tree_sha, _git_out(self.root, "rev-parse", "HEAD^{tree}"))
+        lookup = usable_receipt(self.root, self.suite)
+        self.assertTrue(lookup.usable, lookup.reason)
+
+    def test_committing_an_untracked_file_keeps_the_identity(self) -> None:
+        (self.root / "extra.py").write_text("HELPER = True\n", encoding="utf-8")
+        self._run(self.suite)
+        untracked = content_identity(self.root)
+
+        # The same content, now tracked: a change of bookkeeping, not of what a suite would read.
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-q", "-m", "adopt the helper")
+
+        self.assertEqual(content_identity(self.root), untracked)
+        self.assertTrue(usable_receipt(self.root, self.suite).usable)
+
+    def test_committing_different_content_changes_the_identity(self) -> None:
+        self._run(self.suite)
+        (self.root / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+        _git(self.root, "commit", "-q", "-a", "-m", "a real edit")
+
+        stale = usable_receipt(self.root, self.suite)
+        self.assertFalse(stale.usable)
+        self.assertIn("content changed", stale.reason)
+
+    def test_a_tracked_file_that_matches_an_ignore_rule_still_counts(self) -> None:
+        """Ignore rules govern untracked paths only, and the identity must agree with git.
+
+        The identity is taken through a copy of the real index for exactly this case: from an empty
+        index a tracked-and-ignored path would silently drop out, and edits to it would be invisible.
+        """
+        (self.root / ".gitignore").write_text("/state/\n__pycache__/\nlogged.txt\n", encoding="utf-8")
+        (self.root / "logged.txt").write_text("one\n", encoding="utf-8")
+        _git(self.root, "add", "-A")
+        _git(self.root, "add", "-f", "logged.txt")
+        _git(self.root, "commit", "-q", "-m", "track a path that is also ignored")
+        self._run(self.suite)
+        self.assertTrue(usable_receipt(self.root, self.suite).usable)
+
+        (self.root / "logged.txt").write_text("two\n", encoding="utf-8")
+
+        stale = usable_receipt(self.root, self.suite)
+        self.assertFalse(stale.usable)
+        self.assertIn("content changed", stale.reason)
+
+    def test_a_receipt_from_before_the_tree_identity_is_never_reused(self) -> None:
+        """An old receipt records `head_sha`; nothing here can compare that with a tree id.
+
+        It is re-signed here so the reader cannot dismiss it as merely corrupt: the point is that a
+        well-formed receipt in the old format reads as unresolved rather than as a match.
+        """
+        self._run(self.suite)
+        path = receipt_path(self.root, self.suite)
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["content_identity"] = {"head_sha": "0" * 40, "worktree_digest": "1" * 64}
+        payload["receipt_digest"] = broad_check._receipt_digest(payload)
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+        lookup = usable_receipt(self.root, self.suite)
+        self.assertIsNotNone(load_receipt(path))
+        self.assertFalse(lookup.usable)
+        self.assertIn("content changed", lookup.reason)
 
     def test_a_new_untracked_file_changes_the_identity(self) -> None:
         self._run(self.suite)
@@ -638,7 +719,7 @@ class UnchangedContentReuseTests(BroadCheckTestCase):
         exit_code, receipt = run_broad_check(spec, root=bare, stream=self.stream)
 
         self.assertEqual(exit_code, 0)
-        self.assertEqual(receipt["content_identity"], {"head_sha": "", "worktree_digest": ""})
+        self.assertEqual(receipt["content_identity"], {"tree_sha": ""})
         lookup = usable_receipt(bare, spec)
         self.assertFalse(lookup.usable)
         self.assertIn("no resolvable content identity", lookup.reason)
