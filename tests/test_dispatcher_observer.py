@@ -81,7 +81,7 @@ from tests.fakes.observer import (
 from tests.fanout_fixtures import accepted_transport_run
 from tests.observer_identity import as_observer, bind_observer
 from tests.sprint_close_fixtures import close_decisions, settle_dispatcher_work
-from triggered_agents.runtime import codex_preflight
+from triggered_agents.runtime import codex_preflight, tui_delivery
 from triggered_agents.runtime.agent_prompt_transport import (
     BRACKETED_PASTE_END,
     BRACKETED_PASTE_START,
@@ -555,7 +555,20 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             body="card changed", request_id="swallowed-wake-event",
         )
 
+        # Drive the bounded resend loop without giving process scheduling a chance to consume its
+        # short delivery window before both retries run. Keep this clock local to tui_delivery:
+        # the observer lifecycle still uses its ordinary wall clock for persisted retry deadlines.
+        now = [0.0]
+        slept: list[float] = []
+
+        def sleep(seconds: float) -> None:
+            slept.append(seconds)
+            now[0] += seconds
+
+        delivery_time = mock.Mock(monotonic=lambda: now[0], sleep=sleep, time=time.time)
+
         with mock.patch.object(real_host, "_run_json", side_effect=run_json), \
+             mock.patch.object(tui_delivery, "time", delivery_time), \
              mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3), \
              mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01), \
              mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0), \
@@ -579,6 +592,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             self.assertNotIn("--enter", sends[0])
             self.assertIn("--enter", sends[1])
             self.assertTrue(all("--enter" in send for send in sends[2:]))
+            self.assertTrue(slept)
             owed = (delivery.delivery_id, delivery.through_event)
 
             # Retries are bounded: the last one hands the batch to the replacement path instead of
