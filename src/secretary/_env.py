@@ -1,11 +1,5 @@
-from __future__ import annotations
+"""Compatibility import for the pre-``secretary.infra`` module path."""
 
-import os
+from secretary.infra.env import positive_int
 
-
-def positive_int(name: str, default: int) -> int:
-    try:
-        value = int(os.environ.get(name, "") or default)
-    except ValueError:
-        return default
-    return value if value > 0 else default
+__all__ = ["positive_int"]

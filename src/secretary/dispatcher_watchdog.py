@@ -22,9 +22,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from secretary._env import positive_int
 from secretary.dispatcher_heartbeat import HEARTBEAT_VERSION, run_heartbeat_identity
 from secretary.dispatcher_state import request_token
+from secretary.infra.env import positive_int
 
 # A missing pane is handled immediately. These ceilings remain deliberately generous for a head
 # that has made progress and then goes quiet, and are the fallback for old Orca runtimes without

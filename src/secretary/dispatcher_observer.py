@@ -47,7 +47,6 @@ from datetime import datetime
 from enum import Enum
 from typing import Any
 
-from secretary._env import positive_int
 from secretary.codex_provider_events import CodexProviderSourceError
 from secretary.dispatcher_launch import merge_launch_head_run
 from secretary.dispatcher_state import now_rfc3339, request_token
@@ -65,6 +64,7 @@ from secretary.dispatcher_watchdog import (
     initial_output_stall_seconds,
     pid_file_path,
 )
+from secretary.infra.env import positive_int
 from secretary.dispatcher_worker_lifecycle import (
     CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS,
     ContinuationLivenessState,
