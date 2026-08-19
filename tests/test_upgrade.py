@@ -868,7 +868,7 @@ class UpgradeStepTests(unittest.TestCase):
             root = Path(tmpdir)
             product = root / "product"
             product.mkdir()
-            agent = product / "triggered_agents" / "agents" / "curator"
+            agent = product / "src" / "triggered_agents" / "agents" / "curator"
             agent.mkdir(parents=True)
             (agent / "automation.toml").write_text("name = 'curator'\n", encoding="utf-8")
             subprocess.run(["git", "init", "-b", "main", str(product)], check=True, capture_output=True)
@@ -896,7 +896,7 @@ class UpgradeStepTests(unittest.TestCase):
             root = Path(tmpdir)
             product = root / "product"
             product.mkdir()
-            agent = product / "triggered_agents" / "agents" / "curator"
+            agent = product / "src" / "triggered_agents" / "agents" / "curator"
             agent.mkdir(parents=True)
             (agent / "automation.toml").write_text("name = 'curator'\n", encoding="utf-8")
             subprocess.run(["git", "init", "-b", "main", str(product)], check=True, capture_output=True)
@@ -1086,7 +1086,7 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
         self.assertEqual(failed_push.status, "changed", failed_push.detail)
         self._git(self.instance, "remote", "set-url", "origin", str(self.root / "missing.git"))
         (self.instance / "heads" / "heads.toml").write_text(
-            (self.context.product_root / "triggered_agents" / "agents" / "pipeline" / "heads.toml").read_text(
+            (self.context.product_root / "src" / "triggered_agents" / "agents" / "pipeline" / "heads.toml").read_text(
                 encoding="utf-8"
             ),
             encoding="utf-8",
@@ -1284,7 +1284,10 @@ class InstanceHeadCanonTests(unittest.TestCase):
 
             path, origin = canonical_path(product, instance)
 
-            self.assertEqual(path, product / "triggered_agents" / "agents" / "pipeline" / "heads.toml")
+            self.assertEqual(
+                path,
+                product / "src" / "triggered_agents" / "agents" / "pipeline" / "heads.toml",
+            )
             self.assertEqual(origin, PRODUCT_ORIGIN)
             self.assertEqual(canonical_heads(product, instance), canonical_heads(product))
 

@@ -210,7 +210,7 @@ class PortableFixture(unittest.TestCase):
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text("# portable-skill\n", encoding="utf-8")
         (skill / "portable-skill.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
-        canon = self.product / "triggered_agents" / "agents" / "pipeline" / "heads.toml"
+        canon = self.product / "src" / "triggered_agents" / "agents" / "pipeline" / "heads.toml"
         canon.parent.mkdir(parents=True)
         canon.write_text(PRODUCT_CANON, encoding="utf-8")
         packaging = self.product / "packaging" / "systemd"
@@ -372,7 +372,10 @@ class PortableInstallationTests(PortableFixture):
         result = self.run_upgrade()
 
         pin = read_source(self.instance)
-        self.assertEqual(canonical, self.product / "triggered_agents" / "agents" / "pipeline" / "heads.toml")
+        self.assertEqual(
+            canonical,
+            self.product / "src" / "triggered_agents" / "agents" / "pipeline" / "heads.toml",
+        )
         self.assertEqual(origin, PRODUCT_ORIGIN)
         self.assertTrue(result.ok, result.render())
         self.assertIn("portable-head", snapshot_path(self.instance).read_text(encoding="utf-8"))
@@ -564,7 +567,7 @@ class InstallationOwnerTests(PortableFixture):
 
     def test_role_worktrees_and_automation_workspaces_belong_to_the_owner(self) -> None:
         """Neither is written here; both are decided from a home, and it must be the owner's."""
-        agent = self.product / "triggered_agents" / "agents" / "curator"
+        agent = self.product / "src" / "triggered_agents" / "agents" / "curator"
         agent.mkdir(parents=True, exist_ok=True)
         (agent / "automation.toml").write_text(
             'name = "curator"\nskill = "curate"\n', encoding="utf-8"

@@ -11,7 +11,10 @@ SECRETARY_REPO_ENV = "TA_SECRETARY_REPO"
 # The same fallback written as a shell expression: the prefixes below are rendered into card text
 # and run by a head in its own shell, so the home has to be the one that head runs as rather than
 # the one this process resolved.
-SECRETARY_REPO_SHELL = f'"${{{SECRETARY_REPO_ENV}:-$HOME/{PRODUCT_DIRNAME}}}${{PYTHONPATH:+:$PYTHONPATH}}"'
+SECRETARY_SOURCE_SHELL = (
+    f'"${{{SECRETARY_REPO_ENV}:-$HOME/{PRODUCT_DIRNAME}}}/src'
+    '${PYTHONPATH:+:$PYTHONPATH}"'
+)
 
 
 def secretary_repo(environ: dict[str, str] | None = None) -> Path:
@@ -33,8 +36,8 @@ def pythonpath_prefix(environ: dict[str, str] | None = None) -> str:
     shell resolves it in the order it was written.
     """
     if environ is None:
-        return f"PYTHONPATH={SECRETARY_REPO_SHELL}"
+        return f"PYTHONPATH={SECRETARY_SOURCE_SHELL}"
     return (
-        f"PYTHONPATH={shlex.quote(str(secretary_repo(environ)))}"
+        f"PYTHONPATH={shlex.quote(str(secretary_repo(environ) / 'src'))}"
         '"${PYTHONPATH:+:$PYTHONPATH}"'
     )

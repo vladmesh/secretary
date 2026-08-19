@@ -664,7 +664,7 @@ def _pipeline_json(
 ) -> Any:
     cmd = command or [sys.executable, "-P", "-m", "triggered_agents", "pipeline"]
     env = os.environ.copy()
-    pythonpath = str(pipeline_worktree)
+    pythonpath = str(pipeline_worktree / "src")
     if env.get("PYTHONPATH"):
         pythonpath = f"{pythonpath}{os.pathsep}{env['PYTHONPATH']}"
     env["PYTHONPATH"] = pythonpath

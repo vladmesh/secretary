@@ -610,7 +610,7 @@ class HeadRegistrySourceTests(unittest.TestCase):
         self.assertEqual(registry["canonical_owner"], "product")
         self.assertEqual(
             registry["canonical"],
-            str(product_root / "triggered_agents" / "agents" / "pipeline" / "heads.toml"),
+            str(product_root / "src" / "triggered_agents" / "agents" / "pipeline" / "heads.toml"),
         )
 
     def test_status_credits_the_installation_for_a_registry_it_owns(self):

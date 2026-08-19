@@ -71,7 +71,7 @@ of by module attribute (which would keep an unpatched reference).
 ## The pipeline pause flag is read from a state dir this run owns
 
 The same result-must-not-depend-on-the-host rule covers the live pipeline's pause flag.
-`triggered_agents/agents/pipeline/state.py` resolves `STATE` at import time and
+`src/triggered_agents/agents/pipeline/state.py` resolves `STATE` at import time and
 `agents/pipeline/pause.py` binds `PAUSE_FILE` off it, so the file every
 triggered-dispatch test runs against is fixed before any test body executes. At its
 default that file is the live `<workspaces>/secretary/pipeline/state/pipeline/pause.json`

@@ -67,7 +67,7 @@ class AutomationError(RuntimeError):
 
 
 def agents_root(product_root: Path) -> Path:
-    return product_root / "triggered_agents" / "agents"
+    return product_root / "src" / "triggered_agents" / "agents"
 
 
 def workspaces_root(home: Path | str | None = None) -> Path:

@@ -81,7 +81,7 @@ class SuitePipelineStateDirTests(unittest.TestCase):
             env = dict(os.environ)
             env["TA_PIPELINE_STATE_DIR"] = str(frozen)
             env["PYTHONPATH"] = os.pathsep.join(
-                [str(_REPO_ROOT), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
+                [str(_REPO_ROOT / "src"), *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])]
             )
             probe = (
                 "import json, tests\n"

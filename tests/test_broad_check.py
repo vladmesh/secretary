@@ -14,6 +14,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from io import StringIO
 from pathlib import Path
@@ -624,6 +625,30 @@ class UnchangedContentReuseTests(BroadCheckTestCase):
         self.assertEqual(committed.tree_sha, _git_out(self.root, "rev-parse", "HEAD^{tree}"))
         lookup = usable_receipt(self.root, self.suite)
         self.assertTrue(lookup.usable, lookup.reason)
+
+    def test_same_size_edit_in_the_index_timestamp_window_is_hashed(self) -> None:
+        """The scratch index must retain Git's racy-clean detection boundary.
+
+        Give the tracked file, its index entry and the index itself one timestamp, then change only
+        the file's bytes while retaining its size and stat data. Git hashes that deliberately racy
+        path when the copied index keeps its original mtime. Rewriting the index bytes gives the
+        copy a newer mtime and incorrectly reuses the old blob.
+        """
+        app = self.root / "app.py"
+        index = self.root / _git_out(self.root, "rev-parse", "--git-path", "index")
+        stamp = time.time_ns() - 2_000_000_000
+        os.utime(app, ns=(stamp, stamp))
+        _git(self.root, "add", "app.py")
+        os.utime(index, ns=(stamp, stamp))
+
+        app.write_text("VALUE = 2\n", encoding="utf-8")
+        os.utime(app, ns=(stamp, stamp))
+        observed = content_identity(self.root)
+
+        _git(self.root, "add", "-A")
+        expected = _git_out(self.root, "write-tree")
+        self.assertTrue(observed.resolved)
+        self.assertEqual(observed.tree_sha, expected)
 
     def test_committing_an_untracked_file_keeps_the_identity(self) -> None:
         (self.root / "extra.py").write_text("HELPER = True\n", encoding="utf-8")

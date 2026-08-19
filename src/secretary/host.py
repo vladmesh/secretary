@@ -32,7 +32,7 @@ UNIT_SUFFIXES = (".service", ".timer")
 # The units this checkout ships. Like the role-skill manifest constant, it is what tests about the
 # shipped canon read and never the fallback a host command lands on: the units an installation is
 # planned or doctored against belong to the product checkout it was installed from.
-SHIPPED_PACKAGING_ROOT = Path(__file__).resolve().parents[1] / "packaging" / "systemd"
+SHIPPED_PACKAGING_ROOT = Path(__file__).resolve().parents[2] / "packaging" / "systemd"
 
 
 @dataclass(frozen=True)

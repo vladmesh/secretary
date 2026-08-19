@@ -15,9 +15,12 @@ the intended contract in an issue or pull request will make it easier to work th
 ## Development setup
 
 ```bash
-python3 -m pip install '.[memory]'
+python3 -m pip install -e '.[memory]'
 python3 -m unittest
 ```
+
+Keep the package installed in editable mode: tests and runtime commands resolve deployment assets
+from the repository checkout.
 
 The unit suite is hermetic: it does not need Kanboard, Orca, a network or a configured instance. That
 holds even when the process inherits a live installation's `KANBOARD_*` variables, for example in a

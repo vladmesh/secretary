@@ -37,7 +37,7 @@ from ...runtime.state import PRECHECK_BOARD_UNREACHABLE, PRECHECK_SKIP
 from . import signals
 
 STATE = signals.STATE
-ROLE_SKILLS = Path(__file__).resolve().parents[3] / "scripts" / "role_skills.py"
+ROLE_SKILLS = Path(__file__).resolve().parents[4] / "scripts" / "role_skills.py"
 
 
 def _deep_sweep_file():

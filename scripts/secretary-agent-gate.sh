@@ -43,7 +43,7 @@ export PATH="$HOME/.local/bin:$HOME/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/
 # materialized from an alternate checkout sets TA_SECRETARY_REPO in the unit it renders, and
 # skipping that name here would start the role out of ~/secretary — a checkout the operator may
 # never have upgraded, or may not have at all.
-export PYTHONPATH="${TA_RUNTIME_PYTHONPATH:-${TA_SECRETARY_REPO:-$HOME/secretary}}${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="${TA_RUNTIME_PYTHONPATH:-${TA_SECRETARY_REPO:-$HOME/secretary}}/src${PYTHONPATH:+:$PYTHONPATH}"
 
 agent="${1:?usage: ta-gate.sh <agent> [variant]}"
 variant="${2:-}"

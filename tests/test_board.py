@@ -197,7 +197,7 @@ class BoardHostContractTests(unittest.TestCase):
                 self.assertEqual((declaration.source, declaration.target), (source, target))
 
     def test_task_writer_can_import_the_registry_without_loading_kanboard(self) -> None:
-        source_root = Path(__file__).resolve().parents[1]
+        source_root = Path(__file__).resolve().parents[1] / "src"
         env = dict(os.environ)
         env["PYTHONPATH"] = str(source_root)
         result = subprocess.run(

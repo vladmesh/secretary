@@ -4,6 +4,53 @@
 protocols, the dispatcher lifecycle, installation contracts and recovery. The providers' native CLIs
 do the actual work on top of that.
 
+## Source layout and module boundaries
+
+Product source uses a `src/` layout. The repository root is the product and deployment boundary;
+`src/secretary` is the primary Python package. Keeping importable code below `src/` prevents a test or
+operator command from accidentally importing an uninstalled checkout merely because its current
+directory is the repository root. Packaging, scripts, documentation, examples and tests remain at the
+repository root because they are product assets rather than importable runtime code.
+
+`src/triggered_agents` is a temporary historical namespace, not a second product boundary. It was
+absorbed from a separate repository and now provides runtime primitives used directly by Secretary.
+The dependency evidence makes the intended ownership unambiguous: the Secretary package is already a
+large consumer of that runtime, while only production telemetry crosses back into Secretary. New
+shared runtime code therefore belongs to `secretary`, and no new dependency from `secretary` to
+`triggered_agents` should be introduced. A later migration will move those primitives under the main
+namespace while preserving the installed `triggered-agents` command as a compatibility surface.
+
+The target package layout is feature-first:
+
+```text
+src/secretary/
+  cli/                 command parsing and rendering
+  board/               board protocol, models and adapters
+  tasks/               task lifecycle
+  sprints/             sprint lifecycle and observation
+  dispatch/            production dispatcher orchestration
+  runtime/             heads, sessions and prompt delivery
+  automations/         curator, retro and steward services
+  memory/              facts, journal, index and MCP service
+  installation/        bootstrap, upgrade and host reconciliation
+  backup/              checkpoint, backup and restore
+  secrets/             secret storage and recovery
+  infra/               filesystem, process, environment and path helpers
+  schemas/             packaged data contracts
+```
+
+This tree is a migration destination, not a claim that the current flat package already conforms to
+it. Moves happen one feature at a time with compatibility imports where an installed command or
+integration depends on an old module path. In particular, the large dispatcher and task modules must
+be decomposed by lifecycle responsibility rather than split by file size alone.
+
+Dependencies point inward from entry points to feature APIs: CLI and automation modules may call
+feature services; orchestration may call task, sprint and runtime APIs; adapters implement protocols
+owned by the feature that consumes them. Feature code must not import CLI modules, and shared runtime
+must not import an application module merely to discover configuration. Configuration or paths needed
+by runtime are passed in or exposed through a small shared interface. These rules remove the current
+telemetry cycle and keep `infra` from becoming a second application layer.
+
 ## Storage boundary
 
 ```text
