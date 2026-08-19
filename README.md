@@ -23,8 +23,10 @@ path is documented in [Recovery](docs/RECOVERY.md).
 The host bootstrap currently supports Ubuntu 24.04. Install the CLI and memory runtime from a checkout:
 
 ```bash
-python3 -m pip install '.[memory]'
+python3 -m pip install -e '.[memory]'
 ```
+
+The editable install is required because the runtime also uses deployment assets from the checkout.
 
 Bootstrap the host first:
 
