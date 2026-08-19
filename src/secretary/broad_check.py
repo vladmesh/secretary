@@ -28,6 +28,7 @@ import json
 import os
 import re
 import selectors
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -270,7 +271,12 @@ def content_identity(root: Path) -> ContentIdentity:
         scratch = Path(scratch_dir) / "index"
         try:
             if real_index.exists():
-                scratch.write_bytes(real_index.read_bytes())
+                # Git compares an entry's stat data with the index file's mtime to detect a
+                # racy-clean file and hash it instead of trusting an equal size and timestamp.
+                # Rewriting the bytes gives the scratch index a newer mtime and disables that
+                # guard: a same-size edit made in the index timestamp window can then retain the
+                # old blob. Preserve the real index metadata along with its contents.
+                shutil.copy2(real_index, scratch)
         except OSError:
             return ContentIdentity("")
         env = {"GIT_INDEX_FILE": str(scratch)}
