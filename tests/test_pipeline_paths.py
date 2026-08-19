@@ -85,31 +85,31 @@ class LauncherCheckoutTests(unittest.TestCase):
                "TA_SECRETARY_REPO": "/srv/configured"}
         for script in self.LAUNCHERS:
             with self.subTest(script):
-                self.assertEqual(self.script_pythonpath(script, env), "/srv/named")
+                self.assertEqual(self.script_pythonpath(script, env), "/srv/named/src")
         with mock.patch.dict(os.environ, env, clear=True):
-            self.assertEqual(runtime_role_env.runtime_pythonpath(), "/srv/named")
+            self.assertEqual(runtime_role_env.runtime_pythonpath(), "/srv/named/src")
 
     def test_every_launcher_falls_back_to_the_configured_checkout(self):
         env = {"HOME": "/home/nobody", "TA_SECRETARY_REPO": "/srv/configured"}
         for script in self.LAUNCHERS:
             with self.subTest(script):
-                self.assertEqual(self.script_pythonpath(script, env), "/srv/configured")
+                self.assertEqual(self.script_pythonpath(script, env), "/srv/configured/src")
         with mock.patch.dict(os.environ, env, clear=True):
-            self.assertEqual(runtime_role_env.runtime_pythonpath(), "/srv/configured")
+            self.assertEqual(runtime_role_env.runtime_pythonpath(), "/srv/configured/src")
 
     def test_a_shell_launcher_with_nothing_configured_uses_the_running_users_home(self):
         env = {"HOME": "/home/nobody"}
         for script in self.LAUNCHERS:
             with self.subTest(script):
                 self.assertEqual(
-                    self.script_pythonpath(script, env), "/home/nobody/secretary"
+                    self.script_pythonpath(script, env), "/home/nobody/secretary/src"
                 )
 
     def test_the_module_launcher_with_nothing_configured_uses_its_own_checkout(self):
         """A module already imported knows its tree is importable; a home path may not exist."""
         with mock.patch.dict(os.environ, {"HOME": "/home/nobody"}, clear=True):
             self.assertEqual(
-                runtime_role_env.runtime_pythonpath(), str(runtime_role_env.REPO_ROOT)
+                runtime_role_env.runtime_pythonpath(), str(runtime_role_env.REPO_ROOT / "src")
             )
 
     def test_a_shell_launcher_keeps_an_inherited_pythonpath_behind_the_checkout(self):
@@ -118,7 +118,7 @@ class LauncherCheckoutTests(unittest.TestCase):
         for script in self.LAUNCHERS:
             with self.subTest(script):
                 self.assertEqual(
-                    self.script_pythonpath(script, env), "/srv/configured:/srv/extra"
+                    self.script_pythonpath(script, env), "/srv/configured/src:/srv/extra"
                 )
 
     def test_the_launched_role_command_carries_the_configured_checkout(self):
@@ -127,7 +127,7 @@ class LauncherCheckoutTests(unittest.TestCase):
                                           "TA_SECRETARY_REPO": "/srv/configured"}, clear=True):
             command = runtime_role_env.wrap_shell_command("steward", "true")
 
-        self.assertIn("PYTHONPATH=/srv/configured", command)
+        self.assertIn("PYTHONPATH=/srv/configured/src", command)
 
 
 class OpenRouterKeyTests(unittest.TestCase):

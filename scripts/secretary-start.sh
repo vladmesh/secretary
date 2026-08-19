@@ -17,7 +17,7 @@ export PATH="$HOME/.local/bin:$HOME/bin:${PATH:-/usr/local/sbin:/usr/local/bin:/
 # Same checkout precedence as the automation gate: an explicit TA_RUNTIME_PYTHONPATH, else the
 # product checkout this installation is configured with, else the home default. The interactive
 # secretary must not boot out of a different version than the one the host was upgraded to.
-export PYTHONPATH="${TA_RUNTIME_PYTHONPATH:-${TA_SECRETARY_REPO:-$HOME/secretary}}${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="${TA_RUNTIME_PYTHONPATH:-${TA_SECRETARY_REPO:-$HOME/secretary}}/src${PYTHONPATH:+:$PYTHONPATH}"
 
 head="${1:-}"
 exec python3 -P -m secretary shell ${head:+--head "$head"}

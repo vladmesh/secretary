@@ -100,7 +100,7 @@ from .tui_delivery import (
     read_pane_text,
 )
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 CLAUDE_JSON = Path(os.environ.get("TA_CLAUDE_JSON", str(Path.home() / ".claude.json")))
 WATCHDOG_SECONDS = int(os.environ.get("TA_WATCHDOG_SECONDS", "1200"))  # busy + this quiet = stuck
 IDLE_PROBE_MS = 2500        # tui-idle satisfied within this = idle; timeout = busy
@@ -287,7 +287,9 @@ def _workspace(agent: str) -> str:
 
 
 def _load_spec(agent: str) -> dict:
-    return tomllib.loads((_REPO_ROOT / "triggered_agents" / "agents" / agent / "automation.toml").read_text())
+    return tomllib.loads(
+        (_REPO_ROOT / "src" / "triggered_agents" / "agents" / agent / "automation.toml").read_text()
+    )
 
 
 def _pipeline_paused() -> bool:

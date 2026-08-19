@@ -33,7 +33,7 @@ from pathlib import Path
 from . import production_telemetry
 from .state import AgentState
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = Path(__file__).resolve().parents[3]
 _ENV_MAX_AGE = os.environ.get("TA_HEALTH_MAX_AGE_S")  # global override, wins for every agent
 # Units are the packaged ones under host.unit_prefix, not the decommissioned
 # ta-* names. Most agents map to <prefix><agent>.timer; the pipeline's clock is
@@ -50,7 +50,9 @@ def _max_age_s(agent: str) -> int:
     if _ENV_MAX_AGE:
         return int(_ENV_MAX_AGE)
     try:
-        spec = tomllib.loads((_REPO_ROOT / "triggered_agents" / "agents" / agent / "automation.toml").read_text())
+        spec = tomllib.loads(
+            (_REPO_ROOT / "src" / "triggered_agents" / "agents" / agent / "automation.toml").read_text()
+        )
     except (OSError, tomllib.TOMLDecodeError):
         return 3 * 3600
     # An explicit [health] max_age_s wins — needed for a calendar like pipeline's raw 3-min
@@ -163,7 +165,9 @@ def check(agents: tuple[str, ...]) -> int:
     for agent in agents:
         # No automation.toml means the agent is CLI-only (no timer, no runs); it has nothing to
         # be red about, so report it neutrally and move on.
-        if not (_REPO_ROOT / "triggered_agents" / "agents" / agent / "automation.toml").is_file():
+        if not (
+            _REPO_ROOT / "src" / "triggered_agents" / "agents" / agent / "automation.toml"
+        ).is_file():
             print(f"SKIP {agent}: no automation (CLI-only)")
             continue
         problems = []

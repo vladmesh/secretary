@@ -38,7 +38,7 @@ def runtime_env_path() -> Path:
 RUNTIME_ENV = runtime_env_path()
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 RUNTIME_PYTHONPATH_ENV = "TA_RUNTIME_PYTHONPATH"
 
 
@@ -56,7 +56,8 @@ def runtime_pythonpath() -> str:
     should not be sent to a path that may not exist.
     """
     configured = os.environ.get(RUNTIME_PYTHONPATH_ENV) or os.environ.get(PRODUCT_ENV)
-    return configured or str(REPO_ROOT)
+    root = Path(configured).expanduser() if configured else REPO_ROOT
+    return str(root / "src")
 
 # SECRETARY_DATA_DIR names the installation's data plane, not a secret. It has to survive the
 # allowlist: the production dispatcher unit imports runtime.env wholesale, so a host that moves its

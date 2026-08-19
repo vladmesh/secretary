@@ -33,7 +33,7 @@ from triggered_agents.agents.pipeline.heads import (
 )
 from triggered_agents.runtime.paths import configured_product_root
 
-HEADS_RELATIVE = Path("triggered_agents") / "agents" / "pipeline" / "heads.toml"
+HEADS_RELATIVE = Path("src") / "triggered_agents" / "agents" / "pipeline" / "heads.toml"
 INSTANCE_HEADS_RELATIVE = Path("heads") / "heads.toml"
 SNAPSHOT_RELATIVE = Path("heads") / "heads.yaml"
 SOURCE_RELATIVE = Path("heads") / "source.yaml"

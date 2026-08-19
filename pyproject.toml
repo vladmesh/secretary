@@ -73,6 +73,7 @@ secretary-memory-reindex = "secretary.memory_reindex:main"
 triggered-agents = "triggered_agents.__main__:main"
 
 [tool.setuptools.packages.find]
+where = ["src"]
 include = ["secretary*", "triggered_agents*"]
 
 [tool.setuptools.package-data]

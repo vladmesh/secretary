@@ -1593,7 +1593,7 @@ Flags: `--no-pull` (re-materialise only), `--base-branch`, `--product-root`, `--
 
 `--product-root` names the checkout to install. Every step then reads that checkout and nothing
 else: its `skills/manifest.toml` and `skills/roles/` tree, its `packaging/systemd` templates, its
-`triggered_agents/agents/*/automation.toml` specs, the role worktrees it declares, and its head
+`src/triggered_agents/agents/*/automation.toml` specs, the role worktrees it declares, and its head
 canon when the installation owns none. The checkout that happens to be running the `secretary`
 module has no say, which is what lets one installation be moved onto a candidate version, and what
 lets a second checkout install a host at all.

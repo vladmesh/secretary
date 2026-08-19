@@ -46,7 +46,7 @@ from secretary.data import (
 ORCA_STATE_DIRS = (Path.home() / ".orca", Path.home() / ".config" / "orca")
 PIPELINE_PAUSE_REASON = "secretary backup create"
 PIPELINE_PAUSE_ACTOR = "secretary-backup"
-PRODUCT_REPO_ROOT = Path(__file__).resolve().parents[1]
+PRODUCT_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass(frozen=True)

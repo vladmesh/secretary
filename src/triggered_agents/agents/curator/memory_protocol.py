@@ -174,7 +174,7 @@ def _already_exists_result(
 def _secretary_env(secretary_repo: Path | None) -> dict[str, str]:
     env = dict(os.environ)
     repo = secretary_repo or configured_product_root()
-    paths = [str(repo)]
+    paths = [str(repo / "src")]
     if env.get("PYTHONPATH"):
         paths.append(env["PYTHONPATH"])
     env["PYTHONPATH"] = os.pathsep.join(paths)

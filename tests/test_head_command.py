@@ -202,7 +202,7 @@ class RoleEnvWrapperTests(unittest.TestCase):
                 render_head_command(
                     {"adapter": "claude"}, role="worker", binding=SECRETARY_ROLE_ENV,
                 ).command,
-                f"{BINDING} PYTHONPATH=/opt/checkout\"${{PYTHONPATH:+:$PYTHONPATH}}\" "
+                f"{BINDING} PYTHONPATH=/opt/checkout/src\"${{PYTHONPATH:+:$PYTHONPATH}}\" "
                 "python3 -P -m secretary.role_env exec --role worker -- /bin/sh -lc "
                 "'claude --dangerously-skip-permissions'",
             )
@@ -214,7 +214,7 @@ class RoleEnvWrapperTests(unittest.TestCase):
                     {"adapter": "claude"}, prompt="/steward", role="steward",
                     binding=RUNTIME_ROLE_ENV,
                 ).command,
-                f"{BINDING} PYTHONPATH=/opt/checkout python3 -P -m "
+                f"{BINDING} PYTHONPATH=/opt/checkout/src python3 -P -m "
                 "triggered_agents.runtime.role_env exec --role steward -- /bin/sh -lc "
                 "'claude --dangerously-skip-permissions '\"'\"'/steward'\"'\"''",
             )
@@ -344,12 +344,12 @@ class EveryCallerRendersThroughThisModuleTests(unittest.TestCase):
 def _module_paths() -> list[Path]:
     """Every module of both packages, minus the two files the seam is allowed to live in."""
     allowed = {
-        REPO_ROOT / "triggered_agents" / "runtime" / "pane_host.py",
+        REPO_ROOT / "src" / "triggered_agents" / "runtime" / "pane_host.py",
     }
-    head_package = REPO_ROOT / "triggered_agents" / "runtime" / "head"
+    head_package = REPO_ROOT / "src" / "triggered_agents" / "runtime" / "head"
     paths = []
     for package in ("secretary", "triggered_agents"):
-        for path in sorted((REPO_ROOT / package).rglob("*.py")):
+        for path in sorted((REPO_ROOT / "src" / package).rglob("*.py")):
             if path in allowed or head_package in path.parents:
                 continue
             paths.append(path)
@@ -538,7 +538,7 @@ class SeamGrepTests(unittest.TestCase):
         exception dict would be saying nothing (secretary-1416).
         """
         self.assertEqual(_SEAM_EXCEPTIONS, {})
-        scheduler = REPO_ROOT / "triggered_agents" / "runtime" / "dispatch.py"
+        scheduler = REPO_ROOT / "src" / "triggered_agents" / "runtime" / "dispatch.py"
         self.assertIn(scheduler, _module_paths())
         source = scheduler.read_text(encoding="utf-8")
         self.assertEqual(_terminal_vectors(ast.parse(source)), [])
@@ -589,7 +589,7 @@ class SeamGrepTests(unittest.TestCase):
         from triggered_agents.runtime.pane_host import SessionHost
 
         self.assertIn("stop_workspace", dir(SessionHost))
-        source = (REPO_ROOT / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
+        source = (REPO_ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
         self.assertIn("self.session.stop_workspace(workspace)", source)
         self.assertIn("self.session.stop_workspace(record.workspace)", source)
 

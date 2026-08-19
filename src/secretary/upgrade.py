@@ -388,7 +388,7 @@ def step_publish_head_registry(context: UpgradeContext) -> StepResult:
 def desired_role_worktrees(product_root: Path, home: Path | None = None) -> list[Path]:
     """Every derived role worktree shipped by this product, present or absent."""
     root = workspaces_root(home) / "secretary"
-    agents = product_root / "triggered_agents" / "agents"
+    agents = product_root / "src" / "triggered_agents" / "agents"
     try:
         names = sorted(entry.name for entry in agents.iterdir() if (entry / "automation.toml").is_file())
     except OSError:
@@ -736,7 +736,7 @@ def running_product_root() -> Path:
     For reading what this process itself ships. Never for deciding what to install: that is
     `default_product_root`.
     """
-    return Path(__file__).resolve().parents[1]
+    return Path(__file__).resolve().parents[2]
 
 
 def default_product_root() -> Path:
