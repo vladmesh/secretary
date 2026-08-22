@@ -18,7 +18,6 @@ plan; S1-4 flips them to real assertions when the watchdog switches onto episode
 
 from __future__ import annotations
 
-import json
 import unittest
 
 from secretary.dispatch.head_vitality import (
@@ -32,7 +31,6 @@ from secretary.dispatch.head_vitality import (
 from secretary.dispatch.head_vitality_episode import (
     DEFAULT_VITALITY_THRESHOLDS,
     VitalityEpisode,
-    VitalityThresholds,
     VitalityVerdict,
     reduce_vitality,
 )
