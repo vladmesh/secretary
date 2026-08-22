@@ -18,11 +18,12 @@ Verdict ladder, in the plan's vocabulary::
     Dead            the heartbeat names a gone or unreaped process
     Unverifiable    no strong channel answered; nothing may be concluded
 
-Decisions this module deliberately does NOT make: it never stops, signals or replaces anything,
-it never reads ``recovery_rung`` (the field exists for a later recovery-policy card and stays 0),
-and it treats the two thresholds as description, not authority. Until a later card wires a policy
-and a runtime behind them, episodes are recorded in shadow mode only -- stored and logged, never
-consulted by any dispatcher branch.
+Decisions this module deliberately does NOT make: it never stops, signals or replaces
+anything, and it treats the two thresholds as description, not authority. It neither sets nor
+reads ``recovery_rung`` and its sibling policy fields (they exist for the recovery-policy card,
+S1-5, and ride every reduction untouched); until that policy wired in behind them, episodes are
+recorded and logged by the caller -- stored and consulted only through the decision paths the
+later cards define.
 
 The invariants encoded here (each pinned by a named test):
 
@@ -166,8 +167,27 @@ class VitalityEpisode:
     # Structured provenance: which sources and axes drove the verdict, newest reduction last.
     basis: tuple[str, ...] = ()
     reason: str = ""
-    # Owned by a future recovery-policy card. The reducer neither sets nor reads it.
+    # Owned by the recovery policy (card S1-5). The reducer neither sets nor reads any of
+    # them; ``replace`` carries them through every reduction untouched, which is exactly how
+    # rung state survives from one tick's decision to the next.
+    #
+    # ``recovery_rung`` is the ladder position this head's current intervention episode has
+    # reached (0 none, 1 suspicion noted, 2 SIGCONT sent, 3 response window running,
+    # 4 operator escalated -- see ``head_vitality_policy``).
+    #
+    # ``recovery_span_started_at`` is the freeze stamp (``stall_frozen_since`` value) of the
+    # suspension span those rungs were climbed in. Keying the rung to the span is what makes
+    # SIGCONT-once-per-span work across ticks and dispatcher restarts: a resumed-and-
+    # re-suspended head starts a new span and therefore a fresh ladder, while every tick
+    # inside one span sees the same key.
+    #
+    # ``deterministic_refusals`` counts consecutive observations whose reason carried an
+    # authoritative deterministic terminal class (the 1194 allowlist). It is deliberately
+    # NOT keyed to the suspension span: a launch-refusal loop is not a suspension story, and
+    # a resumed head does not un-refuse the command that refused.
     recovery_rung: int = 0
+    recovery_span_started_at: float = 0.0
+    deterministic_refusals: int = 0
     # Count of distinct advancement boundaries observed for this run. Each real progress moves the
     # epoch, so a future policy can tell "quiet since the same old work" from "quiet since fresh
     # work" without trusting wall-clock arithmetic alone.
@@ -188,6 +208,18 @@ class VitalityEpisode:
             object.__setattr__(self, name, _finite_timestamp(getattr(self, name), name))
         if isinstance(self.recovery_rung, bool) or not isinstance(self.recovery_rung, int):
             raise HeadVitalityError("a vitality episode recovery rung is an int")
+        if self.recovery_rung < 0:
+            raise HeadVitalityError("a vitality episode recovery rung is not negative")
+        object.__setattr__(
+            self, "recovery_span_started_at",
+            _finite_timestamp(
+                getattr(self, "recovery_span_started_at", 0.0),
+                "recovery_span_started_at",
+            ),
+        )
+        refusals = getattr(self, "deterministic_refusals", 0)
+        if isinstance(refusals, bool) or not isinstance(refusals, int) or refusals < 0:
+            raise HeadVitalityError("a vitality episode deterministic refusal count is a non-negative int")
         if self.activity_epoch < 0:
             raise HeadVitalityError("a vitality episode activity epoch is not negative")
         object.__setattr__(
@@ -223,6 +255,8 @@ class VitalityEpisode:
             "basis": list(self.basis),
             "reason": self.reason,
             "recovery_rung": self.recovery_rung,
+            "recovery_span_started_at": self.recovery_span_started_at,
+            "deterministic_refusals": self.deterministic_refusals,
             "activity_epoch": self.activity_epoch,
             "updated_at": self.updated_at,
             "stall_frozen_since": self.stall_frozen_since,
@@ -262,6 +296,13 @@ class VitalityEpisode:
             raise HeadVitalityError("vitality episode recovery rung is a non-negative int")
         if isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0:
             raise HeadVitalityError("vitality episode activity epoch is a non-negative int")
+        # Fields the recovery policy (S1-5) added: absent on records written before it ran,
+        # which is exactly "no rung climbed yet" -- mapped to their zero values rather than
+        # refused, so pre-policy episodes load and keep deciding.
+        span = payload.get("recovery_span_started_at", 0.0)
+        refusals = payload.get("deterministic_refusals", 0)
+        if isinstance(refusals, bool) or not isinstance(refusals, int) or refusals < 0:
+            raise HeadVitalityError("vitality episode deterministic refusal count is a non-negative int")
         return cls(
             run_id=str(payload.get("run_id") or ""),
             verdict=verdict,
@@ -275,6 +316,8 @@ class VitalityEpisode:
             basis=tuple(basis),
             reason=str(payload.get("reason") or ""),
             recovery_rung=rung,
+            recovery_span_started_at=_finite_timestamp(span, "recovery_span_started_at"),
+            deterministic_refusals=refusals,
             activity_epoch=epoch,
             updated_at=_finite_timestamp(payload.get("updated_at"), "updated_at"),
             stall_frozen_since=_finite_timestamp(
