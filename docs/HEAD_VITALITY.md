@@ -124,9 +124,12 @@ remove. A later policy card owns whatever the production numbers become.
 
 The worker/review wait tick computes and persists each role's episode (`worker_vitality_episode`,
 `review_vitality_episode` on the dispatcher record) from values it already holds, and logs one
-durable comment per verdict change. **Nothing consults them**: no watchdog threshold, respawn,
+durable comment per verdict change (keyed on the transition itself, so a flapping verdict cannot
+flood the card). **Nothing consults them**: no watchdog threshold, respawn,
 stop or recovery path reads an episode. Shadow mode exists so the next card can compare the
 reducer's verdicts against what the watchdog actually decided before any decision trusts them.
-A reduction failure degrades to "no episode" with a comment — shadow code must never break the
-tick hosting it.
+A tick whose status carries none of the observed sources (the noop host, a runtime-unavailable
+probe) runs no reduction and writes nothing — an episode is only ever the record of something
+actually observed. A reduction failure degrades to "no episode" with a comment — shadow code must
+never break the tick hosting it.
 

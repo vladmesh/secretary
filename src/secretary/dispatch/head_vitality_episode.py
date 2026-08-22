@@ -311,7 +311,9 @@ def reduce_vitality(
     owned = _latest_per_source(
         [snapshot for snapshot in snapshots if snapshot.run_id == target_run_id]
     )
-    basis = [f"dropped-foreign-run:{name}" for name in foreign]
+    # ``basis`` is durable provenance that tests and humans compare; it is built from sorted
+    # sources so batch order cannot change the words a deterministic reduction writes.
+    basis = [f"dropped-foreign-run:{name}" for name in sorted(foreign)]
     if previous is not None and previous.run_id != target_run_id:
         basis.append(f"identity-changed-from:{previous.run_id}")
 
@@ -441,6 +443,19 @@ def reduce_vitality(
         # observers going blind: its confirmation stands frozen until real evidence moves it.
         if episode.verdict is VitalityVerdict.CONFIRMED_STALL:
             verdict = VitalityVerdict.CONFIRMED_STALL
+            # The confirmation stands, but its onset must be stamped here too: an episode that
+            # arrived confirmed through deserialisation carries the field, yet one reduced into
+            # confirmation by a tick whose observers then went dark does not, and a phase without
+            # its onset is a claim nobody can audit. The quiet it confirmed is still measured
+            # from the same reference every other quiet conclusion uses.
+            quiet_reference = episode.last_progress_at or episode.started_at
+            episode = replace(
+                episode,
+                confirmed_since=(
+                    episode.confirmed_since
+                    or quiet_reference + thresholds.suspect_after + thresholds.confirm_after
+                ),
+            )
             basis.append("preserved-confirmation:strong-sources-unavailable")
         else:
             verdict = VitalityVerdict.UNVERIFIABLE

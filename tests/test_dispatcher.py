@@ -7402,6 +7402,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self._head_at_its_prompt()
         first = self.tick()
         episode_after_first = self._pilot_record()["worker_vitality_episode"]
+        idle_since = self._pilot_record()["worker_idle_since"]
 
         with mock.patch.object(
             self.runtime, "save_records", wraps=self.runtime.save_records
@@ -7412,10 +7413,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         save.assert_called_once()  # The shadow episode's own write, and nothing else.
         after = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
         # No fence field moved: the idle window the test exists to protect was not touched.
-        self.assertEqual(
-            after["worker_idle_since"],
-            self.runtime.production_state.load()["records"]["secretary-510-pilot"]["worker_idle_since"],
-        )
+        self.assertEqual(after["worker_idle_since"], idle_since)
         self.assertEqual(after["worker_idle_confirmations"], 0)
         # And the shadow reduction observed the same steady state, not a new one.
         episode_after_second = after["worker_vitality_episode"]
@@ -7521,6 +7519,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         # A head that disappeared is a different outcome from one that stopped working, and no
         # prompt is spent on a pane there is nothing left to type into.
         self.assertEqual(self.host.report_prompts, [])
+        self.assertEqual(self._pilot_record().get("worker_report_nudge"), {})
 
     # shadow-mode vitality episodes (head-vitality plan) ------------------------
 
@@ -7611,6 +7610,38 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(result["action"], "waiting-worker-report")
         # The failed observation is skipped, not recorded as a verdict.
         self.assertIsNone(self._pilot_record()["worker_vitality_episode"])
+
+    def test_a_tick_that_observed_no_source_writes_no_episode(self) -> None:
+        """An answer with no heartbeat classification, no provider evidence and no pane flag is
+        a tick that looked at nothing. There is no honest reduction of zero observations, so
+        shadow mode writes neither an episode nor the state file."""
+        self._open_the_second_round()
+        self._head_at_its_prompt()
+        self.tick()
+        before = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
+
+        with mock.patch.object(
+            self.host, "worker_status",
+            side_effect=lambda task, record: {"known": True, "live": True, "reason": "live"},
+        ), mock.patch.object(
+            self.runtime, "save_records", wraps=self.runtime.save_records
+        ) as save:
+            result = self.tick()
+
+        self.assertEqual(result["action"], "waiting-worker-report")
+        # Whatever wrote here, it was not the shadow episode: the tick observed no source, so
+        # every state write this tick made must carry the episode exactly as it stood before.
+        self.assertEqual(
+            [
+                call.args[0]["records"]["secretary-510-pilot"]["worker_vitality_episode"]
+                for call in save.call_args_list
+            ],
+            [before["worker_vitality_episode"]] * len(save.call_args_list),
+        )
+        after = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(
+            after["worker_vitality_episode"], before["worker_vitality_episode"]
+        )
 
     def test_an_episode_from_another_run_id_starts_fresh_on_respawn(self) -> None:
         """A replacement head owns a new run identity; its episode starts clean rather than

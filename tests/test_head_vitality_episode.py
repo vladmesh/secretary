@@ -275,6 +275,27 @@ class UnavailableTests(unittest.TestCase):
 
         self.assertEqual(reduced.verdict, VitalityVerdict.CONFIRMED_STALL)
 
+    def test_a_confirmation_earned_then_blind_keeps_its_phase_onset(self) -> None:
+        """Confirmation is stamped the tick it is earned; when the observers then go dark the
+        preserved verdict must still carry that onset, so a later policy can audit how long the
+        phase has run."""
+        previous = episode(last_progress_at=0.0)
+        confirmed = reduce_vitality(
+            previous, [heartbeat(1000.0), provider(1000.0)], now=1000.0, thresholds=THRESHOLDS,
+        )
+        self.assertEqual(confirmed.verdict, VitalityVerdict.CONFIRMED_STALL)
+        self.assertEqual(confirmed.confirmed_since, 900.0)
+
+        # Every strong source goes dark; the confirmation survives, with its onset.
+        blind = reduce_vitality(
+            confirmed,
+            [heartbeat(2000.0, available=False), provider(2000.0, available=False)],
+            now=2000.0, thresholds=THRESHOLDS,
+        )
+
+        self.assertEqual(blind.verdict, VitalityVerdict.CONFIRMED_STALL)
+        self.assertEqual(blind.confirmed_since, 900.0)
+
 
 class AdvisoryTests(unittest.TestCase):
     """Invariant (e): pane evidence corroborates and never convicts."""
@@ -442,6 +463,26 @@ class PurityTests(unittest.TestCase):
         )
 
         self.assertEqual(first, second)
+
+    def test_snapshot_order_does_not_change_the_written_basis(self) -> None:
+        """The whole episode, basis included, is a function of the batch -- not of the order
+        the channels happened to answer in."""
+        previous = episode(verdict=VitalityVerdict.SUSPECTED_STALL, suspected_since=300.0)
+        forward = reduce_vitality(
+            previous,
+            [heartbeat(400.0), provider(400.0), pane(400.0),
+             provider(401.0, run_id="run-other")],
+            now=400.0, thresholds=THRESHOLDS,
+        )
+        backward = reduce_vitality(
+            previous,
+            [provider(401.0, run_id="run-other"), pane(400.0),
+             provider(400.0), heartbeat(400.0)],
+            now=400.0, thresholds=THRESHOLDS,
+        )
+
+        self.assertEqual(forward, backward)
+        self.assertEqual(forward.basis, backward.basis)
 
     def test_no_snapshots_leaves_the_previous_episode_untouched(self) -> None:
         previous = episode(verdict=VitalityVerdict.SUSPECTED_STALL, suspected_since=300.0)

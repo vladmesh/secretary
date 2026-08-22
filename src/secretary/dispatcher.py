@@ -4826,7 +4826,10 @@ class DispatcherRuntime:
         Shadow mode is the whole contract: the episode is computed from values this tick already
         holds, stored on the record, and logged when its verdict changes -- and it must never be
         read by any branch below. Every early return here leaves `record` untouched or unchanged,
-        so a caller cannot tell this method ran except by reading the record afterwards.
+        so a caller cannot tell this method ran except by reading the record afterwards. A tick
+        whose status carries none of the three sources below observed nothing at all (the noop
+        host, a runtime-unavailable probe): no reduction runs and no episode is written, so such
+        ticks rewrite neither state nor history.
 
         Sources actually observed on this path, without any new host call:
 
@@ -4852,12 +4855,19 @@ class DispatcherRuntime:
                 setattr(record, field_name, None)
             return
         pid_status = status.get("pid_status")
+        provider_progress = status.get("provider_progress")
+        if not isinstance(pid_status, dict) and not isinstance(provider_progress, dict) \
+                and "idle" not in status:
+            # Nothing was observed at all (the noop host, a runtime-unavailable tick): there is
+            # no reduction to run and no episode to write, so return before saving anything.
+            # Writing one would both rewrite the state file every such tick and stamp an
+            # "observation" nobody made -- the same lie Unverifiable exists to avoid.
+            return
         snapshots = [
             _VitalitySnapshot.from_pid_heartbeat(
                 pid_status, run_id=run_id, observed_at=now
             )
         ] if isinstance(pid_status, dict) else []
-        provider_progress = status.get("provider_progress")
         if isinstance(provider_progress, dict):
             snapshots.append(
                 _VitalitySnapshot.from_provider_cursor(
@@ -4896,6 +4906,13 @@ class DispatcherRuntime:
         self.save_records(payload, records)
         if not changed:
             return
+        # The request id names only what the comment claims -- the verdict transition itself --
+        # so a flapping verdict cannot mint a fresh idempotency key every tick and turn shadow
+        # logging into an unbounded comment stream.
+        request_id = _attempt_request_id(
+            record.attempt_id or "", f"{kind}-vitality-verdict", task["ref"],
+            suffix=_request_token(f"{previous.verdict.value if previous else 'none'}->{episode.verdict.value}"),
+        )
         self.writer.comment(
             role="dispatcher",
             actor=self.owner,
@@ -4906,10 +4923,7 @@ class DispatcherRuntime:
                 + f"; basis {', '.join(episode.basis) if episode.basis else 'none'}."
                 " Recorded only - shadow mode does not influence dispatcher decisions."
             ),
-            request_id=_attempt_request_id(
-                record.attempt_id or "", f"{kind}-vitality-verdict", task["ref"],
-                suffix=_request_token(f"{episode.verdict.value}-{int(now)}"),
-            ),
+            request_id=request_id,
         )
 
     def _prompt_worker_report(
