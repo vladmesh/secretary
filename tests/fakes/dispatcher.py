@@ -24,6 +24,7 @@ from secretary.dispatcher_heartbeat import run_heartbeat_identity
 from secretary.dispatcher_launcher import claude_launch_model, role_launch_env
 from secretary.dispatcher_observer import OBSERVER_HEAD_FALLBACK
 from secretary.dispatcher_types import HeadLaunchAborted, ReviewLaunch
+from secretary.dispatcher_watchdog import head_run_process_status as _head_run_process_status
 from secretary.dispatcher_watchdog import pid_file_path
 from secretary.dispatcher_worker_lifecycle import head_run_binding
 from secretary.routing_journal import HeadRun, head_run_from_profile
@@ -642,6 +643,10 @@ class FakeHost:
         self.review_status_result: dict | None = None
         self.worker_status_error: Exception | None = None
         self.review_status_error: Exception | None = None
+        # The provider cursor the fake's bound progress seam answers with. Tests advance
+        # it to model a working transcript; the default is one unchanged value, i.e.
+        # admitted Quiet between ticks.
+        self.provider_cursor = "fake:unchanged"
         # Mechanical gate results consumed FIFO; empty means the default green (ci: none / passing).
         self.gate_results: list[GateResult] = []
         self.gate_calls: list[str] = []
@@ -830,16 +835,61 @@ class FakeHost:
         return None
 
     def provider_progress(self, _task, record, kind) -> dict[str, str]:
-        """A fake provider's opaque cursor is still explicitly bound to its HeadRun."""
+        """A fake provider's opaque cursor is still explicitly bound to its HeadRun.
+
+        The default answer re-reads one unchanged cursor: an admitted Quiet, which is
+        what a real rollout produces between ticks when nothing advanced. Tests model
+        advancement or darkness by scripting their own evidence.
+        """
         run = record.review_head_run if kind == "review" else record.worker_head_run
         run_id, fingerprint = head_run_binding(run)
         if not run_id:
             return {"state": "unavailable", "reason": "fake has no persisted HeadRun"}
         return {
             "state": "observed", "admission": "accepted", "source": "fake-bound-session",
-            "source_fingerprint": "f" * 32, "cursor": "fake:unchanged",
+            "source_fingerprint": "f" * 32, "cursor": self.provider_cursor,
             "head_run_id": run_id, "head_run_fingerprint": fingerprint,
         }
+
+    def _synthetic_status(self, task: dict, record, kind: str) -> dict | None:
+        """Derive the vitality sources for a scripted status answer.
+
+        A test that scripts ``worker_status_result``/``review_status_result`` spells the
+        derived booleans the watchdog consumes. The vitality decision additionally needs
+        the sources those booleans were derived from, so the fake derives them here the
+        way the real ``command_terminal_status`` does: the raw classification is read
+        through ``head_run_process_status`` against this record's pid file, and provider
+        progress comes from the same bound-cursor seam. Fixtures that spell
+        ``pid_status``/``provider_progress`` themselves (the vitality wiring tests)
+        pass through verbatim.
+        """
+        scripted = getattr(self, f"{kind}_status_result")
+        if scripted is None:
+            return None
+        result = dict(scripted)
+        if result.get("identity_mismatch"):
+            return result
+        pid_file = record.worker_pid_file if kind == "worker" else record.review_pid_file
+        run = record.worker_head_run if kind == "worker" else record.review_head_run
+        leaf = record.worker_leaf if kind == "worker" else record.review_leaf
+        if "pid_status" not in result:
+            if pid_file:
+                result["pid_status"] = dict(_head_run_process_status(
+                    pid_file, run=run, role=kind,
+                    task=f"card:{task['ref']}", leaf=leaf,
+                ))
+            else:
+                result["pid_status"] = {
+                    "known": False, "alive": False, "match": False,
+                    "state": "not-yet-written",
+                }
+        if "provider_progress" not in result:
+            result["provider_progress"] = dict(self.provider_progress(task, record, kind))
+        if result.get("live") is False:
+            # A scripted not-live answer models a terminal the inventory lost. The
+            # classification above is what the reduction gets to see.
+            result.setdefault("reason", "missing-terminal")
+        return result
 
     def observer_provider_progress(self, record) -> dict[str, str]:
         """The observer twin of the shared exact-HeadRun progress seam."""
@@ -1082,14 +1132,69 @@ class FakeHost:
         self.calls.append("worker_status")
         if self.worker_status_error is not None:
             raise self.worker_status_error
-        return self.worker_status_result or {"known": True, "live": True, "reason": "live"}
+        synthetic = self._synthetic_status(task, record, "worker")
+        if synthetic is not None:
+            return synthetic
+        # No scripted answer: derive the same live shape the real status seam produces,
+        # so the vitality reduction sees this record's true classification and bound
+        # provider cursor instead of an evidence-free "live".
+        pid_file = record.worker_pid_file
+        run = record.worker_head_run
+        leaf = record.worker_leaf
+        pid_status = (
+            dict(_head_run_process_status(
+                pid_file, run=run, role="worker",
+                task=f"card:{task['ref']}", leaf=leaf,
+            ))
+            if pid_file else {
+                "known": False, "alive": False, "match": False,
+                "state": "not-yet-written",
+            }
+        )
+        return {
+            "known": True,
+            "live": bool(pid_status.get("alive")) if pid_status.get("known") else True,
+            "reason": "live" if pid_status.get("alive") else (
+                "process-exited" if pid_status.get("state") == "dead" else "live"
+            ),
+            "pid_confirmed": bool(pid_status.get("match") and pid_status.get("alive")),
+            "last_activity": time.time(),
+            "pid_status": pid_status,
+            "provider_progress": dict(self.provider_progress(task, record, "worker")),
+        }
 
     def review_status(self, task: dict, record) -> dict:
         self.calls.append("review_status")
         if self.review_status_error is not None:
             raise self.review_status_error
         live = task["ref"] in self.reviews
-        return self.review_status_result or {"known": True, "live": live, "reason": "live" if live else "missing-terminal"}
+        synthetic = self._synthetic_status(task, record, "review")
+        if synthetic is not None:
+            return synthetic
+        if not live:
+            return {"known": True, "live": False, "reason": "missing-terminal"}
+        pid_file = record.review_pid_file
+        run = record.review_head_run
+        leaf = record.review_leaf
+        pid_status = (
+            dict(_head_run_process_status(
+                pid_file, run=run, role="review",
+                task=f"card:{task['ref']}", leaf=leaf,
+            ))
+            if pid_file else {
+                "known": False, "alive": False, "match": False,
+                "state": "not-yet-written",
+            }
+        )
+        return {
+            "known": True,
+            "live": bool(pid_status.get("alive")) if pid_status.get("known") else True,
+            "reason": "live",
+            "pid_confirmed": bool(pid_status.get("match") and pid_status.get("alive")),
+            "last_activity": time.time(),
+            "pid_status": pid_status,
+            "provider_progress": dict(self.provider_progress(task, record, "review")),
+        }
 
     def verify_worker_result(self, task: dict, record) -> None:
         self.calls.append("verify_worker_result")

@@ -153,10 +153,10 @@ under `DEFAULT_VITALITY_THRESHOLDS`. The asymmetry-of-cost principle behind ever
 | `issue:06dcf6cb` (board 656): umbrella contract — child-process existence ≠ liveness | `Issue06dcf6cbUmbrellaLivenessContractTests` | pid-only Running with no progress evidence ages ⇒ SuspectedStall ⇒ ConfirmedStall (see "Pid-only evidence ages" above) |
 
 The legacy decision path itself is characterised in `tests/test_head_vitality_legacy_path.py`:
-what the wait tick and gate do *today* for b5195041, 3e7abdf9 and fe04011b, with
-`expectedFailure` marking the two behaviours that still contradict the plan (idle respawn without
-provider evidence; suspension invisible behind a pending gate until six hours pass). S1-4 flips
-those to real assertions when the watchdog switches onto episodes.
+what the wait tick and gate do for b5195041, 3e7abdf9 and fe04011b. Since S1-4 the b5195041
+characterisation is a REAL assertion (a transcript that advances every tick is never prompted,
+never respawned); fe04011b's gate-phase blindness stays `expectedFailure` — it is S1-5 scope
+(SIGCONT / response window), not part of the wait-tick switch.
 
 ### Thresholds
 
@@ -169,14 +169,78 @@ remove. A later policy card owns whatever the production numbers become.
 
 ### Shadow mode
 
-The worker/review wait tick computes and persists each role's episode (`worker_vitality_episode`,
+S1-4 promoted the shadow reduction into the decision input (see "Decision path and destructive
+guard" below); the historical contract it grew from is kept here because the promotion preserved
+it. The worker/review wait tick computes and persists each role's episode (`worker_vitality_episode`,
 `review_vitality_episode` on the dispatcher record) from values it already holds, and logs one
 durable comment per verdict change (keyed on the transition itself, so a flapping verdict cannot
-flood the card). **Nothing consults them**: no watchdog threshold, respawn,
-stop or recovery path reads an episode. Shadow mode exists so the next card can compare the
-reducer's verdicts against what the watchdog actually decided before any decision trusts them.
-A tick whose status carries none of the observed sources (the noop host, a runtime-unavailable
+flood the card). A tick whose status carries none of the observed sources (the noop host, a runtime-unavailable
 probe) runs no reduction and writes nothing — an episode is only ever the record of something
-actually observed. A reduction failure degrades to "no episode" with a comment — shadow code must
-never break the tick hosting it.
+actually observed. A reduction failure degrades to "no episode" with a comment — the reduction must
+never break the tick hosting it; the caller then decides as it would with no episode at all.
+
+## Decision path and destructive guard
+
+Since card S1-4 the wait tick's decision is the persisted episode's verdict — the pane-idle fence,
+the `pid_confirmed and idle` branch and the pure clock ceilings on this path are gone. The
+reduction runs on every wait tick (including not-live shapes: a heartbeat that names a gone
+process reduces to `Dead`; a vanished pane over a live process is an observation failure that
+waits). Verdict → action:
+
+| Verdict | Wait-tick action |
+|---|---|
+| `HealthyActive`, `HealthyQuiet`, `Unverifiable` | `wait`. Fresh evidence of life renews the outer `worker_waiting_since` window; nothing is nudged or signalled. |
+| `Suspended` | `wait` + one operator-visible comment per freeze span. NO destructive step; SIGCONT and its response window are S1-5. |
+| `SuspectedStall` | At most one idempotent report nudge per round generation (the existing `_prompt_worker_report` machinery), then visible degradation (`{kind}-stall-suspected`). A suspicion never destroys. |
+| `ConfirmedStall` | The existing recovery path: one report prompt if the round has not spent it, else `_trigger_wait_watchdog` → respawn once → escalate to Blocked. Only from this verdict. |
+| `Dead` | The existing not-live handling: reclaim via `_trigger_wait_watchdog`. |
+| No episode / `Unverifiable`, ceiling elapsed | **Operator escalation, head untouched** (`_escalate_unobservable_wait`): one idempotent durable comment naming the evidence gap plus a degraded `{kind}-unobserved-wait-escalated` outcome. An unobservable wait is bounded by escalation, NOT by replacement — the guard refuses every destructive step for such a run, so the pre-S1-4 behaviour (reclaim on the clock alone) is gone on purpose. |
+
+### The guard
+
+Every watchdog-driven destructive step passes through
+`secretary.dispatch.head_vitality_guard.assert_destructive_allowed` before anything is stopped,
+killed, respawned or replaced. Refusal classes: `missing-episode` (nothing was observed — a step
+nobody observed acts on nobody's evidence), `foreign-run` (the episode names another HeadRun than
+the one being acted on), `healthy-active`, `healthy-quiet`, `unverifiable`, `suspended`,
+`suspected-stall`, and `pid-only-ceiling-unelapsed` (below). Allowed only for `ConfirmedStall`
+and `Dead`.
+
+**Belt-and-braces for the first production release:** a confirmation earned by the pid-only aging
+arm (issue 656 — the provider source never answered at all) additionally requires the role's
+ordinary outer ceiling (`WORKER_REPORT_STALL_DEFAULT` class) to have elapsed since the episode
+began accumulating. Such a stall is therefore acted on strictly later than the old clock-only
+machinery would have, never earlier. Confirmations earned on witnessed strong quiet are not held.
+A raising reducer fails safe to `wait` + one comment.
+
+A refusal produces a degraded `{kind}-guard-refused` outcome plus one idempotent durable comment
+keyed on the wait-cycle token — never a silent no-op loop without telemetry.
+
+- **Guarded entry points (watchdog-driven):**
+  `dispatcher.DispatcherRuntime._trigger_wait_watchdog` — the verdict-driven recovery entry point;
+  fences both its arms (`_respawn_wait`, `_escalate_wait`) through `_guard_or_wait`.
+  The evidence-shaped branches of the no-episode fallback (`no output since launch`; `no terminal
+  progress`) keep their pre-vitality triggers because they act on what a source actually said;
+  their destructive steps run under `_trigger_wait_watchdog` and are fenced like every other.
+  The pure clock branch of that same fallback no longer destroys at all: it escalates to the
+  operator (see the verdict table).
+  The confirmed-stop paths reached from these two (`_stop_worker_confirmed`,
+  `_end_review_pane_confirmed`) run only underneath a guarded entry.
+
+**Intentionally NOT guarded (legitimate without any episode):**
+
+- Operator-initiated stops (`CommandHostRuntime.stop_head` invoked by an explicit operator
+  command) — a human decided.
+- Card-lifecycle stops: card Done/Blocked transitions, drain, the review bring-up's freeze of the
+  worker (`_adopt_launch_intent`'s confirmed stop) — the lifecycle owns the head.
+- Launch-recovery stops in `dispatcher_launch.resolve_launch_intent` (settling a launch whose tick
+  died) — they act on durable launch intents and heartbeat identity, not vitality verdicts.
+
+Call-site coverage lives in `tests/test_head_vitality_guard_sites.py`: each guarded path is driven
+with the guard patched to refuse (no destructive host call may happen) and once through the real
+guard (the step must happen); each unguarded stop asserts the guard symbol is never consulted.
+Unit tests for every refusal class live in `tests/test_head_vitality_guard.py`.
+
+**Still S1-5:** SIGCONT/response-window handling for `Suspended`, the gate-phase `T` fix
+(fe04011b), and fast escalation on deterministic refusal reasons.
 

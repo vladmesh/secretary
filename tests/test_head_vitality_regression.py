@@ -20,6 +20,7 @@ from __future__ import annotations
 import unittest
 
 from secretary.dispatch.head_vitality import (
+    SourceAvailability,
     VitalitySnapshot,
 )
 from secretary.dispatch.head_vitality_episode import (
@@ -99,11 +100,16 @@ def provider(
 
 def pane(
     observed_at: float, *, idle: bool = True, run_id: str = RUN_ID,
-    refused: bool = False,
+    refused: bool = False, reason: str = "",
 ) -> VitalitySnapshot:
-    """One S1-1 advisory snapshot built through the real builder from a producer payload."""
+    """One S1-1 advisory snapshot built through the real builder from a producer payload.
+
+    ``reason`` carries the bounded refusal diagnostic the producer put on the wire for an
+    unavailable reading, so a replay can assert what S1-5's policy will key on.
+    """
     return VitalitySnapshot.from_pane_readiness(
-        {} if refused else {"idle": idle}, run_id=run_id, observed_at=observed_at,
+        {"reason": reason} if refused else {"idle": idle},
+        run_id=run_id, observed_at=observed_at,
     )
 
 
@@ -490,14 +496,18 @@ class CodegenOrchestrator1194DeterministicSplitFailureTests(unittest.TestCase):
         failure. The escalation belongs to the recovery policy (S1-5 TODO).
         """
         previous = reduce_vitality(
-            None, [pane(1000.0, refused=True)], now=1000.0, thresholds=THRESHOLDS,
+            None,
+            [pane(1000.0, refused=True, reason="terminal_split_source_not_found")],
+            now=1000.0, thresholds=THRESHOLDS,
         )
-        # 45 identical refusals over 65 minutes change nothing: same inputs, same verdict,
-        # and no stall timer ever starts.
+        # 45 identical refusals over the loop's 46 minutes (one per minute, attempts 2..46)
+        # change nothing: same inputs, same verdict, no stall timer ever starts. The real
+        # incident ran 49 minutes (06:53-07:42); the loop here is the bounded replay of it.
         for attempt in range(2, 47):
             previous = reduce_vitality(
                 previous,
-                [pane(1000.0 + attempt * 60, refused=True)],
+                [pane(1000.0 + attempt * 60, refused=True,
+                      reason="terminal_split_source_not_found")],
                 now=1000.0 + attempt * 60, thresholds=THRESHOLDS,
             )
 
@@ -505,6 +515,22 @@ class CodegenOrchestrator1194DeterministicSplitFailureTests(unittest.TestCase):
         self.assertEqual(previous.suspected_since, 0.0)
         self.assertEqual(previous.confirmed_since, 0.0)
         self.assertIn("pane_advisory", previous.unavailable_since)
+
+    def test_the_deterministic_reason_travels_on_the_snapshot(self) -> None:
+        """S1-5 keys its fast escalation on the reason string; the snapshot must carry it.
+
+        The S1-3 review follow-up: a refusal's own diagnostic was dropped at the builder,
+        leaving every dark pane reading with the same generic words, so a recovery policy
+        could not tell an authoritative deterministic class from an ordinary outage. The
+        producer's bounded reason now rides along on the unavailable snapshot.
+        """
+        snapshot = VitalitySnapshot.from_pane_readiness(
+            {"reason": "terminal_split_source_not_found"},
+            run_id=RUN_ID, observed_at=1000.0,
+        )
+
+        self.assertIs(snapshot.availability, SourceAvailability.UNAVAILABLE)
+        self.assertIn("terminal_split_source_not_found", snapshot.reason)
 
     @unittest.expectedFailure
     def test_todo_S1_5_a_deterministic_reason_must_escalate_fast(self) -> None:

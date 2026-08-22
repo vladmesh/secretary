@@ -357,7 +357,10 @@ class VitalitySnapshot:
         speaks to the ``Turn`` axis alone. A busy pane is a head possibly mid-turn, an idle pane is
         a head between turns, and neither reading says anything about the process or the work --
         which is why this source can never, alone, ground a stop decision. An unanswerable probe
-        (no status object, no usable flag) is ``Unknown`` and still advisory.
+        (no status object, no usable flag) is ``Unknown`` and still advisory, carrying the
+        producer's own bounded refusal diagnostic in ``reason`` when it gave one -- a
+        deterministic launch failure such as ``terminal_split_source_not_found`` must stay
+        readable on the snapshot, because a recovery policy keys on exactly that class.
         """
         idle = status.get("idle") if isinstance(status, dict) else None
         if isinstance(idle, bool):
@@ -365,7 +368,10 @@ class VitalitySnapshot:
             reason = ""
         else:
             turn = TurnState.UNKNOWN
-            reason = "pane readiness did not answer"
+            detail = str(status.get("reason") or "").strip()[:REASON_LIMIT] \
+                if isinstance(status, dict) else ""
+            reason = f"pane readiness did not answer: {detail}" if detail \
+                else "pane readiness did not answer"
         return cls(
             run_id=run_id,
             source=SnapshotSource.PANE_ADVISORY,

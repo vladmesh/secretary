@@ -1503,11 +1503,17 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         self.assertEqual([row["action"] for row in self.actions(result)], ["observer-nudged"])
         self.assertEqual(self.host.observer_nudges, ["sprint:1"])
-        # The batch's last card event, named explicitly: the tick's own fence line is written
-        # after it and is not what the delivery is cut through.
+        # The batch's last card event, named explicitly: the tick's own fence line and any
+        # dispatcher bookkeeping comment (e.g. a vitality note) are written after it and
+        # are not what the delivery is cut through.
+        batch_events = [
+            event["event_id"]
+            for event in self.audit.events("secretary-510-pilot")
+            if event["event_id"].startswith("evt_burst-two")
+        ]
         self.assertEqual(
             self.observers()["sprint:1"].delivery.through_event,
-            self.audit.events("secretary-510-pilot")[-1]["event_id"],
+            batch_events[-1],
         )
         entry = {
             "selected_step": "read board", "selected_why": "coalesced batch", "rejected_alternatives": "wait",
@@ -1520,9 +1526,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         record = self.observers()["sprint:1"]
         self.assertEqual([row["action"] for row in self.actions(acknowledged)], ["observer-idle"])
         self.assertEqual(record.delivery.stage, DeliveryStage.IDLE)
+        # The acknowledgement names the event it cut through -- the batch boundary, not a
+        # later dispatcher bookkeeping comment.
         self.assertEqual(
             record.delivery.acknowledged_through,
-            self.audit.events("secretary-510-pilot")[-1]["event_id"],
+            "evt_burst-two_semantic",
         )
 
     def test_persisted_nudge_intent_recovers_after_crash_without_a_duplicate_before_the_deadline(self) -> None:

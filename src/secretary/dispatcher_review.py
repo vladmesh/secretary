@@ -228,11 +228,20 @@ def command_terminal_status(
                 "pid_confirmed": False,
             }
         if not terminal.connected:
-            return {"known": True, "live": False, "reason": "disconnected"}
+            # The classification rides along: the vitality reduction must see a suspended
+            # or dead process behind a dropped pane within the same tick, instead of
+            # reading the disconnect as an unobservable head.
+            return {
+                "known": True, "live": False, "reason": "disconnected",
+                "pid_status": dict(pid_status),
+            }
         if _heartbeat_is_dead(pid_status):
             # The pane is connected and Orca kept its wrapping shell open, but the head process
             # itself is gone (secretary-751): a provider crash or a killed runtime, not silence.
-            return {"known": True, "live": False, "reason": "process-exited"}
+            return {
+                "known": True, "live": False, "reason": "process-exited",
+                "pid_status": dict(pid_status),
+            }
         # The host already read Orca's milliseconds into epoch seconds, and 0.0 is its answer for a
         # session manager that named no clock at all — which is not the same as "printed at the
         # epoch" and must stay `None` here, where the watchdog reads it as "no activity known".
@@ -312,7 +321,20 @@ def command_terminal_status(
             "pid_confirmed": False,
         }
     if _heartbeat_is_live_match(pid_status):
-        return {"known": True, "live": True, "reason": "pid", "pid_confirmed": True}
+        # The classification rides along (a suspended head behind a lost pane must be
+        # seen as Suspended, never aged as Unverifiable), and the pid answers the
+        # process axis alone: no pane flag exists on this shape.
+        return {
+            "known": True, "live": True, "reason": "pid", "pid_confirmed": True,
+            "pid_status": dict(pid_status),
+        }
+    if _heartbeat_is_dead(pid_status):
+        # The pane vanished AND the heartbeat names a gone process: the reclaim is
+        # evidence-backed, so the classification rides along and the reduction sees Dead.
+        return {
+            "known": True, "live": False, "reason": "missing-terminal",
+            "pid_status": dict(pid_status),
+        }
     if not pid_status.get("known"):
         # `pid_file_path`'s own contract: the dispatcher clears the pid file before every fresh
         # launch and the new head writes it "the moment it starts", so a respawn opens a window in
@@ -325,7 +347,17 @@ def command_terminal_status(
         started_at = record.review_started_at if kind == "review" else record.worker_started_at
         if started_at and time.time() - started_at <= _initial_output_stall_seconds():
             return {"known": True, "live": True, "reason": "pid-not-written-yet", "pid_confirmed": False}
-    return {"known": True, "live": False, "reason": "missing-terminal"}
+    # A lost pane over a heartbeat that still names a live process is an observation
+    # failure, not a death: the classification rides along so the vitality reduction can
+    # keep aging such a head conservatively (the pid-only arm) instead of reading the
+    # inventory's blindness as a kill authorisation. An unreadable heartbeat stays the
+    # old not-live shape: nobody can vouch for that head at all.
+    return {
+        "known": True,
+        "live": bool(pid_status.get("alive")) if pid_status.get("known") else False,
+        "reason": "missing-terminal",
+        "pid_status": dict(pid_status),
+    }
 
 
 def _admitted_provider_progress_for_status(value: Any, run: Any) -> dict[str, Any]:

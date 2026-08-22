@@ -285,26 +285,27 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         """secretary-1063: a head that is alive, idle and has delivered nothing for the round the
         dispatcher is waiting on is the pipeline failing to move a card. The bounce that retries it
         has to reach the operator as degradation, or the telemetry reads green right up to the
-        Blocked and the one signal before it is lost."""
+        Blocked and the one signal before it is lost.
+
+        S1-4: the idle fence is gone; the same story is told by the verdict ladder -- a
+        confirmed stall prompts first (degraded), then reclaims (degraded)."""
         ref = "secretary-510-pilot"
         self.runtime.production_tick()  # claims the card and launches its worker
         self.host.worker_status_result = {
             "known": True, "live": True, "reason": "live", "last_activity": time.time(),
             "pid_confirmed": True, "idle": True,
         }
-        self.runtime.production_tick()  # first reading of an idle pane only stamps it
-        payload = self.runtime.production_state.load()
-        payload["records"][ref]["worker_idle_since"] -= idle_stall_seconds() + 60
-        self.runtime.production_state.save(payload)
-
-        pending = self.runtime.production_tick()
+        self.runtime.production_tick()  # baseline: a quiet head below every threshold
+        self._age_worker_episode(seconds=idle_stall_seconds() + 60)
+        pending = self.runtime.production_tick()  # quiet past suspect: one nudge
 
         self.assertEqual(pending["status"], "degraded")
         self.assertEqual(
             [action["action"] for action in pending["actions"] if action.get("pilot_ref") == ref],
-            ["worker-idle-unconfirmed"],
+            ["worker-stall-suspected"],
         )
-        result = self.runtime.production_tick()
+        self._age_worker_episode(seconds=idle_stall_seconds() * 4)
+        result = self.runtime.production_tick()  # quiet past confirm: reclaimed
 
         self.assertEqual(result["status"], "degraded")
         self.assertEqual(
@@ -320,13 +321,22 @@ class ProductionTickTelemetryTests(unittest.TestCase):
             (ref, "advance", "worker-respawned"),
         )
         self.assertIn("generation 1", degradation["reason"])
-        self.assertIn("idle", degradation["reason"])
 
         with mock.patch.dict(
             os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}
         ):
             problems, _ = health._pipeline_status()
         self.assertTrue(any("worker-respawned" in problem for problem in problems))
+
+    def _age_worker_episode(self, seconds: float) -> None:
+        """Move the persisted episode's quiet reference back, as operator clock-rewind."""
+        payload = self.runtime.production_state.load()
+        episode = dict(payload["records"]["secretary-510-pilot"]["worker_vitality_episode"] or {})
+        for name in ("started_at", "updated_at"):
+            if episode.get(name):
+                episode[name] -= seconds
+        payload["records"]["secretary-510-pilot"]["worker_vitality_episode"] = episode
+        self.runtime.production_state.save(payload)
 
     def test_a_blocked_card_is_the_dispatcher_working_not_a_degraded_tick(self) -> None:
         """A card parked in Blocked keeps the tick healthy, on purpose.

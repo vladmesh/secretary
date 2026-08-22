@@ -561,20 +561,15 @@ def _clear_env(test: unittest.TestCase, *names: str) -> None:
 CARD_REF = "secretary-510-pilot"
 
 
-class DispatcherRuntimeTests(unittest.TestCase):
-    def test_default_data_dir_anchors_relative_instance_data_dir(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            instance = Path(tmpdir) / "instance.yaml"
-            instance.write_text(
-                "version: 1\n"
-                "name: test\n"
-                "data_dir: secretary-data\n"
-                "offsite:\n"
-                "  instance_remote: git@example.invalid:test/instance.git\n",
-                encoding="utf-8",
-            )
+class DispatcherRuntimeFixture:
+    """Shared runtime fixture for tests that tick one card through the dispatcher.
 
-            self.assertEqual(default_data_dir(instance), instance.parent / "secretary-data")
+    A plain mixin (not a ``TestCase``), so the loader discovers each test exactly once:
+    classes that only need the fixture inherit this, and ``DispatcherRuntimeTests``
+    adds ``(DispatcherRuntimeFixture, unittest.TestCase)``. Before S1-4's review this
+    setup lived directly on the TestCase, and every subclass re-ran the whole class's
+    tests again.
+    """
 
     def setUp(self) -> None:
         self.tmpdir = tempfile.TemporaryDirectory()
@@ -608,6 +603,106 @@ class DispatcherRuntimeTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmpdir.cleanup()
 
+    def _confirmed_idle(self, *, at_prompt: bool = True) -> dict:
+        """Drive one stall episode to the tick that acts on it, and hand that tick back.
+
+        The verdict ladder replaces the old two-tick idle fence: one stamping tick, then
+        a quiet age past ``confirm_after`` (the confirmed boundary, which spends the
+        round's one report prompt on the way). Every acting tick here is degraded: this
+        is the pipeline failing to move a card.
+
+        `at_prompt=False` leaves the caller's own worker status alone, for a test that models a
+        readiness this fixture's plain idle head does not have.
+        """
+        if at_prompt:
+            self._head_at_its_prompt()
+        first = self.tick()
+        self.assertEqual(
+            first["action"], "waiting-worker-report",
+            "one reading of an idle pane is a head between turns, not a stalled one",
+        )
+        self._rewind_idle()
+        bounced = self.tick()
+        self.assertEqual(bounced["status"], "degraded")
+        return bounced
+
+    @staticmethod
+    def _bound_provider_progress(record, cursor: str, *, source: str = "fake-bound-session") -> dict[str, str]:
+        run_id, fingerprint = head_run_binding(record.worker_head_run)
+        return {
+            "state": "observed", "admission": "accepted", "source": source,
+            "source_fingerprint": "e" * 32, "cursor": cursor,
+            "head_run_id": run_id, "head_run_fingerprint": fingerprint,
+        }
+
+    def _task_document(self) -> str:
+        return (Path(self._pilot_record()["workspace"]) / "TASK.md").read_text(encoding="utf-8")
+
+    def _decide(self, kind: str, reason: str = "the observer looked and decided", *, request_id: str = "") -> None:
+        """The observer's decision on a parked card, the only thing that releases it."""
+        self.writer.decide(
+            role="observer", actor="observer", reference="secretary-510-pilot",
+            kind=kind, body=reason, request_id=request_id or f"decision-{kind}",
+        )
+
+    def _assert_one_generation(self, expected: int) -> None:
+        """Dispatcher state and the worker's own TASK.md name one round, not two numbers that
+        happen to match: every report command in the document is read back and compared."""
+        self.assertEqual(self._pilot_record()["report_generation"], expected)
+        document = self._task_document()
+        request_ids = [
+            line.split("--request-id ", 1)[1].split()[0]
+            for line in document.splitlines()
+            if "--request-id" in line
+        ]
+        self.assertEqual(len(request_ids), 3, "one done and one blocked id per classification")
+        self.assertEqual(len(set(request_ids)), 3, "the two classifications share an id")
+        for request_id in request_ids:
+            self.assertTrue(request_id.endswith(f"-{expected}"), request_id)
+        self.assertIn(f"secretary-report-secretary-510-pilot-{expected}.md", document)
+
+    def _park_and_decide(
+        self, kind: str, *, request_id: str = "", reason: str = "the observer looked and decided",
+    ) -> dict:
+        """Tick the parked verdict through the seam and hand back the tick that acted on it."""
+        parked = self.tick()
+        self.assertEqual(parked["to"], "assessment")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "assessment")
+        self._decide(kind, reason, request_id=request_id)
+        return self.tick()
+
+    def _report_done(self, body: str = "done") -> None:
+        """Report through the command the worker actually holds in its TASK.md."""
+        self.writer.report(
+            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
+            body=body, request_id=self._worker_report_request_id(),
+        )
+
+    def _review_red(self, request_id: str = "review-red", body: str = "fix the hermetic test") -> None:
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot", kind="red",
+            body=body, request_id=request_id,
+        )
+
+    def _worker_report_request_id(self, kind: str = "done", classification: str = "") -> str:
+        """The report request-id the worker in the checkout is actually holding, read out of its
+        TASK.md rather than recomputed here: a test that recomputes it cannot catch the document
+        and the dispatcher's own state naming different report rounds.
+
+        The record may be gone (a dispatcher restart), which changes nothing about what the live
+        worker is holding: the document is in the checkout either way.
+        """
+        record = self.runtime.production_state.load()["records"].get("secretary-510-pilot") or {}
+        workspace = record.get("workspace") or (
+            self.data_dir / "workspaces" / "secretary-510-pilot-pilot"
+        )
+        document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
+        wanted = f"--kind {kind}"
+        if classification:
+            wanted = f"{wanted} --classification {classification}"
+        line = next(line for line in document.splitlines() if wanted in line)
+        return line.split("--request-id ", 1)[1].split()[0]
+
     def observed_sprint(self, *, profile: str = "claude-observer", status: str = "open") -> None:
         """Put the pilot card in a sprint that declares a concrete observer head.
 
@@ -633,12 +728,6 @@ class DispatcherRuntimeTests(unittest.TestCase):
             )
         else:
             self.board.metadata[int(row["id"])]["sprint_status"] = status
-
-    def unobserved_card(self) -> None:
-        """Take the observer away again: the card parks nowhere and its verdicts act at once."""
-        self.board.metadata[12].pop("sprint_ref", None)
-        self.sprints.rows.clear()
-        self.board.sprints.clear()
 
     def start_dispatcher(self) -> None:
         """Put the production state where a running dispatcher leaves it, with an observed card."""
@@ -668,6 +757,136 @@ class DispatcherRuntimeTests(unittest.TestCase):
             payload["last_tick_at"] = now_rfc3339()
             runtime.production_state.save(payload)
         return outcome
+
+    def _run_worker_to_validate(self) -> None:
+        """Claim, drive the worker to report:done, and advance the card into validate.
+
+        The report goes through the command the worker was actually handed, because that id is
+        what attributes the report to the round the dispatcher is waiting for (secretary-1063).
+        """
+        self.tick()
+        self.writer.report(
+            role="worker",
+            actor="worker",
+            reference="secretary-510-pilot",
+            kind="done",
+            body="done",
+            request_id=self._worker_report_request_id(),
+        )
+        advanced = self.tick()
+        self.assertEqual(advanced["to"], "validate")
+
+    def _pilot_record(self) -> dict:
+        return self.runtime.production_state.load()["records"]["secretary-510-pilot"]
+
+    def _head_at_its_prompt(self, kind: str = "worker", *, idle: bool = True) -> None:
+        """The live incident's head: its process is alive and it is not working on anything.
+
+        A pid-confirmed head is exempt from every timing ceiling, so this is the only state that
+        distinguishes a finished or wedged head from one that is thinking.
+        """
+        status = {
+            "known": True, "live": True, "reason": "live",
+            "last_activity": time.time(), "pid_confirmed": True, "idle": idle,
+        }
+        if kind == "review":
+            self.host.review_status_result = status
+        else:
+            self.host.worker_status_result = status
+
+    def _rewind_idle(self, kind: str = "worker") -> None:
+        """Age the current quiet past the whole verdict ladder, to confirmation.
+
+        S1-4: the idle fence is gone from the decision, so this ages the vitality
+        episode's quiet reference instead -- far enough past ``confirm_after`` that the
+        next reduction lands on ``ConfirmedStall``, the state the old double-tick
+        rewind used to reach. For the finer-grained suspicion step the S1-4 decision
+        tests age the episode directly.
+        """
+        self._age_vitality_quiet(kind, 3 * idle_stall_seconds() + 60)
+        # The aged window models a head that has remained quiet.  A fresh last_activity would
+        # instead be precisely the progress that restarts the continuous-idle clock.
+        status = (
+            self.host.review_status_result if kind == "review" else self.host.worker_status_result
+        )
+        if status is not None and status.get("last_activity") is not None:
+            status["last_activity"] = time.time() - (3 * idle_stall_seconds() + 60)
+
+    def _open_the_second_round(self) -> str:
+        """Round 1 reported under its generation, round 2 opened and owns the next one.
+
+        Hands back the report command of the round that is over, read out of the document the
+        first worker was actually given: that is what a retained conversation still holds.
+        """
+        self.host.fail_resume_worker_reason = ""
+        self.start_dispatcher()
+        self.tick()
+        stale_id = self._worker_report_request_id()
+        self._report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+        self.tick()
+        self._review_red()
+        self._park_and_decide("rework")
+        self._assert_one_generation(2)
+        self.assertNotEqual(stale_id, self._worker_report_request_id())
+        return stale_id
+
+    def _age_vitality_quiet(self, kind: str, seconds: float) -> None:
+        """Age the persisted episode's quiet reference so the next reduction sees a stall.
+
+        The verdict ladder measures quiet from the episode's reference (``started_at``
+        before any progress), not from any fence field, so an episode is aged by moving
+        that reference back -- the same operator clock-rewind the old helpers applied to
+        ``worker_idle_since``, applied to the state the decision now actually reads. A
+        run whose reduction is patched out has no episode to age; that is the shape the
+        no-episode tests drive, and aging is simply skipped.
+        """
+        payload = self.runtime.production_state.load()
+        record = payload["records"]["secretary-510-pilot"]
+        episode = record.get(f"{kind}_vitality_episode")
+        if episode is None:
+            return
+        for name in ("started_at", "updated_at"):
+            if episode.get(name):
+                episode[name] -= seconds
+        record[f"{kind}_vitality_episode"] = episode
+        self.runtime.production_state.save(payload)
+
+    def _bounce_the_idle_worker(self) -> dict:
+        """Drive an idle head to the watchdog's destructive step, whatever precedes it.
+
+        An addressable head spends the round's one report prompt at its first confirmed-idle
+        boundary (secretary-1172), so for those the step this returns is the episode after it. A
+        head nothing can type into — the fixture's ordinary exec profile — reaches it at the first.
+        """
+        bounced = self._confirmed_idle()
+        if bounced["action"] == "worker-report-prompted":
+            self._head_at_its_prompt()
+            self._age_vitality_quiet("worker", idle_stall_seconds() + 660)
+            bounced = self.tick()
+        return bounced
+
+
+class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
+    def test_default_data_dir_anchors_relative_instance_data_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = Path(tmpdir) / "instance.yaml"
+            instance.write_text(
+                "version: 1\n"
+                "name: test\n"
+                "data_dir: secretary-data\n"
+                "offsite:\n"
+                "  instance_remote: git@example.invalid:test/instance.git\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(default_data_dir(instance), instance.parent / "secretary-data")
+
+    def unobserved_card(self) -> None:
+        """Take the observer away again: the card parks nowhere and its verdicts act at once."""
+        self.board.metadata[12].pop("sprint_ref", None)
+        self.sprints.rows.clear()
+        self.board.sprints.clear()
 
     def test_unauthenticated_worker_resource_is_not_claimed(self) -> None:
         self.start_dispatcher()
@@ -2369,41 +2588,6 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertNotIn("stop_head:worker", self.host.calls)
         self.assertTrue(self.host.torn_down, "worktree must be torn down on done")
 
-    def _run_worker_to_validate(self) -> None:
-        """Claim, drive the worker to report:done, and advance the card into validate.
-
-        The report goes through the command the worker was actually handed, because that id is
-        what attributes the report to the round the dispatcher is waiting for (secretary-1063).
-        """
-        self.tick()
-        self.writer.report(
-            role="worker",
-            actor="worker",
-            reference="secretary-510-pilot",
-            kind="done",
-            body="done",
-            request_id=self._worker_report_request_id(),
-        )
-        advanced = self.tick()
-        self.assertEqual(advanced["to"], "validate")
-
-    def _decide(self, kind: str, reason: str = "the observer looked and decided", *, request_id: str = "") -> None:
-        """The observer's decision on a parked card, the only thing that releases it."""
-        self.writer.decide(
-            role="observer", actor="observer", reference="secretary-510-pilot",
-            kind=kind, body=reason, request_id=request_id or f"decision-{kind}",
-        )
-
-    def _park_and_decide(
-        self, kind: str, *, request_id: str = "", reason: str = "the observer looked and decided",
-    ) -> dict:
-        """Tick the parked verdict through the seam and hand back the tick that acted on it."""
-        parked = self.tick()
-        self.assertEqual(parked["to"], "assessment")
-        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "assessment")
-        self._decide(kind, reason, request_id=request_id)
-        return self.tick()
-
     def _drop_records_and_restart_attempt(self) -> None:
         """A dispatcher that came back without its records: the card is mid-flight on the board and
         the next tick has to adopt it under a fresh attempt id."""
@@ -2418,12 +2602,45 @@ class DispatcherRuntimeTests(unittest.TestCase):
         payload["records"]["secretary-510-pilot"]["launch_intent"]["at"] -= seconds
         self.runtime.production_state.save(payload)
 
+    def _dead_pid(self) -> int:
+        """A pid the kernel has already reaped, for heartbeats that name a gone process."""
+        proc = subprocess.Popen(["true"])
+        proc.wait()
+        return proc.pid
+
     def _rewind_wait(self, kind: str, seconds: float = 100_000.0) -> None:
-        """Age the current wait so the next tick sees it past the watchdog thresholds."""
+        """Age the current wait so the next tick sees it past the watchdog thresholds.
+
+        S1-4: the wait clock alone no longer decides anything, so this ages the vitality
+        episode's quiet reference by the same span -- the ceiling tests model a head
+        that has genuinely been silent for `seconds`, and the verdict ladder must see
+        exactly that silence. An episode still naming a replaced run is rebound to the
+        current run first (with its reference reset): it belongs to a dead head, and a
+        silence attributed to it must not be spent on the replacement -- but the wait
+        being aged here IS the current head's wait, so its episode starts from now and
+        ages with the same rewind.
+        """
         payload = self.runtime.production_state.load()
         record = payload["records"]["secretary-510-pilot"]
         self.assertTrue(record[f"{kind}_waiting_since"], f"{kind} wait was never stamped")
         record[f"{kind}_waiting_since"] -= seconds
+        episode = record.get(f"{kind}_vitality_episode")
+        if episode is not None:
+            current_run_id = (
+                (record.get(f"{kind}_head_run") or {}).get("run_id") or ""
+            )
+            if current_run_id and episode.get("run_id") != current_run_id:
+                # A fresh episode for the current run, starting its quiet at this rewind.
+                episode = dict(episode)
+                episode["run_id"] = current_run_id
+                episode["started_at"] = time.time()
+                episode["updated_at"] = time.time()
+            # Age only evidence-time fields: the verdict stays what was earned, but
+            # its quiet reference moves with the same operator rewind.
+            for name in ("started_at", "updated_at"):
+                if episode.get(name):
+                    episode[name] -= seconds
+            record[f"{kind}_vitality_episode"] = episode
         self.runtime.production_state.save(payload)
 
     def test_silent_reviewer_is_respawned_once_then_escalated(self) -> None:
@@ -2490,23 +2707,35 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertIn("stop_head:worker", self.host.calls)
 
     def test_live_reviewer_keeps_waiting_inside_the_stall_ceiling(self) -> None:
+        """S1-4: the ladder confirms at confirm_after (15 min), not at the 90-min ceiling.
+
+        A reviewer silent for a minute inside that window is HealthyQuiet: it waits.
+        (The old test aged the wait by nearly the whole 90-minute ceiling; under the
+        verdict ladder that much silence is a confirmed stall, so "inside the ceiling"
+        now means inside ``confirm_after``.)
+        """
         self.start_dispatcher()
         self._run_worker_to_validate()
         self.tick()
         self.tick()
 
-        self._rewind_wait("review", seconds=stall_seconds("review") - 60)
+        self._rewind_wait("review", seconds=60)
         waiting = self.tick()
 
         self.assertEqual(waiting["action"], "waiting-review-verdict")
         self.assertEqual(self.host.reviews, ["secretary-510-pilot"])
 
     def test_fresh_output_keeps_a_live_worker_past_the_old_total_wait_ceiling(self) -> None:
-        """A progress signal renews the silence window instead of respawning real work."""
+        """A progress signal renews the silence window instead of respawning real work.
+
+        S1-4: progress is a moving provider cursor, not terminal bytes -- an advancing
+        transcript keeps the episode HealthyActive no matter how old the wait clock is.
+        """
         self.start_dispatcher()
         self.tick()
         self.tick()
         self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
+        self.host.provider_cursor = f"advanced:{time.time()}"
         self.host.worker_status_result = {
             "known": True, "live": True, "reason": "live", "last_activity": time.time() - 1,
         }
@@ -2517,11 +2746,13 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertNotIn("restart_worker", self.host.calls)
 
     def test_fresh_output_keeps_a_live_reviewer_past_the_old_total_wait_ceiling(self) -> None:
+        """S1-4: an advancing transcript keeps a reviewer HealthyActive past any clock."""
         self.start_dispatcher()
         self._run_worker_to_validate()
         self.tick()
         self.tick()
         self._rewind_wait("review", seconds=stall_seconds("review") + 60)
+        self.host.provider_cursor = f"advanced:{time.time()}"
         self.host.review_status_result = {
             "known": True, "live": True, "reason": "live", "last_activity": time.time() - 1,
         }
@@ -2539,7 +2770,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.tick()
 
         self.host.calls.clear()
-        self._rewind_wait("review", seconds=stall_seconds("review") - 60)
+        self._rewind_wait("review", seconds=60)
         waiting = self.tick()
 
         self.assertEqual(waiting["action"], "waiting-review-verdict")
@@ -2547,14 +2778,30 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertIn("review_status", self.host.calls)
 
     def test_missing_worker_terminal_respawns_without_waiting_for_ceiling(self) -> None:
+        """S1-4: the reclaim needs the heartbeat to agree the head is gone.
+
+        A terminal that vanished while the process behind it still runs is NOT a death
+        (the vitality decision waits on it); this test models the genuinely-gone shape:
+        no pane AND a dead heartbeat, which reduces to ``Dead`` and reclaims immediately.
+        """
         self.start_dispatcher()
         self.tick()
+        # The head's process genuinely died after the first tick: rewrite its heartbeat
+        # with a reaped pid, which is what makes this a reclaimable death.
+        self.host.head_pid = self._dead_pid()
+        record = self.runtime.production_state.records(
+            self.runtime.production_state.load()
+        )["secretary-510-pilot"]
+        self.host._write_head_pid(
+            "worker", "secretary-510-pilot",
+            head_run=record.worker_head_run, leaf=record.worker_leaf,
+        )
         self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
 
         result = self.tick()
 
         self.assertEqual(result["action"], "worker-respawned")
-        self.assertIn("terminal missing-terminal", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+        self.assertIn("gone", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
 
     def test_worker_process_exited_with_shell_left_behind_respawns_without_waiting_for_ceiling(self) -> None:
         """secretary-751 (the secretary-736/secretary-731 incident): the head crashed, Orca kept
@@ -2572,13 +2819,23 @@ class DispatcherRuntimeTests(unittest.TestCase):
         commit = git(workspace, "rev-parse", "HEAD")
         (workspace / "wip.py").write_text("uncommitted = True\n", encoding="utf-8")
         git(workspace, "add", "wip.py")
+        # The head's process died; its pane shell outlived it. Rewrite the heartbeat so
+        # the scripted process-exited answer carries consistent evidence.
+        self.host.head_pid = self._dead_pid()
+        record = self.runtime.production_state.records(
+            self.runtime.production_state.load()
+        )["secretary-510-pilot"]
+        self.host._write_head_pid(
+            "worker", "secretary-510-pilot",
+            head_run=record.worker_head_run, leaf=record.worker_leaf,
+        )
         self.host.worker_status_result = {"known": True, "live": False, "reason": "process-exited"}
 
         respawned = self.tick()
 
         self.assertEqual(respawned["action"], "worker-respawned")
         self.assertIn(
-            "terminal process-exited",
+            "gone",
             self.reader.show("secretary-510-pilot")["comments"][-1]["body"],
         )
         self.assertEqual(git(workspace, "rev-parse", "HEAD"), commit)
@@ -2596,9 +2853,18 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(git(workspace, "diff", "--cached", "--name-only"), "wip.py")
 
     def test_missing_reviewer_terminal_respawns_without_waiting_for_ceiling(self) -> None:
+        """S1-4: the reviewer reclaim needs the heartbeat to agree the head is gone."""
         self.start_dispatcher()
         self._run_worker_to_validate()
         self.tick()
+        self.host.head_pid = self._dead_pid()
+        record = self.runtime.production_state.records(
+            self.runtime.production_state.load()
+        )["secretary-510-pilot"]
+        self.host._write_head_pid(
+            "review", "secretary-510-pilot",
+            head_run=record.review_head_run, leaf=record.review_leaf,
+        )
         self.host.review_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
 
         result = self.tick()
@@ -2606,11 +2872,11 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(result["action"], "review-respawned")
 
     def test_live_worker_without_new_output_is_respawned(self) -> None:
+        """A worker silent for hours past every threshold is confirmed stalled and replaced."""
         self.start_dispatcher()
         self.tick()
-        payload = self.runtime.production_state.load()
-        payload["records"]["secretary-510-pilot"]["worker_progress_at"] = time.time() - stall_seconds("worker") - 1
-        self.runtime.production_state.save(payload)
+        self.tick()
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
         self.host.worker_status_result = {"known": True, "live": True, "reason": "live", "last_activity": time.time() - stall_seconds("worker") - 1}
 
         result = self.tick()
@@ -2618,17 +2884,18 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(result["action"], "worker-respawned")
 
     def test_worker_without_first_output_is_respawned_within_the_short_window(self) -> None:
-        """A live login prompt has activity at launch, but never progresses past it."""
+        """A live login prompt that never progresses is confirmed stalled by the ladder.
+
+        S1-4: the initial-output shortcut is folded into the verdict ladder -- a head
+        whose transcript has never moved is confirmed at ``confirm_after`` and replaced.
+        """
         self.start_dispatcher()
         self.tick()
-        payload = self.runtime.production_state.load()
-        record = payload["records"]["secretary-510-pilot"]
-        started = time.time() - INITIAL_OUTPUT_STALL_DEFAULT - 1
-        record["worker_started_at"] = started
-        record["worker_progress_at"] = started
-        self.runtime.production_state.save(payload)
+        self.tick()
+        self._rewind_wait("worker", seconds=3 * idle_stall_seconds() + 60)
         self.host.worker_status_result = {
-            "known": True, "live": True, "reason": "live", "last_activity": started,
+            "known": True, "live": True, "reason": "live",
+            "last_activity": time.time() - INITIAL_OUTPUT_STALL_DEFAULT - 60,
         }
 
         result = self.tick()
@@ -2636,17 +2903,15 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(result["action"], "worker-respawned")
 
     def test_reviewer_without_first_output_is_respawned_within_the_short_window(self) -> None:
+        """S1-4: a reviewer with no transcript movement confirms at ``confirm_after``."""
         self.start_dispatcher()
         self._run_worker_to_validate()
         self.assertEqual(self.tick()["action"], "review-started")
-        payload = self.runtime.production_state.load()
-        record = payload["records"]["secretary-510-pilot"]
-        started = time.time() - INITIAL_OUTPUT_STALL_DEFAULT - 1
-        record["review_started_at"] = started
-        record["review_progress_at"] = started
-        self.runtime.production_state.save(payload)
+        self.tick()
+        self._rewind_wait("review", seconds=3 * idle_stall_seconds() + 60)
         self.host.review_status_result = {
-            "known": True, "live": True, "reason": "live", "last_activity": started,
+            "known": True, "live": True, "reason": "live",
+            "last_activity": time.time() - INITIAL_OUTPUT_STALL_DEFAULT - 60,
         }
 
         result = self.tick()
@@ -2682,7 +2947,10 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self._run_worker_to_validate()
         self.assertEqual(self.tick()["action"], "review-started")
         self.assertEqual(self.tick()["action"], "waiting-review-verdict")
+        # S1-4: the reviewer is mid-turn (pane busy) and its transcript advances -- real
+        # work, which keeps the episode HealthyActive no matter how old the wait clock is.
         self._rewind_wait("review", seconds=stall_seconds("review") + 60)
+        self.host.provider_cursor = f"working:{time.time()}"
         self.host.review_status_result = {
             "known": True, "live": True, "reason": "live", "last_activity": None,
             "pid_confirmed": True, "idle": False,
@@ -2724,7 +2992,16 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(result["action"], "worker-runtime-unavailable")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
 
-    def test_runtime_inventory_failure_still_uses_the_wait_ceiling(self) -> None:
+    def test_runtime_inventory_failure_still_bounds_the_wait(self) -> None:
+        """S1-4: an Orca outage over a recently-healthy head never reclaims, but escalates.
+
+        The old test expected a ceiling respawn even though the last real observation
+        said HealthyQuiet -- exactly the kill-on-a-clock the plan forbids. The guard
+        makes destruction unreachable for an unobservable head, so once the outer
+        ceiling elapses with no readable evidence the tick escalates to the OPERATOR
+        instead: a durable comment plus a degraded outcome, head untouched. The wait is
+        bounded by escalation, not by replacement.
+        """
         self.start_dispatcher()
         self.tick()
         self.tick()
@@ -2733,8 +3010,16 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         result = self.tick()
 
-        self.assertEqual(result["action"], "worker-respawned")
-        self.assertIn("restart_worker", self.host.calls)
+        # No destructive step: the head stays up and the record keeps its leaf.
+        self.assertNotIn("restart_worker", self.host.calls)
+        self.assertNotIn("stop_head:worker", self.host.calls)
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
+        # The bound is operator escalation, visibly degraded telemetry.
+        self.assertEqual(result["action"], "worker-unobserved-wait-escalated")
+        self.assertEqual(result["status"], "degraded")
+        last = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
+        self.assertIn("NOT stopped or replaced", last)
+        self.assertIn(f"outer ceiling {stall_seconds('worker')}s", last)
 
     def test_dead_worker_is_respawned_once_then_escalated(self) -> None:
         self.start_dispatcher()
@@ -3206,21 +3491,6 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
         self.assertLess(self.host.calls.index("stop_head:worker"), self.host.calls.index("restart_worker"))
         self.assertIn("continuation: replacement", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
-
-    def _review_red(self, request_id: str = "review-red", body: str = "fix the hermetic test") -> None:
-        self.writer.verdict(
-            role="reviewer", actor="reviewer", reference="secretary-510-pilot", kind="red",
-            body=body, request_id=request_id,
-        )
-
-    @staticmethod
-    def _bound_provider_progress(record, cursor: str, *, source: str = "fake-bound-session") -> dict[str, str]:
-        run_id, fingerprint = head_run_binding(record.worker_head_run)
-        return {
-            "state": "observed", "admission": "accepted", "source": source,
-            "source_fingerprint": "e" * 32, "cursor": cursor,
-            "head_run_id": run_id, "head_run_fingerprint": fingerprint,
-        }
 
     def _install_legacy_unbound_v1_worker_source(
         self, source_patch: dict[str, Any] | None = None,
@@ -5972,33 +6242,23 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "in_progress")
         self.assertEqual(self._record_of().worker_launch_attempts, 1)
         # And the next tick brings the rework up again. The record names no head, which is what the
-        # dispatcher reads as a worker pane that is not there and replaces.
+        # dispatcher reads as a worker pane that is not there and replaces. S1-4: the replaced
+        # head's heartbeat must agree it is gone for the reclaim to run.
         self.host.fail_restart_error = None
+        self.host.head_pid = self._dead_pid()
+        current = self.runtime.production_state.records(
+            self.runtime.production_state.load()
+        )["secretary-510-pilot"]
+        self.host._write_head_pid(
+            "worker", "secretary-510-pilot",
+            head_run=current.worker_head_run, leaf=current.worker_leaf,
+        )
         self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
         self.tick()
         record = self._record_of()
         self.assertEqual(record.state, "claimed")
         self.assertEqual(record.worker_launch_attempts, 0)
         self.assertEqual(self.host.calls.count("restart_worker"), 2)
-
-    def _worker_report_request_id(self, kind: str = "done", classification: str = "") -> str:
-        """The report request-id the worker in the checkout is actually holding, read out of its
-        TASK.md rather than recomputed here: a test that recomputes it cannot catch the document
-        and the dispatcher's own state naming different report rounds.
-
-        The record may be gone (a dispatcher restart), which changes nothing about what the live
-        worker is holding: the document is in the checkout either way.
-        """
-        record = self.runtime.production_state.load()["records"].get("secretary-510-pilot") or {}
-        workspace = record.get("workspace") or (
-            self.data_dir / "workspaces" / "secretary-510-pilot-pilot"
-        )
-        document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
-        wanted = f"--kind {kind}"
-        if classification:
-            wanted = f"{wanted} --classification {classification}"
-        line = next(line for line in document.splitlines() if wanted in line)
-        return line.split("--request-id ", 1)[1].split()[0]
 
     def _reviewer_red_request_id(self) -> str:
         """The red request-id the dispatcher actually hands the reviewer, taken from the prompt
@@ -6340,35 +6600,6 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
     # the report generation (secretary-1061) ----------------------------------
 
-    def _pilot_record(self) -> dict:
-        return self.runtime.production_state.load()["records"]["secretary-510-pilot"]
-
-    def _task_document(self) -> str:
-        return (Path(self._pilot_record()["workspace"]) / "TASK.md").read_text(encoding="utf-8")
-
-    def _assert_one_generation(self, expected: int) -> None:
-        """Dispatcher state and the worker's own TASK.md name one round, not two numbers that
-        happen to match: every report command in the document is read back and compared."""
-        self.assertEqual(self._pilot_record()["report_generation"], expected)
-        document = self._task_document()
-        request_ids = [
-            line.split("--request-id ", 1)[1].split()[0]
-            for line in document.splitlines()
-            if "--request-id" in line
-        ]
-        self.assertEqual(len(request_ids), 3, "one done and one blocked id per classification")
-        self.assertEqual(len(set(request_ids)), 3, "the two classifications share an id")
-        for request_id in request_ids:
-            self.assertTrue(request_id.endswith(f"-{expected}"), request_id)
-        self.assertIn(f"secretary-report-secretary-510-pilot-{expected}.md", document)
-
-    def _report_done(self, body: str = "done") -> None:
-        """Report through the command the worker actually holds in its TASK.md."""
-        self.writer.report(
-            role="worker", actor="worker", reference="secretary-510-pilot", kind="done",
-            body=body, request_id=self._worker_report_request_id(),
-        )
-
     def test_a_fresh_worker_is_handed_the_attempts_first_generation(self) -> None:
         self.start_dispatcher()
 
@@ -6418,6 +6649,16 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.tick()["action"], "gate-red-rework")
         self._assert_one_generation(2)
         record = self._pilot_record()
+        # The rework head's process genuinely died (dead heartbeat behind a missing
+        # terminal), which is the reclaimable shape.
+        self.host.head_pid = self._dead_pid()
+        current = self.runtime.production_state.records(
+            self.runtime.production_state.load()
+        )["secretary-510-pilot"]
+        self.host._write_head_pid(
+            "worker", "secretary-510-pilot",
+            head_run=current.worker_head_run, leaf=current.worker_leaf,
+        )
         self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
 
         respawned = self.tick()
@@ -6624,7 +6865,6 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self._bounce_the_idle_worker()["action"], "worker-respawned")
         self.tick()
         self._rewind_idle()
-        self.tick()
         self.assertEqual(self.tick()["to"], "blocked")
 
     def test_an_adopted_card_recovers_the_generation_its_worker_is_holding(self) -> None:
@@ -6804,6 +7044,13 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         # Any rebuild of the document inside the round reads the frozen decision, not the board.
         self.tick()
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
+        prompted = self.tick()
+        # The addressable head gets the round's one prompt first, then the confirmed
+        # stall reclaims it -- and the rebuild still reads the frozen decision.
+        self.assertEqual(prompted["action"], "worker-report-prompted")
+        self.assertEqual(self._document_decision(), "add a live check")
+        self.assertNotIn("revert the whole thing", self._task_document())
         self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
         respawned = self.tick()
 
@@ -7136,7 +7383,6 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.tick()
         self._rewind_idle()
 
-        self.tick()
         self.assertEqual(self.tick()["to"], "blocked")
 
     def test_a_staged_report_event_with_no_comment_ends_nothing(self) -> None:
@@ -7240,90 +7486,6 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
     # the bounded wait for a worker report (secretary-1063) --------------------
 
-    def _head_at_its_prompt(self, kind: str = "worker", *, idle: bool = True) -> None:
-        """The live incident's head: its process is alive and it is not working on anything.
-
-        A pid-confirmed head is exempt from every timing ceiling, so this is the only state that
-        distinguishes a finished or wedged head from one that is thinking.
-        """
-        status = {
-            "known": True, "live": True, "reason": "live",
-            "last_activity": time.time(), "pid_confirmed": True, "idle": idle,
-        }
-        if kind == "review":
-            self.host.review_status_result = status
-        else:
-            self.host.worker_status_result = status
-
-    def _rewind_idle(self, kind: str = "worker") -> None:
-        """Age the current idleness past the window that separates it from a head between turns."""
-        payload = self.runtime.production_state.load()
-        record = payload["records"]["secretary-510-pilot"]
-        self.assertTrue(record[f"{kind}_idle_since"], f"{kind} idleness was never stamped")
-        record[f"{kind}_idle_since"] -= idle_stall_seconds() + 60
-        self.runtime.production_state.save(payload)
-        # The aged window models a head that has remained quiet.  A fresh last_activity would
-        # instead be precisely the progress that restarts the continuous-idle clock.
-        status = (
-            self.host.review_status_result if kind == "review" else self.host.worker_status_result
-        )
-        assert status is not None
-        status["last_activity"] = record[f"{kind}_idle_since"]
-
-    def _open_the_second_round(self) -> str:
-        """Round 1 reported under its generation, round 2 opened and owns the next one.
-
-        Hands back the report command of the round that is over, read out of the document the
-        first worker was actually given: that is what a retained conversation still holds.
-        """
-        self.host.fail_resume_worker_reason = ""
-        self.start_dispatcher()
-        self.tick()
-        stale_id = self._worker_report_request_id()
-        self._report_done()
-        self.assertEqual(self.tick()["to"], "validate")
-        self.tick()
-        self._review_red()
-        self._park_and_decide("rework")
-        self._assert_one_generation(2)
-        self.assertNotEqual(stale_id, self._worker_report_request_id())
-        return stale_id
-
-    def _confirmed_idle(self, *, at_prompt: bool = True) -> dict:
-        """Drive one idle episode to the tick that acts on it, and hand that tick back.
-
-        Every caller gets the health check with it: this tick is the pipeline failing to move a
-        card, so it is degraded wherever it happens, not only on the path one test drives.
-
-        `at_prompt=False` leaves the caller's own worker status alone, for a test that models a
-        readiness this fixture's plain idle head does not have.
-        """
-        if at_prompt:
-            self._head_at_its_prompt()
-        self.assertEqual(
-            self.tick()["action"], "waiting-worker-report",
-            "one reading of an idle pane is a head between turns, not a stalled one",
-        )
-        self._rewind_idle()
-        bounced = self.tick()
-        self.assertEqual(bounced["action"], "worker-idle-unconfirmed")
-        self.assertEqual(bounced["status"], "degraded")
-        bounced = self.tick()
-        self.assertEqual(bounced["status"], "degraded")
-        return bounced
-
-    def _bounce_the_idle_worker(self) -> dict:
-        """Drive an idle head to the watchdog's destructive step, whatever precedes it.
-
-        An addressable head spends the round's one report prompt at its first confirmed-idle
-        boundary (secretary-1172), so for those the step this returns is the episode after it. A
-        head nothing can type into — the fixture's ordinary exec profile — reaches it at the first.
-        """
-        bounced = self._confirmed_idle()
-        if bounced["action"] == "worker-report-prompted":
-            bounced = self._confirmed_idle()
-        return bounced
-
     def test_a_head_held_in_a_dialog_is_bounded_like_an_idle_one(self) -> None:
         """A pane waiting on a dialog is not working either, and nothing in the pipeline answers a
         dialog, so it is the same stopped head under a different word."""
@@ -7340,18 +7502,28 @@ class DispatcherRuntimeTests(unittest.TestCase):
         bounced = self._confirmed_idle(at_prompt=False)
 
         self.assertEqual(bounced["action"], "worker-respawned")
-        self.assertIn("held in a dialog", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
+        # S1-4: the dialog wording rode on the old idle fence; the verdict ladder names
+        # the same bounded end by its evidence.
+        self.assertIn("confirms a stall", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
 
     def test_a_live_head_nothing_can_read_falls_back_to_the_ceiling(self) -> None:
         """secretary-820's adopted head has no pane identity, so nothing can say whether it is
-        working. A live pid is not on its own a reason to wait forever: the ordinary ceiling is the
-        fallback, exactly as for a runtime that exposes no signal at all."""
+        working. A live pid is not on its own a reason to wait forever: the pid-only arm
+        ages the episode, and the outer ceiling must also have elapsed before the
+        confirmed stall acts (the guard's belt-and-braces rule)."""
         self._open_the_second_round()
         self.host.worker_status_result = {
             "known": True, "live": True, "reason": "pid", "pid_confirmed": True,
         }
         self.assertEqual(self.tick()["action"], "waiting-worker-report")
 
+        # The prompt comes first: the head is addressable and the round is open.
+        self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
+        prompted = self.tick()
+        self.assertEqual(prompted["action"], "worker-report-prompted")
+
+        # A second silent stretch past every threshold: now the ceiling has elapsed too
+        # and the confirmed stall reclaims the head.
         self._rewind_wait("worker", seconds=stall_seconds("worker") + 60)
         respawned = self.tick()
 
@@ -7383,26 +7555,29 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self._open_the_second_round()
         self._head_at_its_prompt()
         self.tick()
-        self.assertTrue(self._pilot_record()["worker_idle_since"])
 
+        # S1-4: idleness is episode quiet, not a fence stamp. The busy pane is Turn=Active;
+        # with no provider movement yet the verdict stays HealthyQuiet, and the assertion
+        # is that nothing destructive happened across the transition.
         self._head_at_its_prompt(idle=False)
         self.tick()
 
-        self.assertEqual(self._pilot_record()["worker_idle_since"], 0.0)
+        record = self._pilot_record()
+        self.assertEqual(
+            (record["worker_vitality_episode"] or {}).get("verdict"), "healthy_quiet"
+        )
         self.assertNotIn("restart_worker", self.host.calls)
 
     def test_a_steady_idle_wait_does_not_rewrite_the_state_file(self) -> None:
-        """The fence persists transitions, not heartbeats. A head can sit inside one idle episode
-        for as long as it works, and re-reading the same window every tick has nothing to save.
-
-        The shadow vitality episode is exempt by design: its whole job in this card is to record
-        what the reducer sees while the fence deliberately saves nothing, so this test pins that
-        the *fence* fields stay write-free and the verdict stays unchanged across the tick."""
+        """The wait persists decisions, not heartbeats. A head can sit inside one quiet
+        episode for as long as it works, and a steady tick writes the state once (the
+        reduction's own write, which also renews ``worker_waiting_since``) with an
+        unchanged verdict."""
         self._open_the_second_round()
         self._head_at_its_prompt()
         first = self.tick()
         episode_after_first = self._pilot_record()["worker_vitality_episode"]
-        idle_since = self._pilot_record()["worker_idle_since"]
+        waiting_since = self._pilot_record()["worker_waiting_since"]
 
         with mock.patch.object(
             self.runtime, "save_records", wraps=self.runtime.save_records
@@ -7410,14 +7585,16 @@ class DispatcherRuntimeTests(unittest.TestCase):
             result = self.tick()
 
         self.assertEqual(result["action"], first["action"])
-        save.assert_called_once()  # The shadow episode's own write, and nothing else.
+        # Two writes per steady tick: the reduction's own, and the HealthyQuiet branch
+        # renewing ``worker_waiting_since`` (fresh evidence of life restarts the outer
+        # window). The old fence wrote nothing; the verdict ladder owns the state now.
+        self.assertEqual(save.call_count, 2)
         after = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
-        # No fence field moved: the idle window the test exists to protect was not touched.
-        self.assertEqual(after["worker_idle_since"], idle_since)
-        self.assertEqual(after["worker_idle_confirmations"], 0)
-        # And the shadow reduction observed the same steady state, not a new one.
+        # And the reduction observed the same steady state, not a new one.
         episode_after_second = after["worker_vitality_episode"]
         self.assertEqual(episode_after_second["verdict"], episode_after_first["verdict"])
+        # The outer window was renewed (a later stamp), not abandoned.
+        self.assertGreaterEqual(after["worker_waiting_since"], waiting_since)
 
     def test_idle_tui_repaints_do_not_restart_the_delivery_window(self) -> None:
         """Pane bytes are not a delivery; readiness still ends a stalled round."""
@@ -7432,7 +7609,7 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         # The repaint did not cancel the episode: it ended in the round's report prompt, and the
         # episode after that one is the respawn.
-        self.assertEqual(result["action"], "worker-report-prompted")
+        self.assertEqual(result["action"], "waiting-worker-report")
         self.assertEqual(self._confirmed_idle()["action"], "worker-respawned")
         self.assertIn("restart_worker", self.host.calls)
 
@@ -7445,25 +7622,28 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.tick()
         result = self.tick()
 
-        self.assertEqual(result["action"], "worker-report-prompted")
+        self.assertEqual(result["action"], "waiting-worker-report")
         self.assertEqual(self._confirmed_idle()["action"], "worker-respawned")
         self.assertIn("restart_worker", self.host.calls)
 
     def test_last_moment_repaint_does_not_cancel_an_idle_respawn(self) -> None:
-        """The stop fence only accepts renewed work, not a terminal repaint."""
+        """The ladder only accepts renewed work, not a terminal repaint: bytes on the pane
+        do not move the provider cursor, so the quiet keeps aging to confirmation."""
         self._open_the_second_round()
         self._head_at_its_prompt()
         self.tick()
         self._rewind_idle()
+        self.assertEqual(self.tick()["action"], "worker-report-prompted")
         fresh_status = dict(self.host.worker_status_result, last_activity=time.time())
 
         with mock.patch.object(self.host, "worker_status", side_effect=[
             dict(self.host.worker_status_result), fresh_status,
         ]):
-            self.tick()
             result = self.tick()
 
-        self.assertEqual(result["action"], "worker-report-prompted")
+        # The repaint renewed nothing: the prompt was spent, so the next confirmed
+        # episode is the respawn.
+        self.assertEqual(result["action"], "waiting-worker-report")
         self.assertEqual(self._confirmed_idle()["action"], "worker-respawned")
         self.assertIn("restart_worker", self.host.calls)
 
@@ -7485,24 +7665,38 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertNotIn("restart_worker", self.host.calls)
 
     def test_last_moment_pid_flap_preserves_the_idle_window(self) -> None:
+        """A tick whose heartbeat cannot confirm the pid neither advances nor resets the
+        quiet the episode already holds: the ladder is driven by evidence, not by one
+        probe's shape."""
         self._open_the_second_round()
         self._head_at_its_prompt()
         self.tick()
         self._rewind_idle()
-        aged = self._pilot_record()["worker_idle_since"]
+        self.assertEqual(self.tick()["action"], "worker-report-prompted")
+        aged_episode = dict(self._pilot_record()["worker_vitality_episode"])
 
         with mock.patch.object(self.host, "worker_status", side_effect=[
             dict(self.host.worker_status_result),
             dict(self.host.worker_status_result, pid_confirmed=False),
         ]):
-            self.assertEqual(self.tick()["action"], "worker-idle-unconfirmed")
+            self.assertEqual(self.tick()["action"], "waiting-worker-report")
             self.assertEqual(self.tick()["action"], "waiting-worker-report")
 
-        self.assertEqual(self._pilot_record()["worker_idle_since"], aged)
-        self.assertEqual(self.tick()["action"], "worker-report-prompted")
-        self.assertEqual(self._confirmed_idle()["action"], "worker-respawned")
+        after = self._pilot_record()["worker_vitality_episode"]
+        # The episode survived the flap with its reference intact.
+        self.assertEqual(after["started_at"], aged_episode["started_at"])
+        self.assertEqual(after["run_id"], aged_episode["run_id"])
+        self._rewind_idle()
+        self.assertEqual(self.tick()["action"], "worker-respawned")
 
     def test_last_moment_missing_terminal_uses_the_terminal_watchdog(self) -> None:
+        """S1-4: a terminal that vanished while the heartbeat stays live is not a death.
+
+        The old test expected an immediate respawn off the inventory alone; the vitality
+        decision waits on that shape (the process is provably alive) and the ladder
+        recovers it through evidence. A genuinely gone head still reclaims fast -- the
+        dead-heartbeat variants cover that.
+        """
         self._open_the_second_round()
         self._head_at_its_prompt()
         self.tick()
@@ -7515,25 +7709,22 @@ class DispatcherRuntimeTests(unittest.TestCase):
             self.tick()
             result = self.tick()
 
-        self.assertEqual(result["action"], "worker-respawned")
-        # A head that disappeared is a different outcome from one that stopped working, and no
-        # prompt is spent on a pane there is nothing left to type into.
-        self.assertEqual(self.host.report_prompts, [])
-        self.assertEqual(self._pilot_record().get("worker_report_nudge"), {})
+        self.assertEqual(result["action"], "waiting-worker-report")
+        self.assertNotIn("restart_worker", self.host.calls)
 
     # shadow-mode vitality episodes (head-vitality plan) ------------------------
 
     def _vitality_audit_comments(self) -> list[str]:
-        """The durable dispatcher comments the shadow reduction has written so far."""
+        """The durable dispatcher comments the vitality reduction has written so far."""
         return [
             comment.get("body") or ""
             for comment in self.reader.show("secretary-510-pilot").get("comments", [])
-            if "Vitality shadow" in (comment.get("body") or "")
+            if "Vitality" in (comment.get("body") or "")
         ]
 
     def test_the_wait_tick_persists_a_shadow_episode_without_changing_its_decision(self) -> None:
-        """Shadow mode, end to end: the tick reduces what it observed into an episode on the
-        record, and the decision it returns is the decision the pre-vitality machinery makes."""
+        """End to end: the tick reduces what it observed into an episode on the record,
+        and a below-threshold verdict leaves the head waiting."""
         self._open_the_second_round()
         self._head_at_its_prompt()
 
@@ -7542,16 +7733,16 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(result["action"], "waiting-worker-report")
         stored = self._pilot_record()["worker_vitality_episode"]
         self.assertIsNotNone(stored)
-        # The fake status names no provider progress and no raw pid classification, so the only
-        # source this path truly observed is the advisory pane reading.
-        self.assertEqual(stored["verdict"], "unverifiable")
+        # The fake's derived evidence: live pid, unchanged provider cursor, idle pane.
+        self.assertEqual(stored["verdict"], "healthy_quiet")
         self.assertTrue(
             any(token.startswith("advisory:") for token in stored["basis"]), stored["basis"]
         )
-        # And the verdict change is logged exactly once, as a comment that says it decides nothing.
+        # And the verdict change is logged exactly once, as a comment that says this
+        # verdict decides nothing (it is not one of the destructive ones).
         comments = self._vitality_audit_comments()
         self.assertEqual(len(comments), 1, comments)
-        self.assertIn("does not influence", comments[0])
+        self.assertIn("does not authorise destruction", comments[0])
 
     def test_a_verdict_change_is_logged_and_a_steady_verdict_is_not(self) -> None:
         self._open_the_second_round()
@@ -7580,17 +7771,20 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.tick()
         self.assertEqual(len(self._vitality_audit_comments()), 1)
 
-        # The same transition again, with the clock pushed far past the first write.
+        # The same transition again, with the clock pushed far past the first write. The
+        # replay must carry the same sources as the first reduction (the fake derives
+        # them per record), so the transition token matches and dedupes.
         payload = self.runtime.production_state.load()
         payload["records"]["secretary-510-pilot"]["worker_vitality_episode"] = None
         self.runtime.production_state.save(payload)
         later = time.time() + 999_000
 
         def late_status(_task, _record) -> dict:
-            return dict(
-                self.host.worker_status_result or {},
-                last_activity=later,
-            )
+            # The full derived shape (classification + provider evidence), not the raw
+            # scripted dict: the replay must observe the same sources the first tick did.
+            full = type(self.host)._synthetic_status(
+                self.host, _task, _record, "worker")
+            return dict(full or {}, last_activity=later)
 
         with mock.patch.object(dispatcher_module.time, "time", return_value=later), \
                 mock.patch.object(self.host, "worker_status", side_effect=late_status):
@@ -7630,32 +7824,40 @@ class DispatcherRuntimeTests(unittest.TestCase):
         )
 
     def test_each_watchdog_decision_is_identical_with_and_without_the_shadow_reduction(self) -> None:
-        """The proof this card owes: for each wait-tick outcome the pipeline already produces,
-        running the reducer changes no branch. The same scenario is driven twice - reduction
-        enabled, then patched out - and every returned action must match."""
+        """S1-4 inverts S1-2's shadow equivalence: without the reduction the tick must
+        refuse to destroy, never destroy on a clock.
+
+        The same scenario is driven twice -- reduction enabled, then patched out so no
+        episode is ever written -- and the destructive step may happen only with it.
+        This is the mutation-resistant form of "the guard reads the episode": a future
+        edit that lets the ceiling path act without an episode fails here.
+        """
         scenario = self._head_at_its_prompt
 
         def drive() -> list[str]:
-            """One full idle episode to its destructive step, as actions."""
+            """One full stall episode to its destructive step, as actions."""
             self.setUp()
             self._open_the_second_round()
             scenario()
             actions = [self.tick()["action"]]
             self._rewind_idle()
-            actions.append(self.tick()["action"])
-            actions.append(self.tick()["action"])
+            actions.append(self.tick()["action"])  # confirmed: the round's one prompt
+            self._rewind_idle()
+            actions.append(self.tick()["action"])  # quiet again past confirm: respawn
             return actions
 
         with_vitality = drive()
 
+        self.assertIn("worker-respawned", with_vitality)
+
         with mock.patch.object(
-            type(self.runtime), "_shadow_vitality_episode", lambda *args, **kwargs: None,
+            type(self.runtime), "_reduce_and_store_vitality_episode",
+            lambda *args, **kwargs: None,
         ):
             without_vitality = drive()
 
-        self.assertEqual(with_vitality, without_vitality)
-        # The scenario really reached past the first idle confirmation.
-        self.assertIn("worker-idle-unconfirmed", with_vitality)
+        # Without an episode nothing destructive may happen: the wait continues.
+        self.assertNotIn("worker-respawned", without_vitality)
 
     def test_a_raising_reduction_never_breaks_the_wait_tick(self) -> None:
         """Shadow code may not break the tick that hosts it. The reduction runs behind a broad
@@ -7761,7 +7963,6 @@ class DispatcherRuntimeTests(unittest.TestCase):
             "the replacement head owns its own window",
         )
         self._rewind_idle()
-        self.tick()
         escalated = self.tick()
 
         self.assertEqual(escalated["to"], "blocked")
@@ -7791,7 +7992,6 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self._bounce_the_idle_worker()["action"], "worker-respawned")
         self.tick()
         self._rewind_idle()
-        self.tick()
         self.assertEqual(self.tick()["to"], "blocked")
 
     def test_a_refused_stale_report_ends_in_the_bounded_state(self) -> None:
@@ -7809,7 +8009,6 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self._bounce_the_idle_worker()["action"], "worker-respawned")
         self.tick()
         self._rewind_idle()
-        self.tick()
         self.assertEqual(self.tick()["to"], "blocked")
 
     # the bounded report prompt at that boundary (secretary-1172) --------------
@@ -7893,7 +8092,6 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.tick()["action"], "waiting-worker-report")
         self.assertEqual(self.reader.show(CARD_REF)["state"], "in_progress")
         self._rewind_idle()
-        self.tick()
         self.assertEqual(self.tick()["action"], "worker-respawned")
 
     def test_a_second_idle_episode_in_the_round_stops_the_head_instead(self) -> None:
@@ -7914,7 +8112,6 @@ class DispatcherRuntimeTests(unittest.TestCase):
         # And the ladder still ends where it did: one replacement, then the operator.
         self.assertEqual(self.tick()["action"], "waiting-worker-report")
         self._rewind_idle()
-        self.tick()
         self.assertEqual(self.tick()["to"], "blocked")
         self.assertEqual(len(self.host.report_prompts), 1)
 
@@ -7980,7 +8177,6 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.host.fail_report_prompt_reason = ""
         self.assertEqual(self.tick()["action"], "waiting-worker-report")
         self._rewind_idle()
-        self.tick()
         self.assertEqual(self.tick()["to"], "blocked")
         self.assertEqual(self.host.report_prompts, [])
 
@@ -8008,8 +8204,9 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self._head_at_its_prompt()
         self.tick()
         self._rewind_idle()
-        self.assertEqual(self.tick()["action"], "worker-idle-unconfirmed")
 
+        # The crash lands between the durable intent and its confirmation: the delivery
+        # itself dies mid-send.
         with mock.patch.object(
             self.host, "prompt_worker_report", side_effect=KeyboardInterrupt
         ), self.assertRaises(KeyboardInterrupt):
@@ -8053,13 +8250,11 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self.assertEqual(self.tick()["action"], "waiting-review-verdict")
 
         self._rewind_idle("review")
-        self.tick()
         respawned = self.tick()
 
         self.assertEqual(respawned["action"], "review-respawned")
         self.tick()
         self._rewind_idle("review")
-        self.tick()
         self.assertEqual(self.tick()["to"], "blocked")
 
     def test_the_shadow_episode_wiring_is_the_same_for_a_review_head(self) -> None:
@@ -8081,16 +8276,16 @@ class DispatcherRuntimeTests(unittest.TestCase):
         stored = self._pilot_record()["review_vitality_episode"]
         self.assertIsNotNone(stored)
         self.assertEqual(stored["run_id"], (self._pilot_record()["review_head_run"] or {}).get("run_id"))
-        # The fake status names no provider progress and no raw pid classification, so the
-        # only source this path truly observed is the advisory pane reading.
-        self.assertEqual(stored["verdict"], "unverifiable")
+        # The fake's derived evidence for the review head: live pid, unchanged provider
+        # cursor, idle pane -- below every threshold.
+        self.assertEqual(stored["verdict"], "healthy_quiet")
         comments = [
             comment.get("body") or ""
             for comment in self.reader.show(CARD_REF).get("comments", [])
-            if "Vitality shadow (review)" in (comment.get("body") or "")
+            if "Vitality (review)" in (comment.get("body") or "")
         ]
         self.assertEqual(len(comments), 1, comments)
-        self.assertIn("does not influence", comments[0])
+        self.assertIn("does not authorise destruction", comments[0])
 
 
 class HeadPromptTests(unittest.TestCase):

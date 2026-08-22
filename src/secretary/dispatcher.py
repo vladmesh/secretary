@@ -34,7 +34,13 @@ from secretary.dispatch.head_vitality_episode import (
     DEFAULT_VITALITY_THRESHOLDS as _DEFAULT_VITALITY_THRESHOLDS,
 )
 from secretary.dispatch.head_vitality_episode import (
+    VitalityVerdict as VitalityVerdict,
+)
+from secretary.dispatch.head_vitality_episode import (
     reduce_vitality as _reduce_vitality,
+)
+from secretary.dispatch.head_vitality_guard import (
+    assert_destructive_allowed as _assert_destructive_allowed,
 )
 from secretary.dispatcher_gate import (
     GATE_PENDING_STALL_SECONDS,
@@ -321,12 +327,6 @@ from secretary.dispatcher_watchdog import (
     heartbeat_is_mismatch as _heartbeat_is_mismatch,
 )
 from secretary.dispatcher_watchdog import (
-    idle_outcome as _idle_outcome,
-)
-from secretary.dispatcher_watchdog import (
-    idle_stall_seconds as _idle_stall_seconds,
-)
-from secretary.dispatcher_watchdog import (
     initial_output_stall_seconds as _initial_output_stall_seconds,
 )
 from secretary.dispatcher_watchdog import (
@@ -343,9 +343,6 @@ from secretary.dispatcher_watchdog import (
 )
 from secretary.dispatcher_watchdog import (
     wait_cycle_token as _wait_cycle_token,
-)
-from secretary.dispatcher_watchdog import (
-    wait_outcome as _wait_outcome,
 )
 from secretary.dispatcher_worker_lifecycle import (
     BUSY_RETRY_INITIAL_SECONDS,
@@ -467,6 +464,14 @@ OBSERVER_REPO_BRANCH = "observers"
 # stop is never called unconfirmed over a process that is in the middle of leaving.
 HEAD_STOP_GRACE_SECONDS = 5.0
 HEAD_STOP_POLL_SECONDS = 0.1
+
+# The verdicts from which the wait/watchdog path may take its destructive steps (S1-4).
+# Everything else waits: this is the vocabulary the vitality guard enforces, spelled here
+# so telemetry can name which comments describe decisions rather than shadow records.
+DESTRUCTIVE_VERDICTS = frozenset({
+    VitalityVerdict.CONFIRMED_STALL,
+    VitalityVerdict.DEAD,
+})
 
 # What two provider-source descriptors have to agree on before one launch may keep the copy it was
 # already prepared with. These are the facts preflight fixes for the lifetime of the source: its
@@ -4701,13 +4706,6 @@ class DispatcherRuntime:
             # restart it; it also cannot prove progress, so the ordinary wait ceiling stays.
             status = {"known": False, "live": True, "reason": "runtime-unavailable"}
             runtime_reason = scrub_host_output(str(exc))
-
-        def unavailable() -> dict[str, Any]:
-            return {
-                "status": "degraded", "step": "review" if kind == "review" else "advance",
-                "pilot_ref": task["ref"], "attempt_id": attempt_id,
-                "action": f"{kind}-runtime-unavailable", "reason": runtime_reason,
-            }
         if status.get("identity_mismatch"):
             return {
                 "status": "degraded",
@@ -4717,11 +4715,6 @@ class DispatcherRuntime:
                 "action": f"{kind}-heartbeat-identity-mismatch",
                 "reason": "the heartbeat names a live process with a mismatching launch identity",
             }
-        if not status.get("live"):
-            return self._trigger_wait_watchdog(
-                task, record, records, payload, attempt_id, kind=kind,
-                trigger=f"terminal {status.get('reason') or 'missing'}",
-            )
         activity = status.get("last_activity")
         progress_at = float(getattr(record, f"{kind}_progress_at") or 0.0)
         if activity:
@@ -4731,55 +4724,169 @@ class DispatcherRuntime:
                 setattr(record, f"{kind}_progress_at", progress_at)
                 self.save_records(payload, records)
         now = time.time()
-        self._shadow_vitality_episode(
+        episode = self._reduce_and_store_vitality_episode(
             task, record, records, payload, status, kind=kind, now=now
         )
-        pid_confirmed = bool(status.get("pid_confirmed"))
-        if pid_confirmed and "idle" in status:
-            # The pid heartbeat proves this exact process runs and the pane says whether it is doing
-            # anything: that beats any clock, so the timing ceilings below do not apply here.
-            idle, fence_moved = _idle_outcome(record, status, kind=kind, now=now)
-            if fence_moved:
-                self.save_records(payload, records)
-            if idle != "wait":
-                expectation = _wait_expectation(kind)
-                if kind == "worker":
-                    expectation = f"{expectation} for generation {record.report_generation}"
-                state = "held in a dialog" if status.get("idle_reason") == "dialog" else "idle"
-                idle_since = float(getattr(record, f"{kind}_idle_since") or now)
-                idle_trigger = (
-                    f"the head has been {state} for {int(now - idle_since)}s with no {expectation}"
+        # THE DECISION IS THE VERDICT (S1-4): the persisted episode -- reduced from this
+        # very tick's observations on every shape the status carries, including the
+        # not-live ones -- chooses between waiting, nudging and recovering. The old
+        # not-live shortcut is gone: what used to be an unconditional reclaim is now
+        # taken only when the reduction actually saw death (``Dead``), and a terminal
+        # that vanished while the heartbeat stays live is decided by evidence, not by
+        # the inventory.
+        return self._decide_wait_by_verdict(
+            task, record, records, payload, attempt_id,
+            kind=kind, status=status, episode=episode, now=now,
+            runtime_reason=runtime_reason, activity=activity, progress_at=progress_at,
+        )
+
+    def _decide_wait_by_verdict(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        kind: str,
+        status: dict[str, Any],
+        episode: Any,
+        now: float,
+        runtime_reason: str,
+        activity: Any,
+        progress_at: float,
+    ) -> dict[str, Any] | None:
+        """Turn this tick's vitality verdict into the wait tick's one decision.
+
+        Verdict -> action, per the plan's recovery policy (nudge before destruction,
+        ``wait`` whenever the evidence does not earn intervention):
+
+        * ``HealthyActive`` / ``HealthyQuiet`` / ``Unverifiable`` / ``Suspended`` ->
+          ``wait``. A quiet-below-threshold head is between turns; an unverifiable head
+          has no strong witness; a suspended head is SIGCONT territory (S1-5). None of
+          them may be nudged into a respawn by a clock.
+        * ``SuspectedStall`` -> at most one idempotent report nudge per round, keyed on
+          the round generation like every nudge; a suspicion never destroys.
+        * ``ConfirmedStall`` / ``Dead`` -> the ordinary recovery path
+          (``_trigger_wait_watchdog``), whose every destructive step re-checks the guard.
+        * No episode at all (nothing was ever observed for this run), or ``Unverifiable``
+          -> ``wait`` while the ceiling has not elapsed, then an OPERATOR escalation
+          (``_escalate_unobservable_wait``): one idempotent durable comment plus a
+          degraded outcome naming the evidence gap. Such a run is never destroyed -- a
+          run nobody could observe is also a run nobody can prove dead -- so its wait is
+          bounded by escalation, not by replacement. This differs from main before
+          S1-4, which reclaimed such heads on the clock alone; that behaviour is what
+          the guard now refuses.
+
+        Evidence-shaped legacy branches inside this fallback (no output since launch; no
+        terminal progress) keep their pre-vitality triggers because they act on what a
+        source actually said, and their destructive steps are still fenced by the guard.
+        """
+        ref = task["ref"]
+        expectation = _wait_expectation(kind)
+        if kind == "worker":
+            expectation = f"{expectation} for generation {record.report_generation}"
+        verdict = episode.verdict if episode is not None else None
+
+        def plain_wait() -> dict[str, Any] | None:
+            if runtime_reason:
+                return {
+                    "status": "degraded", "step": "review" if kind == "review" else "advance",
+                    "pilot_ref": ref, "attempt_id": attempt_id,
+                    "action": f"{kind}-runtime-unavailable", "reason": runtime_reason,
+                }
+            return None
+
+        if verdict is VitalityVerdict.DEAD:
+            # The heartbeat names a gone process: the existing not-live handling, from
+            # the same evidence the reduction used.
+            return self._trigger_wait_watchdog(
+                task, record, records, payload, attempt_id, kind=kind,
+                trigger="the pid heartbeat names a gone or unreaped process",
+            )
+        if verdict is VitalityVerdict.CONFIRMED_STALL:
+            reason = (
+                f"the {kind} head's vitality episode confirms a stall "
+                f"({episode.reason or 'strong quiet past both thresholds'})"
+                f" with no {expectation}"
+            )
+            if kind == "worker":
+                # The confirmed boundary: ask once for the report before anything
+                # destructive, exactly as the idle ladder did -- but only when the
+                # episode itself says the head is stalled.
+                prompted, reason = self._prompt_worker_report(
+                    task, record, records, payload, attempt_id, trigger=reason
                 )
-                # Stopping a live pane needs evidence separated in time: never a second status probe
-                # inside this tick, because a turn can start between two adjacent probes.
-                if idle == "pending":
-                    return {
-                        "status": "degraded", "step": "review" if kind == "review" else "advance",
-                        "pilot_ref": task["ref"], "attempt_id": attempt_id,
-                        "action": f"{kind}-idle-unconfirmed", "reason": idle_trigger,
-                    }
-                if kind == "worker":
-                    # The confirmed-idle boundary: the last point before something destructive happens
-                    # to a head that may simply have finished. A failed prompt travels on in the trigger.
-                    prompted, idle_trigger = self._prompt_worker_report(
-                        task, record, records, payload, attempt_id, trigger=idle_trigger
-                    )
-                    if prompted is not None:
-                        return prompted
-                # Degraded, not ok: an `ok` bounce would write healthy telemetry over the one signal
-                # that says this card needs looking at before it reaches Blocked.
-                return self._trigger_wait_watchdog(
-                    task, record, records, payload, attempt_id, kind=kind,
-                    trigger=idle_trigger, stall=_idle_stall_seconds(), degraded=True,
+                if prompted is not None:
+                    return prompted
+            # Degraded, not ok: an `ok` bounce would write healthy telemetry over the
+            # one signal that says this card needs looking at before it reaches Blocked.
+            return self._trigger_wait_watchdog(
+                task, record, records, payload, attempt_id, kind=kind,
+                trigger=reason, degraded=True,
+            )
+        if verdict is VitalityVerdict.SUSPECTED_STALL:
+            # One idempotent nudge, then wait: the suspicion phase exists so a single
+            # lost turn recovers conversationally instead of destructively.
+            suspicion_basis = episode.reason or "strong quiet past the suspect threshold"
+            if kind == "worker":
+                prompted, trigger = self._prompt_worker_report(
+                    task, record, records, payload, attempt_id,
+                    trigger=(
+                        f"the {kind} head's vitality episode suspects a stall "
+                        f"({suspicion_basis}) with no {expectation}"
+                    ),
                 )
-            return unavailable() if runtime_reason else None
-        # Either no heartbeat, or one that cannot say what the head is doing (adopted head, lost pane
-        # binding, refused probe). A live pid alone is no reason to wait forever: ordinary ceilings.
+                if prompted is not None:
+                    return prompted
+                # The prompt was already spent this round (or the head cannot take one):
+                # carry the suspicion as visible degradation without escalating.
+                return {
+                    "status": "degraded",
+                    "step": "review" if kind == "review" else "advance",
+                    "pilot_ref": ref, "attempt_id": attempt_id,
+                    "action": f"{kind}-stall-suspected", "reason": trigger,
+                }
+            return {
+                "status": "degraded",
+                "step": "review" if kind == "review" else "advance",
+                "pilot_ref": ref, "attempt_id": attempt_id,
+                "action": f"{kind}-stall-suspected",
+                "reason": (
+                    f"the review head's vitality episode suspects a stall "
+                    f"({suspicion_basis}) with no {expectation}"
+                ),
+            }
+        if verdict is VitalityVerdict.SUSPENDED:
+            # Operator-visible, non-destructive: SIGCONT and its response window are
+            # S1-5. The comment is keyed on the frozen span so it cannot flood.
+            self._comment_suspension_once(task, record, episode, kind=kind)
+            return plain_wait()
+        if verdict in (VitalityVerdict.HEALTHY_ACTIVE, VitalityVerdict.HEALTHY_QUIET):
+            # Fresh evidence of life: renew the outer window and wait. No clock on this
+            # path may act against what the evidence calls alive.
+            setattr(record, f"{kind}_waiting_since", now)
+            self.save_records(payload, records)
+            return plain_wait()
+        # Unverifiable, or no episode at all: nothing strong answered, so the honest
+        # answer is that nobody knows. The plan forbids KILLING such a run -- and the
+        # guard enforces exactly that, refusing every destructive step on this path --
+        # but an unobservable wait is still bounded: once the role's outer ceiling has
+        # elapsed with no verdict earned, the tick escalates to the OPERATOR (one
+        # idempotent durable comment per wait cycle plus a degraded outcome). Escalation
+        # is not replacement: the head is never touched here. The two legacy
+        # evidence-shaped branches below keep their pre-vitality meaning because they
+        # act only on what a source actually said (no output since launch; no terminal
+        # progress), and even they are fenced by the guard.
         stall = _stall_seconds(kind)
         waiting_since = float(getattr(record, f"{kind}_waiting_since") or 0.0)
         started_at = float(getattr(record, f"{kind}_started_at") or 0.0)
-        # Except the first-output window, off for a confirmed pid: that heartbeat answers the silence.
-        if not pid_confirmed and activity and started_at and float(activity) <= started_at and now - started_at > _initial_output_stall_seconds():
+        pid_confirmed = bool(status.get("pid_confirmed"))
+        if (
+            not pid_confirmed and activity and started_at
+            and float(activity) <= started_at
+            and now - started_at > _initial_output_stall_seconds()
+        ):
             return self._trigger_wait_watchdog(
                 task, record, records, payload, attempt_id, kind=kind,
                 trigger=f"no terminal output since launch for {int(now - started_at)}s",
@@ -4789,28 +4896,175 @@ class DispatcherRuntime:
                 task, record, records, payload, attempt_id, kind=kind,
                 trigger=f"no terminal output for {int(now - progress_at)}s",
             )
-        # Fresh activity is progress, not merely liveness: it starts a new wait window.
-        if activity and float(activity) >= waiting_since:
-            setattr(record, f"{kind}_waiting_since", now)
-            self.save_records(payload, records)
-            return None
         if not waiting_since:
             setattr(record, f"{kind}_waiting_since", now)
             self.save_records(payload, records)
-            return unavailable() if runtime_reason else None
-        outcome = _wait_outcome(
-            waiting_since=waiting_since,
-            now=now,
-            stall_seconds=stall,
-            respawns=int(getattr(record, f"{kind}_respawns") or 0),
-        )
-        if outcome == "wait":
-            return unavailable() if runtime_reason else None
-        if outcome == "respawn":
-            return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=now, trigger=f"no {_wait_expectation(kind)} within {stall}s")
-        return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=stall, trigger=f"no {_wait_expectation(kind)}")
+            return plain_wait()
+        unobserved_for = now - waiting_since
+        if unobserved_for >= stall:
+            return self._escalate_unobservable_wait(
+                task, record, attempt_id, kind=kind,
+                seconds=int(unobserved_for), ceiling=stall,
+                runtime_reason=runtime_reason,
+            )
+        return plain_wait()
 
-    def _shadow_vitality_episode(
+    def _escalate_unobservable_wait(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        attempt_id: str,
+        *,
+        kind: str,
+        seconds: int,
+        ceiling: int,
+        runtime_reason: str = "",
+    ) -> dict[str, Any]:
+        """Escalate an unobservable head to the operator WITHOUT touching it.
+
+        Reached only from the no-episode/Unverifiable fallback of
+        ``_decide_wait_by_verdict`` once the role's outer ceiling has elapsed on a wait
+        nobody could observe. The plan's asymmetry forbids killing what nothing could
+        read (the guard refuses it), but an operator must not inherit an unbounded silent
+        wait either, so this is the bound: one durable comment per wait cycle (keyed like
+        every watchdog comment, so it cannot flood) naming the evidence gap and the
+        elapsed span, plus a degraded tick outcome. The head is not signalled, stopped or
+        replaced; if it starts answering again the reduction earns a verdict and the
+        ordinary table takes over.
+        """
+        ref = task["ref"]
+        detail = f"; {runtime_reason}" if runtime_reason else ""
+        self.writer.comment(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            body=(
+                f"Dispatcher wait watchdog ({kind}): nothing could observe this head for "
+                f"{seconds}s (outer ceiling {ceiling}s) -- no readable heartbeat and no "
+                f"provider answer{detail}. The head was NOT stopped or replaced: no "
+                "evidence earned that. Escalating to the operator; the card keeps "
+                "waiting until someone looks or the head becomes observable again."
+            ),
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id, f"{kind}-unobserved-wait", ref,
+                _wait_cycle_token(record),
+            ),
+        )
+        return {
+            "status": "degraded",
+            "step": "review" if kind == "review" else "advance",
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "action": f"{kind}-unobserved-wait-escalated",
+            "reason": (
+                f"nothing could observe the head for {seconds}s "
+                f"(ceiling {ceiling}s); escalated to the operator, head untouched"
+            ),
+        }
+
+    def _comment_suspension_once(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        episode: Any,
+        *,
+        kind: str,
+    ) -> None:
+        """Comment a suspended head once per freeze span; never act on it here."""
+        since = float(episode.stall_frozen_since or 0.0)
+        request_id = _attempt_request_id(
+            record.attempt_id or "", f"{kind}-vitality-suspended", task["ref"],
+            suffix=_request_token(f"suspended@{since:.0f}"),
+        )
+        self.writer.comment(
+            role="dispatcher",
+            actor=self.owner,
+            reference=task["ref"],
+            body=(
+                f"Vitality ({kind}): the head's process is parked on a stop signal "
+                f"(suspended since {time.strftime('%H:%M:%S', time.gmtime(since))}). "
+                "Nothing was signalled or stopped; resuming it is a separate, explicit "
+                "step."
+            ),
+            request_id=request_id,
+        )
+
+    def _vitality_guard_decision(
+        self,
+        record: DispatcherRecord,
+        *,
+        kind: str,
+        action: str,
+        current_run_id: str = "",
+    ) -> Any:
+        """Ask the vitality guard whether this watchdog-driven step may proceed."""
+        field_name = f"{kind}_vitality_episode"
+        return _assert_destructive_allowed(
+            getattr(record, field_name),
+            action,
+            time.time(),
+            current_run_id=current_run_id or str(
+                ((record.review_head_run if kind == "review" else record.worker_head_run)
+                 or {}).get("run_id") or ""
+            ),
+            pid_only_outer_ceiling_seconds=float(_stall_seconds(kind)),
+        )
+
+    def _guard_or_wait(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        kind: str,
+        now: float,
+        action: str,
+        proceed: Callable[[], dict[str, Any]],
+        current_run_id: str = "",
+    ) -> dict[str, Any]:
+        """Run one watchdog-driven destructive step through the vitality guard.
+
+        Allowed -> the step runs as before. Refused -> the tick degrades to a visible,
+        idempotent ``{kind}-guard-refused`` wait outcome naming the refusal class, and
+        the destructive step does not happen. A refusal is never a silent no-op: the
+        outcome carries it, and the durable comment is written once per cycle (keyed on
+        the wait-cycle token, like every other watchdog comment).
+        """
+        decision = self._vitality_guard_decision(
+            record, kind=kind, action=action, current_run_id=current_run_id,
+        )
+        if decision.allowed:
+            return proceed()
+        request_id = _attempt_request_id(
+            record.attempt_id or attempt_id,
+            f"{kind}-vitality-guard-refused",
+            task["ref"],
+            _wait_cycle_token(record),
+        )
+        self.writer.comment(
+            role="dispatcher",
+            actor=self.owner,
+            reference=task["ref"],
+            body=(
+                f"Dispatcher wait watchdog refused ({decision.refusal.value}): "
+                f"{decision.reason}. Nothing was stopped or replaced; the card keeps "
+                "waiting."
+            ),
+            request_id=request_id,
+        )
+        return {
+            "status": "degraded",
+            "step": "review" if kind == "review" else "advance",
+            "pilot_ref": task["ref"],
+            "attempt_id": attempt_id,
+            "action": f"{kind}-guard-refused",
+            "reason": f"{decision.refusal.value}: {decision.reason}",
+            "guard": decision.to_json(),
+        }
+
+    def _reduce_and_store_vitality_episode(
         self,
         task: dict[str, Any],
         record: DispatcherRecord,
@@ -4820,16 +5074,17 @@ class DispatcherRuntime:
         *,
         kind: str,
         now: float,
-    ) -> None:
-        """Reduce and persist one shadow-mode vitality episode for this role's head run.
+    ) -> Any:
+        """Reduce and persist one vitality episode for this role's head run; return it.
 
-        Shadow mode is the whole contract: the episode is computed from values this tick already
-        holds, stored on the record, and logged when its verdict changes -- and it must never be
-        read by any branch below. Every early return here leaves `record` untouched or unchanged,
-        so a caller cannot tell this method ran except by reading the record afterwards. A tick
-        whose status carries none of the three sources below observed nothing at all (the noop
-        host, a runtime-unavailable probe): no reduction runs and no episode is written, so such
-        ticks rewrite neither state nor history.
+        This is S1-2's shadow reduction, promoted (card S1-4) into the wait tick's
+        decision input. The contract grows by exactly one clause: the method now returns
+        the episode it stored (``None`` when nothing was observed or the reduction
+        failed) so the caller can decide from it -- every other property is unchanged.
+        Every early return here leaves ``record`` untouched or unchanged, so a caller
+        that gets ``None`` decides as it would have with no episode at all: a reduction
+        failure degrades to "no episode" plus one comment and must never break the tick
+        hosting it.
 
         Sources actually observed on this path, without any new host call:
 
@@ -4853,7 +5108,7 @@ class DispatcherRuntime:
             # dropped explicitly.
             if previous is not None:
                 setattr(record, field_name, None)
-            return
+            return None
         pid_status = status.get("pid_status")
         provider_progress = status.get("provider_progress")
         if not isinstance(pid_status, dict) and not isinstance(provider_progress, dict) \
@@ -4861,8 +5116,11 @@ class DispatcherRuntime:
             # Nothing was observed at all (the noop host, a runtime-unavailable tick): there is
             # no reduction to run and no episode to write, so return before saving anything.
             # Writing one would both rewrite the state file every such tick and stamp an
-            # "observation" nobody made -- the same lie Unverifiable exists to avoid.
-            return
+            # "observation" nobody made -- the same lie Unverifiable exists to avoid. The
+            # caller decides this tick from ``None`` -- i.e. from the outer ceilings, the
+            # pre-vitality behaviour for an unobservable head -- while the guard below any
+            # destructive step still reads whatever verdict the record already carries.
+            return None
         snapshots = [
             _VitalitySnapshot.from_pid_heartbeat(
                 pid_status, run_id=run_id, observed_at=now
@@ -4888,7 +5146,8 @@ class DispatcherRuntime:
             episode = _reduce_vitality(previous, snapshots, now, _DEFAULT_VITALITY_THRESHOLDS)
         except Exception as exc:  # noqa: BLE001 - shadow mode must never break the hosting tick
             # Shadow mode may never break the tick that hosts it. A reduction failure is recorded
-            # as no episode so the next tick starts clean, and nothing downstream changes.
+            # as no episode so the next tick starts clean, and nothing downstream changes --
+            # including the decision, which then falls back to the outer ceilings.
             self.writer.comment(
                 role="dispatcher",
                 actor=self.owner,
@@ -4899,13 +5158,13 @@ class DispatcherRuntime:
                     suffix=_request_token(str(now)),
                 ),
             )
-            return
+            return None
         changed = previous is None or previous.verdict is not episode.verdict
         setattr(record, field_name, episode)
         records[task["ref"]] = record
         self.save_records(payload, records)
         if not changed:
-            return
+            return episode
         # The request id names only what the comment claims -- the verdict transition itself --
         # so a flapping verdict cannot mint a fresh idempotency key every tick and turn shadow
         # logging into an unbounded comment stream.
@@ -4918,13 +5177,17 @@ class DispatcherRuntime:
             actor=self.owner,
             reference=task["ref"],
             body=(
-                f"Vitality shadow ({kind}): {episode.verdict.value}"
+                f"Vitality ({kind}): {episode.verdict.value}"
                 + (f" (was {previous.verdict.value})" if previous is not None else " (first observation)")
                 + f"; basis {', '.join(episode.basis) if episode.basis else 'none'}."
-                " Recorded only - shadow mode does not influence dispatcher decisions."
+                + (
+                    "" if episode.verdict in DESTRUCTIVE_VERDICTS
+                    else " Recorded only - does not authorise destruction."
+                )
             ),
             request_id=request_id,
         )
+        return episode
 
     def _prompt_worker_report(
         self,
@@ -4963,9 +5226,23 @@ class DispatcherRuntime:
             self.save_records(payload, records)
             return None, f"{trigger}, and the report prompt was refused: {scrub_host_output(str(exc))}"
         nudge.confirm()
-        # The prompted head owns a fresh idle window: charging it with the episode that produced the
-        # prompt would escalate on the next tick before the worker could have answered.
+        # The prompted head owns a fresh idle window AND a fresh stall episode: charging it
+        # with the episode that produced the prompt would escalate on the next tick before
+        # the worker could have answered. The episode restarts its quiet reference at now,
+        # keeping the run identity and history, so the ladder must re-earn suspicion from
+        # the moment the worker was actually asked.
         _reset_idle(record, "worker")
+        episode = getattr(record, "worker_vitality_episode")
+        if episode is not None:
+            record.worker_vitality_episode = replace(
+                episode,
+                verdict=VitalityVerdict.HEALTHY_QUIET,
+                suspected_since=0.0,
+                confirmed_since=0.0,
+                started_at=time.time(),
+                updated_at=time.time(),
+                reason="report prompt delivered; the quiet clock restarts here",
+            )
         records[ref] = record
         self.save_records(payload, records)
         # Persisted before the comment: a raising writer must not leave the prompt unrecorded.
@@ -4996,14 +5273,32 @@ class DispatcherRuntime:
         self, task, record, records, payload, attempt_id, *, kind: str, trigger: str,
         stall: int | None = None, degraded: bool = False,
     ):
-        if int(getattr(record, f"{kind}_respawns") or 0) < 1:
-            return self._respawn_wait(
-                task, record, records, payload, attempt_id, kind=kind, now=time.time(),
-                trigger=trigger, degraded=degraded,
-            )
-        return self._escalate_wait(
-            task, record, records, payload, attempt_id, kind=kind,
-            stall=_stall_seconds(kind) if stall is None else stall, trigger=trigger,
+        """The verdict-driven recovery entry point (S1-4): respawn once, then escalate.
+
+        Reached ONLY from decisions the persisted vitality episode drove -- a ``Dead``
+        or ``ConfirmedStall`` verdict in the wait tick. The destructive step itself is
+        fenced by the vitality guard inside ``_guard_or_wait`` before
+        ``_respawn_wait``/``_escalate_wait`` run, so a stale episode, a foreign run or a
+        verdict that does not authorise destruction turns into a visible wait instead of
+        a stop.
+        """
+        action = f"{kind}-escalate" \
+            if int(getattr(record, f"{kind}_respawns") or 0) >= 1 else f"{kind}-respawn"
+        return self._guard_or_wait(
+            task, record, records, payload, attempt_id, kind=kind, now=time.time(),
+            action=action,
+            proceed=lambda: (
+                self._respawn_wait(
+                    task, record, records, payload, attempt_id, kind=kind,
+                    now=time.time(), trigger=trigger, degraded=degraded,
+                )
+                if action == f"{kind}-respawn"
+                else self._escalate_wait(
+                    task, record, records, payload, attempt_id, kind=kind,
+                    stall=_stall_seconds(kind) if stall is None else stall,
+                    trigger=trigger,
+                )
+            ),
         )
 
     def _respawn_wait(

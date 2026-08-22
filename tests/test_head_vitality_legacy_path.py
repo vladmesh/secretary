@@ -134,24 +134,23 @@ class LegacyPathTests(unittest.TestCase):
 
 
 class IssueB5195041LegacyIdlePathTests(LegacyPathTests):
-    """issue:b5195041abbc3ec28243: the idle fence reads the screen, not the transcript.
+    """issue:b5195041abbc3ec28243: the idle fence read the screen, not the transcript.
 
-    Today a pid-confirmed head whose pane reads idle for two confirmations past the idle
-    window goes straight to the report prompt and then to a stop/respawn -- no provider
-    evidence is consulted anywhere on that path. Per the plan ("nudge/respawn/block only
-    on a dead transcript") that is the destructive mistake; S1-4 flips this to assert the
-    episode's HealthyActive blocks the respawn.
+    The original defect -- a pid-confirmed head whose pane reads idle for two
+    confirmations past the idle window goes straight to the report prompt and then to a
+    stop/respawn with no provider evidence consulted -- is fixed by S1-4: the wait tick's
+    decision is the persisted episode's verdict, and an advancing provider cursor keeps
+    that verdict at HealthyActive, which refuses every destructive rung. These are REAL
+    assertions now.
     """
 
-    @unittest.expectedFailure
-    def test_flip_in_S1_4_a_working_transcript_blocks_the_legacy_idle_respawn(self) -> None:
-        """The plan's demand: an advancing provider cursor forbids the idle respawn.
+    def test_a_working_transcript_blocks_the_legacy_idle_respawn(self) -> None:
+        """The plan's demand, flipped (S1-4): an advancing provider cursor forbids the respawn.
 
-        Expected failure: the legacy idle fence still acts on pane readiness alone --
-        ``_wait_watchdog`` consults neither the provider cursor nor the vitality episode
-        before acting on a confirmed-idle head -- so a second idle episode on a head that
-        provably works still ends in ``worker-respawned``. S1-4 flips this to assert the
-        episode's HealthyActive blocks every rung of that ladder (prompt, respawn, block).
+        The screen reads idle forever while the transcript keeps advancing (the exact
+        b5195041 shape: rollout JSONL moves, nothing refreshes the pane). The reduction
+        sees Turn=Active on every tick, so no episode ever confirms a stall: the head is
+        prompted once by the first quiet crossing and then simply waited on.
         """
         self.start_dispatcher()
         # The retained conversation is available, so the rework resumes the same worker.
@@ -177,30 +176,46 @@ class IssueB5195041LegacyIdlePathTests(LegacyPathTests):
             """One pane-idle episode to its acting tick, screen idle throughout."""
             first = self.tick()
             assert first["action"] == "waiting-worker-report"
+            # The transcript advances every tick -- the exact thing the pane cannot show.
+            self.host.provider_cursor = f"rollout:{time.time()}"
             payload = self.runtime.production_state.load()
             record = payload["records"][CARD_REF]
-            record["worker_idle_since"] -= 301  # past IDLE_STALL_DEFAULT
-            self.runtime.production_state.save(payload)
-            status["last_activity"] -= 400
-            self.tick()  # worker-idle-unconfirmed: the window's two-tick separation
+            episode = record.get("worker_vitality_episode")
+            if episode:
+                # Age the persisted quiet reference the way an operator clock-rewind
+                # would; the transcript itself never stops advancing.
+                for name in ("started_at", "updated_at"):
+                    if episode.get(name):
+                        episode[name] -= 1000
+                record["worker_vitality_episode"] = episode
+                self.runtime.production_state.save(payload)
             return self.tick()
 
-        # The screen reads idle forever while the transcript keeps advancing (the exact
-        # b5195041 shape: rollout JSONL moves, nothing refreshes the pane).
         status = {
             "known": True, "live": True, "reason": "live",
             "last_activity": time.time(), "pid_confirmed": True,
             "idle": True,
         }
         self.host.worker_status_result = dict(status)
-        prompted = idle_episode()
-        self.assertEqual(prompted["action"], "worker-report-prompted")
-
+        # A working head is never acted on destructively: with the transcript advancing
+        # every tick, no episode ever leaves HealthyActive, so there is not even a
+        # prompt -- just waits, forever, on evidence of life.
+        first = idle_episode()
+        self.assertEqual(first["action"], "waiting-worker-report")
         second = idle_episode()
 
-        # What the plan demands of the switch (S1-4): a working transcript is never respawned.
+        # What the plan demands of the switch (S1-4): a working transcript is never
+        # respawned -- the advancing cursor keeps every verdict at HealthyActive, so
+        # the ladder cannot act no matter how the pane reads or how old the wait clock is.
         self.assertNotEqual(second["action"], "worker-respawned")
         self.assertNotIn("restart_worker", self.host.calls)
+        self.assertEqual(self.host.calls.count("prompt_worker_report"), 0)
+        record = self.record_of()
+        self.assertIsNotNone(record.worker_vitality_episode)
+        self.assertIn(
+            "advancing@provider_cursor", " ".join(record.worker_vitality_episode.basis),
+            "the working head's own evidence says its transcript advances",
+        )
 
 
 class Issue3e7abdf9LegacyBusyReadinessTests(LegacyPathTests):

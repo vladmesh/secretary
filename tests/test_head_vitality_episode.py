@@ -345,6 +345,58 @@ class UnavailableTests(unittest.TestCase):
         self.assertEqual(resumed.verdict, VitalityVerdict.HEALTHY_ACTIVE)
         self.assertEqual(resumed.confirmed_since, 0.0)
 
+    def test_a_suspicion_survives_a_dark_provider_while_the_pid_keeps_answering(self) -> None:
+        """The freeze arm preserves an earned SuspectedStall instead of demoting it.
+
+        The S1-3 review follow-up: an earned ``SuspectedStall`` whose provider then went
+        dark was rewritten to ``HealthyQuiet`` with ``suspected_since`` left stamped -- a
+        dangling onset on a phase the verdict no longer claimed. The rule a dark source
+        obeys everywhere else applies here too: it never advances AND never rewinds a
+        phase. Mutation-resistant by construction: flipping the preserved verdict back to
+        HealthyQuiet fails both the verdict assertion and its onset's.
+        """
+        previous = episode(last_progress_at=0.0)
+        suspected = reduce_vitality(
+            previous, [heartbeat(400.0), provider(400.0)], now=400.0, thresholds=THRESHOLDS,
+        )
+        self.assertEqual(suspected.verdict, VitalityVerdict.SUSPECTED_STALL)
+        self.assertEqual(suspected.suspected_since, 300.0)
+
+        # The provider goes dark mid-suspicion; the pid keeps answering Running.
+        dark = reduce_vitality(
+            suspected,
+            [heartbeat(500.0), provider(500.0, available=False)],
+            now=500.0, thresholds=THRESHOLDS,
+        )
+
+        # The suspicion stands frozen: same phase, same onset, no aging past it.
+        self.assertEqual(dark.verdict, VitalityVerdict.SUSPECTED_STALL)
+        self.assertEqual(dark.suspected_since, 300.0)
+        self.assertEqual(dark.confirmed_since, 0.0)
+        self.assertIn("preserved-suspicion:provider-dark-pid-alive", dark.basis)
+
+        # Much later ticks change nothing: freezing never advances the ladder either --
+        # confirmation must be EARNED on strong quiet evidence, not inherited from a
+        # channel outage.
+        later = reduce_vitality(
+            dark,
+            [heartbeat(900_000.0), provider(900_000.0, available=False)],
+            now=900_000.0, thresholds=THRESHOLDS,
+        )
+        self.assertEqual(later.verdict, VitalityVerdict.SUSPECTED_STALL)
+        self.assertEqual(later.suspected_since, 300.0)
+        self.assertEqual(later.confirmed_since, 0.0)
+
+        # And only the four authorised endings still move it: real progress first.
+        resumed = reduce_vitality(
+            later,
+            [heartbeat(900_100.0), provider(900_100.0, progress=ProgressState.ADVANCING,
+                                            cursor="13:def")],
+            now=900_100.0, thresholds=THRESHOLDS,
+        )
+        self.assertEqual(resumed.verdict, VitalityVerdict.HEALTHY_ACTIVE)
+        self.assertEqual(resumed.suspected_since, 0.0)
+
 
 class AdvisoryTests(unittest.TestCase):
     """Invariant (e): pane evidence corroborates and never convicts."""

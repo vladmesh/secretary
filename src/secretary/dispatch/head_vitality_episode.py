@@ -480,6 +480,11 @@ def reduce_vitality(
             # is not laundered back to health by its observers going dark -- exactly as in
             # the all-strong-dark branch below. Only progress, suspension, death or an
             # identity change ends it; its onset stands so the phase stays auditable.
+            # A dark source never advances AND never rewinds a phase. Whatever the ladder has
+            # EARNED on real evidence before the channel went dark stands frozen -- with its
+            # onset -- until one of the four authorised endings moves it; only phases below
+            # suspicion stay (truthfully) at HealthyQuiet, because freezing must not invent
+            # a suspicion nobody earned.
             if episode.verdict is VitalityVerdict.CONFIRMED_STALL:
                 verdict = VitalityVerdict.CONFIRMED_STALL
                 episode = replace(
@@ -491,6 +496,16 @@ def reduce_vitality(
                     reason="progress source known but not answering; confirmation stands",
                 )
                 basis.append("preserved-confirmation:provider-dark-pid-alive")
+            elif episode.verdict is VitalityVerdict.SUSPECTED_STALL:
+                verdict = VitalityVerdict.SUSPECTED_STALL
+                episode = replace(
+                    episode,
+                    suspected_since=(
+                        episode.suspected_since or reference + thresholds.suspect_after
+                    ),
+                    reason="progress source known but not answering; suspicion stands",
+                )
+                basis.append("preserved-suspicion:provider-dark-pid-alive")
             else:
                 verdict = VitalityVerdict.HEALTHY_QUIET
                 episode = replace(
