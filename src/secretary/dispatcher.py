@@ -5232,7 +5232,7 @@ class DispatcherRuntime:
         # keeping the run identity and history, so the ladder must re-earn suspicion from
         # the moment the worker was actually asked.
         _reset_idle(record, "worker")
-        episode = getattr(record, "worker_vitality_episode")
+        episode = record.worker_vitality_episode
         if episode is not None:
             record.worker_vitality_episode = replace(
                 episode,

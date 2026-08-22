@@ -105,7 +105,6 @@ from secretary.dispatcher_watchdog import (
     initial_output_stall_seconds,
     pid_file_path,
     stall_seconds,
-    wait_outcome,
 )
 from secretary.dispatcher_worker_lifecycle import (
     ContinuationLivenessState,
@@ -9051,21 +9050,6 @@ class WaitWatchdogTests(unittest.TestCase):
         for bogus in ("", "soon", "0", "-5"):
             with mock.patch.dict(os.environ, {"SECRETARY_HEAD_IDLE_STALL_SECONDS": bogus}):
                 self.assertEqual(idle_stall_seconds(), IDLE_STALL_DEFAULT)
-
-    def test_inside_the_ceiling_keeps_waiting(self) -> None:
-        outcome = wait_outcome(waiting_since=0.0, now=7199.0, stall_seconds=7200, respawns=0)
-
-        self.assertEqual(outcome, "wait")
-
-    def test_past_the_ceiling_respawns_once_then_escalates(self) -> None:
-        self.assertEqual(
-            wait_outcome(waiting_since=0.0, now=7201.0, stall_seconds=7200, respawns=0),
-            "respawn",
-        )
-        self.assertEqual(
-            wait_outcome(waiting_since=0.0, now=7201.0, stall_seconds=7200, respawns=1),
-            "escalate",
-        )
 
     def test_ceiling_comes_from_the_env_at_call_time(self) -> None:
         with mock.patch.dict(

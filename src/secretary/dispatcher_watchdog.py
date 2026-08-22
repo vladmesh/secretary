@@ -7,10 +7,12 @@ supplies `lastOutputAt`, a head must also produce its first output shortly after
 output renews the ordinary, generous silence ceiling. A runtime that cannot supply activity
 timestamps, or cannot expose the pid heartbeat, uses that ceiling as its fallback.
 
-A confirmed pid answers whether the process runs, not whether it is doing anything. A head that
-is ready for input has stopped working, and if nothing lands for the round being waited on while
-it stays that way, that ends the wait too. The destructive outcome requires two separate ticks
-that observe the same aged idle episode; the first is a degraded pending signal.
+Since S1-4 the wait tick's decision is the persisted vitality episode's verdict
+(`dispatcher.DispatcherRuntime._decide_wait_by_verdict`), which replaced this module's
+continuous-idle fence (`idle_outcome`) and its clock-only wait ladder (`wait_outcome`): the
+fence fields the fence used to own are still cleared by `reset_idle`/`reset_wait`, but nothing
+advances them any more. A confirmed pid answers whether the process runs, not whether it is
+doing anything — that question now belongs to the reducer and the recovery policy.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ import os
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import Any
 
 from secretary.dispatcher_heartbeat import HEARTBEAT_VERSION, run_heartbeat_identity
 from secretary.dispatcher_state import request_token
@@ -96,45 +98,6 @@ def review_launch_abort_stuck_ticks() -> int:
 def review_infra_retry_attempts() -> int:
     """How many reviewer bring-up failures a green candidate absorbs before the card is blocked."""
     return positive_int("SECRETARY_REVIEW_INFRA_RETRY_ATTEMPTS", REVIEW_INFRA_RETRY_ATTEMPTS_DEFAULT)
-
-
-class IdleOutcome(NamedTuple):
-    """One role's idle verdict plus whether reaching it changed the record.
-
-    ``changed`` exists so a caller persists state only on a real transition.
-    """
-    state: str
-    changed: bool
-
-
-def _fence(record, name: str, value: float) -> bool:
-    """Write one fence field, reporting whether it actually moved."""
-    if getattr(record, name) == value:
-        return False
-    setattr(record, name, value)
-    return True
-
-
-def idle_outcome(record, status: dict[str, Any], *, kind: str, now: float) -> IdleOutcome:
-    """Advance one role's idle fence: ``wait``, ``pending`` or ``act``.
-
-    The sole owner of the continuous-idle window and its two-tick confirmation. A busy pane clears
-    both values; repaint activity intentionally does not.
-    """
-    idle_name = f"{kind}_idle_since"
-    confirmation_name = f"{kind}_idle_confirmations"
-    idle_since = float(getattr(record, idle_name) or 0.0)
-    if not status.get("idle"):
-        changed = _fence(record, idle_name, 0.0)
-        return IdleOutcome("wait", _fence(record, confirmation_name, 0) or changed)
-    if not idle_since:
-        changed = _fence(record, idle_name, now)
-        return IdleOutcome("wait", _fence(record, confirmation_name, 0) or changed)
-    if now - idle_since <= idle_stall_seconds():
-        return IdleOutcome("wait", _fence(record, confirmation_name, 0))
-    confirmations = int(getattr(record, confirmation_name) or 0) + 1
-    _fence(record, confirmation_name, confirmations)
-    return IdleOutcome("act" if confirmations >= 2 else "pending", True)
 
 
 def reset_idle(record, kind: str) -> None:
@@ -435,19 +398,6 @@ def bind_head_heartbeat(
     record = dict(status["record"])
     record["leaf"] = str(leaf or "")
     return _replace_json(Path(pid_file), record)
-
-
-def wait_outcome(
-    *,
-    waiting_since: float,
-    now: float,
-    stall_seconds: int,
-    respawns: int,
-) -> str:
-    """Decide a waiting tick: "wait", "respawn" or "escalate"."""
-    if now - waiting_since <= stall_seconds:
-        return "wait"
-    return "respawn" if respawns < 1 else "escalate"
 
 
 def reset_wait(record, kind: str) -> None:

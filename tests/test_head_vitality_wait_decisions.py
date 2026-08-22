@@ -203,9 +203,13 @@ class WaitTickVerdictTableTests(DispatcherRuntimeFixture, unittest.TestCase):
         # Age the persisted quiet past suspect_after but short of confirm_after.
         self._age_vitality_quiet("worker", 500.0)
         first = self.tick()
+        # Assert the verdict instead of skipping (S1-4 review follow-up): a fixture that
+        # cannot reach suspected_stall is a broken test, not an inapplicable one.
         episode = self._pilot_record()["worker_vitality_episode"]
-        if episode["verdict"] != "suspected_stall":
-            self.skipTest(f"fixture reached {episode['verdict']} instead of suspected_stall")
+        self.assertEqual(
+            episode["verdict"], "suspected_stall",
+            f"the fixture aged quiet to {episode['verdict']} instead of suspected_stall",
+        )
         self.assertEqual(first["action"], "worker-stall-suspected")
         self.assertEqual(first["status"], "degraded")
         prompts = self.host.calls.count("prompt_worker_report")
