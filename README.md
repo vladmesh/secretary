@@ -14,6 +14,7 @@ path is documented in [Recovery](docs/RECOVERY.md).
 - [Vision](docs/VISION.md) — what the appliance is for and who it is for
 - [Roadmap](docs/ROADMAP.md) — product states, milestones and open questions
 - [Architecture](docs/ARCHITECTURE.md) — storage boundary, runtime flow, security model
+- [Head vitality](docs/HEAD_VITALITY.md) — observation axes, snapshots and their invariants
 - [Protocols](docs/PROTOCOLS.md) — command contracts for tasks, sprints, memory and secrets
 - [Operations](docs/OPERATIONS.md) — runbooks for a running installation
 - [Recovery](docs/RECOVERY.md) — the checkpoint contract, fresh install and restore
