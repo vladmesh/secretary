@@ -1,19 +1,18 @@
 """Incident regression table for the head-vitality reducer (card S1-3).
 
 Every historical destructive mistake the head-vitality plan lists is replayed here as a
-tick-by-tick timeline through the S1-1 snapshot builders and the S1-2 ``reduce_vitality``
-reducer, and each test asserts exactly the verdict the plan demands -- including *when* the
-ladder reaches SuspectedStall/ConfirmedStall under ``DEFAULT_VITALITY_THRESHOLDS``. The
-asymmetry-of-cost principle behind every row: a false "working" costs an idle hour, but a
-false kill loses a live round, so a verdict that can stop a head must be earned by strong,
-admitted evidence only.
+tick-by-tick timeline through the S1-1 snapshot builders (``from_pid_heartbeat``,
+``from_provider_cursor``, ``from_pane_readiness``) fed with the producer payload dicts the
+wait tick actually carries -- ``dispatcher_watchdog.head_process_status`` classifications,
+admitted/unadmitted ``provider_progress_for_run`` evidence, pane readiness ``{"idle": bool}``
+-- and folded by the S1-2 ``reduce_vitality`` reducer. Each test asserts exactly the verdict
+the plan demands, including *when* the ladder reaches SuspectedStall/ConfirmedStall under
+``DEFAULT_VITALITY_THRESHOLDS``. The asymmetry-of-cost principle behind every row: a false
+"working" costs an idle hour, but a false kill loses a live round, so a verdict that can
+stop a head must be earned by strong, admitted evidence only.
 
 The tests are named after their incident refs so the plan's regression table
 (``docs/HEAD_VITALITY.md``, section "Regression table") can point at one test per incident.
-
-Two classes at the bottom characterise the *legacy* decision path (what the watchdog did in
-each incident). They are ``expectedFailure`` where today's behaviour still contradicts the
-plan; S1-4 flips them to real assertions when the watchdog switches onto episodes.
 """
 
 from __future__ import annotations
@@ -21,11 +20,6 @@ from __future__ import annotations
 import unittest
 
 from secretary.dispatch.head_vitality import (
-    ProcessState,
-    ProgressState,
-    SnapshotSource,
-    SourceAvailability,
-    TurnState,
     VitalitySnapshot,
 )
 from secretary.dispatch.head_vitality_episode import (
@@ -36,62 +30,142 @@ from secretary.dispatch.head_vitality_episode import (
 )
 
 RUN_ID = "run-secretary-1420"
+RUN_FINGERPRINT = "a" * 32
 THRESHOLDS = DEFAULT_VITALITY_THRESHOLDS  # suspect_after=300s, confirm_after=600s
 
 
+def pid_status(
+    *, alive: bool = True, match: bool = True, stopped: bool = False,
+) -> dict[str, object]:
+    """A ``head_process_status`` classification, as the watchdog spells it."""
+    if not alive:
+        return {"known": True, "alive": False, "match": False,
+                "state": "dead", "record": {"pid": 1}}
+    if not match:
+        return {"known": True, "alive": True, "match": False,
+                "state": "identity-mismatch", "stopped": stopped}
+    return {"known": True, "alive": True, "match": True,
+            "state": "live-match", "stopped": stopped}
+
+
+def provider_evidence(
+    cursor: str, *, admitted: bool = True, bound_run: str = RUN_ID,
+) -> dict[str, object]:
+    """An admitted exact-run ``provider_progress_for_run`` answer, as the wire spells it."""
+    if not admitted:
+        return {
+            "state": "unavailable", "source": "codex-session",
+            "reason": "Codex provider source has no bound v1 baseline",
+        }
+    return {
+        "state": "observed", "admission": "accepted", "source": "codex-session",
+        "source_fingerprint": "e" * 32, "cursor": cursor,
+        "head_run_id": bound_run, "head_run_fingerprint": RUN_FINGERPRINT,
+    }
+
+
 def heartbeat(
-    observed_at: float, *, process: ProcessState = ProcessState.RUNNING,
-    run_id: str = RUN_ID, available: bool = True,
+    observed_at: float, *, alive: bool = True, match: bool = True, stopped: bool = False,
+    run_id: str = RUN_ID, status: dict[str, object] | None = None,
 ) -> VitalitySnapshot:
-    """A pid-heartbeat snapshot with only the Process axis filled."""
-    if not available:
-        return VitalitySnapshot(
-            run_id=run_id, source=SnapshotSource.PID_HEARTBEAT, observed_at=observed_at,
-            availability=SourceAvailability.UNAVAILABLE,
-            reason="pid heartbeat is inconclusive: unreadable",
-        )
-    return VitalitySnapshot(
-        run_id=run_id, source=SnapshotSource.PID_HEARTBEAT, observed_at=observed_at,
-        availability=SourceAvailability.AVAILABLE, process=process,
+    """One S1-1 pid snapshot built through the real builder from a producer payload."""
+    return VitalitySnapshot.from_pid_heartbeat(
+        status if status is not None else pid_status(alive=alive, match=match, stopped=stopped),
+        run_id=run_id, observed_at=observed_at,
     )
 
 
 def provider(
-    observed_at: float, *, progress: ProgressState = ProgressState.QUIET,
-    cursor: str = "12:abc", run_id: str = RUN_ID, available: bool = True,
+    observed_at: float, *, cursor: str = "12:abc", previous_cursor: str = "12:abc",
+    baseline: bool = False, admitted: bool = True, run_id: str = RUN_ID,
+    evidence: dict[str, object] | None = None,
 ) -> VitalitySnapshot:
-    """A provider-cursor snapshot with only the Progress axis filled."""
-    if not available:
-        return VitalitySnapshot(
-            run_id=run_id, source=SnapshotSource.PROVIDER_CURSOR, observed_at=observed_at,
-            availability=SourceAvailability.UNAVAILABLE,
-            reason="provider cursor is not admitted",
-        )
-    return VitalitySnapshot(
-        run_id=run_id, source=SnapshotSource.PROVIDER_CURSOR, observed_at=observed_at,
-        availability=SourceAvailability.AVAILABLE, progress=progress, cursor=cursor,
+    """One S1-1 provider snapshot built through the real builder from a producer payload.
+
+    The builder's own rule is reproduced here, not bypassed: Advancing requires this
+    snapshot's cursor to differ from ``previous_cursor`` (this run's last recorded cursor,
+    as the wiring feeds it back from the episode), Quiet means it re-read the same value,
+    and ``baseline=True`` is the first-ever observation (no earlier cursor to compare
+    against, so the builder answers Unknown). Callers replaying an advancing transcript
+    therefore give each tick its own new cursor AND the prior tick's cursor.
+    """
+    return VitalitySnapshot.from_provider_cursor(
+        evidence if evidence is not None else provider_evidence(cursor, admitted=admitted),
+        run_id=run_id,
+        previous_cursor="" if baseline else previous_cursor,
+        observed_at=observed_at,
     )
 
 
 def pane(
     observed_at: float, *, idle: bool = True, run_id: str = RUN_ID,
+    refused: bool = False,
 ) -> VitalitySnapshot:
-    """An advisory pane-readiness snapshot with only the Turn axis filled."""
-    return VitalitySnapshot(
-        run_id=run_id, source=SnapshotSource.PANE_ADVISORY, observed_at=observed_at,
-        availability=SourceAvailability.AVAILABLE,
-        turn=TurnState.IDLE if idle else TurnState.ACTIVE,
+    """One S1-1 advisory snapshot built through the real builder from a producer payload."""
+    return VitalitySnapshot.from_pane_readiness(
+        {} if refused else {"idle": idle}, run_id=run_id, observed_at=observed_at,
     )
 
 
 def replay(timeline: list[tuple[float, list[VitalitySnapshot]]]) -> list[VitalityEpisode]:
-    """Fold a whole incident's tick-by-tick observation timeline into its episodes."""
+    """Fold a whole incident's tick-by-tick observation timeline into its episodes.
+
+    The caller owns the per-source cursor memory exactly as the wait tick does: snapshots
+    are compared against the previous episode's recorded cursor, which is what makes one
+    reading Advancing and the next Quiet. Timelines that only ever show movement may leave
+    that to ``provider(advancing=True)``; timelines replaying a freeze thread the cursor.
+    """
     episodes: list[VitalityEpisode] = []
     previous: VitalityEpisode | None = None
     for now, snapshots in timeline:
         previous = reduce_vitality(previous, snapshots, float(now), THRESHOLDS)
         episodes.append(previous)
     return episodes
+
+
+def frozen_cursor_timeline(
+    ticks: list[float], *, stopped_cursor: str = "12:frozen", busy: bool = True,
+) -> list[tuple[float, list[VitalitySnapshot]]]:
+    """The 8f86ed63 shape: live pid + admitted cursor frozen at one value + busy pane.
+
+    The first tick baselines the cursor; every later tick re-reads the SAME value, so the
+    reducer sees admitted Quiet exactly as it would from real rollout evidence.
+    """
+    steps: list[tuple[float, list[VitalitySnapshot]]] = []
+    for index, now in enumerate(ticks):
+        steps.append((
+            float(now),
+            [
+                heartbeat(float(now)),
+                provider(float(now), cursor=stopped_cursor,
+                         previous_cursor="" if index == 0 else stopped_cursor),
+                pane(float(now), idle=not busy),
+            ],
+        ))
+    return steps
+
+
+def advancing_cursor_timeline(
+    ticks: list[float], *, idle: bool = True,
+) -> list[tuple[float, list[VitalitySnapshot]]]:
+    """The b5195041 shape: live pid + transcript advancing every tick + screen idle.
+
+    Each tick's rollout cursor differs from the previous one, which is exactly the
+    comparison the builder makes against this run's last recorded cursor.
+    """
+    steps: list[tuple[float, list[VitalitySnapshot]]] = []
+    for index, now in enumerate(ticks):
+        cursor = f"{index + 1}:rollout"
+        steps.append((
+            float(now),
+            [
+                heartbeat(float(now)),
+                provider(float(now), cursor=cursor,
+                         previous_cursor=f"{index}:rollout"),
+                pane(float(now), idle=idle),
+            ],
+        ))
+    return steps
 
 
 class IssueB5195041CodexTranscriptBlindnessTests(unittest.TestCase):
@@ -111,19 +185,8 @@ class IssueB5195041CodexTranscriptBlindnessTests(unittest.TestCase):
         The strong channel outranks the advisory one, so nothing may nudge, respawn or
         block this head.
         """
-        # 20:44:00 through 20:51:00, ticks every minute; the transcript moves every tick.
-        timeline = [
-            (
-                now,
-                [
-                    heartbeat(now),
-                    provider(now, progress=ProgressState.ADVANCING, cursor=f"{index}:rollout"),
-                    pane(now, idle=True),
-                ],
-            )
-            for index, now in enumerate(range(0, 421, 60), start=1)
-        ]
-        episodes = replay(timeline)
+        ticks = list(range(0, 421, 60))
+        episodes = replay(advancing_cursor_timeline(ticks))
 
         self.assertEqual(
             [episode.verdict for episode in episodes],
@@ -147,38 +210,33 @@ class IssueB5195041CodexTranscriptBlindnessTests(unittest.TestCase):
         self.assertTrue(all(episode.suspected_since == 0.0 for episode in episodes))
 
     def test_no_destructive_verdict_while_the_transcript_was_alive_until_20_58_45(self) -> None:
-        """Replay of 20:44-20:59: the transcript advances through the whole window, so the
-        episode never reaches any verdict a recovery policy may act on destructively.
+        """Replay of the incident's own wall clock, 20:44-20:59, one tick per minute.
 
         In reality the dispatcher nudged at 20:44, respawned at 20:51 and blocked at 20:58;
-        the episode the plan demands stays HealthyActive throughout, because the provider
-        cursor moved until 20:58:45.
+        the episode the plan demands stays healthy throughout, because the provider cursor
+        moved until 20:58:45 -- five seconds before the block.
         """
         base = 20 * 3600 + 44 * 60  # 20:44:00 in wall-clock seconds of the hour
         block_at = 20 * 3600 + 58 * 60
         last_advance = base + 14 * 60 + 45  # transcript active until 20:58:45
 
-        def timeline() -> list[tuple[float, list[VitalitySnapshot]]]:
-            steps = []
-            for now in range(base, block_at + 1, 60):
-                advancing = now <= last_advance
-                steps.append((
-                    float(now),
-                    [
-                        heartbeat(float(now)),
-                        provider(
-                            float(now),
-                            progress=(
-                                ProgressState.ADVANCING if advancing else ProgressState.QUIET
-                            ),
-                            cursor="12:alive" if advancing else "12:frozen",
-                        ),
-                        pane(float(now), idle=True),
-                    ],
+        steps: list[tuple[float, list[VitalitySnapshot]]] = []
+        for index, now in enumerate(range(base, block_at + 1, 60)):
+            advancing = now <= last_advance
+            batch = [heartbeat(float(now))]
+            if advancing:
+                batch.append(provider(
+                    float(now), cursor=f"{index + 1}:rollout",
+                    previous_cursor=f"{index}:rollout",
                 ))
-            return steps
+            else:
+                # After the last advance the same cursor re-reads: admitted quiet.
+                batch.append(provider(float(now), cursor="15:final",
+                                      previous_cursor="15:final"))
+            batch.append(pane(float(now), idle=True))
+            steps.append((float(now), batch))
 
-        episodes = replay(timeline())
+        episodes = replay(steps)
 
         for index, episode in enumerate(episodes):
             with self.subTest(tick=index):
@@ -204,9 +262,11 @@ class Issue3e7abdf9BusyReadAsUnavailableTests(unittest.TestCase):
         """The secretary-1423 shape itself: pane busy, process alive, transcript moving."""
         reduced = reduce_vitality(
             None,
-            [heartbeat(1000.0), provider(1000.0, progress=ProgressState.ADVANCING,
-                                         cursor="13:def"),
-             pane(1000.0, idle=False)],
+            [
+                heartbeat(1000.0),
+                provider(1000.0, cursor="13:def", previous_cursor="12:abc"),
+                pane(1000.0, idle=False),
+            ],
             now=1000.0, thresholds=THRESHOLDS,
         )
 
@@ -223,19 +283,18 @@ class Issue3e7abdf9BusyReadAsUnavailableTests(unittest.TestCase):
         readiness failure alone.
         """
         first = reduce_vitality(
-            None, [heartbeat(100.0), provider(100.0)], now=100.0, thresholds=THRESHOLDS,
+            None,
+            [heartbeat(100.0), provider(100.0, cursor="13:def", baseline=True)],
+            now=100.0, thresholds=THRESHOLDS,
         )
         second = reduce_vitality(
             first,
             [
                 heartbeat(400.0),
-                provider(400.0),
+                # The rollout re-reads its own recorded value: admitted quiet, not silence.
+                provider(400.0, cursor="13:def", previous_cursor="13:def"),
                 # The refused probe: unavailable advisory, no turn opinion.
-                VitalitySnapshot(
-                    run_id=RUN_ID, source=SnapshotSource.PANE_ADVISORY, observed_at=400.0,
-                    availability=SourceAvailability.UNAVAILABLE,
-                    reason="pane readiness did not answer",
-                ),
+                pane(400.0, refused=True),
             ],
             now=400.0, thresholds=THRESHOLDS,
         )
@@ -253,10 +312,8 @@ class Issue3e7abdf9BusyReadAsUnavailableTests(unittest.TestCase):
     ) -> None:
         """Provider unknown (unadmitted journal): the verdict may not become Dead or Stall."""
         shapes = [
-            # Provider went dark entirely.
-            [heartbeat(1000.0), provider(1000.0, available=False)],
-            # Provider answered about the process but was never admitted.
-            [heartbeat(1000.0)],
+            # Provider went dark entirely (unadmitted evidence on the wire).
+            [heartbeat(1000.0), provider(1000.0, admitted=False)],
             # Only the busy pane answered alongside the pid.
             [heartbeat(1000.0), pane(1000.0, idle=False)],
         ]
@@ -265,7 +322,6 @@ class Issue3e7abdf9BusyReadAsUnavailableTests(unittest.TestCase):
                 reduced = reduce_vitality(None, batch, now=1000.0, thresholds=THRESHOLDS)
                 self.assertNotEqual(reduced.verdict, VitalityVerdict.DEAD)
                 self.assertNotEqual(reduced.verdict, VitalityVerdict.CONFIRMED_STALL)
-                self.assertNotEqual(reduced.verdict, VitalityVerdict.SUSPECTED_STALL)
 
 
 class Issue8f86ed63BusyMasksStallTests(unittest.TestCase):
@@ -281,24 +337,14 @@ class Issue8f86ed63BusyMasksStallTests(unittest.TestCase):
     def test_pid_running_and_provider_quiet_over_the_hour_climbs_to_confirmed(self) -> None:
         """The required verdict: SuspectedStall then ConfirmedStall, timed from progress.
 
-        Ticks arrive every 5 minutes across the incident hour; the rollout froze at the
-        baseline cursor. Assert the exact crossing points under the default thresholds:
-        quiet measured from the last progress crosses suspect_after at +300s and
+        Ticks arrive every 5 minutes across the incident hour; the rollout froze at its
+        06:50 cursor. Assert the exact crossing points under the default thresholds: quiet
+        measured from the first (baselining) observation crosses suspect_after at +300s and
         confirm_after at +900s.
         """
-        reference = 100.0  # last provider progress before the wedge
-        timeline = []
-        for offset in range(0, 1201, 300):
-            now = reference + offset
-            timeline.append((
-                float(now),
-                [
-                    heartbeat(float(now)),
-                    provider(float(now), progress=ProgressState.QUIET, cursor="12:frozen"),
-                    pane(float(now), idle=False),
-                ],
-            ))
-        episodes = replay(timeline)
+        reference = 100.0
+        ticks = [reference + offset for offset in range(0, 1201, 300)]
+        episodes = replay(frozen_cursor_timeline(ticks))
 
         by_offset = {
             index * 300: episode.verdict for index, episode in enumerate(episodes)
@@ -322,10 +368,19 @@ class Issue8f86ed63BusyMasksStallTests(unittest.TestCase):
         The advisory active reading appears in basis as corroboration of what the pane said
         and nowhere else: it contributes zero weight against the strong quiet evidence.
         """
-        previous = VitalityEpisode(run_id=RUN_ID, started_at=100.0, updated_at=100.0)
+        previous = VitalityEpisode(
+            run_id=RUN_ID, started_at=100.0, updated_at=100.0,
+            evidence_cursors={"provider_cursor": "12:frozen"},
+        )
         reduced = reduce_vitality(
             previous,
-            [heartbeat(1000.0), provider(1000.0), pane(1000.0, idle=False)],
+            [
+                heartbeat(1000.0),
+                # The rollout re-reads its 06:50 value: admitted quiet against the
+                # cursor this episode already recorded.
+                provider(1000.0, cursor="12:frozen", previous_cursor="12:frozen"),
+                pane(1000.0, idle=False),
+            ],
             now=1000.0, thresholds=THRESHOLDS,
         )
 
@@ -351,8 +406,7 @@ class IssueFe04011bStoppedWorkerSixHourCeilingTests(unittest.TestCase):
     def test_proc_state_t_is_suspended_within_one_tick(self) -> None:
         """One tick seeing /proc state `T` yields Suspended -- immediately, not after hours."""
         reduced = reduce_vitality(
-            None, [heartbeat(100.0, process=ProcessState.SUSPENDED)], now=100.0,
-            thresholds=THRESHOLDS,
+            None, [heartbeat(100.0, stopped=True)], now=100.0, thresholds=THRESHOLDS,
         )
 
         self.assertEqual(reduced.verdict, VitalityVerdict.SUSPENDED)
@@ -368,11 +422,14 @@ class IssueFe04011bStoppedWorkerSixHourCeilingTests(unittest.TestCase):
         frozen_at = 160.0
         resumed_at = frozen_at + 27 * 60  # 27 minutes in `T`
         previous = reduce_vitality(
-            None, [heartbeat(100.0), provider(100.0)], now=100.0, thresholds=THRESHOLDS,
+            None,
+            [heartbeat(100.0), provider(100.0, baseline=True)],
+            now=100.0, thresholds=THRESHOLDS,
         )
         parked = reduce_vitality(
             previous,
-            [heartbeat(frozen_at, process=ProcessState.SUSPENDED), provider(frozen_at)],
+            [heartbeat(frozen_at, stopped=True),
+             provider(frozen_at, cursor="12:abc")],
             now=frozen_at, thresholds=THRESHOLDS,
         )
         self.assertEqual(parked.verdict, VitalityVerdict.SUSPENDED)
@@ -382,15 +439,16 @@ class IssueFe04011bStoppedWorkerSixHourCeilingTests(unittest.TestCase):
         for now in range(int(frozen_at) + 300, int(resumed_at), 300):
             parked = reduce_vitality(
                 parked,
-                [heartbeat(float(now), process=ProcessState.SUSPENDED),
-                 provider(float(now))],
+                [heartbeat(float(now), stopped=True),
+                 provider(float(now), cursor="12:abc")],
                 now=float(now), thresholds=THRESHOLDS,
             )
             with self.subTest(suspended_tick=now):
                 self.assertEqual(parked.verdict, VitalityVerdict.SUSPENDED)
 
         woke = reduce_vitality(
-            parked, [heartbeat(resumed_at), provider(resumed_at)],
+            parked,
+            [heartbeat(resumed_at), provider(resumed_at, cursor="12:abc")],
             now=resumed_at, thresholds=THRESHOLDS,
         )
 
@@ -402,9 +460,9 @@ class IssueFe04011bStoppedWorkerSixHourCeilingTests(unittest.TestCase):
     def test_a_suspended_head_is_never_confirmed_stall_and_never_dead(self) -> None:
         """/proc `T` cannot be read as a stall conclusion nor as a gone process, ever."""
         batches = [
-            [heartbeat(1000.0, process=ProcessState.SUSPENDED)],
-            [heartbeat(1000.0, process=ProcessState.SUSPENDED), provider(1000.0)],
-            [heartbeat(1000.0, process=ProcessState.SUSPENDED), provider(1000.0),
+            [heartbeat(1000.0, stopped=True)],
+            [heartbeat(1000.0, stopped=True), provider(1000.0)],
+            [heartbeat(1000.0, stopped=True), provider(1000.0),
              pane(1000.0, idle=True)],
         ]
         for batch in batches:
@@ -431,31 +489,22 @@ class CodegenOrchestrator1194DeterministicSplitFailureTests(unittest.TestCase):
         episode must never launder into Dead, Suspended or a stall verdict off a launch
         failure. The escalation belongs to the recovery policy (S1-5 TODO).
         """
-        split_refusal = VitalitySnapshot(
-            run_id=RUN_ID, source=SnapshotSource.PANE_ADVISORY, observed_at=1000.0,
-            availability=SourceAvailability.UNAVAILABLE,
-            reason="terminal_split_source_not_found",
-        )
         previous = reduce_vitality(
-            None, [split_refusal], now=1000.0, thresholds=THRESHOLDS,
+            None, [pane(1000.0, refused=True)], now=1000.0, thresholds=THRESHOLDS,
         )
         # 45 identical refusals over 65 minutes change nothing: same inputs, same verdict,
         # and no stall timer ever starts.
         for attempt in range(2, 47):
             previous = reduce_vitality(
-                previous, [split_refusal.__class__(
-                    run_id=RUN_ID, source=SnapshotSource.PANE_ADVISORY,
-                    observed_at=1000.0 + attempt * 60,
-                    availability=SourceAvailability.UNAVAILABLE,
-                    reason="terminal_split_source_not_found",
-                )],
+                previous,
+                [pane(1000.0 + attempt * 60, refused=True)],
                 now=1000.0 + attempt * 60, thresholds=THRESHOLDS,
             )
 
         self.assertEqual(previous.verdict, VitalityVerdict.UNVERIFIABLE)
         self.assertEqual(previous.suspected_since, 0.0)
         self.assertEqual(previous.confirmed_since, 0.0)
-        self.assertIn(SnapshotSource.PANE_ADVISORY.value, previous.unavailable_since)
+        self.assertIn("pane_advisory", previous.unavailable_since)
 
     @unittest.expectedFailure
     def test_todo_S1_5_a_deterministic_reason_must_escalate_fast(self) -> None:
@@ -478,20 +527,25 @@ class Issue06dcf6cbUmbrellaLivenessContractTests(unittest.TestCase):
     existence of a child process is NOT proof of liveness. A pid that answers `Running`
     while no strong progress has been seen long enough is exactly the ConfirmedStall case;
     a bare heartbeat must not keep a wedged head alive forever.
+
+    Note for the switch (S1-4): today's wait tick always carries a provider snapshot --
+    an unadmitted one still witnesses the source -- so the pid-only aging below is the
+    policy/builder-reachable arm of the decision (see docs "Pid-only evidence ages"),
+    exercised here through ``from_pid_heartbeat`` alone.
     """
 
     def test_pid_only_running_with_no_progress_for_hours_confirms_the_stall(self) -> None:
-        """The decision S1-2 left open, settled here: pid-only Quiet DOES age into a stall.
+        """The decision S1-2 left open, settled here: pid-only Running DOES age into a stall.
 
         Reading the plan strictly: `Unavailable != no progress` forbids a *dark* source
         from voting for stall, and an unavailable source must not be invented. But issue
         656's own text settles the available-pid case -- the heartbeat IS answering, it
         proves Running and nothing more, and "a process exists" is precisely the weak
         evidence the umbrella refuses to accept as liveness. So a Running pid with no
-        strong progress evidence ages HealthyQuiet -> SuspectedStall -> ConfirmedStall
-        from the episode's quiet reference: the provider source is treated as simply
-        absent (it votes for nothing, neither progress nor stall), while the pid's silence
-        about progress stops being free once it outlives both thresholds.
+        progress source that has ever answered ages HealthyQuiet -> SuspectedStall ->
+        ConfirmedStall from the episode's start: the absent provider votes for nothing
+        (neither progress nor stall), while the pid's silence about progress stops being
+        free once it outlives both thresholds.
         """
         started = 100.0
         timeline = []

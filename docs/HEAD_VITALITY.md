@@ -128,10 +128,17 @@ heartbeat — Running, with no progress source ever heard from. S1-3 settled it 
   moves) nor quiet (no `quiet:<n>s` basis token names it).
 
 This is shadow-only until a policy card consumes episodes; nothing in today's watchdog reads it.
+One reachability note for sizing the production risk: today's wait tick always attaches a
+provider snapshot to the status it reduces — even `{"state": "unavailable"}` witnesses the
+source — so the pid-only aging arm is reachable through the builders and a future policy, but
+is not produced by the current wiring. A wired tick with an unadmitted provider lands in the
+freeze arm instead; S1-4 must decide which arm each wired shape deserves.
 
 ## Regression table
 
-Each historical incident is replayed tick by tick through the builders + reducer in
+Each historical incident is replayed tick by tick through the S1-1 snapshot builders fed with
+producer payload dicts (the shapes `head_process_status`, `provider_progress_for_run` and pane
+readiness put on the wire) and folded by the reducer in
 `tests/test_head_vitality_regression.py`, asserting exactly when the ladder crosses each rung
 under `DEFAULT_VITALITY_THRESHOLDS`. The asymmetry-of-cost principle behind every row: a false
 "working" costs an idle hour; a false kill loses a live round.

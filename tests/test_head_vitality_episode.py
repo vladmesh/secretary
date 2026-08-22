@@ -296,6 +296,55 @@ class UnavailableTests(unittest.TestCase):
         self.assertEqual(blind.verdict, VitalityVerdict.CONFIRMED_STALL)
         self.assertEqual(blind.confirmed_since, 900.0)
 
+    def test_a_confirmation_survives_a_dark_provider_while_the_pid_keeps_answering(self) -> None:
+        """The witnessed-freeze arm must never launder an earned confirmation.
+
+        Invariant (g) has no provider-shaped exception: the confirmation was earned on real
+        admitted quiet, and a provider going dark afterwards while the pid keeps answering
+        says nothing that could end it. The freeze arm must therefore preserve the verdict
+        AND its onset -- not demote the phase to HealthyQuiet with dangling stamps (the
+        S1-3 review's MAJOR 1), and not keep aging a phase that is already terminal.
+        """
+        previous = episode(last_progress_at=0.0)
+        confirmed = reduce_vitality(
+            previous, [heartbeat(1000.0), provider(1000.0)], now=1000.0, thresholds=THRESHOLDS,
+        )
+        self.assertEqual(confirmed.verdict, VitalityVerdict.CONFIRMED_STALL)
+        self.assertEqual(confirmed.confirmed_since, 900.0)
+        self.assertEqual(confirmed.suspected_since, 300.0)
+
+        # The provider goes dark mid-episode; the pid keeps answering Running.
+        dark = reduce_vitality(
+            confirmed,
+            [heartbeat(1300.0), provider(1300.0, available=False)],
+            now=1300.0, thresholds=THRESHOLDS,
+        )
+
+        self.assertEqual(dark.verdict, VitalityVerdict.CONFIRMED_STALL)
+        self.assertEqual(dark.confirmed_since, 900.0)
+        self.assertEqual(dark.suspected_since, 300.0)
+        self.assertIn(
+            "preserved-confirmation:provider-dark-pid-alive", dark.basis,
+        )
+        # Much later ticks change nothing: no aging past a terminal phase.
+        later = reduce_vitality(
+            dark,
+            [heartbeat(900_000.0), provider(900_000.0, available=False)],
+            now=900_000.0, thresholds=THRESHOLDS,
+        )
+        self.assertEqual(later.verdict, VitalityVerdict.CONFIRMED_STALL)
+        self.assertEqual(later.confirmed_since, 900.0)
+
+        # And only the four authorised endings still move it: real progress first.
+        resumed = reduce_vitality(
+            dark,
+            [heartbeat(900_100.0), provider(900_100.0, progress=ProgressState.ADVANCING,
+                                            cursor="13:def")],
+            now=900_100.0, thresholds=THRESHOLDS,
+        )
+        self.assertEqual(resumed.verdict, VitalityVerdict.HEALTHY_ACTIVE)
+        self.assertEqual(resumed.confirmed_since, 0.0)
+
 
 class AdvisoryTests(unittest.TestCase):
     """Invariant (e): pane evidence corroborates and never convicts."""

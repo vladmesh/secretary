@@ -448,8 +448,8 @@ def reduce_vitality(
         #     tracked dark in ``unavailable_since`` -- has evidence on file. Its silence is
         #     unavailability, and unavailable evidence freezes instead of spending (the
         #     plan's ``Unavailable != no progress``; sprint Done-when: an unavailable source
-        #     never feeds the stall counter), so the episode rests at HealthyQuiet: a
-        #     broken channel must not age a live head toward its death.
+        #     never feeds the stall counter), so no NEW stall time accrues here: a broken
+        #     channel must not age a live head toward its death.
         #   * No progress source has ever answered: the pid is this episode's only witness.
         #     The run is provably alive, and claiming ``quiet`` would assert an observation
         #     nobody made -- but neither may it rest healthy forever. Issue 656's contract
@@ -458,6 +458,11 @@ def reduce_vitality(
         #     every quiet conclusion uses. The absent source contributes no vote of its
         #     own: it is neither progress (the reference never moves) nor quiet (no
         #     ``quiet:<n>s`` token names it).
+        #
+        # In both arms the sticky-confirmation invariant holds unchanged (only progress,
+        # suspension, death or an identity change ends an earned confirmation): a phase the
+        # ladder has already reached is preserved below, never demoted by its observers'
+        # silence.
         reference = episode.last_progress_at or episode.started_at
         quiet_seconds = max(0.0, now - reference)
         basis.append("alive-no-progress-source@" + ",".join(sorted(
@@ -469,12 +474,33 @@ def reduce_vitality(
             or episode.evidence_cursors.keys() & _PROGRESS_SOURCES
         )
         if progress_witnessed:
-            verdict = VitalityVerdict.HEALTHY_QUIET
-            episode = replace(
-                episode,
-                reason="progress source known to this episode but not answering; frozen",
-            )
+            # The freeze arm: no new stall time accrues while the witnessed progress source
+            # is silent. One exception, and it is the sticky-confirmation invariant, not an
+            # aging rule: a confirmation the ladder already EARNED on real quiet evidence
+            # is not laundered back to health by its observers going dark -- exactly as in
+            # the all-strong-dark branch below. Only progress, suspension, death or an
+            # identity change ends it; its onset stands so the phase stays auditable.
+            if episode.verdict is VitalityVerdict.CONFIRMED_STALL:
+                verdict = VitalityVerdict.CONFIRMED_STALL
+                episode = replace(
+                    episode,
+                    confirmed_since=(
+                        episode.confirmed_since
+                        or reference + thresholds.suspect_after + thresholds.confirm_after
+                    ),
+                    reason="progress source known but not answering; confirmation stands",
+                )
+                basis.append("preserved-confirmation:provider-dark-pid-alive")
+            else:
+                verdict = VitalityVerdict.HEALTHY_QUIET
+                episode = replace(
+                    episode,
+                    reason="progress source known to this episode but not answering; frozen",
+                )
         elif quiet_seconds >= thresholds.suspect_after + thresholds.confirm_after:
+            # The pid-only aging arm: no progress source has ever answered, so issue 656's
+            # "existence is not liveness" applies and the pid's own long silence about
+            # progress climbs the ladder from the episode's reference.
             verdict = VitalityVerdict.CONFIRMED_STALL
             episode = replace(
                 episode,

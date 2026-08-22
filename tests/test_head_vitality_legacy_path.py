@@ -270,17 +270,28 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
 
         Expected failure: ``_gate_pending`` reads only the clock -- a suspended worker
         behind a pending gate is invisible until six hours pass, exactly the incident.
+
+        The fixture ordering matters (S1-3 review MAJOR 2): the pending gate answers must be
+        queued BEFORE the report tick, so the second validate-side tick reaches
+        ``_gate_pending`` -- the machinery the incident is about -- and the expected failure
+        below is the gate's six-hour blindness, not a fixture mismatch.
         """
-        self.start_dispatcher()
-        self.run_worker_to_validate_and_review()
-
-        # CI hangs; the card parks in gate-pending.
         from secretary.dispatcher_gate import GateResult
-        self.host.gate_results = [GateResult("pending", "CI still running")]
 
-        pending_tick = self.tick()
-        self.assertEqual(pending_tick["action"], "gate-pending")
-        self.assertEqual(pending_tick["status"], "ok")
+        self.start_dispatcher()
+        self.host.gate_results = [
+            GateResult("pending", "CI still running"),
+            GateResult("pending", "CI still running"),
+            GateResult("pending", "CI still running"),
+        ]
+        self.tick()
+        self.report_done()
+        # The report's own move lands in validate; the gate has not been asked yet.
+        self.assertEqual(self.tick()["to"], "validate")
+
+        gated = self.tick()
+        self.assertEqual(gated["action"], "gate-pending")
+        self.assertEqual(gated["status"], "ok")
 
         # Meanwhile the worker's process is discovered suspended (its /proc state is `T`).
         stopped_status = {
