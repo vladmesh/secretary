@@ -46,7 +46,7 @@ from secretary.dispatch.head_vitality_policy import (
     DEFAULT_RECOVERY_THRESHOLDS as _DEFAULT_RECOVERY_THRESHOLDS,
 )
 from secretary.dispatch.head_vitality_policy import (
-    RecoveryDecision as _RecoveryDecision,
+    RUNG_ESCALATED as _RUNG_ESCALATED,
 )
 from secretary.dispatch.head_vitality_policy import (
     RecoveryIntent as _RecoveryIntent,
@@ -59,9 +59,6 @@ from secretary.dispatch.head_vitality_policy import (
 )
 from secretary.dispatch.head_vitality_policy import (
     decide_recovery as _decide_recovery,
-)
-from secretary.dispatch.head_vitality_policy import (
-    RUNG_ESCALATED as _RUNG_ESCALATED,
 )
 from secretary.dispatcher_gate import (
     GATE_PENDING_STALL_SECONDS,
@@ -5027,15 +5024,13 @@ class DispatcherRuntime:
         if episode is None:
             return None
         decision = _decide_recovery(episode, episode, now, self._recovery_thresholds())
-        if decision.intent is _RecoveryIntent.OBSERVE:
-            # An observe with unchanged state still rewrites nothing: persisting per tick
-            # would churn the record for zero information. Only a rung/refusal change is
-            # worth a save, which apply_rung_state makes cheap to detect by value.
-            if (
-                episode.recovery_rung == decision.rung
-                and episode.deterministic_refusals == decision.refusals
-            ):
-                return decision, episode
+        # An observe with unchanged state rewrites nothing: persisting per tick would churn
+        # the record for zero information. Only a rung/refusal change is worth a save.
+        if decision.intent is _RecoveryIntent.OBSERVE and (
+            episode.recovery_rung == decision.rung
+            and episode.deterministic_refusals == decision.refusals
+        ):
+            return decision, episode
         updated = _apply_rung_state(episode, decision)
         return decision, updated
 
@@ -6802,7 +6797,7 @@ class DispatcherRuntime:
             and "idle" not in status
         ):
             # Nothing was observed: no honest episode exists for this tick.
-            return getattr(record, "worker_vitality_episode")
+            return record.worker_vitality_episode
         try:
             return self._reduce_and_store_vitality_episode(
                 task, record, records, payload, status, kind="worker", now=time.time(),

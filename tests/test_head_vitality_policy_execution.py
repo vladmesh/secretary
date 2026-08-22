@@ -22,20 +22,18 @@ from pathlib import Path
 from unittest import mock
 
 import secretary.dispatcher as secretary_dispatcher
+from secretary.dispatcher_heartbeat import heartbeat_identity
 from secretary.dispatcher_state import DispatcherRecord
 from secretary.dispatcher_watchdog import (
     head_process_status,
     suspension_response_window_seconds,
 )
-from secretary.dispatcher_heartbeat import heartbeat_identity
-from triggered_agents.runtime.head import with_pid_heartbeat
-
 from tests.test_dispatcher import CARD_REF, DispatcherRuntimeFixture
 from tests.test_head_vitality_wait_decisions import (
     RUNNING_STATUS,
     STOPPED_STATUS,
-    _suspension_comments,
 )
+from triggered_agents.runtime.head import with_pid_heartbeat
 
 
 class WindowExpiryTests(DispatcherRuntimeFixture, unittest.TestCase):
