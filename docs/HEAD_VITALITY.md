@@ -111,6 +111,46 @@ Rules the reducer enforces (each pinned by a named test in `tests/test_head_vita
 - The reducer is pure and deterministic: same inputs, same episode, no I/O, no clock. The caller
   owns `now`.
 
+### Pid-only evidence ages (the issue 656 decision)
+
+S1-2 left one branch open: what an episode concludes when its *only* strong witness is the pid
+heartbeat — Running, with no progress source ever heard from. S1-3 settled it (pinned by
+`test_pid_only_running_with_no_progress_for_hours_confirms_the_stall`), separating two cases:
+
+- **A progress source this episode has witnessed** — it left a cursor, or sits dark in
+  `unavailable_since` — keeps the freeze semantics unchanged. Its silence is unavailability:
+  `Unavailable != no progress`, so a broken channel must never age a live head toward its death.
+- **No progress source has ever answered**: the pid is the only witness, and bare process
+  existence is not proof of liveness (`issue:06dcf6cb`). The pid's sustained answer of "running,
+  and nothing else" ages HealthyQuiet → SuspectedStall at `suspect_after` → ConfirmedStall at
+  `suspect_after + confirm_after`, measured from `started_at` (no advancement was ever seen). The
+  absent provider contributes no vote of its own: it is neither progress (the reference never
+  moves) nor quiet (no `quiet:<n>s` basis token names it).
+
+This is shadow-only until a policy card consumes episodes; nothing in today's watchdog reads it.
+
+## Regression table
+
+Each historical incident is replayed tick by tick through the builders + reducer in
+`tests/test_head_vitality_regression.py`, asserting exactly when the ladder crosses each rung
+under `DEFAULT_VITALITY_THRESHOLDS`. The asymmetry-of-cost principle behind every row: a false
+"working" costs an idle hour; a false kill loses a live round.
+
+| Incident | Test | Required verdict / behaviour |
+|---|---|---|
+| `issue:b5195041` (board 951, secretary-1420): idle ~380s ×3 against a live Codex transcript; nudge → respawn → Blocked on a working head | `IssueB5195041CodexTranscriptBlindnessTests` | provider Advancing ⇒ `HealthyActive`; advisory pane-idle alone never leaves `Unverifiable`; no destructive verdict while the transcript moved |
+| `issue:3e7abdf9` (board 997, secretary-1423): wait-for-readiness timeout on a working head read as transport refusal; retained worker replaced | `Issue3e7abdf9BusyReadAsUnavailableTests` | busy pane + Running + Advancing ⇒ `HealthyActive`; readiness Unavailable is Turn-axis only and never stall evidence; provider unknown ⇒ `HealthyQuiet`, never Dead/ConfirmedStall |
+| `issue:8f86ed63` (board 1010, secretary-1428): 11 busy-retry cycles in an hour, rollout frozen since 06:50, composer stale ("busy is readiness, not liveness") | `Issue8f86ed63BusyMasksStallTests` | Running + admitted Quiet over the hour ⇒ `SuspectedStall` at +300s, `ConfirmedStall` at +900s from last progress; the busy pane corroborates in `basis` only |
+| `issue:fe04011b` (board 1156, codegen-orchestrator-1197): worker+child in `T (stopped)` 27 min, revived by SIGCONT; ticks wrote `gate-pending ok`, six-hour ceiling applied | `IssueFe04011bStoppedWorkerSixHourCeilingTests` | `/proc` state `T` ⇒ `Suspended` within one tick; stall clocks frozen for the whole stop; never ConfirmedStall, never Dead |
+| codegen-orchestrator-1194 (board card, sprint 1148): reviewer spawn failed 49 min, 45× identical deterministic `terminal_split_source_not_found` with a live terminal | `CodegenOrchestrator1194DeterministicSplitFailureTests` | not a vitality question: snapshot Unavailable with a deterministic reason keeps `Unverifiable` forever; TODO(S1-5) test marks that such a reason must escalate fast inside one attempt |
+| `issue:06dcf6cb` (board 656): umbrella contract — child-process existence ≠ liveness | `Issue06dcf6cbUmbrellaLivenessContractTests` | pid-only Running with no progress evidence ages ⇒ SuspectedStall ⇒ ConfirmedStall (see "Pid-only evidence ages" above) |
+
+The legacy decision path itself is characterised in `tests/test_head_vitality_legacy_path.py`:
+what the wait tick and gate do *today* for b5195041, 3e7abdf9 and fe04011b, with
+`expectedFailure` marking the two behaviours that still contradict the plan (idle respawn without
+provider evidence; suspension invisible behind a pending gate until six hours pass). S1-4 flips
+those to real assertions when the watchdog switches onto episodes.
+
 ### Thresholds
 
 Defaults are comparability choices, not authority: `suspect_after = IDLE_STALL_DEFAULT`
