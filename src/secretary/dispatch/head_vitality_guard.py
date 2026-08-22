@@ -139,10 +139,11 @@ def _refused(
     action: str, refusal: GuardRefusal, reason: str,
     episode: VitalityEpisode | None = None,
 ) -> GuardDecision:
+    verdict = getattr(getattr(episode, "verdict", None), "value", "")
     return GuardDecision(
         action=action, allowed=False, refusal=refusal,
         reason=reason,
-        verdict="" if episode is None else episode.verdict.value,
+        verdict=verdict,
         episode_run_id="" if episode is None else episode.run_id,
     )
 
@@ -198,11 +199,13 @@ def assert_destructive_allowed(
         )
     if episode.verdict is not VitalityVerdict.CONFIRMED_STALL \
             and episode.verdict is not VitalityVerdict.DEAD:
-        # A ladder rung this card does not know: refuse on principle. New verdicts must
-        # be added to the map above explicitly before they can destroy anything.
+        # A ladder rung this card does not know -- or a malformed verdict that never was
+        # one: refuse on principle. New verdicts must be added to the map above
+        # explicitly before they can destroy anything.
+        raw = getattr(episode.verdict, "value", episode.verdict)
         return _refused(
             action, GuardRefusal.UNVERIFIABLE,
-            f"verdict {episode.verdict.value} is not one the guard knows as "
+            f"verdict {raw} is not one the guard knows as "
             "destructive-authorising; refusing on principle",
             episode,
         )
