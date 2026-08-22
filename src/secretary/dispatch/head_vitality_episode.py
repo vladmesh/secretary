@@ -330,7 +330,12 @@ def reduce_vitality(
         snapshot for snapshot in strong
         if snapshot.progress in (ProgressState.ADVANCING, ProgressState.QUIET)
     ]
-    for snapshot in owned.values():
+    # ``owned`` is a dict keyed by source, so iterating it directly would let the batch's answer
+    # order decide the words a deterministic reduction writes. Every ``basis`` token emitted in
+    # this loop names its source, so the loop walks the sorted sources instead: same inputs in any
+    # order, same basis out (the order-independence tests pin exactly this for dark sources too).
+    for source_value in sorted(snapshot.source.value for snapshot in owned.values()):
+        snapshot = owned[SnapshotSource(source_value)]
         if snapshot.availability is SourceAvailability.UNAVAILABLE:
             if snapshot.source.value not in episode.unavailable_since:
                 episode = replace(
