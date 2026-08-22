@@ -27,7 +27,7 @@ os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
 from secretary import dispatcher as dispatcher_module
 from tests.test_dispatcher import (
-    DispatcherRuntimeTests,
+    DispatcherRuntimeFixture,
 )
 
 
@@ -45,7 +45,7 @@ def _refuse_everything(_episode, action, _now, **_kwargs):
     return _Decision()
 
 
-class WatchdogPathsAreGuardedTests(DispatcherRuntimeTests):
+class WatchdogPathsAreGuardedTests(DispatcherRuntimeFixture, unittest.TestCase):
     """Every watchdog-driven destructive step must pass through the vitality guard."""
 
     def _with_refusing_guard(self):
@@ -143,10 +143,10 @@ class WatchdogPathsAreGuardedTests(DispatcherRuntimeTests):
             head_run=record.worker_head_run, leaf=record.worker_leaf,
         )
 
-    def test_the_ceiling_fallback_on_an_unobserved_head_is_guarded(self) -> None:
-        """No reduction ever ran (patched out): the ceiling branch still may not destroy
-        without the guard's blessing. The nudge is spent first so the tick drives past
-        the prompt to the ceiling-driven respawn."""
+    def test_the_unobservable_ceiling_escalates_without_touching_the_head(self) -> None:
+        """No reduction ever ran (patched out): the ceiling branch may not destroy an
+        unobserved head. Its bound is operator escalation -- one durable comment per
+        wait cycle plus a degraded outcome -- never a stop or a replacement."""
         self._open_the_second_round()
         self._head_at_its_prompt()
         self.tick()
@@ -154,7 +154,7 @@ class WatchdogPathsAreGuardedTests(DispatcherRuntimeTests):
         self.tick()  # the round's one prompt
         self._rewind_idle()
 
-        with self._with_refusing_guard(), mock.patch.object(
+        with mock.patch.object(
             type(self.runtime), "_reduce_and_store_vitality_episode",
             lambda *args, **kwargs: None,
         ):
@@ -165,11 +165,15 @@ class WatchdogPathsAreGuardedTests(DispatcherRuntimeTests):
             self.runtime.production_state.save(payload)
             outcome = self.tick()
 
-        self.assertEqual(outcome["action"], "worker-guard-refused")
+        self.assertEqual(outcome["action"], "worker-unobserved-wait-escalated")
+        self.assertEqual(outcome["status"], "degraded")
         self.assertNotIn("restart_worker", self.host.calls)
+        self.assertNotIn("stop_head:worker", self.host.calls)
+        last = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
+        self.assertIn("NOT stopped or replaced", last)
 
 
-class TheGuardReallyFiresTests(DispatcherRuntimeTests):
+class TheGuardReallyFiresTests(DispatcherRuntimeFixture, unittest.TestCase):
     """With the real guard, the same paths reach their destructive step.
 
     A coverage test that only proves refusal would also pass if the guard were never
@@ -197,7 +201,7 @@ class TheGuardReallyFiresTests(DispatcherRuntimeTests):
         self.assertEqual(guard.call_args.args[1], "worker-respawn")
 
 
-class LegitimateStopsWithoutAnEpisodeTests(DispatcherRuntimeTests):
+class LegitimateStopsWithoutAnEpisodeTests(DispatcherRuntimeFixture, unittest.TestCase):
     """Operator, lifecycle and launch-recovery stops need no episode and get none."""
 
     def test_an_operator_stop_runs_without_any_episode(self) -> None:

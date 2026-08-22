@@ -40,12 +40,6 @@ from secretary.dispatch.head_vitality_episode import (
     reduce_vitality as _reduce_vitality,
 )
 from secretary.dispatch.head_vitality_guard import (
-    GuardDecision as _GuardDecision,
-)
-from secretary.dispatch.head_vitality_guard import (
-    GuardRefusal as _GuardRefusal,
-)
-from secretary.dispatch.head_vitality_guard import (
     assert_destructive_allowed as _assert_destructive_allowed,
 )
 from secretary.dispatcher_gate import (
@@ -333,12 +327,6 @@ from secretary.dispatcher_watchdog import (
     heartbeat_is_mismatch as _heartbeat_is_mismatch,
 )
 from secretary.dispatcher_watchdog import (
-    idle_outcome as _idle_outcome,
-)
-from secretary.dispatcher_watchdog import (
-    idle_stall_seconds as _idle_stall_seconds,
-)
-from secretary.dispatcher_watchdog import (
     initial_output_stall_seconds as _initial_output_stall_seconds,
 )
 from secretary.dispatcher_watchdog import (
@@ -355,9 +343,6 @@ from secretary.dispatcher_watchdog import (
 )
 from secretary.dispatcher_watchdog import (
     wait_cycle_token as _wait_cycle_token,
-)
-from secretary.dispatcher_watchdog import (
-    wait_outcome as _wait_outcome,
 )
 from secretary.dispatcher_worker_lifecycle import (
     BUSY_RETRY_INITIAL_SECONDS,
@@ -4784,15 +4769,18 @@ class DispatcherRuntime:
           the round generation like every nudge; a suspicion never destroys.
         * ``ConfirmedStall`` / ``Dead`` -> the ordinary recovery path
           (``_trigger_wait_watchdog``), whose every destructive step re-checks the guard.
-        * No episode at all (nothing was ever observed for this run) -> the pre-vitality
-          ceilings keep the wait bounded, exactly as before, because a run nobody could
-          observe is also a run nobody can prove alive.
+        * No episode at all (nothing was ever observed for this run), or ``Unverifiable``
+          -> ``wait`` while the ceiling has not elapsed, then an OPERATOR escalation
+          (``_escalate_unobservable_wait``): one idempotent durable comment plus a
+          degraded outcome naming the evidence gap. Such a run is never destroyed -- a
+          run nobody could observe is also a run nobody can prove dead -- so its wait is
+          bounded by escalation, not by replacement. This differs from main before
+          S1-4, which reclaimed such heads on the clock alone; that behaviour is what
+          the guard now refuses.
 
-        The role's outer stall ceiling stays as a belt-and-braces bound ONLY where it
-        agrees with the verdict: it fires on ``Unverifiable``/no-episode waits (where the
-        reducer genuinely has nothing) but never overrides ``HealthyActive``,
-        ``HealthyQuiet`` or ``Suspended`` -- a ceiling must not kill what the evidence
-        says is alive or unobservable.
+        Evidence-shaped legacy branches inside this fallback (no output since launch; no
+        terminal progress) keep their pre-vitality triggers because they act on what a
+        source actually said, and their destructive steps are still fenced by the guard.
         """
         ref = task["ref"]
         expectation = _wait_expectation(kind)
@@ -4881,9 +4869,15 @@ class DispatcherRuntime:
             self.save_records(payload, records)
             return plain_wait()
         # Unverifiable, or no episode at all: nothing strong answered, so the honest
-        # answer is that nobody knows. The pre-vitality outer ceiling keeps such a wait
-        # bounded -- but only while it stays unverifiable; any earned verdict above
-        # already returned.
+        # answer is that nobody knows. The plan forbids KILLING such a run -- and the
+        # guard enforces exactly that, refusing every destructive step on this path --
+        # but an unobservable wait is still bounded: once the role's outer ceiling has
+        # elapsed with no verdict earned, the tick escalates to the OPERATOR (one
+        # idempotent durable comment per wait cycle plus a degraded outcome). Escalation
+        # is not replacement: the head is never touched here. The two legacy
+        # evidence-shaped branches below keep their pre-vitality meaning because they
+        # act only on what a source actually said (no output since launch; no terminal
+        # progress), and even they are fenced by the guard.
         stall = _stall_seconds(kind)
         waiting_since = float(getattr(record, f"{kind}_waiting_since") or 0.0)
         started_at = float(getattr(record, f"{kind}_started_at") or 0.0)
@@ -4906,31 +4900,67 @@ class DispatcherRuntime:
             setattr(record, f"{kind}_waiting_since", now)
             self.save_records(payload, records)
             return plain_wait()
-        outcome = _wait_outcome(
-            waiting_since=waiting_since,
-            now=now,
-            stall_seconds=stall,
-            respawns=int(getattr(record, f"{kind}_respawns") or 0),
-        )
-        if outcome == "wait":
-            return plain_wait()
-        if outcome == "respawn":
-            return self._guard_or_wait(
-                task, record, records, payload, attempt_id, kind=kind, now=now,
-                action=f"{kind}-respawn",
-                proceed=lambda: self._respawn_wait(
-                    task, record, records, payload, attempt_id, kind=kind, now=now,
-                    trigger=f"no {_wait_expectation(kind)} within {stall}s",
-                ),
+        unobserved_for = now - waiting_since
+        if unobserved_for >= stall:
+            return self._escalate_unobservable_wait(
+                task, record, attempt_id, kind=kind,
+                seconds=int(unobserved_for), ceiling=stall,
+                runtime_reason=runtime_reason,
             )
-        return self._guard_or_wait(
-            task, record, records, payload, attempt_id, kind=kind, now=now,
-            action=f"{kind}-escalate",
-            proceed=lambda: self._escalate_wait(
-                task, record, records, payload, attempt_id, kind=kind, stall=stall,
-                trigger=f"no {_wait_expectation(kind)}",
+        return plain_wait()
+
+    def _escalate_unobservable_wait(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        attempt_id: str,
+        *,
+        kind: str,
+        seconds: int,
+        ceiling: int,
+        runtime_reason: str = "",
+    ) -> dict[str, Any]:
+        """Escalate an unobservable head to the operator WITHOUT touching it.
+
+        Reached only from the no-episode/Unverifiable fallback of
+        ``_decide_wait_by_verdict`` once the role's outer ceiling has elapsed on a wait
+        nobody could observe. The plan's asymmetry forbids killing what nothing could
+        read (the guard refuses it), but an operator must not inherit an unbounded silent
+        wait either, so this is the bound: one durable comment per wait cycle (keyed like
+        every watchdog comment, so it cannot flood) naming the evidence gap and the
+        elapsed span, plus a degraded tick outcome. The head is not signalled, stopped or
+        replaced; if it starts answering again the reduction earns a verdict and the
+        ordinary table takes over.
+        """
+        ref = task["ref"]
+        detail = f"; {runtime_reason}" if runtime_reason else ""
+        self.writer.comment(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            body=(
+                f"Dispatcher wait watchdog ({kind}): nothing could observe this head for "
+                f"{seconds}s (outer ceiling {ceiling}s) -- no readable heartbeat and no "
+                f"provider answer{detail}. The head was NOT stopped or replaced: no "
+                "evidence earned that. Escalating to the operator; the card keeps "
+                "waiting until someone looks or the head becomes observable again."
+            ),
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id, f"{kind}-unobserved-wait", ref,
+                _wait_cycle_token(record),
             ),
         )
+        return {
+            "status": "degraded",
+            "step": "review" if kind == "review" else "advance",
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "action": f"{kind}-unobserved-wait-escalated",
+            "reason": (
+                f"nothing could observe the head for {seconds}s "
+                f"(ceiling {ceiling}s); escalated to the operator, head untouched"
+            ),
+        }
 
     def _comment_suspension_once(
         self,
@@ -5152,7 +5182,7 @@ class DispatcherRuntime:
                 + f"; basis {', '.join(episode.basis) if episode.basis else 'none'}."
                 + (
                     "" if episode.verdict in DESTRUCTIVE_VERDICTS
-                    else " Recorded only - does not influence dispatcher decisions."
+                    else " Recorded only - does not authorise destruction."
                 )
             ),
             request_id=request_id,

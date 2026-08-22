@@ -194,6 +194,7 @@ waits). Verdict → action:
 | `SuspectedStall` | At most one idempotent report nudge per round generation (the existing `_prompt_worker_report` machinery), then visible degradation (`{kind}-stall-suspected`). A suspicion never destroys. |
 | `ConfirmedStall` | The existing recovery path: one report prompt if the round has not spent it, else `_trigger_wait_watchdog` → respawn once → escalate to Blocked. Only from this verdict. |
 | `Dead` | The existing not-live handling: reclaim via `_trigger_wait_watchdog`. |
+| No episode / `Unverifiable`, ceiling elapsed | **Operator escalation, head untouched** (`_escalate_unobservable_wait`): one idempotent durable comment naming the evidence gap plus a degraded `{kind}-unobserved-wait-escalated` outcome. An unobservable wait is bounded by escalation, NOT by replacement — the guard refuses every destructive step for such a run, so the pre-S1-4 behaviour (reclaim on the clock alone) is gone on purpose. |
 
 ### The guard
 
@@ -215,15 +216,16 @@ A raising reducer fails safe to `wait` + one comment.
 A refusal produces a degraded `{kind}-guard-refused` outcome plus one idempotent durable comment
 keyed on the wait-cycle token — never a silent no-op loop without telemetry.
 
-**Guarded entry points (watchdog-driven):**
-
-- `dispatcher.DispatcherRuntime._trigger_wait_watchdog` — the verdict-driven recovery entry point;
+- **Guarded entry points (watchdog-driven):**
+  `dispatcher.DispatcherRuntime._trigger_wait_watchdog` — the verdict-driven recovery entry point;
   fences both its arms (`_respawn_wait`, `_escalate_wait`) through `_guard_or_wait`.
-- `dispatcher.DispatcherRuntime._decide_wait_by_verdict`'s no-episode ceiling fallback — the
-  pre-vitality ceilings keep unobservable waits bounded, but their destructive branches still ask
-  the guard (which refuses without an episode).
-- `dispatcher_dispatcher_worker_lifecycle`/review confirmed-stop paths reached from the two above
-  (`_stop_worker_confirmed`, `_end_review_pane_confirmed`) run only underneath a guarded entry.
+  The evidence-shaped branches of the no-episode fallback (`no output since launch`; `no terminal
+  progress`) keep their pre-vitality triggers because they act on what a source actually said;
+  their destructive steps run under `_trigger_wait_watchdog` and are fenced like every other.
+  The pure clock branch of that same fallback no longer destroys at all: it escalates to the
+  operator (see the verdict table).
+  The confirmed-stop paths reached from these two (`_stop_worker_confirmed`,
+  `_end_review_pane_confirmed`) run only underneath a guarded entry.
 
 **Intentionally NOT guarded (legitimate without any episode):**
 
