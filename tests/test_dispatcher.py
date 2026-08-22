@@ -22,6 +22,11 @@ from secretary._fsutil import file_lock, try_file_lock
 from secretary.board.models import Actor, EntityKind, Event, EventKind
 from secretary.board_transport import ensure as ensure_board_transport
 from secretary.checkpoint import CheckpointPusher, CheckpointResult, CheckpointWriter
+from secretary.dispatch.head_vitality import HeadVitalityError
+from secretary.dispatch.head_vitality_episode import (
+    VitalityEpisode,
+    VitalityVerdict,
+)
 from secretary.dispatcher import (
     STOPPED_BY_OPERATOR,
     STOPPED_BY_RECONCILIATION,
@@ -495,6 +500,50 @@ class WorkerReportNudgeStateTests(unittest.TestCase):
     def test_an_unknown_stage_is_not_silently_discarded(self) -> None:
         with self.assertRaises(ValueError):
             DispatcherRecord.from_json({"worker_report_nudge": {"stage": "future-stage"}})
+
+
+class VitalityEpisodeRecordTests(unittest.TestCase):
+    """Shadow-mode vitality episodes on the record, as durable values (head-vitality plan)."""
+
+    def test_an_episode_round_trips_through_a_record(self) -> None:
+        stored = VitalityEpisode(
+            run_id="run-1",
+            verdict=VitalityVerdict.SUSPECTED_STALL,
+            started_at=0.0,
+            suspected_since=300.0,
+            last_progress_at=100.0,
+            last_progress_source="provider_cursor",
+            evidence_cursors={"provider_cursor": "14:def"},
+            unavailable_since={"pane_advisory": 500.0},
+            basis=("quiet:400s@provider_cursor", "suspected-stall"),
+            reason="strong quiet for 400s with no advancement",
+            activity_epoch=2,
+            updated_at=400.0,
+        )
+
+        restored = DispatcherRecord.from_json({
+            "worker_vitality_episode": json.loads(json.dumps(stored.to_json())),
+            "review_vitality_episode": json.loads(json.dumps(stored.to_json())),
+        })
+
+        self.assertEqual(restored.worker_vitality_episode, stored)
+        self.assertEqual(restored.review_vitality_episode, stored)
+
+    def test_absence_is_no_episode_not_an_empty_one(self) -> None:
+        """A record from before the field existed - or a role never yet observed - carries no
+        claim at all, which is the one reading shadow mode may not fudge."""
+        record = DispatcherRecord.from_json({})
+
+        self.assertIsNone(record.worker_vitality_episode)
+        self.assertIsNone(record.review_vitality_episode)
+        self.assertIsNone(record.to_json()["worker_vitality_episode"])
+        self.assertIsNone(record.to_json()["review_vitality_episode"])
+
+    def test_a_damaged_stored_episode_stops_the_load(self) -> None:
+        with self.assertRaises(HeadVitalityError):
+            DispatcherRecord.from_json({
+                "worker_vitality_episode": {"version": 1, "verdict": "totally-fine"},
+            })
 
 
 def _clear_env(test: unittest.TestCase, *names: str) -> None:
