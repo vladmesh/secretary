@@ -448,6 +448,30 @@ class SerialisationTests(unittest.TestCase):
         with self.assertRaises(HeadVitalityError):
             VitalitySnapshot.from_json({**base, "observed_at": None})
 
+    def test_from_json_rejects_a_boolean_version_that_compares_equal_to_one(self) -> None:
+        """``True == 1`` in Python: an equality check alone would accept it."""
+        base = VitalitySnapshot.from_pane_readiness(
+            {"idle": True}, run_id=RUN_ID, observed_at=1.0
+        ).to_json()
+        for forged in (True, 1.0):
+            with self.subTest(version=forged), self.assertRaises(HeadVitalityError):
+                VitalitySnapshot.from_json({**base, "version": forged})
+
+    def test_from_json_rejects_non_finite_timestamps(self) -> None:
+        base = VitalitySnapshot.from_pane_readiness(
+            {"idle": True}, run_id=RUN_ID, observed_at=1.0
+        ).to_json()
+        for forged in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(observed_at=forged), self.assertRaises(HeadVitalityError):
+                VitalitySnapshot.from_json({**base, "observed_at": forged})
+
+    def test_a_constructor_timestamp_must_be_finite_too(self) -> None:
+        for forged in (float("nan"), float("inf")):
+            with self.subTest(observed_at=forged), self.assertRaises(HeadVitalityError):
+                VitalitySnapshot.from_pane_readiness(
+                    {"idle": True}, run_id=RUN_ID, observed_at=forged
+                )
+
 
 if __name__ == "__main__":
     unittest.main()
