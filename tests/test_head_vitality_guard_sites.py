@@ -20,16 +20,13 @@ from __future__ import annotations
 
 import os
 import tempfile
-import time
 import unittest
-from pathlib import Path
 from unittest import mock
 
 os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
 from secretary import dispatcher as dispatcher_module
-from tests.test_dispatcher import (  # noqa: E402
-    CARD_REF,
+from tests.test_dispatcher import (
     DispatcherRuntimeTests,
 )
 
