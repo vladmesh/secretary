@@ -47,7 +47,13 @@ def _suspension_comments(case) -> list[str]:
 
 
 class SuspendedWaitTickDecisionTests(DispatcherRuntimeFixture, unittest.TestCase):
-    """The Suspended arm of ``_decide_wait_by_verdict``: comment once per freeze span."""
+    """The Suspended arm of ``_decide_wait_by_verdict``, through the S1-5 policy.
+
+    The card's own contract, per freeze span: exactly one SIGCONT (the request-id is
+    derived from the span stamp, so a re-suspension with a new span fires again while
+    every tick inside one span replays the same id), one comment per policy action, never
+    a signal beyond SIGCONT, and no renewal of the outer wait clock.
+    """
 
     def setUp(self) -> None:
         super().setUp()
@@ -55,20 +61,24 @@ class SuspendedWaitTickDecisionTests(DispatcherRuntimeFixture, unittest.TestCase
         self.tick()  # claim + launch; the worker heartbeat binds a live pid
         self.host.worker_status_result = dict(STOPPED_STATUS)
 
-    def test_a_suspended_head_waits_with_one_comment_and_no_signal(self) -> None:
-        """Observe -> decide: one comment names the frozen span; nothing is signalled."""
+    def test_a_suspended_head_gets_one_sigcont_one_comment_and_no_stop(self) -> None:
+        """Observe -> decide: one identity-fenced SIGCONT names the span; nothing is stopped."""
         first = self.tick()
-        self.assertEqual(first["action"], "waiting-worker-report")
+        self.assertEqual(first["action"], "worker-sigcont-sent")
         episode = self._pilot_record()["worker_vitality_episode"]
         self.assertEqual(episode["verdict"], "suspended")
+        # Rung 3 = response window running after the send; the span key is stamped.
+        self.assertEqual(episode["recovery_rung"], 3)
+        self.assertEqual(episode["recovery_span_started_at"], episode["stall_frozen_since"])
 
         decided = self.tick()
 
-        self.assertEqual(decided["action"], "waiting-worker-report")
+        # Inside the window the policy observes: same comment count, no second signal.
+        self.assertEqual(decided["action"], "worker-suspension-observed")
         comments = _suspension_comments(self)
         self.assertEqual(len(comments), 1, comments)
         self.assertIn("parked on a stop signal", comments[0])
-        self.assertIn("Nothing was signalled or stopped", comments[0])
+        self.assertIn("identity-fenced SIGCONT", comments[0])
         record = self._pilot_record()
         self.assertEqual(record["worker_respawns"], 0)
         self.assertNotIn("restart_worker", self.host.calls)
@@ -103,6 +113,10 @@ class SuspendedWaitTickDecisionTests(DispatcherRuntimeFixture, unittest.TestCase
         episode = self._pilot_record()["worker_vitality_episode"]
         self.assertEqual(episode["verdict"], "healthy_quiet")
         self.assertEqual(episode["stall_frozen_since"], 0.0)
+        # The recovered span cleared the policy ladder with it: a future suspension
+        # starts fresh instead of inheriting this span's rungs.
+        self.assertEqual(episode["recovery_rung"], 0)
+        self.assertEqual(episode["recovery_span_started_at"], 0.0)
         self.assertEqual(len(_suspension_comments(self)), 1, "a thaw writes nothing")
 
         # Re-freeze inside a different wall-clock second so the span (and its key) moves.
@@ -124,7 +138,8 @@ class SuspendedWaitTickDecisionTests(DispatcherRuntimeFixture, unittest.TestCase
         self.tick()
         decided = self.tick()
 
-        self.assertEqual(decided["action"], "waiting-review-verdict")
+        # The review twin runs the identical policy: one SIGCONT, then in-window observes.
+        self.assertEqual(decided["action"], "review-suspension-observed")
         comments = [
             str(comment.get("body") or "")
             for comment in self.reader.show(CARD_REF)["comments"]
@@ -203,9 +218,13 @@ class WaitTickVerdictTableTests(DispatcherRuntimeFixture, unittest.TestCase):
         # Age the persisted quiet past suspect_after but short of confirm_after.
         self._age_vitality_quiet("worker", 500.0)
         first = self.tick()
+        # Assert the verdict instead of skipping (S1-4 review follow-up): a fixture that
+        # cannot reach suspected_stall is a broken test, not an inapplicable one.
         episode = self._pilot_record()["worker_vitality_episode"]
-        if episode["verdict"] != "suspected_stall":
-            self.skipTest(f"fixture reached {episode['verdict']} instead of suspected_stall")
+        self.assertEqual(
+            episode["verdict"], "suspected_stall",
+            f"the fixture aged quiet to {episode['verdict']} instead of suspected_stall",
+        )
         self.assertEqual(first["action"], "worker-stall-suspected")
         self.assertEqual(first["status"], "degraded")
         prompts = self.host.calls.count("prompt_worker_report")
@@ -222,12 +241,12 @@ class WaitTickVerdictTableTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         The guard would refuse a disabled arm's drift into the ceiling path -- but the
         refusal is itself observable. This test pins the arm positively: the outcome is
-        the plain wait, not a guard refusal and not a respawn.
+        the policy's in-window observation, not a guard refusal and not a respawn.
         """
         outcome = self._decide_with(dict(STOPPED_STATUS))
-        self.assertEqual(outcome["action"], "waiting-worker-report")
+        self.assertEqual(outcome["action"], "worker-suspension-observed")
         self.assertNotIn("guard-refused", str(outcome.get("action")))
-        # And the arm really produced the comment through the real code path.
+        # And the arm really produced the SIGCONT through the real code path.
         self.assertEqual(len(_suspension_comments(self)), 1)
 
 

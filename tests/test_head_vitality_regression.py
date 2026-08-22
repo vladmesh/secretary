@@ -532,18 +532,96 @@ class CodegenOrchestrator1194DeterministicSplitFailureTests(unittest.TestCase):
         self.assertIs(snapshot.availability, SourceAvailability.UNAVAILABLE)
         self.assertIn("terminal_split_source_not_found", snapshot.reason)
 
-    @unittest.expectedFailure
-    def test_todo_S1_5_a_deterministic_reason_must_escalate_fast(self) -> None:
-        """TODO(S1-5, recovery policy): ``terminal_split_source_not_found`` is an
-        authoritative deterministic class per the plan ("Быстро перескакивать ранги могут
-        только авторитетные детерминированные классы"), so the policy must skip the retry
-        ladder and escalate within the same attempt instead of re-sending the same command
-        45 times. Written as expectedFailure: no policy consumes episodes yet, so the
-        contract below has nothing to assert itself against."""
-        # The policy input would be the persisted episode plus the deterministic reason;
-        # the assertion below names the contract S1-5 owes.
-        self.fail("S1-5: no recovery-policy seam exists yet to escalate "
-                  "'terminal_split_source_not_found' inside one attempt")
+    def test_a_deterministic_reason_escalates_fast_through_the_policy(self) -> None:
+        """The S1-5 contract, flipped: N identical authoritative refusals escalate at once.
+
+        The 1194 replay (45 refusals over 46 minutes) is fed through the real reduction and
+        the real policy exactly as the dispatcher wires them: each tick's unavailable pane
+        snapshot carries the reason on the episode, and the policy counts identical
+        authoritative sightings. At the limit it returns ``escalate_operator`` -- inside one
+        attempt, minutes into the loop instead of 49 minutes in -- while a heuristic reason
+        repeated just as often earns only observation. The reducer's own honesty is asserted
+        first (Unverifiable throughout): escalation is a POLICY conclusion about a launch
+        fact, never a vitality verdict about the head.
+        """
+        from secretary.dispatch.head_vitality_policy import (
+            DeterministicReasonClass,
+            RecoveryIntent,
+            apply_rung_state,
+            decide_recovery,
+            deterministic_reason_class,
+        )
+
+        # The allowlist classifies the incident's own token, and only authoritative tokens:
+        self.assertIs(
+            deterministic_reason_class("pane readiness did not answer: "
+                                       "terminal_split_source_not_found"),
+            DeterministicReasonClass.SPLIT_SOURCE_NOT_FOUND,
+        )
+        self.assertIsNone(deterministic_reason_class(
+            "pane readiness did not answer: transport timeout",
+        ))
+
+        previous = reduce_vitality(
+            None,
+            [pane(1000.0, refused=True, reason="terminal_split_source_not_found")],
+            now=1000.0, thresholds=THRESHOLDS,
+        )
+        escalated: list[bool] = []
+        for attempt in range(2, 47):
+            previous = reduce_vitality(
+                previous,
+                [pane(1000.0 + attempt * 60, refused=True,
+                      reason="terminal_split_source_not_found")],
+                now=1000.0 + attempt * 60, thresholds=THRESHOLDS,
+            )
+            decision = decide_recovery(previous, previous, now=1000.0 + attempt * 60)
+            escalated.append(decision.intent is RecoveryIntent.ESCALATE_OPERATOR)
+            # The dispatcher persists the policy's count each tick; the replay does too,
+            # or the count would restart at 1 forever and the limit could never fire.
+            previous = apply_rung_state(previous, decision)
+            if any(escalated):
+                break
+
+        # The reducer stays honest for the whole loop...
+        self.assertEqual(previous.verdict, VitalityVerdict.UNVERIFIABLE)
+        # ...and the policy escalates within the FIRST THREE sightings (limit 3), minutes
+        # into the incident instead of 49 minutes after it.
+        self.assertTrue(any(escalated))
+        first_escalation = escalated.index(True) + 1
+        self.assertLessEqual(first_escalation, 3, f"escalated at sighting {first_escalation}")
+
+    def test_a_heuristic_reason_repeated_is_never_evidence(self) -> None:
+        """The distinction the card names in code: heuristic repetition is not authority.
+
+        The same dark-pane shape with an ordinary outage diagnostic, fed through the same
+        reduction and policy for far more than the deterministic limit, never escalates:
+        unavailability freezes evidence instead of spending it, and its repetition buys no
+        rung.
+        """
+        from secretary.dispatch.head_vitality_policy import (
+            RecoveryIntent,
+            apply_rung_state,
+            decide_recovery,
+        )
+
+        previous = reduce_vitality(
+            None,
+            [pane(1000.0, refused=True, reason="transport timeout")],
+            now=1000.0, thresholds=THRESHOLDS,
+        )
+        for attempt in range(2, 47):
+            previous = reduce_vitality(
+                previous,
+                [pane(1000.0 + attempt * 60, refused=True, reason="transport timeout")],
+                now=1000.0 + attempt * 60, thresholds=THRESHOLDS,
+            )
+            decision = decide_recovery(previous, previous, now=1000.0 + attempt * 60)
+            self.assertIsNot(decision.intent, RecoveryIntent.ESCALATE_OPERATOR)
+            previous = apply_rung_state(previous, decision)
+
+        self.assertEqual(previous.verdict, VitalityVerdict.UNVERIFIABLE)
+        self.assertEqual(previous.deterministic_refusals, 0)
 
 
 class Issue06dcf6cbUmbrellaLivenessContractTests(unittest.TestCase):
