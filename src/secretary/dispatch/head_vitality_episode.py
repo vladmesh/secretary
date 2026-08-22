@@ -527,7 +527,9 @@ def reduce_vitality(
             # EARNED on real evidence before the channel went dark stands frozen -- with its
             # onset -- until one of the four authorised endings moves it; only phases below
             # suspicion stay (truthfully) at HealthyQuiet, because freezing must not invent
-            # a suspicion nobody earned.
+            # a suspicion nobody earned. The dark channel's own diagnostic still rides on
+            # ``reason`` (see the tail of this function): a launch refusal must stay readable
+            # for the policy's deterministic allowlist even while the pid keeps the head alive.
             if episode.verdict is VitalityVerdict.CONFIRMED_STALL:
                 verdict = VitalityVerdict.CONFIRMED_STALL
                 episode = replace(
@@ -553,7 +555,18 @@ def reduce_vitality(
                 verdict = VitalityVerdict.HEALTHY_QUIET
                 episode = replace(
                     episode,
-                    reason="progress source known to this episode but not answering; frozen",
+                    reason=(
+                        # The frozen note is the honest conclusion here, but a dark
+                        # channel's own diagnostic wins when it has one: an authoritative
+                        # launch refusal is more useful to the operator (and to the
+                        # policy's deterministic allowlist) than the generic frozen words.
+                        next(
+                            (snapshot.reason for name in sorted(owned)
+                             if (snapshot := owned[name]).availability
+                             is SourceAvailability.UNAVAILABLE and snapshot.reason),
+                            "progress source known to this episode but not answering; frozen",
+                        )
+                    ),
                 )
         elif quiet_seconds >= thresholds.suspect_after + thresholds.confirm_after:
             # The pid-only aging arm: no progress source has ever answered, so issue 656's

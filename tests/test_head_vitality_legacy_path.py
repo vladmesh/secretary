@@ -340,3 +340,93 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
         ]
         self.assertEqual(len(comments), 1, comments)
         self.assertIn("identity-fenced SIGCONT", comments[0])
+
+    def test_an_expired_response_window_mid_gate_escalates_without_stopping(self) -> None:
+        """The second rung works inside the gate wait too: operator, never a stop."""
+        from secretary.dispatcher_gate import GateResult
+        from secretary.dispatcher_watchdog import suspension_response_window_seconds
+
+        self.start_dispatcher()
+        self.host.gate_results = [
+            GateResult("pending", "CI still running"),
+            GateResult("pending", "CI still running"),
+            GateResult("pending", "CI still running"),
+            GateResult("pending", "CI still running"),
+        ]
+        self.tick()
+        self.report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+        self.tick()  # first pending stamp
+
+        stopped_status = {
+            "known": True, "live": True, "reason": "live",
+            "last_activity": time.time(), "pid_confirmed": True, "idle": False,
+            "pid_status": {"known": True, "alive": True, "match": True,
+                           "state": "live-match", "stopped": True},
+        }
+        self.host.worker_status_result = dict(stopped_status)
+
+        sent = self.tick()
+        self.assertEqual(sent["action"], "worker-sigcont-sent")
+
+        # Age BOTH span stamps past the response window: the head stayed parked.
+        payload = self.runtime.production_state.load()
+        episode = payload["records"][CARD_REF]["worker_vitality_episode"]
+        for name in ("stall_frozen_since", "recovery_span_started_at"):
+            if episode.get(name):
+                episode[name] -= suspension_response_window_seconds() + 60
+        payload["records"][CARD_REF]["worker_vitality_episode"] = episode
+        self.runtime.production_state.save(payload)
+
+        escalated = self.tick()
+
+        self.assertEqual(escalated["action"], "worker-suspension-escalated")
+        record = self.record_of()
+        self.assertEqual(record.worker_respawns, 0)
+        # The six-hour gate ceiling was nowhere near elapsed; only the policy spoke.
+        self.assertLess(
+            time.time() - record.gate_pending_since, 600,
+            "the escalation must come from the response window, not the gate clock",
+        )
+        self.assertNotIn("restart_worker", self.host.calls)
+        self.assertNotIn("stop_head:worker", self.host.calls)
+        self.assertNotIn("stop_workspace", self.host.calls)
+
+    def test_a_deterministic_refusal_mid_gate_escalates_fast(self) -> None:
+        """The 1194 contract holds while CI is pending: N identical refusals reach a human.
+
+        A reviewer spawn refusing deterministically behind a pending gate must not sit out
+        the six-hour rollup ceiling either; three sightings are enough for the policy.
+        """
+        from secretary.dispatch.head_vitality_policy import (
+            DEFAULT_DETERMINISTIC_REFUSAL_LIMIT,
+        )
+        from secretary.dispatcher_gate import GateResult
+
+        self.start_dispatcher()
+        self.host.gate_results = [GateResult("pending", "CI still running")] * 8
+        self.tick()
+        self.report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+        self.tick()  # first pending stamp (no scripted worker status yet: plain wait)
+
+        refusal_status = {
+            "known": True, "live": True, "reason": "live",
+            "last_activity": time.time(), "pid_confirmed": False,
+            "provider_progress": {"state": "unavailable",
+                                  "reason": "terminal_split_source_not_found"},
+        }
+        self.host.worker_status_result = dict(refusal_status)
+        for _ in range(DEFAULT_DETERMINISTIC_REFUSAL_LIMIT):
+            outcome = self.tick()
+
+        self.assertEqual(outcome["action"], "worker-deterministic-refusal-escalated")
+        comments = [
+            str(comment.get("body") or "")
+            for comment in self.reader.show(CARD_REF)["comments"]
+            if isinstance(comment, dict) and "authoritative refusal" in str(comment.get("body") or "")
+        ]
+        self.assertEqual(len(comments), 1, comments)
+        record = self.record_of()
+        self.assertEqual(record.worker_respawns, 0)
+        self.assertNotIn("restart_worker", self.host.calls)
