@@ -129,6 +129,65 @@ class SuspendedWaitTickDecisionTests(DispatcherRuntimeFixture, unittest.TestCase
             "the second freeze span must reach the operator as its own comment",
         )
 
+    def test_recovery_clears_the_rung_on_the_right_role_only(self) -> None:
+        """The rung reset lands on the suspended role's own episode slot -- never across.
+
+        Card S1-6 regression: ``_run_recovery_policy`` used to persist the reset with a
+        hardcoded ``kind="worker"``, so a RECOVERED review head left its cleared episode
+        (bound to the review run's run_id) parked on ``worker_vitality_episode`` while
+        ``review_vitality_episode.recovery_rung`` stayed stale. A foreign-run episode in
+        the worker slot is fail-safe (the destructive guard refuses it as FOREIGN_RUN)
+        but wrong: the review ladder never reset, and the worker slot held another
+        run's state.
+        """
+        # Worker first, so both roles hold episodes and neither slot starts empty.
+        self.host.worker_status_result = dict(STOPPED_STATUS)
+        self.tick()
+        worker_suspended = self._pilot_record()["worker_vitality_episode"]
+        self.assertEqual(worker_suspended["verdict"], "suspended")
+        self.assertGreater(worker_suspended["recovery_rung"], 0)
+
+        # The worker resumes: the WORKER mirror of the fix -- its own slot clears.
+        self.host.worker_status_result = dict(RUNNING_STATUS)
+        worker_resumed = self.tick()
+
+        self.assertEqual(worker_resumed["action"], "waiting-worker-report")
+        worker_cleared = self._pilot_record()["worker_vitality_episode"]
+        self.assertEqual(worker_cleared["verdict"], "healthy_quiet")
+        self.assertEqual(worker_cleared["recovery_rung"], 0)
+        self.assertEqual(
+            worker_cleared["run_id"], worker_suspended["run_id"],
+            "the same worker episode is updated in place",
+        )
+
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self.host.review_status_result = dict(STOPPED_STATUS)
+        self.tick()
+        review_suspended = self._pilot_record()["review_vitality_episode"]
+        worker_before = self._pilot_record()["worker_vitality_episode"]
+        self.assertEqual(review_suspended["verdict"], "suspended")
+        self.assertGreater(review_suspended["recovery_rung"], 0)
+
+        # The review head resumes: its own slot must be the one that clears.
+        self.host.review_status_result = dict(RUNNING_STATUS)
+        resumed = self.tick()
+
+        self.assertEqual(resumed["action"], "waiting-review-verdict")
+        record = self._pilot_record()
+        review_after = record["review_vitality_episode"]
+        worker_after = record["worker_vitality_episode"]
+        self.assertEqual(review_after["recovery_rung"], 0)
+        self.assertEqual(review_after["recovery_span_started_at"], 0.0)
+        self.assertEqual(
+            review_after["run_id"], review_suspended["run_id"],
+            "the same review episode is updated, not replaced by a foreign one",
+        )
+        self.assertEqual(
+            worker_after, worker_before,
+            "a review recovery must not touch the worker's episode slot",
+        )
+
     def test_a_suspended_review_head_gets_the_same_arm(self) -> None:
         """The review twin decides identically: comment once, no stop, no replacement."""
         self._run_worker_to_validate()
