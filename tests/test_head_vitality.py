@@ -424,7 +424,9 @@ class SerialisationTests(unittest.TestCase):
         self.assertEqual(len(self.round_trip(snapshot).cursor or ""), CURSOR_LIMIT)
 
     def test_from_json_refuses_payloads_that_change_meaning(self) -> None:
-        base = VitalitySnapshot.from_pane_readiness({"idle": True}, run_id=RUN_ID).to_json()
+        base = VitalitySnapshot.from_pane_readiness(
+            {"idle": True}, run_id=RUN_ID, observed_at=1.0
+        ).to_json()
         cases = [
             {**base, "version": 99},
             {**base, "version": "1"},
@@ -440,7 +442,9 @@ class SerialisationTests(unittest.TestCase):
                 VitalitySnapshot.from_json(payload)
 
     def test_from_json_rejects_a_non_number_timestamp_before_coercing_it(self) -> None:
-        base = VitalitySnapshot.from_pane_readiness({"idle": True}, run_id=RUN_ID).to_json()
+        base = VitalitySnapshot.from_pane_readiness(
+            {"idle": True}, run_id=RUN_ID, observed_at=1.0
+        ).to_json()
         with self.assertRaises(HeadVitalityError):
             VitalitySnapshot.from_json({**base, "observed_at": None})
 

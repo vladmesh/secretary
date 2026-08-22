@@ -280,7 +280,7 @@ class VitalitySnapshot:
         *,
         run_id: str,
         previous_cursor: str = "",
-        observed_at: float = 0.0,
+        observed_at: float,
     ) -> VitalitySnapshot:
         """Wrap one ``dispatcher_tui.provider_progress_for_run`` answer against the earlier cursor.
 
@@ -342,7 +342,7 @@ class VitalitySnapshot:
 
     @classmethod
     def from_pane_readiness(
-        cls, status: Any, *, run_id: str, observed_at: float = 0.0
+        cls, status: Any, *, run_id: str, observed_at: float
     ) -> VitalitySnapshot:
         """Wrap one pane readiness answer (`{"idle": bool}` as callers of ``PaneHost`` build it).
 
