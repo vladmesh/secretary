@@ -4889,8 +4889,11 @@ class DispatcherRuntime:
         if verdict in (VitalityVerdict.HEALTHY_ACTIVE, VitalityVerdict.HEALTHY_QUIET):
             # Fresh evidence of life: renew the outer window and wait. No clock on this
             # path may act against what the evidence calls alive. A recovered suspension
-            # lands here too; the policy's rung reset rides the same recovery decision.
-            self._run_recovery_policy(task, record, records, payload, episode=episode, now=now)
+            # lands here too; the policy's rung reset rides the same recovery decision,
+            # persisted back onto this same role's episode slot.
+            self._run_recovery_policy(
+                task, record, records, payload, episode=episode, kind=kind, now=now,
+            )
             setattr(record, f"{kind}_waiting_since", now)
             self.save_records(payload, records)
             return plain_wait()
@@ -5088,21 +5091,31 @@ class DispatcherRuntime:
         payload: dict[str, Any],
         *,
         episode: Any,
+        kind: str,
         now: float,
     ) -> None:
         """Let the policy observe a non-suspended verdict (rung reset after recovery).
 
         The wait-tick table already handled this verdict; the policy call exists purely to
-        clear the persisted ladder when a suspension has resolved, so the next span starts
-        at rung 2 again instead of inheriting an old escalation.
+        clear the persisted ladder when a suspension has resolved: the cleared episode comes
+        back at ``RUNG_NONE``, and a later fresh suspension span climbs
+        ``RUNG_SIGCONT_SENT`` -> ``RUNG_RESPONSE_WINDOW`` again instead of inheriting an old
+        escalation.
+
+        ``kind`` routes the persistence, exactly as everywhere else on this path: the reset
+        is stored back onto the SAME role's episode slot the reduction read it from
+        (``review_vitality_episode`` for the review head, the worker slot for the worker).
+        Persisting across roles would park one run's episode in the other role's field --
+        a foreign-run episode the destructive guard refuses as FOREIGN_RUN until some later
+        ordinary reduction overwrites it, and a rung that never resets on the real subject.
         """
-        asked = self._recovery_policy_decision(episode=episode, kind="worker", now=now)
+        asked = self._recovery_policy_decision(episode=episode, kind=kind, now=now)
         if asked is None:
             return
         _, updated = asked
         if updated is not episode:
             self._store_recovery_episode(
-                record, records, payload, task["ref"], kind="worker", episode=updated,
+                record, records, payload, task["ref"], kind=kind, episode=updated,
             )
 
     def _execute_recovery_intent(

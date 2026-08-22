@@ -122,11 +122,8 @@ class DeterministicAllowlistTests(unittest.TestCase):
             "pane readiness did not answer",
             "pid heartbeat is inconclusive: not-yet-written",
             "provider cursor is unadmitted",
-            "terminal_split_source_not_foundish but actually a different string is fine",
         ):
             with self.subTest(reason=reason):
-                if reason == "terminal_split_source_not_foundish but actually a different string is fine":
-                    continue  # substring match is deliberate; see the positive test above
                 self.assertIsNone(deterministic_reason_class(reason))
 
 
