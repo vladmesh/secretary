@@ -85,6 +85,21 @@ def idle_stall_seconds() -> int:
     return positive_int("SECRETARY_HEAD_IDLE_STALL_SECONDS", IDLE_STALL_DEFAULT)
 
 
+# How long a suspended head is given to answer its SIGCONT before the recovery policy
+# escalates to the operator (S1-5). Deliberately minutes-scale: the whole rung exists so a
+# stopped head reaches a human far below the six-hour ceilings, while a resuming head gets
+# many tick cadences to show life. An unparseable value falls back rather than raising out of
+# module import and taking the dispatcher with it, like every ceiling here.
+SUSPENSION_RESPONSE_WINDOW_DEFAULT = 5 * 60
+
+
+def suspension_response_window_seconds() -> int:
+    """The SIGCONT response window for the recovery policy's second rung."""
+    return positive_int(
+        "SECRETARY_HEAD_SUSPENSION_RESPONSE_SECONDS", SUSPENSION_RESPONSE_WINDOW_DEFAULT,
+    )
+
+
 def bring_up_defer_attempts() -> int:
     """How many deferred bring-ups one role's head gets before its card is blocked."""
     return positive_int("SECRETARY_BRINGUP_DEFER_ATTEMPTS", BRING_UP_DEFER_ATTEMPTS_DEFAULT)

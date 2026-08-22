@@ -23,6 +23,7 @@ from unittest import mock
 os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
 from secretary import dispatcher as dispatcher_module
+from secretary.dispatch.head_vitality_episode import VitalityVerdict
 from secretary.dispatcher_state import DispatcherRecord, now_rfc3339
 from secretary.tasks import TaskAudit, TaskReader, TaskWriter
 from tests.dispatcher_fixtures import ensure_attempt
@@ -272,24 +273,22 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
 
     A card waiting in validate whose worker sat in ``T (stopped)`` kept writing
     ``gate-pending status: ok errors: []`` with ``worker_idle_since=0``; only the six-hour
-    ``GATE_PENDING_STALL_SECONDS`` ceiling applied. The plan's Done-when says `T` must not
-    wait out a six-hour ceiling; S1-4/S1-5 flip this test when the gate path learns to ask
-    whether the process it waits on is alive.
+    ``GATE_PENDING_STALL_SECONDS`` ceiling applied. Flipped by S1-5 (SIGCONT / response
+    window): the gate-pending tick now runs the same vitality reduction + recovery policy
+    for the worker head as the report wait does, so `/proc` state `T` is acted on within
+    one tick and the six-hour ceiling remains only the outer bound for the CI rollup.
     """
 
-    @unittest.expectedFailure
-    def test_flip_in_S1_4_S1_5_a_stopped_worker_ends_the_gate_wait_before_the_ceiling(
+    def test_a_stopped_worker_ends_the_gate_wait_before_the_ceiling(
         self,
     ) -> None:
-        """The plan's demand: /proc state `T` inside the gate wait is acted on in one tick.
+        """The plan's demand, flipped (S1-5): `T` inside the gate wait is acted on in one tick.
 
-        Expected failure: ``_gate_pending`` reads only the clock -- a suspended worker
-        behind a pending gate is invisible until six hours pass, exactly the incident.
-
+        The original defect: ``_gate_pending`` read only the clock -- a suspended worker
+        behind a pending gate was invisible until six hours passed, exactly the incident.
         The fixture ordering matters (S1-3 review MAJOR 2): the pending gate answers must be
         queued BEFORE the report tick, so the second validate-side tick reaches
-        ``_gate_pending`` -- the machinery the incident is about -- and the expected failure
-        below is the gate's six-hour blindness, not a fixture mismatch.
+        ``_gate_pending`` -- the machinery the incident is about.
         """
         from secretary.dispatcher_gate import GateResult
 
@@ -324,5 +323,20 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
 
         noticed = self.tick()
 
-        # What the plan demands: the suspension is seen within a tick, not after 6h.
-        self.assertNotEqual(noticed["action"], "gate-pending")
+        # What the plan demands: the suspension is seen within a tick, not after 6h --
+        # one identity-fenced SIGCONT, rung state on file, nothing stopped.
+        self.assertEqual(noticed["action"], "worker-sigcont-sent")
+        record = self.record_of()
+        episode = record.worker_vitality_episode
+        assert episode is not None
+        self.assertEqual(episode.verdict, VitalityVerdict.SUSPENDED)
+        self.assertEqual(episode.recovery_rung, 3)
+        self.assertEqual(record.worker_respawns, 0)
+        self.assertNotIn("restart_worker", self.host.calls)
+        comments = [
+            str(comment.get("body") or "")
+            for comment in self.reader.show(CARD_REF)["comments"]
+            if isinstance(comment, dict) and "stop signal" in str(comment.get("body") or "")
+        ]
+        self.assertEqual(len(comments), 1, comments)
+        self.assertIn("identity-fenced SIGCONT", comments[0])

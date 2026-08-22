@@ -42,6 +42,27 @@ from secretary.dispatch.head_vitality_episode import (
 from secretary.dispatch.head_vitality_guard import (
     assert_destructive_allowed as _assert_destructive_allowed,
 )
+from secretary.dispatch.head_vitality_policy import (
+    DEFAULT_RECOVERY_THRESHOLDS as _DEFAULT_RECOVERY_THRESHOLDS,
+)
+from secretary.dispatch.head_vitality_policy import (
+    RecoveryDecision as _RecoveryDecision,
+)
+from secretary.dispatch.head_vitality_policy import (
+    RecoveryIntent as _RecoveryIntent,
+)
+from secretary.dispatch.head_vitality_policy import (
+    RecoveryThresholds as _RecoveryThresholds,
+)
+from secretary.dispatch.head_vitality_policy import (
+    apply_rung_state as _apply_rung_state,
+)
+from secretary.dispatch.head_vitality_policy import (
+    decide_recovery as _decide_recovery,
+)
+from secretary.dispatch.head_vitality_policy import (
+    RUNG_ESCALATED as _RUNG_ESCALATED,
+)
 from secretary.dispatcher_gate import (
     GATE_PENDING_STALL_SECONDS,
     GATE_TRANSPORT_MAX_ATTEMPTS,
@@ -340,6 +361,9 @@ from secretary.dispatcher_watchdog import (
 )
 from secretary.dispatcher_watchdog import (
     stall_seconds as _stall_seconds,
+)
+from secretary.dispatcher_watchdog import (
+    suspension_response_window_seconds as _suspension_response_window_seconds,
 )
 from secretary.dispatcher_watchdog import (
     wait_cycle_token as _wait_cycle_token,
@@ -4858,13 +4882,18 @@ class DispatcherRuntime:
                 ),
             }
         if verdict is VitalityVerdict.SUSPENDED:
-            # Operator-visible, non-destructive: SIGCONT and its response window are
-            # S1-5. The comment is keyed on the frozen span so it cannot flood.
-            self._comment_suspension_once(task, record, episode, kind=kind)
-            return plain_wait()
+            # The recovery policy owns this arm (S1-5): one identity-fenced SIGCONT per
+            # suspension span, then a bounded response window, then operator escalation --
+            # never a stop. The comment is keyed per span so it cannot flood.
+            return self._execute_recovery_intent(
+                task, record, records, payload, attempt_id,
+                episode=episode, kind=kind, now=now,
+            )
         if verdict in (VitalityVerdict.HEALTHY_ACTIVE, VitalityVerdict.HEALTHY_QUIET):
             # Fresh evidence of life: renew the outer window and wait. No clock on this
-            # path may act against what the evidence calls alive.
+            # path may act against what the evidence calls alive. A recovered suspension
+            # lands here too; the policy's rung reset rides the same recovery decision.
+            self._run_recovery_policy(task, record, records, payload, episode=episode, now=now)
             setattr(record, f"{kind}_waiting_since", now)
             self.save_records(payload, records)
             return plain_wait()
@@ -4878,6 +4907,15 @@ class DispatcherRuntime:
         # evidence-shaped branches below keep their pre-vitality meaning because they
         # act only on what a source actually said (no output since launch; no terminal
         # progress), and even they are fenced by the guard.
+        #
+        # Before the ceilings speak, the policy gets its say: an authoritative
+        # deterministic refusal riding this tick's unavailable snapshot (the 1194 class)
+        # escalates after N identical sightings instead of waiting out any ceiling.
+        policy_outcome = self._recovery_policy_outcome(
+            task, record, records, payload, attempt_id, episode=episode, kind=kind, now=now,
+        )
+        if policy_outcome is not None:
+            return policy_outcome
         stall = _stall_seconds(kind)
         waiting_since = float(getattr(record, f"{kind}_waiting_since") or 0.0)
         started_at = float(getattr(record, f"{kind}_started_at") or 0.0)
@@ -4962,32 +5000,330 @@ class DispatcherRuntime:
             ),
         }
 
-    def _comment_suspension_once(
+    def _recovery_thresholds(self) -> Any:
+        """This installation's recovery-policy thresholds, read per call.
+
+        The response window comes from the watchdog's env knob so operations can tighten it
+        without a release; the deterministic-refusal limit stays at its small default.
+        """
+        return _RecoveryThresholds(
+            response_window_seconds=float(_suspension_response_window_seconds()),
+            deterministic_refusal_limit=_DEFAULT_RECOVERY_THRESHOLDS.deterministic_refusal_limit,
+        )
+
+    def _recovery_policy_decision(
         self,
-        task: dict[str, Any],
-        record: DispatcherRecord,
         episode: Any,
         *,
         kind: str,
+        now: float,
+    ) -> tuple[Any, Any] | None:
+        """Ask the policy what this tick should intend, and persist its rung state.
+
+        Returns ``(decision, updated_episode)`` or ``None`` when there is nothing to decide
+        (no episode). The rung write happens here, once, so every caller of the policy -- the
+        wait tick and the gate phase alike -- persists exactly the same shape.
+        """
+        if episode is None:
+            return None
+        decision = _decide_recovery(episode, episode, now, self._recovery_thresholds())
+        if decision.intent is _RecoveryIntent.OBSERVE:
+            # An observe with unchanged state still rewrites nothing: persisting per tick
+            # would churn the record for zero information. Only a rung/refusal change is
+            # worth a save, which apply_rung_state makes cheap to detect by value.
+            if (
+                episode.recovery_rung == decision.rung
+                and episode.deterministic_refusals == decision.refusals
+            ):
+                return decision, episode
+        updated = _apply_rung_state(episode, decision)
+        return decision, updated
+
+    def _store_recovery_episode(
+        self,
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        ref: str,
+        *,
+        kind: str,
+        episode: Any,
     ) -> None:
-        """Comment a suspended head once per freeze span; never act on it here."""
-        since = float(episode.stall_frozen_since or 0.0)
-        request_id = _attempt_request_id(
-            record.attempt_id or "", f"{kind}-vitality-suspended", task["ref"],
-            suffix=_request_token(f"suspended@{since:.0f}"),
+        field_name = f"{kind}_vitality_episode"
+        setattr(record, field_name, episode)
+        records[ref] = record
+        self.save_records(payload, records)
+
+    def _recovery_policy_outcome(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        episode: Any,
+        kind: str,
+        now: float,
+    ) -> dict[str, Any] | None:
+        """Turn a policy decision into a tick outcome where the caller needs one.
+
+        Used on arms that only escalate (the deterministic-refusal fast path): ``None``
+        means "no escalation earned, carry on with the caller's own logic".
+        """
+        asked = self._recovery_policy_decision(episode=episode, kind=kind, now=now)
+        if asked is None:
+            return None
+        decision, updated = asked
+        if updated is not episode:
+            self._store_recovery_episode(
+                record, records, payload, task["ref"], kind=kind, episode=updated,
+            )
+        if decision.intent is not _RecoveryIntent.ESCALATE_OPERATOR:
+            return None
+        return self._escalate_recovery_to_operator(
+            task, record, attempt_id, kind=kind, decision=decision, now=now,
         )
+
+    def _run_recovery_policy(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        *,
+        episode: Any,
+        now: float,
+    ) -> None:
+        """Let the policy observe a non-suspended verdict (rung reset after recovery).
+
+        The wait-tick table already handled this verdict; the policy call exists purely to
+        clear the persisted ladder when a suspension has resolved, so the next span starts
+        at rung 2 again instead of inheriting an old escalation.
+        """
+        asked = self._recovery_policy_decision(episode=episode, kind="worker", now=now)
+        if asked is None:
+            return
+        _, updated = asked
+        if updated is not episode:
+            self._store_recovery_episode(
+                record, records, payload, task["ref"], kind="worker", episode=updated,
+            )
+
+    def _execute_recovery_intent(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        episode: Any,
+        kind: str,
+        now: float,
+    ) -> dict[str, Any]:
+        """Execute one recovery-policy intent for a suspended head, safely.
+
+        The Suspended arm's whole surface: ask the policy, persist its rung state, then act:
+
+        * ``sigcont``  -> one identity-fenced SIGCONT (never SIGTERM/SIGKILL from this path)
+          plus one durable comment naming the span; idempotent because the policy keys the
+          intent on the freeze stamp and only returns it for a fresh span.
+        * ``observe`` inside the window -> the plain degraded wait outcome, visible in
+          telemetry but touching nothing.
+        * ``escalate_operator`` -> one durable comment per span asking a human to look;
+          the head is never signalled, stopped or replaced. The guard would refuse any
+          destructive step on a Suspended verdict regardless; this path simply never asks.
+        """
+        ref = task["ref"]
+        asked = self._recovery_policy_decision(episode=episode, kind=kind, now=now)
+        if asked is None:
+            return {
+                "status": "degraded", "step": "review" if kind == "review" else "advance",
+                "pilot_ref": ref, "attempt_id": attempt_id,
+                "action": f"{kind}-suspension-observed", "reason": "no vitality episode on file",
+            }
+        decision, updated = asked
+        self._store_recovery_episode(record, records, payload, ref, kind=kind, episode=updated)
+        step = "review" if kind == "review" else "advance"
+        if decision.intent is _RecoveryIntent.SIGCONT:
+            sent = self._sigcont_head(task, record, kind=kind, now=now)
+            body = (
+                f"Vitality ({kind}): the head's process is parked on a stop signal "
+                f"(suspended since {time.strftime('%H:%M:%S', time.gmtime(decision.detail['span_started_at']))}). "
+                + (
+                    f"Sent one identity-fenced SIGCONT; holding a "
+                    f"{int(decision.detail['response_window_seconds'])}s response window before escalating."
+                    if sent else
+                    "Could NOT verify the process identity, so nothing was signalled; "
+                    "holding the response window and watching."
+                )
+                + " The head was not stopped."
+            )
+            self.writer.comment(
+                role="dispatcher",
+                actor=self.owner,
+                reference=ref,
+                body=body,
+                request_id=_attempt_request_id(
+                    record.attempt_id or attempt_id, f"{kind}-vitality-sigcont", ref,
+                    suffix=_request_token(f"sigcont@{decision.detail['span_started_at']:.0f}"),
+                ),
+            )
+            return {
+                "status": "degraded", "step": step, "pilot_ref": ref,
+                "attempt_id": attempt_id,
+                "action": f"{kind}-sigcont-sent" if sent else f"{kind}-sigcont-fenced",
+                "reason": decision.reason,
+                "recovery": decision.to_json(),
+            }
+        if decision.intent is _RecoveryIntent.ESCALATE_OPERATOR:
+            self._escalate_suspended_head(
+                task, record, attempt_id, kind=kind, decision=decision,
+            )
+            return {
+                "status": "degraded", "step": step, "pilot_ref": ref,
+                "attempt_id": attempt_id,
+                "action": f"{kind}-suspension-escalated",
+                "reason": decision.reason,
+                "recovery": decision.to_json(),
+            }
+        # Observe: inside the response window (or already escalated and holding).
+        return {
+            "status": "ok" if decision.rung < _RUNG_ESCALATED else "degraded",
+            "step": step, "pilot_ref": ref, "attempt_id": attempt_id,
+            "action": f"{kind}-suspension-observed",
+            "reason": decision.reason,
+            "recovery": decision.to_json(),
+        }
+
+    def _sigcont_head(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        *,
+        kind: str,
+        now: float = 0.0,
+    ) -> bool:
+        """Send SIGCONT to this role's head process group, identity-fenced at send time.
+
+        The ONLY signal this recovery path may send, and only after re-verifying through
+        the heartbeat that the live process behind the pid file is still this exact HeadRun
+        (`guard_head_run_identity` raises on a foreign live process, the same fence
+        `_confirm_head_process_gone` uses before its signals). A mismatched, unreadable or
+        vanished identity sends nothing: resuming somebody else's process group is worse
+        than leaving our own parked one parked one more tick. Never SIGTERM/SIGKILL here --
+        suspension is recoverable by definition, and the destructive paths keep their own
+        guarded entries.
+        """
+        if getattr(self.host, "mode", "real") == "noop":
+            return False
+        pid_file = record.review_pid_file if kind == "review" else record.worker_pid_file
+        if not pid_file:
+            return False
+        run = record.review_head_run if kind == "review" else record.worker_head_run
+        leaf = record.review_leaf if kind == "review" else record.worker_leaf
+        try:
+            status = _guard_head_run_identity(
+                pid_file, run=run, role=kind, task=f"card:{task['ref']}", leaf=leaf,
+            )
+        except _HeadRunIdentityMismatch:
+            return False
+        if not _heartbeat_is_live_match(status):
+            return False
+        pid = int(status["pid"])
+        try:
+            # Same group rule as `_signal_head`: the terminal gives an interactive head
+            # its own foreground process group, so the CONT reaches its helpers too; old
+            # launches and focused tests may share OUR group, and signalling that would
+            # wake the dispatcher itself rather than the head.
+            group = os.getpgid(pid)
+            if group != os.getpgrp():
+                os.killpg(group, signal.SIGCONT)
+            else:
+                os.kill(pid, signal.SIGCONT)
+        except ProcessLookupError:
+            return False
+        except OSError as exc:
+            raise HostError(f"head process {pid} could not be resumed: {exc}") from None
+        return True
+
+    def _escalate_suspended_head(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        attempt_id: str,
+        *,
+        kind: str,
+        decision: Any,
+    ) -> None:
+        """One durable comment per suspension span: the response window expired."""
+        detail = decision.detail or {}
+        suspended_for = int(detail.get("suspended_for_seconds") or 0)
+        window = int(detail.get("span_started_at") or 0)
         self.writer.comment(
             role="dispatcher",
             actor=self.owner,
             reference=task["ref"],
             body=(
-                f"Vitality ({kind}): the head's process is parked on a stop signal "
-                f"(suspended since {time.strftime('%H:%M:%S', time.gmtime(since))}). "
-                "Nothing was signalled or stopped; resuming it is a separate, explicit "
-                "step."
+                f"Dispatcher recovery policy ({kind}): the head stayed suspended for "
+                f"{suspended_for}s -- past the response window even after SIGCONT. The "
+                "process was NOT stopped or replaced: a suspended process is alive by "
+                "the kernel's own word. Escalating to the operator; please look at the "
+                f"head (pane handle {record.review_handle if kind == 'review' else record.handle}"
+                f", heartbeat {record.review_pid_file if kind == 'review' else record.worker_pid_file})."
             ),
-            request_id=request_id,
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id, f"{kind}-suspension-window-expired",
+                task["ref"], suffix=_request_token(f"suspended@{window:.0f}"),
+            ),
         )
+
+    def _escalate_recovery_to_operator(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        attempt_id: str,
+        *,
+        kind: str,
+        decision: Any,
+        now: float = 0.0,
+    ) -> dict[str, Any]:
+        """Escalate a deterministic terminal refusal class to the operator, touching nothing.
+
+        Reached from the no-conclusion fallback once N identical authoritative refusals are
+        on file (the 1194 contract): the attempt cannot succeed by retrying, so the ladder
+        is skipped entirely. One comment per refusal count (idempotent via the request id),
+        plus a degraded outcome. The head is never signalled or replaced from here.
+        """
+        detail = decision.detail or {}
+        ref = task["ref"]
+        self.writer.comment(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            body=(
+                f"Dispatcher recovery policy ({kind}): the same authoritative refusal "
+                f"({detail.get('deterministic_class', 'deterministic')}) arrived "
+                f"{detail.get('identical_refusals', '?')}x. Retrying cannot change it: the "
+                "reason names a property of this launch (configuration, executable, "
+                "credentials, quota), not a transient outage. Escalating to the operator "
+                "instead of re-sending; nothing was stopped or replaced."
+            ),
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id, f"{kind}-deterministic-refusal",
+                ref, str(detail.get("identical_refusals") or 0),
+            ),
+        )
+        return {
+            "status": "degraded",
+            "step": "review" if kind == "review" else "advance",
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "action": f"{kind}-deterministic-refusal-escalated",
+            "reason": decision.reason,
+            "recovery": decision.to_json(),
+        }
 
     def _vitality_guard_decision(
         self,
@@ -6380,6 +6716,16 @@ class DispatcherRuntime:
         """CI is non-terminal (a check still running, or none posted yet). Wait, tracking how long the
         rollup has sat non-terminal; past GATE_PENDING_STALL_SECONDS escalate once to Blocked so a
         required check nothing ever posts does not leave the card unwatched forever.
+
+        Since S1-5 the wait is no longer blind to the worker head it is waiting beside
+        (issue fe04011b: a worker sat in `T (stopped)` for 27 minutes while every tick
+        wrote ``gate-pending ok`` and only the six-hour ceiling applied). Each pending
+        tick runs the same vitality reduction + recovery policy for the worker that the
+        report-wait tick runs, so a suspended head sees its SIGCONT within one tick and an
+        expired response window reaches the operator in minutes. The gate's own clock
+        stays as the OUTER escalation ceiling for the CI rollup itself -- non-destructive
+        per S1-4 semantics -- but it is no longer the first thing to notice a stopped
+        process.
         """
         ref = task["ref"]
         now = time.time()
@@ -6387,6 +6733,26 @@ class DispatcherRuntime:
             record.gate_pending_since = now
             self.save_records(payload, records)
             return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "action": "gate-pending"}
+        # The worker head's vitality, observed and acted on exactly as the report wait does.
+        # A reduction failure or an unobservable head degrades to None here, which leaves
+        # this method on its ordinary path: the gate ceiling remains the outer bound for a
+        # CI rollup nobody can see through, and no head is touched on a maybe.
+        vitality = self._worker_vitality_for_gate(task, record, records, payload)
+        if vitality is not None:
+            episode = vitality
+            if episode.verdict is VitalityVerdict.SUSPENDED:
+                return self._execute_recovery_intent(
+                    task, record, records, payload, attempt_id,
+                    episode=episode, kind="worker", now=now,
+                )
+            # Any other verdict still rides the policy once: a deterministic refusal on
+            # file escalates fast even mid-gate, and a recovered suspension resets its rung.
+            outcome = self._recovery_policy_outcome(
+                task, record, records, payload, attempt_id,
+                episode=episode, kind="worker", now=now,
+            )
+            if outcome is not None:
+                return outcome
         if now - record.gate_pending_since <= GATE_PENDING_STALL_SECONDS:
             return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "action": "gate-pending"}
         self.host.stop(record)
@@ -6405,6 +6771,44 @@ class DispatcherRuntime:
         records.pop(ref, None)
         self.save_records(payload, records)
         return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "to": "blocked"}
+
+    def _worker_vitality_for_gate(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+    ) -> Any:
+        """Reduce this tick's worker-head vitality while the card waits on the gate.
+
+        The gate-pending path never called ``_wait_watchdog``, so it never built the status
+        shape the reduction consumes; asking the host directly would duplicate
+        ``command_terminal_status``. Instead the same seam the wait tick uses
+        (``host.worker_status``) is probed here, guarded so ANY failure degrades to
+        ``None`` -- the gate must keep working over an unobservable head exactly as it did
+        before this card, with the gate ceiling as the outer bound. The returned episode
+        (persisted by ``_reduce_and_store_vitality_episode``) is what the caller feeds the
+        policy; the verdict table itself stays owned by the caller.
+        """
+        if getattr(self.host, "mode", "real") == "noop":
+            return None
+        try:
+            status = self.host.worker_status(task, record)
+        except Exception:  # noqa: BLE001 - a blind probe must never break the gate tick
+            return None
+        if not isinstance(status, dict) or (
+            not isinstance(status.get("pid_status"), dict)
+            and not isinstance(status.get("provider_progress"), dict)
+            and "idle" not in status
+        ):
+            # Nothing was observed: no honest episode exists for this tick.
+            return getattr(record, "worker_vitality_episode")
+        try:
+            return self._reduce_and_store_vitality_episode(
+                task, record, records, payload, status, kind="worker", now=time.time(),
+            )
+        except Exception:  # noqa: BLE001 - shadow-mode failure degrades to no episode
+            return None
 
     def _parks_for_decision(self, task: dict[str, Any]) -> bool:
         """Whether a substantive verdict on this card waits for a decision, or acts at once."""

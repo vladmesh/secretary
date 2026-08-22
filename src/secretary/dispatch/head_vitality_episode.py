@@ -618,6 +618,18 @@ def reduce_vitality(
     return replace(
         episode,
         verdict=verdict,
+        # A dark source's own bounded diagnostic rides on the episode's reason whenever no
+        # conclusion of our own claims the field: the recovery policy (S1-5) keys its
+        # deterministic-refusal allowlist on exactly this string, so a launch refusal like
+        # ``terminal_split_source_not_found`` must survive reduction, not be flattened into
+        # an anonymous "nothing answered". Verdicts that DO write a reason (stalls,
+        # suspension) keep theirs -- those conclusions outrank quoting a channel.
+        reason=episode.reason if episode.reason else next(
+            (snapshot.reason for name in sorted(owned)
+             if (snapshot := owned[name]).availability is SourceAvailability.UNAVAILABLE
+             and snapshot.reason),
+            "",
+        ),
         basis=tuple(basis[:BASIS_ENTRY_LIMIT]),
         updated_at=now,
     )
