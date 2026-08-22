@@ -268,6 +268,9 @@ def command_terminal_status(
             # A pid-heartbeat that proves this exact process still runs; only this — not a
             # silent pane — should let a wait watchdog trust liveness past the timing ceilings.
             "pid_confirmed": pid_confirmed,
+            # The raw classification, passed through so the shadow vitality reduction can build
+            # its own snapshot without a second /proc probe. No existing consumer reads it.
+            "pid_status": dict(pid_status),
             "provider_progress": dict(provider_progress),
         }
         if pid_confirmed:

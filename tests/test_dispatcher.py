@@ -22,6 +22,11 @@ from secretary._fsutil import file_lock, try_file_lock
 from secretary.board.models import Actor, EntityKind, Event, EventKind
 from secretary.board_transport import ensure as ensure_board_transport
 from secretary.checkpoint import CheckpointPusher, CheckpointResult, CheckpointWriter
+from secretary.dispatch.head_vitality import HeadVitalityError
+from secretary.dispatch.head_vitality_episode import (
+    VitalityEpisode,
+    VitalityVerdict,
+)
 from secretary.dispatcher import (
     STOPPED_BY_OPERATOR,
     STOPPED_BY_RECONCILIATION,
@@ -495,6 +500,50 @@ class WorkerReportNudgeStateTests(unittest.TestCase):
     def test_an_unknown_stage_is_not_silently_discarded(self) -> None:
         with self.assertRaises(ValueError):
             DispatcherRecord.from_json({"worker_report_nudge": {"stage": "future-stage"}})
+
+
+class VitalityEpisodeRecordTests(unittest.TestCase):
+    """Shadow-mode vitality episodes on the record, as durable values (head-vitality plan)."""
+
+    def test_an_episode_round_trips_through_a_record(self) -> None:
+        stored = VitalityEpisode(
+            run_id="run-1",
+            verdict=VitalityVerdict.SUSPECTED_STALL,
+            started_at=0.0,
+            suspected_since=300.0,
+            last_progress_at=100.0,
+            last_progress_source="provider_cursor",
+            evidence_cursors={"provider_cursor": "14:def"},
+            unavailable_since={"pane_advisory": 500.0},
+            basis=("quiet:400s@provider_cursor", "suspected-stall"),
+            reason="strong quiet for 400s with no advancement",
+            activity_epoch=2,
+            updated_at=400.0,
+        )
+
+        restored = DispatcherRecord.from_json({
+            "worker_vitality_episode": json.loads(json.dumps(stored.to_json())),
+            "review_vitality_episode": json.loads(json.dumps(stored.to_json())),
+        })
+
+        self.assertEqual(restored.worker_vitality_episode, stored)
+        self.assertEqual(restored.review_vitality_episode, stored)
+
+    def test_absence_is_no_episode_not_an_empty_one(self) -> None:
+        """A record from before the field existed - or a role never yet observed - carries no
+        claim at all, which is the one reading shadow mode may not fudge."""
+        record = DispatcherRecord.from_json({})
+
+        self.assertIsNone(record.worker_vitality_episode)
+        self.assertIsNone(record.review_vitality_episode)
+        self.assertIsNone(record.to_json()["worker_vitality_episode"])
+        self.assertIsNone(record.to_json()["review_vitality_episode"])
+
+    def test_a_damaged_stored_episode_stops_the_load(self) -> None:
+        with self.assertRaises(HeadVitalityError):
+            DispatcherRecord.from_json({
+                "worker_vitality_episode": {"version": 1, "verdict": "totally-fine"},
+            })
 
 
 def _clear_env(test: unittest.TestCase, *names: str) -> None:
@@ -7344,18 +7393,31 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
     def test_a_steady_idle_wait_does_not_rewrite_the_state_file(self) -> None:
         """The fence persists transitions, not heartbeats. A head can sit inside one idle episode
-        for as long as it works, and re-reading the same window every tick has nothing to save."""
+        for as long as it works, and re-reading the same window every tick has nothing to save.
+
+        The shadow vitality episode is exempt by design: its whole job in this card is to record
+        what the reducer sees while the fence deliberately saves nothing, so this test pins that
+        the *fence* fields stay write-free and the verdict stays unchanged across the tick."""
         self._open_the_second_round()
         self._head_at_its_prompt()
-        self.tick()
+        first = self.tick()
+        episode_after_first = self._pilot_record()["worker_vitality_episode"]
+        idle_since = self._pilot_record()["worker_idle_since"]
 
         with mock.patch.object(
             self.runtime, "save_records", wraps=self.runtime.save_records
         ) as save:
             result = self.tick()
 
-        self.assertEqual(result["action"], "waiting-worker-report")
-        save.assert_not_called()
+        self.assertEqual(result["action"], first["action"])
+        save.assert_called_once()  # The shadow episode's own write, and nothing else.
+        after = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
+        # No fence field moved: the idle window the test exists to protect was not touched.
+        self.assertEqual(after["worker_idle_since"], idle_since)
+        self.assertEqual(after["worker_idle_confirmations"], 0)
+        # And the shadow reduction observed the same steady state, not a new one.
+        episode_after_second = after["worker_vitality_episode"]
+        self.assertEqual(episode_after_second["verdict"], episode_after_first["verdict"])
 
     def test_idle_tui_repaints_do_not_restart_the_delivery_window(self) -> None:
         """Pane bytes are not a delivery; readiness still ends a stalled round."""
@@ -7458,6 +7520,145 @@ class DispatcherRuntimeTests(unittest.TestCase):
         # prompt is spent on a pane there is nothing left to type into.
         self.assertEqual(self.host.report_prompts, [])
         self.assertEqual(self._pilot_record().get("worker_report_nudge"), {})
+
+    # shadow-mode vitality episodes (head-vitality plan) ------------------------
+
+    def _vitality_audit_comments(self) -> list[str]:
+        """The durable dispatcher comments the shadow reduction has written so far."""
+        return [
+            comment.get("body") or ""
+            for comment in self.reader.show("secretary-510-pilot").get("comments", [])
+            if "Vitality shadow" in (comment.get("body") or "")
+        ]
+
+    def test_the_wait_tick_persists_a_shadow_episode_without_changing_its_decision(self) -> None:
+        """Shadow mode, end to end: the tick reduces what it observed into an episode on the
+        record, and the decision it returns is the decision the pre-vitality machinery makes."""
+        self._open_the_second_round()
+        self._head_at_its_prompt()
+
+        result = self.tick()
+
+        self.assertEqual(result["action"], "waiting-worker-report")
+        stored = self._pilot_record()["worker_vitality_episode"]
+        self.assertIsNotNone(stored)
+        # The fake status names no provider progress and no raw pid classification, so the only
+        # source this path truly observed is the advisory pane reading.
+        self.assertEqual(stored["verdict"], "unverifiable")
+        self.assertTrue(
+            any(token.startswith("advisory:") for token in stored["basis"]), stored["basis"]
+        )
+        # And the verdict change is logged exactly once, as a comment that says it decides nothing.
+        comments = self._vitality_audit_comments()
+        self.assertEqual(len(comments), 1, comments)
+        self.assertIn("does not influence", comments[0])
+
+    def test_a_verdict_change_is_logged_and_a_steady_verdict_is_not(self) -> None:
+        self._open_the_second_round()
+        self._head_at_its_prompt(idle=False)  # busy pane -> HealthyActive is unreachable here,
+        # but a first observation followed by a same-verdict tick must log once and only once.
+
+        self.tick()
+
+        with mock.patch.object(
+            self.runtime, "save_records", wraps=self.runtime.save_records
+        ):
+            self.tick()
+
+        self.assertEqual(len(self._vitality_audit_comments()), 1)
+
+    def test_each_watchdog_decision_is_identical_with_and_without_the_shadow_reduction(self) -> None:
+        """The proof this card owes: for each wait-tick outcome the pipeline already produces,
+        running the reducer changes no branch. The same scenario is driven twice - reduction
+        enabled, then patched out - and every returned action must match."""
+        scenario = self._head_at_its_prompt
+
+        def drive() -> list[str]:
+            """One full idle episode to its destructive step, as actions."""
+            self.setUp()
+            self._open_the_second_round()
+            scenario()
+            actions = [self.tick()["action"]]
+            self._rewind_idle()
+            actions.append(self.tick()["action"])
+            actions.append(self.tick()["action"])
+            return actions
+
+        with_vitality = drive()
+
+        with mock.patch.object(
+            type(self.runtime), "_shadow_vitality_episode", lambda *args, **kwargs: None,
+        ):
+            without_vitality = drive()
+
+        self.assertEqual(with_vitality, without_vitality)
+        # The scenario really reached past the first idle confirmation.
+        self.assertIn("worker-idle-unconfirmed", with_vitality)
+
+    def test_a_raising_reduction_never_breaks_the_wait_tick(self) -> None:
+        """Shadow code may not break the tick that hosts it. The reduction runs behind a broad
+        except on purpose: any failure degrades to no episode, never to a broken tick."""
+        self._open_the_second_round()
+        self._head_at_its_prompt()
+
+        with mock.patch.object(
+            dispatcher_module, "_reduce_vitality",
+            side_effect=RuntimeError("reducer exploded"),
+        ):
+            result = self.tick()
+
+        self.assertEqual(result["action"], "waiting-worker-report")
+        # The failed observation is skipped, not recorded as a verdict.
+        self.assertIsNone(self._pilot_record()["worker_vitality_episode"])
+
+    def test_a_tick_that_observed_no_source_writes_no_episode(self) -> None:
+        """An answer with no heartbeat classification, no provider evidence and no pane flag is
+        a tick that looked at nothing. There is no honest reduction of zero observations, so
+        shadow mode writes neither an episode nor the state file."""
+        self._open_the_second_round()
+        self._head_at_its_prompt()
+        self.tick()
+        before = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
+
+        with mock.patch.object(
+            self.host, "worker_status",
+            side_effect=lambda task, record: {"known": True, "live": True, "reason": "live"},
+        ), mock.patch.object(
+            self.runtime, "save_records", wraps=self.runtime.save_records
+        ) as save:
+            result = self.tick()
+
+        self.assertEqual(result["action"], "waiting-worker-report")
+        # Whatever wrote here, it was not the shadow episode: the tick observed no source, so
+        # every state write this tick made must carry the episode exactly as it stood before.
+        self.assertEqual(
+            [
+                call.args[0]["records"]["secretary-510-pilot"]["worker_vitality_episode"]
+                for call in save.call_args_list
+            ],
+            [before["worker_vitality_episode"]] * len(save.call_args_list),
+        )
+        after = self.runtime.production_state.load()["records"]["secretary-510-pilot"]
+        self.assertEqual(
+            after["worker_vitality_episode"], before["worker_vitality_episode"]
+        )
+
+    def test_an_episode_from_another_run_id_starts_fresh_on_respawn(self) -> None:
+        """A replacement head owns a new run identity; its episode starts clean rather than
+        inheriting the old head's stall."""
+        self._open_the_second_round()
+        self._head_at_its_prompt()
+        self.tick()
+        stale = self._pilot_record()["worker_vitality_episode"]
+        payload = self.runtime.production_state.load()
+        payload["records"]["secretary-510-pilot"]["worker_head_run"]["run_id"] = "run-respawned"
+        self.runtime.production_state.save(payload)
+
+        self.tick()
+
+        fresh = self._pilot_record()["worker_vitality_episode"]
+        self.assertEqual(fresh["run_id"], "run-respawned")
+        self.assertNotEqual(fresh["started_at"], stale["started_at"])
 
     def test_an_idle_worker_is_pointed_at_the_current_command_once(self) -> None:
         """The live incident (issue:df7d0778b26357e60046): work complete, nothing on the card, and

@@ -240,6 +240,27 @@ class ProviderCursorTests(unittest.TestCase):
         self.assertEqual(snapshot.progress, ProgressState.UNKNOWN)
         self.assertEqual(snapshot.availability, SourceAvailability.UNAVAILABLE)
 
+    def test_observed_but_not_admitted_evidence_is_unavailable_and_not_quiet(self) -> None:
+        """The other half of the admission gate: a reading that says `observed` but was never
+        admitted (`admission` missing or refused) is a channel problem too. Treating it as an
+        answer would let unverified evidence vote Quiet and spend stall time."""
+        snapshot = VitalitySnapshot.from_provider_cursor(
+            {
+                "state": "observed",
+                "source": "codex-session",
+                "cursor": "12:abc",
+                "head_run_id": RUN_ID,
+                "reason": "provider-progress source admission is incomplete",
+            },
+            run_id=RUN_ID,
+            previous_cursor="12:abc",
+            observed_at=1006.0,
+        )
+
+        self.assertEqual(snapshot.progress, ProgressState.UNKNOWN)
+        self.assertEqual(snapshot.availability, SourceAvailability.UNAVAILABLE)
+        self.assertIn("not admitted", snapshot.reason)
+
     def test_another_runs_cursor_is_fenced_as_unavailable(self) -> None:
         snapshot = VitalitySnapshot.from_provider_cursor(
             self.admitted_evidence("12:abc", head_run_id="run-2"),
@@ -403,7 +424,9 @@ class SerialisationTests(unittest.TestCase):
         self.assertEqual(len(self.round_trip(snapshot).cursor or ""), CURSOR_LIMIT)
 
     def test_from_json_refuses_payloads_that_change_meaning(self) -> None:
-        base = VitalitySnapshot.from_pane_readiness({"idle": True}, run_id=RUN_ID).to_json()
+        base = VitalitySnapshot.from_pane_readiness(
+            {"idle": True}, run_id=RUN_ID, observed_at=1.0
+        ).to_json()
         cases = [
             {**base, "version": 99},
             {**base, "version": "1"},
@@ -419,9 +442,35 @@ class SerialisationTests(unittest.TestCase):
                 VitalitySnapshot.from_json(payload)
 
     def test_from_json_rejects_a_non_number_timestamp_before_coercing_it(self) -> None:
-        base = VitalitySnapshot.from_pane_readiness({"idle": True}, run_id=RUN_ID).to_json()
+        base = VitalitySnapshot.from_pane_readiness(
+            {"idle": True}, run_id=RUN_ID, observed_at=1.0
+        ).to_json()
         with self.assertRaises(HeadVitalityError):
             VitalitySnapshot.from_json({**base, "observed_at": None})
+
+    def test_from_json_rejects_a_boolean_version_that_compares_equal_to_one(self) -> None:
+        """``True == 1`` in Python: an equality check alone would accept it."""
+        base = VitalitySnapshot.from_pane_readiness(
+            {"idle": True}, run_id=RUN_ID, observed_at=1.0
+        ).to_json()
+        for forged in (True, 1.0):
+            with self.subTest(version=forged), self.assertRaises(HeadVitalityError):
+                VitalitySnapshot.from_json({**base, "version": forged})
+
+    def test_from_json_rejects_non_finite_timestamps(self) -> None:
+        base = VitalitySnapshot.from_pane_readiness(
+            {"idle": True}, run_id=RUN_ID, observed_at=1.0
+        ).to_json()
+        for forged in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(observed_at=forged), self.assertRaises(HeadVitalityError):
+                VitalitySnapshot.from_json({**base, "observed_at": forged})
+
+    def test_a_constructor_timestamp_must_be_finite_too(self) -> None:
+        for forged in (float("nan"), float("inf")):
+            with self.subTest(observed_at=forged), self.assertRaises(HeadVitalityError):
+                VitalitySnapshot.from_pane_readiness(
+                    {"idle": True}, run_id=RUN_ID, observed_at=forged
+                )
 
 
 if __name__ == "__main__":

@@ -40,6 +40,7 @@ and the producers' shapes can drift only through a failing test.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -152,8 +153,8 @@ class VitalitySnapshot:
         if isinstance(self.observed_at, bool) or not isinstance(self.observed_at, (int, float)):
             raise HeadVitalityError("a vitality snapshot carries an epoch-seconds timestamp")
         observed_at = float(self.observed_at)
-        if observed_at < 0:
-            raise HeadVitalityError("a vitality snapshot timestamp is not negative")
+        if not math.isfinite(observed_at) or observed_at < 0:
+            raise HeadVitalityError("a vitality snapshot timestamp is finite and not negative")
         # Frozen fields are normalised through ``object.__setattr__`` once, at construction, so a
         # snapshot built from a chatty diagnostic and its serialised form compare equal.
         object.__setattr__(self, "run_id", str(self.run_id))
@@ -192,7 +193,9 @@ class VitalitySnapshot:
         """
         if not isinstance(payload, dict):
             raise HeadVitalityError("a vitality snapshot is read from an object")
-        if payload.get("version") != SNAPSHOT_VERSION:
+        # ``True == 1`` in Python, so an equality check alone would read a boolean version as a
+        # supported one; the version is either this exact int or the payload is not ours.
+        if type(payload.get("version")) is not int or payload.get("version") != SNAPSHOT_VERSION:
             raise HeadVitalityError("vitality snapshot has an unsupported version")
         raw_observed_at = payload.get("observed_at")
         if isinstance(raw_observed_at, bool) or not isinstance(raw_observed_at, (int, float)):
@@ -200,6 +203,10 @@ class VitalitySnapshot:
             # default for "when was this observed": a damaged timestamp is refused, not zeroed.
             raise HeadVitalityError("vitality snapshot timestamp is not a number")
         observed_at = float(raw_observed_at)
+        if not math.isfinite(observed_at):
+            # NaN sorts neither before nor after anything and inf never ages out, so either value
+            # would silently break every "how long has it been quiet" comparison downstream.
+            raise HeadVitalityError("vitality snapshot timestamp is not finite")
         try:
             source = SnapshotSource(str(payload.get("source") or ""))
             availability = SourceAvailability(str(payload.get("availability") or ""))
@@ -280,7 +287,7 @@ class VitalitySnapshot:
         *,
         run_id: str,
         previous_cursor: str = "",
-        observed_at: float = 0.0,
+        observed_at: float,
     ) -> VitalitySnapshot:
         """Wrap one ``dispatcher_tui.provider_progress_for_run`` answer against the earlier cursor.
 
@@ -342,7 +349,7 @@ class VitalitySnapshot:
 
     @classmethod
     def from_pane_readiness(
-        cls, status: Any, *, run_id: str, observed_at: float = 0.0
+        cls, status: Any, *, run_id: str, observed_at: float
     ) -> VitalitySnapshot:
         """Wrap one pane readiness answer (`{"idle": bool}` as callers of ``PaneHost`` build it).
 

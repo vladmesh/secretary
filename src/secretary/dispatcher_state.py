@@ -6,7 +6,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from secretary.dispatcher_types import DispatcherError
 from secretary.dispatcher_worker_lifecycle import (
@@ -14,6 +14,14 @@ from secretary.dispatcher_worker_lifecycle import (
     WorkerContinuationLiveness,
     WorkerReportNudge,
 )
+
+# ``VitalityEpisode`` is imported lazily in ``DispatcherRecord.from_json``: the episode module
+# reads the heartbeat vocabulary from ``dispatcher_watchdog``, whose own imports reach back into
+# this module, so an eager import here would close a cycle at load time. A deferred import keeps
+# the record's typed persistence without making the state module an ancestor of the vocabulary.
+
+if TYPE_CHECKING:
+    from secretary.dispatch.head_vitality_episode import VitalityEpisode
 
 # Every way a claim can answer "not this card". A claim-skip is about the card in front of the
 # scan and says nothing about the ones behind it, so the Ready pass records it and moves on to the
@@ -163,6 +171,14 @@ class DispatcherRecord:
     worker_continuation_liveness: WorkerContinuationLiveness = field(
         default_factory=WorkerContinuationLiveness
     )
+    # Shadow-mode vitality episodes (head-vitality plan, "Vitality reducer"): the persisted
+    # conclusion of reduce_vitality for each role's head run, written by the wait tick and read by
+    # nobody. They exist so the next card can compare the reducer's verdicts against what the
+    # watchdog actually decided before any decision trusts them; no dispatcher branch may consult
+    # them. `None` means this record has never carried an episode - a record written before the
+    # field existed loads as exactly that, not as an empty verdict.
+    worker_vitality_episode: VitalityEpisode | None = None
+    review_vitality_episode: VitalityEpisode | None = None
     review_waiting_since: float = 0.0
     review_respawns: int = 0
     review_started_at: float = 0.0
@@ -299,6 +315,14 @@ class DispatcherRecord:
             "worker_progress_at": self.worker_progress_at,
             "worker_continuation": self.worker_continuation.to_json(),
             "worker_continuation_liveness": self.worker_continuation_liveness.to_json(),
+            "worker_vitality_episode": (
+                self.worker_vitality_episode.to_json()
+                if self.worker_vitality_episode is not None else None
+            ),
+            "review_vitality_episode": (
+                self.review_vitality_episode.to_json()
+                if self.review_vitality_episode is not None else None
+            ),
             "worker_respawns": self.worker_respawns,
             "worker_started_at": self.worker_started_at,
             "worker_head_run": dict(self.worker_head_run),
@@ -420,6 +444,18 @@ class DispatcherRecord:
             worker_continuation_liveness=WorkerContinuationLiveness.from_json(
                 payload.get("worker_continuation_liveness")
             ),
+            # Absence is "no episode yet", not an empty one: a record from before the field
+            # existed, or a role whose head has never been observed, carries no claim. A present
+            # but damaged payload raises - a corrupt shadow verdict must stop the load rather
+            # than be silently dropped, or the record would look observed when it was not.
+            worker_vitality_episode=(
+                _vitality_episode_from_json(payload["worker_vitality_episode"])
+                if payload.get("worker_vitality_episode") is not None else None
+            ),
+            review_vitality_episode=(
+                _vitality_episode_from_json(payload["review_vitality_episode"])
+                if payload.get("review_vitality_episode") is not None else None
+            ),
             review_waiting_since=float(payload.get("review_waiting_since") or 0.0),
             review_respawns=int(payload.get("review_respawns") or 0),
             review_started_at=float(payload.get("review_started_at") or 0.0),
@@ -434,6 +470,18 @@ class DispatcherRecord:
 
 def _run_snapshot(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _vitality_episode_from_json(payload: Any) -> VitalityEpisode:
+    """Load one persisted vitality episode, importing its module lazily.
+
+    See the import note at the top of this module: the episode vocabulary sits above
+    ``dispatcher_watchdog`` in the dependency order, so the record reads it at call time instead
+    of at load time.
+    """
+    from secretary.dispatch.head_vitality_episode import VitalityEpisode
+
+    return VitalityEpisode.from_json(payload)
 
 
 def now_rfc3339() -> str:
