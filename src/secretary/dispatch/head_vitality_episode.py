@@ -70,6 +70,12 @@ EPISODE_VERSION = 1
 BASIS_TOKEN_LIMIT = 80
 BASIS_ENTRY_LIMIT = 10
 
+# The sources whose axis is Progress. An episode that has ever seen one of these answer --
+# a cursor on file or a dark entry in ``unavailable_since`` -- has witnessed progress
+# evidence, which is what separates "the progress channel broke" (freeze, never spend)
+# from "nothing but the pid has ever spoken here" (issue 656: bare existence ages).
+_PROGRESS_SOURCES = frozenset({SnapshotSource.PROVIDER_CURSOR.value})
+
 
 class VitalityVerdict(StrEnum):
     """What the reducer concludes about one run, as of one reduction."""
@@ -434,14 +440,68 @@ def reduce_vitality(
         else:
             verdict = VitalityVerdict.HEALTHY_QUIET
     elif strong:
-        # A strong channel answered about the process but none could speak about progress (the
-        # pid heartbeat alone). The run is provably alive; claiming quiet would assert an
-        # observation nobody made, so the episode rests at HealthyQuiet without aging toward a
-        # stall: absent progress evidence is not quiet evidence.
-        verdict = VitalityVerdict.HEALTHY_QUIET
+        # A strong channel answered about the process but none could speak about progress
+        # (the pid heartbeat alone, or a provider still on its first observation). Two
+        # sub-cases the plan separates, and conflating them caused the incidents:
+        #
+        #   * A progress source this episode has *witnessed* -- it left a cursor, or it is
+        #     tracked dark in ``unavailable_since`` -- has evidence on file. Its silence is
+        #     unavailability, and unavailable evidence freezes instead of spending (the
+        #     plan's ``Unavailable != no progress``; sprint Done-when: an unavailable source
+        #     never feeds the stall counter), so the episode rests at HealthyQuiet: a
+        #     broken channel must not age a live head toward its death.
+        #   * No progress source has ever answered: the pid is this episode's only witness.
+        #     The run is provably alive, and claiming ``quiet`` would assert an observation
+        #     nobody made -- but neither may it rest healthy forever. Issue 656's contract
+        #     is that the existence of a process is not proof of liveness, so the pid's own
+        #     sustained answer of "running, and nothing else" ages from the same reference
+        #     every quiet conclusion uses. The absent source contributes no vote of its
+        #     own: it is neither progress (the reference never moves) nor quiet (no
+        #     ``quiet:<n>s`` token names it).
+        reference = episode.last_progress_at or episode.started_at
+        quiet_seconds = max(0.0, now - reference)
         basis.append("alive-no-progress-source@" + ",".join(sorted(
             snapshot.source.value for snapshot in strong
         )))
+        episode = replace(episode, stall_frozen_since=0.0)
+        progress_witnessed = bool(
+            episode.unavailable_since.keys() & _PROGRESS_SOURCES
+            or episode.evidence_cursors.keys() & _PROGRESS_SOURCES
+        )
+        if progress_witnessed:
+            verdict = VitalityVerdict.HEALTHY_QUIET
+            episode = replace(
+                episode,
+                reason="progress source known to this episode but not answering; frozen",
+            )
+        elif quiet_seconds >= thresholds.suspect_after + thresholds.confirm_after:
+            verdict = VitalityVerdict.CONFIRMED_STALL
+            episode = replace(
+                episode,
+                confirmed_since=(
+                    episode.confirmed_since
+                    or reference + thresholds.suspect_after + thresholds.confirm_after
+                ),
+                suspected_since=(
+                    episode.suspected_since
+                    or reference + thresholds.suspect_after
+                ),
+                reason=f"running with no progress evidence for {int(quiet_seconds)}s",
+            )
+            basis.append("confirmed-stall")
+        elif quiet_seconds >= thresholds.suspect_after:
+            verdict = VitalityVerdict.SUSPECTED_STALL
+            episode = replace(
+                episode,
+                suspected_since=(
+                    episode.suspected_since
+                    or reference + thresholds.suspect_after
+                ),
+                reason=f"running with no progress evidence for {int(quiet_seconds)}s",
+            )
+            basis.append("suspected-stall")
+        else:
+            verdict = VitalityVerdict.HEALTHY_QUIET
     else:
         # Every strong source is dark (or only the advisory pane answered). Nothing may be
         # concluded -- and an already-confirmed episode is not laundered back to health by its
