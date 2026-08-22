@@ -7567,6 +7567,68 @@ class DispatcherRuntimeTests(unittest.TestCase):
 
         self.assertEqual(len(self._vitality_audit_comments()), 1)
 
+    def test_the_same_transition_at_two_times_dedupes_to_one_comment(self) -> None:
+        """The verdict-transition request id names the transition, never the clock.
+
+        The S1-2 review follow-up: a key that mixed the tick's ``time.time()`` in would let
+        one flapping verdict mint a fresh idempotency owner every tick. Replay the same
+        none->verdict transition at two wall-clock times far apart: the second write must be
+        answered as a replay of the first (one durable comment), not as a new occurrence.
+        """
+        self._open_the_second_round()
+        self._head_at_its_prompt()
+        self.tick()
+        self.assertEqual(len(self._vitality_audit_comments()), 1)
+
+        # The same transition again, with the clock pushed far past the first write.
+        payload = self.runtime.production_state.load()
+        payload["records"]["secretary-510-pilot"]["worker_vitality_episode"] = None
+        self.runtime.production_state.save(payload)
+        later = time.time() + 999_000
+
+        def late_status(_task, _record) -> dict:
+            return dict(
+                self.host.worker_status_result or {},
+                last_activity=later,
+            )
+
+        with mock.patch.object(dispatcher_module.time, "time", return_value=later), \
+                mock.patch.object(self.host, "worker_status", side_effect=late_status):
+            self.tick()
+
+        # The replay is answered by the original owner: one durable comment, not two.
+        self.assertEqual(len(self._vitality_audit_comments()), 1)
+
+    def test_an_episode_with_no_run_id_is_dropped_not_carried(self) -> None:
+        """A tick whose HeadRun payload lost its run id owns no episode.
+
+        The S1-2 review follow-up: the shadow reduction binds every episode to a
+        ``HeadRun.run_id``, so a status whose run payload names nobody cannot honestly
+        keep the previous episode on the record -- leaving it would misattribute a
+        history to a head nobody can name. The next tick must start from nothing.
+        """
+        self._open_the_second_round()
+        self._head_at_its_prompt()
+        self.tick()
+        stored = self._pilot_record()["worker_vitality_episode"]
+        self.assertIsNotNone(stored)
+
+        payload = self.runtime.production_state.load()
+        record = payload["records"]["secretary-510-pilot"]
+        stale = dict(record["worker_vitality_episode"])
+        record["worker_head_run"] = dict(record["worker_head_run"] or {}, run_id="")
+        self.runtime.production_state.save(payload)
+
+        result = self.tick()
+
+        self.assertEqual(result["action"], "waiting-worker-report")
+        after = self._pilot_record()
+        self.assertIsNone(after["worker_vitality_episode"])
+        # And the drop is durable: nothing re-materialised the old run's history.
+        self.assertNotEqual(
+            (after["worker_vitality_episode"] or {}).get("started_at"), stale.get("started_at")
+        )
+
     def test_each_watchdog_decision_is_identical_with_and_without_the_shadow_reduction(self) -> None:
         """The proof this card owes: for each wait-tick outcome the pipeline already produces,
         running the reducer changes no branch. The same scenario is driven twice - reduction
@@ -7999,6 +8061,36 @@ class DispatcherRuntimeTests(unittest.TestCase):
         self._rewind_idle("review")
         self.tick()
         self.assertEqual(self.tick()["to"], "blocked")
+
+    def test_the_shadow_episode_wiring_is_the_same_for_a_review_head(self) -> None:
+        """The review wait tick reduces its own episode too (the kind="review" wiring).
+
+        The S1-2 review follow-up: the shadow reduction was pinned end to end for the
+        worker only. One wait machinery serves both heads, so this replays the same
+        contract against a reviewer -- episode written on `review_vitality_episode`,
+        shadow comment emitted, and the decision unchanged by any of it.
+        """
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "review-started")
+        self._head_at_its_prompt("review")
+
+        result = self.tick()
+
+        self.assertEqual(result["action"], "waiting-review-verdict")
+        stored = self._pilot_record()["review_vitality_episode"]
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored["run_id"], (self._pilot_record()["review_head_run"] or {}).get("run_id"))
+        # The fake status names no provider progress and no raw pid classification, so the
+        # only source this path truly observed is the advisory pane reading.
+        self.assertEqual(stored["verdict"], "unverifiable")
+        comments = [
+            comment.get("body") or ""
+            for comment in self.reader.show(CARD_REF).get("comments", [])
+            if "Vitality shadow (review)" in (comment.get("body") or "")
+        ]
+        self.assertEqual(len(comments), 1, comments)
+        self.assertIn("does not influence", comments[0])
 
 
 class HeadPromptTests(unittest.TestCase):
