@@ -186,6 +186,40 @@ class LaunchIntentTests(unittest.TestCase):
     def record(self) -> DispatcherRecord | None:
         return self.runtime.production_state.records(self.runtime.production_state.load()).get(REF)
 
+    def kill_worker_heartbeat(self, *, path: str = "") -> None:
+        """Rewrite the worker's heartbeat with a reaped pid: the head is genuinely gone.
+
+        S1-4: a scripted ``missing-terminal`` answer alone no longer grounds a reclaim,
+        because the vitality reduction reads the raw classification too -- and a live
+        heartbeat behind a lost pane is not a death. Tests that model a dead head give
+        the heartbeat the same evidence. A launch that died before binding its pid file
+        passes the intent's path explicitly.
+        """
+        record = self.record()
+        target = path or (record.worker_pid_file if record else "")
+        if not target:
+            return
+        self.host.head_pid = self._dead_pid()
+        self.host._write_head_pid(
+            "worker", REF, head_run=record.worker_head_run, leaf=record.worker_leaf,
+        )
+
+    def kill_review_heartbeat(self) -> None:
+        """The reviewer twin of ``kill_worker_heartbeat``."""
+        record = self.record()
+        if not record or not record.review_pid_file:
+            return
+        self.host.head_pid = self._dead_pid()
+        self.host._write_head_pid(
+            "review", REF, head_run=record.review_head_run, leaf=record.review_leaf,
+        )
+
+    def _dead_pid(self) -> int:
+        """A pid the kernel has already reaped, for heartbeats that name a gone process."""
+        proc = subprocess.Popen(["true"])
+        proc.wait()
+        return proc.pid
+
     def workspace_of_record(self) -> str:
         record = self.record()
         return record.workspace if record else ""
@@ -627,7 +661,9 @@ class LaunchIntentTests(unittest.TestCase):
 
     def test_a_respawn_that_outlived_its_tick_is_adopted_not_doubled(self) -> None:
         self.tick()
-        # A worker pane Orca no longer knows about: the watchdog respawns it once.
+        # A worker pane Orca no longer knows about, and a heartbeat that agrees the
+        # process is gone: the watchdog reclaims it once.
+        self.kill_worker_heartbeat()
         self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
         with self.state_dies_after("restart_worker"):
             with self.assertRaises(OSError):
@@ -636,8 +672,11 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.stored_intent()["action"], "worker-respawn")
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
 
-        # The respawned head is alive, so it is adopted rather than respawned a second time, even
-        # though the terminal inventory still cannot see it.
+        # The respawned head is alive: give its heartbeat a live pid (the crash-tick
+        # launch inherited the dead one from the scripted death), so the intent's
+        # liveness check adopts it instead of stopping a leftover.
+        self.host.head_pid = os.getpid()
+        self.host._write_head_pid("worker", REF, run_id=self.stored_intent().get("run_id") or "")
         adopted = self.tick()
 
         self.assertEqual(adopted["action"], "worker-launch-adopted")
@@ -1419,10 +1458,26 @@ class LaunchIntentTests(unittest.TestCase):
 
         self.assertEqual((self.stored_intent()["round"], self.stored_intent()["opens_round"]), (2, True))
 
+        # Nothing of that launch is running: the intent's liveness check reads the dead
+        # heartbeat at the intent's pid path, stops the leftover, clears the reservation
+        # holder and hands the card back to the ordinary path. S1-4: the relaunch is
+        # evidence-driven -- the record itself carries no heartbeat for a head that never
+        # finished binding, so the first tick only clears the phantom; the second ages
+        # past every threshold and the confirmed stall relaunches inside round 2.
         self.host.head_pid = os.getpid()
-        # Nothing of that launch is running and the pane inventory cannot see one either, so the
-        # ordinary path owns the card again and the wait watchdog respawns its head.
+        self.kill_worker_heartbeat(path=self.stored_intent().get("pid_file") or "")
         self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
+        self.tick()
+        # Age the fresh phantom episode past every threshold so the confirmed stall
+        # relaunches inside the round it reserved.
+        payload = self.runtime.production_state.load()
+        record_payload = payload["records"][REF]
+        episode = dict(record_payload["worker_vitality_episode"] or {})
+        for name in ("started_at", "updated_at"):
+            if episode.get(name):
+                episode[name] -= 10_000.0
+        record_payload["worker_vitality_episode"] = episode
+        self.runtime.production_state.save(payload)
         self.tick()
 
         record = self.record()
@@ -1440,6 +1495,7 @@ class LaunchIntentTests(unittest.TestCase):
     def test_a_respawn_adoption_stays_inside_its_round(self) -> None:
         """A respawn continues the round it interrupted, so its intent reserves nothing."""
         self.tick()
+        self.kill_worker_heartbeat()
         self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
         with self.state_dies_after("restart_worker"):
             with self.assertRaises(OSError):
@@ -1793,7 +1849,9 @@ class LaunchIntentTests(unittest.TestCase):
     def test_an_adopted_reviewer_is_stopped_before_its_watchdog_respawns_it(self) -> None:
         self.adopt_reviewer()
         # The pane inventory cannot see a head that was adopted without a handle, which is exactly
-        # the reading that used to respawn a reviewer beside a live one.
+        # the reading that used to respawn a reviewer beside a live one. The adopted head's
+        # heartbeat names a gone process, so the reclaim is evidence-backed.
+        self.kill_review_heartbeat()
         self.host.review_status_result = {
             "known": True, "live": False, "reason": "missing-terminal"
         }
@@ -2334,6 +2392,7 @@ class LaunchIntentTests(unittest.TestCase):
 
     def test_a_respawn_records_its_returned_leaf_without_an_inventory_lookup(self) -> None:
         self.tick()
+        self.kill_worker_heartbeat()
         self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
 
         with self.legacy_pane_lookup_is_unavailable():
@@ -2429,6 +2488,7 @@ class LaunchIntentTests(unittest.TestCase):
 
     def test_a_worker_respawn_after_an_unconfirmed_stop_starts_nothing(self) -> None:
         self.tick()
+        self.kill_worker_heartbeat()
         self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
         self.host.fail_stop_head_reason = "orca terminal stop failed"
 
@@ -2450,6 +2510,7 @@ class LaunchIntentTests(unittest.TestCase):
         """A list failure is not evidence a leaf-scoped head vanished before its heartbeat exists."""
         self.tick()
         Path(pid_file_path("worker", REF)).unlink()
+        self.kill_worker_heartbeat()
         self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
         real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")  # type: ignore[arg-type]
         real_host._run_json = mock.Mock(side_effect=HostError("orca terminal list unavailable"))
@@ -2466,6 +2527,7 @@ class LaunchIntentTests(unittest.TestCase):
     def test_a_reviewer_respawn_after_an_unconfirmed_stop_starts_nothing(self) -> None:
         self.run_to_validate()
         self.tick()  # reviewer up
+        self.kill_review_heartbeat()
         self.host.review_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
         self.host.fail_stop_review_reason = "orca refused to close the reviewer pane"
 
