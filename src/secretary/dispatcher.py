@@ -24,6 +24,18 @@ from secretary.codex_provider_events import (
     CodexProviderSourceError,
 )
 from secretary.config import DataDirError, instance_data_dir, validate_instance
+from secretary.dispatch.head_vitality import (
+    SnapshotSource as _SnapshotSource,
+)
+from secretary.dispatch.head_vitality import (
+    VitalitySnapshot as _VitalitySnapshot,
+)
+from secretary.dispatch.head_vitality_episode import (
+    DEFAULT_VITALITY_THRESHOLDS as _DEFAULT_VITALITY_THRESHOLDS,
+)
+from secretary.dispatch.head_vitality_episode import (
+    reduce_vitality as _reduce_vitality,
+)
 from secretary.dispatcher_gate import (
     GATE_PENDING_STALL_SECONDS,
     GATE_TRANSPORT_MAX_ATTEMPTS,
@@ -250,7 +262,6 @@ from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
 from secretary.dispatcher_tui import (
     delivery_readiness_state as _delivery_readiness_state,
 )
-from secretary.dispatcher_tui import turn_started_confirm as _turn_started_confirm
 from secretary.dispatcher_tui import (
     prepare_claude_provider_progress_source as _prepare_claude_provider_progress_source,
 )
@@ -263,6 +274,7 @@ from secretary.dispatcher_tui import (
 from secretary.dispatcher_tui import (
     terminal_turn_started as _terminal_turn_started,
 )
+from secretary.dispatcher_tui import turn_started_confirm as _turn_started_confirm
 from secretary.dispatcher_types import (
     # Every dispatcher stop has an initiator (review takeover, verdict, watchdog, replacement,
     # operator, reconciliation), and both HeadRuns record it.
@@ -4719,6 +4731,9 @@ class DispatcherRuntime:
                 setattr(record, f"{kind}_progress_at", progress_at)
                 self.save_records(payload, records)
         now = time.time()
+        self._shadow_vitality_episode(
+            task, record, records, payload, status, kind=kind, now=now
+        )
         pid_confirmed = bool(status.get("pid_confirmed"))
         if pid_confirmed and "idle" in status:
             # The pid heartbeat proves this exact process runs and the pane says whether it is doing
@@ -4794,6 +4809,108 @@ class DispatcherRuntime:
         if outcome == "respawn":
             return self._respawn_wait(task, record, records, payload, attempt_id, kind=kind, now=now, trigger=f"no {_wait_expectation(kind)} within {stall}s")
         return self._escalate_wait(task, record, records, payload, attempt_id, kind=kind, stall=stall, trigger=f"no {_wait_expectation(kind)}")
+
+    def _shadow_vitality_episode(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        status: dict[str, Any],
+        *,
+        kind: str,
+        now: float,
+    ) -> None:
+        """Reduce and persist one shadow-mode vitality episode for this role's head run.
+
+        Shadow mode is the whole contract: the episode is computed from values this tick already
+        holds, stored on the record, and logged when its verdict changes -- and it must never be
+        read by any branch below. Every early return here leaves `record` untouched or unchanged,
+        so a caller cannot tell this method ran except by reading the record afterwards.
+
+        Sources actually observed on this path, without any new host call:
+
+        * ``pid_heartbeat`` -- only when the status carries ``pid_status`` (the raw
+          ``head_process_status`` classification). The wait tick itself consumes derived booleans
+          (`pid_confirmed`, `identity_mismatch`), so the classification is passed through by
+          ``command_terminal_status`` alongside them; where it is absent the source stays
+          Unavailable rather than being reconstructed from a boolean.
+        * ``provider_cursor`` -- from ``status["provider_progress"]``, the already-admitted
+          exact-HeadRun evidence ``command_terminal_status`` fetched; compared against the
+          previous cursor persisted on the episode.
+        * ``pane_advisory`` -- from the same status's ``idle`` flag, advisory by construction.
+        """
+        field_name = f"{kind}_vitality_episode"
+        previous = getattr(record, field_name)
+        run_payload = record.review_head_run if kind == "review" else record.worker_head_run
+        run_id = str((run_payload or {}).get("run_id") or "")
+        if not run_id:
+            # Without a durable run identity there is nothing an episode may bind to. Leaving any
+            # stale episode in place would misattribute it to a head nobody can name, so it is
+            # dropped explicitly.
+            if previous is not None:
+                setattr(record, field_name, None)
+            return
+        pid_status = status.get("pid_status")
+        snapshots = [
+            _VitalitySnapshot.from_pid_heartbeat(
+                pid_status, run_id=run_id, observed_at=now
+            )
+        ] if isinstance(pid_status, dict) else []
+        provider_progress = status.get("provider_progress")
+        if isinstance(provider_progress, dict):
+            snapshots.append(
+                _VitalitySnapshot.from_provider_cursor(
+                    provider_progress,
+                    run_id=run_id,
+                    previous_cursor=(
+                        (previous.evidence_cursors or {}).get(_SnapshotSource.PROVIDER_CURSOR.value, "")
+                        if previous is not None else ""
+                    ),
+                    observed_at=now,
+                )
+            )
+        if "idle" in status:
+            snapshots.append(
+                _VitalitySnapshot.from_pane_readiness(status, run_id=run_id, observed_at=now)
+            )
+        try:
+            episode = _reduce_vitality(previous, snapshots, now, _DEFAULT_VITALITY_THRESHOLDS)
+        except Exception as exc:  # noqa: BLE001 - shadow mode must never break the hosting tick
+            # Shadow mode may never break the tick that hosts it. A reduction failure is recorded
+            # as no episode so the next tick starts clean, and nothing downstream changes.
+            self.writer.comment(
+                role="dispatcher",
+                actor=self.owner,
+                reference=task["ref"],
+                body=f"Vitality shadow reduction failed and was skipped: {scrub_host_output(str(exc))[:160]}",
+                request_id=_attempt_request_id(
+                    record.attempt_id or "", f"{kind}-vitality-error", task["ref"],
+                    suffix=_request_token(str(now)),
+                ),
+            )
+            return
+        changed = previous is None or previous.verdict is not episode.verdict
+        setattr(record, field_name, episode)
+        records[task["ref"]] = record
+        self.save_records(payload, records)
+        if not changed:
+            return
+        self.writer.comment(
+            role="dispatcher",
+            actor=self.owner,
+            reference=task["ref"],
+            body=(
+                f"Vitality shadow ({kind}): {episode.verdict.value}"
+                + (f" (was {previous.verdict.value})" if previous is not None else " (first observation)")
+                + f"; basis {', '.join(episode.basis) if episode.basis else 'none'}."
+                " Recorded only - shadow mode does not influence dispatcher decisions."
+            ),
+            request_id=_attempt_request_id(
+                record.attempt_id or "", f"{kind}-vitality-verdict", task["ref"],
+                suffix=_request_token(f"{episode.verdict.value}-{int(now)}"),
+            ),
+        )
 
     def _prompt_worker_report(
         self,
