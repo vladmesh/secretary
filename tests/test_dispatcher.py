@@ -135,7 +135,7 @@ from secretary.head_registry import canonical_heads
 from secretary.routing_journal import (
     attempts as routing_attempts,
 )
-from secretary.sprints import instance_open_sprint_limit
+from secretary.sprints import BUDGET_UNCHARGED_INFRASTRUCTURE, instance_open_sprint_limit
 from secretary.task_commands import _read_body
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 from tests.dispatcher_fixtures import ensure_attempt
@@ -6365,8 +6365,11 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(
             [_budget_event_type(event) for event in self.audit_events()
              if _budget_event_type(event) is not None],
-            ["blocked"],
-            "only the operator escalation costs the sprint an event; the retries before it do not",
+            [BUDGET_UNCHARGED_INFRASTRUCTURE],
+            # secretary-1457: the escalation is still the one budget event of this episode — the
+            # retries before it produce none — but a reviewer the host never brought up is an
+            # infrastructure outcome, so it is counted apart instead of spending the sprint.
+            "the escalation is the only budget event, and it is the uncharged one",
         )
 
     # secretary-1163: a head pane that is not ready for its launch prompt defers the bring-up.

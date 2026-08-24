@@ -13,8 +13,10 @@ from secretary._fsutil import try_file_lock, write_json
 from secretary.board.models import Event, EventKind
 from secretary.checkpoint import checkpoint_snapshot
 from secretary.dispatcher_launch import (
+    FAILURE_CLASS_INFRASTRUCTURE,
     REVIEW_ROLE,
     WORKER_ROLE,
+    bring_up_failure_class,
     forget_role_head,
     launch_intent,
     stop_launch_intent,
@@ -40,7 +42,7 @@ from secretary.dispatcher_state import (
     attempt_request_id as _attempt_request_id,
 )
 from secretary.dispatcher_types import STOPPED_BY_RECONCILIATION, HostError
-from secretary.sprints import SprintWriter, budget_thresholds
+from secretary.sprints import BUDGET_UNCHARGED_INFRASTRUCTURE, SprintWriter, budget_thresholds
 from secretary.tasks import ACTIVE_STATES, TaskError
 
 # Durable telemetry of terminal production ticks, written into production-state.json under
@@ -1472,7 +1474,16 @@ def _budget_event_type(event: dict[str, Any]) -> str | None:
     if target:
         request_id = str(event.get("request_id") or "")
         if target == "blocked":
-            return "blocked"
+            # A bring-up that never produced a head wrote its class into this transition's action
+            # token (`bring_up_blocked_action`), and this is the reading side of that token: an
+            # infrastructure outcome is counted, and charged to nobody.  Every other block — a
+            # worker's own report, the gate, a merge, a release — has no such token and charges
+            # exactly as it always did.
+            return (
+                BUDGET_UNCHARGED_INFRASTRUCTURE
+                if bring_up_failure_class(request_id) == FAILURE_CLASS_INFRASTRUCTURE
+                else "blocked"
+            )
         if target == "ready" and source in ACTIVE_STATES:
             return "preempt"
         if target == "in_progress" and "gate-red" in request_id:

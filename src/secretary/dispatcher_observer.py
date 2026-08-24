@@ -2882,6 +2882,10 @@ def render_observer_prompt(
         if delivery is not None and delivery.delivery_id and delivery.through_event
         else ("", "")
     )
+    # Counted, never charged: the host failing to bring a card up is not the card spending the
+    # sprint's restart budget, and the observer still has to see how often it happened.
+    uncharged = budget.get("uncharged") if isinstance(budget.get("uncharged"), dict) else {}
+    infrastructure = int(uncharged.get("infrastructure_blocked") or 0)
     sections = [
         f"# Sprint {ref}",
         "",
@@ -2927,6 +2931,10 @@ def render_observer_prompt(
         f"total {int(budget.get('total') or 0)} restart events recorded so far",
         "Signal threshold reached." if budget.get("signal_reached") else "Signal threshold not reached.",
         "Hard threshold reached." if budget.get("hard_reached") else "Hard threshold not reached.",
+        *(
+            [f"{infrastructure} infrastructure bring-up outcomes recorded, charged to no threshold."]
+            if infrastructure else []
+        ),
         "",
     ]
     if marker[0]:
