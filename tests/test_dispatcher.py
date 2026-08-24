@@ -148,6 +148,7 @@ from triggered_agents.runtime.head import (
     with_pid_heartbeat,
     wrap_role_command,
 )
+from triggered_agents.runtime.pane_host import PaneSplitSourceMissing
 from triggered_agents.runtime.prompt_document import (
     NUDGE_FILE_MODE,
     NUDGE_MAX_BYTES,
@@ -1017,6 +1018,18 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(record.review_infra_failures, limit)
         self.assertEqual(record.gate_state, "green")
         self.assertFalse(self.host.reviews)
+
+    def test_reviewer_split_fallback_reason_is_visible_in_the_tick(self) -> None:
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.host.review_launch_fallback_reason = "terminal_split_source_not_found"
+
+        result = self.tick()
+
+        self.assertEqual(result["action"], "review-started")
+        self.assertEqual(
+            result["reviewer_fallback_reason"], "terminal_split_source_not_found"
+        )
 
     def test_unwritable_reviewer_launch_intent_uses_the_green_infrastructure_ceiling(self) -> None:
         self.start_dispatcher()
@@ -12573,6 +12586,7 @@ class RecordingReviewHost(CommandHostRuntime):
         fail_ops: set[str] | None = None,
         split_pane_key: str = "",
         split_source_missing: bool = False,
+        split_source_missing_after_open: bool = False,
     ) -> None:
         super().__init__(catalog or ReviewCatalog(), root, mode="real")  # type: ignore[arg-type]
         self.preflight_codex_run = self._transport_preflight  # type: ignore[method-assign]
@@ -12580,6 +12594,7 @@ class RecordingReviewHost(CommandHostRuntime):
         self.fail_ops = fail_ops or set()
         self.split_pane_key = split_pane_key
         self.split_source_missing = split_source_missing
+        self.split_source_missing_after_open = split_source_missing_after_open
         self.terminals = [
             {"handle": "term-worker", "leafId": "leaf-worker", "title": "codex", "connected": True}
         ] if terminals is None else terminals
@@ -12631,6 +12646,11 @@ class RecordingReviewHost(CommandHostRuntime):
             return {"terminals": self.terminals}
         if op == "split":
             if self.split_source_missing:
+                if self.split_source_missing_after_open:
+                    self.terminals.append(
+                        {"handle": "term-review", "leafId": "leaf-review", "title": None,
+                         "connected": True}
+                    )
                 raise HostError(
                     "orca terminal split failed: terminal_split_source_not_found"
                 )
@@ -12726,7 +12746,7 @@ class ReviewPaneTests(unittest.TestCase):
         launch = host.start_review(self.task, self._record())
 
         self.assertEqual(launch.leaf, "leaf-from-reply")
-        self.assertEqual(host.ops().count("list"), 1, "the split leaf needed no inventory fallback")
+        self.assertEqual(host.ops().count("list"), 2, "the split safety inventory is mandatory")
 
     def test_reviewer_pane_carries_the_reference_and_the_role(self) -> None:
         host = RecordingReviewHost(self.root)
@@ -12769,6 +12789,19 @@ class ReviewPaneTests(unittest.TestCase):
         self.assertEqual(host.ops().count("split"), 1)
         self.assertEqual(host.ops().count("create"), 1)
         self.assertLess(host.ops().index("create"), host.ops().index("close"))
+        self.assertEqual(launch.fallback_reason, "terminal_split_source_not_found")
+
+    def test_reviewer_does_not_fall_back_when_the_split_left_a_pane(self) -> None:
+        host = RecordingReviewHost(
+            self.root, split_source_missing=True, split_source_missing_after_open=True
+        )
+
+        with self.assertRaises(PaneSplitSourceMissing):
+            host.start_review(self.task, self._record())
+
+        self.assertEqual(host.ops().count("split"), 1)
+        self.assertNotIn("create", host.ops())
+        self.assertNotIn("close", host.ops(), "a failed reviewer must not kill the worker head")
 
     def test_create_terminal_returns_the_leaf_from_its_pane_key(self) -> None:
         host = RecordingReviewHost(self.root)

@@ -1045,6 +1045,7 @@ class FakeHost:
             run=launched.run,
             head_run=dict(launched.head_run),
             delivery_evidence=dict(launched.delivery_evidence),
+            fallback_reason=str(getattr(self, "review_launch_fallback_reason", "")),
         )
 
     def nudge_review_delivery(self, task: dict, record, intent: dict) -> dict:

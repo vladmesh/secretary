@@ -30,9 +30,10 @@ class PaneHostError(RuntimeError):
 class PaneSplitSourceMissing(PaneHostError):
     """The split anchor is absent from the host's renderer graph.
 
-    A pane can remain addressable as a PTY after its UI node disappears. In that case the refused
-    split started no child, so a caller may safely retry by opening a standalone pane. Other split
-    failures stay untyped and fail closed because they may have left a process behind.
+    A pane can remain addressable as a PTY after its UI node disappears. Orca uses this same
+    refusal before and after attempting to create the child, so a caller must inventory panes
+    before recovering with a standalone pane. Other split failures stay untyped and fail closed
+    because they may have left a process behind.
     """
 
 
@@ -59,6 +60,8 @@ class Pane:
     # Advisory work liveness for a caller that watches a head for progress; the pid heartbeat is
     # what answers whether a process is there.
     last_output_at: float = 0.0
+    # Set only by the head-operation recovery path. Pane inventory never supplies it.
+    fallback_reason: str = ""
 
 
 class PaneHost(Protocol):

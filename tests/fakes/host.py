@@ -20,6 +20,7 @@ class FakeSessionHost:
         self.closed: list[str] = []
         self.refuse_close = False
         self.split_source_missing = False
+        self.split_source_missing_after_open = False
         self.next_handle = 1
         # A test that cares *when* the session manager was reached, not only whether it was.
         self.on_call: Callable[[str], None] | None = None
@@ -42,6 +43,12 @@ class FakeSessionHost:
         self.calls.append(("split_pane", handle))
         self._note("split_pane")
         if self.split_source_missing:
+            if self.split_source_missing_after_open:
+                workspace = self._workspace_of(handle)
+                pane = Pane(handle=f"term:{self.next_handle}", leaf=f"leaf:{self.next_handle}")
+                self.next_handle += 1
+                self.panes_by_workspace.setdefault(workspace, []).append(pane)
+                self.commands[pane.handle] = command
             raise PaneSplitSourceMissing("split source vanished")
         workspace = self._workspace_of(handle)
         pane = Pane(handle=f"term:{self.next_handle}", leaf=f"leaf:{self.next_handle}")
