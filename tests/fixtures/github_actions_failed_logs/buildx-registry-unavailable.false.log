@@ -1,0 +1,2 @@
+# Provenance: derived from a broken Buildx setup command rendered by a GitHub Actions runner, not a live capture.
+build	Set up Docker Buildx	##[error]buildx setup script returned HTTP status: 503 while parsing local configuration

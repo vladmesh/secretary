@@ -96,6 +96,11 @@ class DispatcherRecord:
     # Both reset the moment any answer — green, red or pending — comes back.
     gate_transport_failures: int = 0
     gate_transport_error: str = ""
+    # The rerun is a second backend operation after an answered red result.  It has the same
+    # transport ceiling, but keeps its own consecutive count so that rereading the red result does
+    # not erase an unanswered rerun POST on the following tick.
+    gate_rerun_transport_failures: int = 0
+    gate_rerun_transport_error: str = ""
     # Recovery of a classified CI-service red is bounded separately from transport retries.  It is
     # anchored to the SHA and exact Actions run the gate reran, so a rework starts clean while an
     # unchanged checkout cannot spin on the old terminal check-run.
@@ -288,6 +293,8 @@ class DispatcherRecord:
             "gate_attestation": dict(self.gate_attestation),
             "gate_transport_failures": self.gate_transport_failures,
             "gate_transport_error": self.gate_transport_error,
+            "gate_rerun_transport_failures": self.gate_rerun_transport_failures,
+            "gate_rerun_transport_error": self.gate_rerun_transport_error,
             "gate_infrastructure_reruns_sha": self.gate_infrastructure_reruns_sha,
             "gate_infrastructure_reruns": self.gate_infrastructure_reruns,
             "gate_infrastructure_rerun_run_id": self.gate_infrastructure_rerun_run_id,
@@ -417,6 +424,8 @@ class DispatcherRecord:
             gate_attestation=_run_snapshot(payload.get("gate_attestation")),
             gate_transport_failures=int(payload.get("gate_transport_failures") or 0),
             gate_transport_error=str(payload.get("gate_transport_error") or ""),
+            gate_rerun_transport_failures=int(payload.get("gate_rerun_transport_failures") or 0),
+            gate_rerun_transport_error=str(payload.get("gate_rerun_transport_error") or ""),
             gate_infrastructure_reruns_sha=str(payload.get("gate_infrastructure_reruns_sha") or ""),
             gate_infrastructure_reruns=int(payload.get("gate_infrastructure_reruns") or 0),
             gate_infrastructure_rerun_run_id=str(payload.get("gate_infrastructure_rerun_run_id") or ""),

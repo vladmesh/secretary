@@ -6157,17 +6157,35 @@ class DispatcherRuntime:
             )
         try:
             self.host.rerun_failed_ci(task, record, result)
-        except (GateTransportError, HostError) as exc:
+        except GateTransportError as exc:
+            retry = self._gate_rerun_transport_retry(
+                task, record, records, payload, attempt_id, exc, step=phase,
+            )
+            if retry is not None:
+                return retry
+            exhausted = GateTransportError(
+                "failed Actions rerun stayed unreachable for "
+                f"{record.gate_rerun_transport_failures} consecutive attempts: "
+                f"{record.gate_rerun_transport_error}"
+            )
+            return self._block_infrastructure_rerun_unavailable(
+                task, record, records, payload, attempt_id, result, exhausted, phase=phase,
+            )
+        except HostError as exc:
             return self._block_infrastructure_rerun_unavailable(
                 task, record, records, payload, attempt_id, result, exc, phase=phase,
             )
         record.rejected_sha = sha
         record.rejected_failure_class = "infrastructure"
         record.rejected_failure_reason = result.failure_reason
-        record.rejected_done_reports = 0
+        # `_accept_stale_infrastructure_done` records one accepted stale report as a guard against
+        # a later duplicate.  Do not erase that guard when the rerun itself returns red again.
+        # Fresh worker reports and substantive reds reset it at their own state transitions.
         record.gate_infrastructure_reruns += 1
         record.gate_infrastructure_rerun_run_id = result.failed_run_id
         record.gate_infrastructure_rerun_reason = result.failure_reason
+        record.gate_rerun_transport_failures = 0
+        record.gate_rerun_transport_error = ""
         record.gate_pending_since = time.time()
         detail = scrub_host_output(result.summary)
         log = scrub_host_output(result.log).strip()
@@ -6205,6 +6223,8 @@ class DispatcherRuntime:
         record.gate_infrastructure_reruns = 0
         record.gate_infrastructure_rerun_run_id = ""
         record.gate_infrastructure_rerun_reason = ""
+        record.gate_rerun_transport_failures = 0
+        record.gate_rerun_transport_error = ""
 
     def _block_infrastructure_reruns_exhausted(
         self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
@@ -6940,6 +6960,47 @@ class DispatcherRuntime:
             ),
         }
 
+    def _gate_rerun_transport_retry(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        exc: GateTransportError,
+        *,
+        step: str,
+    ) -> dict[str, Any] | None:
+        """Retry the answered-red recovery POST with the ordinary gate transport ceiling.
+
+        The red check-run is a valid answer, but the subsequent rerun POST is a separate question.
+        Its count cannot share the read's counter because the next red check-run would reset that
+        counter before retrying the unanswered POST.
+        """
+        ref = task["ref"]
+        record.gate_rerun_transport_failures += 1
+        record.gate_rerun_transport_error = scrub_host_output(str(exc))
+        attempts = record.gate_rerun_transport_failures
+        records[ref] = record
+        self.save_records(payload, records)
+        if attempts >= GATE_TRANSPORT_MAX_ATTEMPTS:
+            return None
+        return {
+            "status": "degraded",
+            "step": step,
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "action": "gate-transport-retry",
+            "attempts": attempts,
+            "max_attempts": GATE_TRANSPORT_MAX_ATTEMPTS,
+            "reason": (
+                f"the failed Actions rerun could not reach its backend "
+                f"(attempt {attempts}/{GATE_TRANSPORT_MAX_ATTEMPTS}): "
+                f"{record.gate_rerun_transport_error}; the card is unchanged and the rerun is "
+                "asked again on the next tick"
+            ),
+        }
+
     def _block_gate_transport(
         self,
         task: dict[str, Any],
@@ -6976,6 +7037,9 @@ class DispatcherRuntime:
         payload: dict[str, Any],
         attempt_id: str,
         result: GateResult,
+        *,
+        step: str = "gate",
+        action: str = "gate-pending",
     ) -> dict[str, Any]:
         """CI is non-terminal (a check still running, or none posted yet). Wait, tracking how long the
         rollup has sat non-terminal; past GATE_PENDING_STALL_SECONDS escalate once to Blocked so a
@@ -6996,7 +7060,7 @@ class DispatcherRuntime:
         if not record.gate_pending_since:
             record.gate_pending_since = now
             self.save_records(payload, records)
-            return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "action": "gate-pending"}
+            return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "action": action}
         # The worker head's vitality, observed and acted on exactly as the report wait does.
         # A reduction failure or an unobservable head degrades to None here, which leaves
         # this method on its ordinary path: the gate ceiling remains the outer bound for a
@@ -7018,7 +7082,7 @@ class DispatcherRuntime:
             if outcome is not None:
                 return outcome
         if now - record.gate_pending_since <= GATE_PENDING_STALL_SECONDS:
-            return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "action": "gate-pending"}
+            return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "action": action}
         self.host.stop(record)
         self.writer.move(
             role="dispatcher",
@@ -7030,11 +7094,11 @@ class DispatcherRuntime:
                 f"no terminal result for longer than the threshold "
                 f"({GATE_PENDING_STALL_SECONDS}s). Card moved to Blocked for a human."
             ),
-            request_id=_attempt_request_id(record.attempt_id or attempt_id, "gate-pending-stall", ref),
+            request_id=_attempt_request_id(record.attempt_id or attempt_id, f"{action}-stall", ref),
         )
         records.pop(ref, None)
         self.save_records(payload, records)
-        return {"status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id, "to": "blocked"}
+        return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "to": "blocked"}
 
     def _worker_vitality_for_gate(
         self,
@@ -7152,7 +7216,17 @@ class DispatcherRuntime:
                 step="review", outcome="merge gate failed",
             )
         if kind == "pending":
-            return {"status": "ok", "step": "review", "pilot_ref": ref, "attempt_id": attempt_id, "action": "merge-gate-pending"}
+            if result is None:
+                return self._block_merge_path(
+                    task, record, records, payload, attempt_id,
+                    action="merge-gate-result-blocked",
+                    reason="merge gate returned pending without a result payload",
+                    step="review", outcome="merge gate result unavailable",
+                )
+            return self._gate_pending(
+                task, record, records, payload, attempt_id, result,
+                step="review", action="merge-gate-pending",
+            )
         if kind != "green":
             if result is None:
                 return self._block_merge_path(

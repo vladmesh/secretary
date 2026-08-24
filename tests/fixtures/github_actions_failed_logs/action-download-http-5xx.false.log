@@ -1,0 +1,3 @@
+# Provenance: derived from the documented GitHub Actions runner error shape, not a live capture.
+build	Set up job	Getting action download info
+build	Set up job	##[error]workflow syntax is invalid: unexpected mapping key

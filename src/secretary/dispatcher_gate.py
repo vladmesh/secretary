@@ -91,18 +91,29 @@ _RUNNER_BOILERPLATE_RE = re.compile(r"(?i)process completed with exit code \d+")
 # not sufficient: broken workflow YAML and setup scripts fail there too.  Every accepted signature
 # names a CI service boundary and an unambiguous unavailable/5xx response from it.
 _ACTION_DOWNLOAD_5XX_RE = re.compile(
-    r"(?i)getting action download info[^\n]{0,120}?(?:http(?:/\d(?:\.\d)?)?\s*"
-    r"(?:status\s*)?[: ]?|returned\s+(?:an\s+)?(?:http\s+)?(?:error|status)\s*[: ]?)5\d\d\b"
+    # The runner prints its preparation notice and the failed download on separate entries.  The
+    # fragment, not a source line, is the unit of adjacency because `_failed_log` joins entries
+    # with newlines.  Requiring the action-download wording on the 5xx entry keeps an unrelated
+    # setup failure from borrowing the preparation notice above it.
+    r"(?im)\bgetting action download info\b(?:[^\n]*\n){0,3}[^\n]*"
+    r"(?:failed to download action|response status code does not indicate success)[^\n]*\b5\d\d\b"
 )
 _REGISTRY_UNAVAILABLE_RE = re.compile(
-    r"(?i)(?:registry(?:[./][\w./:-]+)?|ghcr\.io|docker\.io|quay\.io|image manifest|"
-    r"pulling fs layer)[^\n]{0,120}(?:http(?:/\d(?:\.\d)?)?\s*(?:status\s*)?[: ]?5\d\d|"
-    r"(?:service|temporarily) unavailable|received unexpected http status\s*:?\s*5\d\d|"
-    r"unexpected status(?: code)?\s*:?\s*5\d\d)"
+    # A named registry plus a service-unavailable response is explicit evidence.  Docker/Buildx
+    # daemon messages are explicit too even when they omit the registry name: they name an HTTP
+    # boundary and a 5xx themselves.  The caller still binds this to one of the container steps.
+    r"(?im)(?:"
+    r"(?:registry(?:[./][\w./:-]+)?|ghcr\.io|docker\.io|quay\.io|image manifest|pulling fs layer)"
+    r"[^\n]{0,240}?(?:http(?:/\d(?:\.\d)?)?\s*(?:status\s*)?[: ]?5\d\d|"
+    r"(?:service|temporarily) unavailable)"
+    r"|(?:received unexpected http status|unexpected status(?: code)?)\s*:?\s*5\d\d"
+    r")"
 )
 _RUNNER_UNAVAILABLE_RE = re.compile(
-    r"(?i)(?:runner|hosted runner).{0,120}(?:not started|failed to start|unavailable|"
-    r"lost communication|shutdown signal)"
+    # These are runner-service diagnostics, not arbitrary setup-script prose that happens to use
+    # the word "runner".  Keep the vocabulary enumerable with the fixture corpus below.
+    r"(?i)(?:the hosted runner failed to start|the runner has (?:received a shutdown signal|"
+    r"lost communication with the server)|the job was cancelled because the runner was not started)"
 )
 # How a failed backend command says that an answer *did* arrive.
 #
@@ -480,7 +491,8 @@ def _github_gate(
 
 def _actions_run_id(item: dict) -> str:
     match = _RUN_URL_RE.search(str(
-        item.get("details_url") or item.get("html_url") or item.get("targetUrl") or ""
+        item.get("details_url") or item.get("html_url") or item.get("targetUrl")
+        or item.get("target_url") or ""
     ))
     return match.group(2) if match else ""
 
@@ -926,7 +938,10 @@ def _failed_log(host, repo: str, item: dict, lines: int = GATE_LOG_FRAGMENT_LINE
     `##[error]` line that is not the runner's generic completion echo, which carries the same
     marker as a real cause; a job whose error was never marked at all falls back to its own tail.
     """
-    match = _RUN_URL_RE.search(str(item.get("details_url") or item.get("html_url") or item.get("targetUrl") or ""))
+    match = _RUN_URL_RE.search(str(
+        item.get("details_url") or item.get("html_url") or item.get("targetUrl")
+        or item.get("target_url") or ""
+    ))
     if not match:
         return _LogFragment(available=False,
                             reason="the entry is not an Actions run (no run link)")
@@ -983,7 +998,10 @@ def _classify_failed_step(step: str, text: str) -> tuple[str, str]:
         return "infrastructure", "action-download-http-5xx"
     if "set up docker buildx" in lowered_step and _REGISTRY_UNAVAILABLE_RE.search(text):
         return "infrastructure", "buildx-registry-unavailable"
-    if any(token in lowered_step for token in ("pull image", "pulling image", "docker pull", "load image")) and _REGISTRY_UNAVAILABLE_RE.search(text):
+    if any(token in lowered_step for token in (
+        "initialize containers", "initialize container", "pull image", "pulling image",
+        "docker pull", "load image",
+    )) and _REGISTRY_UNAVAILABLE_RE.search(text):
         return "infrastructure", "image-registry-unavailable"
     if "set up job" in lowered_step and _RUNNER_UNAVAILABLE_RE.search(text):
         return "infrastructure", "runner-unavailable"

@@ -1,0 +1,2 @@
+# Provenance: derived from a broken setup script rendered by a GitHub Actions runner, not a live capture.
+build	Set up job	##[error]runner setup script failed to start: ./prepare-runner: command not found

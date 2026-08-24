@@ -78,6 +78,9 @@ from secretary.dispatcher_state import (
     DispatcherRecord,
     now_rfc3339,
 )
+
+
+GITHUB_FAILED_LOG_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "github_actions_failed_logs"
 from secretary.dispatcher_state import (
     attempt_request_id as _attempt_request_id,
 )
@@ -3576,6 +3579,34 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             self.reader.show("secretary-510-pilot")["comments"][-1]["body"],
         )
 
+    def test_infrastructure_rerun_transport_retries_with_the_gate_transport_ceiling(self) -> None:
+        self.start_dispatcher()
+        self.tick()
+        self.host.gate_rerun_error = GateTransportError(self.TRANSPORT_ERROR)
+        self.host.gate_results = [GateResult(
+            "red", "CI red: job «build» failed", "Getting action download info: HTTP 502",
+            failure_class="infrastructure", failure_reason="action-download-http-5xx",
+            failed_run_id="999", failed_run_repo="example-org/sample",
+        )] * GATE_TRANSPORT_MAX_ATTEMPTS
+        self._report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+
+        for attempt in range(1, GATE_TRANSPORT_MAX_ATTEMPTS):
+            deferred = self.tick()
+            self.assertEqual(deferred["action"], "gate-transport-retry")
+            self.assertEqual(deferred["attempts"], attempt)
+            self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+
+        blocked = self.tick()
+
+        self.assertEqual(blocked["action"], "gate-infrastructure-rerun-blocked")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertIn(
+            f"{GATE_TRANSPORT_MAX_ATTEMPTS} consecutive attempts",
+            self.reader.show("secretary-510-pilot")["comments"][-1]["body"],
+        )
+        self.assertEqual(self.host.calls.count("rerun_failed_ci"), GATE_TRANSPORT_MAX_ATTEMPTS)
+
     def test_same_sha_done_after_a_persisted_infrastructure_red_retries_the_gate(self) -> None:
         """The stale-SHA safeguard reads the gate result stored in dispatcher state, never prose."""
         self.start_dispatcher()
@@ -3600,6 +3631,29 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             "classified from its CI step as infrastructure",
             "\n".join(item["body"] for item in self.reader.show("secretary-510-pilot")["comments"]),
         )
+
+    def test_infrastructure_rerun_preserves_the_accepted_stale_done_guard(self) -> None:
+        self.start_dispatcher()
+        self.tick()
+        payload = self.runtime.production_state.load()
+        record = payload["records"]["secretary-510-pilot"]
+        record.update({
+            "rejected_sha": self.host.commit,
+            "rejected_failure_class": "infrastructure",
+            "rejected_failure_reason": "action-download-http-5xx",
+        })
+        self.runtime.production_state.save(payload)
+        self._report_done("same SHA after an infra red")
+        self.assertEqual(self.tick()["action"], "stale-done-infrastructure-retry")
+        self.host.gate_results = [GateResult(
+            "red", "CI red: job «build» failed", "Getting action download info: HTTP 502",
+            failure_class="infrastructure", failure_reason="action-download-http-5xx",
+            failed_run_id="999", failed_run_repo="example-org/sample",
+        )]
+
+        self.assertEqual(self.tick()["action"], "gate-infrastructure-rerun")
+
+        self.assertEqual(self._pilot_record()["rejected_done_reports"], 1)
 
     def test_second_stale_infrastructure_done_is_visible_blocked_not_a_deduplicated_noop(self) -> None:
         self.start_dispatcher()
@@ -4239,6 +4293,31 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         self.assertEqual(waiting["action"], "merge-gate-pending")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+
+    def test_a_stalled_pending_merge_gate_blocks_at_the_same_ceiling(self) -> None:
+        self.start_dispatcher()
+        self.host.gate_results = [
+            GateResult("green", "green"),
+            GateResult("pending", "CI rerun queued"),
+            GateResult("pending", "CI rerun queued"),
+        ]
+        self._run_worker_to_validate()
+        self.tick()
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot",
+            kind="green", body="looks good", request_id="review-green-pending-stall",
+        )
+        self.assertEqual(self.tick()["action"], "merge-gate-pending")
+        payload = self.runtime.production_state.load()
+        record = payload["records"]["secretary-510-pilot"]
+        record["gate_pending_since"] = time.time() - dispatcher_module.GATE_PENDING_STALL_SECONDS - 1
+        self.runtime.production_state.save(payload)
+
+        stalled = self.tick()
+
+        self.assertEqual(stalled["to"], "blocked")
+        self.assertEqual(stalled["step"], "review")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
 
     def test_a_reslice_decision_stops_the_heads_and_keeps_the_workspace(self) -> None:
         self.start_dispatcher()
@@ -12286,30 +12365,64 @@ class DispatcherGateTests(unittest.TestCase):
         self.assertEqual(result.status, "red")
         self.assertIn("FileNotFoundError: absent", result.log)
 
-    def test_github_gate_red_classifies_an_unavailable_image_registry_as_infrastructure(self) -> None:
-        run_log = "\n".join([
-            "tests\tPull image\t##[error]registry.internal returned unexpected HTTP status: 503 Service Unavailable",
-        ])
+    def test_github_failed_log_fixture_corpus_classifies_the_enumerated_signatures(self) -> None:
+        """Every accepted signature and its near miss use runner-shaped `--log-failed` fixtures.
+
+        The fixture header records whether a sample is an actual capture or a documented runner/
+        daemon form.  The gate still receives the unmodified tab-separated output, including the
+        separate action-download and error entries that `_failed_log` joins into one fragment.
+        """
+        cases = (
+            ("action-download-http-5xx.true.log", "infrastructure", "action-download-http-5xx"),
+            ("action-download-http-5xx.false.log", "substantive", ""),
+            ("image-registry-unavailable.true.log", "infrastructure", "image-registry-unavailable"),
+            ("image-registry-unavailable.false.log", "substantive", ""),
+            ("runner-unavailable.true.log", "infrastructure", "runner-unavailable"),
+            ("runner-unavailable.false.log", "substantive", ""),
+            ("buildx-registry-unavailable.true.log", "infrastructure", "buildx-registry-unavailable"),
+            ("buildx-registry-unavailable.false.log", "substantive", ""),
+        )
+        for fixture, expected_class, expected_reason in cases:
+            with self.subTest(fixture=fixture):
+                run_log = (GITHUB_FAILED_LOG_FIXTURES / fixture).read_text(encoding="utf-8")
+                with tempfile.TemporaryDirectory() as tmp:
+                    ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+                    host = GithubGateHost(
+                        Path(tmp), self._github_adapter(), pr_open=True,
+                        check_runs=[{
+                            "status": "COMPLETED", "conclusion": "FAILURE", "name": "build",
+                            "details_url": "https://github.com/example-org/sample/actions/runs/999",
+                        }],
+                        run_log=run_log,
+                    )
+                    result = host.gate_check(self._task(), self._record(ws))
+                self.assertEqual(result.status, "red")
+                self.assertEqual(result.failure_class, expected_class)
+                self.assertEqual(result.failure_reason, expected_reason)
+
+    def test_github_gate_reads_a_snake_case_actions_run_url(self) -> None:
+        run_log = (GITHUB_FAILED_LOG_FIXTURES / "action-download-http-5xx.true.log").read_text(
+            encoding="utf-8"
+        )
         with tempfile.TemporaryDirectory() as tmp:
             ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
             host = GithubGateHost(
-                Path(tmp), self._github_adapter(),
-                pr_open=True,
+                Path(tmp), self._github_adapter(), pr_open=True,
                 check_runs=[{
-                    "status": "COMPLETED", "conclusion": "FAILURE", "name": "tests",
-                    "details_url": "https://github.com/example-org/sample/actions/runs/999",
+                    "status": "COMPLETED", "conclusion": "FAILURE", "name": "build",
+                    "target_url": "https://github.com/example-org/sample/actions/runs/999",
                 }],
                 run_log=run_log,
             )
             result = host.gate_check(self._task(), self._record(ws))
-        self.assertEqual(result.status, "red")
-        self.assertEqual(result.failure_class, "infrastructure")
-        self.assertEqual(result.failure_reason, "image-registry-unavailable")
-        self.assertIn("infrastructure failure", result.summary)
+        self.assertEqual(result.failed_run_id, "999")
+        self.assertEqual(result.failure_reason, "action-download-http-5xx")
 
     def test_github_infrastructure_rerun_waits_for_its_new_attempt_then_reads_the_new_terminal_checks(self) -> None:
         """The gate, not a dispatcher fake default, proves a rerun can replace the old red."""
-        run_log = "tests\tSet up job\tGetting action download info: HTTP 502\n"
+        run_log = (GITHUB_FAILED_LOG_FIXTURES / "action-download-http-5xx.true.log").read_text(
+            encoding="utf-8"
+        )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             ws = _build_gated_workspace(root, "main", "pipeline/secretary-633")
@@ -12339,47 +12452,6 @@ class DispatcherGateTests(unittest.TestCase):
             green = host.gate_check(self._task(), record)
 
         self.assertEqual(green.status, "green")
-
-    def test_github_gate_does_not_classify_pytest_registry_503_output_as_infrastructure(self) -> None:
-        run_log = "\n".join([
-            "tests\tRun tests\tFAILED tests/test_registry.py::test_pull_retries_on_503 - AssertionError",
-            "tests\tRun tests\tassert response.status == 503",
-            "tests\tRun tests\t##[error]Process completed with exit code 1.",
-        ])
-        with tempfile.TemporaryDirectory() as tmp:
-            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
-            host = GithubGateHost(
-                Path(tmp), self._github_adapter(), pr_open=True,
-                check_runs=[{
-                    "status": "COMPLETED", "conclusion": "FAILURE", "name": "tests",
-                    "details_url": "https://github.com/example-org/sample/actions/runs/999",
-                }],
-                run_log=run_log,
-            )
-            result = host.gate_check(self._task(), self._record(ws))
-        self.assertEqual(result.failure_class, "substantive")
-        self.assertEqual(result.failure_reason, "")
-
-    def test_github_gate_does_not_mask_a_broken_workflow_setup_step_as_infrastructure(self) -> None:
-        run_log = "\n".join([
-            "tests\tSet up job\tGetting action download info",
-            "tests\tSet up job\t##[error]workflow syntax is invalid: unexpected mapping key",
-        ])
-        with tempfile.TemporaryDirectory() as tmp:
-            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
-            host = GithubGateHost(
-                Path(tmp), self._github_adapter(),
-                pr_open=True,
-                check_runs=[{
-                    "status": "COMPLETED", "conclusion": "FAILURE", "name": "tests",
-                    "details_url": "https://github.com/example-org/sample/actions/runs/999",
-                }],
-                run_log=run_log,
-            )
-            result = host.gate_check(self._task(), self._record(ws))
-        self.assertEqual(result.status, "red")
-        self.assertEqual(result.failure_class, "substantive")
-        self.assertEqual(result.failure_reason, "")
 
     def test_github_gate_red_reports_unavailable_log_when_not_an_actions_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
