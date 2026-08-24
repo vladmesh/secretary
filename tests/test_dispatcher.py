@@ -3593,7 +3593,7 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         for attempt in range(1, GATE_TRANSPORT_MAX_ATTEMPTS):
             deferred = self.tick()
-            self.assertEqual(deferred["action"], "gate-transport-retry")
+            self.assertEqual(deferred["action"], "gate-rerun-transport-retry")
             self.assertEqual(deferred["attempts"], attempt)
             self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
 
@@ -4319,6 +4319,34 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(stalled["step"], "review")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
 
+    def test_a_stalled_pending_release_gate_blocks_at_the_same_ceiling(self) -> None:
+        self.start_dispatcher()
+        self.host.gate_results = [
+            GateResult("green", "green"),
+            GateResult("green", "green"),
+            GateResult("pending", "CI rerun queued"),
+            GateResult("pending", "CI rerun queued"),
+        ]
+        self._run_worker_to_validate()
+        self.tick()
+        self.writer.verdict(
+            role="reviewer", actor="reviewer", reference="secretary-510-pilot",
+            kind="green", body="looks good", request_id="review-green-release-pending-stall",
+        )
+        self.assertEqual(self.tick()["to"], "assessment")
+        self._decide("release")
+        self.assertEqual(self.tick()["action"], "merge-gate-pending")
+        payload = self.runtime.production_state.load()
+        record = payload["records"]["secretary-510-pilot"]
+        record["gate_pending_since"] = time.time() - dispatcher_module.GATE_PENDING_STALL_SECONDS - 1
+        self.runtime.production_state.save(payload)
+
+        stalled = self.tick()
+
+        self.assertEqual(stalled["to"], "blocked")
+        self.assertEqual(stalled["step"], "assessment")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+
     def test_a_reslice_decision_stops_the_heads_and_keeps_the_workspace(self) -> None:
         self.start_dispatcher()
         self._run_worker_to_validate()
@@ -4941,6 +4969,23 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(result["status"], "blocked")
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
         self.assertEqual(self.host.reviews, [])
+
+    def test_a_missing_remote_base_ref_blocks_without_spending_transport_retries(self) -> None:
+        self.start_dispatcher()
+        self.host.gate_error = HostError(
+            "gate base fetch (git fetch) refused: fatal: couldn't find remote ref removed-base"
+        )
+        self._run_worker_to_validate()
+
+        blocked = self.tick()
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+        self.assertEqual(len(self.host.gate_calls), 1)
+        reason = self._blocked_reason()
+        self.assertIn("git fetch", reason)
+        self.assertIn("couldn't find remote ref removed-base", reason)
+        self.assertNotIn("no answer", reason)
 
     # --- secretary-1164: a gate backend that never answered is not a red gate ---
 
@@ -12235,6 +12280,22 @@ class DispatcherGateTests(unittest.TestCase):
                 host.gate_check(self._task(), self._record(ws))
         self.assertIn("gate base fetch", str(caught.exception))
 
+    def test_base_fetch_missing_remote_ref_is_a_determinate_git_refusal(self) -> None:
+        """A remote that says a requested base ref is absent answered `git fetch`; it is not
+        transport silence and must reach the dispatcher as a one-tick blocking failure."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GateHost(Path(tmp), {"validation": {"ci": "local", "command": "true"}})
+            task = self._task()
+            task["workspace"] = {"base_branch": "removed-base"}
+
+            with self.assertRaises(HostError) as caught:
+                host.gate_check(task, self._record(ws))
+
+        self.assertNotIsInstance(caught.exception, GateTransportError)
+        self.assertIn("git fetch", str(caught.exception))
+        self.assertIn("fatal: couldn't find remote ref removed-base", str(caught.exception))
+
     def test_local_gate_timeout_is_never_a_transport_failure(self) -> None:
         """A local validation command that hung is a determinate answer about the branch: no
         backend was asked, so the local gate cannot reach the transport class at all, and the
@@ -12311,6 +12372,22 @@ class DispatcherGateTests(unittest.TestCase):
         self.assertEqual(
             _backend_call(Stub(0, ""), ["gh", "api", "x"], "gate gh api").returncode, 0
         )
+
+    def test_only_git_fetch_reads_a_missing_remote_ref_as_an_answer(self) -> None:
+        class Stub:
+            def run_capture(self, args, label, *, cwd=None):
+                return subprocess.CompletedProcess(
+                    args, 128, "", "fatal: couldn't find remote ref removed-base"
+                )
+
+        completed = _backend_call(
+            Stub(), ["git", "-C", "workspace", "fetch", "origin", "removed-base"],
+            "gate base fetch",
+        )
+
+        self.assertEqual(completed.returncode, 128)
+        with self.assertRaises(GateTransportError):
+            _backend_call(Stub(), ["gh", "api", "x"], "gate gh api")
 
     def test_github_gate_red_fragment_skips_aggregate_job_echo(self) -> None:
         """secretary-766: `--log-failed` dumps every failed job, including one that only

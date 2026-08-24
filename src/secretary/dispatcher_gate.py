@@ -139,14 +139,18 @@ _ANSWERED_RE = re.compile(
     r'(?im)(\bgraphql:\s|^\s*remote:\s|!\s*\[(?:rejected|remote rejected|deleted|no match)\]'
     r'|^\s*\{\s*"(?:errors|message)")'
 )
+# 4. `git fetch` reporting that the requested remote ref does not exist. This is a terminal
+# answer from the named remote, but git gives it neither an HTTP status nor the push report shape
+# above. Keep it coupled to the fetch invocation: `fatal` by itself remains unclassified silence.
+_GIT_FETCH_MISSING_REF_RE = re.compile(r"(?im)^fatal: couldn't find remote ref [^\r\n]+$")
 
 
-def _backend_answered(text: str) -> bool:
+def _backend_answered(text: str, args: list[str]) -> bool:
     """Did the gate's backend answer this failed backend command?
 
     An HTTP status decides first (5xx is the backend failing to answer, not an answer); otherwise
-    one of the answer shapes above must be present. Text matching none of them is a question that
-    got no answer.
+    one of the answer shapes above must be present. A missing ref is also an answer, but only from
+    `git fetch`. Text matching none of them is a question that got no answer.
     """
     text = (text or "").strip()
     if not text:
@@ -155,6 +159,8 @@ def _backend_answered(text: str) -> bool:
     if status:
         code = status.group(1) or status.group(2)
         return not code.startswith("5")
+    if args[:1] == ["git"] and "fetch" in args and _GIT_FETCH_MISSING_REF_RE.search(text):
+        return True
     return bool(_ANSWERED_RE.search(text))
 
 
@@ -176,7 +182,7 @@ def _backend_call(host, args: list[str], label: str, *, cwd: Path | None = None)
     if completed.returncode == 0:
         return completed
     text = _tail((completed.stderr or completed.stdout or "").strip())
-    if _backend_answered(text):
+    if _backend_answered(text, args):
         return completed
     raise GateTransportError(f"{label} got no answer: {text or '(no output)'}")
 
@@ -371,7 +377,7 @@ def _recover_base(host, workspace: str, base: str) -> str:
         # An answered refusal (a base branch the remote does not have, a rejected credential) is
         # a determinate gate failure, exactly as it was before this call moved here.
         raise HostError(
-            f"gate base fetch failed: {_tail((fetch.stderr or fetch.stdout or '').strip())}"
+            f"gate base fetch (git fetch) refused: {_tail((fetch.stderr or fetch.stdout or '').strip())}"
         )
     behind = host._run(
         ["git", "-C", workspace, "rev-list", "--count", f"HEAD..origin/{base}"],

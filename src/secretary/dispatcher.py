@@ -6990,7 +6990,7 @@ class DispatcherRuntime:
             "step": step,
             "pilot_ref": ref,
             "attempt_id": attempt_id,
-            "action": "gate-transport-retry",
+            "action": "gate-rerun-transport-retry",
             "attempts": attempts,
             "max_attempts": GATE_TRANSPORT_MAX_ATTEMPTS,
             "reason": (
@@ -7542,7 +7542,17 @@ class DispatcherRuntime:
             # `drift` is decided before the gate is asked; only an answer clears the budget.
             self._gate_answered(ref, record, records, payload)
         if kind == "pending":
-            return {"status": "ok", "step": "assessment", "pilot_ref": ref, "attempt_id": attempt_id, "action": "merge-gate-pending"}
+            if result is None:
+                return self._block_merge_path(
+                    task, record, records, payload, attempt_id,
+                    action="release-gate-result-blocked",
+                    reason="merge gate returned pending without a result payload",
+                    step="assessment", outcome="merge gate result unavailable",
+                )
+            return self._gate_pending(
+                task, record, records, payload, attempt_id, result,
+                step="assessment", action="merge-gate-pending",
+            )
         if kind != "green":
             summary = {
                 "drift": f"the release cannot land: {detail}",
