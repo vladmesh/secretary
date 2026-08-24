@@ -436,7 +436,7 @@ as it was. `plane`, `policy`, `remote` and `orca_binding` are carried over.
 A takedown also opens a new onboarding cycle, recorded as `onboarding_cycle` in the draft and mixed into
 the provision run id. Without it a re-onboarding on an unchanged HEAD would land on the previous cycle's
 run: `provision-apply` would republish the very adapter the takedown deleted without any new provisioning,
-and the old passed gate receipt would then make `project gate` refuse the new run as superseded. A new
+and the old passed dispatcher-owned exact-SHA gate receipt would then make `project gate` refuse the new run as superseded. A new
 cycle gives `provision-start` a fresh run directory instead. The old run directories stay on disk as
 history; nothing reads them again. Drafts published before this existed carry no cycle and keep their run
 ids.
@@ -1207,19 +1207,22 @@ the merge below runs on the tick that performs a recorded `release` decision. A 
 still resolves in Validate, so a card only reaches Assessment with nothing mechanical left to decide.
 A card with no observer to release it merges on the verdict's own tick, as below.
 
-### Exact-SHA gate evidence
+### Dispatcher-owned exact-SHA gate receipt
 
-An executed local or GitHub mechanical gate can leave a valid receipt only when it names the exact
-commit SHA being judged, its base SHA, completed terminal checks, completion time and check-set digest.
-The receipt is evidence for that SHA and lifecycle stage only. A reviewer or observer may suppress a
+An executed local or GitHub mechanical gate can leave a valid dispatcher-owned exact-SHA gate
+receipt only when it names the exact commit SHA being judged, its base SHA, completed terminal
+checks, completion time and check-set digest.
+Its ownership, attestation and travel are defined in [Receipt names](PROTOCOLS.md#receipt-names). A
+reviewer or observer may suppress a
 routine repeat of the already-attested broad validation on that unchanged SHA, but must still inspect
 the diff and acceptance criteria; focused reproduction, mandatory CI and the fresh pre-merge gate remain
 independent decisions.
 
-Do not carry that evidence to a new commit, a later lifecycle stage, or a different check set. Missing
-evidence, `gate_mode: none`, and noop execution are explicit absence of a broad-suite attestation, even
-when they preserve dispatcher control flow. In those cases, obtain the focused or broad validation the
-decision needs instead of describing a suite as already passed.
+Do not carry a dispatcher-owned exact-SHA gate receipt to a new commit, a later lifecycle stage, or
+a different check set. Missing evidence, `gate_mode: none`, and noop execution are explicit absence
+of a broad-suite attestation, even when they preserve dispatcher control flow. In those cases,
+obtain the focused or broad validation the decision needs instead of describing a suite as already
+passed.
 
 A release the dispatcher cannot carry out takes the card to Blocked with the failure on it, the
 same as any merge that could not land before Assessment existed. It never sends the card back for
@@ -1750,7 +1753,7 @@ secretary dispatcher production-tick --instance <dir> --probe
 python3 -m unittest
 ```
 
-### Broad checks and their receipts
+### Worker-local broad receipt
 
 A broad run is expensive enough that its result should survive the terminal it printed to. The
 documented form wraps the suite:
@@ -1761,12 +1764,13 @@ python3 -m secretary check show --module unittest
 ```
 
 `check broad` streams the check's combined output to stderr while it runs, exits with the check's
-own status (a signal-killed check becomes the usual `128+N`), and writes one JSON receipt under
-`state/checks/` in the workspace — an ignored path, never committed. The receipt holds the check
-and its check-set digest, the working directory, the import provenance described below, start, end
-and duration, the exit code, the parsed verdict and counts where the runner prints them, and a
-bounded tail of the output. The verdict is scanned off the stream as it goes past, so a runner that
-prints `OK (skipped=8)` and then megabytes of cleanup output still has its counts recorded, without
+own status (a signal-killed check becomes the usual `128+N`), and writes one worker-local broad
+receipt under `state/checks/` in the workspace — an ignored path, never committed. The
+worker-local broad receipt holds the check and its check-set digest, the working directory, the
+import provenance described below, start, end and duration, the exit code, the parsed verdict and
+counts where the runner prints them, and a bounded tail of the output. The verdict is scanned off the
+stream as it goes past, so a runner that prints `OK (skipped=8)` and then megabytes of cleanup output
+still has its counts recorded, without
 the receipt growing to hold the logs.
 
 Two check shapes are accepted, and they differ in one promise:
@@ -1792,9 +1796,10 @@ Two check shapes are accepted, and they differ in one promise:
   summary to read.
 
 Observed provenance is necessary and not sufficient. A receipt may replace a run only when the
-check process imported the adapter's configured project package *from this workspace*: a missing or unreadable record, an empty
-path, an unresolvable one, and a path outside the candidate are all refusals. That matters in an
-ordinary Python setup, where `PYTHONPATH` can put another checkout of the project ahead of this one
+check process imported the adapter's configured project package *from this workspace*: a missing or
+unreadable record, an empty path, an unresolvable one, and a path outside the candidate are all
+refusals. That matters in an ordinary Python setup, where `PYTHONPATH` can put another checkout of
+the project ahead of this one
 — the receipt records that other path truthfully and is still refused for reuse, because the run it
 describes was a run of different code. An import from the configured interpreter's own environment
 (such as `.venv/.../site-packages`) is also refused even when that environment sits under the
@@ -1819,16 +1824,16 @@ returns — is derived from one model of the raw process result, and the boundar
 and requires the stored fields to match it exactly. So a "complete" receipt that records a signal, an
 exit code and signal that disagree, a complete run whose reason is a single space, or a status
 outside the 0..255 a POSIX process can return are all refused, and reuse cannot hand back a masked
-or invented status. Corruption outranks both status preservation and reuse. `check broad --reuse` skips the run while the receipt is usable — through the same single
-predicate `check show` reports, so the two can never disagree — and a report can quote the evidence
-instead of rebuilding it.
+or invented status. Corruption outranks both status preservation and reuse. `check broad --reuse`
+skips the run while the receipt is usable — through the same single predicate `check show` reports,
+so the two can never disagree — and a report can quote the evidence instead of rebuilding it.
 
-This receipt is a local convenience for whoever ran the suite. It is not the mechanical gate's
-exact-SHA attestation and never travels downstream in its place.
+Its ownership, attestation and travel are defined in [Receipt names](PROTOCOLS.md#receipt-names).
 
-`--probe` is a real dry tick: it takes the same singleton lock, passes the same mutation guards, scans the same card
-states and runs the same decision logic, but the first write turns into an abort and lands in the report as "what the
-next tick would do". A green probe with a broken tick is impossible, because a broken tick fails here too.
+`--probe` is a real dry tick: it takes the same singleton lock, passes the same mutation guards,
+scans the same card states and runs the same decision logic, but the first write turns into an abort
+and lands in the report as "what the next tick would do". A green probe with a broken tick is
+impossible, because a broken tick fails here too.
 
 ### Head readiness
 

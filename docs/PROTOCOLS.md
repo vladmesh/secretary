@@ -150,26 +150,39 @@ At an identity-fenced observer replacement, the old episode is first terminalize
 audit evidence; the replacement launch intent then opens a fresh episode bound only to the new
 HeadRun while carrying the unchanged delivery id and event high-water mark.
 
-## SHA-bound mechanical gate evidence
+## Receipt names
 
-Every real mechanical gate result materializes a reusable receipt bound to one checkout:
+The protocol names exactly two receipts:
+
+- A worker-local broad receipt is owned by the worker. It attests one local broad suite's result
+  for the current content, stays in that worker's workspace and never travels downstream.
+- A dispatcher-owned exact-SHA gate receipt is owned by the dispatcher. It attests completed
+  terminal gate checks for one exact SHA and lifecycle stage, then travels with the active card to
+  review and Assessment and into the release audit.
+
+### Dispatcher-owned exact-SHA gate receipt
+
+Every real mechanical gate result materializes a dispatcher-owned exact-SHA gate receipt bound to
+one checkout and containing:
 `validated_sha`, `base_sha`, `gate_mode`, terminal `required_checks` (name, conclusion and URL),
-`completed_at`, and a `command_or_check_set_digest`. For a local gate this is the configured command's
-digest; for GitHub it is a stable required-check-set identity, not a workflow-definition or run digest.
+`completed_at`, and a `command_or_check_set_digest`. For a local gate this is the configured
+command's digest; for GitHub it is a stable required-check-set identity, not a workflow-definition
+or run digest.
 Both object IDs are full 40-character SHA-1 or 64-character SHA-256 values; abbreviations are not
-evidence. A local gate captures HEAD before and after its command and fails closed if the command moves
-it. Only `local` and `github` may carry receipts; `none` and noop are valid only without one, and an
-unknown mode is never accepted.
-The dispatcher persists the receipt with the active card, renders it into the reviewer's task
-document, replaces it with the fresh post-review receipt in the Assessment delivery, and writes the
-fresh final receipt into the release audit after the mandatory exact-SHA pre-merge re-check. That
-document is written outside the checkout, under the run artifacts and private to the installation,
-because a workspace's identity is the tracked diff and untracked files a receipt hashes; the pane
+evidence. A local gate captures HEAD before and after its command and fails closed if the command
+moves it. Only `local` and `github` may carry receipts; `none` and noop are valid only without one,
+and an unknown mode is never accepted.
+The dispatcher persists the dispatcher-owned exact-SHA gate receipt with the active card, renders it
+into the reviewer's task document, replaces it with the fresh post-review receipt in the Assessment
+delivery, and writes the fresh final receipt into the release audit after the mandatory exact-SHA
+pre-merge re-check. That document is written outside the checkout, under the run artifacts and
+private to the installation, because a workspace's identity is the tracked diff and untracked files
+a receipt hashes; the pane
 receives only a bounded pointer to it. `TASK.md` is likewise a generated, git-ignored workspace
 handoff packet. These are operational projections, not repository documentation or candidate
 changes. A receipt is evidence, not permission to skip the pre-merge check or independent review.
 
-### The pull request a GitHub gate opens
+## The pull request a GitHub gate opens
 
 A `github` gate opens the pull request the `pull_request` workflow needs, and that pull request is
 also the only description of the change a later reader of `main` gets: its title lands in the merge
@@ -267,9 +280,10 @@ of bad network, which is the failure this contract exists to prevent.
 
 A reviewer that cannot be started is a failure of the review stage, not a verdict on the candidate.
 A split pane that will not open, an unavailable reviewer resource, or an unwritable launch intent:
-the card holds its green gate receipt, its candidate SHA, its report round and request ids and its suspended worker
-session, and the next tick launches the reviewer again against that same evidence. It does not move
-through Ready, does not launch a worker, does not re-run the mechanical gate or any broad validation,
+the card holds its green dispatcher-owned exact-SHA gate receipt, its candidate SHA, its report
+round and request ids and its suspended worker session, and the next tick launches the reviewer again
+against that same evidence. It does not move through Ready, does not launch a worker, does not re-run
+the mechanical gate or any broad validation,
 does not regenerate the candidate, and charges the sprint no budget event; each attempt is one
 `review-infrastructure-retry` action naming the held candidate. The retries are bounded
 (`SECRETARY_REVIEW_INFRA_RETRY_ATTEMPTS`, ten by default) and count consecutive failures only. Once
@@ -287,44 +301,50 @@ worker, write reviewer routing or lifecycle attribution, clear the intent, or re
 Successful confirmation crosses the ordinary launch adoption boundary once; `unavailable`, malformed
 and stale-handle evidence remain separately typed and use their existing conservative recovery paths.
 
+### Broad-check handling
+
 Workers use focused checks while developing and run no more than one local broad suite for a report
 generation/unchanged SHA unless they state why it was rerun. That broad run goes through
 `secretary check broad`, which streams the combined output, returns the check's own exit status and
-writes a workspace-local receipt under the ignored `state/checks/` path: command and check-set digest,
-cwd and imported project provenance, start/end/duration, exit code, parsed verdict and counts where the
-runner prints them (scanned off the stream, so cleanup output after a summary cannot erase it), and a
-bounded diagnostic tail. The receipt is evidence about content, not about time: it records the
-content as one git tree object id — the tree this worktree, tracked edits and untracked files included,
-would commit to — so `secretary check show` answers whether it still describes the code in front of the
-role, and committing that content unchanged keeps the receipt usable. While a usable receipt exists,
-rerunning the broad suite only because the pane scrolled its output away is prohibited;
-an edited worktree or a concrete red result being fixed opens a justified new run, named
-in the report. A receipt only ever claims an import it observed from the process that ran the check:
-the `--module` shape runs the suite itself and records what that process imported, while an arbitrary
-`--command` shell — which may change directory or import environment before any interpreter starts —
+writes a worker-local broad receipt under the ignored `state/checks/` path: command and check-set
+digest, cwd and imported project provenance, start/end/duration, exit code, parsed verdict and
+counts where the runner prints them (scanned off the stream, so cleanup output after a summary
+cannot erase it), and a bounded diagnostic tail. The worker-local broad receipt is evidence about
+content, not time: it records the content as one git tree object id, the tree this worktree with
+tracked edits and untracked files would commit to. `secretary check show` therefore answers whether
+it still describes the code in front of the role, and committing that content unchanged keeps the
+worker-local broad receipt usable. While a usable worker-local broad receipt exists, rerunning the
+broad suite only because the pane scrolled its output away is prohibited; an edited worktree or a
+concrete red result being fixed opens a justified new run, named in the report. A worker-local broad
+receipt only ever claims an import it observed from the process that ran the check. The `--module`
+shape runs the suite itself and records what that process imported. An arbitrary
+`--command` shell may change directory or import environment before any interpreter starts, so it
 attests no import and is never reused in place of a run. Reuse asks more than that the import was
 observed: it has to have resolved inside the candidate workspace, so a legitimate import environment
-that resolves the project to another checkout is recorded truthfully and still refused. One predicate
-answers that question for every route, and a check is keyed by its structured check set — shape,
-module and exact argument vector — so two invocations that render alike cannot answer for each other. Anything less than an intact, finished receipt
-with observed provenance for exactly this content — a truncated or edited artifact, a result no run
-could have written, a killed or timed-out run, a checkout with no resolvable identity — is not a
-summary and does not attest anything. The receipt never leaves the workspace and is never committed: only an
-executed local/GitHub gate with a valid exact-SHA receipt is authoritative reusable evidence
-downstream. A none/noop gate or missing
-receipt attests no broad suite, so the role runs or requests validation appropriate to the decision.
-Reviewers independently inspect changed code and invariants, but do not repeat an attested broad command
-on the same SHA without a recorded `rerun_reason`; targeted reproduction remains appropriate for a new
+that resolves the project to another checkout is recorded truthfully and still refused. One
+predicate answers that question for every route, and a check is keyed by its structured check set —
+shape, module and exact argument vector — so two invocations that render alike cannot answer for
+each other.
+Anything less than an intact, finished receipt with observed provenance for exactly this content — a
+truncated or edited artifact, a result no run could have written, a killed or timed-out run, a
+checkout with no resolvable identity — is not a summary and does not attest anything. The
+worker-local broad receipt never leaves the workspace and is never committed: only an executed
+local/GitHub gate with a valid dispatcher-owned exact-SHA gate receipt is authoritative reusable
+evidence downstream. A none/noop gate or missing dispatcher-owned exact-SHA gate receipt attests no
+broad suite, so the role runs or requests validation appropriate to the decision. Reviewers
+independently inspect changed code and invariants, but do not repeat an attested broad command on
+the same SHA without a recorded `rerun_reason`; targeted reproduction remains appropriate for a new
 blocker, uncovered external behaviour, or security/data-loss risk. Re-review
-packets carry the previous reviewed SHA, previous blocker text/IDs, current SHA and changed-path delta,
-so the next reviewer verifies the delta and closure rather than restarting at the original base.
+packets carry the previous reviewed SHA, previous blocker text/IDs, current SHA and changed-path
+delta, so the next reviewer verifies the delta and closure rather than restarting at the original base.
 
-Observers consume the worker report, reviewer verdict and gate receipt before code/CI exploration. A
-valid executed exact-SHA receipt suppresses its routine broad rerun; none/noop or missing evidence does
-not, and permits appropriate focused or broad validation. Contradictory evidence, RED/Blocked
-classification, a real Definition-of-Done gap, or a security/data-loss concern also requires research.
-The role that owns a further broad rerun records its reason in the report; a receipt never transfers
-ownership of an unexplained rerun or suppresses a targeted reproduction of a new concrete risk.
+Observers consume the worker report, reviewer verdict and dispatcher-owned exact-SHA gate receipt
+before code/CI exploration. A valid executed dispatcher-owned exact-SHA gate receipt suppresses its
+routine broad rerun; none/noop or missing evidence does not, and permits appropriate focused or
+broad validation. Contradictory evidence, RED/Blocked classification, a real Definition-of-Done gap,
+or a security/data-loss concern also requires research. The role that owns a further broad rerun
+records its reason in the report; a worker-local broad receipt never transfers ownership of an unexplained
+rerun or suppresses a targeted reproduction of a new concrete risk.
 
 A card parks only where a decision can come from: its sprint is open and declares a concrete
 observer head. A card with no linked sprint, or one whose sprint declares `--observer none` or has
@@ -1528,7 +1548,7 @@ it started from, and a retry carries it through. It does not enable anything and
 provision agent nothing.
 
 A takedown opens a new onboarding cycle. The draft records it as `onboarding_cycle` and the provision run
-id derives from it, so provision results and gate receipts from an earlier cycle cannot be reused on an
+id derives from it, so provision results and dispatcher-owned exact-SHA gate receipts from an earlier cycle cannot be reused on an
 unchanged scanner head. Evidence is bound to the cycle that produced it.
 
 Diagnosing failures, recovering a stale disabled draft, re-onboarding an enabled legacy project and

@@ -8603,6 +8603,16 @@ class HeadPromptTests(unittest.TestCase):
     def _command_lines(self, doc: str) -> list[str]:
         return [line for line in doc.splitlines() if "python3 -P -m secretary task" in line]
 
+    def _assert_receipt_name_at_site(
+        self, prompt: str, site: str, expected: str, other: str,
+    ) -> None:
+        """A named prompt site must retain the canonical name for the receipt it describes."""
+        _, found, rest = prompt.partition(site)
+        self.assertTrue(found, f"prompt must retain receipt site: {site!r}")
+        sentence = site + rest.split(".", 1)[0]
+        self.assertIn(expected, sentence)
+        self.assertNotIn(other, sentence)
+
     def test_review_prompt_names_a_concrete_body_file(self) -> None:
         doc = self.host._review_prompt(self.task, "attempt-1", 3)
         commands = self._command_lines(doc)
@@ -8677,12 +8687,39 @@ class HeadPromptTests(unittest.TestCase):
         # The shell shape is offered, with the promise it cannot keep spelled out.
         self.assertIn("never reused in place of a run", doc)
         self.assertIn("state/checks/broad-<digest>.json", doc)
-        self.assertIn("the receipt already covers is prohibited", doc)
+        self.assertIn("worker-local broad receipt already covers is prohibited", doc)
         # Reuse is bounded by the candidate-trust rule the wrapper enforces.
         self.assertIn("imported the project from this workspace", doc)
         # The justified reruns stay open, and the receipt never impersonates the gate.
         self.assertIn("opens a new justified run", doc)
-        self.assertIn("exact-SHA attestation", doc)
+        self.assertIn("worker-local broad receipt", doc)
+        self.assertIn("dispatcher-owned exact-SHA gate receipt", doc)
+
+    def test_worker_prompt_names_each_receipt_at_its_own_site(self) -> None:
+        worker = self.host._worker_task_doc(self.task, "main", "attempt-1")
+
+        broad = "worker-local broad receipt"
+        gate = "dispatcher-owned exact-SHA gate receipt"
+        sites = (
+            ("Run that broad suite through the receipt wrapper, so its ", broad),
+            ("`--reuse` is the default way to invoke it: with a usable ", broad),
+            ("in the report. While that ", broad),
+            ("reusable downstream only if it produces a valid ", gate),
+            ("It is never presented as a ", gate),
+        )
+        for site, expected in sites:
+            other = gate if expected == broad else broad
+            self._assert_receipt_name_at_site(worker, site, expected, other)
+
+        corrupted = worker.replace(
+            "in the report. While that worker-local broad receipt is usable",
+            "in the report. While that dispatcher-owned exact-SHA gate receipt is usable",
+            1,
+        )
+        with self.assertRaises(AssertionError):
+            for site, expected in sites:
+                other = gate if expected == broad else broad
+                self._assert_receipt_name_at_site(corrupted, site, expected, other)
 
     def test_worker_prompt_names_a_concrete_body_file(self) -> None:
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
@@ -8840,7 +8877,7 @@ class HeadPromptTests(unittest.TestCase):
     def test_worker_prompt_does_not_call_none_or_noop_validation_authoritative(self) -> None:
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")
 
-        self.assertIn("only if it produces a valid exact-SHA receipt", doc)
+        self.assertIn("only if it produces a valid dispatcher-owned exact-SHA gate receipt", doc)
         self.assertIn("none/noop gate", doc)
         self.assertIn("attests no broad suite", doc)
         self.assertNotIn("authoritative broad suite belongs", doc)

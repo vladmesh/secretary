@@ -4181,6 +4181,32 @@ class ObserverConfigurationTests(unittest.TestCase):
         self.assertIn("--through-event evt-card-1", message)
         self.assertIn("only when that receipt exists", message)
         self.assertIn("none/noop/missing evidence proves no broad suite", message)
+        broad = "worker-local broad receipt"
+        gate = "dispatcher-owned exact-SHA gate receipt"
+
+        def assert_receipt_name_at_site(site: str, expected: str, other: str) -> None:
+            _, found, rest = message.partition(site)
+            self.assertTrue(found, f"observer message must retain receipt site: {site!r}")
+            sentence = site + rest.split(".", 1)[0]
+            self.assertIn(expected, sentence)
+            self.assertNotIn(other, sentence)
+
+        for site, expected in (
+            ("Read its worker report, reviewer verdict and any valid executed ", gate),
+            ("Keep a ", broad),
+        ):
+            other = gate if expected == broad else broad
+            assert_receipt_name_at_site(site, expected, other)
+
+        corrupted = message.replace(
+            "Keep a worker-local broad receipt with the worker",
+            "Keep a dispatcher-owned exact-SHA gate receipt with the worker",
+            1,
+        )
+        with self.assertRaises(AssertionError):
+            _, found, rest = corrupted.partition("Keep a ")
+            self.assertTrue(found)
+            self.assertIn(broad, "Keep a " + rest.split(".", 1)[0])
         # The pane started a turn, and that alone does not close an observer delivery.
         self.assertEqual(outcome, "accepted")
         # Readiness is asked and the pane is fingerprinted on both sides of the send: the byte

@@ -317,7 +317,7 @@ the board, and runs neither the memory reindex nor the host materialiser.
 
 The manual recovery and durability sprint was deployed in two production batches:
 `dab7508` (recovery, reference allocation and checkpoint safety) followed by `5f79500`
-(exact-SHA gate receipts and sparse observer wakes). Deployment validation recorded a green suite of
+(dispatcher-owned exact-SHA gate receipts and sparse observer wakes). Deployment validation recorded a green suite of
 1,978 tests and role-skill delivery synchronized across all nine targets, with zero missing targets and
 zero drift.
 
@@ -348,7 +348,7 @@ secret-recovery finding. It is not healthy, and it must not be recovered, materi
 changed merely to run a canary whose selected subscription heads are already authenticated.
 
 For later real sprints, keep recording card reference; resolved worker and reviewer heads; candidate SHA;
-exact-SHA mechanical-gate receipt; observer decision; checkpoint publication; worker/gate/reviewer launch
+dispatcher-owned exact-SHA gate receipt; observer decision; checkpoint publication; worker/gate/reviewer launch
 counts; delivery failures; and manual prompts. A successful normal launch is not evidence that a retry
 path ran. Do not freeze production merely to preserve the old canary premise, and do not inject a failure
 that mutates candidate history or weakens the gate.
