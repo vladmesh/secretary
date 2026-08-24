@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -572,16 +572,201 @@ def launch_deferred(
     }
 
 
+# --- One classification of a bring-up that did not produce a head -------------------------------
+#
+# Both bring-up paths — the worker's (claim, respawn, rework) and the reviewer's (`start_review`) —
+# used to answer this question with their own copy of the rules: the worker turned every `HostError`
+# into a defect of the card, while the reviewer had a second class name, a second counter and a
+# second ceiling for the same failure. An observer reading a Blocked card could not tell "the host
+# never opened a pane" from "this card cannot be brought up as written". One classifier answers it
+# for both, and both call it: nothing below decides a class from a message, a role or a caller.
+#
+# The rule is what the failure says about the card, and a bring-up says almost nothing: at this
+# point no line of the card's work has been read, let alone judged. So a failure of the host —
+# a pane that would not open, an inventory that would not answer, a pane that never took its
+# prompt — is `infrastructure`, and the card carries no verdict out of it. The one family that is
+# not is a failure of this card's own bring-up contract: the checkout it was requeued onto is gone,
+# or is not the worktree on the branch this card's claim recorded. No healthy host survives that
+# and no later tick repairs it, so it stays what it already was — a `task` outcome that blocks the
+# card for a person.
+FAILURE_CLASS_INFRASTRUCTURE = "infrastructure"
+FAILURE_CLASS_TASK = "task"
+# The mechanical gate reached the same two classes first and named the second one `substantive`
+# (`DispatcherRecord.rejected_failure_class`, `GateResult.failure_class`). That field is not renamed
+# here and this is not a third name for it: `task` is the sprint's word for a bring-up outcome, and
+# this constant is the whole of the correspondence, so a reader of either side can find the other.
+GATE_NAME_FOR_TASK_CLASS = "substantive"
+
+# The enumerated causes. A bring-up outcome carries one of these, never free text: the free text is
+# the evidence beside it, and an observer (and the budget card after this one) reads the cause.
+CAUSE_PANE_NEVER_READY = "pane_never_ready"
+CAUSE_LAUNCH_ABORTED = "launch_aborted"
+CAUSE_HOST_UNAVAILABLE = "host_unavailable"
+CAUSE_WORKSPACE_CONTRACT = "workspace_contract"
+# The cause decides the class, so no caller and no raise site can pair them freely.
+BRING_UP_CAUSE_CLASSES = {
+    CAUSE_PANE_NEVER_READY: FAILURE_CLASS_INFRASTRUCTURE,
+    CAUSE_LAUNCH_ABORTED: FAILURE_CLASS_INFRASTRUCTURE,
+    CAUSE_HOST_UNAVAILABLE: FAILURE_CLASS_INFRASTRUCTURE,
+    CAUSE_WORKSPACE_CONTRACT: FAILURE_CLASS_TASK,
+}
+# Where in a card's life the bring-up was. `rework` is the same worker relaunch as `respawn` from a
+# red round rather than a stall, and it is named apart because that is what the evidence has to say.
+STAGE_CLAIM = "claim"
+STAGE_RESPAWN = "respawn"
+STAGE_REWORK = "rework"
+STAGE_REVIEW = "review"
+BRING_UP_STAGES = (STAGE_CLAIM, STAGE_RESPAWN, STAGE_REWORK, STAGE_REVIEW)
+
+# The durable token. A blocked bring-up already wrote its action into the transition's request id,
+# and the reviewer path already spelled one of these `review-infrastructure-blocked`, so the class
+# goes where that token is: an infrastructure outcome gets `-infrastructure-` in front of `-blocked`
+# and a task outcome keeps the action it always had. That keeps every existing task-class request id
+# byte-identical, and gives the class a reading that survives the tick, the pane and the log — which
+# is what the budget card downstream needs from `_budget_event_type`.
+INFRASTRUCTURE_ACTION_TOKEN = "infrastructure"
+
+
+def infrastructure_action(action: str) -> str:
+    """`review-blocked` -> `review-infrastructure-blocked`. Idempotent."""
+    if f"-{INFRASTRUCTURE_ACTION_TOKEN}-" in f"-{action}-":
+        return action
+    suffix = "-blocked"
+    if action.endswith(suffix):
+        return f"{action[: -len(suffix)]}-{INFRASTRUCTURE_ACTION_TOKEN}{suffix}"
+    return f"{action}-{INFRASTRUCTURE_ACTION_TOKEN}"
+
+
+def bring_up_blocked_action(action: str, failure: "BringUpFailure") -> str:
+    """The action token a blocked bring-up writes into its transition, per its class."""
+    return infrastructure_action(action) if failure.infrastructure else action
+
+
+def bring_up_failure_class(request_id: str) -> str:
+    """Read a blocked bring-up's class back off the transition it wrote. The consumer's half."""
+    return (
+        FAILURE_CLASS_INFRASTRUCTURE
+        if f"-{INFRASTRUCTURE_ACTION_TOKEN}-blocked" in request_id
+        else FAILURE_CLASS_TASK
+    )
+
+
+@dataclass(frozen=True)
+class BringUpFailure:
+    """What one bring-up that produced no head was, in the words both paths use for it."""
+
+    failure_class: str
+    cause: str
+    stage: str
+    role: str
+    attempt_id: str
+    detail: str
+    readiness: str = ""
+    attempts: int = 0
+
+    @property
+    def infrastructure(self) -> bool:
+        return self.failure_class == FAILURE_CLASS_INFRASTRUCTURE
+
+    def evidence(self) -> dict[str, Any]:
+        """What did not come up, at which step, under which attempt."""
+        evidence: dict[str, Any] = {
+            "failure_class": self.failure_class,
+            "cause": self.cause,
+            "stage": self.stage,
+            "head": role_label(self.role),
+            "attempt_id": self.attempt_id,
+            "detail": self.detail,
+        }
+        if self.readiness:
+            evidence["readiness"] = self.readiness
+        if self.attempts:
+            evidence["attempts"] = self.attempts
+        return evidence
+
+    def clause(self) -> str:
+        """The one sentence that names the class on the card, in the tick, and nowhere differently."""
+        verdict = (
+            f"the {role_label(self.role)} head never came up, so this is not a verdict about the card"
+            if self.infrastructure
+            else f"this card's own {role_label(self.role)} bring-up contract is what failed"
+        )
+        return (
+            f"[bring-up outcome: class={self.failure_class}, cause={self.cause}, "
+            f"stage={self.stage}, head={role_label(self.role)}, "
+            f"attempt={self.attempt_id or '(unknown)'}] {verdict}."
+        )
+
+    def outcome_fields(self, reason: str) -> dict[str, Any]:
+        """The tick outcome's half of the same statement, carrying the card's exact reason string."""
+        return {
+            "failure_class": self.failure_class,
+            "failure_cause": self.cause,
+            "failure_reason": reason,
+            "bring_up": self.evidence(),
+        }
+
+
+def classify_bring_up_failure(
+    exc: BaseException | None,
+    record: DispatcherRecord,
+    role: str,
+    *,
+    stage: str,
+    attempt_id: str,
+    detail: str = "",
+) -> BringUpFailure:
+    """The one place a bring-up failure becomes a class, a cause and its evidence.
+
+    `exc` is the failure as the host raised it; the reviewer's preflight has no exception to raise
+    (a resource that is not ready, a launch intent that could not be written) and passes None with
+    `detail` instead. A raise site that knows something the type cannot say — this card's checkout
+    is not the one its claim recorded — says it with `HostError(..., bring_up_cause=...)`, and an
+    unknown cause there is ignored rather than trusted.
+    """
+    cause = ""
+    readiness = ""
+    attempts = 0
+    if isinstance(exc, HeadPaneNotReady):
+        # The bounded deferral is spent by the time this is asked (`launch_deferred` answered None),
+        # so the pane was busy or held in a dialog for every attempt this role was given.
+        cause = CAUSE_PANE_NEVER_READY
+        readiness = exc.readiness
+        attempts = launch_attempts(record, role) + 1
+    elif isinstance(exc, HeadLaunchAborted):
+        cause = CAUSE_LAUNCH_ABORTED
+    else:
+        declared = str(getattr(exc, "bring_up_cause", "") or "")
+        cause = declared if declared in BRING_UP_CAUSE_CLASSES else CAUSE_HOST_UNAVAILABLE
+    text = detail or (scrub_host_output(str(exc)) if exc is not None else "")
+    return BringUpFailure(
+        failure_class=BRING_UP_CAUSE_CLASSES[cause],
+        cause=cause,
+        stage=stage if stage in BRING_UP_STAGES else STAGE_CLAIM,
+        role=role,
+        attempt_id=attempt_id,
+        detail=text,
+        readiness=readiness,
+        attempts=attempts,
+    )
+
+
 def bring_up_blocked_reason(
-    default: str, exc: Exception, record: DispatcherRecord, role: str
+    default: str, exc: Exception, record: DispatcherRecord, role: str, *,
+    failure: BringUpFailure,
 ) -> str:
-    """The card's Blocked reason for a bring-up that will not be retried."""
+    """The card's Blocked reason for a bring-up that will not be retried.
+
+    `failure` is required rather than derived here, so no caller can write this reason without
+    having classified the failure first: the class the observer reads on the card is the same
+    object the tick outcome and the request id are built from.
+    """
     if not isinstance(exc, HeadPaneNotReady):
-        return f"{default}: {scrub_host_output(str(exc))}"
+        return f"{default}: {scrub_host_output(str(exc))}\n{failure.clause()}"
     return (
         f"the {role_label(role)} head pane was {pane_state_label(exc.readiness)} on all "
         f"{launch_attempts(record, role) + 1} bring-up attempts and never took its launch prompt: "
-        f"{scrub_host_output(str(exc))}"
+        f"{scrub_host_output(str(exc))}\n{failure.clause()}"
     )
 
 

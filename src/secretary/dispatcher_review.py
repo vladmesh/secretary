@@ -8,9 +8,13 @@ from typing import Any
 from secretary.dispatcher_helpers import scrub_host_output
 from secretary.dispatcher_launch import (
     REVIEW_ROLE,
+    STAGE_REVIEW,
     WORKER_ROLE,
+    BringUpFailure,
+    bring_up_blocked_action,
     bring_up_blocked_reason,
     busy_launch_delivery,
+    classify_bring_up_failure,
     clear_launch_intent,
     confirm_launch_intent,
     defer_busy_launch_delivery,
@@ -126,14 +130,24 @@ def review_infrastructure_retry(
     }
 
 
-def review_infrastructure_blocked_reason(record: DispatcherRecord, reason: str) -> str:
-    """What the operator reads when reviewer infrastructure never came back."""
+def review_infrastructure_blocked_reason(
+    record: DispatcherRecord, reason: str, failure: BringUpFailure
+) -> str:
+    """What the operator reads when a reviewer bring-up will not be retried.
+
+    The green candidate's own sentence is the reviewer-specific half and stays: the card was never
+    reworked and its receipt still stands, so it is the reviewer that gets relaunched. The class,
+    the cause and the evidence beneath it come from the shared classifier, in the same words the
+    worker path writes and the same words this tick's outcome carries.
+    """
+    if not failure.infrastructure:
+        return f"review bring-up failed: {reason}\n{failure.clause()}"
     sha = candidate_sha(record)
     return (
         f"reviewer infrastructure failed on {record.review_infra_failures} consecutive launch "
         f"attempts over a green candidate; the card was never reworked and its gate receipt for "
         f"{sha or '(sha unavailable)'} still stands, so relaunch the reviewer rather than the "
-        f"worker: {reason}"
+        f"worker: {reason}\n{failure.clause()}"
     )
 
 
@@ -147,28 +161,47 @@ def review_infrastructure_failure(
     payload: dict[str, Any],
     reason: str,
     outcome_reason: str,
+    exc: BaseException | None = None,
 ) -> dict[str, Any]:
-    """One bounded path for a proven-headless reviewer infrastructure failure."""
-    held = review_infrastructure_retry(
-        runtime, task, records, record, attempt_id, payload=payload, reason=reason
-    )
-    if held is not None:
-        return held
+    """One bounded path for a proven-headless reviewer bring-up failure over a green candidate.
+
+    The classification is the worker path's, made by the same call: `exc` is the failure as the host
+    raised it where there is one, and the preflight cases that have no exception (a head resource
+    that is not ready, a launch intent that could not be written) pass their `reason` as evidence.
+    Only an infrastructure outcome is held for another launch — a card whose own bring-up contract
+    is broken is not made whole by relaunching a reviewer over it.
+    """
     ref = task["ref"]
+    failure = classify_bring_up_failure(
+        exc, record, REVIEW_ROLE, stage=STAGE_REVIEW,
+        attempt_id=record.attempt_id or attempt_id, detail=reason,
+    )
+    if failure.infrastructure:
+        held = review_infrastructure_retry(
+            runtime, task, records, record, attempt_id, payload=payload, reason=reason
+        )
+        if held is not None:
+            return dict(held, **failure.outcome_fields(held["reason"]))
+    blocked_reason = review_infrastructure_blocked_reason(record, reason, failure)
     runtime.writer.move(
         role="dispatcher",
         actor=runtime.owner,
         reference=ref,
         target="blocked",
-        reason=review_infrastructure_blocked_reason(record, reason),
+        reason=blocked_reason,
         request_id=_attempt_request_id(
-            record.attempt_id or attempt_id, "review-infrastructure-blocked", ref,
+            record.attempt_id or attempt_id,
+            bring_up_blocked_action("review-blocked", failure),
+            ref,
             _wait_cycle_token(record),
         ),
     )
     records[ref] = record
     runtime.save_records(payload, records)
-    return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": outcome_reason}
+    return {
+        "status": "blocked", "step": "review", "pilot_ref": ref, "reason": outcome_reason,
+        **failure.outcome_fields(blocked_reason),
+    }
 
 
 def command_terminal_status(
@@ -805,6 +838,7 @@ def start_review(
         return review_infrastructure_failure(
             runtime, task, records, record, attempt_id, payload=payload,
             reason=scrub_host_output(str(exc)), outcome_reason="review resource check failed",
+            exc=exc,
         )
     if not readiness.launch_allowed:
         record.state = "review_starting"
@@ -933,6 +967,7 @@ def start_review(
             return review_infrastructure_failure(
                 runtime, task, records, record, attempt_id, payload=payload,
                 reason=scrub_host_output(str(exc)), outcome_reason="host review failed",
+                exc=exc,
             )
         else:
             deferred = launch_deferred(
@@ -951,18 +986,35 @@ def start_review(
             records[ref] = record
             runtime.save_records(payload, records)
             return deferred
+        # No green candidate to hold, and the bounded pane deferral is spent. The classification is
+        # the same call the worker path makes, so the card's reason, the class in the transition and
+        # this tick's outcome are one statement. Nothing is relaunched from here.
+        failure = classify_bring_up_failure(
+            exc, record, REVIEW_ROLE, stage=STAGE_REVIEW,
+            attempt_id=record.attempt_id or attempt_id,
+        )
+        blocked_reason = bring_up_blocked_reason(
+            "review bring-up failed", exc, record, REVIEW_ROLE, failure=failure
+        )
         runtime.writer.move(
             role="dispatcher",
             actor=runtime.owner,
             reference=ref,
             target="blocked",
-            reason=bring_up_blocked_reason("review bring-up failed", exc, record, REVIEW_ROLE),
+            reason=blocked_reason,
             request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, "review-blocked", ref, _wait_cycle_token(record)
+                record.attempt_id or attempt_id,
+                bring_up_blocked_action("review-blocked", failure),
+                ref,
+                _wait_cycle_token(record),
             ),
         )
         records.pop(ref, None)
-        return {"status": "blocked", "step": "review", "pilot_ref": ref, "reason": "host review failed"}
+        return {
+            "status": "blocked", "step": "review", "pilot_ref": ref,
+            "reason": "host review failed",
+            **failure.outcome_fields(blocked_reason),
+        }
     # The reviewer is up: its pane and its launch configuration go into the intent on disk before
     # the record is told anything about it, so a tick that dies from here on is adopted with the
     # routing history of the head that actually ran.

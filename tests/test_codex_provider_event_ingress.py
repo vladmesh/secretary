@@ -1288,7 +1288,8 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         ):
             launched, failure = runtime._bring_up_worker_head(
                 task, record, records, payload, record.attempt_id,
-                step="advance", blocked_reason="contract", blocked_request_id="contract-worker",
+                step="advance", stage="rework", blocked_reason="contract",
+                blocked_action="contract-worker-blocked",
             )
 
         self.assertIsNone(failure)
