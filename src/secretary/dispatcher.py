@@ -4412,6 +4412,10 @@ class DispatcherRuntime:
                 }
             current_sha = self.host.head_commit(record)
             if current_sha and current_sha == record.rejected_sha:
+                if record.rejected_failure_class == "infrastructure":
+                    return self._accept_stale_infrastructure_done(
+                        task, record, records, payload, attempt_id, current_sha,
+                    )
                 return self._reject_stale_done(task, record, records, payload, attempt_id, current_sha)
             record.rejected_done_reports = 0
             record.review_baseline = len(task.get("comments") or [])
@@ -4476,6 +4480,76 @@ class DispatcherRuntime:
             "pilot_ref": ref,
             "attempt_id": attempt_id,
             "action": "waiting-worker-report",
+        }
+
+    def _accept_stale_infrastructure_done(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        sha: str,
+    ) -> dict[str, Any]:
+        """Let an infra-red SHA retry the gate without opening a no-op worker round.
+
+        This is deliberately beside ``_reject_stale_done``: that safeguard remains intact for a
+        red review and a substantive gate.  The class was persisted from the gate result, so this
+        branch neither parses a card comment nor trusts a manual flag.
+        """
+        ref = task["ref"]
+        try:
+            self.host.retain_worker(record)
+            record.worker_continuation.begin_retention(time.time())
+        except HostError:
+            unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
+            if unconfirmed is not None:
+                return unconfirmed
+        record.rejected_done_reports = 0
+        record.gate_state = ""
+        record.gate_pending_since = 0.0
+        record.gate_transport_failures = 0
+        record.gate_transport_error = ""
+        _reset_wait(record, "worker")
+        _reset_wait(record, "review")
+        self.writer.comment(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            body=(
+                f"The repeated done report for HEAD {sha} was accepted for automatic mechanical "
+                f"gate retry: the previous red was classified from its CI step as infrastructure "
+                f"({record.rejected_failure_reason or 'enumerated infrastructure signature'}). "
+                "No worker rework round was opened."
+            ),
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id, "stale-done-infrastructure-retry", ref,
+                str(record.report_generation),
+            ),
+        )
+        record.comment_baseline = len(self.reader.show(ref).get("comments") or [])
+        record.review_baseline = record.comment_baseline
+        records[ref] = record
+        self.save_records(payload, records)
+        self.writer.move(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            target="validate",
+            reason=(
+                "worker report:done retries an infrastructure-classified mechanical gate on the "
+                "same SHA"
+            ),
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id, "stale-done-infrastructure-validate", ref,
+                str(record.report_generation),
+            ),
+        )
+        record.state = "validate"
+        self.save_records(payload, records)
+        return {
+            "status": "ok", "step": "advance", "pilot_ref": ref, "attempt_id": attempt_id,
+            "to": "validate", "action": "stale-done-infrastructure-retry",
         }
 
     def _reject_stale_done(
@@ -4636,6 +4710,8 @@ class DispatcherRuntime:
             if unconfirmed is not None:
                 return unconfirmed
             record.rejected_sha = reviewed
+            record.rejected_failure_class = "substantive"
+            record.rejected_failure_reason = "red-review"
             record.rejected_done_reports = 0
             # The only point where both the last review body and the SHA it judged are available.
             # Keep them for the next review packet instead of reconstructing the card from base.
@@ -5974,7 +6050,13 @@ class DispatcherRuntime:
         comment, mirroring the review-red rework path. `phase` distinguishes the pre-review gate
         from the pre-merge re-check in the request-id and the log line."""
         ref = task["ref"]
+        if result.failure_class == "infrastructure" and phase == "gate":
+            return self._retry_infrastructure_gate(
+                task, record, records, payload, attempt_id, result,
+            )
         record.rejected_sha = self.host.head_commit(record)
+        record.rejected_failure_class = "substantive"
+        record.rejected_failure_reason = result.failure_reason
         record.rejected_done_reports = 0
         detail = scrub_host_output(result.summary)
         log = scrub_host_output(result.log).strip()
@@ -6002,6 +6084,54 @@ class DispatcherRuntime:
             task, record, records, payload, attempt_id, phase=phase,
             move_reason=body, verdict_outcome=f"{phase}_red",
         )
+
+    def _retry_infrastructure_gate(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        result: GateResult,
+    ) -> dict[str, Any]:
+        """Keep an enumerated CI-service outage in Validate and retry its exact checkout.
+
+        The worker has already reported done and is retained at this point.  Moving back to In
+        progress would manufacture a round with no code action, and its ``gate-red`` request id
+        would charge the sprint.  No board move here means neither happens.
+        """
+        ref = task["ref"]
+        record.rejected_sha = self.host.head_commit(record)
+        record.rejected_failure_class = "infrastructure"
+        record.rejected_failure_reason = result.failure_reason
+        record.rejected_done_reports = 0
+        detail = scrub_host_output(result.summary)
+        log = scrub_host_output(result.log).strip()
+        fingerprint = result.fingerprint or _gate_fingerprint("infrastructure", log or detail)
+        body = (
+            "The mechanical validation gate is red from an infrastructure failure "
+            f"({result.failure_reason or 'enumerated CI-service signature'}): {detail}. "
+            "The exact SHA stays in Validate for an automatic retry; no worker rework round or "
+            "red_ci budget event was opened."
+        )
+        if log:
+            body += f"\nTail:\n```\n{log}\n```"
+        body += f"\n<!-- gate-fingerprint: {fingerprint} -->"
+        self.writer.comment(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            body=body,
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id, "gate-infrastructure-retry", ref, fingerprint,
+            ),
+        )
+        records[ref] = record
+        self.save_records(payload, records)
+        return {
+            "status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id,
+            "action": "gate-infrastructure-retry", "reason": result.failure_reason,
+        }
 
     def _begin_red_transition(
         self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],

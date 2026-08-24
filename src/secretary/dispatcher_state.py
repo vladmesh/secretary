@@ -106,10 +106,13 @@ class DispatcherRecord:
     # it existed, a record re-adopted from the board — means the gate stops refreshing that pull
     # request, never that it assumes the text is its own.
     gate_pr_authorship: dict[str, Any] = field(default_factory=dict)
-    # Last checkout rejected by a mechanical gate or red review in this attempt. A worker that
-    # reports done again at this exact SHA has not produced a new result, so the dispatcher can
-    # return it to rework once and then escalate instead of looping forever.
+    # Last checkout rejected by a mechanical gate or red review in this attempt.  The class and
+    # reason come from the gate's structured result, before any card comment is made.  A same-SHA
+    # report after an infrastructure red may retry that gate; every other same-SHA report is still
+    # the stale-result safeguard and returns to rework once before escalating.
     rejected_sha: str = ""
+    rejected_failure_class: str = "substantive"
+    rejected_failure_reason: str = ""
     rejected_done_reports: int = 0
     # Reviewer pane (secretary-651). The reviewer runs in its own split pane inside the worker's
     # worktree, so its terminal handle must be tracked apart from `handle` (the worker's) or
@@ -303,6 +306,8 @@ class DispatcherRecord:
             "review_started_at": self.review_started_at,
             "review_waiting_since": self.review_waiting_since,
             "rejected_done_reports": self.rejected_done_reports,
+            "rejected_failure_class": self.rejected_failure_class,
+            "rejected_failure_reason": self.rejected_failure_reason,
             "rejected_sha": self.rejected_sha,
             "state": self.state,
             "worker": self.worker,
@@ -403,6 +408,8 @@ class DispatcherRecord:
             gate_transport_error=str(payload.get("gate_transport_error") or ""),
             gate_pr_authorship=_run_snapshot(payload.get("gate_pr_authorship")),
             rejected_sha=str(payload.get("rejected_sha") or ""),
+            rejected_failure_class=str(payload.get("rejected_failure_class") or "substantive"),
+            rejected_failure_reason=str(payload.get("rejected_failure_reason") or ""),
             rejected_done_reports=int(payload.get("rejected_done_reports") or 0),
             review_handle=str(payload.get("review_handle") or ""),
             review_leaf=str(payload.get("review_leaf") or ""),

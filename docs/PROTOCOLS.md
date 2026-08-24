@@ -1020,11 +1020,15 @@ cannot write a classification, so it refuses `--kind blocked` outright and names
 vocabulary has one definition, in `secretary.tasks`. Its `--kind done` is unchanged.
 
 The dispatcher also remembers the SHA that a mechanical gate or a red review rejected in the current
-attempt. A `done` report on the same SHA does not move to Validate: the first such report sends the worker
-back to rework in the same workspace, requiring a new commit. The second moves the card to Blocked so the
-rework loop cannot spin forever. If the code deliberately does not change, for instance when the defect is
-in a test or in the gate itself, the worker reports `--kind blocked` with the analysis instead of another
-`done`.
+attempt. A `done` report on the same SHA normally does not move to Validate: the first such report sends the
+worker back to rework in the same workspace, requiring a new commit. The second moves the card to Blocked so
+the rework loop cannot spin forever. The exception is a red GitHub gate classified from its failed job and
+step as an enumerated infrastructure failure: action-download HTTP 5xx, unavailable image registry or Buildx
+registry setup, or an unavailable runner during `Set up job`. That exact SHA stays in Validate for an automatic
+gate retry and opens no worker round. A setup-step name, a card comment, or a manual flag never classifies the
+failure; a broken workflow setup remains substantive. If the code deliberately does not change for a
+substantive rejection, for instance when the defect is in a test or in the gate itself, the worker reports
+`--kind blocked` with the analysis instead of another `done`.
 
 The audit trail is always written to the installation's data directory: `--data-dir`, else
 `SECRETARY_DATA_DIR`, else `data_dir` from instance config. A relative `data_dir` resolves against the
@@ -1234,10 +1238,12 @@ heartbeat; a session it cannot confirm gets a confirmed stop, and the round lose
 Nothing here stops every terminal in the worktree, so the worker's own pane stays the reviewer's
 split anchor.
 
-Both red verdicts return the card to In progress through one transition, and both hand the round
-back to the session that wrote the code. What differs is what opens it. A red mechanical gate opens
-it directly, always: nothing about a failed gate is a judgement anyone has to make. A red review on
-a card whose sprint declares a concrete observer opens nothing by itself; the card parks in
+Substantive red verdicts return the card to In progress through one transition, and both hand the round
+back to the session that wrote the code. An enumerated infrastructure red from the mechanical gate instead
+holds the card in Validate and retries the same SHA, with no `gate-red` transition and therefore no `red_ci`
+budget event. What differs is what opens a substantive rework. A substantive red mechanical gate opens it
+directly: nothing about that failed gate is a judgement anyone has to make. A red review on a card whose sprint
+declares a concrete observer opens nothing by itself; the card parks in
 Assessment once the reviewer's stop is confirmed, and the transition runs on the tick that performs
 a recorded `rework` decision. A red review on a card with no observer to decide opens it directly
 after that same confirmed stop, up to the no-observer ceiling above, which blocks the card instead

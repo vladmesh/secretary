@@ -3504,6 +3504,58 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertLess(self.host.calls.index("stop_head:worker"), self.host.calls.index("restart_worker"))
         self.assertIn("continuation: replacement", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
 
+    def test_infrastructure_gate_red_retries_the_same_sha_without_a_worker_round_or_budget(self) -> None:
+        self.start_dispatcher()
+        self.tick()
+        self.host.gate_results = [GateResult(
+            "red", "CI red: job «build» failed", "Getting action download info: HTTP 502",
+            failure_class="infrastructure", failure_reason="action-download-http-5xx",
+        )]
+        self._report_done()
+
+        self.assertEqual(self.tick()["to"], "validate")
+        retried = self.tick()
+
+        self.assertEqual(retried["action"], "gate-infrastructure-retry")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+        record = self._pilot_record()
+        self.assertEqual(record["report_generation"], 1)
+        self.assertEqual(record["rejected_failure_class"], "infrastructure")
+        self.assertEqual(record["rejected_failure_reason"], "action-download-http-5xx")
+        self.assertNotIn("restart_worker", self.host.calls)
+        self.assertNotIn("resume_worker", self.host.calls)
+        comment = self.reader.show("secretary-510-pilot")["comments"][-1]["body"]
+        self.assertIn("action-download-http-5xx", comment)
+        self.assertIn("no worker rework round or red_ci budget event", comment)
+        self.assertNotIn(
+            "red_ci", [_budget_event_type(event) for event in self.audit_events()],
+        )
+
+    def test_same_sha_done_after_a_persisted_infrastructure_red_retries_the_gate(self) -> None:
+        """The stale-SHA safeguard reads the gate result stored in dispatcher state, never prose."""
+        self.start_dispatcher()
+        self.tick()
+        payload = self.runtime.production_state.load()
+        record = payload["records"]["secretary-510-pilot"]
+        record.update({
+            "rejected_sha": self.host.commit,
+            "rejected_failure_class": "infrastructure",
+            "rejected_failure_reason": "action-download-http-5xx",
+        })
+        self.runtime.production_state.save(payload)
+        self._report_done("same SHA after an infra red")
+
+        accepted = self.tick()
+
+        self.assertEqual(accepted["action"], "stale-done-infrastructure-retry")
+        self.assertEqual(accepted["to"], "validate")
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "validate")
+        self.assertNotIn("restart_worker", self.host.calls)
+        self.assertIn(
+            "classified from its CI step as infrastructure",
+            "\n".join(item["body"] for item in self.reader.show("secretary-510-pilot")["comments"]),
+        )
+
     def _install_legacy_unbound_v1_worker_source(
         self, source_patch: dict[str, Any] | None = None,
     ) -> None:
@@ -12122,9 +12174,9 @@ class DispatcherGateTests(unittest.TestCase):
         self.assertEqual(result.status, "red")
         self.assertIn("FileNotFoundError: absent", result.log)
 
-    def test_github_gate_red_flags_an_infra_failure(self) -> None:
+    def test_github_gate_red_classifies_an_unavailable_image_registry_as_infrastructure(self) -> None:
         run_log = "\n".join([
-            "tests\tPull image\t##[error]docker: pull access denied for registry.internal/app",
+            "tests\tPull image\t##[error]registry.internal returned unexpected HTTP status: 503 Service Unavailable",
         ])
         with tempfile.TemporaryDirectory() as tmp:
             ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
@@ -12139,7 +12191,30 @@ class DispatcherGateTests(unittest.TestCase):
             )
             result = host.gate_check(self._task(), self._record(ws))
         self.assertEqual(result.status, "red")
-        self.assertIn("infrastructure setup failure", result.summary)
+        self.assertEqual(result.failure_class, "infrastructure")
+        self.assertEqual(result.failure_reason, "image-registry-unavailable")
+        self.assertIn("infrastructure failure", result.summary)
+
+    def test_github_gate_does_not_mask_a_broken_workflow_setup_step_as_infrastructure(self) -> None:
+        run_log = "\n".join([
+            "tests\tSet up job\tGetting action download info",
+            "tests\tSet up job\t##[error]workflow syntax is invalid: unexpected mapping key",
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = _build_gated_workspace(Path(tmp), "main", "pipeline/secretary-633")
+            host = GithubGateHost(
+                Path(tmp), self._github_adapter(),
+                pr_open=True,
+                check_runs=[{
+                    "status": "COMPLETED", "conclusion": "FAILURE", "name": "tests",
+                    "details_url": "https://github.com/example-org/sample/actions/runs/999",
+                }],
+                run_log=run_log,
+            )
+            result = host.gate_check(self._task(), self._record(ws))
+        self.assertEqual(result.status, "red")
+        self.assertEqual(result.failure_class, "substantive")
+        self.assertEqual(result.failure_reason, "")
 
     def test_github_gate_red_reports_unavailable_log_when_not_an_actions_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
