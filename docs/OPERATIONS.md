@@ -1772,21 +1772,25 @@ the receipt growing to hold the logs.
 Two check shapes are accepted, and they differ in one promise:
 
 - `--module unittest` (add `--module-arg` for arguments) is the standard shape. The wrapper builds
-  the argv, so the suite runs in a process that records its own working directory and the
-  `secretary` package it imported. That is provenance observed from the process that ran the check,
-  which is what makes a receipt reusable.
+  the argv, so the suite runs in a process that records its own working directory, interpreter and
+  project package import. A registered project's adapter may set `broad_check.interpreter` and
+  `broad_check.import_package`; the interpreter is relative to the candidate workspace unless
+  absolute, and the package is the one that process imports for provenance. For example,
+  `codegen-orchestrator` uses `.venv/bin/python` and `codegen_orchestrator`. This is an explicit
+  adapter contract, not a package-name or tree-layout heuristic. Unconfigured and unregistered
+  checkouts retain the legacy `sys.executable`/`secretary` default.
 - `--command '<shell>'` accepts anything a project needs. A shell can `cd` elsewhere or reach a
   different interpreter or import path before any check starts, so this receipt records
   `origin: unobservable`, claims no import, and is never reused in place of a run. It remains a
   summary to read.
 
 Observed provenance is necessary and not sufficient. A receipt may replace a run only when the
-check process imported the project *from this workspace*: a missing or unreadable record, an empty
+check process imported the adapter's configured project package *from this workspace*: a missing or unreadable record, an empty
 path, an unresolvable one, and a path outside the candidate are all refusals. That matters in an
 ordinary Python setup, where `PYTHONPATH` can put another checkout of the project ahead of this one
 — the receipt records that other path truthfully and is still refused for reuse, because the run it
-describes was a run of different code. For a project whose broad suite does not import `secretary`,
-the receipt remains a summary to read and is not offered for reuse.
+describes was a run of different code. A shell-form check records no import provenance and is never
+offered for reuse.
 
 A check is identified by its structured check set — shape, module and the exact argument vector, or
 the shell string — not by how it renders. `--module-arg 'one two'` and

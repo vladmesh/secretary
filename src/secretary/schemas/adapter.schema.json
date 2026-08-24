@@ -81,6 +81,24 @@
           "description": "Whether the pipeline may write files into the project repo."
         }
       }
+    },
+    "broad_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["interpreter", "import_package"],
+      "description": "Explicit Python runtime and project package for reusable `check broad --module` receipts.",
+      "properties": {
+        "interpreter": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Interpreter for module broad checks. A relative path is resolved from the candidate workspace, for example .venv/bin/python."
+        },
+        "import_package": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$",
+          "description": "Package the check process must import and prove came from the candidate workspace."
+        }
+      }
     }
   }
 }

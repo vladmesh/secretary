@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -31,6 +33,8 @@ from secretary.broad_check import (
     summarize,
     usable_receipt,
 )
+from secretary.config import ConfigError, load_config, validate
+from secretary.onboarding import DEFAULT_INSTANCE
 
 
 def add_check_subcommands(subparsers) -> None:
@@ -62,6 +66,11 @@ def add_check_subcommands(subparsers) -> None:
 
 def _common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--root", default=".", help="workspace root; the receipt lives under it")
+    parser.add_argument(
+        "--instance",
+        default=os.environ.get("SECRETARY_INSTANCE", DEFAULT_INSTANCE),
+        help="registered project adapters (default: SECRETARY_INSTANCE or the default instance)",
+    )
     shape = parser.add_mutually_exclusive_group(required=True)
     shape.add_argument(
         "--module",
@@ -92,10 +101,107 @@ def _fail(exc: BroadCheckError) -> int:
 
 def _spec(args: argparse.Namespace) -> CheckSpec:
     if args.module:
-        return CheckSpec.for_module(args.module, args.module_arg)
+        interpreter, import_package = _module_contract(Path(args.root), Path(args.instance))
+        return CheckSpec.for_module(
+            args.module,
+            args.module_arg,
+            interpreter=interpreter,
+            import_package=import_package,
+        )
     if args.module_arg:
         raise BroadCheckError("module_arg_without_module", "--module-arg needs --module")
     return CheckSpec.for_shell(args.command)
+
+
+def _module_contract(root: Path, instance: Path) -> tuple[str, str]:
+    """Return the registered project's explicit module-check contract, or the legacy default.
+
+    A worker's checkout is normally a git worktree, not the registered checkout itself. Comparing
+    git common directories identifies the registered repository without guessing from its files;
+    an ordinary unregistered checkout keeps the long-standing Secretary default for direct use.
+    """
+    binding = _binding_for_workspace(root, instance)
+    if binding is None:
+        return sys.executable, "secretary"
+    adapter_name = binding.get("adapter")
+    if not isinstance(adapter_name, str) or not adapter_name:
+        raise BroadCheckError("invalid_project_adapter", "registered project has no adapter")
+    try:
+        adapter = load_config(instance / "adapters" / f"{adapter_name}.yaml")
+    except ConfigError as exc:
+        raise BroadCheckError("invalid_project_adapter", f"adapter {adapter_name!r} is unavailable") from exc
+    if not isinstance(adapter, dict) or validate(adapter, "adapter", f"{adapter_name}.yaml"):
+        raise BroadCheckError("invalid_project_adapter", f"adapter {adapter_name!r} is invalid")
+    configured = adapter.get("broad_check")
+    if configured is None:
+        return sys.executable, "secretary"
+    if not isinstance(configured, dict):  # schema validation above normally catches this.
+        raise BroadCheckError("invalid_project_adapter", f"adapter {adapter_name!r} has no broad-check contract")
+    interpreter = str(configured.get("interpreter") or "").strip()
+    import_package = str(configured.get("import_package") or "").strip()
+    if not interpreter or not import_package:
+        raise BroadCheckError("invalid_project_adapter", f"adapter {adapter_name!r} has no broad-check contract")
+    interpreter_path = Path(interpreter)
+    if not interpreter_path.is_absolute():
+        # Keep a venv's symlink spelling. Resolving the final component would turn
+        # `.venv/bin/python` into the base interpreter and discard that environment's site paths.
+        interpreter = str(root.resolve() / interpreter_path)
+    return interpreter, import_package
+
+
+def _binding_for_workspace(root: Path, instance: Path) -> dict[str, object] | None:
+    projects = instance / "projects"
+    if not projects.is_dir():
+        return None
+    candidates: list[dict[str, object]] = []
+    for path in sorted(projects.glob("*.yaml")):
+        try:
+            binding = load_config(path)
+        except ConfigError:
+            continue
+        if not isinstance(binding, dict) or binding.get("enabled") is not True:
+            continue
+        repo = binding.get("repo")
+        if isinstance(repo, str) and repo and _same_repository(root, Path(repo).expanduser()):
+            candidates.append(binding)
+    if len(candidates) > 1:
+        raise BroadCheckError("ambiguous_project", "workspace matches more than one registered project")
+    return candidates[0] if candidates else None
+
+
+def _same_repository(first: Path, second: Path) -> bool:
+    if first.resolve() == second.resolve():
+        return True
+    first_common = _git_common_dir(first)
+    second_common = _git_common_dir(second)
+    return first_common is not None and first_common == second_common
+
+
+def _git_common_dir(root: Path) -> Path | None:
+    try:
+        top = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        common = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--git-common-dir"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except OSError:
+        return None
+    if top.returncode != 0 or common.returncode != 0:
+        return None
+    top_path = Path(top.stdout.strip())
+    common_path = Path(common.stdout.strip())
+    if not top_path.is_dir() or not str(common_path):
+        return None
+    return (common_path if common_path.is_absolute() else top_path / common_path).resolve()
 
 
 def run_check_broad(args: argparse.Namespace) -> int:
