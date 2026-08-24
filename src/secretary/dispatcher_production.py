@@ -683,6 +683,7 @@ class _ProbeHost:
         "prompt_worker_report",
         "verify_worker_result",
         "gate_check",
+        "rerun_failed_ci",
         "complete_green",
         "teardown",
         "stop",

@@ -57,6 +57,13 @@ GATE_LOG_FRAGMENT_LINES = int(os.environ.get("SECRETARY_GATE_LOG_FRAGMENT_LINES"
 # blip costs the card a tick, not a round; a backend that is genuinely gone still reaches a human.
 GATE_TRANSPORT_MAX_ATTEMPTS = max(1, int(os.environ.get("SECRETARY_GATE_TRANSPORT_MAX_ATTEMPTS", "5")))
 
+# A failed Actions run with an enumerated CI-service signature may be rerun without reopening the
+# worker.  The cap is per HEAD SHA: it is a recovery mechanism, never an unbounded poll of an
+# already-concluded run.
+GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS = max(
+    1, int(os.environ.get("SECRETARY_GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS", "2"))
+)
+
 # How much of one board source (the card statement, the worker's done report) reaches the PR body.
 # The PR describes the change and points at the card; it is not a second copy of the board, and a
 # body must not approach GitHub's own size ceiling.
@@ -83,12 +90,15 @@ _RUNNER_BOILERPLATE_RE = re.compile(r"(?i)process completed with exit code \d+")
 # Infrastructure reds have a deliberately small, reviewable vocabulary.  A setup step alone is
 # not sufficient: broken workflow YAML and setup scripts fail there too.  Every accepted signature
 # names a CI service boundary and an unambiguous unavailable/5xx response from it.
-_HTTP_5XX_RE = re.compile(r"(?i)\b(?:http(?:/\d(?:\.\d)?)?\s*(?:status\s*)?[: ]?\s*)?5\d\d\b")
-_ACTION_DOWNLOAD_RE = re.compile(r"(?i)getting action download info")
+_ACTION_DOWNLOAD_5XX_RE = re.compile(
+    r"(?i)getting action download info[^\n]{0,120}?(?:http(?:/\d(?:\.\d)?)?\s*"
+    r"(?:status\s*)?[: ]?|returned\s+(?:an\s+)?(?:http\s+)?(?:error|status)\s*[: ]?)5\d\d\b"
+)
 _REGISTRY_UNAVAILABLE_RE = re.compile(
-    r"(?i)(?:registry|ghcr\.io|docker\.io|quay\.io|image manifest|pulling fs layer).{0,180}"
-    r"(?:5\d\d|service unavailable|temporarily unavailable)|"
-    r"(?:received unexpected http status|unexpected status(?: code)?).{0,40}\b5\d\d\b"
+    r"(?i)(?:registry(?:[./][\w./:-]+)?|ghcr\.io|docker\.io|quay\.io|image manifest|"
+    r"pulling fs layer)[^\n]{0,120}(?:http(?:/\d(?:\.\d)?)?\s*(?:status\s*)?[: ]?5\d\d|"
+    r"(?:service|temporarily) unavailable|received unexpected http status\s*:?\s*5\d\d|"
+    r"unexpected status(?: code)?\s*:?\s*5\d\d)"
 )
 _RUNNER_UNAVAILABLE_RE = re.compile(
     r"(?i)(?:runner|hosted runner).{0,120}(?:not started|failed to start|unavailable|"
@@ -173,6 +183,10 @@ class GateResult:
     # uses to decide whether it may retry the exact same SHA without reopening the worker.
     failure_class: str = "substantive"  # "substantive" | "infrastructure"
     failure_reason: str = ""
+    # The Actions run which supplied an infrastructure-classified red.  Only this concrete run
+    # can be rerun; an external status or a log without a run URL remains a red verdict.
+    failed_run_id: str = ""
+    failed_run_repo: str = ""
     # A green result is reusable evidence only when it names the exact tree and the terminal
     # checks which judged it.  The dispatcher persists this plain JSON object with the card so it
     # can hand the same receipt to review, Assessment and the release audit without asking another
@@ -412,6 +426,19 @@ def _github_gate(
     _ensure_pr(host, workspace, task, record, branch, base)
     sha = host._run(["git", "-C", workspace, "rev-parse", "HEAD"], "gate head sha").stdout.strip()
     repo = _name_with_owner(host, workspace)
+    rerun_run_id = str(getattr(record, "gate_infrastructure_rerun_run_id", "") or "")
+    rerun_sha = str(getattr(record, "gate_infrastructure_reruns_sha", "") or "")
+    if rerun_run_id and rerun_sha == sha:
+        status, _conclusion = _rerun_status(host, repo, rerun_run_id)
+        if status != "COMPLETED":
+            return GateResult(
+                "pending",
+                f"CI infrastructure rerun {rerun_run_id} is {status.lower()} for `{branch}` @ `{sha[:12]}`",
+                failure_class="infrastructure",
+                failure_reason=str(getattr(record, "gate_infrastructure_rerun_reason", "") or ""),
+                failed_run_id=rerun_run_id,
+                failed_run_repo=repo,
+            )
     rollup, failed, checked = _poll_ci(host, repo, sha, required or [])
     receipt = mint_gate_receipt(
         validated_sha=sha,
@@ -438,15 +465,59 @@ def _github_gate(
         log = fragment.text if fragment.available else f"log unavailable: {fragment.reason}"
         cause = fragment.text if fragment.available else f"unavailable:{fragment.reason}"
         fingerprint = _fingerprint("github", job, fragment.step, cause)
+        failed_run_id = _actions_run_id(failed or {})
         return GateResult(
             "red", summary, log, fingerprint=fingerprint,
             failure_class=fragment.failure_class, failure_reason=fragment.failure_reason,
+            failed_run_id=failed_run_id, failed_run_repo=repo,
             attestation=receipt,
         )
     return GateResult(
         "pending", f"CI {rollup.lower()} for `{branch}` @ `{short}` — no terminal result yet",
         attestation=receipt,
     )
+
+
+def _actions_run_id(item: dict) -> str:
+    match = _RUN_URL_RE.search(str(
+        item.get("details_url") or item.get("html_url") or item.get("targetUrl") or ""
+    ))
+    return match.group(2) if match else ""
+
+
+def rerun_failed_ci(host, result: GateResult) -> None:
+    """Ask Actions to rerun the failed jobs of the exact run that produced an infra red."""
+    run_id = result.failed_run_id
+    repo = result.failed_run_repo
+    if not run_id or not repo:
+        raise HostError("infrastructure gate red cannot be rerun: failed Actions run is unavailable")
+    completed = _backend_call(
+        host, ["gh", "run", "rerun", "--failed", run_id, "-R", repo], "gate rerun failed CI"
+    )
+    if completed.returncode != 0:
+        raise HostError(
+            f"gate rerun failed CI: {_tail((completed.stderr or completed.stdout or '').strip())}"
+        )
+
+
+def _rerun_status(host, repo: str, run_id: str) -> tuple[str, str]:
+    """Read the rerun's current attempt, not the terminal check-runs from its prior attempt."""
+    completed = _backend_call(
+        host,
+        ["gh", "run", "view", run_id, "-R", repo, "--json", "status,conclusion"],
+        "gate infrastructure rerun status",
+    )
+    if completed.returncode != 0:
+        raise HostError(
+            f"gate infrastructure rerun status failed: {_tail((completed.stderr or completed.stdout or '').strip())}"
+        )
+    try:
+        payload = json.loads((completed.stdout or "").strip())
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict) or not str(payload.get("status") or ""):
+        raise HostError("gate infrastructure rerun status returned no run state")
+    return str(payload.get("status") or "").upper(), str(payload.get("conclusion") or "").upper()
 
 
 def _name_with_owner(host, workspace: str) -> str:
@@ -908,11 +979,11 @@ def _classify_failed_step(step: str, text: str) -> tuple[str, str]:
     """
     step = step.strip()
     lowered_step = step.casefold()
-    if _ACTION_DOWNLOAD_RE.search(text) and _HTTP_5XX_RE.search(text):
+    if "set up job" in lowered_step and _ACTION_DOWNLOAD_5XX_RE.search(text):
         return "infrastructure", "action-download-http-5xx"
     if "set up docker buildx" in lowered_step and _REGISTRY_UNAVAILABLE_RE.search(text):
         return "infrastructure", "buildx-registry-unavailable"
-    if _REGISTRY_UNAVAILABLE_RE.search(text):
+    if any(token in lowered_step for token in ("pull image", "pulling image", "docker pull", "load image")) and _REGISTRY_UNAVAILABLE_RE.search(text):
         return "infrastructure", "image-registry-unavailable"
     if "set up job" in lowered_step and _RUNNER_UNAVAILABLE_RE.search(text):
         return "infrastructure", "runner-unavailable"

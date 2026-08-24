@@ -96,6 +96,13 @@ class DispatcherRecord:
     # Both reset the moment any answer — green, red or pending — comes back.
     gate_transport_failures: int = 0
     gate_transport_error: str = ""
+    # Recovery of a classified CI-service red is bounded separately from transport retries.  It is
+    # anchored to the SHA and exact Actions run the gate reran, so a rework starts clean while an
+    # unchanged checkout cannot spin on the old terminal check-run.
+    gate_infrastructure_reruns_sha: str = ""
+    gate_infrastructure_reruns: int = 0
+    gate_infrastructure_rerun_run_id: str = ""
+    gate_infrastructure_rerun_reason: str = ""
     # The pull request this card's github gate wrote, and the digest of the exact title and body
     # it wrote there (secretary-1439): `{"number": int, "digest": str}`, empty at rest. This is the
     # gate's whole authorship test on the refresh path, and it lives here — outside the pull
@@ -281,6 +288,10 @@ class DispatcherRecord:
             "gate_attestation": dict(self.gate_attestation),
             "gate_transport_failures": self.gate_transport_failures,
             "gate_transport_error": self.gate_transport_error,
+            "gate_infrastructure_reruns_sha": self.gate_infrastructure_reruns_sha,
+            "gate_infrastructure_reruns": self.gate_infrastructure_reruns,
+            "gate_infrastructure_rerun_run_id": self.gate_infrastructure_rerun_run_id,
+            "gate_infrastructure_rerun_reason": self.gate_infrastructure_rerun_reason,
             "gate_pr_authorship": dict(self.gate_pr_authorship),
             "handle": self.handle,
             "head": self.head,
@@ -406,6 +417,10 @@ class DispatcherRecord:
             gate_attestation=_run_snapshot(payload.get("gate_attestation")),
             gate_transport_failures=int(payload.get("gate_transport_failures") or 0),
             gate_transport_error=str(payload.get("gate_transport_error") or ""),
+            gate_infrastructure_reruns_sha=str(payload.get("gate_infrastructure_reruns_sha") or ""),
+            gate_infrastructure_reruns=int(payload.get("gate_infrastructure_reruns") or 0),
+            gate_infrastructure_rerun_run_id=str(payload.get("gate_infrastructure_rerun_run_id") or ""),
+            gate_infrastructure_rerun_reason=str(payload.get("gate_infrastructure_rerun_reason") or ""),
             gate_pr_authorship=_run_snapshot(payload.get("gate_pr_authorship")),
             rejected_sha=str(payload.get("rejected_sha") or ""),
             rejected_failure_class=str(payload.get("rejected_failure_class") or "substantive"),

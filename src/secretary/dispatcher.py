@@ -61,6 +61,7 @@ from secretary.dispatch.head_vitality_policy import (
     decide_recovery as _decide_recovery,
 )
 from secretary.dispatcher_gate import (
+    GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS,
     GATE_PENDING_STALL_SECONDS,
     GATE_TRANSPORT_MAX_ATTEMPTS,
     GateResult,
@@ -70,6 +71,7 @@ from secretary.dispatcher_gate import (
 )
 from secretary.dispatcher_gate import (
     gate_check as _gate_check,
+    rerun_failed_ci as _rerun_failed_ci,
 )
 from secretary.dispatcher_gate import (
     validation_ci as _validation_ci,
@@ -1797,6 +1799,10 @@ class CommandHostRuntime:
 
     def gate_check(self, task: dict[str, Any], record: DispatcherRecord) -> GateResult:
         return _gate_check(self, task, record)
+
+    def rerun_failed_ci(self, task: dict[str, Any], record: DispatcherRecord, result: GateResult) -> None:
+        """The gate owns the GitHub Actions write needed to retry its classified failed run."""
+        _rerun_failed_ci(self, result)
 
     def verify_worker_result(self, task: dict[str, Any], record: DispatcherRecord) -> None:
         if self.mode == "noop":
@@ -4434,6 +4440,7 @@ class DispatcherRuntime:
             record.gate_pending_since = 0.0
             record.gate_transport_failures = 0
             record.gate_transport_error = ""
+            self._reset_infrastructure_reruns(record)
             _reset_wait(record, "worker")
             _reset_wait(record, "review")
             records[ref] = record
@@ -4498,6 +4505,10 @@ class DispatcherRuntime:
         branch neither parses a card comment nor trusts a manual flag.
         """
         ref = task["ref"]
+        if record.rejected_done_reports:
+            return self._block_repeated_infrastructure_done(
+                task, record, records, payload, attempt_id, sha,
+            )
         try:
             self.host.retain_worker(record)
             record.worker_continuation.begin_retention(time.time())
@@ -4505,11 +4516,15 @@ class DispatcherRuntime:
             unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
             if unconfirmed is not None:
                 return unconfirmed
-        record.rejected_done_reports = 0
+        # A legacy/recovered record can still hand the worker an infra-classified stale SHA.  One
+        # report is enough to return it to the real gate rerun path; another identical report has
+        # no new evidence and must not reuse the same request id as a silent no-op tick.
+        record.rejected_done_reports = 1
         record.gate_state = ""
         record.gate_pending_since = 0.0
         record.gate_transport_failures = 0
         record.gate_transport_error = ""
+        self._reset_infrastructure_reruns(record)
         _reset_wait(record, "worker")
         _reset_wait(record, "review")
         self.writer.comment(
@@ -4551,6 +4566,33 @@ class DispatcherRuntime:
             "status": "ok", "step": "advance", "pilot_ref": ref, "attempt_id": attempt_id,
             "to": "validate", "action": "stale-done-infrastructure-retry",
         }
+
+    def _block_repeated_infrastructure_done(
+        self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
+        payload: dict[str, Any], attempt_id: str, sha: str,
+    ) -> dict[str, Any]:
+        """A second stale infra report cannot add evidence after the accepted gate retry."""
+        ref = task["ref"]
+        unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
+        if unconfirmed is not None:
+            return unconfirmed
+        reports = record.rejected_done_reports + 1
+        self.writer.move(
+            role="dispatcher", actor=self.owner, reference=ref, target="blocked",
+            reason=(
+                f"The worker reported done {reports} times on unchanged infrastructure-classified "
+                f"HEAD {sha} ({record.rejected_failure_reason or 'enumerated CI-service signature'}). "
+                "One report already returned the SHA to the bounded Actions rerun path; a further "
+                "identical report has no new gate evidence."
+            ),
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id, "stale-done-infrastructure-blocked", ref, str(reports),
+            ),
+        )
+        records.pop(ref, None)
+        self.save_records(payload, records)
+        return {"status": "blocked", "step": "advance", "pilot_ref": ref, "attempt_id": attempt_id,
+                "action": "stale-done-infrastructure-blocked"}
 
     def _reject_stale_done(
         self,
@@ -5975,6 +6017,7 @@ class DispatcherRuntime:
             )
         record.gate_state = "green"
         record.gate_pending_since = 0.0
+        self._reset_infrastructure_reruns(record)
         record.gate_attestation = accepted.persisted_payload()
         records[ref] = record
         self.save_records(payload, records)
@@ -6050,9 +6093,9 @@ class DispatcherRuntime:
         comment, mirroring the review-red rework path. `phase` distinguishes the pre-review gate
         from the pre-merge re-check in the request-id and the log line."""
         ref = task["ref"]
-        if result.failure_class == "infrastructure" and phase == "gate":
+        if result.failure_class == "infrastructure":
             return self._retry_infrastructure_gate(
-                task, record, records, payload, attempt_id, result,
+                task, record, records, payload, attempt_id, result, phase=phase,
             )
         record.rejected_sha = self.host.head_commit(record)
         record.rejected_failure_class = "substantive"
@@ -6093,26 +6136,48 @@ class DispatcherRuntime:
         payload: dict[str, Any],
         attempt_id: str,
         result: GateResult,
+        *,
+        phase: str,
     ) -> dict[str, Any]:
-        """Keep an enumerated CI-service outage in Validate and retry its exact checkout.
+        """Rerun an enumerated CI-service outage without opening a worker rework round.
 
         The worker has already reported done and is retained at this point.  Moving back to In
         progress would manufacture a round with no code action, and its ``gate-red`` request id
         would charge the sprint.  No board move here means neither happens.
         """
         ref = task["ref"]
-        record.rejected_sha = self.host.head_commit(record)
+        sha = self.host.head_commit(record)
+        if record.gate_infrastructure_reruns_sha != sha:
+            self._reset_infrastructure_reruns(record)
+            record.gate_infrastructure_reruns_sha = sha
+        spent = record.gate_infrastructure_reruns
+        if spent >= GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS:
+            return self._block_infrastructure_reruns_exhausted(
+                task, record, records, payload, attempt_id, result, phase=phase,
+            )
+        try:
+            self.host.rerun_failed_ci(task, record, result)
+        except (GateTransportError, HostError) as exc:
+            return self._block_infrastructure_rerun_unavailable(
+                task, record, records, payload, attempt_id, result, exc, phase=phase,
+            )
+        record.rejected_sha = sha
         record.rejected_failure_class = "infrastructure"
         record.rejected_failure_reason = result.failure_reason
         record.rejected_done_reports = 0
+        record.gate_infrastructure_reruns += 1
+        record.gate_infrastructure_rerun_run_id = result.failed_run_id
+        record.gate_infrastructure_rerun_reason = result.failure_reason
+        record.gate_pending_since = time.time()
         detail = scrub_host_output(result.summary)
         log = scrub_host_output(result.log).strip()
         fingerprint = result.fingerprint or _gate_fingerprint("infrastructure", log or detail)
         body = (
             "The mechanical validation gate is red from an infrastructure failure "
             f"({result.failure_reason or 'enumerated CI-service signature'}): {detail}. "
-            "The exact SHA stays in Validate for an automatic retry; no worker rework round or "
-            "red_ci budget event was opened."
+            f"Actions run {result.failed_run_id or 'unavailable'} was rerun ({record.gate_infrastructure_reruns}/"
+            f"{GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS}) and the exact SHA stays in Validate until its "
+            "new terminal result; no worker rework round or red_ci budget event was opened."
         )
         if log:
             body += f"\nTail:\n```\n{log}\n```"
@@ -6123,15 +6188,69 @@ class DispatcherRuntime:
             reference=ref,
             body=body,
             request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, "gate-infrastructure-retry", ref, fingerprint,
+                record.attempt_id or attempt_id, "gate-infrastructure-rerun", ref,
+                f"{sha}:{record.gate_infrastructure_reruns}:{fingerprint}",
             ),
         )
         records[ref] = record
         self.save_records(payload, records)
         return {
             "status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id,
-            "action": "gate-infrastructure-retry", "reason": result.failure_reason,
+            "action": "gate-infrastructure-rerun", "reason": result.failure_reason,
         }
+
+    @staticmethod
+    def _reset_infrastructure_reruns(record: DispatcherRecord) -> None:
+        record.gate_infrastructure_reruns_sha = ""
+        record.gate_infrastructure_reruns = 0
+        record.gate_infrastructure_rerun_run_id = ""
+        record.gate_infrastructure_rerun_reason = ""
+
+    def _block_infrastructure_reruns_exhausted(
+        self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
+        payload: dict[str, Any], attempt_id: str, result: GateResult, *, phase: str,
+    ) -> dict[str, Any]:
+        ref = task["ref"]
+        self.host.stop(record)
+        reason = (
+            "Mechanical gate remains red from infrastructure failure "
+            f"({result.failure_reason or 'enumerated CI-service signature'}) after "
+            f"{record.gate_infrastructure_reruns} Actions rerun(s) for HEAD "
+            f"{record.gate_infrastructure_reruns_sha or self.host.head_commit(record)}; "
+            "the bounded automatic recovery is exhausted."
+        )
+        self.writer.move(
+            role="dispatcher", actor=self.owner, reference=ref, target="blocked", reason=reason,
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id, f"{phase}-infrastructure-reruns-exhausted", ref,
+                str(record.gate_infrastructure_reruns),
+            ),
+        )
+        records.pop(ref, None)
+        self.save_records(payload, records)
+        return {"status": "blocked", "step": phase, "pilot_ref": ref, "attempt_id": attempt_id,
+                "action": "gate-infrastructure-reruns-exhausted", "reason": result.failure_reason}
+
+    def _block_infrastructure_rerun_unavailable(
+        self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
+        payload: dict[str, Any], attempt_id: str, result: GateResult, exc: Exception, *, phase: str,
+    ) -> dict[str, Any]:
+        ref = task["ref"]
+        self.host.stop(record)
+        reason = (
+            "Mechanical gate is red from infrastructure failure "
+            f"({result.failure_reason or 'enumerated CI-service signature'}), but its failed Actions "
+            f"run could not be rerun: {scrub_host_output(str(exc))}. Blocked rather than rereading "
+            "the same terminal result."
+        )
+        self.writer.move(
+            role="dispatcher", actor=self.owner, reference=ref, target="blocked", reason=reason,
+            request_id=_attempt_request_id(record.attempt_id or attempt_id, f"{phase}-infrastructure-rerun-blocked", ref),
+        )
+        records.pop(ref, None)
+        self.save_records(payload, records)
+        return {"status": "blocked", "step": phase, "pilot_ref": ref, "attempt_id": attempt_id,
+                "action": "gate-infrastructure-rerun-blocked", "reason": result.failure_reason}
 
     def _begin_red_transition(
         self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
@@ -6210,6 +6329,7 @@ class DispatcherRuntime:
         record.gate_attestation = {}
         record.gate_transport_failures = 0
         record.gate_transport_error = ""
+        self._reset_infrastructure_reruns(record)
         # The judged round ends here: a stale review pin would refuse the rework's merge.
         record.review_commit = ""
         _reset_wait(record, "review")

@@ -1025,10 +1025,19 @@ worker back to rework in the same workspace, requiring a new commit. The second 
 the rework loop cannot spin forever. The exception is a red GitHub gate classified from its failed job and
 step as an enumerated infrastructure failure: action-download HTTP 5xx, unavailable image registry or Buildx
 registry setup, or an unavailable runner during `Set up job`. That exact SHA stays in Validate for an automatic
-gate retry and opens no worker round. A setup-step name, a card comment, or a manual flag never classifies the
-failure; a broken workflow setup remains substantive. If the code deliberately does not change for a
+gate retry and opens no worker round. The gate asks GitHub to rerun the failed Actions run, then treats the
+rollup as pending until that run has a new terminal state; rereading a concluded failure is not a retry. Reruns
+are SHA-scoped and bounded by `SECRETARY_GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS` (two by default). An exhausted
+ceiling, or a run GitHub cannot rerun, moves the card to Blocked with the infrastructure class and count or
+unavailable-rerun cause. This rule applies to both the pre-review and pre-merge gates. A setup-step name, a
+card comment, or a manual flag never classifies the failure; service evidence must be in that failed step, so a
+pytest assertion mentioning a registry or a 503 remains substantive, as does a broken workflow setup. If the code deliberately does not change for a
 substantive rejection, for instance when the defect is in a test or in the gate itself, the worker reports
 `--kind blocked` with the analysis instead of another `done`.
+
+A recovered stale worker result bearing that infrastructure class is accepted once into the same bounded gate
+path. A further report of that unchanged SHA is Blocked visibly, naming the class and the prior retry, rather
+than replaying the first report's request id as a quiet tick.
 
 The audit trail is always written to the installation's data directory: `--data-dir`, else
 `SECRETARY_DATA_DIR`, else `data_dir` from instance config. A relative `data_dir` resolves against the
@@ -1240,8 +1249,10 @@ split anchor.
 
 Substantive red verdicts return the card to In progress through one transition, and both hand the round
 back to the session that wrote the code. An enumerated infrastructure red from the mechanical gate instead
-holds the card in Validate and retries the same SHA, with no `gate-red` transition and therefore no `red_ci`
-budget event. What differs is what opens a substantive rework. A substantive red mechanical gate opens it
+holds the card in Validate while the gate reruns the failed Actions run for the same SHA, with no `gate-red`
+transition and therefore no `red_ci` budget event. The rerun has a bounded per-SHA ceiling and is never
+emulated by polling the old terminal run; an unavailable rerun or an exhausted ceiling is Blocked visibly.
+This holds for a pre-merge re-check as well as the first gate. What differs is what opens a substantive rework. A substantive red mechanical gate opens it
 directly: nothing about that failed gate is a judgement anyone has to make. A red review on a card whose sprint
 declares a concrete observer opens nothing by itself; the card parks in
 Assessment once the reviewer's stop is confirmed, and the transition runs on the tick that performs

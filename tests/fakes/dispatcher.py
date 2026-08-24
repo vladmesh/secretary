@@ -651,6 +651,8 @@ class FakeHost:
         self.gate_results: list[GateResult] = []
         self.gate_calls: list[str] = []
         self.gate_error: Exception | None = None
+        self.gate_reruns: list[tuple[str, str]] = []
+        self.gate_rerun_error: Exception | None = None
         # Reviewer pane bookkeeping (secretary-651): which handle each review was split off, which
         # reviewer panes were closed on their own, and the commit the checkout reports. `commit` is
         # what start_review pins; reassign it to model a checkout that moved under a green verdict.
@@ -1215,6 +1217,12 @@ class FakeHost:
                 raise scripted
             return scripted
         return GateResult("green", "gate green")
+
+    def rerun_failed_ci(self, task: dict, record, result: GateResult) -> None:
+        self.calls.append("rerun_failed_ci")
+        if self.gate_rerun_error is not None:
+            raise self.gate_rerun_error
+        self.gate_reruns.append((task["ref"], result.failed_run_id))
 
     def restore_workspace(self, task: dict, worker: str) -> str:
         self.calls.append("restore_workspace")
