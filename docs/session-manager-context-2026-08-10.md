@@ -88,7 +88,7 @@ acknowledged. Its central invariant, and the reason a portable protocol is even 
 
 > The screen is read for evidence, never for content.
 
-Results travel out of band. `secretary check broad` writes a durable receipt under `state/checks/`
+Results travel out of band. `secretary check broad` writes a durable worker-local broad receipt under `state/checks/`
 keyed by HEAD object id plus a digest of the tracked diff and untracked files, so a scrolled pane
 can no longer be mistaken for a suite that never ran, and `RunResult` is the one model every
 recorded result is derived from.
@@ -101,7 +101,7 @@ recorded result is derived from.
 | `2896a3c` | CR normalised to LF before the control-byte policy: a reviewer prompt embeds `task["description"]` verbatim and an HTML textarea submits CRLF, so a card edited in the board's web form would otherwise be a permanent rejection on every retry |
 | `a5a306c` | `pane_host`: the three operations delivery needs (`send`, `read`, `wait_idle`) stated as a protocol with `OrcaPaneHost` behind it; the delivery path builds no argument vectors of its own |
 
-Broad suite on `a5a306c`: 2,356 tests, `OK (skipped=8)`, receipt `usable`.
+Broad suite on `a5a306c`: 2,356 tests, `OK (skipped=8)`, worker-local broad receipt `usable`.
 
 ## 4. What the 2026-08-10 canary proved
 

@@ -1469,9 +1469,11 @@ class CommandHostRuntime:
         through_event = str(getattr(delivery, "through_event", "") or "")
         message = (
             "A linked card changed. Read its worker report, reviewer verdict and any valid executed "
-            "exact-SHA gate receipt first. Suppress a routine broad rerun only when that receipt exists; "
+            "dispatcher-owned exact-SHA gate receipt first. Suppress a routine broad rerun only when "
+            "that receipt exists; "
             "none/noop/missing evidence proves no broad suite, so run or request appropriate validation "
-            "when the decision needs it. Take the next semantic step, then record resume."
+            "when the decision needs it. A worker-local broad receipt stays with the worker and does "
+            "not suppress that rerun. Take the next semantic step, then record resume."
         )
         if delivery_id and through_event:
             message += (
@@ -3139,18 +3141,21 @@ class CommandHostRuntime:
             "During development, run the smallest relevant checks first. Run at most one local broad",
             "suite for this report generation and unchanged content when it is actually useful; name any",
             "additional broad rerun and its reason in the report. A later executed local/GitHub gate is",
-            "reusable downstream only if it produces a valid exact-SHA receipt. A none/noop gate or a",
-            "missing receipt attests no broad suite; do not call it authoritative, and run the appropriate",
-            "validation before reporting when this card's acceptance criteria require it.",
+            "reusable downstream only if it produces a valid dispatcher-owned exact-SHA gate receipt. A",
+            "none/noop gate or a missing dispatcher-owned exact-SHA gate receipt attests no broad suite;",
+            "do not call it authoritative, and run the appropriate validation before reporting when this",
+            "card's acceptance criteria require it.",
             "",
-            "Run that broad suite through the receipt wrapper, so its result outlives the pane:",
+            "Run that broad suite through the receipt wrapper, so its worker-local broad receipt outlives",
+            "the pane:",
             "",
             "    python3 -m secretary check broad --reuse --module <this project's broad suite module>",
             "",
-            "`--reuse` is the default way to invoke it: with a usable receipt it prints that receipt",
+            "`--reuse` is the default way to invoke it: with a usable worker-local broad receipt it prints",
+            "that worker-local broad receipt",
             "and returns the result the run had, and otherwise it runs the suite. So the answer to a",
-            "pane that scrolled away is this same command, not a rerun; asking for a rerun over content",
-            "the receipt already covers is prohibited. Drop `--reuse` only to force a fresh run you can",
+            "pane that scrolled away is this same command, not a rerun; asking for a rerun over content the",
+            "worker-local broad receipt already covers is prohibited. Drop `--reuse` only to force a fresh run you can",
             "name a reason for.",
             "",
             "It streams the combined output while the suite runs and returns the check's own exit",
@@ -3158,15 +3163,14 @@ class CommandHostRuntime:
             "digest, cwd and imported project, start/end/duration, exit code, parsed verdict and",
             "counts where the runner prints them, and a bounded diagnostic tail. Read it back with",
             "`python3 -m secretary check show --module <the same module>` and quote its summary",
-            "in the report. While that receipt is usable, you already have the answer. An edit to the",
+            "in the report. While that worker-local broad receipt is usable, you already have the answer. An edit to the",
             "content, or a concrete red result you are fixing, opens a new justified run — name which",
             "one in the report. Committing content a receipt already covers is not one of them: the",
-            "identity is the tree, so a commit that changes no byte reuses the receipt. The receipt",
-            "is workspace-local and",
-            "ignored by git; never commit it, and never present it as the mechanical gate's",
-            "exact-SHA attestation.",
+            "identity is the tree, so a commit that changes no byte reuses the worker-local broad receipt.",
+            "The worker-local broad receipt is workspace-local and ignored by git; never commit it or",
+            "present it as downstream evidence.",
             "",
-            "A receipt stands in for a run only while it describes this content and the check",
+            "A worker-local broad receipt stands in for a run only while it describes this content and the check",
             "process imported the project from this workspace; an import resolved elsewhere is",
             "recorded truthfully and still refused. `check show` and `--reuse` answer that with",
             "one predicate, so they cannot disagree.",

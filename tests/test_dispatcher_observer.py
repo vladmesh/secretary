@@ -4181,6 +4181,18 @@ class ObserverConfigurationTests(unittest.TestCase):
         self.assertIn("--through-event evt-card-1", message)
         self.assertIn("only when that receipt exists", message)
         self.assertIn("none/noop/missing evidence proves no broad suite", message)
+        self.assertIn("dispatcher-owned exact-SHA gate receipt", message)
+        self.assertIn("worker-local broad receipt", message)
+        gate_sentence = next(
+            sentence for sentence in message.split(".")
+            if "dispatcher-owned exact-SHA gate receipt" in sentence
+        )
+        broad_sentence = next(
+            sentence for sentence in message.split(".")
+            if "worker-local broad receipt" in sentence
+        )
+        self.assertNotIn("worker-local broad receipt", gate_sentence)
+        self.assertNotIn("dispatcher-owned exact-SHA gate receipt", broad_sentence)
         # The pane started a turn, and that alone does not close an observer delivery.
         self.assertEqual(outcome, "accepted")
         # Readiness is asked and the pane is fingerprinted on both sides of the send: the byte

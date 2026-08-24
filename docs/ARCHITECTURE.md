@@ -330,7 +330,7 @@ short line naming its absolute path. Both roles are nudged that way and both bri
 document they nudged at: the worker at the `TASK.md` in its checkout, the reviewer at a review kept
 out of the checkout. The reviewer was the first for which the rule was enforced rather than merely
 followed; the worker followed it in the prompt it sent and not in the record it kept, which is how a
-bring-up came to answer an unconfirmed pointer by closing the pane behind it. Its review — description, gate attestation, verdict
+bring-up came to answer an unconfirmed pointer by closing the pane behind it. Its review — description, dispatcher-owned exact-SHA gate receipt, verdict
 commands, some 12 KiB of it — is written under the run artifacts, private, because a workspace's
 identity is the tracked diff and untracked files a receipt hashes to say which code it is evidence
 for. The nudge is derived from that path alone, so nothing a card description carries (an ESC, a

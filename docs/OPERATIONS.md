@@ -436,7 +436,7 @@ as it was. `plane`, `policy`, `remote` and `orca_binding` are carried over.
 A takedown also opens a new onboarding cycle, recorded as `onboarding_cycle` in the draft and mixed into
 the provision run id. Without it a re-onboarding on an unchanged HEAD would land on the previous cycle's
 run: `provision-apply` would republish the very adapter the takedown deleted without any new provisioning,
-and the old passed gate receipt would then make `project gate` refuse the new run as superseded. A new
+and the old passed dispatcher-owned exact-SHA gate receipt would then make `project gate` refuse the new run as superseded. A new
 cycle gives `provision-start` a fresh run directory instead. The old run directories stay on disk as
 history; nothing reads them again. Drafts published before this existed carry no cycle and keep their run
 ids.
@@ -1207,16 +1207,17 @@ the merge below runs on the tick that performs a recorded `release` decision. A 
 still resolves in Validate, so a card only reaches Assessment with nothing mechanical left to decide.
 A card with no observer to release it merges on the verdict's own tick, as below.
 
-### Exact-SHA gate evidence
+### Dispatcher-owned exact-SHA gate receipt
 
-An executed local or GitHub mechanical gate can leave a valid receipt only when it names the exact
+An executed local or GitHub mechanical gate can leave a valid dispatcher-owned exact-SHA gate receipt only when it names the exact
 commit SHA being judged, its base SHA, completed terminal checks, completion time and check-set digest.
-The receipt is evidence for that SHA and lifecycle stage only. A reviewer or observer may suppress a
+Its ownership, attestation and travel are defined in [Receipt names](PROTOCOLS.md#receipt-names). A
+reviewer or observer may suppress a
 routine repeat of the already-attested broad validation on that unchanged SHA, but must still inspect
 the diff and acceptance criteria; focused reproduction, mandatory CI and the fresh pre-merge gate remain
 independent decisions.
 
-Do not carry that evidence to a new commit, a later lifecycle stage, or a different check set. Missing
+Do not carry a dispatcher-owned exact-SHA gate receipt to a new commit, a later lifecycle stage, or a different check set. Missing
 evidence, `gate_mode: none`, and noop execution are explicit absence of a broad-suite attestation, even
 when they preserve dispatcher control flow. In those cases, obtain the focused or broad validation the
 decision needs instead of describing a suite as already passed.
@@ -1750,7 +1751,7 @@ secretary dispatcher production-tick --instance <dir> --probe
 python3 -m unittest
 ```
 
-### Broad checks and their receipts
+### Worker-local broad receipt
 
 A broad run is expensive enough that its result should survive the terminal it printed to. The
 documented form wraps the suite:
@@ -1761,11 +1762,11 @@ python3 -m secretary check show --module unittest
 ```
 
 `check broad` streams the check's combined output to stderr while it runs, exits with the check's
-own status (a signal-killed check becomes the usual `128+N`), and writes one JSON receipt under
-`state/checks/` in the workspace — an ignored path, never committed. The receipt holds the check
-and its check-set digest, the working directory, the import provenance described below, start, end
-and duration, the exit code, the parsed verdict and counts where the runner prints them, and a
-bounded tail of the output. The verdict is scanned off the stream as it goes past, so a runner that
+own status (a signal-killed check becomes the usual `128+N`), and writes one worker-local broad receipt under
+`state/checks/` in the workspace — an ignored path, never committed. The worker-local broad receipt
+holds the check and its check-set digest, the working directory, the import provenance described below,
+start, end and duration, the exit code, the parsed verdict and counts where the runner prints them, and
+a bounded tail of the output. The verdict is scanned off the stream as it goes past, so a runner that
 prints `OK (skipped=8)` and then megabytes of cleanup output still has its counts recorded, without
 the receipt growing to hold the logs.
 
@@ -1823,8 +1824,7 @@ or invented status. Corruption outranks both status preservation and reuse. `che
 predicate `check show` reports, so the two can never disagree — and a report can quote the evidence
 instead of rebuilding it.
 
-This receipt is a local convenience for whoever ran the suite. It is not the mechanical gate's
-exact-SHA attestation and never travels downstream in its place.
+Its ownership, attestation and travel are defined in [Receipt names](PROTOCOLS.md#receipt-names).
 
 `--probe` is a real dry tick: it takes the same singleton lock, passes the same mutation guards, scans the same card
 states and runs the same decision logic, but the first write turns into an abort and lands in the report as "what the
