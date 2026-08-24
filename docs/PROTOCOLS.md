@@ -1260,7 +1260,8 @@ gate instead holds the card in Validate while the gate reruns the failed Actions
 SHA, with no `gate-red` transition and therefore no `red_ci` budget event. The rerun has a bounded
 per-SHA ceiling and is never emulated by polling the old terminal run; an unavailable rerun or an
 exhausted ceiling is Blocked visibly. The same pending-stall ceiling covers a rerun that never
-completes on the pre-merge path. This holds for a pre-merge re-check as well as the first gate.
+completes on the first gate, the pre-merge re-check, or the release re-check after an observer
+decision.
 What differs is what opens a substantive rework. A substantive red mechanical gate opens it
 directly: nothing about that failed gate is a judgement anyone has to make. A red review on a card
 whose sprint
