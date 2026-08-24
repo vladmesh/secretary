@@ -8603,20 +8603,15 @@ class HeadPromptTests(unittest.TestCase):
     def _command_lines(self, doc: str) -> list[str]:
         return [line for line in doc.splitlines() if "python3 -P -m secretary task" in line]
 
-    def _assert_receipt_names_stay_separate(self, prompt: str) -> None:
-        """Each canonical receipt name must keep the other receipt's name out of its sentence."""
-        broad = "worker-local broad receipt"
-        gate = "dispatcher-owned exact-SHA gate receipt"
-        sentences = prompt.replace("\n", " ").split(".")
-        broad_sentences = [sentence for sentence in sentences if broad in sentence]
-        gate_sentences = [sentence for sentence in sentences if gate in sentence]
-
-        self.assertTrue(broad_sentences, "prompt must name the worker-local broad receipt")
-        self.assertTrue(gate_sentences, "prompt must name the dispatcher-owned exact-SHA gate receipt")
-        for sentence in broad_sentences:
-            self.assertNotIn(gate, sentence)
-        for sentence in gate_sentences:
-            self.assertNotIn(broad, sentence)
+    def _assert_receipt_name_at_site(
+        self, prompt: str, site: str, expected: str, other: str,
+    ) -> None:
+        """A named prompt site must retain the canonical name for the receipt it describes."""
+        _, found, rest = prompt.partition(site)
+        self.assertTrue(found, f"prompt must retain receipt site: {site!r}")
+        sentence = site + rest.split(".", 1)[0]
+        self.assertIn(expected, sentence)
+        self.assertNotIn(other, sentence)
 
     def test_review_prompt_names_a_concrete_body_file(self) -> None:
         doc = self.host._review_prompt(self.task, "attempt-1", 3)
@@ -8700,18 +8695,31 @@ class HeadPromptTests(unittest.TestCase):
         self.assertIn("worker-local broad receipt", doc)
         self.assertIn("dispatcher-owned exact-SHA gate receipt", doc)
 
-    def test_worker_prompt_keeps_the_two_receipt_names_separate(self) -> None:
+    def test_worker_prompt_names_each_receipt_at_its_own_site(self) -> None:
         worker = self.host._worker_task_doc(self.task, "main", "attempt-1")
 
-        self._assert_receipt_names_stay_separate(worker)
+        broad = "worker-local broad receipt"
+        gate = "dispatcher-owned exact-SHA gate receipt"
+        sites = (
+            ("Run that broad suite through the receipt wrapper, so its ", broad),
+            ("`--reuse` is the default way to invoke it: with a usable ", broad),
+            ("in the report. While that ", broad),
+            ("reusable downstream only if it produces a valid ", gate),
+            ("It is never presented as a ", gate),
+        )
+        for site, expected in sites:
+            other = gate if expected == broad else broad
+            self._assert_receipt_name_at_site(worker, site, expected, other)
 
         corrupted = worker.replace(
-            "worker-local broad receipt",
-            "worker-local broad receipt, not a dispatcher-owned exact-SHA gate receipt",
+            "in the report. While that worker-local broad receipt is usable",
+            "in the report. While that dispatcher-owned exact-SHA gate receipt is usable",
             1,
         )
         with self.assertRaises(AssertionError):
-            self._assert_receipt_names_stay_separate(corrupted)
+            for site, expected in sites:
+                other = gate if expected == broad else broad
+                self._assert_receipt_name_at_site(corrupted, site, expected, other)
 
     def test_worker_prompt_names_a_concrete_body_file(self) -> None:
         doc = self.host._worker_task_doc(self.task, "main", "attempt-1")

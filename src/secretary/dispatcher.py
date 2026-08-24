@@ -1472,7 +1472,7 @@ class CommandHostRuntime:
             "dispatcher-owned exact-SHA gate receipt first. Suppress a routine broad rerun only when "
             "that receipt exists; "
             "none/noop/missing evidence proves no broad suite, so run or request appropriate validation "
-            "when the decision needs it. A worker-local broad receipt stays with the worker and does "
+            "when the decision needs it. Keep a worker-local broad receipt with the worker. It does "
             "not suppress that rerun. Take the next semantic step, then record resume."
         )
         if delivery_id and through_event:
@@ -3167,8 +3167,8 @@ class CommandHostRuntime:
             "content, or a concrete red result you are fixing, opens a new justified run — name which",
             "one in the report. Committing content a receipt already covers is not one of them: the",
             "identity is the tree, so a commit that changes no byte reuses the worker-local broad receipt.",
-            "The worker-local broad receipt is workspace-local and ignored by git; never commit it or",
-            "present it as downstream evidence.",
+            "The worker-local broad receipt is workspace-local and ignored by git; never commit it.",
+            "It is never presented as a dispatcher-owned exact-SHA gate receipt.",
             "",
             "A worker-local broad receipt stands in for a run only while it describes this content and the check",
             "process imported the project from this workspace; an import resolved elsewhere is",
