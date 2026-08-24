@@ -12572,12 +12572,14 @@ class RecordingReviewHost(CommandHostRuntime):
         terminals: list[dict] | None = None,
         fail_ops: set[str] | None = None,
         split_pane_key: str = "",
+        split_source_missing: bool = False,
     ) -> None:
         super().__init__(catalog or ReviewCatalog(), root, mode="real")  # type: ignore[arg-type]
         self.preflight_codex_run = self._transport_preflight  # type: ignore[method-assign]
         self.calls: list[list[str]] = []
         self.fail_ops = fail_ops or set()
         self.split_pane_key = split_pane_key
+        self.split_source_missing = split_source_missing
         self.terminals = [
             {"handle": "term-worker", "leafId": "leaf-worker", "title": "codex", "connected": True}
         ] if terminals is None else terminals
@@ -12628,6 +12630,10 @@ class RecordingReviewHost(CommandHostRuntime):
         if op == "list":
             return {"terminals": self.terminals}
         if op == "split":
+            if self.split_source_missing:
+                raise HostError(
+                    "orca terminal split failed: terminal_split_source_not_found"
+                )
             # The new pane joins the worktree's inventory, which is how the caller resolves its
             # leafId afterwards.
             self.terminals.append(
@@ -12751,6 +12757,18 @@ class ReviewPaneTests(unittest.TestCase):
         self.assertEqual(launch.handle, "term-created")
         self.assertEqual(launch.leaf, "leaf-created")
         self.assertNotIn("split", host.ops())
+
+    def test_reviewer_falls_back_when_connected_anchor_is_not_split_capable(self) -> None:
+        """An addressable PTY may outlive its renderer node; that cannot park review forever."""
+        host = RecordingReviewHost(self.root, split_source_missing=True)
+
+        launch = host.start_review(self.task, self._record())
+
+        self.assertEqual(launch.handle, "term-created")
+        self.assertEqual(launch.leaf, "leaf-created")
+        self.assertEqual(host.ops().count("split"), 1)
+        self.assertEqual(host.ops().count("create"), 1)
+        self.assertLess(host.ops().index("create"), host.ops().index("close"))
 
     def test_create_terminal_returns_the_leaf_from_its_pane_key(self) -> None:
         host = RecordingReviewHost(self.root)

@@ -195,6 +195,19 @@ class HeadOperationTests(unittest.TestCase):
         self.assertIn(("split_pane", anchor.handle), self.host.calls)
         self.assertIn(("rename_pane", outcome.run.handle, "secretary-1412 worker"), self.host.calls)
 
+    def test_a_missing_split_source_falls_back_to_a_standalone_pane(self) -> None:
+        anchor = self.bring_up().run
+        self.host.split_source_missing = True
+
+        outcome = self.bring_up(split_from=anchor.handle)
+
+        self.assertIn(("split_pane", anchor.handle), self.host.calls)
+        self.assertIn(("open_pane", WORKSPACE, "secretary-1412 worker"), self.host.calls)
+        self.assertNotIn(
+            ("rename_pane", outcome.run.handle, "secretary-1412 worker"), self.host.calls
+        )
+        self.assertEqual(outcome.run.handle, "term:2")
+
     def test_a_bring_up_whose_pane_closes_cleanly_left_nothing_running(self) -> None:
         with self.assertRaises(HeadSpawnFailed):
             self.bring_up(

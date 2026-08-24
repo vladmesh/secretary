@@ -25,7 +25,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from ..pane_host import Pane, SessionHost
+from ..pane_host import Pane, PaneSplitSourceMissing, SessionHost
 from ..prompt_document import nudge_for
 from ..tui_delivery import (
     READINESS_BLOCKED,
@@ -395,7 +395,13 @@ def _open_pane(
     """
     if not split_from:
         return host.open_pane(workspace, title, command)
-    pane = host.split_pane(split_from, command)
+    try:
+        pane = host.split_pane(split_from, command)
+    except PaneSplitSourceMissing:
+        # Orca can retain an addressable PTY after its renderer node disappears. The split refusal
+        # proves no child was opened, so this one failure is safe to recover with a standalone pane.
+        # Every ambiguous split failure still escapes without starting a second process.
+        return host.open_pane(workspace, title, command)
     if not pane.leaf:
         # A split reply that names the pane by handle alone can still be found in a fresh
         # inventory, which yields the same stable leaf `open_pane` returns directly. A new head is

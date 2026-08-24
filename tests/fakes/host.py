@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from triggered_agents.runtime.pane_host import Pane
+from triggered_agents.runtime.pane_host import Pane, PaneSplitSourceMissing
 
 
 class FakeSessionHost:
@@ -19,6 +19,7 @@ class FakeSessionHost:
         self.sent: list[tuple[str, str, bool]] = []
         self.closed: list[str] = []
         self.refuse_close = False
+        self.split_source_missing = False
         self.next_handle = 1
         # A test that cares *when* the session manager was reached, not only whether it was.
         self.on_call: Callable[[str], None] | None = None
@@ -40,6 +41,8 @@ class FakeSessionHost:
     def split_pane(self, handle: str, command: str) -> Pane:
         self.calls.append(("split_pane", handle))
         self._note("split_pane")
+        if self.split_source_missing:
+            raise PaneSplitSourceMissing("split source vanished")
         workspace = self._workspace_of(handle)
         pane = Pane(handle=f"term:{self.next_handle}", leaf=f"leaf:{self.next_handle}")
         self.next_handle += 1
