@@ -1778,7 +1778,14 @@ Two check shapes are accepted, and they differ in one promise:
   absolute, and the package is the one that process imports for provenance. For example,
   `codegen-orchestrator` uses `.venv/bin/python` and `codegen_orchestrator`. This is an explicit
   adapter contract, not a package-name or tree-layout heuristic. Unconfigured and unregistered
-  checkouts retain the legacy `sys.executable`/`secretary` default.
+  checkouts retain the legacy `sys.executable`/`secretary` default; the command's JSON response
+  names that fallback as `module_contract.reason` (`no_project_binding`,
+  `project_binding_disabled`, or `adapter_missing_broad_check`). Adding `broad_check` changes the
+  adapter bytes and therefore its digest, so run `project gate` again after adding it: until that
+  gate re-enables the binding, the disabled binding uses the named legacy fallback.
+  If the configured interpreter cannot start, `check broad` returns the structured
+  `interpreter_start_failed` error with exit status 2; this is distinct from a completed red suite
+  and writes no receipt because no check process ran.
 - `--command '<shell>'` accepts anything a project needs. A shell can `cd` elsewhere or reach a
   different interpreter or import path before any check starts, so this receipt records
   `origin: unobservable`, claims no import, and is never reused in place of a run. It remains a
@@ -1789,8 +1796,10 @@ check process imported the adapter's configured project package *from this works
 path, an unresolvable one, and a path outside the candidate are all refusals. That matters in an
 ordinary Python setup, where `PYTHONPATH` can put another checkout of the project ahead of this one
 — the receipt records that other path truthfully and is still refused for reuse, because the run it
-describes was a run of different code. A shell-form check records no import provenance and is never
-offered for reuse.
+describes was a run of different code. An import from the configured interpreter's own environment
+(such as `.venv/.../site-packages`) is also refused even when that environment sits under the
+workspace: it attests an installed copy, not the candidate tree. A shell-form check records no
+import provenance and is never offered for reuse.
 
 A check is identified by its structured check set — shape, module and the exact argument vector, or
 the shell string — not by how it renders. `--module-arg 'one two'` and

@@ -17,6 +17,7 @@ import sys
 import tempfile
 import time
 import unittest
+from errno import ENOEXEC
 from io import StringIO
 from pathlib import Path
 from signal import NSIG
@@ -877,6 +878,12 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
                     "imported_project": str(self.scripts / "secretary" / "__init__.py"),
                 }
             },
+            "missing interpreter environment provenance": {
+                "project_provenance": {
+                    "origin": "check-process",
+                    "imported_project": str(self.root / "secretary" / "__init__.py"),
+                }
+            },
             "an unresolvable import path": {
                 "project_provenance": {"origin": "check-process", "imported_project": "\x00"}
             },
@@ -889,6 +896,7 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
             "project_provenance": {
                 "origin": "check-process",
                 "imported_project": str(self.root / "secretary" / "__init__.py"),
+                "environment_prefix": str(self.scripts),
             }
         }
         self.assertEqual(broad_check.candidate_import_refusal(trusted, self.root), "")
@@ -1000,6 +1008,129 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
         ]), 0)
         second = _run_main(argv)
         self.assertTrue(second["reused"])
+
+    def test_missing_configured_interpreter_is_a_structured_cli_error(self) -> None:
+        instance = self._register(
+            interpreter=".venv/bin/python", import_package="codegen_orchestrator"
+        )
+        source_root = Path(__file__).resolve().parents[1]
+        completed = subprocess.run(
+            [
+                sys.executable, "-m", "secretary", "check", "broad", "--root", str(self.root),
+                "--instance", str(instance), "--module", "project_suite",
+            ],
+            cwd=source_root,
+            env={**os.environ, "PYTHONPATH": str(source_root / "src")},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertEqual(completed.stdout, "")
+        error = json.loads(completed.stderr)
+        self.assertEqual(error["error"]["code"], "interpreter_start_failed")
+        self.assertIn(".venv/bin/python", error["error"]["message"])
+        spec = CheckSpec.for_module(
+            "project_suite",
+            interpreter=str(self.root / ".venv" / "bin" / "python"),
+            import_package="codegen_orchestrator",
+        )
+        self.assertFalse(receipt_path(self.root, spec).exists())
+
+    def test_other_interpreter_os_errors_follow_the_same_cli_contract(self) -> None:
+        instance = self._register(
+            interpreter=".venv/bin/python", import_package="codegen_orchestrator"
+        )
+        argv = [
+            "check", "broad", "--root", str(self.root), "--instance", str(instance),
+            "--module", "project_suite",
+        ]
+        stdout = StringIO()
+        stderr = StringIO()
+        with mock.patch("secretary.broad_check.subprocess.Popen", side_effect=OSError(ENOEXEC, "Exec format error")), \
+             mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
+            status = main(argv)
+
+        self.assertEqual(status, 2)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(json.loads(stderr.getvalue())["error"]["code"], "interpreter_start_failed")
+
+    def test_legacy_fallback_reason_is_visible_in_the_cli_response(self) -> None:
+        (self.root / "legacysuite.py").write_text("print('legacy')\n", encoding="utf-8")
+        disabled = self._register(interpreter=".venv/bin/python", import_package="codegen_orchestrator")
+        binding = disabled / "projects" / "example.yaml"
+        binding.write_text(binding.read_text(encoding="utf-8").replace("enabled: true", "enabled: false"), encoding="utf-8")
+        no_contract = Path(self.tmpdir.name) / "no-contract"
+        (no_contract / "projects").mkdir(parents=True)
+        (no_contract / "adapters").mkdir()
+        (no_contract / "projects" / "example.yaml").write_text(
+            "id: example\n"
+            f"repo: {self.root}\n"
+            "adapter: example\n"
+            "enabled: true\n",
+            encoding="utf-8",
+        )
+        (no_contract / "adapters" / "example.yaml").write_text(
+            "setup:\n  commands: ['true']\n"
+            "smoke:\n  command: 'true'\n"
+            "validation:\n  ci: github\n"
+            "artifact_policy:\n  write_project_files: false\n",
+            encoding="utf-8",
+        )
+        cases = {
+            "no_project_binding": Path(self.tmpdir.name) / "missing-instance",
+            "project_binding_disabled": disabled,
+            "adapter_missing_broad_check": no_contract,
+        }
+        for reason, instance in cases.items():
+            with self.subTest(reason=reason):
+                payload = _run_main([
+                    "check", "broad", "--root", str(self.root), "--instance", str(instance),
+                    "--module", "legacysuite",
+                ])
+                self.assertEqual(payload["module_contract"], {
+                    "source": "legacy_default", "reason": reason,
+                })
+
+    def test_installed_copy_inside_configured_venv_is_not_candidate_provenance(self) -> None:
+        # A src-layout project has no top-level package directory for cwd to win. Its configured
+        # venv may import an installed copy under the candidate, which must not become reusable.
+        (self.root / ".gitignore").write_text(
+            (self.root / ".gitignore").read_text(encoding="utf-8") + ".venv/\n",
+            encoding="utf-8",
+        )
+        venv = self.root / ".venv"
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True)
+        interpreter = venv / "bin" / "python"
+        site_packages = Path(subprocess.check_output(
+            [str(interpreter), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+            text=True,
+        ).strip())
+        package = site_packages / "codegen_orchestrator"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("NAME = 'installed'\n", encoding="utf-8")
+        (self.root / "src").mkdir()
+        (self.root / "src" / "codegen_orchestrator").mkdir()
+        (self.root / "src" / "codegen_orchestrator" / "__init__.py").write_text(
+            "NAME = 'candidate'\n", encoding="utf-8"
+        )
+        (self.root / "installed_suite.py").write_text(
+            "import codegen_orchestrator\nprint(codegen_orchestrator.NAME)\n", encoding="utf-8"
+        )
+        spec = CheckSpec.for_module(
+            "installed_suite", interpreter=str(interpreter), import_package="codegen_orchestrator"
+        )
+
+        _, receipt = self._run(spec)
+
+        provenance = receipt["project_provenance"]
+        self.assertEqual(provenance["environment_prefix"], str(venv))
+        self.assertTrue(provenance["imported_project"].startswith(str(site_packages)))
+        lookup = usable_receipt(self.root, spec)
+        self.assertFalse(lookup.usable)
+        self.assertIn("interpreter environment", lookup.reason)
 
 
 class CheckSetIdentityTests(BroadCheckTestCase):

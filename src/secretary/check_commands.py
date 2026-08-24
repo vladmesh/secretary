@@ -37,6 +37,31 @@ from secretary.config import ConfigError, load_config, validate
 from secretary.onboarding import DEFAULT_INSTANCE
 
 
+_GIT_TIMEOUT = 60
+
+
+class ModuleContract:
+    """The adapter-owned module-check runtime, plus any legacy-default diagnosis."""
+
+    def __init__(self, interpreter: str, import_package: str, reason: str = "") -> None:
+        self.interpreter = interpreter
+        self.import_package = import_package
+        self.reason = reason
+
+    def as_dict(self) -> dict[str, str]:
+        if self.reason:
+            return {"source": "legacy_default", "reason": self.reason}
+        return {"source": "adapter"}
+
+
+class ResolvedCheck:
+    """The executable check and the contract selection the caller should be able to see."""
+
+    def __init__(self, spec: CheckSpec, module_contract: dict[str, str] | None = None) -> None:
+        self.spec = spec
+        self.module_contract = module_contract
+
+
 def add_check_subcommands(subparsers) -> None:
     check = subparsers.add_parser(
         "check", help="run a broad check with a workspace-local receipt, or read that receipt"
@@ -99,30 +124,30 @@ def _fail(exc: BroadCheckError) -> int:
     return 2
 
 
-def _spec(args: argparse.Namespace) -> CheckSpec:
+def _spec(args: argparse.Namespace) -> ResolvedCheck:
     if args.module:
-        interpreter, import_package = _module_contract(Path(args.root), Path(args.instance))
-        return CheckSpec.for_module(
+        contract = _module_contract(Path(args.root), Path(args.instance))
+        return ResolvedCheck(CheckSpec.for_module(
             args.module,
             args.module_arg,
-            interpreter=interpreter,
-            import_package=import_package,
-        )
+            interpreter=contract.interpreter,
+            import_package=contract.import_package,
+        ), contract.as_dict())
     if args.module_arg:
         raise BroadCheckError("module_arg_without_module", "--module-arg needs --module")
-    return CheckSpec.for_shell(args.command)
+    return ResolvedCheck(CheckSpec.for_shell(args.command))
 
 
-def _module_contract(root: Path, instance: Path) -> tuple[str, str]:
+def _module_contract(root: Path, instance: Path) -> ModuleContract:
     """Return the registered project's explicit module-check contract, or the legacy default.
 
     A worker's checkout is normally a git worktree, not the registered checkout itself. Comparing
     git common directories identifies the registered repository without guessing from its files;
     an ordinary unregistered checkout keeps the long-standing Secretary default for direct use.
     """
-    binding = _binding_for_workspace(root, instance)
+    binding, fallback_reason = _binding_for_workspace(root, instance)
     if binding is None:
-        return sys.executable, "secretary"
+        return ModuleContract(sys.executable, "secretary", fallback_reason)
     adapter_name = binding.get("adapter")
     if not isinstance(adapter_name, str) or not adapter_name:
         raise BroadCheckError("invalid_project_adapter", "registered project has no adapter")
@@ -134,7 +159,7 @@ def _module_contract(root: Path, instance: Path) -> tuple[str, str]:
         raise BroadCheckError("invalid_project_adapter", f"adapter {adapter_name!r} is invalid")
     configured = adapter.get("broad_check")
     if configured is None:
-        return sys.executable, "secretary"
+        return ModuleContract(sys.executable, "secretary", "adapter_missing_broad_check")
     if not isinstance(configured, dict):  # schema validation above normally catches this.
         raise BroadCheckError("invalid_project_adapter", f"adapter {adapter_name!r} has no broad-check contract")
     interpreter = str(configured.get("interpreter") or "").strip()
@@ -146,33 +171,54 @@ def _module_contract(root: Path, instance: Path) -> tuple[str, str]:
         # Keep a venv's symlink spelling. Resolving the final component would turn
         # `.venv/bin/python` into the base interpreter and discard that environment's site paths.
         interpreter = str(root.resolve() / interpreter_path)
-    return interpreter, import_package
+    return ModuleContract(interpreter, import_package)
 
 
-def _binding_for_workspace(root: Path, instance: Path) -> dict[str, object] | None:
+def _binding_for_workspace(root: Path, instance: Path) -> tuple[dict[str, object] | None, str]:
     projects = instance / "projects"
     if not projects.is_dir():
-        return None
-    candidates: list[dict[str, object]] = []
+        return None, "no_project_binding"
+    enabled: list[dict[str, object]] = []
+    disabled_match = False
+    root_common = _git_common_dir(root)
     for path in sorted(projects.glob("*.yaml")):
         try:
             binding = load_config(path)
         except ConfigError:
             continue
-        if not isinstance(binding, dict) or binding.get("enabled") is not True:
+        if not isinstance(binding, dict):
             continue
         repo = binding.get("repo")
-        if isinstance(repo, str) and repo and _same_repository(root, Path(repo).expanduser()):
-            candidates.append(binding)
-    if len(candidates) > 1:
+        if not isinstance(repo, str) or not repo:
+            continue
+        if not _same_repository(root, Path(repo).expanduser(), first_common=root_common,
+                                first_common_known=True):
+            continue
+        if binding.get("enabled") is True:
+            enabled.append(binding)
+        else:
+            disabled_match = True
+    if len(enabled) > 1:
         raise BroadCheckError("ambiguous_project", "workspace matches more than one registered project")
-    return candidates[0] if candidates else None
+    if enabled:
+        return enabled[0], ""
+    return None, "project_binding_disabled" if disabled_match else "no_project_binding"
 
 
-def _same_repository(first: Path, second: Path) -> bool:
-    if first.resolve() == second.resolve():
-        return True
-    first_common = _git_common_dir(first)
+def _same_repository(
+    first: Path,
+    second: Path,
+    *,
+    first_common: Path | None = None,
+    first_common_known: bool = False,
+) -> bool:
+    try:
+        if first.resolve() == second.resolve():
+            return True
+    except OSError:
+        return False
+    if not first_common_known:
+        first_common = _git_common_dir(first)
     second_common = _git_common_dir(second)
     return first_common is not None and first_common == second_common
 
@@ -185,6 +231,7 @@ def _git_common_dir(root: Path) -> Path | None:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            timeout=_GIT_TIMEOUT,
         )
         common = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--git-common-dir"],
@@ -192,8 +239,9 @@ def _git_common_dir(root: Path) -> Path | None:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            timeout=_GIT_TIMEOUT,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return None
     if top.returncode != 0 or common.returncode != 0:
         return None
@@ -208,17 +256,20 @@ def run_check_broad(args: argparse.Namespace) -> int:
     """Run the check and hand back its own exit status, never a status of our own invention."""
     root = Path(args.root)
     try:
-        spec = _spec(args)
+        resolved = _spec(args)
+        spec = resolved.spec
         if args.reuse:
             # The one authorization question, asked the one way `check show` asks it.
             lookup = usable_receipt(root, spec)
             authorized = lookup.authorized()
             if authorized is not None:
-                print(json.dumps(
-                    {"reused": True, "path": str(lookup.path), "receipt": authorized,
-                     "summary": summarize(authorized)},
-                    sort_keys=True, indent=2,
-                ))
+                payload = {
+                    "reused": True, "path": str(lookup.path), "receipt": authorized,
+                    "summary": summarize(authorized),
+                }
+                if resolved.module_contract is not None:
+                    payload["module_contract"] = resolved.module_contract
+                print(json.dumps(payload, sort_keys=True, indent=2))
                 # A receipt that stands in for the run hands back the result that run had, taken
                 # from the canonical model the load boundary reconstructed — never from a raw
                 # field this command read for itself.
@@ -233,11 +284,13 @@ def run_check_broad(args: argparse.Namespace) -> int:
         )
     except BroadCheckError as exc:
         return _fail(exc)
-    print(json.dumps(
-        {"reused": False, "path": str(receipt_path(root, spec)), "receipt": receipt,
-         "summary": summarize(receipt)},
-        sort_keys=True, indent=2,
-    ))
+    payload = {
+        "reused": False, "path": str(receipt_path(root, spec)), "receipt": receipt,
+        "summary": summarize(receipt),
+    }
+    if resolved.module_contract is not None:
+        payload["module_contract"] = resolved.module_contract
+    print(json.dumps(payload, sort_keys=True, indent=2))
     result = recorded_result(receipt)
     if result is None:  # unreachable: the writer records the model it just derived
         raise BroadCheckError("unrepresentable_result", "the check result could not be recorded")
@@ -246,10 +299,13 @@ def run_check_broad(args: argparse.Namespace) -> int:
 
 def run_check_show(args: argparse.Namespace) -> int:
     try:
-        lookup = usable_receipt(Path(args.root), _spec(args))
+        resolved = _spec(args)
+        lookup = usable_receipt(Path(args.root), resolved.spec)
     except BroadCheckError as exc:
         return _fail(exc)
     payload = lookup.as_dict()
+    if resolved.module_contract is not None:
+        payload["module_contract"] = resolved.module_contract
     if lookup.receipt is not None:
         payload["summary"] = summarize(lookup.receipt)
     print(json.dumps(payload, sort_keys=True, indent=2))

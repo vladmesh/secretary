@@ -119,6 +119,7 @@ with open(_record, "w", encoding="utf-8") as _handle:
     json.dump(
         {
             "python": sys.executable,
+            "environment_prefix": sys.prefix,
             "cwd": os.getcwd(),
             "imported_package": _package,
             "imported_project": _imported,
@@ -136,6 +137,7 @@ _ORIGIN_UNOBSERVABLE = "unobservable"
 _UNOBSERVED_PROVENANCE = {
     "origin": _ORIGIN_UNOBSERVABLE,
     "python": "",
+    "environment_prefix": "",
     "cwd": "",
     "imported_package": "",
     "imported_project": "",
@@ -346,6 +348,7 @@ def _read_provenance(record: Path | None, root: Path) -> dict[str, object]:
     return {
         "origin": _ORIGIN_CHECK_PROCESS,
         "python": str(payload.get("python") or ""),
+        "environment_prefix": str(payload.get("environment_prefix") or ""),
         "cwd": str(payload.get("cwd") or ""),
         "imported_package": str(payload.get("imported_package") or ""),
         "imported_project": imported,
@@ -542,13 +545,21 @@ def _run_and_record(
     incomplete_reason = ""
     # stdout and stderr share one pipe on purpose: two pipes would reorder a failing test's
     # traceback against the dots that located it, and the tail is exactly where that matters.
-    process = subprocess.Popen(
-        spec.argv(record),
-        cwd=str(root),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        env=environment,
-    )
+    try:
+        process = subprocess.Popen(
+            spec.argv(record),
+            cwd=str(root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=environment,
+        )
+    except OSError as exc:
+        if spec.shape == _SHAPE_MODULE:
+            raise BroadCheckError(
+                "interpreter_start_failed",
+                f"could not start configured interpreter {spec.interpreter!r}: {exc}",
+            ) from exc
+        raise BroadCheckError("check_start_failed", f"could not start broad check: {exc}") from exc
     try:
         assert process.stdout is not None
         deadline = None if not timeout_seconds else started + float(timeout_seconds)
@@ -867,13 +878,29 @@ def candidate_import_refusal(
         return "the check process imported no project, so it validated no checkout"
     try:
         resolved = Path(imported).resolve()
-        inside = resolved.is_relative_to(Path(root).resolve())
+        resolved_root = Path(root).resolve()
+        inside = resolved.is_relative_to(resolved_root)
     except (OSError, ValueError):
         return f"the imported project path could not be resolved: {imported}"
     if not inside:
         # Recomputed against this workspace rather than read off the receipt's own flag: the
         # question is where the import lands for the reader, now.
         return f"the check process imported {imported}, which is outside this candidate workspace"
+    environment_prefix = provenance.get("environment_prefix")
+    if not isinstance(environment_prefix, str) or not environment_prefix:
+        return "the receipt records no interpreter environment provenance"
+    try:
+        resolved_prefix = Path(environment_prefix).resolve()
+        imported_from_environment = (
+            resolved_prefix != resolved_root and resolved.is_relative_to(resolved_prefix)
+        )
+    except (OSError, ValueError):
+        imported_from_environment = False
+    if imported_from_environment:
+        return (
+            f"the check process imported {imported} from its interpreter environment, not "
+            "the candidate workspace"
+        )
     return ""
 
 
