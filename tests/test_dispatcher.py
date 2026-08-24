@@ -6628,10 +6628,31 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
     # --- secretary-1458: the contract preflight, before a card is given to a worker at all -----
 
     def _refused_contract(self, shape: str) -> str:
-        """Make this card's registered project one nobody can broad-check, and say why."""
+        """Make this card's registered project one nobody can broad-check, and say why.
+
+        The board state at the moment the preflight is asked is recorded too: that is the property
+        AC1 is about, and the only way to see it from outside is to look while the question is
+        being answered.
+        """
         message = f"adapter 'secretary' is unusable for this project ({shape})"
         self.catalog.broad_check_refusal = ContractUnusable(shape, "secretary", message)
+        self.asked_while = []
+        self.catalog.broad_check_probe = lambda project: self.asked_while.append(
+            (project, self.reader.show(CARD_REF)["state"], list(self.host.calls))
+        )
         return message
+
+    def _events_between_claim_and_block(self) -> list[dict]:
+        """Everything the audit recorded strictly between this card's claim and its block."""
+        events = self.audit_events()
+        targets = [
+            index for index, event in enumerate(events)
+            if event.get("record_type") == "board.protocol_event"
+            and (event.get("transition") or {}).get("target") in ("in_progress", "blocked")
+            and str(event.get("ref") or "").endswith(CARD_REF)
+        ]
+        self.assertEqual(len(targets), 2, "the card was claimed once and blocked once")
+        return events[targets[0] + 1:targets[1]]
 
     def _preflight_blocked(self, shape: str = CANNOT_ATTEST_PROJECT) -> dict:
         self._refused_contract(shape)
@@ -6669,11 +6690,26 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
                 self.assertIn(shape, reason)
                 self.assertIn(f"class={FAILURE_CLASS_INFRASTRUCTURE}", reason)
                 self.assertTrue(reason.endswith(blocked["failure_reason"]))
+                # AC1: the decision was made off the registry alone, with the card still in
+                # Ready and the host untouched — not after the claim, where finding it would
+                # already have cost what this card exists to save.
+                self.assertEqual(
+                    self.asked_while, [("secretary", "ready", [])],
+                    "the contract was resolved before the card was claimed and before any host "
+                    "call, exactly once",
+                )
+                # And the claim is a door, not a round: the board protocol gives the dispatcher no
+                # Ready-to-Blocked edge, so the outcome has to be written from a claimed card —
+                # but nothing at all happens in between, so there is no window in which the card
+                # sits In progress without the outcome that belongs to it.
+                self.assertEqual(
+                    self._events_between_claim_and_block(), [],
+                    "no workspace, no head, no comment, no other work between claim and outcome",
+                )
                 # AC3: no round was spent. No workspace was restored, no head was brought up and
-                # no worker was ever handed the card; the claim above is the door to an outcome,
-                # because the board protocol has no dispatcher edge from Ready to Blocked.
+                # no worker was ever handed the card.
+                self.assertEqual(self.host.calls, [], "the host was never asked for anything")
                 self.assertEqual(self.host.prepared, [], "no workspace")
-                self.assertNotIn("prepare_worker", self.host.calls, "no head")
                 self.assertEqual(self.runtime.production_state.load()["records"], {})
                 self.assertFalse((self.data_dir / "workspaces").exists())
 

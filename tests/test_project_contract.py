@@ -32,6 +32,7 @@ from secretary.projects.contract import (
     LEGACY_REASON_MISSING_BROAD_CHECK,
     ContractUnusable,
     module_contract,
+    preflight,
 )
 
 ADAPTER_BODY = (
@@ -66,6 +67,24 @@ class ProjectContractTests(unittest.TestCase):
             instance=self.instance,
             project_root=self.repo,
         )
+
+    def binding(self) -> dict:
+        return {"adapter": "example", "repo": str(self.repo)}
+
+    def ask_preflight(self, project_root: Path | None = None) -> None:
+        """The dispatcher's question, asked of the shared rules directly."""
+        preflight(
+            self.binding(),
+            instance=self.instance,
+            project_root=self.repo if project_root is None else project_root,
+        )
+
+    def relative_interpreter(self, tree: Path) -> Path:
+        """The `.venv/bin/python` an adapter's relative contract means, inside one tree."""
+        interpreter = tree / ".venv" / "bin" / "python"
+        interpreter.parent.mkdir(parents=True, exist_ok=True)
+        interpreter.symlink_to(sys.executable)
+        return interpreter
 
     def refusal(self, binding: dict | None = None) -> ContractUnusable:
         with self.assertRaises(ContractUnusable) as caught:
@@ -194,6 +213,95 @@ class ProjectContractTests(unittest.TestCase):
                     "earlier, and never under a second name",
                 )
 
+    def test_the_preflight_never_answers_for_a_relative_interpreter_it_cannot_see(self) -> None:
+        """The boundary this card had to draw: a workspace-dependent question is not the
+        dispatcher's to answer.
+
+        The adapter schema resolves a relative interpreter from the *candidate workspace*, and at
+        preflight there is no candidate workspace. Answering from the registered checkout would be
+        a statement about a different directory — and it is the false approval that statement
+        buys (the checkout has an untracked `.venv`, the fresh worktree does not) that let a card
+        through to a worker who then refused it. So the preflight gives the same answer either
+        way: nothing.
+        """
+        self.adapter(
+            ADAPTER_BODY
+            + "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n"
+        )
+        interpreter = self.relative_interpreter(self.repo)
+
+        self.ask_preflight()  # no false refusal: the contract is usable as far as anyone can tell
+
+        interpreter.unlink()
+        self.ask_preflight()  # and no false approval either: the answer never came from this tree
+
+    def test_the_worker_answers_the_relative_interpreter_in_the_tree_that_runs_it(self) -> None:
+        """The other half of the same boundary: the side holding the tree decides, both ways."""
+        self.adapter(
+            ADAPTER_BODY
+            + "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n"
+        )
+        workspace = self.root / "worktree"
+        workspace.mkdir()
+        self.relative_interpreter(self.repo)
+
+        with self.assertRaises(ContractUnusable) as caught:
+            module_contract(self.binding(), instance=self.instance, project_root=workspace)
+
+        self.assertEqual(caught.exception.shape, INTERPRETER_UNAVAILABLE)
+        self.assertIn(
+            str(workspace), caught.exception.message,
+            "the worker's refusal is about the worktree it was given, not the registered checkout",
+        )
+        in_the_worktree = self.relative_interpreter(workspace)
+        resolved = module_contract(
+            self.binding(), instance=self.instance, project_root=workspace
+        )
+        self.assertEqual(
+            resolved.interpreter, str(in_the_worktree),
+            "and the contract it resolves runs that tree's own interpreter, not the checkout's",
+        )
+
+    def test_the_preflight_does_refuse_an_absolute_interpreter_that_is_not_there(self) -> None:
+        """AC2 as the observer narrowed it: `interpreter_unavailable` is the preflight's to report
+        for an absolute path, which names the same file whatever tree the check runs in."""
+        self.adapter(
+            ADAPTER_BODY
+            + f"broad_check:\n  interpreter: {self.root / 'nowhere' / 'python'}\n"
+            + "  import_package: thing\n"
+        )
+
+        with self.assertRaises(ContractUnusable) as caught:
+            self.ask_preflight()
+
+        self.assertEqual(caught.exception.shape, INTERPRETER_UNAVAILABLE)
+
+    def test_every_other_shape_is_the_preflights_to_refuse_too(self) -> None:
+        """AC5: one implementation of the rules. What differs is only the workspace-dependent
+        question above, so every shape that does not need a tree stops the card at the dispatcher.
+        """
+        cases = {
+            ADAPTER_UNAVAILABLE: None,
+            ADAPTER_INVALID: "setup:\n  commands: ['true']\n",
+            BROAD_CHECK_INCOMPLETE: ADAPTER_BODY + (
+                "broad_check:\n  interpreter: '   '\n  import_package: thing\n"
+            ),
+            CANNOT_ATTEST_PROJECT: ADAPTER_BODY,
+        }
+        self.package("codegen_orchestrator")
+        for shape, body in cases.items():
+            with self.subTest(shape=shape):
+                adapter_file = self.instance / "adapters" / "example.yaml"
+                if body is None:
+                    adapter_file.unlink(missing_ok=True)
+                else:
+                    self.adapter(body)
+
+                with self.assertRaises(ContractUnusable) as caught:
+                    self.ask_preflight()
+
+                self.assertEqual(caught.exception.shape, shape)
+
     def test_the_legacy_default_over_somebody_elses_checkout_cannot_attest_it(self) -> None:
         """The live shape: 13 adapters, none declaring `broad_check`, one Secretary checkout.
 
@@ -266,15 +374,14 @@ class CatalogContractTests(unittest.TestCase):
             (instance / "adapters" / "example.yaml").write_text(adapter_body, encoding="utf-8")
         return InstanceCatalog(instance / "instance.yaml")
 
-    def test_a_usable_contract_is_returned_to_the_preflight(self) -> None:
-        contract = self.catalog().broad_check_contract("example")
-
-        self.assertEqual(contract.import_package, LEGACY_IMPORT_PACKAGE)
-        self.assertEqual(contract.reason, LEGACY_REASON_MISSING_BROAD_CHECK)
+    def test_a_usable_contract_passes_the_preflight_in_silence(self) -> None:
+        """The live AC4 case, through the dispatcher's own catalog: a Secretary checkout on the
+        legacy default. The preflight answers only whether the card may go out."""
+        self.assertIsNone(self.catalog().broad_check_preflight("example"))
 
     def test_an_unusable_one_reaches_the_preflight_as_the_shared_refusal(self) -> None:
         with self.assertRaises(ContractUnusable) as caught:
-            self.catalog(adapter_body=None).broad_check_contract("example")
+            self.catalog(adapter_body=None).broad_check_preflight("example")
 
         self.assertEqual(caught.exception.shape, ADAPTER_UNAVAILABLE)
 

@@ -21,6 +21,16 @@ being attested is exactly the sources that get imported. For any other project t
 attests an installed copy of somebody else's package, which is a check that cannot fail for the
 right reason and cannot pass for one either. So usability is asked relative to a project: can this
 contract attest THIS checkout, rather than does the adapter happen to spell the key.
+
+The rules are one implementation; what differs between the two callers is not the rules but the
+set of questions each is in a position to ask. The adapter schema resolves a *relative*
+interpreter against the candidate workspace (``schemas/adapter.schema.json``), and at preflight no
+candidate workspace exists yet — so "does that interpreter exist" is a question only the side
+holding the tree can answer. `preflight` therefore answers everything a workspace is not needed
+for and stops there; `module_contract` is the worker's own resolution, which has the tree and
+answers the rest. Neither side may state something about a tree it is not looking at: testing a
+relative interpreter in the registered checkout would be an assertion about a different directory,
+and it is exactly that assertion which approved contracts the worker then refused.
 """
 
 from __future__ import annotations
@@ -100,12 +110,38 @@ class ContractUnusable(Exception):
 
 
 def module_contract(binding: dict[str, Any], *, instance: Path, project_root: Path) -> ModuleContract:
-    """The usable broad-check contract of one registered project, or ``ContractUnusable``.
+    """The worker's own resolution: the contract to run in THIS tree, or ``ContractUnusable``.
 
-    Cheap and offline by construction: it reads the binding it was handed and the adapter beside
-    it, and looks at the project's own checkout. Nothing here starts a process, creates a
-    workspace or brings up a head, which is what lets the dispatcher ask it before a claim.
+    `project_root` is the workspace the check will run in, which is what the adapter schema means
+    when it resolves a relative interpreter. Having that tree, this side answers every question —
+    including whether the interpreter the contract names is actually there.
     """
+    return _usable_contract(
+        binding, instance=instance, project_root=project_root, workspace=project_root
+    )
+
+
+def preflight(binding: dict[str, Any], *, instance: Path, project_root: Path) -> None:
+    """Whether a card may be given to a worker at all, or ``ContractUnusable`` (secretary-1458).
+
+    Cheap and offline by construction: the binding it was handed, the adapter beside it, and the
+    registered checkout's own layout. Nothing here starts a process, creates a workspace or brings
+    up a head, which is what lets the dispatcher ask it before a claim.
+
+    It answers only what a candidate workspace is not needed for. A relative interpreter is
+    resolved from that workspace, and no workspace exists yet, so this side neither approves nor
+    refuses on it: the tree that will run the check is the only place that question has an answer,
+    and the worker's own resolution asks it there.
+    """
+    _usable_contract(binding, instance=instance, project_root=project_root, workspace=None)
+
+
+def _usable_contract(
+    binding: dict[str, Any], *, instance: Path, project_root: Path, workspace: Path | None,
+) -> ModuleContract:
+    """The one implementation of the rules. `workspace` is the tree the check will run in, or None
+    when no candidate workspace exists yet and the workspace-dependent question is not this
+    caller's to answer."""
     adapter_name = binding.get("adapter")
     if not isinstance(adapter_name, str) or not adapter_name:
         raise ContractUnusable(ADAPTER_UNAVAILABLE, "", "registered project has no adapter")
@@ -119,15 +155,42 @@ def module_contract(binding: dict[str, Any], *, instance: Path, project_root: Pa
         raise ContractUnusable(
             ADAPTER_INVALID, adapter_name, f"adapter {adapter_name!r} is invalid"
         )
-    contract = _declared_contract(adapter, adapter_name, Path(project_root))
-    _refuse_unusable(contract, adapter_name, Path(project_root))
+    contract, interpreter_answerable = _declared_contract(adapter, adapter_name, workspace)
+    if interpreter_answerable and not _executable(contract.interpreter):
+        raise ContractUnusable(
+            INTERPRETER_UNAVAILABLE, adapter_name,
+            f"could not start configured interpreter {contract.interpreter!r}: "
+            "it is not an executable file",
+        )
+    if contract.reason and not _attests(Path(project_root), contract.import_package):
+        # Only the legacy default is judged against the checkout's own layout. An adapter that
+        # declares a contract has stated which package attests that project, and OPERATIONS.md
+        # promises that statement is honoured rather than second-guessed by a layout heuristic;
+        # what such a contract actually imported is still checked by the receipt's provenance. The
+        # default states nothing about this project: it names Secretary's package for every
+        # registered project alike, so for a checkout that does not hold those sources the check it
+        # buys attests an installed copy of somebody else's code.
+        raise ContractUnusable(
+            CANNOT_ATTEST_PROJECT, adapter_name,
+            f"adapter {adapter_name!r} declares no broad-check contract, so the legacy default "
+            f"attests package {contract.import_package!r}, which is not part of this project's "
+            f"checkout {Path(project_root)}",
+        )
     return contract
 
 
-def _declared_contract(adapter: dict[str, Any], adapter_name: str, project_root: Path) -> ModuleContract:
+def _declared_contract(
+    adapter: dict[str, Any], adapter_name: str, workspace: Path | None,
+) -> tuple[ModuleContract, bool]:
+    """The contract the adapter declares, and whether its interpreter is this caller's to check."""
     configured = adapter.get("broad_check")
     if configured is None:
-        return ModuleContract(sys.executable, LEGACY_IMPORT_PACKAGE, LEGACY_REASON_MISSING_BROAD_CHECK)
+        # The legacy default names an absolute interpreter — the one running now — so it is fully
+        # answerable from either side.
+        legacy = ModuleContract(
+            sys.executable, LEGACY_IMPORT_PACKAGE, LEGACY_REASON_MISSING_BROAD_CHECK
+        )
+        return legacy, True
     if not isinstance(configured, dict):  # schema validation above normally catches this.
         raise ContractUnusable(
             BROAD_CHECK_INCOMPLETE, adapter_name,
@@ -141,34 +204,16 @@ def _declared_contract(adapter: dict[str, Any], adapter_name: str, project_root:
             f"adapter {adapter_name!r} has no broad-check contract",
         )
     interpreter_path = Path(interpreter)
-    if not interpreter_path.is_absolute():
-        # Keep a venv's symlink spelling. Resolving the final component would turn
-        # `.venv/bin/python` into the base interpreter and discard that environment's site paths.
-        interpreter = str(project_root.resolve() / interpreter_path)
-    return ModuleContract(interpreter, import_package)
-
-
-def _refuse_unusable(contract: ModuleContract, adapter_name: str, project_root: Path) -> None:
-    if not _executable(contract.interpreter):
-        raise ContractUnusable(
-            INTERPRETER_UNAVAILABLE, adapter_name,
-            f"could not start configured interpreter {contract.interpreter!r}: "
-            "it is not an executable file",
-        )
-    if contract.reason and not _attests(project_root, contract.import_package):
-        # Only the legacy default is judged against the checkout's own layout. An adapter that
-        # declares a contract has stated which package attests that project, and OPERATIONS.md
-        # promises that statement is honoured rather than second-guessed by a layout heuristic;
-        # what such a contract actually imported is still checked by the receipt's provenance. The
-        # default states nothing about this project: it names Secretary's package for every
-        # registered project alike, so for a checkout that does not hold those sources the check it
-        # buys attests an installed copy of somebody else's code.
-        raise ContractUnusable(
-            CANNOT_ATTEST_PROJECT, adapter_name,
-            f"adapter {adapter_name!r} declares no broad-check contract, so the legacy default "
-            f"attests package {contract.import_package!r}, which is not part of this project's "
-            f"checkout {project_root}",
-        )
+    if interpreter_path.is_absolute():
+        return ModuleContract(interpreter, import_package), True
+    if workspace is None:
+        # Resolved from the candidate workspace, per the adapter schema, and there is none yet.
+        # Left as the adapter spells it and not tested: the answer belongs to the tree that will
+        # run the check, and any other tree would answer a different question.
+        return ModuleContract(interpreter, import_package), False
+    # Keep a venv's symlink spelling. Resolving the final component would turn
+    # `.venv/bin/python` into the base interpreter and discard that environment's site paths.
+    return ModuleContract(str(Path(workspace).resolve() / interpreter_path), import_package), True
 
 
 def _executable(interpreter: str) -> bool:
