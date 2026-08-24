@@ -27,6 +27,16 @@ class PaneHostError(RuntimeError):
     """A session manager that answered a pane operation with something unusable."""
 
 
+class PaneSplitSourceMissing(PaneHostError):
+    """The split anchor is absent from the host's renderer graph.
+
+    A pane can remain addressable as a PTY after its UI node disappears. Orca uses this same
+    refusal before and after attempting to create the child, so a caller must inventory panes
+    before recovering with a standalone pane. Other split failures stay untyped and fail closed
+    because they may have left a process behind.
+    """
+
+
 @dataclass(frozen=True)
 class Pane:
     """One pane as the session manager named it: the handle to address, and its stable leaf.
@@ -50,6 +60,8 @@ class Pane:
     # Advisory work liveness for a caller that watches a head for progress; the pid heartbeat is
     # what answers whether a process is there.
     last_output_at: float = 0.0
+    # Set only by the head-operation recovery path. Pane inventory never supplies it.
+    fallback_reason: str = ""
 
 
 class PaneHost(Protocol):
@@ -157,13 +169,20 @@ class OrcaSessionHost(OrcaPaneHost):
         return Pane(handle=handle, leaf=_pane_key_leaf(terminal.get("paneKey")))
 
     def split_pane(self, handle: str, command: str) -> Pane:
-        result = self.run_json([
-            "orca", "terminal", "split",
-            "--terminal", handle,
-            "--direction", "vertical",
-            "--command", command,
-            "--json",
-        ])
+        try:
+            result = self.run_json([
+                "orca", "terminal", "split",
+                "--terminal", handle,
+                "--direction", "vertical",
+                "--command", command,
+                "--json",
+            ])
+        except Exception as exc:  # The injected runner owns its error type.
+            if "terminal_split_source_not_found" in str(exc):
+                raise PaneSplitSourceMissing(
+                    "orca split source is absent from the renderer graph"
+                ) from None
+            raise
         split = result.get("split") if isinstance(result.get("split"), dict) else result
         opened = split.get("handle") if isinstance(split, dict) else None
         if not isinstance(opened, str) or not opened:

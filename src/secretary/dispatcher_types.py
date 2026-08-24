@@ -116,6 +116,8 @@ class ReviewLaunch:
     # that stop moves. The caller writes it onto the record, which is where it becomes durable.
     head_run: dict[str, Any] = field(default_factory=dict)
     delivery_evidence: dict[str, Any] = field(default_factory=dict)
+    # A successful standalone recovery after a recognised split refusal.
+    fallback_reason: str = ""
 
 
 def review_pane_label(reference: str) -> str:

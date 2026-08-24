@@ -22,10 +22,10 @@ matters is where they reach:
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
-from ..pane_host import Pane, SessionHost
+from ..pane_host import Pane, PaneSplitSourceMissing, SessionHost
 from ..prompt_document import nudge_for
 from ..tui_delivery import (
     READINESS_BLOCKED,
@@ -147,6 +147,9 @@ class HeadOutcome:
 
     run: HeadRun
     delivery: DeliveryOutcome | None = None
+    # A recovered split is relevant to the caller's tick report. This is not an identity or
+    # lifecycle fact that belongs in HeadRun.
+    fallback_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -275,12 +278,12 @@ def spawn(
         # is nothing to deliver and nothing to confirm. Which of the two shapes this head is in is
         # the caller's to say, because it is the rendered command that decides it, not the spec:
         # a raw command override runs an adapter's binary in a shape the profile never described.
-        return HeadOutcome(run)
+        return HeadOutcome(run, fallback_reason=pane.fallback_reason)
     try:
         delivery = _deliver(transport, host, run, pointer, subject=subject or "head-launch")
     except Exception as exc:  # noqa: BLE001 — classified by what it left running, not by type
         raise _spawn_delivery_failure(host, run, pointer, exc, transport=transport) from None
-    return HeadOutcome(delivery.run.working(), delivery.outcome)
+    return HeadOutcome(delivery.run.working(), delivery.outcome, pane.fallback_reason)
 
 
 def nudge(
@@ -395,7 +398,23 @@ def _open_pane(
     """
     if not split_from:
         return host.open_pane(workspace, title, command)
-    pane = host.split_pane(split_from, command)
+    # The token identifies an Orca refusal, not the point at which it happened. Preserve an
+    # inventory from before the split so a second read can prove no pane appeared from it.
+    before_split = {(pane.handle, pane.leaf) for pane in host.panes(workspace)}
+    try:
+        pane = host.split_pane(split_from, command)
+    except PaneSplitSourceMissing:
+        after_split = {(pane.handle, pane.leaf) for pane in host.panes(workspace)}
+        if after_split - before_split:
+            # The failed split may have started a reviewer. No handle was returned, so opening a
+            # replacement would leave two heads in the same checkout. Fail closed instead.
+            raise
+        # The inventory proves this refusal left no pane in the worktree. Only this recognised
+        # token may take the standalone path; every other split error still escapes unchanged.
+        return replace(
+            host.open_pane(workspace, title, command),
+            fallback_reason="terminal_split_source_not_found",
+        )
     if not pane.leaf:
         # A split reply that names the pane by handle alone can still be found in a fresh
         # inventory, which yields the same stable leaf `open_pane` returns directly. A new head is

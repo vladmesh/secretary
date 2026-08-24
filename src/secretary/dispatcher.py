@@ -527,6 +527,8 @@ class LaunchedHead:
     # The head's own run: identity that outlives a pane handle, lifecycle, and the initiator that
     # ended it. Empty for a bring-up whose caller keeps no lifecycle of its own.
     head_run: dict[str, Any] = field(default_factory=dict)
+    # A successful recovery route that the dispatcher exposes in this tick's outcome.
+    fallback_reason: str = ""
 
 
 # The identity a session manager returns while creating one pane.
@@ -1654,6 +1656,7 @@ class CommandHostRuntime:
             run=launched.run,
             head_run=dict(launched.head_run),
             delivery_evidence=dict(launched.delivery_evidence),
+            fallback_reason=launched.fallback_reason,
         )
 
     def nudge_review_delivery(
@@ -2547,6 +2550,7 @@ class CommandHostRuntime:
                 _delivery_evidence_json(delivery, subject) if delivery is not None else {}
             ),
             head_run=outcome.run.to_json(),
+            fallback_reason=outcome.fallback_reason,
         )
 
     def _head_spec(self, head: str, adapter: str) -> HeadSpec:
@@ -2663,7 +2667,7 @@ class CommandHostRuntime:
     def _launched(
         self, handle: str, head: str, task: dict[str, Any] | None, role: str, workspace: str = "",
         failover: bool = False, leaf: str = "", delivery_evidence: dict[str, Any] | None = None,
-        head_run: dict[str, Any] | None = None,
+        head_run: dict[str, Any] | None = None, fallback_reason: str = "",
     ) -> LaunchedHead:
         """Pair the pane with the launch snapshot of the head running in it."""
         if task is None:
@@ -2671,6 +2675,7 @@ class CommandHostRuntime:
                 handle=handle, head=head, leaf=leaf,
                 delivery_evidence=dict(delivery_evidence or {}),
                 head_run=dict(head_run or {}),
+                fallback_reason=fallback_reason,
             )
         try:
             run = self.catalog.head_run(
@@ -2687,6 +2692,7 @@ class CommandHostRuntime:
             leaf=leaf,
             delivery_evidence=dict(delivery_evidence or {}),
             head_run=dict(head_run or {}),
+            fallback_reason=fallback_reason,
         )
 
     @property

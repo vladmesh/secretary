@@ -138,7 +138,13 @@ Orca is the current session manager and live terminal UI. One card occupies one 
 gets its own terminal, the reviewer starts as a separate split pane in the same worktree, and both
 handles are kept apart in dispatcher state. A split rather than a second terminal, because on a
 headless server a freshly created terminal arrives as a background surface and does not materialise
-in a worktree the client already has open. When review starts, the worker's head is stopped and its
+in a worktree the client already has open. Orca's `terminal_split_source_not_found` can arrive before
+or after its child attempt, so the dispatcher snapshots the pane inventory before the split and reads
+it again after that refusal. Only an unchanged inventory permits a standalone reviewer terminal in
+the same worktree; a newly visible pane leaves the launch fail-closed, avoiding a duplicate reviewer.
+The tick records the successful standalone route with `reviewer_fallback_reason`. Any other split
+failure remains fail-closed, because it may have already started a child and opening another pane
+would duplicate it. When review starts, the worker's head is stopped and its
 commit is recorded: the merge gate will not accept a green verdict if the checkout moved since.
 Where that worktree lives is Orca's answer, not the dispatcher's: workspaces are namespaced by the
 session manager's repo registration, which is the binding's `orca_binding`, and the Secretary project

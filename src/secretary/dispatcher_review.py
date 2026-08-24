@@ -1004,10 +1004,13 @@ def start_review(
     if not record.worker_continuation.retained:
         forget_role_head(record, WORKER_ROLE)
     record.state = "reviewing"
-    return {
+    outcome = {
         "status": "ok",
         "step": "review",
         "pilot_ref": ref,
         "attempt_id": attempt_id,
         "action": action,
     }
+    if launch.fallback_reason:
+        outcome["reviewer_fallback_reason"] = launch.fallback_reason
+    return outcome

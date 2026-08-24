@@ -32,6 +32,7 @@ import unittest
 from pathlib import Path
 
 from tests.fakes.host import FakeSessionHost
+from triggered_agents.runtime.pane_host import PaneSplitSourceMissing
 from triggered_agents.runtime.head import (
     EXITED,
     FINISHING,
@@ -194,6 +195,34 @@ class HeadOperationTests(unittest.TestCase):
 
         self.assertIn(("split_pane", anchor.handle), self.host.calls)
         self.assertIn(("rename_pane", outcome.run.handle, "secretary-1412 worker"), self.host.calls)
+
+    def test_a_missing_split_source_falls_back_to_a_standalone_pane(self) -> None:
+        anchor = self.bring_up().run
+        self.host.split_source_missing = True
+
+        outcome = self.bring_up(split_from=anchor.handle)
+
+        self.assertIn(("split_pane", anchor.handle), self.host.calls)
+        self.assertIn(("open_pane", WORKSPACE, "secretary-1412 worker"), self.host.calls)
+        self.assertNotIn(
+            ("rename_pane", outcome.run.handle, "secretary-1412 worker"), self.host.calls
+        )
+        self.assertEqual(outcome.run.handle, "term:2")
+        self.assertEqual(outcome.fallback_reason, "terminal_split_source_not_found")
+
+    def test_a_missing_split_source_that_left_a_pane_fails_closed(self) -> None:
+        anchor = self.bring_up().run
+        self.host.split_source_missing = True
+        self.host.split_source_missing_after_open = True
+
+        with self.assertRaises(PaneSplitSourceMissing):
+            self.bring_up(split_from=anchor.handle)
+
+        self.assertEqual(
+            self.host.calls.count(("open_pane", WORKSPACE, "secretary-1412 worker")), 1,
+            "the failed split must not open a standalone replacement",
+        )
+        self.assertEqual(len(self.host.panes(WORKSPACE)), 2)
 
     def test_a_bring_up_whose_pane_closes_cleanly_left_nothing_running(self) -> None:
         with self.assertRaises(HeadSpawnFailed):
