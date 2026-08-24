@@ -153,7 +153,7 @@ under `DEFAULT_VITALITY_THRESHOLDS`. The asymmetry-of-cost principle behind ever
 | `issue:3e7abdf9` (board 997, secretary-1423): wait-for-readiness timeout on a working head read as transport refusal; retained worker replaced | `Issue3e7abdf9BusyReadAsUnavailableTests` | busy pane + Running + Advancing ⇒ `HealthyActive`; readiness Unavailable is Turn-axis only and never stall evidence; provider unknown ⇒ `HealthyQuiet`, never Dead/ConfirmedStall |
 | `issue:8f86ed63` (board 1010, secretary-1428): 11 busy-retry cycles in an hour, rollout frozen since 06:50, composer stale ("busy is readiness, not liveness") | `Issue8f86ed63BusyMasksStallTests` | Running + admitted Quiet over the hour ⇒ `SuspectedStall` at +300s, `ConfirmedStall` at +900s from last progress; the busy pane corroborates in `basis` only |
 | `issue:fe04011b` (board 1156, codegen-orchestrator-1197): worker+child in `T (stopped)` 27 min, revived by SIGCONT; ticks wrote `gate-pending ok`, six-hour ceiling applied | `IssueFe04011bStoppedWorkerSixHourCeilingTests`; gate-phase twin: `IssueFe04011bLegacyGatePendingTests` | `/proc` state `T` ⇒ `Suspended` within one tick; stall clocks frozen for the whole stop; never ConfirmedStall, never Dead. Since S1-5 the gate-pending tick runs the same reduction + policy, so a suspended head gets its SIGCONT within one tick instead of waiting out `GATE_PENDING_STALL_SECONDS` |
-| codegen-orchestrator-1194 (board card, sprint 1148): reviewer spawn failed 49 min, 45× identical deterministic `terminal_split_source_not_found` with a live terminal | `CodegenOrchestrator1194DeterministicSplitFailureTests` | not a vitality question: snapshot Unavailable with a deterministic reason keeps `Unverifiable` forever — but since S1-5 the recovery policy counts identical authoritative sightings and escalates to the operator at 3 (the flipped test drives the real reduction + policy through the incident's own timeline); a heuristic reason repeated just as often earns only observation |
+| codegen-orchestrator-1194 (board card, sprint 1148): reviewer spawn failed 49 min, 45× identical deterministic `terminal_split_source_not_found` with a live terminal | `CodegenOrchestrator1194DeterministicSplitFailureTests`; `ReviewPaneTests.test_reviewer_falls_back_when_connected_anchor_is_not_split_capable` | a split source missing from Orca's renderer graph has opened no child, so reviewer bring-up retries once as a standalone pane in the same worktree. It is not a vitality question: if that launch path cannot recover, snapshot Unavailable with the deterministic reason keeps `Unverifiable` forever; the policy escalates identical authoritative sightings at 3, while a heuristic reason repeated just as often earns only observation |
 | `issue:06dcf6cb` (board 656): umbrella contract — child-process existence ≠ liveness | `Issue06dcf6cbUmbrellaLivenessContractTests` | pid-only Running with no progress evidence ages ⇒ SuspectedStall ⇒ ConfirmedStall (see "Pid-only evidence ages" above) |
 
 The legacy decision path itself is characterised in `tests/test_head_vitality_legacy_path.py`:
@@ -316,8 +316,11 @@ The plan: identical heuristic reasons N times are not evidence; only authoritati
 classes may skip ranks. `DETERMINISTIC_TERMINAL_REASONS` is the explicit allowlist — what
 qualifies is a refusal naming a property of THIS launch, which retrying cannot change: invalid
 configuration, missing executable, authentication rejected, resource exhausted, and the incident's
-own `terminal_split_source_not_found`. Matching is token-in-bounded-string against the diagnostic
-the producer put on the snapshot (the reducer now carries a dark source's reason onto the episode).
+own `terminal_split_source_not_found`. Reviewer bring-up handles that last token before it reaches
+the policy: Orca has refused before creating a child because the split anchor's renderer node is
+gone, so it opens one standalone pane in the same worktree. Matching is token-in-bounded-string
+against the diagnostic the producer put on the snapshot (the reducer now carries a dark source's
+reason onto the episode).
 After three identical sightings (`deterministic_refusal_limit`) the policy returns
 `escalate_operator` and the dispatcher writes one comment and stops re-sending — minutes into what
 was a 49-minute silent loop. Timing/availability/transport refusals deliberately do NOT qualify:
@@ -335,4 +338,3 @@ gate-phase ticks in `tests/test_head_vitality_wait_decisions.py` and
 replacement on a quiescent boundary, same-profile respawn as a policy rung, runtime failover, and
 `block` with evidence — all waiting on the HeadRuntime admission/drain/stop boundary. The
 `ConfirmedStall` recovery path is unchanged in this sprint: respawn once, then escalate.
-

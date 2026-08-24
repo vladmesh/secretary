@@ -1022,6 +1022,12 @@ distinct aborted outcome and the tick reports a launch-aborted action, status de
 Blocked and the record is not deleted: a live head would be left with no pointer to it. The intent stays on disk
 together with the handle from the error, and the next tick resolves it like any other.
 
+Reviewer launch prefers a split from the worker pane. An Orca refusal carrying exactly
+`terminal_split_source_not_found` proves that the split anchor's renderer node is gone before a
+child was created, so the launch safely falls back to a standalone reviewer terminal in the same
+worktree. Do not treat another split error this way: its outcome is ambiguous and remains an ordinary
+fail-closed infrastructure failure.
+
 Everything the tick does with an already-launched head — reading its pane id, writing the routing event, saving
 the record — happens while the intent is live, so a failure at those steps does not mean "there is no head" and
 is reported the same aborted way. By then the intent holds the launch configuration, so an adopted head reaches
