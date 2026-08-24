@@ -1,0 +1,3 @@
+# Provenance: derived from documented Buildx and Docker daemon output, not a live capture.
+build	Set up Docker Buildx	#1 ERROR: Error response from daemon: received unexpected HTTP status: 503 Service Unavailable
+build	Set up Docker Buildx	##[error]ERROR: failed to solve: received unexpected HTTP status: 503 Service Unavailable

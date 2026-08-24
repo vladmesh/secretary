@@ -57,6 +57,13 @@ GATE_LOG_FRAGMENT_LINES = int(os.environ.get("SECRETARY_GATE_LOG_FRAGMENT_LINES"
 # blip costs the card a tick, not a round; a backend that is genuinely gone still reaches a human.
 GATE_TRANSPORT_MAX_ATTEMPTS = max(1, int(os.environ.get("SECRETARY_GATE_TRANSPORT_MAX_ATTEMPTS", "5")))
 
+# A failed Actions run with an enumerated CI-service signature may be rerun without reopening the
+# worker.  The cap is per HEAD SHA: it is a recovery mechanism, never an unbounded poll of an
+# already-concluded run.
+GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS = max(
+    1, int(os.environ.get("SECRETARY_GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS", "2"))
+)
+
 # How much of one board source (the card statement, the worker's done report) reaches the PR body.
 # The PR describes the change and points at the card; it is not a second copy of the board, and a
 # body must not approach GitHub's own size ceiling.
@@ -80,11 +87,33 @@ _RUNNER_BOILERPLATE_RE = re.compile(r"(?i)process completed with exit code \d+")
 # Content-level signs of a preparation/infra failure rather than a test/assertion failure: a
 # worker that reads a down registry or dependency install as "my code is broken" edits the wrong
 # thing.
-_INFRA_MARK_RE = re.compile(
-    r"(?i)\b(docker|registry|pull access denied|no space left|econnrefused|"
-    r"could not resolve host|network is unreachable|connection (?:reset|refused|timed out)|"
-    r"temporary failure in name resolution|failed to fetch|apt-get|npm err! network|"
-    r"pip.{0,20}(?:could not find|could not install)|dependency resolution)\b"
+# Infrastructure reds have a deliberately small, reviewable vocabulary.  A setup step alone is
+# not sufficient: broken workflow YAML and setup scripts fail there too.  Every accepted signature
+# names a CI service boundary and an unambiguous unavailable/5xx response from it.
+_ACTION_DOWNLOAD_5XX_RE = re.compile(
+    # The runner prints its preparation notice and the failed download on separate entries.  The
+    # fragment, not a source line, is the unit of adjacency because `_failed_log` joins entries
+    # with newlines.  Requiring the action-download wording on the 5xx entry keeps an unrelated
+    # setup failure from borrowing the preparation notice above it.
+    r"(?im)\bgetting action download info\b(?:[^\n]*\n){0,3}[^\n]*"
+    r"(?:failed to download action|response status code does not indicate success)[^\n]*\b5\d\d\b"
+)
+_REGISTRY_UNAVAILABLE_RE = re.compile(
+    # A named registry plus a service-unavailable response is explicit evidence.  Docker/Buildx
+    # daemon messages are explicit too even when they omit the registry name: they name an HTTP
+    # boundary and a 5xx themselves.  The caller still binds this to one of the container steps.
+    r"(?im)(?:"
+    r"(?:registry(?:[./][\w./:-]+)?|ghcr\.io|docker\.io|quay\.io|image manifest|pulling fs layer)"
+    r"[^\n]{0,240}?(?:http(?:/\d(?:\.\d)?)?\s*(?:status\s*)?[: ]?5\d\d|"
+    r"(?:service|temporarily) unavailable)"
+    r"|(?:received unexpected http status|unexpected status(?: code)?)\s*:?\s*5\d\d"
+    r")"
+)
+_RUNNER_UNAVAILABLE_RE = re.compile(
+    # These are runner-service diagnostics, not arbitrary setup-script prose that happens to use
+    # the word "runner".  Keep the vocabulary enumerable with the fixture corpus below.
+    r"(?i)(?:the hosted runner failed to start|the runner has (?:received a shutdown signal|"
+    r"lost communication with the server)|the job was cancelled because the runner was not started)"
 )
 # How a failed backend command says that an answer *did* arrive.
 #
@@ -160,6 +189,15 @@ class GateResult:
     # Stable identity of the failure, independent of the head SHA (which changes on every rework
     # commit): what the repeat-bounce check compares round to round. Empty for green/pending.
     fingerprint: str = ""
+    # A terminal red is either a code/workflow verdict or an enumerated CI-service outage.  This
+    # structured result, not a phrase later rendered into a card comment, is what the dispatcher
+    # uses to decide whether it may retry the exact same SHA without reopening the worker.
+    failure_class: str = "substantive"  # "substantive" | "infrastructure"
+    failure_reason: str = ""
+    # The Actions run which supplied an infrastructure-classified red.  Only this concrete run
+    # can be rerun; an external status or a log without a run URL remains a red verdict.
+    failed_run_id: str = ""
+    failed_run_repo: str = ""
     # A green result is reusable evidence only when it names the exact tree and the terminal
     # checks which judged it.  The dispatcher persists this plain JSON object with the card so it
     # can hand the same receipt to review, Assessment and the release audit without asking another
@@ -174,7 +212,8 @@ class _LogFragment:
     available: bool
     step: str = ""
     text: str = ""
-    infra: bool = False
+    failure_class: str = "substantive"
+    failure_reason: str = ""
     reason: str = ""
 
 
@@ -377,10 +416,11 @@ def _local_gate(host, task: dict, record, workspace: str) -> GateResult:
     if completed.returncode == 0:
         return GateResult("green", "local validation passed", attestation=receipt)
     tail = _tail((completed.stderr or completed.stdout or "").strip(), GATE_LOG_FRAGMENT_LINES) or "(no output)"
-    summary = "local validation failed"
-    if _INFRA_MARK_RE.search(tail):
-        summary += "; this looks like an infrastructure setup failure rather than a test failure"
-    return GateResult("red", summary, tail, fingerprint=_fingerprint("local", tail), attestation=receipt)
+    # A local command carries no Actions job/step provenance.  Do not infer infrastructure from
+    # arbitrary test output here: it could be a test fixture mentioning a registry or a workflow
+    # setup script the worker must fix.
+    return GateResult("red", "local validation failed", tail,
+                      fingerprint=_fingerprint("local", tail), attestation=receipt)
 
 
 def _github_gate(
@@ -397,6 +437,19 @@ def _github_gate(
     _ensure_pr(host, workspace, task, record, branch, base)
     sha = host._run(["git", "-C", workspace, "rev-parse", "HEAD"], "gate head sha").stdout.strip()
     repo = _name_with_owner(host, workspace)
+    rerun_run_id = str(getattr(record, "gate_infrastructure_rerun_run_id", "") or "")
+    rerun_sha = str(getattr(record, "gate_infrastructure_reruns_sha", "") or "")
+    if rerun_run_id and rerun_sha == sha:
+        status, _conclusion = _rerun_status(host, repo, rerun_run_id)
+        if status != "COMPLETED":
+            return GateResult(
+                "pending",
+                f"CI infrastructure rerun {rerun_run_id} is {status.lower()} for `{branch}` @ `{sha[:12]}`",
+                failure_class="infrastructure",
+                failure_reason=str(getattr(record, "gate_infrastructure_rerun_reason", "") or ""),
+                failed_run_id=rerun_run_id,
+                failed_run_repo=repo,
+            )
     rollup, failed, checked = _poll_ci(host, repo, sha, required or [])
     receipt = mint_gate_receipt(
         validated_sha=sha,
@@ -418,16 +471,65 @@ def _github_gate(
         if fragment.step:
             where += f", step \"{safe_one_line(fragment.step)}\""
         summary = f"CI red: {where} failed on `{branch}` @ `{short}`"
-        if fragment.infra:
-            summary += "; this looks like an infrastructure setup failure rather than a test failure"
+        if fragment.failure_class == "infrastructure":
+            summary += f"; infrastructure failure: {fragment.failure_reason}"
         log = fragment.text if fragment.available else f"log unavailable: {fragment.reason}"
         cause = fragment.text if fragment.available else f"unavailable:{fragment.reason}"
         fingerprint = _fingerprint("github", job, fragment.step, cause)
-        return GateResult("red", summary, log, fingerprint=fingerprint, attestation=receipt)
+        failed_run_id = _actions_run_id(failed or {})
+        return GateResult(
+            "red", summary, log, fingerprint=fingerprint,
+            failure_class=fragment.failure_class, failure_reason=fragment.failure_reason,
+            failed_run_id=failed_run_id, failed_run_repo=repo,
+            attestation=receipt,
+        )
     return GateResult(
         "pending", f"CI {rollup.lower()} for `{branch}` @ `{short}` — no terminal result yet",
         attestation=receipt,
     )
+
+
+def _actions_run_id(item: dict) -> str:
+    match = _RUN_URL_RE.search(str(
+        item.get("details_url") or item.get("html_url") or item.get("targetUrl")
+        or item.get("target_url") or ""
+    ))
+    return match.group(2) if match else ""
+
+
+def rerun_failed_ci(host, result: GateResult) -> None:
+    """Ask Actions to rerun the failed jobs of the exact run that produced an infra red."""
+    run_id = result.failed_run_id
+    repo = result.failed_run_repo
+    if not run_id or not repo:
+        raise HostError("infrastructure gate red cannot be rerun: failed Actions run is unavailable")
+    completed = _backend_call(
+        host, ["gh", "run", "rerun", "--failed", run_id, "-R", repo], "gate rerun failed CI"
+    )
+    if completed.returncode != 0:
+        raise HostError(
+            f"gate rerun failed CI: {_tail((completed.stderr or completed.stdout or '').strip())}"
+        )
+
+
+def _rerun_status(host, repo: str, run_id: str) -> tuple[str, str]:
+    """Read the rerun's current attempt, not the terminal check-runs from its prior attempt."""
+    completed = _backend_call(
+        host,
+        ["gh", "run", "view", run_id, "-R", repo, "--json", "status,conclusion"],
+        "gate infrastructure rerun status",
+    )
+    if completed.returncode != 0:
+        raise HostError(
+            f"gate infrastructure rerun status failed: {_tail((completed.stderr or completed.stdout or '').strip())}"
+        )
+    try:
+        payload = json.loads((completed.stdout or "").strip())
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict) or not str(payload.get("status") or ""):
+        raise HostError("gate infrastructure rerun status returned no run state")
+    return str(payload.get("status") or "").upper(), str(payload.get("conclusion") or "").upper()
 
 
 def _name_with_owner(host, workspace: str) -> str:
@@ -836,7 +938,10 @@ def _failed_log(host, repo: str, item: dict, lines: int = GATE_LOG_FRAGMENT_LINE
     `##[error]` line that is not the runner's generic completion echo, which carries the same
     marker as a real cause; a job whose error was never marked at all falls back to its own tail.
     """
-    match = _RUN_URL_RE.search(str(item.get("details_url") or item.get("html_url") or item.get("targetUrl") or ""))
+    match = _RUN_URL_RE.search(str(
+        item.get("details_url") or item.get("html_url") or item.get("targetUrl")
+        or item.get("target_url") or ""
+    ))
     if not match:
         return _LogFragment(available=False,
                             reason="the entry is not an Actions run (no run link)")
@@ -872,4 +977,32 @@ def _failed_log(host, repo: str, item: dict, lines: int = GATE_LOG_FRAGMENT_LINE
     text = "\n".join(entry[2] for entry in tail).strip()
     if not text:
         return _LogFragment(available=False, reason="the gate received an empty log")
-    return _LogFragment(available=True, step=step, text=text, infra=bool(_INFRA_MARK_RE.search(text)))
+    failure_class, failure_reason = _classify_failed_step(step, text)
+    return _LogFragment(
+        available=True, step=step, text=text,
+        failure_class=failure_class, failure_reason=failure_reason,
+    )
+
+
+def _classify_failed_step(step: str, text: str) -> tuple[str, str]:
+    """Classify an Actions red from its failed step and service evidence.
+
+    This is intentionally an allowlist.  In particular, a failing ``Set up job`` does not become
+    infra merely because of its name: the logged failure must show an action-download 5xx, or an
+    unavailable runner.  The return value is persisted by the dispatcher before a card comment is
+    rendered, so card prose cannot affect a later retry decision.
+    """
+    step = step.strip()
+    lowered_step = step.casefold()
+    if "set up job" in lowered_step and _ACTION_DOWNLOAD_5XX_RE.search(text):
+        return "infrastructure", "action-download-http-5xx"
+    if "set up docker buildx" in lowered_step and _REGISTRY_UNAVAILABLE_RE.search(text):
+        return "infrastructure", "buildx-registry-unavailable"
+    if any(token in lowered_step for token in (
+        "initialize containers", "initialize container", "pull image", "pulling image",
+        "docker pull", "load image",
+    )) and _REGISTRY_UNAVAILABLE_RE.search(text):
+        return "infrastructure", "image-registry-unavailable"
+    if "set up job" in lowered_step and _RUNNER_UNAVAILABLE_RE.search(text):
+        return "infrastructure", "runner-unavailable"
+    return "substantive", ""

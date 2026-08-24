@@ -1,0 +1,3 @@
+# Provenance: derived from the documented Actions runner and Docker daemon output, not a live capture.
+build	Initialize containers	Pulling docker image ghcr.io/example-org/service:latest
+build	Initialize containers	##[error]Error response from daemon: received unexpected HTTP status: 503 Service Unavailable

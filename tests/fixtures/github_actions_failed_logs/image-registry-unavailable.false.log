@@ -1,0 +1,4 @@
+# Provenance: derived from pytest output rendered by a GitHub Actions runner, not a live capture.
+tests	Run pytest	FAILED tests/test_registry.py::test_pull_retries_on_503 - AssertionError
+tests	Run pytest	assert response.status == 503
+tests	Run pytest	##[error]Process completed with exit code 1.

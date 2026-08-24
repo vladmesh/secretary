@@ -1,0 +1,2 @@
+# Provenance: derived from the documented GitHub-hosted runner diagnostic, not a live capture.
+build	Set up job	##[error]The hosted runner failed to start. Please try again.

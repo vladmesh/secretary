@@ -1020,11 +1020,31 @@ cannot write a classification, so it refuses `--kind blocked` outright and names
 vocabulary has one definition, in `secretary.tasks`. Its `--kind done` is unchanged.
 
 The dispatcher also remembers the SHA that a mechanical gate or a red review rejected in the current
-attempt. A `done` report on the same SHA does not move to Validate: the first such report sends the worker
-back to rework in the same workspace, requiring a new commit. The second moves the card to Blocked so the
-rework loop cannot spin forever. If the code deliberately does not change, for instance when the defect is
-in a test or in the gate itself, the worker reports `--kind blocked` with the analysis instead of another
-`done`.
+attempt. A `done` report on the same SHA normally does not move to Validate: the first such report sends the
+worker back to rework in the same workspace, requiring a new commit. The second moves the card to Blocked so
+the rework loop cannot spin forever. The exception is a red GitHub gate classified from its failed
+job and step as an enumerated infrastructure failure: action-download HTTP 5xx, unavailable image
+registry or Buildx registry setup, or an unavailable runner during `Set up job`. Classification
+reads only the failed `gh run view --log-failed` fragment: action download requires its runner
+notice adjacent to a failed-download 5xx entry; registry failures require a container/Buildx step
+and either a named registry outage or a Docker daemon HTTP 5xx; runner failures require a
+runner-service diagnostic. That exact SHA stays in Validate for an automatic gate retry and opens
+no worker round. The gate asks GitHub to rerun the failed Actions run, then treats the rollup as
+pending until that run has a new terminal state; rereading a concluded failure is not a retry.
+Reruns are SHA-scoped and bounded by `SECRETARY_GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS` (two by
+default). The rerun request itself uses the normal `SECRETARY_GATE_TRANSPORT_MAX_ATTEMPTS`
+transport ceiling. An exhausted ceiling, or a run GitHub cannot rerun, moves the card to Blocked
+with the infrastructure class and count or unavailable-rerun cause. This rule applies to both the
+pre-review and pre-merge gates. A setup-step name, a card comment, or a manual flag never
+classifies the failure; service evidence must be in that failed step, so a pytest assertion
+mentioning a registry or a 503 remains substantive, as does a broken workflow setup. If the code
+deliberately does not change for a substantive rejection, for instance when the defect is in a
+test or in the gate itself, the worker reports
+`--kind blocked` with the analysis instead of another `done`.
+
+A recovered stale worker result bearing that infrastructure class is accepted once into the same bounded gate
+path. A further report of that unchanged SHA is Blocked visibly, naming the class and the prior retry, rather
+than replaying the first report's request id as a quiet tick.
 
 The audit trail is always written to the installation's data directory: `--data-dir`, else
 `SECRETARY_DATA_DIR`, else `data_dir` from instance config. A relative `data_dir` resolves against the
@@ -1234,10 +1254,17 @@ heartbeat; a session it cannot confirm gets a confirmed stop, and the round lose
 Nothing here stops every terminal in the worktree, so the worker's own pane stays the reviewer's
 split anchor.
 
-Both red verdicts return the card to In progress through one transition, and both hand the round
-back to the session that wrote the code. What differs is what opens it. A red mechanical gate opens
-it directly, always: nothing about a failed gate is a judgement anyone has to make. A red review on
-a card whose sprint declares a concrete observer opens nothing by itself; the card parks in
+Substantive red verdicts return the card to In progress through one transition, and both hand the
+round back to the session that wrote the code. An enumerated infrastructure red from the mechanical
+gate instead holds the card in Validate while the gate reruns the failed Actions run for the same
+SHA, with no `gate-red` transition and therefore no `red_ci` budget event. The rerun has a bounded
+per-SHA ceiling and is never emulated by polling the old terminal run; an unavailable rerun or an
+exhausted ceiling is Blocked visibly. The same pending-stall ceiling covers a rerun that never
+completes on the pre-merge path. This holds for a pre-merge re-check as well as the first gate.
+What differs is what opens a substantive rework. A substantive red mechanical gate opens it
+directly: nothing about that failed gate is a judgement anyone has to make. A red review on a card
+whose sprint
+declares a concrete observer opens nothing by itself; the card parks in
 Assessment once the reviewer's stop is confirmed, and the transition runs on the tick that performs
 a recorded `rework` decision. A red review on a card with no observer to decide opens it directly
 after that same confirmed stop, up to the no-observer ceiling above, which blocks the card instead
