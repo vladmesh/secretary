@@ -320,6 +320,13 @@ def normalize_sprint_entity(sprint: dict[str, Any]) -> dict[str, Any]:
     budget = budget if isinstance(budget, dict) else {}
     by_type = budget.get("by_type")
     by_type = by_type if isinstance(by_type, dict) else {}
+    # The uncharged counts are carried only where a sprint has any, so a record of a sprint that
+    # never had one stays byte-identical to the record this export always wrote.
+    uncharged = budget.get("uncharged")
+    uncharged = {
+        str(key): _int_or_none(value) or 0
+        for key, value in sorted(uncharged.items()) if _int_or_none(value)
+    } if isinstance(uncharged, dict) else {}
     resume = sprint.get("resume")
     comments = sprint.get("comments")
     return {
@@ -339,7 +346,10 @@ def normalize_sprint_entity(sprint: dict[str, Any]) -> dict[str, Any]:
         # refuses the whole set on it rather than guessing a repair.
         **({"observer": sprint["observer"]} if "observer" in sprint else {}),
         "status": str(sprint.get("status") or ""),
-        "budget": {"by_type": {str(key): _int_or_none(value) or 0 for key, value in sorted(by_type.items())}},
+        "budget": {
+            "by_type": {str(key): _int_or_none(value) or 0 for key, value in sorted(by_type.items())},
+            **({"uncharged": uncharged} if uncharged else {}),
+        },
         "current_task": str(sprint.get("current_task") or ""),
         "resume": (
             {str(key): str(value) for key, value in sorted(resume.items())}

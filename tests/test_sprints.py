@@ -32,6 +32,8 @@ from secretary.sprint_observer import (
 )
 from secretary.sprints import (
     BUDGET_EVENT_TYPES,
+    BUDGET_UNCHARGED_EVENT_TYPES,
+    BUDGET_UNCHARGED_INFRASTRUCTURE,
     SprintReader,
     SprintWriter,
     _close_archive_request_id,
@@ -1902,6 +1904,110 @@ class SprintTests(SprintFixture):
         self.assertEqual(second["sprint"]["budget"]["by_type"]["red_ci"], 1)
         events = TaskAudit(self.tmp.name).events(reference=ref)
         self.assertEqual([event["kind"] for event in events], ["created", "budget_recorded"])
+
+    def _budget_of(self, reference: str) -> dict:
+        return self.writer.reader.show(reference, include_cards=False)["budget"]
+
+    def test_infrastructure_outcome_is_counted_apart_and_spends_nothing(self) -> None:
+        """An infrastructure bring-up is visible in the sprint and moves no threshold."""
+        writer = SprintWriter(  # type: ignore[arg-type]
+            self.client, data_dir=self.tmp.name, instance=self.instance,
+            thresholds={"signal": 1, "hard": 1},
+        )
+        ref = self._create(goal="infrastructure outcomes")["sprint"]["ref"]
+
+        for index in range(3):
+            writer.record_budget(
+                role="dispatcher", actor="dispatcher", reference=ref,
+                event_type=BUDGET_UNCHARGED_INFRASTRUCTURE,
+                request_id=f"infra-{index}", source_event_id=f"evt-infra-{index}",
+            )
+
+        budget = writer.reader.show(ref, include_cards=False)["budget"]
+        self.assertEqual(budget["uncharged"], {BUDGET_UNCHARGED_INFRASTRUCTURE: 3})
+        self.assertEqual(budget["total"], 0)
+        self.assertEqual(budget["by_type"], {event: 0 for event in BUDGET_EVENT_TYPES})
+        self.assertFalse(budget["signal_reached"])
+        self.assertFalse(budget["hard_reached"])
+        # Three of them under a hard limit of one: the sprint is still open, and no hard stop
+        # was written.
+        self.assertEqual(writer.reader.show(ref, include_cards=False)["status"], "open")
+        self.assertEqual(
+            [event["kind"] for event in TaskAudit(self.tmp.name).events(reference=ref)],
+            ["created"] + ["budget_recorded"] * 3,
+        )
+        self.assertEqual(
+            writer.reader.status(ref)["budget"]["uncharged"],
+            {BUDGET_UNCHARGED_INFRASTRUCTURE: 3},
+        )
+
+    def test_a_task_class_block_still_charges_beside_an_infrastructure_one(self) -> None:
+        ref = self._create(goal="both classes")["sprint"]["ref"]
+
+        self.writer.record_budget(
+            role="dispatcher", actor="dispatcher", reference=ref,
+            event_type=BUDGET_UNCHARGED_INFRASTRUCTURE, request_id="infra-one",
+        )
+        for index, event_type in enumerate(BUDGET_EVENT_TYPES):
+            self.writer.record_budget(
+                role="dispatcher", actor="dispatcher", reference=ref,
+                event_type=event_type, request_id=f"charge-{index}",
+            )
+
+        budget = self._budget_of(ref)
+        self.assertEqual(budget["by_type"], {event: 1 for event in BUDGET_EVENT_TYPES})
+        self.assertEqual(budget["total"], len(BUDGET_EVENT_TYPES))
+        self.assertEqual(budget["uncharged"], {BUDGET_UNCHARGED_INFRASTRUCTURE: 1})
+
+    def test_a_sprint_stored_without_uncharged_counts_reads_them_as_zero(self) -> None:
+        """A sprint written before this quantity existed reads back, and reads back as zero."""
+        ref = self._create(goal="stored before")["sprint"]["ref"]
+        stored = self.writer.reader.show(ref, include_cards=False)
+        task_id = int(str(stored["id"]).removeprefix("sprint_kanboard_"))
+        self.client.call("saveTaskMetadata", task_id=task_id, values={
+            "sprint_budget": json.dumps({"by_type": {"blocked": 2, "red_ci": 1}}),
+        })
+        self.assertNotIn(
+            "sprint_budget_uncharged", self.client.call("getTaskMetadata", task_id=task_id),
+        )
+
+        budget = self._budget_of(ref)
+        self.assertEqual(budget["total"], 3)
+        self.assertEqual(budget["by_type"]["blocked"], 2)
+        self.assertEqual(
+            budget["uncharged"], {event: 0 for event in BUDGET_UNCHARGED_EVENT_TYPES},
+        )
+
+        # And the next infrastructure outcome starts from that zero rather than failing on it.
+        self.writer.record_budget(
+            role="dispatcher", actor="dispatcher", reference=ref,
+            event_type=BUDGET_UNCHARGED_INFRASTRUCTURE, request_id="infra-after-legacy",
+        )
+        self.assertEqual(self._budget_of(ref)["uncharged"][BUDGET_UNCHARGED_INFRASTRUCTURE], 1)
+        self.assertEqual(self._budget_of(ref)["total"], 3)
+
+    def test_a_hard_stop_keeps_the_uncharged_counts_it_did_not_compute(self) -> None:
+        """The hard-stop edge rewrites the charged budget; the counts beside it survive it."""
+        writer = SprintWriter(  # type: ignore[arg-type]
+            self.client, data_dir=self.tmp.name, instance=self.instance,
+            thresholds={"signal": 1, "hard": 1},
+        )
+        ref = self._create(goal="hard stop with infrastructure")["sprint"]["ref"]
+        writer.record_budget(
+            role="dispatcher", actor="dispatcher", reference=ref,
+            event_type=BUDGET_UNCHARGED_INFRASTRUCTURE, request_id="infra-before-stop",
+        )
+
+        writer.record_budget(
+            role="dispatcher", actor="dispatcher", reference=ref, event_type="blocked",
+            request_id="hard-stop", source_event_id="evt-card-blocked",
+        )
+
+        sprint = writer.reader.show(ref, include_cards=False)
+        self.assertEqual(sprint["status"], "stopped")
+        self.assertEqual(sprint["budget"]["by_type"]["blocked"], 1)
+        self.assertEqual(sprint["budget"]["total"], 1)
+        self.assertEqual(sprint["budget"]["uncharged"], {BUDGET_UNCHARGED_INFRASTRUCTURE: 1})
 
     def test_hard_budget_stop_has_its_own_durable_event(self) -> None:
         writer = SprintWriter(  # type: ignore[arg-type]

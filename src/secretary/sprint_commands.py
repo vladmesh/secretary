@@ -11,7 +11,7 @@ from pathlib import Path
 from secretary.config import ConfigError, load_config
 from secretary.dispatcher_observer import observer_snapshot
 from secretary.sprint_observer import observer_choice
-from secretary.sprints import BUDGET_EVENT_TYPES, SprintReader, SprintWriter
+from secretary.sprints import BUDGET_RECORDED_EVENT_TYPES, SprintReader, SprintWriter
 from secretary.task_commands import _add_data_dir_args, _read_body, resolve_data_dir
 from secretary.tasks import KanboardClient, TaskError
 
@@ -74,7 +74,7 @@ def add_sprint_subcommands(subparsers) -> None:
         elif name == "current-task":
             command.add_argument("--task", required=True)
         elif name == "budget":
-            command.add_argument("--type", required=True, choices=BUDGET_EVENT_TYPES)
+            command.add_argument("--type", required=True, choices=BUDGET_RECORDED_EVENT_TYPES)
         elif name == "resume":
             command.add_argument("--body-file", required=True)
             command.add_argument("--delivery-id")

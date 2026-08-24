@@ -20,6 +20,7 @@ from secretary.dispatcher import (
     InstanceCatalog,
 )
 from secretary.dispatcher_heartbeat import heartbeat_identity
+from secretary.dispatcher_launch import infrastructure_action
 from secretary.dispatcher_observer import (
     EVENT_DEFERRED,
     EVENT_LAUNCHED,
@@ -62,7 +63,11 @@ from secretary.role_env import (
     runtime_env,
 )
 from secretary.sprint_observer import encode_observer, head_choice
-from secretary.sprints import SprintReader, SprintWriter
+from secretary.sprints import (
+    BUDGET_UNCHARGED_INFRASTRUCTURE,
+    SprintReader,
+    SprintWriter,
+)
 from secretary.status import _observers as status_observers
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter, _now
 from tests.fakes.dispatcher import (
@@ -2400,6 +2405,32 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(hard_stop_events[0]["payload"]["reason"], "budget_hard_limit")
         self.assertIn("observer-stopped", [row.get("action") for row in self.actions(result)])
 
+    def test_an_infrastructure_block_is_recorded_on_the_sprint_without_charging_it(self) -> None:
+        """End to end: the tick reads the class off the transition and counts it apart."""
+        self.catalog.instance = {"sprint_budget": {"signal": 1, "hard": 2}}
+        self.runtime.sprints = SprintReader(self.board, data_dir=self.data_dir, thresholds={"signal": 1, "hard": 2})  # type: ignore[arg-type]
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.writer.move(
+            role="po", actor="operator", reference="secretary-510-pilot", target="blocked",
+            reason="the worker head never came up", sprint_override=True,
+            sprint_override_reason="the worker head never came up",
+            request_id=infrastructure_action("dispatcher-attempt-1-bringup-blocked"),
+        )
+
+        self.runtime.production_tick()
+
+        sprint = self.runtime.sprints.show("sprint:1")
+        self.assertEqual(sprint["budget"]["total"], 0)
+        self.assertEqual(sprint["budget"]["by_type"]["blocked"], 0)
+        self.assertEqual(
+            sprint["budget"]["uncharged"], {BUDGET_UNCHARGED_INFRASTRUCTURE: 1},
+        )
+        self.assertFalse(sprint["budget"]["signal_reached"])
+        self.assertEqual(sprint["status"], "open")
+        # The card itself is untouched by the budget decision: it stays Blocked for the observer.
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+
     def test_budget_event_classification_excludes_green_card_cycle(self) -> None:
         cases = {
             "red_review": {"kind": "verdict", "payload": {"marker": "review:red"}},
@@ -2412,6 +2443,44 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual({name: _budget_event_type(event) for name, event in cases.items()}, {name: name for name in cases})
         self.assertIsNone(_budget_event_type({"kind": "verdict", "payload": {"marker": "review:green"}}))
         self.assertIsNone(_budget_event_type({"kind": "moved", "payload": {"to": "done"}}))
+
+    def test_infrastructure_bring_up_block_is_counted_apart_from_a_task_block(self) -> None:
+        """The class is read off the transition's own action token, not decided a second time."""
+        blocked = {"kind": "moved", "payload": {"to": "blocked"}}
+        charged = (
+            "dispatcher-attempt-1-bringup-blocked",
+            "dispatcher-attempt-1-worker-respawn-blocked",
+            "dispatcher-attempt-1-rework-blocked",
+            "dispatcher-attempt-1-review-blocked",
+            # A block that is not a bring-up at all: a worker's own report, the gate, a merge.
+            "dispatcher-attempt-1-worker-report-blocked",
+            "",
+        )
+        uncharged = tuple(
+            infrastructure_action(action) for action in (
+                "dispatcher-attempt-1-bringup-blocked",
+                "dispatcher-attempt-1-worker-respawn-blocked",
+                "dispatcher-attempt-1-rework-blocked",
+                "dispatcher-attempt-1-review-blocked",
+            )
+        )
+
+        self.assertEqual(
+            [_budget_event_type({**blocked, "request_id": request_id}) for request_id in charged],
+            ["blocked"] * len(charged),
+        )
+        self.assertEqual(
+            [_budget_event_type({**blocked, "request_id": request_id}) for request_id in uncharged],
+            [BUDGET_UNCHARGED_INFRASTRUCTURE] * len(uncharged),
+        )
+        # The other budget-shaped events keep their type whatever the request id spells.
+        self.assertEqual(
+            _budget_event_type({
+                "kind": "moved", "payload": {"from": "validate", "to": "ready"},
+                "request_id": uncharged[0],
+            }),
+            "preempt",
+        )
 
     def test_full_green_card_cycle_does_not_charge_the_sprint_budget(self) -> None:
         self.open_sprint()

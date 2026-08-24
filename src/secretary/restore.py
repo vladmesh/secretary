@@ -406,6 +406,12 @@ def _restore_sprint_metadata(sprint: dict[str, Any]) -> dict[str, str]:
         "sprint_budget": json.dumps(
             {"by_type": sprint["budget"]["by_type"]}, sort_keys=True, separators=(",", ":")
         ),
+        **(
+            {"sprint_budget_uncharged": json.dumps(
+                sprint["budget"]["uncharged"], sort_keys=True, separators=(",", ":")
+            )}
+            if sprint["budget"].get("uncharged") else {}
+        ),
         "sprint_current_task": str(sprint["current_task"]),
         "sprint_resume": (
             json.dumps(resume, sort_keys=True, separators=(",", ":")) if resume else ""
@@ -607,6 +613,14 @@ def _normalized_sprints(data_dir: Path) -> list[dict[str, Any]]:
         budget = sprint.get("budget")
         if not isinstance(budget, dict) or not isinstance(budget.get("by_type"), dict) or any(
             not isinstance(count, int) for count in budget["by_type"].values()
+        ):
+            raise RestoreError("normalized sprint export has an invalid budget")
+        # A pre-uncharged export carries no such key at all, and restores a sprint whose uncharged
+        # counts read as zero.
+        uncharged = budget.get("uncharged", {})
+        if not isinstance(uncharged, dict) or any(
+            not isinstance(count, int) or isinstance(count, bool) or count < 0
+            for count in uncharged.values()
         ):
             raise RestoreError("normalized sprint export has an invalid budget")
         if sprint.get("resume") is not None and not isinstance(sprint.get("resume"), dict):

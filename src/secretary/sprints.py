@@ -47,12 +47,15 @@ SPRINT_METADATA = {
     "sprint_reservations",
     "sprint_status",
     "sprint_budget",
+    "sprint_budget_uncharged",
     "sprint_current_task",
     "sprint_resume",
     "sprint_source_audit",
     "sprint_observer",
 }
 SOURCE_AUDIT_FIELDS = ("created_at", "updated_at", "board")
+# What a restart costs the sprint.  Every type here is charged: it enters `total` and moves the
+# signal and hard thresholds.
 BUDGET_EVENT_TYPES = (
     "red_review",
     "blocked",
@@ -61,6 +64,18 @@ BUDGET_EVENT_TYPES = (
     "recreated_task",
     "hotfix",
 )
+# A bring-up that never produced a head says nothing about the card (`FAILURE_CLASS_INFRASTRUCTURE`
+# in `dispatcher_launch`), so it must not spend the sprint's restart budget.  It is still counted,
+# because an observer reading a sprint has to see how often the host failed to bring a card up; it
+# is counted apart, so counting it can never move a threshold.  The two families are recorded
+# through the same `record_budget` call and told apart only here.
+BUDGET_UNCHARGED_INFRASTRUCTURE = "infrastructure_blocked"
+BUDGET_UNCHARGED_EVENT_TYPES = (BUDGET_UNCHARGED_INFRASTRUCTURE,)
+BUDGET_RECORDED_EVENT_TYPES = BUDGET_EVENT_TYPES + BUDGET_UNCHARGED_EVENT_TYPES
+# The uncharged counts live in their own metadata field rather than inside `sprint_budget`: the
+# hard-stop edge rewrites `sprint_budget` from the computed `by_type` alone (`SprintSupplement`),
+# and a quantity stored inside it would be erased by the charge that stops the sprint.
+BUDGET_UNCHARGED_FIELD = "sprint_budget_uncharged"
 DEFAULT_BUDGET_SIGNAL = 3
 DEFAULT_BUDGET_HARD = 6
 # How many sprints an installation may hold open at once.  One is what this product
@@ -536,7 +551,7 @@ class SprintReader:
             if str(key) in SPRINT_METADATA
         }
         repositories = _json_list(meta.get("sprint_repositories"))
-        budget = _budget(meta.get("sprint_budget"), self.thresholds)
+        budget = _budget(meta.get("sprint_budget"), self.thresholds, meta.get(BUDGET_UNCHARGED_FIELD))
         result: dict[str, Any] = {
             "id": f"sprint_kanboard_{task_id}",
             "ref": _text(raw.get("reference")),
@@ -1040,7 +1055,7 @@ class SprintWriter:
             "sprint_definition_of_done": str(intent["definition_of_done"]),
             "sprint_repositories": json.dumps(list(intent["repositories"]), separators=(",", ":")),
             "sprint_status": str(intent.get("status") or "open"),
-            "sprint_budget": json.dumps(_budget(thresholds=self.thresholds), separators=(",", ":")),
+            "sprint_budget": _budget_json(_budget(thresholds=self.thresholds)),
             "sprint_current_task": "",
             "sprint_resume": "",
         }
@@ -1219,8 +1234,11 @@ class SprintWriter:
 
     def record_budget(self, *, role: str, actor: str, reference: str, event_type: str, request_id: str | None = None, source_event_id: str = "") -> dict[str, Any]:
         self._role(role, {"po", "dispatcher", "steward"})
-        if event_type not in BUDGET_EVENT_TYPES:
+        if event_type not in BUDGET_RECORDED_EVENT_TYPES:
             raise TaskError("validation", "unknown budget event type " + repr(event_type), 2)
+        # One recording path for both families; only the charge is conditional.  An uncharged type
+        # can never reach the hard limit, so it never takes the typed hard-stop edge below.
+        charged = event_type in BUDGET_EVENT_TYPES
         request_id = request_id or str(uuid.uuid4())
         existing = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
         if existing is not None:
@@ -1241,7 +1259,7 @@ class SprintWriter:
             return self._committed("budget_recorded", existing) if self.audit.committed_event(request_id) else self._pending("budget_recorded", existing)
         before = self.reader.show(reference)
         before_budget = _budget(before.get("budget"), self.thresholds)
-        hard_stop = before["status"] == "open" and before_budget["total"] + 1 >= self.thresholds["hard"]
+        hard_stop = charged and before["status"] == "open" and before_budget["total"] + 1 >= self.thresholds["hard"]
         if hard_stop:
             budget = _budget({"by_type": dict(before_budget["by_type"]) | {event_type: before_budget["by_type"][event_type] + 1}}, self.thresholds)
             event = self._event(
@@ -1259,9 +1277,13 @@ class SprintWriter:
             )
         def mutation(sprint: dict[str, Any]) -> None:
             budget = _budget(sprint.get("budget"), self.thresholds)
-            budget["by_type"][event_type] += 1
-            budget = _budget({"by_type": budget["by_type"]}, self.thresholds)
-            values = {"sprint_budget": json.dumps(budget, separators=(",", ":"))}
+            if charged:
+                budget["by_type"][event_type] += 1
+                budget = _budget({"by_type": budget["by_type"]}, self.thresholds)
+                values = {"sprint_budget": _budget_json(budget)}
+            else:
+                budget["uncharged"][event_type] += 1
+                values = {BUDGET_UNCHARGED_FIELD: json.dumps(budget["uncharged"], sort_keys=True, separators=(",", ":"))}
             self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values=values)
         result = self._write(
             "budget_recorded", role, actor, reference, request_id,
@@ -2373,7 +2395,15 @@ def _json_list(value: str | None) -> list[str]:
     return _unique_strings(raw) if isinstance(raw, list) else []
 
 
-def _budget(value: Any = None, thresholds: dict[str, int] | None = None) -> dict[str, Any]:
+def _budget(
+    value: Any = None, thresholds: dict[str, int] | None = None, uncharged: Any = None,
+) -> dict[str, Any]:
+    """The normalized budget: charged counts that move the thresholds, uncharged counts beside them.
+
+    `uncharged` is the separately stored quantity; where it is not given, an already normalized
+    budget passed as `value` carries its own. Both families default to zero for every type, so a
+    sprint stored before a type existed reads as zero rather than as an error.
+    """
     source = value if isinstance(value, dict) else {}
     if isinstance(value, str):
         try:
@@ -2381,10 +2411,33 @@ def _budget(value: Any = None, thresholds: dict[str, int] | None = None) -> dict
         except ValueError:
             source = {}
     by_type = source.get("by_type") if isinstance(source, dict) else {}
-    counts = {event_type: max(0, int(by_type.get(event_type, 0))) if isinstance(by_type, dict) else 0 for event_type in BUDGET_EVENT_TYPES}
+    counts = {event_type: _budget_count(by_type, event_type) for event_type in BUDGET_EVENT_TYPES}
+    if uncharged is None:
+        uncharged = source.get("uncharged") if isinstance(source, dict) else {}
+    if isinstance(uncharged, str):
+        try:
+            uncharged = json.loads(uncharged)
+        except ValueError:
+            uncharged = {}
+    spare = {event_type: _budget_count(uncharged, event_type) for event_type in BUDGET_UNCHARGED_EVENT_TYPES}
     limits = thresholds or budget_thresholds()
+    # Deliberately only the charged counts: an uncharged outcome is visible, and moves nothing.
     total = sum(counts.values())
-    return {"total": total, "by_type": counts, "thresholds": limits, "signal_reached": total >= limits["signal"], "hard_reached": total >= limits["hard"]}
+    return {"total": total, "by_type": counts, "uncharged": spare, "thresholds": limits, "signal_reached": total >= limits["signal"], "hard_reached": total >= limits["hard"]}
+
+
+def _budget_count(counts: Any, event_type: str) -> int:
+    if not isinstance(counts, dict):
+        return 0
+    try:
+        return max(0, int(counts.get(event_type, 0)))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _budget_json(budget: dict[str, Any]) -> str:
+    """The `sprint_budget` field's value. The uncharged counts have their own field and stay out."""
+    return json.dumps({key: value for key, value in budget.items() if key != "uncharged"}, separators=(",", ":"))
 
 
 def _source_audit(value: Any) -> dict[str, str] | None:
