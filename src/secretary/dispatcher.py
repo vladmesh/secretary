@@ -115,11 +115,21 @@ from secretary.dispatcher_helpers import (
     safe_one_line as _safe_one_line,
 )
 from secretary.dispatcher_launch import (
+    CAUSE_WORKSPACE_CONTRACT,
     REVIEW_ROLE,
+    STAGE_CLAIM,
+    STAGE_RESPAWN,
+    STAGE_REWORK,
     WORKER_ROLE,
 )
 from secretary.dispatcher_launch import (
+    bring_up_blocked_action as _bring_up_blocked_action,
+)
+from secretary.dispatcher_launch import (
     bring_up_blocked_reason as _bring_up_blocked_reason,
+)
+from secretary.dispatcher_launch import (
+    classify_bring_up_failure as _classify_bring_up_failure,
 )
 from secretary.dispatcher_launch import (
     clear_launch_intent as _clear_launch_intent,
@@ -132,6 +142,9 @@ from secretary.dispatcher_launch import (
 )
 from secretary.dispatcher_launch import (
     head_stop_unconfirmed as _head_stop_unconfirmed,
+)
+from secretary.dispatcher_launch import (
+    infrastructure_action as _infrastructure_action,
 )
 from secretary.dispatcher_launch import (
     keep_reserved_round as _keep_reserved_round,
@@ -505,6 +518,20 @@ DESTRUCTIVE_VERDICTS = frozenset({
 _PREPARED_SOURCE_IDENTITY_KEYS = (
     "version", "kind", "run_id", "head_run_fingerprint", "workspace", "role", "task_ref", "root",
 )
+
+
+def _blocked_actions_and_their_infrastructure_twins(*actions: str) -> tuple[str, ...]:
+    """Each blocked action and the token its infrastructure-classified form writes.
+
+    A card blocked by a bring-up now names the outcome's class in the action it wrote, so the
+    requeue that brings it back to Ready has to recognise both forms as its own block: recognising
+    only the historical one would leave a re-run looking like a fresh claim over a live attempt.
+    """
+    seen: dict[str, None] = {}
+    for action in actions:
+        seen.setdefault(action, None)
+        seen.setdefault(_infrastructure_action(action), None)
+    return tuple(seen)
 
 
 def _same_repo(first: Path, second: Path) -> bool:
@@ -1045,7 +1072,12 @@ class CommandHostRuntime:
             self._validate_resumable_workspace(task, workspace)
         else:
             if require_existing_workspace:
-                raise HostError("resume workspace is missing")
+                # The card was requeued onto the checkout its own last attempt preserved, and that
+                # checkout is gone. No host repairs it and no later tick finds it: this is the one
+                # bring-up family that is about the card rather than the host.
+                raise HostError(
+                    "resume workspace is missing", bring_up_cause=CAUSE_WORKSPACE_CONTRACT
+                )
             workspace = self._create_workspace(project, worker_id, base, expected=workspace)
             self._set_worker_branch(workspace, _legacy_worker_branch(task["ref"]))
             self._run_setup(project, workspace)
@@ -1087,7 +1119,11 @@ class CommandHostRuntime:
         if self.mode == "noop":
             workspace.mkdir(parents=True, exist_ok=True)
         elif not workspace.is_dir():
-            raise HostError("rework workspace is missing")
+            # Same family as the missing resume workspace above: the checkout this card's rework
+            # continues in is not there, which is this card's own bring-up contract, not the host's.
+            raise HostError(
+                "rework workspace is missing", bring_up_cause=CAUSE_WORKSPACE_CONTRACT
+            )
         base = self.catalog.default_branch(
             task["project"], task.get("workspace", {}).get("base_branch")
         )
@@ -2387,22 +2423,30 @@ class CommandHostRuntime:
             return
         path = Path(workspace)
         if not path.is_dir():
-            raise HostError("resume workspace is not a directory")
+            raise HostError(
+                "resume workspace is not a directory", bring_up_cause=CAUSE_WORKSPACE_CONTRACT
+            )
         try:
             top_level = self._run(
                 ["git", "-C", workspace, "rev-parse", "--show-toplevel"], "resume workspace git check"
             ).stdout.strip()
         except HostError as exc:
-            raise HostError("resume workspace is not a git worktree") from exc
+            raise HostError(
+                "resume workspace is not a git worktree", bring_up_cause=CAUSE_WORKSPACE_CONTRACT
+            ) from exc
         if not _same_repo(Path(top_level), path):
-            raise HostError("resume workspace git root does not match its expected path")
+            raise HostError(
+                "resume workspace git root does not match its expected path",
+                bring_up_cause=CAUSE_WORKSPACE_CONTRACT,
+            )
         branch = self._run(
             ["git", "-C", workspace, "branch", "--show-current"], "resume workspace branch check"
         ).stdout.strip()
         expected_branch = _legacy_worker_branch(task["ref"])
         if branch != expected_branch:
             raise HostError(
-                f"resume workspace is on branch {branch or '(detached)'}, expected {expected_branch}"
+                f"resume workspace is on branch {branch or '(detached)'}, expected {expected_branch}",
+                bring_up_cause=CAUSE_WORKSPACE_CONTRACT,
             )
         repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
         if not repo.is_dir():
@@ -2416,7 +2460,10 @@ class CommandHostRuntime:
             if line.startswith("worktree ")
         }
         if not any(_same_repo(Path(candidate), path) for candidate in registered):
-            raise HostError("resume workspace is not a registered worktree of the project repo")
+            raise HostError(
+                "resume workspace is not a registered worktree of the project repo",
+                bring_up_cause=CAUSE_WORKSPACE_CONTRACT,
+            )
 
     def _run_setup(self, project: str, workspace: str) -> None:
         if self.mode == "noop":
@@ -3771,7 +3818,7 @@ class DispatcherRuntime:
         requeued = active is not None
         retry_after_block = resume_workspace or any(
             self.audit.committed_event(_attempt_request_id(attempt_id, action, ref)) is not None
-            for action in (
+            for action in _blocked_actions_and_their_infrastructure_twins(
                 "bringup-blocked",
                 "worker-result-blocked",
                 "worker-blocked",
@@ -3791,6 +3838,8 @@ class DispatcherRuntime:
                 "review-freeze-red-blocked",
                 "review-inventory-blocked",
                 "review-wait-stall",
+                # The stale-result rework's own block, which this list never named.
+                "stale-done-rework-blocked",
             )
         )
         if requeued and active is not None:
@@ -3988,19 +4037,35 @@ class DispatcherRuntime:
                 records[ref] = record
                 self.save_records(payload, records)
                 return deferred
+            # The deferral is spent, so this bring-up is over. What it was — a host that never
+            # opened a pane, or this card's own checkout contract — is decided by the one shared
+            # classifier, and the same object writes the card's reason, the durable action token in
+            # the transition and the tick outcome the steward reads. An infrastructure outcome is
+            # not a retry: the card is blocked for a person exactly as before, and no new attempt
+            # is opened here.
+            failure = _classify_bring_up_failure(
+                exc, record, WORKER_ROLE, stage=STAGE_CLAIM, attempt_id=record.attempt_id
+            )
+            reason = _bring_up_blocked_reason(
+                "dispatcher bring-up failed", exc, record, WORKER_ROLE, failure=failure
+            )
             self.writer.move(
                 role="dispatcher",
                 actor=self.owner,
                 reference=ref,
                 target="blocked",
-                reason=_bring_up_blocked_reason(
-                    "dispatcher bring-up failed", exc, record, WORKER_ROLE
+                reason=reason,
+                request_id=_attempt_request_id(
+                    record.attempt_id, _bring_up_blocked_action("bringup-blocked", failure), ref
                 ),
-                request_id=_attempt_request_id(record.attempt_id, "bringup-blocked", ref),
             )
             records.pop(ref, None)
             self.save_records(payload, records)
-            return {"status": "blocked", "step": "claim", "pilot_ref": ref, "reason": "host bring-up failed"}
+            return {
+                "status": "blocked", "step": "claim", "pilot_ref": ref,
+                "reason": "host bring-up failed",
+                **failure.outcome_fields(reason),
+            }
         record.workspace = prepared["workspace"]
         _record_worker_delivery_evidence(record, prepared.get("delivery_evidence"))
         # The intent carries the pane, the launch snapshot and this head's own run before the record
@@ -4186,10 +4251,17 @@ class DispatcherRuntime:
         attempt_id: str,
         *,
         step: str,
+        stage: str,
         blocked_reason: str,
-        blocked_request_id: str,
+        blocked_action: str,
+        blocked_request_suffix: str = "",
     ) -> tuple[LaunchedHead | None, dict[str, Any] | None]:
-        """Relaunch this card's worker in its own workspace, under the intent already on disk."""
+        """Relaunch this card's worker in its own workspace, under the intent already on disk.
+
+        The blocked transition is named rather than handed in whole, because the action token is
+        where the outcome's class becomes durable: only the shared classifier below decides which
+        of the two tokens this relaunch writes.
+        """
         ref = task["ref"]
         try:
             self._require_head_ready(record.head)
@@ -4230,8 +4302,10 @@ class DispatcherRuntime:
                 payload=payload,
                 attempt_id=attempt_id,
                 step=step,
+                stage=stage,
                 reason=blocked_reason,
-                request_id=blocked_request_id,
+                action=blocked_action,
+                request_suffix=blocked_request_suffix,
                 error=exc,
             )
         # The head is up. Its pane, launch configuration and own run go into the intent before
@@ -4692,10 +4766,9 @@ class DispatcherRuntime:
             payload,
             attempt_id,
             step="advance",
+            stage=STAGE_REWORK,
             blocked_reason="stale-result rework bring-up failed",
-            blocked_request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, "stale-done-rework-blocked", ref
-            ),
+            blocked_action="stale-done-rework-blocked",
         )
         if launched is None:
             assert failed is not None
@@ -5829,13 +5902,10 @@ class DispatcherRuntime:
                 payload,
                 attempt_id,
                 step=step,
+                stage=STAGE_RESPAWN,
                 blocked_reason="worker respawn failed",
-                blocked_request_id=_attempt_request_id(
-                    record.attempt_id or attempt_id,
-                    "worker-respawn-blocked",
-                    ref,
-                    _wait_cycle_token(record),
-                ),
+                blocked_action="worker-respawn-blocked",
+                blocked_request_suffix=_wait_cycle_token(record),
             )
             if launched is None:
                 assert failed is not None
@@ -6813,10 +6883,9 @@ class DispatcherRuntime:
             payload,
             attempt_id,
             step=step,
+            stage=STAGE_REWORK,
             blocked_reason="rework bring-up failed",
-            blocked_request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, blocked_kind, ref
-            ),
+            blocked_action=blocked_kind,
         )
         if launched is None:
             assert failed is not None
@@ -6888,25 +6957,41 @@ class DispatcherRuntime:
         payload: dict[str, Any],
         attempt_id: str,
         step: str,
+        stage: str,
         reason: str,
-        request_id: str,
+        action: str,
+        request_suffix: str = "",
         error: Exception,
     ) -> dict[str, Any]:
         """Block a failed rework launch while retaining the workspace's resume provenance."""
+        failure = _classify_bring_up_failure(
+            error, record, WORKER_ROLE, stage=stage, attempt_id=record.attempt_id or attempt_id
+        )
+        blocked_reason = _bring_up_blocked_reason(
+            reason, error, record, WORKER_ROLE, failure=failure
+        )
         self.writer.move(
             role="dispatcher",
             actor=self.owner,
             reference=ref,
             target="blocked",
-            reason=_bring_up_blocked_reason(reason, error, record, WORKER_ROLE),
-            request_id=request_id,
+            reason=blocked_reason,
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id,
+                _bring_up_blocked_action(action, failure),
+                ref,
+                request_suffix,
+            ),
         )
         resume_workspaces = payload.setdefault("resume_workspaces", {})
         if isinstance(resume_workspaces, dict):
             resume_workspaces[ref] = record.attempt_id or attempt_id
         records.pop(ref, None)
         self.save_records(payload, records)
-        return {"status": "blocked", "step": step, "pilot_ref": ref, "reason": reason}
+        return {
+            "status": "blocked", "step": step, "pilot_ref": ref, "reason": reason,
+            **failure.outcome_fields(blocked_reason),
+        }
 
     def _gate_answered(
         self,

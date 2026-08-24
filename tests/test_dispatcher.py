@@ -62,6 +62,16 @@ from secretary.dispatcher_helpers import (
     _task_doc_decision,
     red_review_count,
 )
+from secretary.dispatcher_launch import (
+    CAUSE_HOST_UNAVAILABLE,
+    CAUSE_PANE_NEVER_READY,
+    BRING_UP_CAUSE_CLASSES,
+    CAUSE_WORKSPACE_CONTRACT,
+    FAILURE_CLASS_INFRASTRUCTURE,
+    FAILURE_CLASS_TASK,
+    bring_up_failure_class,
+    classify_bring_up_failure,
+)
 from secretary.dispatcher_launcher import (
     claude_launch_model,
     ensure_claude_workspace_ready,
@@ -3192,9 +3202,16 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             for event in self.audit_events()
             if event.get("record_type") == "board.protocol_event"
             and event.get("transition", {}).get("target") == "blocked"
-            and "worker-respawn-blocked" in event["request_id"]
+            and "worker-respawn" in event["request_id"]
+            and "blocked" in event["request_id"]
         ]
         self.assertEqual(len(set(blocks)), 2, f"escalations must be distinct requests: {blocks}")
+        # secretary-1456: a respawn the host never brought a head up for is an infrastructure
+        # outcome, and the class is durable on the transition itself.
+        self.assertTrue(
+            all(bring_up_failure_class(block) == "infrastructure" for block in blocks),
+            blocks,
+        )
 
     def test_adopted_card_still_sees_a_report_the_dispatcher_never_consumed(self) -> None:
         """secretary-654: the worker posts report:done and the dispatcher loses its record before
@@ -6519,6 +6536,191 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertNotIn("review bring-up failed", reason)
         self.assertEqual(self._record_of().review_infra_failures, limit)
         self.assertEqual(self._record_of().review_launch_attempts, 0)
+
+    # --- secretary-1456: one classification of a bring-up that produced no head -----------------
+
+    def _blocked_transition(self, ref: str = "secretary-510-pilot") -> dict:
+        """The transition event of the block this tick wrote, with the durable action token in it."""
+        blocked = [
+            event
+            for event in self.audit_events()
+            if event.get("record_type") == "board.protocol_event"
+            and event.get("transition", {}).get("target") == "blocked"
+            and str(event.get("ref") or "").endswith(ref)
+        ]
+        self.assertTrue(blocked, "no blocked transition was written")
+        return blocked[-1]
+
+    def test_the_same_classifier_answers_for_the_worker_and_the_reviewer(self) -> None:
+        """One implementation, called by both paths: the same failure cannot be a host failure for
+        one role and a defect of the card for the other, which is what the two copies allowed."""
+        record = DispatcherRecord(
+            worker="w", workspace="", handle="", head="codex", review_head="codex",
+            attempt_id="attempt-1", comment_baseline=0, review_baseline=0, state="claimed",
+            claimed_at=0.0,
+        )
+
+        worker = classify_bring_up_failure(
+            HostError("orca terminal split failed"), record, "worker",
+            stage="claim", attempt_id="attempt-1",
+        )
+        reviewer = classify_bring_up_failure(
+            HostError("orca terminal split failed"), record, "review",
+            stage="review", attempt_id="attempt-1",
+        )
+
+        self.assertEqual(worker.failure_class, FAILURE_CLASS_INFRASTRUCTURE)
+        self.assertEqual((worker.failure_class, worker.cause), (reviewer.failure_class, reviewer.cause))
+        self.assertEqual(worker.cause, CAUSE_HOST_UNAVAILABLE)
+        # The cause is enumerable, and it is the cause that decides the class.
+        self.assertIn(worker.cause, BRING_UP_CAUSE_CLASSES)
+        self.assertEqual(
+            classify_bring_up_failure(
+                HostError("resume workspace is missing", bring_up_cause=CAUSE_WORKSPACE_CONTRACT),
+                record, "worker", stage="claim", attempt_id="attempt-1",
+            ).failure_class,
+            FAILURE_CLASS_TASK,
+        )
+
+    def test_a_worker_bringup_the_host_never_answered_is_an_infrastructure_outcome(self) -> None:
+        """A host that never opened a pane says nothing about the card, so the card must not reach
+        the observer looking like a defect of the task."""
+        self.start_dispatcher()
+        self.host.fail_prepare_reason = "orca terminal split failed: terminal_exited"
+
+        blocked = self.tick()
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["failure_class"], FAILURE_CLASS_INFRASTRUCTURE)
+        self.assertEqual(blocked["failure_cause"], CAUSE_HOST_UNAVAILABLE)
+        evidence = blocked["bring_up"]
+        self.assertEqual(evidence["stage"], "claim")
+        self.assertEqual(evidence["head"], "worker")
+        self.assertTrue(evidence["attempt_id"])
+        self.assertIn("orca terminal split failed", evidence["detail"])
+        task = self.reader.show("secretary-510-pilot")
+        self.assertEqual(task["state"], "blocked")
+        # The card and the tick say the same thing, in the same words.
+        self.assertTrue(task["comments"][-1]["body"].endswith(blocked["failure_reason"]))
+        self.assertIn(f"class={FAILURE_CLASS_INFRASTRUCTURE}", task["comments"][-1]["body"])
+        # And the class survives the tick: it is readable off the transition itself.
+        transition = self._blocked_transition()
+        self.assertEqual(
+            bring_up_failure_class(transition["request_id"]), FAILURE_CLASS_INFRASTRUCTURE
+        )
+        self.assertIn(evidence["attempt_id"], transition["request_id"])
+        # No second attempt is opened here or on the tick after it: one bring-up was tried, and the
+        # card waits for a person rather than the dispatcher retrying it into the ground.
+        self.assertEqual(self.host.calls.count("prepare_worker"), 1)
+        self.assertNotIn("secretary-510-pilot", self.runtime.production_state.load()["records"])
+        self.tick()
+        self.assertEqual(self.host.calls.count("prepare_worker"), 1)
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+
+    def test_a_worker_bringup_this_cards_own_checkout_broke_stays_a_task_outcome(self) -> None:
+        """The other half: a checkout this card's claim recorded and that is no longer there is not
+        an infrastructure excuse, and it blocks exactly as it always did."""
+        self.start_dispatcher()
+        self.host.fail_prepare_error = HostError(
+            "resume workspace is missing", bring_up_cause=CAUSE_WORKSPACE_CONTRACT
+        )
+
+        blocked = self.tick()
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["failure_class"], FAILURE_CLASS_TASK)
+        self.assertEqual(blocked["failure_cause"], CAUSE_WORKSPACE_CONTRACT)
+        task = self.reader.show("secretary-510-pilot")
+        self.assertEqual(task["state"], "blocked")
+        self.assertIn("dispatcher bring-up failed", task["comments"][-1]["body"])
+        self.assertTrue(task["comments"][-1]["body"].endswith(blocked["failure_reason"]))
+        transition = self._blocked_transition()
+        self.assertEqual(bring_up_failure_class(transition["request_id"]), FAILURE_CLASS_TASK)
+        self.assertIn("bringup-blocked", transition["request_id"])
+        self.assertNotIn("infrastructure", transition["request_id"])
+
+    def test_a_worker_pane_that_never_frees_up_ends_as_an_infrastructure_outcome(self) -> None:
+        """The bounded deferral is unchanged, and what it ends in is a statement about the pane."""
+        limit = self._bound_bring_up_attempts(2)
+        self.start_dispatcher()
+        self.host.fail_prepare_error = self._pane_not_ready("blocked")
+
+        for _ in range(limit):
+            self.assertEqual(self.tick()["action"], "worker-launch-deferred")
+        blocked = self.tick()
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["failure_class"], FAILURE_CLASS_INFRASTRUCTURE)
+        self.assertEqual(blocked["failure_cause"], CAUSE_PANE_NEVER_READY)
+        self.assertEqual(blocked["bring_up"]["readiness"], "blocked")
+        self.assertEqual(blocked["bring_up"]["attempts"], limit + 1)
+        self.assertTrue(
+            self.reader.show("secretary-510-pilot")["comments"][-1]["body"].endswith(
+                blocked["failure_reason"]
+            )
+        )
+        self.assertEqual(
+            bring_up_failure_class(self._blocked_transition()["request_id"]),
+            FAILURE_CLASS_INFRASTRUCTURE,
+        )
+        # The ceiling is a ceiling: nothing relaunches the head after it.
+        self.assertEqual(self.host.calls.count("prepare_worker"), limit + 1)
+        self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+
+    def test_a_reviewer_bringup_that_never_came_up_is_the_same_infrastructure_outcome(self) -> None:
+        """The reviewer's hold over a green candidate stays, and past its ceiling the outcome is
+        classified by the very call the worker path makes."""
+        limit = self._bound_review_infra_retries(2)
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.host.fail_review_error = HostError("orca terminal split failed: terminal_exited")
+
+        for attempt in range(limit - 1):
+            held = self.tick()
+            self.assertEqual(held["action"], "review-infrastructure-retry")
+            self.assertEqual(held["failure_class"], FAILURE_CLASS_INFRASTRUCTURE)
+            self.assertEqual(held["attempts"], attempt + 1)
+        blocked = self.tick()
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["failure_class"], FAILURE_CLASS_INFRASTRUCTURE)
+        self.assertEqual(blocked["failure_cause"], CAUSE_HOST_UNAVAILABLE)
+        self.assertEqual(blocked["bring_up"]["stage"], "review")
+        self.assertEqual(blocked["bring_up"]["head"], "reviewer")
+        task = self.reader.show("secretary-510-pilot")
+        self.assertEqual(task["state"], "blocked")
+        self.assertTrue(task["comments"][-1]["body"].endswith(blocked["failure_reason"]))
+        self.assertIn(f"class={FAILURE_CLASS_INFRASTRUCTURE}", task["comments"][-1]["body"])
+        self.assertEqual(
+            bring_up_failure_class(self._blocked_transition()["request_id"]),
+            FAILURE_CLASS_INFRASTRUCTURE,
+        )
+        # Past the ceiling the reviewer is not launched again either.
+        self.assertEqual(self.host.calls.count("start_review"), limit)
+
+    def test_a_reviewer_bringup_over_a_broken_checkout_is_a_task_outcome_and_is_not_held(self) -> None:
+        """A green candidate is held over infrastructure, not over a card whose own bring-up
+        contract is broken: relaunching a reviewer cannot repair that, so it blocks at once."""
+        self._bound_review_infra_retries(3)
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.host.fail_review_error = HostError(
+            "review workspace is not a registered worktree of the project repo",
+            bring_up_cause=CAUSE_WORKSPACE_CONTRACT,
+        )
+
+        blocked = self.tick()
+
+        self.assertEqual(blocked["status"], "blocked")
+        self.assertEqual(blocked["failure_class"], FAILURE_CLASS_TASK)
+        self.assertEqual(blocked["failure_cause"], CAUSE_WORKSPACE_CONTRACT)
+        task = self.reader.show("secretary-510-pilot")
+        self.assertEqual(task["state"], "blocked")
+        self.assertTrue(task["comments"][-1]["body"].endswith(blocked["failure_reason"]))
+        transition = self._blocked_transition()
+        self.assertEqual(bring_up_failure_class(transition["request_id"]), FAILURE_CLASS_TASK)
+        self.assertNotIn("infrastructure", transition["request_id"])
+        self.assertEqual(self.host.calls.count("start_review"), 1)
 
     def test_a_rework_bringup_defers_on_a_pane_that_is_not_ready(self) -> None:
         """A rework is a bring-up like any other: a red gate that lands while the head's pane is

@@ -15,7 +15,19 @@ class DispatcherError(Exception):
 
 
 class HostError(Exception):
-    pass
+    """A host operation the dispatcher asked for did not happen.
+
+    `bring_up_cause` is the one optional thing a raiser may say about a failure beyond its message:
+    the enumerated bring-up cause from `dispatcher_launch`, when the raise site — and only the raise
+    site — knows which one it is. Everything else about a bring-up failure is classified from the
+    exception's type by the one classifier, so nothing here decides a class: the vocabulary and the
+    cause-to-class mapping live in `dispatcher_launch.classify_bring_up_failure`, and a cause this
+    field carries that the classifier does not know is ignored rather than trusted.
+    """
+
+    def __init__(self, *args: Any, bring_up_cause: str = "") -> None:
+        super().__init__(*args)
+        self.bring_up_cause = bring_up_cause
 
 
 class GateTransportError(HostError):
