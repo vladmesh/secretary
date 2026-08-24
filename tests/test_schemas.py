@@ -95,6 +95,14 @@ class SchemaValidTests(unittest.TestCase):
         data["validation"] = {"ci": "github"}
         self.assertEqual(validate(data, "adapter", "a.yaml"), [])
 
+    def test_adapter_broad_check_contract_passes(self):
+        data = copy.deepcopy(VALID_ADAPTER)
+        data["broad_check"] = {
+            "interpreter": ".venv/bin/python",
+            "import_package": "codegen_orchestrator",
+        }
+        self.assertEqual(validate(data, "adapter", "a.yaml"), [])
+
     def test_onboarding_draft_accepts_required_checks(self):
         data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
         data["provision"]["adapter"]["validation"] = {"ci": "github", "required_checks": ["test"]}
@@ -277,6 +285,11 @@ class SchemaInvalidTests(unittest.TestCase):
         data["validation"] = {"ci": "none", "missing": []}
         errors = validate(data, "adapter", "a.yaml")
         self.assertTrue(errors)
+
+    def test_adapter_broad_check_contract_rejects_an_unqualified_package(self):
+        data = copy.deepcopy(VALID_ADAPTER)
+        data["broad_check"] = {"interpreter": ".venv/bin/python", "import_package": "-bad"}
+        self.assertTrue(validate(data, "adapter", "a.yaml"))
 
     def test_manifest_missing_component(self):
         data = copy.deepcopy(VALID_MANIFEST)

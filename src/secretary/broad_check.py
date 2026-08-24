@@ -106,18 +106,25 @@ class ContentIdentity:
 #: `python -c` puts the working directory first on `sys.path`, exactly as `python -m unittest`
 #: does, so the module runs with the import path it would have had without this wrapper.
 _PROVENANCE_BOOTSTRAP = """\
-import json, os, runpy, sys
+import importlib, json, os, runpy, sys
 
-_record, _module = sys.argv[1], sys.argv[2]
-sys.argv = [_module, *sys.argv[3:]]
+_record, _module, _package = sys.argv[1:4]
+sys.argv = [_module, *sys.argv[4:]]
 try:
-    import secretary as _project
+    _project = importlib.import_module(_package)
     _imported = getattr(_project, "__file__", "") or ""
 except Exception:
     _imported = ""
 with open(_record, "w", encoding="utf-8") as _handle:
     json.dump(
-        {"python": sys.executable, "cwd": os.getcwd(), "imported_secretary": _imported}, _handle
+        {
+            "python": sys.executable,
+            "environment_prefix": sys.prefix,
+            "cwd": os.getcwd(),
+            "imported_package": _package,
+            "imported_project": _imported,
+        },
+        _handle,
     )
 runpy.run_module(_module, run_name="__main__", alter_sys=True)
 """
@@ -130,8 +137,10 @@ _ORIGIN_UNOBSERVABLE = "unobservable"
 _UNOBSERVED_PROVENANCE = {
     "origin": _ORIGIN_UNOBSERVABLE,
     "python": "",
+    "environment_prefix": "",
     "cwd": "",
-    "imported_secretary": "",
+    "imported_package": "",
+    "imported_project": "",
     "inside_workspace": False,
 }
 
@@ -150,13 +159,34 @@ class CheckSpec:
     module: str = ""
     module_args: tuple[str, ...] = ()
     command: str = ""
+    interpreter: str = sys.executable
+    import_package: str = "secretary"
 
     @classmethod
-    def for_module(cls, module: str, args: Iterable[str] = ()) -> CheckSpec:
+    def for_module(
+        cls,
+        module: str,
+        args: Iterable[str] = (),
+        *,
+        interpreter: str = sys.executable,
+        import_package: str = "secretary",
+    ) -> CheckSpec:
         module = module.strip()
         if not module or module.startswith("-"):
             raise BroadCheckError("empty_module", "a module check needs a module name")
-        return cls(_SHAPE_MODULE, module, tuple(args))
+        interpreter = interpreter.strip()
+        import_package = import_package.strip()
+        if not interpreter:
+            raise BroadCheckError("empty_interpreter", "a module check needs an interpreter")
+        if not import_package:
+            raise BroadCheckError("empty_import_package", "a module check needs an import package")
+        return cls(
+            _SHAPE_MODULE,
+            module,
+            tuple(args),
+            interpreter=interpreter,
+            import_package=import_package,
+        )
 
     @classmethod
     def for_shell(cls, command: str) -> CheckSpec:
@@ -179,6 +209,8 @@ class CheckSpec:
                 "shape": _SHAPE_MODULE,
                 "module": self.module,
                 "args": list(self.module_args),
+                "interpreter": self.interpreter,
+                "import_package": self.import_package,
             }
         return {"schema": _CHECK_SET_SCHEMA, "shape": _SHAPE_SHELL, "command": self.command}
 
@@ -200,7 +232,8 @@ class CheckSpec:
     def argv(self, record: Path | None) -> list[str]:
         if self.shape == _SHAPE_MODULE:
             return [
-                sys.executable, "-c", _PROVENANCE_BOOTSTRAP, str(record), self.module,
+                self.interpreter, "-c", _PROVENANCE_BOOTSTRAP, str(record), self.module,
+                self.import_package,
                 *self.module_args,
             ]
         return ["bash", "-lc", self.command]
@@ -208,7 +241,8 @@ class CheckSpec:
     def displayed_argv(self) -> list[str]:
         if self.shape == _SHAPE_MODULE:
             return [
-                sys.executable, "-c", "<provenance bootstrap>", "<provenance record>", self.module,
+                self.interpreter, "-c", "<provenance bootstrap>", "<provenance record>", self.module,
+                self.import_package,
                 *self.module_args,
             ]
         return ["bash", "-lc", self.command]
@@ -304,7 +338,7 @@ def _read_provenance(record: Path | None, root: Path) -> dict[str, object]:
         return dict(_UNOBSERVED_PROVENANCE)
     if not isinstance(payload, Mapping):
         return dict(_UNOBSERVED_PROVENANCE)
-    imported = str(payload.get("imported_secretary") or "")
+    imported = str(payload.get("imported_project") or "")
     inside = False
     if imported:
         try:
@@ -314,8 +348,10 @@ def _read_provenance(record: Path | None, root: Path) -> dict[str, object]:
     return {
         "origin": _ORIGIN_CHECK_PROCESS,
         "python": str(payload.get("python") or ""),
+        "environment_prefix": str(payload.get("environment_prefix") or ""),
         "cwd": str(payload.get("cwd") or ""),
-        "imported_secretary": imported,
+        "imported_package": str(payload.get("imported_package") or ""),
+        "imported_project": imported,
         "inside_workspace": inside,
     }
 
@@ -509,13 +545,21 @@ def _run_and_record(
     incomplete_reason = ""
     # stdout and stderr share one pipe on purpose: two pipes would reorder a failing test's
     # traceback against the dots that located it, and the tail is exactly where that matters.
-    process = subprocess.Popen(
-        spec.argv(record),
-        cwd=str(root),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        env=environment,
-    )
+    try:
+        process = subprocess.Popen(
+            spec.argv(record),
+            cwd=str(root),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=environment,
+        )
+    except OSError as exc:
+        if spec.shape == _SHAPE_MODULE:
+            raise BroadCheckError(
+                "interpreter_start_failed",
+                f"could not start configured interpreter {spec.interpreter!r}: {exc}",
+            ) from exc
+        raise BroadCheckError("check_start_failed", f"could not start broad check: {exc}") from exc
     try:
         assert process.stdout is not None
         deadline = None if not timeout_seconds else started + float(timeout_seconds)
@@ -803,7 +847,9 @@ class ReceiptLookup:
         }
 
 
-def candidate_import_refusal(receipt: Mapping[str, object], root: Path) -> str:
+def candidate_import_refusal(
+    receipt: Mapping[str, object], root: Path, *, expected_package: str = ""
+) -> str:
     """The candidate-trust boundary: why this receipt's import may not be trusted, or ``""``.
 
     Observed provenance is necessary and not sufficient: only an import resolved *inside this
@@ -821,18 +867,40 @@ def candidate_import_refusal(receipt: Mapping[str, object], root: Path) -> str:
             "import provenance was not observed from the check process, so this receipt attests "
             "no checkout"
         )
-    imported = str(provenance.get("imported_secretary") or "")
+    imported_package = str(provenance.get("imported_package") or "")
+    if expected_package and imported_package != expected_package:
+        return (
+            f"the check process recorded package {imported_package or '(none)'!r}, not the "
+            f"configured project package {expected_package!r}"
+        )
+    imported = str(provenance.get("imported_project") or "")
     if not imported:
         return "the check process imported no project, so it validated no checkout"
     try:
         resolved = Path(imported).resolve()
-        inside = resolved.is_relative_to(Path(root).resolve())
+        resolved_root = Path(root).resolve()
+        inside = resolved.is_relative_to(resolved_root)
     except (OSError, ValueError):
         return f"the imported project path could not be resolved: {imported}"
     if not inside:
         # Recomputed against this workspace rather than read off the receipt's own flag: the
         # question is where the import lands for the reader, now.
         return f"the check process imported {imported}, which is outside this candidate workspace"
+    environment_prefix = provenance.get("environment_prefix")
+    if not isinstance(environment_prefix, str) or not environment_prefix:
+        return "the receipt records no interpreter environment provenance"
+    try:
+        resolved_prefix = Path(environment_prefix).resolve()
+        imported_from_environment = (
+            resolved_prefix != resolved_root and resolved.is_relative_to(resolved_prefix)
+        )
+    except (OSError, ValueError):
+        imported_from_environment = False
+    if imported_from_environment:
+        return (
+            f"the check process imported {imported} from its interpreter environment, not "
+            "the candidate workspace"
+        )
     return ""
 
 
@@ -858,7 +926,7 @@ def usable_receipt(root: Path, check: CheckSpec | str) -> ReceiptLookup:
     if receipt.get("status") != _STATUS_COMPLETE:
         reason = str(receipt.get("incomplete_reason") or "run did not finish")
         return ReceiptLookup(False, f"run did not finish: {reason}", receipt, path)
-    refusal = candidate_import_refusal(receipt, root)
+    refusal = candidate_import_refusal(receipt, root, expected_package=spec.import_package)
     if refusal:
         return ReceiptLookup(False, refusal, receipt, path)
     recorded = receipt.get("content_identity")
@@ -886,7 +954,7 @@ def summarize(receipt: Mapping[str, Any]) -> str:
     tree = identity.get("tree_sha", "") if isinstance(identity, Mapping) else ""
     provenance = receipt.get("project_provenance")
     if isinstance(provenance, Mapping):
-        imported = str(provenance.get("imported_secretary") or "")
+        imported = str(provenance.get("imported_project") or "")
         origin = str(provenance.get("origin") or "")
     else:
         imported, origin = "", ""
