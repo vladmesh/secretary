@@ -29,6 +29,7 @@ src/secretary/
   tasks/               task lifecycle
   sprints/             sprint lifecycle and observation
   dispatch/            production dispatcher orchestration
+  projects/            registered projects: their bindings and adapter-owned contracts
   runtime/             heads, sessions and prompt delivery
   automations/         curator, retro and steward services
   memory/              facts, journal, index and MCP service

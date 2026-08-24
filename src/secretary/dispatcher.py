@@ -396,6 +396,11 @@ from secretary.head_health import (
 )
 from secretary.head_registry import HeadRegistryConfigError, installed_heads
 from secretary.observer_root import OBSERVER_REPO_NAME, observer_root_repo
+from secretary.projects.contract import (
+    ContractUnusable,
+    ModuleContract,
+    module_contract,
+)
 from secretary.routing_journal import (
     HEAD_FROM_CARD,
     HEAD_FROM_FALLBACK,
@@ -606,6 +611,18 @@ class InstanceCatalog:
         if not loaded:
             raise HostError(f"adapter {adapter!r} is unavailable")
         return loaded
+
+    def broad_check_contract(self, project: str) -> ModuleContract:
+        """The project's usable broad-check contract, or `ContractUnusable` (secretary-1458).
+
+        The rules are `projects.contract`'s, the same implementation the worker's own
+        `secretary check broad --module` resolves through, so a card is never handed out on a
+        contract the worker would then refuse. Reading the binding and the adapter beside it is
+        all this costs: no workspace, no head, no process.
+        """
+        binding = self.binding(project)
+        repo = Path(str(binding.get("repo") or "")).expanduser()
+        return module_contract(binding, instance=self.instance_dir or Path("."), project_root=repo)
 
     def default_branch(self, project: str, override: str | None) -> str:
         if override:
@@ -3776,6 +3793,79 @@ class DispatcherRuntime:
             request_id=_attempt_request_id(attempt_id, "head-failover-comment", ref),
         )
 
+    def _broad_check_contract_refusal(self, task: dict[str, Any]) -> ContractUnusable | None:
+        """Why this card's registered project cannot be broad-checked, or None (secretary-1458).
+
+        Offline and cheap: the binding and the adapter beside it, read before anything is claimed.
+        A project this dispatcher cannot even look up is not this preflight's finding — the paths
+        that need the binding fail on it in their own words — so a `HostError` leaves the claim
+        exactly as it was.
+        """
+        project = str(task.get("project") or "")
+        if not project:
+            return None
+        try:
+            self.catalog.broad_check_contract(project)
+        except ContractUnusable as exc:
+            return exc
+        except HostError:
+            return None
+        return None
+
+    def _contract_preflight_blocked(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        refusal: ContractUnusable,
+    ) -> dict[str, Any]:
+        """The typed infrastructure outcome for a card nobody can broad-check.
+
+        This is the same outcome a bring-up that produced no head carries, made by the same
+        classifier and written with the same durable action token: an installation whose registry
+        cannot supply a usable contract is a failure of the host, not a verdict about the card. The
+        two properties the card must have follow from that token alone rather than from anything
+        here — the sprint budget reads it and counts the block as uncharged, and a block is not a
+        retry, so no new attempt is opened and nothing is scheduled to come back.
+        """
+        ref = task["ref"]
+        attempt_id = record.attempt_id
+        detail = (
+            f"the broad-check contract of registered project {task.get('project')!r} cannot "
+            f"attest this card: {refusal.detail()}"
+        )
+        failure = _classify_bring_up_failure(
+            None, record, WORKER_ROLE, stage=STAGE_CLAIM, attempt_id=attempt_id, detail=detail,
+        )
+        reason = (
+            "the card was not given to a worker: this project's broad-check contract cannot "
+            f"attest it, so no workspace and no head were created. {detail}\n{failure.clause()}"
+        )
+        self.writer.move(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            target="blocked",
+            reason=reason,
+            request_id=_attempt_request_id(
+                attempt_id,
+                _bring_up_blocked_action("contract-preflight-blocked", failure),
+                ref,
+            ),
+        )
+        records.pop(ref, None)
+        self.save_records(payload, records)
+        return {
+            "status": "blocked",
+            "step": "contract-preflight",
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "reason": "broad-check contract preflight failed",
+            "contract_refusal": refusal.evidence(),
+            **failure.outcome_fields(reason),
+        }
+
     def _claim(
         self,
         task: dict[str, Any],
@@ -3825,6 +3915,8 @@ class DispatcherRuntime:
                 "worker-respawn-blocked",
                 "worker-wait-stall",
                 "rework-blocked",
+                # The contract preflight's own block, which a repaired adapter brings back to Ready.
+                "contract-preflight-blocked",
                 "gate-blocked",
                 "gate-red-blocked",
                 "gate-pending-stall",
@@ -3905,6 +3997,15 @@ class DispatcherRuntime:
         self.open_worker_round(record, round_number=self._journal_round(ref) + 1)
         records[ref] = record
         self.save_records(payload, records)
+        # Before anything is launched: a registered project whose broad-check contract cannot
+        # attest it has nothing a worker's round could produce evidence with, and discovering that
+        # inside the workspace costs the round (secretary-1458). The claim above is not the round —
+        # no workspace is restored, no head is brought up and no worker is ever handed the card —
+        # it is the door: the board protocol gives the dispatcher no Ready-to-Blocked edge, so an
+        # outcome about a claimed card is the only place this can be recorded at all.
+        refusal = self._broad_check_contract_refusal(claimed)
+        if refusal is not None:
+            return self._contract_preflight_blocked(claimed, record, records, payload, refusal)
         return self._launch_worker_after_claim(
             claimed,
             record,
