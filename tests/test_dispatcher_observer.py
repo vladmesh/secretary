@@ -386,6 +386,33 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertIn("stop_observer_if_quiescent", self.host.calls)
         self.assertEqual(self.observers()["sprint:1"].launches, 2)
 
+    def test_the_rotation_hands_down_the_pid_evidence_that_made_it_judge_the_head_dead(self) -> None:
+        """secretary-1462 round 7: the conditional stop is owed the liveness fact, not left to guess.
+
+        The tick decides to replace this head because its pid heartbeat says the process is gone.
+        The head runtime cannot read that for itself — Orca answers about panes, and a pane says
+        `busy` for the wrapper shell a dead head leaves behind exactly as it does for a working one
+        — so the fact travels with the epoch, read at the same judgement, and the runtime skips the
+        pane probe instead of refusing the rotation on it forever.
+        """
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.kill_observer()
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="replacement needed", request_id="dead-head-event",
+        )
+
+        self.runtime.production_tick()
+
+        self.assertEqual(
+            [(ref, alive) for ref, _epoch, alive in self.host.observer_quiescent_stops],
+            [("sprint:1", False)],
+            "the rotation named the head's process dead, which is why it was rotating it",
+        )
+        self.assertEqual(self.observers()["sprint:1"].launches, 2)
+
     def test_a_head_that_refused_every_wake_is_replaced_even_when_it_looks_busy(self) -> None:
         """secretary-1462 round 5: an emergency replacement is not routed through the quiet stop.
 

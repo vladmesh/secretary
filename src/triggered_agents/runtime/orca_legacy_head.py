@@ -38,12 +38,16 @@ them. `stop_workspace` is the container teardown Orca offers, one call for every
 and it names no head; it lives here so that no session-manager call for a head's life is made
 anywhere else. `stop_workspace` takes the same lock as the verbs, so that the teardown an observer's
 stop really is cannot run beside a delivery into one of the panes it is removing. `stop_if_quiescent`
-is `stop` under a precondition this runtime alone can check — the head's own epoch still where the
-caller last saw it, and no turn the backend still shows as running — with the check, the closing of
-admission and the stop itself inside one critical section, so that none of the three is observable
-without the others. It is not a seventh verb on the protocol: the six are what every backend owes,
-and this is a composition of one of them with state that is the runtime's own. The backend that
-comes next will owe the same composition, and the protocol grows then, once, on purpose.
+is `stop` under a precondition — the head's own epoch still where the caller last saw it, and, for a
+head whose process the caller has established is still alive, no turn the backend still shows as
+running — with the check, the closing of admission and the stop itself inside one critical section,
+so that none of the three is observable without the others. It is the single place that decides
+whether a head may be taken down for a replacement, which is why the caller's pid-heartbeat evidence
+comes in as a required argument rather than being re-guessed here from a pane: Orca answers about
+ptys, and a pty cannot tell a working head from a dead head's leftover shell. It is not a seventh
+verb on the protocol: the six are what every backend owes, and this is a composition of one of them
+with state that is the runtime's own. The backend that comes next will owe the same composition, and
+the protocol grows then, once, on purpose.
 """
 from __future__ import annotations
 
@@ -534,6 +538,7 @@ class OrcaLegacyHeadRuntime:
         initiator: StopInitiator,
         *,
         expected_activity_epoch: int,
+        head_process_alive: bool,
         teardown: Callable[[], None] | None = None,
         transport: HeadTransport | None = None,
         commit: Commit | None = None,
@@ -542,22 +547,47 @@ class OrcaLegacyHeadRuntime:
     ) -> StopReceipt:
         """End this head only while it is still quiet, with the check and the stop indivisible.
 
-        "Quiet" is two facts: the head's activity epoch is still the one the caller last saw, and
-        no turn the backend still shows as running is outstanding. Both are read, admission is
-        closed and the stop is performed inside one critical section, so no delivery can arrive
-        between "it is finished" and "its pane is gone" — which is precisely the window a caller
-        that checked first and stopped second used to leave open.
+        This is the single place that decides whether a head may be taken down for a replacement.
+        No caller keeps part of that decision and none goes around it; what a caller owes is the
+        two facts it, and only it, can establish, and they travel in together.
 
-        `expected_activity_epoch` is the caller's own reading, and it belongs to the moment the
-        caller decided this head was finished. Read in the argument list of this call it would say
-        nothing: whatever the head did between the decision and the stop would already be in it.
-        Read at the decision, it is what makes that decision expire.
+        The order inside the one critical section, and the order is the contract:
 
-        A refusal is typed and leaves nothing behind. `HEAD_BUSY` is a turn the backend still shows
-        running; `HEAD_ALIVE` with `STOP_ACTIVITY_SINCE` is a head that did something since the
-        caller looked. In both cases nothing was stopped, and admission is exactly as it was —
-        including when it was already closed by an earlier drain, which this must not silently
-        re-open.
+          1. **The head's activity epoch against the caller's.** `expected_activity_epoch` is the
+             caller's own reading, and it belongs to the moment the caller decided this head was
+             finished — read in the argument list of this call it would say nothing, because
+             whatever the head did between the decision and the stop would already be in it. It
+             moved, so the decision has expired: `HEAD_ALIVE` with `STOP_ACTIVITY_SINCE`, and
+             nothing is probed;
+          2. **the head's process, by the fact the caller already established.** `head_process_alive`
+             is the caller's pid-heartbeat evidence — the same evidence that made it decide to
+             replace this head — and it is a required argument because there is no reading of it
+             this runtime can make: Orca answers about ptys, not about processes. A process that is
+             established *not* alive makes any outstanding lease stale by definition: the turn it
+             names ended when the process did, so the lease is closed here and the pane is **not**
+             probed;
+          3. **only for a head whose process is alive, the end of the turn.** A pane that will take
+             input again is a turn that ended: the lease is closed and the stop goes ahead. Working,
+             held, or unprobeable is `HEAD_BUSY` — an active turn is never interrupted, which is the
+             sprint's own definition of done;
+          4. **admission closed, then the stop.**
+
+        Why liveness outranks readiness, and it is not a preference. `terminal_readiness` answers
+        about a pane, not about a turn: it says `busy` both for an agent TUI that is working and for
+        the bare wrapper shell a head leaves behind when it dies, and `unknown` for a pane that has
+        gone entirely. A signal that cannot tell "working" from "not there" cannot hold a veto over
+        "not there". Letting it would make this refusal *permanent* rather than conservative:
+        nothing else on a rotation moves this head's epoch or closes its lease — `deliver` and
+        `observe` are only reached for a head the tick believes is live — so every later tick would
+        get the same answer, and the sprint would keep a ghost pane and never get a new observer.
+
+        Every refusal here names a condition some other path can change: a live head finishes its
+        turn; activity is absorbed by the next tick's fresh judgement. A refusal whose condition
+        nothing can change would be a defect, not caution.
+
+        A refusal is typed and leaves nothing behind: nothing was stopped, and admission is exactly
+        as it was — including when it was already closed by an earlier drain, which this must not
+        silently re-open.
 
         `teardown` is for the callers whose stop is not `head_ops.stop`: the observer's is Orca's
         whole-worktree teardown, because a per-handle close reports a stop that worked as a stop
@@ -585,14 +615,24 @@ class OrcaLegacyHeadRuntime:
                     epoch=epoch,
                 )
             held = self.activity.lease(run.run_id)
+            if held is not None and not head_process_alive:
+                # The caller established this head's process is gone, by the pid heartbeat it
+                # already read to decide the head needed replacing. A lease outstanding on a
+                # process that no longer exists is stale by definition — the turn it names ended
+                # when the process did — so it is closed here and the pane is never asked.
+                #
+                # Not asking is the whole repair. The probe below says `busy` for the bare wrapper
+                # shell a dead head leaves behind exactly as it does for a working agent, so asking
+                # it here refused the rotation in precisely the state the rotation exists for, and
+                # refused it forever: nothing on this path moves the epoch or closes the lease, so
+                # the next tick got the same answer, and the one after that.
+                self.activity.release(run.run_id)
+                held = None
             if held is not None:
-                # The same question `deliver` asks of the same lease, for the same reason: a lease
-                # granted three ticks ago and never seen to close is stale knowledge, and only
-                # `deliver`, `observe` and `stop` ever close one. Neither of the first two runs on
-                # the path that rotates a dead head — its pane is unreadable or its process is gone,
-                # so nothing observes it — and refusing on the lease alone would make the refusal
-                # permanent: the sprint would keep its ghost pane and never get a new observer.
-                # Asking the backend is what turns "nobody saw that turn end" back into a fact.
+                # A head whose process is alive is the only head whose pane is worth asking about,
+                # and here the question is a real one: a lease granted three ticks ago and never
+                # seen to close is stale knowledge, and only `deliver`, `observe` and `stop` ever
+                # close one. A pane that will take input again is a turn that has ended.
                 running = self._turn_still_running(run)
                 if running:
                     return StopReceipt(
@@ -617,8 +657,12 @@ class OrcaLegacyHeadRuntime:
                         confirm_gone=confirm_gone,
                     )
                 else:
-                    teardown()
+                    # The epoch this stop ends on is taken before the teardown runs, not after: an
+                    # observer's teardown reaches `forget_head` on its way out, so an `acted` after
+                    # it would count up from nothing and put `1` on the receipt of a head that had
+                    # been through many turns.
                     ended = self.activity.acted(run.run_id)
+                    teardown()
                     self.activity.forget(run.run_id)
                     return StopReceipt(status=HEAD_OK, run=run, epoch=ended)
             except BaseException:

@@ -1501,15 +1501,22 @@ class CommandHostRuntime:
             return 0
         return self.head_runtime.activity.epoch(self._observer_lifecycle_run(record).run_id)
 
-    def stop_observer_if_quiescent(self, record: Any, expected_activity_epoch: int) -> bool:
+    def stop_observer_if_quiescent(
+        self, record: Any, expected_activity_epoch: int, head_process_alive: bool
+    ) -> bool:
         """End this observer only while it is still quiet. False means it was not, and nothing ran.
 
-        The check and the teardown are one critical section inside the head runtime: no turn
-        outstanding, this head's epoch still where the caller saw it, admission closed, and only
-        then the teardown — so a delivery cannot land between deciding the head is finished and
-        taking its pane away. The teardown itself is `stop_observer` unchanged, because an
-        observer's stop is Orca's whole-worktree teardown plus its pid confirmation, not a pane
-        close; it runs inside that same section rather than after it.
+        The check and the teardown are one critical section inside the head runtime: this head's
+        epoch still where the caller saw it, the turn settled, admission closed, and only then the
+        teardown — so a delivery cannot land between deciding the head is finished and taking its
+        pane away. The teardown itself is `stop_observer` unchanged, because an observer's stop is
+        Orca's whole-worktree teardown plus its pid confirmation, not a pane close; it runs inside
+        that same section rather than after it.
+
+        Both facts come from the caller and neither is re-read here. `head_process_alive` is the
+        pid-heartbeat answer the caller already had — this host cannot produce it, because what it
+        can ask Orca about is a pane, and a pane says `busy` for a dead head's leftover shell just
+        as loudly as for a working one.
         """
         if self.mode == "noop":
             return True
@@ -1517,6 +1524,7 @@ class CommandHostRuntime:
             self._observer_lifecycle_run(record),
             head_ops.StopInitiator(actor=STOPPED_BY_DISPATCHER),
             expected_activity_epoch=expected_activity_epoch,
+            head_process_alive=head_process_alive,
             teardown=lambda: self.stop_observer(record),
         )
         return receipt.ok
@@ -2717,6 +2725,12 @@ class CommandHostRuntime:
                 # Delivery can refuse with a live pane before the bring-up returns normally. Bind
                 # that pane to the written heartbeat before persisting the failed launch intent.
                 _bind_head_heartbeat(pid_file, expected=heartbeat, leaf=failed_run.leaf)
+            if receipt.failure is None:
+                # A refusal the boundary made on its own terms, before any operation ran: a
+                # bring-up over a turn this runtime is still holding is the one that exists. It
+                # carries no `HeadOperationError` to translate, so the reason is the message —
+                # `_launch_failure(None, ...)` would have raised `HostError("None")`.
+                raise HostError(receipt.reason) from None
             raise self._launch_failure(receipt.failure, workspace, pid_file, subject) from None
         if pid_file:
             # Pane create gives the leaf after the head wrote its base identity. A best-effort bind

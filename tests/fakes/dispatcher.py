@@ -721,6 +721,8 @@ class FakeHost:
         self.observer_activity_epochs: dict[str, int] = {}
         # The head turning out not to be quiet after all, which refuses a conditional stop.
         self.observer_not_quiescent = False
+        # Every conditional stop this host was asked for: (sprint, expected epoch, process alive).
+        self.observer_quiescent_stops: list[tuple[str, int, bool]] = []
         # The pid a worker/reviewer bring-up writes to its heartbeat file, the way the real
         # launcher's `with_pid_heartbeat` wrapper does. Launch-intent recovery reads it, so a fake
         # that never wrote one would make every intent look like a head that never came up. None
@@ -1030,14 +1032,23 @@ class FakeHost:
         """Like the real host: this head's own epoch, which a conditional stop compares against."""
         return int(self.observer_activity_epochs.get(str(record.sprint), 0))
 
-    def stop_observer_if_quiescent(self, record, expected_activity_epoch: int) -> bool:
+    def stop_observer_if_quiescent(
+        self, record, expected_activity_epoch: int, head_process_alive: bool
+    ) -> bool:
         """Like the real host: the head runtime refuses the stop unless the head is still quiet.
 
         The fake keeps the same two refusals the runtime has — a turn still running, or an epoch
         that moved since the caller looked — so a test can make a rotation lose the race without
-        needing a second thread.
+        needing a second thread. `observer_not_quiescent` stands for the first of those whatever
+        this head's process is doing: which of the runtime's reasons produced it is settled against
+        the real runtime in `tests/test_head_runtime.py`, and what this layer owes is that a refusal
+        parks the relaunch. The liveness fact the caller is now required to hand down is recorded so
+        that a test can check it travelled and was read where the judgement was made.
         """
         self.calls.append("stop_observer_if_quiescent")
+        self.observer_quiescent_stops.append(
+            (str(record.sprint), int(expected_activity_epoch), bool(head_process_alive))
+        )
         if self.observer_not_quiescent:
             return False
         if int(expected_activity_epoch) != self.observer_activity_epoch(record):

@@ -571,7 +571,7 @@ class SerialisedHeadTests(unittest.TestCase):
         )
         self.assertTrue(
             self.runtime.stop_if_quiescent(
-                quiet, self.stopper, expected_activity_epoch=unchanged
+                quiet, self.stopper, expected_activity_epoch=unchanged, head_process_alive=True
             ).ok,
             "a head nobody touched is still stoppable on the epoch its caller last read",
         )
@@ -587,7 +587,9 @@ class SerialisedHeadTests(unittest.TestCase):
         self.assertEqual(seen.epoch, quiet, "an observation with no clock moved nothing")
         self.assertEqual(self.epoch(run), quiet)
         self.assertTrue(
-            self.runtime.stop_if_quiescent(run, self.stopper, expected_activity_epoch=quiet).ok,
+            self.runtime.stop_if_quiescent(
+                run, self.stopper, expected_activity_epoch=quiet, head_process_alive=True
+            ).ok,
             "and a head that was only looked at is still quiet",
         )
 
@@ -603,7 +605,7 @@ class SerialisedHeadTests(unittest.TestCase):
         run = self.bring_up()
 
         receipt = self.runtime.stop_if_quiescent(
-            run, self.stopper, expected_activity_epoch=self.epoch(run)
+            run, self.stopper, expected_activity_epoch=self.epoch(run), head_process_alive=True
         )
 
         self.assertEqual(receipt.status, HEAD_OK)
@@ -615,7 +617,9 @@ class SerialisedHeadTests(unittest.TestCase):
         self.host.last_output_at = 2000.0
         self.runtime.observe(run)
 
-        receipt = self.runtime.stop_if_quiescent(run, self.stopper, expected_activity_epoch=stale)
+        receipt = self.runtime.stop_if_quiescent(
+            run, self.stopper, expected_activity_epoch=stale, head_process_alive=True
+        )
 
         self.assertEqual(receipt.status, HEAD_ALIVE)
         self.assertEqual(receipt.reason, STOP_ACTIVITY_SINCE)
@@ -626,10 +630,11 @@ class SerialisedHeadTests(unittest.TestCase):
         )
 
     def test_a_stop_if_quiescent_refuses_a_head_that_is_mid_turn(self) -> None:
+        """A live head that is working is not interrupted: the sprint's own definition of done."""
         run, lease = self.working()
 
         receipt = self.runtime.stop_if_quiescent(
-            run, self.stopper, expected_activity_epoch=self.epoch(run)
+            run, self.stopper, expected_activity_epoch=self.epoch(run), head_process_alive=True
         )
 
         self.assertEqual(receipt.status, HEAD_BUSY)
@@ -639,19 +644,19 @@ class SerialisedHeadTests(unittest.TestCase):
         self.assertTrue(self.runtime.activity.admits(run.run_id))
 
     def test_a_stop_if_quiescent_reclaims_a_lease_whose_turn_the_backend_says_has_ended(self) -> None:
-        """secretary-1462 round 5: a lease nobody saw close must not refuse the rotation forever.
+        """A lease nobody saw close must not refuse the rotation of a live but finished head.
 
         Only `deliver`, `observe` and `stop` ever release a lease, and on the path that rotates a
-        head none of the first two runs — the head is dead or its pane cannot be read, so nothing
-        observes it. Refusing on the lease alone made that refusal permanent: the sprint kept a
-        ghost pane and never got a new observer. The stop asks the backend the same question the
-        delivery asks, and a pane that will take input again is a turn that has ended.
+        head none of the first two runs. For a head whose process the caller found alive, the pane
+        is the honest place to ask, and a pane that will take input again is a turn that has ended:
+        the lease is reclaimed and the stop goes through. What must never depend on that answer is
+        the head whose process is gone — `..._rotates_a_head_that_died_mid_turn` is that one.
         """
         run, _ = self.working()
         self.host.idle = True
 
         receipt = self.runtime.stop_if_quiescent(
-            run, self.stopper, expected_activity_epoch=self.epoch(run)
+            run, self.stopper, expected_activity_epoch=self.epoch(run), head_process_alive=True
         )
 
         self.assertEqual(receipt.status, HEAD_OK)
@@ -659,12 +664,18 @@ class SerialisedHeadTests(unittest.TestCase):
         self.assertIsNone(self.runtime.activity.lease(run.run_id))
 
     def test_a_stop_if_quiescent_refuses_a_turn_the_probe_could_not_say_had_ended(self) -> None:
-        """"I could not tell" is not permission here either: the head keeps its pane."""
+        """"I could not tell" is not permission for a *live* head: it keeps its pane.
+
+        The refusal is bounded by the head being alive, and that is what makes it a refusal a caller
+        can wait out: this head is running and will finish its turn. The same pane answer about a
+        head whose process is gone is not read at all, because it would be a refusal nothing could
+        ever lift.
+        """
         run, lease = self.working()
         self.host.idle = None
 
         receipt = self.runtime.stop_if_quiescent(
-            run, self.stopper, expected_activity_epoch=self.epoch(run)
+            run, self.stopper, expected_activity_epoch=self.epoch(run), head_process_alive=True
         )
 
         self.assertEqual(receipt.status, HEAD_BUSY)
@@ -672,6 +683,117 @@ class SerialisedHeadTests(unittest.TestCase):
         self.assertEqual(receipt.lease, lease)
         self.assertEqual(self.host.closed, [], "nothing was stopped")
         self.assertTrue(self.runtime.activity.admits(run.run_id))
+
+    def test_a_stop_if_quiescent_rotates_a_head_that_died_mid_turn(self) -> None:
+        """The invariant: a head that is not alive never stops its own replacement happening.
+
+        This is the ordinary way a head fails — it dies while it is working, so its lease is still
+        outstanding and Orca is left holding the wrapper shell `with_pid_heartbeat` puts around it.
+        That shell answers the idle probe exactly as a working agent does, `busy`, because
+        `terminal_readiness` asks about a pane and not about a turn. Reading it here refused the
+        rotation in the one state rotation exists for, and refused it forever: nothing else on this
+        path moves the epoch or closes the lease, so every following tick got the same answer.
+
+        The caller's pid-heartbeat evidence outranks the pane, so the probe is not made at all.
+        """
+        run, _ = self.working()
+        # What the real Orca answers for a bare shell with no agent TUI on it, measured.
+        self.host.idle = False
+        probed: list[str] = []
+        self.host.on_call = probed.append
+
+        receipt = self.runtime.stop_if_quiescent(
+            run, self.stopper, expected_activity_epoch=self.epoch(run), head_process_alive=False
+        )
+        self.host.on_call = None
+
+        self.assertEqual(receipt.status, HEAD_OK)
+        self.assertEqual(self.host.closed, [run.handle], "the ghost pane went with it")
+        self.assertIsNone(
+            self.runtime.activity.lease(run.run_id),
+            "a lease held by a process that is gone named a turn that ended with it",
+        )
+        self.assertNotIn(
+            "wait_idle", probed, "a dead head's pane is not asked to authorise its own replacement"
+        )
+
+    def test_a_dead_head_is_rotated_however_many_ticks_have_asked_before(self) -> None:
+        """The refusal was permanent, so its repair is checked over more than one tick.
+
+        Nothing between two ticks of the rotation changes: the epoch only moves for `acted` and
+        `observed`, and neither runs for a head the tick has judged dead. A repair that only made
+        the first attempt succeed would leave the same trap one tick further along.
+        """
+        run, _ = self.working()
+        self.host.idle = False
+        epoch = self.epoch(run)
+
+        outcomes = [
+            self.runtime.stop_if_quiescent(
+                run, self.stopper, expected_activity_epoch=epoch, head_process_alive=False
+            ).status
+            for _ in range(3)
+        ]
+
+        self.assertEqual(outcomes[0], HEAD_OK, "the first tick already rotated it")
+        self.assertEqual(self.host.closed, [run.handle], "and it was stopped exactly once")
+
+    def test_a_stop_if_quiescent_still_refuses_a_live_head_whose_pane_it_could_not_read(
+        self,
+    ) -> None:
+        """Liveness outranking readiness is not readiness being ignored.
+
+        The pane says nothing useful in both of these, and the difference is entirely the process:
+        the head that is alive keeps its turn, and the head that is gone is replaced.
+        """
+        alive, _ = self.working()
+        self.host.idle = None
+
+        refused = self.runtime.stop_if_quiescent(
+            alive, self.stopper, expected_activity_epoch=self.epoch(alive), head_process_alive=True
+        )
+
+        self.assertEqual(refused.status, HEAD_BUSY)
+        self.assertEqual(self.host.closed, [], "a live head is never interrupted")
+
+        dead, _ = self.working()
+        allowed = self.runtime.stop_if_quiescent(
+            dead, self.stopper, expected_activity_epoch=self.epoch(dead), head_process_alive=False
+        )
+
+        self.assertEqual(allowed.status, HEAD_OK)
+        self.assertEqual(self.host.closed, [dead.handle])
+
+    def test_a_dead_head_that_moved_since_the_judgement_is_still_refused_on_its_epoch(self) -> None:
+        """The liveness fact skips the pane probe. It does not skip the epoch.
+
+        A judgement that has expired has expired whatever it said about the process — the caller
+        reads both at the same moment, so a stale liveness reading travels with a stale epoch and
+        the epoch is what catches it. This refusal is exitable: the next tick judges again.
+        """
+        run = self.bring_up()
+        stale = self.epoch(run)
+        self.host.idle = False
+        self.assertTrue(
+            self.runtime.deliver(run, NudgePointer.line("one more"), transport=CONFIRMING).ok
+        )
+
+        receipt = self.runtime.stop_if_quiescent(
+            run, self.stopper, expected_activity_epoch=stale, head_process_alive=False
+        )
+
+        self.assertEqual(receipt.status, HEAD_ALIVE)
+        self.assertEqual(receipt.reason, STOP_ACTIVITY_SINCE)
+        self.assertEqual(self.host.closed, [], "nothing was stopped")
+        self.assertTrue(
+            self.runtime.stop_if_quiescent(
+                run,
+                self.stopper,
+                expected_activity_epoch=self.epoch(run),
+                head_process_alive=False,
+            ).ok,
+            "and a caller that looks again gets its stop",
+        )
 
     def test_a_stop_if_quiescent_reads_the_epoch_before_it_asks_about_the_turn(self) -> None:
         """The epoch is what guards this stop, so it is what decides it, and it decides it first.
@@ -694,7 +816,9 @@ class SerialisedHeadTests(unittest.TestCase):
         probed: list[str] = []
         self.host.on_call = probed.append
 
-        receipt = self.runtime.stop_if_quiescent(run, self.stopper, expected_activity_epoch=stale)
+        receipt = self.runtime.stop_if_quiescent(
+            run, self.stopper, expected_activity_epoch=stale, head_process_alive=True
+        )
         self.host.on_call = None
 
         self.assertEqual(receipt.status, HEAD_ALIVE)
@@ -709,7 +833,7 @@ class SerialisedHeadTests(unittest.TestCase):
         self.host.refuse_close = True
 
         receipt = self.runtime.stop_if_quiescent(
-            run, self.stopper, expected_activity_epoch=self.epoch(run)
+            run, self.stopper, expected_activity_epoch=self.epoch(run), head_process_alive=True
         )
 
         self.assertEqual(receipt.status, HEAD_ALIVE)
@@ -724,7 +848,7 @@ class SerialisedHeadTests(unittest.TestCase):
         self.host.refuse_close = True
 
         self.runtime.stop_if_quiescent(
-            run, self.stopper, expected_activity_epoch=self.epoch(run)
+            run, self.stopper, expected_activity_epoch=self.epoch(run), head_process_alive=True
         )
 
         self.assertFalse(
@@ -742,7 +866,11 @@ class SerialisedHeadTests(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             self.runtime.stop_if_quiescent(
-                run, self.stopper, expected_activity_epoch=self.epoch(run), teardown=teardown
+                run,
+                self.stopper,
+                expected_activity_epoch=self.epoch(run),
+                head_process_alive=True,
+                teardown=teardown,
             )
 
         self.assertEqual(torn, ["tried"])
@@ -756,11 +884,38 @@ class SerialisedHeadTests(unittest.TestCase):
             run,
             self.stopper,
             expected_activity_epoch=self.epoch(run),
+            head_process_alive=True,
             teardown=lambda: torn.append("tried"),
         )
 
         self.assertEqual(receipt.status, HEAD_BUSY)
         self.assertEqual(torn, [], "the check and the teardown are one thing, in that order")
+
+    def test_a_teardown_stop_reports_the_epoch_this_head_actually_ended_on(self) -> None:
+        """The observer's teardown forgets the head on its way out, so the epoch is taken first.
+
+        `stop_observer` calls `forget_head`, which is right — it is the cleanup the `stop` verb does
+        for itself. Counting the stop afterwards started from nothing and put `1` on the receipt of
+        a head that had been through several turns.
+        """
+        run = self.bring_up()
+        self.host.idle = True
+        self.assertTrue(
+            self.runtime.deliver(run, NudgePointer.line("work"), transport=CONFIRMING).ok
+        )
+        before = self.epoch(run)
+        self.assertGreater(before, 1)
+
+        receipt = self.runtime.stop_if_quiescent(
+            run,
+            self.stopper,
+            expected_activity_epoch=before,
+            head_process_alive=True,
+            teardown=lambda: self.runtime.forget_head(run.run_id),
+        )
+
+        self.assertEqual(receipt.status, HEAD_OK)
+        self.assertEqual(receipt.epoch, before + 1)
 
     # what the boundary owes rather than its callers ------------------------
     def test_a_bring_up_over_a_head_that_is_running_a_turn_is_a_receipt_not_an_exception(
