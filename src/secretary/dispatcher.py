@@ -286,17 +286,10 @@ from secretary.dispatcher_tui import (
     DELIVERY_ACCEPTED,
     READINESS_BUSY,
     READINESS_READY,
-    READINESS_UNKNOWN,
     TuiDeliveryError,
 )
 from secretary.dispatcher_tui import (
     bind_claude_provider_progress_source as _bind_claude_provider_progress_source,
-)
-from secretary.dispatcher_tui import (
-    close_terminal_strict as _close_tui_terminal_strict,
-)
-from secretary.dispatcher_tui import (
-    deliver_interactive_prompt as _deliver_interactive_prompt,
 )
 from secretary.dispatcher_tui import deliver_tui_prompt as _deliver_tui_prompt
 from secretary.dispatcher_tui import (
@@ -309,12 +302,8 @@ from secretary.dispatcher_tui import (
     provider_progress_for_run as _provider_progress_for_run,
 )
 from secretary.dispatcher_tui import (
-    terminal_readiness as _terminal_readiness,
-)
-from secretary.dispatcher_tui import (
     terminal_turn_started as _terminal_turn_started,
 )
-from secretary.dispatcher_tui import turn_started_confirm as _turn_started_confirm
 from secretary.dispatcher_types import (
     # Every dispatcher stop has an initiator (review takeover, verdict, watchdog, replacement,
     # operator, reconciliation), and both HeadRuns record it.
@@ -463,7 +452,14 @@ from triggered_agents.runtime.head import (
 from triggered_agents.runtime.head import (
     with_pid_heartbeat as _with_pid_heartbeat,
 )
+from triggered_agents.runtime.head import (
+    OBSERVE_PANE_DISCONNECTED as _OBSERVE_PANE_DISCONNECTED,
+)
+from triggered_agents.runtime.head import (
+    OBSERVE_READINESS_UNKNOWN as _OBSERVE_READINESS_UNKNOWN,
+)
 from triggered_agents.runtime.launch_prefix import pythonpath_prefix
+from triggered_agents.runtime.orca_legacy_head import OrcaLegacyHeadRuntime
 from triggered_agents.runtime.pane_host import (
     OrcaSessionHost,
     Pane,
@@ -569,10 +565,6 @@ class LaunchedHead:
     head_run: dict[str, Any] = field(default_factory=dict)
     # A successful recovery route that the dispatcher exposes in this tick's outcome.
     fallback_reason: str = ""
-
-
-# The identity a session manager returns while creating one pane.
-PaneIdentity = Pane
 
 
 class InstanceCatalog:
@@ -858,6 +850,10 @@ class DispatcherHeadTransport:
     adapter: str = ""
     role: str = ""
     before_send: Callable[[], head_ops.HeadRun | None] | None = None
+    # The caller's acknowledgement arrives somewhere other than this delivery. Only the observer
+    # wake sets it: it holds both proofs a delivery can have and quotes the delivery id in the
+    # resume written from the turn it starts, so the weaker of the two must not refuse it.
+    ack_out_of_band: bool = False
 
     def deliver(
         self,
@@ -890,6 +886,7 @@ class DispatcherHeadTransport:
                 subject=subject,
                 document_path=pointer.document,
                 before_send=handoff_before_send if self.before_send is not None else None,
+                ack_out_of_band=self.ack_out_of_band,
             )
         except Exception as exc:
             # A source may already have been durably bound when a later delivery stage refuses. The
@@ -920,6 +917,10 @@ class CommandHostRuntime:
         # The owner installs one entry before it asks this host to open a Codex pane, keyed by the
         # HeadRun id in that intent so a same-workspace respawn cannot inherit a predecessor's source.
         self._codex_provider_ingresses: dict[str, CodexProviderEventIngress] = {}
+        # The one boundary a head's life is lived through. Long-lived, unlike the session host it
+        # builds per call, because the turn leases and the activity epoch are what it holds: a
+        # runtime rebuilt on every access would have no memory of the turns it handed out.
+        self._head_runtime = OrcaLegacyHeadRuntime(lambda: self.session)
 
     def configure_codex_provider_ingress(
         self,
@@ -1333,46 +1334,57 @@ class CommandHostRuntime:
             launch_prompt=_observer_launch_prompt(),
             identity=identity,
         )
-        pane = self._create_terminal(
-            str(workspace),
+        lifecycle_run = self._open_head_pane(
+            lifecycle_run,
             f"{reference} observer",
             _with_pid_heartbeat(launch.command, pid_file, identity=heartbeat),
         )
-        lifecycle_run = lifecycle_run.rebound(pane.handle, leaf=pane.leaf)
         ingress = self._codex_provider_ingress(lifecycle_run)
         if ingress is not None:
             # The returned pane leaf is part of the run identity the event source is bound to:
             # persist it before the first provider prompt, not in the post-launch save below.
             ingress.commit_run(lifecycle_run)
-        _bind_head_heartbeat(pid_file, expected=heartbeat, leaf=pane.leaf)
+        _bind_head_heartbeat(pid_file, expected=heartbeat, leaf=lifecycle_run.leaf)
         delivered = False
         delivery_evidence: dict[str, Any] = {}
-        post_delivery_run = lifecycle_run
         if launch.prompt_after_start:
-            try:
-                def bind_before_send() -> head_ops.HeadRun:
-                    nonlocal post_delivery_run
-                    if ingress is None:
-                        return post_delivery_run
-                    post_delivery_run = head_ops.post_delivery_run(
+            # What this bring-up persists is the run its ingress bound, not the lifecycle the
+            # delivery moved: the observer's watchdog adopts exactly the record the source binding
+            # was made durable under, and a launcher returning a later value would hand adoption a
+            # run the crash-era intent never saw.
+            bound_run = lifecycle_run
+
+            def bind_before_send() -> head_ops.HeadRun:
+                nonlocal bound_run
+                if ingress is not None:
+                    bound_run = head_ops.post_delivery_run(
                         lifecycle_run, ingress.bind_before_delivery(),
                     )
-                    return post_delivery_run
+                return bound_run
 
-                outcome = _deliver_tui_prompt(
-                    pane.handle,
-                    str(workspace),
-                    OBSERVER_PROMPT_FILE,
-                    run_json=self._run_json,
-                    adapter=launch.adapter or "codex",
-                    prompt_text=_observer_launch_prompt(),
+            failure: Exception | None = None
+            try:
+                receipt = self.head_runtime.deliver(
+                    lifecycle_run,
+                    head_ops.NudgePointer(text=_observer_launch_prompt()),
+                    transport=self._head_transport(
+                        str(workspace),
+                        OBSERVER_PROMPT_FILE,
+                        launch.adapter or "codex",
+                        OBSERVER_ROLE,
+                        before_send=bind_before_send if ingress is not None else None,
+                    ),
                     subject="observer-launch",
-                    before_send=bind_before_send if ingress is not None else None,
                 )
-                lifecycle_run = post_delivery_run
-                delivered = True
-                delivery_evidence = _delivery_evidence_json(outcome, "observer-launch")
+                failure = None if receipt.ok else receipt.failure
             except (TuiDeliveryError, HostError) as exc:
+                failure = exc
+            if failure is None:
+                lifecycle_run = bound_run
+                delivered = True
+                delivery_evidence = _delivery_evidence_json(receipt.delivery, "observer-launch")
+            else:
+                exc = failure
                 # Every prompt this bring-up put in front of a head is accounted for, batch or not.
                 evidence = _delivery_evidence_json(exc, "observer-launch")
                 try:
@@ -1382,15 +1394,15 @@ class CommandHostRuntime:
                         run=lifecycle_run,
                         role=OBSERVER_ROLE,
                         task=f"sprint:{reference}",
-                        leaf=pane.leaf,
+                        leaf=lifecycle_run.leaf,
                     )
                 except Exception as stop_exc:
                     # The pane is still up and this dict is the only pointer to it: reporting a plain
                     # bring-up failure would leave the sprint headless and open a second head beside it.
                     raise ObserverLaunchAborted(
                         f"{exc}; observer terminal stop failed: {stop_exc}",
-                        handle=pane.handle,
-                        leaf=pane.leaf,
+                        handle=lifecycle_run.handle,
+                        leaf=lifecycle_run.leaf,
                         workspace=str(workspace),
                         pid_file=pid_file,
                         run=run,
@@ -1399,8 +1411,8 @@ class CommandHostRuntime:
                 raise ObserverLaunchAborted(str(exc), evidence=evidence) from None
         return {
             "workspace": str(workspace),
-            "handle": pane.handle,
-            "leaf": pane.leaf,
+            "handle": lifecycle_run.handle,
+            "leaf": lifecycle_run.leaf,
             # Whether this bring-up put a prompt in front of the head, and what delivery saw doing it.
             "prompt_delivered": delivered,
             "delivery_evidence": delivery_evidence,
@@ -1429,7 +1441,7 @@ class CommandHostRuntime:
         if not workspace:
             # A record written before the intent named a workspace: the handle is all that is left.
             if record.handle:
-                self._close_observer_pane(record.handle)
+                self._close_observer_pane(record, record.handle)
             return
         if not self._observer_workspace_registered(workspace):
             self._confirm_head_process_gone(
@@ -1466,29 +1478,57 @@ class CommandHostRuntime:
             return {}
         if not record.workspace or not (record.handle or record.leaf):
             raise HostError("observer record names no terminal to read")
-        terminals = self._worktree_terminals(str(record.workspace))
-        terminal = next(
-            (pane for pane in terminals if record.leaf and pane.leaf == record.leaf),
-            None,
-        )
-        if terminal is None and not record.leaf:
-            terminal = next(
-                (pane for pane in terminals if record.handle and pane.handle == record.handle),
-                None,
-            )
-        if terminal is None:
-            raise HostError("observer terminal is not in the inventory of its workspace")
-        if not terminal.connected:
+        seen = self.head_runtime.observe(self._observer_lifecycle_run(record))
+        if seen.reason == _OBSERVE_PANE_DISCONNECTED:
             raise HostError("observer terminal is not connected")
-        readiness = _terminal_readiness(terminal.handle, run_json=self._run_json)
-        if readiness == READINESS_UNKNOWN:
+        if seen.reason == _OBSERVE_READINESS_UNKNOWN:
             # A probe that failed is not a working observer; raising puts it on the bounded failure path.
             raise HostError("observer terminal readiness could not be read")
-        status: dict[str, Any] = {"idle": readiness == READINESS_READY}
-        if terminal.last_output_at:
-            status["last_activity"] = terminal.last_output_at
+        if not seen.ok:
+            # Every other way this observation can fail is the pane not being findable in its
+            # workspace, which an unreadable inventory is indistinguishable from here.
+            raise HostError("observer terminal is not in the inventory of its workspace")
+        status: dict[str, Any] = {"idle": seen.readiness == READINESS_READY}
+        if seen.last_output_at:
+            status["last_activity"] = seen.last_output_at
         # Only the idle-recovery path needs that clock, and it says so itself when it is missing.
         return status
+
+    def _observer_lifecycle_run(self, record: Any) -> head_ops.HeadRun:
+        """This observer as the head runtime addresses it: its own run, at the pane it is in.
+
+        The persisted run is preferred, because the turn leases and the activity epoch the runtime
+        keeps are per head and a fresh identity every tick would keep losing them. A record written
+        before that run existed still has a workspace and a pane, which is all an observation needs.
+        """
+        workspace = str(getattr(record, "workspace", "") or "")
+        handle = str(getattr(record, "handle", "") or "")
+        leaf = str(getattr(record, "leaf", "") or "")
+        stored = getattr(record, "head_run", {})
+        run: head_ops.HeadRun | None = None
+        if isinstance(stored, dict) and stored.get("run_id"):
+            try:
+                run = head_ops.HeadRun.from_json(stored)
+            except (head_ops.HeadRunError, head_ops.TaskRefError, TypeError, ValueError):
+                run = None
+        if run is None:
+            # Deliberately not resolved through the catalog: an observation must not fail because
+            # a profile was renamed since this observer started, and nothing an observation reads
+            # depends on the spec. A delivery that does need the adapter is told it explicitly.
+            run = head_ops.HeadRun(
+                run_id=head_ops.new_run_id(),
+                spec=HeadSpec(
+                    profile_id=str(getattr(record, "head", "") or "unknown-observer"),
+                    adapter="unknown",
+                ),
+                workspace=workspace,
+                task_ref=head_ops.TaskRef.sprint(
+                    str(getattr(record, "sprint", "") or "unknown-sprint")
+                ),
+                role=OBSERVER_ROLE,
+                pid_file=str(getattr(record, "pid_file", "") or ""),
+            )
+        return replace(run, workspace=workspace or run.workspace, handle=handle, leaf=leaf)
 
     def observer_provider_progress(self, record: Any) -> dict[str, str]:
         """Read provider progress only from this observer's persisted HeadRun."""
@@ -1559,15 +1599,12 @@ class CommandHostRuntime:
             # is what a launch has always been confirmed by, and it says the same thing about a
             # wake. What stays out of band is the causal acknowledgement, not the delivery: the
             # observer still quotes the delivery id in the resume it writes from this turn.
-            return _deliver_interactive_prompt(
-                current,
-                message,
-                run_json=self._run_json,
-                adapter=adapter,
-                confirm=_turn_started_confirm(
-                    current, workspace, adapter, run_json=self._run_json
+            receipt = self.head_runtime.deliver(
+                replace(self._observer_lifecycle_run(record), handle=current),
+                head_ops.NudgePointer(text=message),
+                transport=self._head_transport(
+                    workspace, adapter=adapter, role=OBSERVER_ROLE, ack_out_of_band=True,
                 ),
-                ack_out_of_band=True,
                 subject="observer-wake",
             )
         except TuiDeliveryError as exc:
@@ -1576,6 +1613,11 @@ class CommandHostRuntime:
             # (terminal identity, payload size and hash, stage, fingerprints) and no prompt text.
             failure.evidence = getattr(exc, "evidence", None)
             raise failure from None
+        if not receipt.ok:
+            failure = HostError(f"observer wake was not delivered: {receipt.reason}")
+            failure.evidence = receipt.evidence
+            raise failure from None
+        return receipt.delivery
 
     def _stop_observer_terminals(
         self,
@@ -1595,15 +1637,26 @@ class CommandHostRuntime:
         """
         if run is not None:
             self._guard_head_run(run, role, pid_file=pid_file, task=task, leaf=leaf)
-        self.session.stop_workspace(workspace)
+        self.head_runtime.stop_workspace(workspace)
 
-    def _close_observer_pane(self, handle: str) -> None:
-        try:
-            _close_tui_terminal_strict(handle, run_json=self._run_json)
-        except HostError:
-            raise
-        except Exception as exc:
-            raise HostError(f"observer terminal close failed: {exc}") from None
+    def _close_observer_pane(self, record: Any, handle: str) -> None:
+        """End an observer that is nothing but a pane handle, through the head runtime.
+
+        The record predates the intent naming a workspace, so there is no worktree to take down and
+        no leaf to re-find the pty by: the handle is the whole of what is left. A run already
+        confirmed gone gets a fresh identity, because the stop must not skip a pane the record still
+        names.
+        """
+        run = self._observer_lifecycle_run(record)
+        if run.settled:
+            run = replace(
+                run, run_id=head_ops.new_run_id(), lifecycle=head_ops.SPAWNED, stopped_by=None,
+            )
+        receipt = self.head_runtime.stop(
+            replace(run, handle=handle, leaf=""), head_ops.StopInitiator(actor=STOPPED_BY_DISPATCHER),
+        )
+        if not receipt.ok:
+            raise HostError(f"observer terminal close failed: {receipt.reason}")
 
     def _observer_run(self, head: str, workspace: str) -> dict[str, Any]:
         try:
@@ -1756,10 +1809,9 @@ class CommandHostRuntime:
                 ingress.poll()
         document, nudge = self._review_document(task, record)
         try:
-            outcome = head_ops.nudge(
+            receipt = self.head_runtime.deliver(
                 run,
                 head_ops.NudgePointer(text=nudge, document=str(document)),
-                host=self.session,
                 transport=self._head_transport(
                     workspace,
                     str(document),
@@ -1769,15 +1821,21 @@ class CommandHostRuntime:
                 ),
                 subject="reviewer-launch",
             )
-        except (head_ops.HeadOperationError, TuiDeliveryError, HostError) as exc:
+        except (TuiDeliveryError, HostError) as exc:
             failure = HostError(f"retained reviewer document nudge was not delivered: {exc}")
             failure.evidence = _delivery_evidence_json(exc, "reviewer-launch")
             raise failure from None
+        if not receipt.ok:
+            failure = HostError(
+                f"retained reviewer document nudge was not delivered: {receipt.reason}"
+            )
+            failure.evidence = _delivery_evidence_json(receipt.failure, "reviewer-launch")
+            raise failure from None
         return {
-            "handle": outcome.run.handle,
-            "leaf": outcome.run.leaf,
-            "head_run": outcome.run.to_json(),
-            "delivery_evidence": _delivery_evidence_json(outcome.delivery, "reviewer-launch"),
+            "handle": receipt.run.handle,
+            "leaf": receipt.run.leaf,
+            "head_run": receipt.run.to_json(),
+            "delivery_evidence": _delivery_evidence_json(receipt.delivery, "reviewer-launch"),
         }
 
     def worker_status(self, task: dict[str, Any], record: DispatcherRecord) -> dict[str, Any]:
@@ -2058,7 +2116,7 @@ class CommandHostRuntime:
         for pid_file, run, kind, leaf in heartbeats:
             self._guard_head_run(run, kind, pid_file=pid_file, leaf=leaf)
         try:
-            self.session.stop_workspace(record.workspace)
+            self.head_runtime.stop_workspace(record.workspace)
         except HostError as exc:
             if "selector_not_found" not in str(exc):
                 raise
@@ -2083,22 +2141,20 @@ class CommandHostRuntime:
     ) -> None:
         """End this card's reviewer through the head operation, recording who ended it."""
         run = self.review_lifecycle_run(record)
-        try:
-            outcome = head_ops.stop(
-                run,
-                head_ops.StopInitiator(actor=initiator),
-                host=self.session,
-                transport=self._head_transport(record.workspace, role="reviewer"),
-                commit=lambda finishing: self._commit_review_run(record, finishing),
-                preflight=lambda current: self._guard_head_run(current, "reviewer"),
-                confirm_gone=lambda path: self._confirm_head_process_gone(
-                    path, run=run, role="reviewer",
-                ),
-            )
-        except head_ops.HeadStopFailed as exc:
+        receipt = self.head_runtime.stop(
+            run,
+            head_ops.StopInitiator(actor=initiator),
+            transport=self._head_transport(record.workspace, role="reviewer"),
+            commit=lambda finishing: self._commit_review_run(record, finishing),
+            preflight=lambda current: self._guard_head_run(current, "reviewer"),
+            confirm_gone=lambda path: self._confirm_head_process_gone(
+                path, run=run, role="reviewer",
+            ),
+        )
+        if not receipt.ok:
             # A preflight mismatch is intentionally uncommitted: that foreign process was never this run.
-            raise HostError(str(exc)) from None
-        self._commit_review_run(record, outcome.run)
+            raise HostError(receipt.reason)
+        self._commit_review_run(record, receipt.run)
 
     def _commit_review_run(self, record: DispatcherRecord, run: head_ops.HeadRun) -> None:
         """Write this reviewer's run onto the record, flushing it when the caller lent us the state.
@@ -2145,22 +2201,20 @@ class CommandHostRuntime:
     ) -> None:
         """End this card's worker through the head operation, recording who ended it."""
         run = self.worker_lifecycle_run(record)
-        try:
-            outcome = head_ops.stop(
-                run,
-                head_ops.StopInitiator(actor=initiator),
-                host=self.session,
-                transport=self._head_transport(record.workspace, role="worker"),
-                commit=lambda finishing: self._commit_worker_run(record, finishing),
-                preflight=lambda current: self._guard_head_run(current, "worker"),
-                confirm_gone=lambda path: self._confirm_head_process_gone(
-                    path, run=run, role="worker",
-                ),
-            )
-        except head_ops.HeadStopFailed as exc:
+        receipt = self.head_runtime.stop(
+            run,
+            head_ops.StopInitiator(actor=initiator),
+            transport=self._head_transport(record.workspace, role="worker"),
+            commit=lambda finishing: self._commit_worker_run(record, finishing),
+            preflight=lambda current: self._guard_head_run(current, "worker"),
+            confirm_gone=lambda path: self._confirm_head_process_gone(
+                path, run=run, role="worker",
+            ),
+        )
+        if not receipt.ok:
             # A failed preflight must leave the persisted HeadRun untouched.
-            raise HostError(str(exc)) from None
-        self._commit_worker_run(record, outcome.run)
+            raise HostError(receipt.reason)
+        self._commit_worker_run(record, receipt.run)
 
     def _commit_worker_run(self, record: DispatcherRecord, run: head_ops.HeadRun) -> None:
         """Write this worker's run onto the record, and flush it if the caller gave us the state.
@@ -2587,52 +2641,50 @@ class CommandHostRuntime:
             # pointer text is the legacy shape, not an empty prompt — that head is sent the prompt
             # file's own contents; a caller with a task document passes the bounded line naming it.
             pointer = head_ops.NudgePointer(text=launch_prompt or "", document=prompt_document)
-        try:
-            outcome = head_ops.spawn(
-                self._head_spec(head, adapter),
-                workspace,
-                task_ref,
-                host=self.session,
-                command=command,
-                title=title,
-                pointer=pointer,
-                pid_file=pid_file,
-                split_from=split_from,
-                transport=self._head_transport(
-                    workspace, prompt_file, adapter, role,
-                    before_send=ingress.bind_before_delivery if ingress is not None else None,
-                ),
-                subject=subject,
-                run_id=run_id,
-                role=role,
-                run=preflight_run,
-                commit=ingress.commit_run if ingress is not None else None,
-            )
-        except head_ops.HeadOperationError as exc:
-            failed_run = getattr(exc, "run", None)
+        receipt = self.head_runtime.start(
+            self._head_spec(head, adapter),
+            workspace,
+            task_ref,
+            command=command,
+            title=title,
+            pointer=pointer,
+            pid_file=pid_file,
+            split_from=split_from,
+            transport=self._head_transport(
+                workspace, prompt_file, adapter, role,
+                before_send=ingress.bind_before_delivery if ingress is not None else None,
+            ),
+            subject=subject,
+            run_id=run_id,
+            role=role,
+            run=preflight_run,
+            commit=ingress.commit_run if ingress is not None else None,
+        )
+        if not receipt.ok:
+            failed_run = receipt.run
             if pid_file and failed_run is not None and failed_run.leaf:
-                # Delivery can refuse with a live pane before `spawn` returns normally. Bind that
-                # pane to the written heartbeat before persisting the failed launch intent.
+                # Delivery can refuse with a live pane before the bring-up returns normally. Bind
+                # that pane to the written heartbeat before persisting the failed launch intent.
                 _bind_head_heartbeat(pid_file, expected=heartbeat, leaf=failed_run.leaf)
-            raise self._launch_failure(exc, workspace, pid_file, subject) from None
+            raise self._launch_failure(receipt.failure, workspace, pid_file, subject) from None
         if pid_file:
             # Pane create gives the leaf after the head wrote its base identity. A best-effort bind
             # is enough: the reader still requires the run, role and task binding to match.
-            _bind_head_heartbeat(pid_file, expected=heartbeat, leaf=outcome.run.leaf)
-        delivery = outcome.delivery
+            _bind_head_heartbeat(pid_file, expected=heartbeat, leaf=receipt.run.leaf)
+        delivery = receipt.delivery
         return self._launched(
-            outcome.run.handle,
+            receipt.run.handle,
             head,
             task,
             role,
             workspace,
             failover,
-            leaf=outcome.run.leaf,
+            leaf=receipt.run.leaf,
             delivery_evidence=(
                 _delivery_evidence_json(delivery, subject) if delivery is not None else {}
             ),
-            head_run=outcome.run.to_json(),
-            fallback_reason=outcome.fallback_reason,
+            head_run=receipt.run.to_json(),
+            fallback_reason=receipt.fallback_reason,
         )
 
     def _head_spec(self, head: str, adapter: str) -> HeadSpec:
@@ -2658,11 +2710,14 @@ class CommandHostRuntime:
         adapter: str = "",
         role: str = "",
         before_send: Callable[[], head_ops.HeadRun | None] | None = None,
+        ack_out_of_band: bool = False,
     ) -> DispatcherHeadTransport:
         """This product's delivery and close semantics, for the operation to perform through
         the host it is running on.
         """
-        return DispatcherHeadTransport(self, workspace, prompt_file, adapter, role, before_send)
+        return DispatcherHeadTransport(
+            self, workspace, prompt_file, adapter, role, before_send, ack_out_of_band,
+        )
 
     @staticmethod
     def _run_heartbeat_identity(run: head_ops.HeadRun, role: str) -> dict[str, str]:
@@ -2778,15 +2833,47 @@ class CommandHostRuntime:
         )
 
     @property
+    def head_runtime(self) -> OrcaLegacyHeadRuntime:
+        """The typed boundary every head lifecycle operation of this dispatcher goes through."""
+        return self._head_runtime
+
+    @property
     def session(self) -> OrcaSessionHost:
-        """The session manager this runtime opens, addresses and closes panes through."""
+        """The session manager this runtime reads a workspace's pane inventory through.
+
+        Not a lifecycle seam any more: starting, delivering to, observing, draining, stopping and
+        attaching to a head all go through `head_runtime`. What is left is the workspace inventory —
+        which panes exist, which are connected — read to choose a split anchor and to answer
+        diagnostics. A read that names no head is not a head's lifecycle.
+        """
         return OrcaSessionHost(self._run_json)
 
-    def _create_terminal(self, workspace: str, title: str, command: str) -> PaneIdentity:
+    def _open_head_pane(
+        self, run: head_ops.HeadRun, title: str, command: str
+    ) -> head_ops.HeadRun:
+        """Bring a head up in a pane of its own, with no prompt delivered by the bring-up.
+
+        The observer is the one head whose delivery contour is its own: it opens the pane, then puts
+        its launch prompt in front of it through the same boundary, so that the two halves can be
+        accounted for separately. `start` with no pointer is exactly that pane and nothing else.
+        """
         try:
-            return self.session.open_pane(workspace, title, command)
+            receipt = self.head_runtime.start(
+                run.spec,
+                run.workspace,
+                run.task_ref,
+                command=command,
+                title=title,
+                pid_file=run.pid_file,
+                run_id=run.run_id,
+                role=run.role,
+                run=run,
+            )
         except PaneHostError as exc:
             raise HostError(str(exc)) from None
+        if not receipt.ok:
+            raise HostError(receipt.reason)
+        return receipt.run
 
     def _split_anchor(self, record: DispatcherRecord) -> str:
         """Pane to split the reviewer off. The worker's own pane when it is still connected, so
@@ -3026,10 +3113,9 @@ class CommandHostRuntime:
         """
         run = self.worker_lifecycle_run(record)
         try:
-            outcome = head_ops.nudge(
+            receipt = self.head_runtime.deliver(
                 run,
                 pointer,
-                host=self.session,
                 transport=self._head_transport(
                     record.workspace, "TASK.md",
                     self._prompt_adapter(record.worker_run, record.head),
@@ -3037,16 +3123,16 @@ class CommandHostRuntime:
                 ),
                 subject=subject,
             )
-        except head_ops.HeadOperationError as exc:
-            failure = HostError(f"{what} was not delivered: {exc}")
-            failure.evidence = getattr(exc, "evidence", None)
-            raise failure from None
         except (TuiDeliveryError, HostError) as exc:
             failure = HostError(f"{what} was not delivered: {exc}")
             failure.evidence = getattr(exc, "evidence", None)
             raise failure from None
-        record.worker_head_run = outcome.run.to_json()
-        _record_worker_delivery_evidence(record, outcome.delivery)
+        if not receipt.ok:
+            failure = HostError(f"{what} was not delivered: {receipt.reason}")
+            failure.evidence = receipt.evidence
+            raise failure from None
+        record.worker_head_run = receipt.run.to_json()
+        _record_worker_delivery_evidence(record, receipt.delivery)
 
     def _set_worker_branch(self, workspace: str, branch: str) -> None:
         if self.mode == "noop":

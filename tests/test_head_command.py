@@ -585,13 +585,23 @@ class SeamGrepTests(unittest.TestCase):
     def test_a_workspace_stop_is_a_session_host_verb(self) -> None:
         """Criterion 3: the dispatcher's two by-worktree stops go through the host like every
         other pane command. It stays a stop of the whole worktree — a caller that can no longer
-        name a head — and is deliberately not `head_ops.stop`, which ends one named head."""
+        name a head — and is deliberately not `head_ops.stop`, which ends one named head.
+
+        Since secretary-1461 the call is spelled on the head runtime rather than on the session host
+        directly, because that boundary is where every session call for a head's life now lives. The
+        claim is unchanged and is asserted on both halves: the dispatcher makes the two by-worktree
+        stops through the runtime, and the runtime makes them through the `SessionHost` verb.
+        """
+        from triggered_agents.runtime import orca_legacy_head
         from triggered_agents.runtime.pane_host import SessionHost
 
         self.assertIn("stop_workspace", dir(SessionHost))
         source = (REPO_ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
-        self.assertIn("self.session.stop_workspace(workspace)", source)
-        self.assertIn("self.session.stop_workspace(record.workspace)", source)
+        self.assertIn("self.head_runtime.stop_workspace(workspace)", source)
+        self.assertIn("self.head_runtime.stop_workspace(record.workspace)", source)
+        self.assertNotIn("head_ops.stop(", source)
+        runtime_source = Path(orca_legacy_head.__file__).read_text(encoding="utf-8")
+        self.assertIn("self.host.stop_workspace(workspace)", runtime_source)
 
 
 if __name__ == "__main__":

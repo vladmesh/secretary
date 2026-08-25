@@ -8,7 +8,9 @@ three operations hand each other. Four things about it are decisions rather than
     about the pane can move, and `rebound` puts the new handle on the same run;
   * **the lifecycle is four states and moves one way.** `spawned` has a pane, `working` has been
     given its task, `finishing` is one somebody has asked to stop, and `exited` is one whose stop
-    was confirmed. A record in `finishing` is a stop begun and not confirmed;
+    was confirmed. A record in `finishing` is a stop begun and not confirmed. All four are history:
+    none of them says what the head is doing right now, and `working` in particular is not a busy
+    flag -- `HeadRuntime` owns the turn lease and the activity epoch that answer that;
   * **who stopped it is recorded, and before the stop happens.** `finishing` cannot be entered
     without an initiator. The first initiator is also the one that stays, because a refused stop
     is retried by later ticks through other paths, so `finishing` is idempotent;
@@ -26,7 +28,10 @@ from .task_ref import TaskRef
 
 # A head that has a pane and has not been given its task yet.
 SPAWNED = "spawned"
-# A head its task has been delivered to.
+# A head its task has been delivered to. A historical fact and only that: it says a delivery
+# happened, never that a turn is running now. Whether a head is busy this second is a `TurnLease`
+# and an activity epoch on the runtime (`runtime.HeadActivity`), because a record read back from
+# disk a tick later cannot answer a question about the present.
 WORKING = "working"
 # A head somebody has asked to stop; its initiator is on the run from this state on.
 FINISHING = "finishing"
@@ -185,7 +190,12 @@ class HeadRun:
         return replace(self, handle=handle, leaf=leaf or self.leaf)
 
     def working(self) -> HeadRun:
-        """This head has been given its task."""
+        """This head has been given its task, which is a fact about the past and stays true.
+
+        Not a statement that a turn is running. A caller asking whether this head is busy asks its
+        runtime, which holds the lease that was granted for the turn and the epoch that moves when
+        the head is seen doing something; this value is still `working` long after that turn ended.
+        """
         if self.lifecycle in (FINISHING, EXITED):
             raise HeadRunError(f"a head in {self.lifecycle} is not given more work")
         return replace(self, lifecycle=WORKING)
