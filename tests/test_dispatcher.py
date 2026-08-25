@@ -72,6 +72,14 @@ from secretary.dispatcher_launch import (
     bring_up_failure_class,
     classify_bring_up_failure,
 )
+from secretary.projects.contract import (
+    CANNOT_ATTEST_PROJECT,
+    CONTRACT_REFUSALS,
+    UNDECIDABLE_NO_REGISTERED_PROJECT,
+    UNDECIDABLE_PROJECT_UNAVAILABLE,
+    UNDECIDABLE_RELATIVE_INTERPRETER,
+    ContractVerdict,
+)
 from secretary.dispatcher_launcher import (
     claude_launch_model,
     ensure_claude_workspace_ready,
@@ -6619,6 +6627,208 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.tick()
         self.assertEqual(self.host.calls.count("prepare_worker"), 1)
         self.assertEqual(self.reader.show("secretary-510-pilot")["state"], "blocked")
+
+    # --- secretary-1458: the contract preflight, before a card is given to a worker at all -----
+
+    def _refused_contract(self, shape: str) -> str:
+        """Make this card's registered project one nobody can broad-check, and say why.
+
+        The board state at the moment the preflight is asked is recorded too: that is the property
+        AC1 is about, and the only way to see it from outside is to look while the question is
+        being answered.
+        """
+        message = f"adapter 'secretary' is unusable for this project ({shape})"
+        self.catalog.broad_check_state = ContractVerdict.as_refused(shape, "secretary", message)
+        self._watch_the_preflight()
+        return message
+
+    def _watch_the_preflight(self) -> None:
+        """Record what the board and the host looked like each time the verdict was asked for."""
+        self.asked_while = []
+        self.catalog.broad_check_probe = lambda project: self.asked_while.append(
+            (project, self.reader.show(CARD_REF)["state"], list(self.host.calls))
+        )
+
+    def _events_between_claim_and_block(self) -> list[dict]:
+        """Everything the audit recorded strictly between this card's claim and its block."""
+        events = self.audit_events()
+        targets = [
+            index for index, event in enumerate(events)
+            if event.get("record_type") == "board.protocol_event"
+            and (event.get("transition") or {}).get("target") in ("in_progress", "blocked")
+            and str(event.get("ref") or "").endswith(CARD_REF)
+        ]
+        self.assertEqual(len(targets), 2, "the card was claimed once and blocked once")
+        return events[targets[0] + 1:targets[1]]
+
+    def _preflight_blocked(self, shape: str = CANNOT_ATTEST_PROJECT) -> dict:
+        self._refused_contract(shape)
+        self.start_dispatcher()
+        return self.tick()
+
+    def test_every_unusable_contract_shape_stops_the_card_before_it_is_claimed(self) -> None:
+        """AC1/AC2/AC3: the refusal is read off the registry, and nothing is spent finding it.
+
+        Each shape gets a fresh fixture, because a card is only ever handed out once.
+        """
+        for index, shape in enumerate(CONTRACT_REFUSALS):
+            with self.subTest(shape=shape):
+                if index:
+                    self.tearDown()
+                    self.setUp()
+                message = self._refused_contract(shape)
+                self.start_dispatcher()
+
+                blocked = self.tick()
+
+                self.assertEqual(blocked["status"], "blocked")
+                self.assertEqual(blocked["step"], "contract-preflight")
+                self.assertEqual(blocked["failure_class"], FAILURE_CLASS_INFRASTRUCTURE)
+                self.assertEqual(
+                    blocked["contract_refusal"],
+                    {"shape": shape, "adapter": "secretary", "detail": message},
+                    "the evidence names the adapter and the exact form of the refusal",
+                )
+                # The card reads the same as the tick, and names what is missing in the adapter.
+                task = self.reader.show(CARD_REF)
+                self.assertEqual(task["state"], "blocked")
+                reason = task["comments"][-1]["body"]
+                self.assertIn(message, reason)
+                self.assertIn(shape, reason)
+                self.assertIn(f"class={FAILURE_CLASS_INFRASTRUCTURE}", reason)
+                self.assertTrue(reason.endswith(blocked["failure_reason"]))
+                # AC1: the decision was made off the registry alone, with the card still in
+                # Ready and the host untouched — not after the claim, where finding it would
+                # already have cost what this card exists to save.
+                self.assertEqual(
+                    self.asked_while, [("secretary", "ready", [])],
+                    "the contract was resolved before the card was claimed and before any host "
+                    "call, exactly once",
+                )
+                # And the claim is a door, not a round: the board protocol gives the dispatcher no
+                # Ready-to-Blocked edge, so the outcome has to be written from a claimed card —
+                # but nothing at all happens in between, so there is no window in which the card
+                # sits In progress without the outcome that belongs to it.
+                self.assertEqual(
+                    self._events_between_claim_and_block(), [],
+                    "no workspace, no head, no comment, no other work between claim and outcome",
+                )
+                # AC3: no round was spent. No workspace was restored, no head was brought up and
+                # no worker was ever handed the card.
+                self.assertEqual(self.host.calls, [], "the host was never asked for anything")
+                self.assertEqual(self.host.prepared, [], "no workspace")
+                self.assertEqual(self.runtime.production_state.load()["records"], {})
+                self.assertFalse((self.data_dir / "workspaces").exists())
+
+    def test_the_preflight_block_is_the_infrastructure_class_the_budget_reads(self) -> None:
+        """AC2: not a new branch — the class is in the transition, where the budget already looks."""
+        blocked = self._preflight_blocked()
+
+        transition = self._blocked_transition()
+        self.assertEqual(
+            bring_up_failure_class(transition["request_id"]), FAILURE_CLASS_INFRASTRUCTURE
+        )
+        self.assertIn(blocked["bring_up"]["attempt_id"], transition["request_id"])
+        self.assertEqual(
+            [_budget_event_type(event) for event in self.audit_events()
+             if _budget_event_type(event) is not None],
+            [BUDGET_UNCHARGED_INFRASTRUCTURE],
+            "the sprint is not charged for a card the installation could not check",
+        )
+
+    def test_the_dispatcher_does_not_retry_a_card_with_no_usable_contract(self) -> None:
+        """AC2: a block is not a retry. The card waits for the adapter to be repaired by a person."""
+        self._preflight_blocked()
+
+        again = self.tick()
+
+        self.assertEqual(again["action"], "terminal-state")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
+        self.assertEqual(self.host.prepared, [])
+        self.assertEqual(
+            len([
+                event for event in self.audit_events()
+                if event.get("record_type") == "board.protocol_event"
+                and event.get("transition", {}).get("target") == "blocked"
+            ]),
+            1,
+            "one block, not one per tick",
+        )
+
+    def test_a_project_whose_contract_attests_it_is_claimed_exactly_as_before(self) -> None:
+        """AC4 and the `fit` state, the regression that would stop this very sprint.
+
+        The pilot project is Secretary, whose adapter declares no `broad_check` — as no adapter in
+        the live installation does — so it is dispatched on the legacy default, and that default
+        does attest a Secretary checkout.
+        """
+        self._watch_the_preflight()
+        self.start_dispatcher()
+
+        claimed = self.tick()
+
+        self.assertEqual(claimed["step"], "claim")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "in_progress")
+        self.assertEqual(self.host.prepared, [CARD_REF])
+        self.assertIsNone(self.catalog.broad_check_state, "the fixture answered `fit`")
+        self.assertEqual(
+            [state for _, state, _ in self.asked_while], ["ready"],
+            "and it was asked before the claim, exactly as a refusal is",
+        )
+
+    def test_an_undecidable_contract_issues_the_card_and_says_so_by_name(self) -> None:
+        """AC6, the third state: `undecidable` is a decision with a name, not a silence.
+
+        A relative interpreter is resolved from the candidate workspace, which does not exist at
+        preflight. The observer settled that this resolves in favour of the documented
+        compatibility promise rather than of saving the round: the card is issued, and the side
+        that will hold the tree answers the question there. What is asserted here is that the
+        dispatcher reaches that outcome through the named state — the same path a `fit` takes —
+        and not through a branch that lets an unanswered question pass as approval.
+        """
+        cases = {
+            UNDECIDABLE_RELATIVE_INTERPRETER: "resolved from the candidate workspace",
+            UNDECIDABLE_NO_REGISTERED_PROJECT: "no registered project",
+            UNDECIDABLE_PROJECT_UNAVAILABLE: "could not be read",
+        }
+        for index, (question, detail) in enumerate(cases.items()):
+            with self.subTest(question=question):
+                if index:
+                    self.tearDown()
+                    self.setUp()
+                self.catalog.broad_check_state = ContractVerdict.as_undecidable(
+                    question, "secretary", detail
+                )
+                self._watch_the_preflight()
+                self.start_dispatcher()
+
+                claimed = self.tick()
+
+                self.assertEqual(claimed["step"], "claim", "the card goes to work")
+                self.assertEqual(self.reader.show(CARD_REF)["state"], "in_progress")
+                self.assertEqual(self.host.prepared, [CARD_REF])
+                self.assertNotIn("contract_refusal", claimed)
+                self.assertEqual(
+                    self.reader.show(CARD_REF)["state"], "in_progress",
+                    "no card is blocked on a question nobody was in a position to answer",
+                )
+                self.assertEqual([state for _, state, _ in self.asked_while], ["ready"])
+
+    def test_an_unreadable_contract_state_is_never_a_default_allow(self) -> None:
+        """The hole this card kept re-growing: "nothing came back, so the card may go".
+
+        There is no such branch left. The dispatcher's decision is exhaustive over the three named
+        states, and a verdict it does not recognise stops the pass instead of being waved through.
+        """
+        self.start_dispatcher()
+        self.catalog.broad_check_state = ContractVerdict(state="who-knows", adapter="secretary")
+
+        with self.assertRaises(HostError) as caught:
+            self.tick()
+
+        self.assertIn("who-knows", str(caught.exception))
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "ready", "not claimed either")
+        self.assertEqual(self.host.prepared, [])
 
     def test_a_worker_bringup_this_cards_own_checkout_broke_stays_a_task_outcome(self) -> None:
         """The other half: a checkout this card's claim recorded and that is no longer there is not

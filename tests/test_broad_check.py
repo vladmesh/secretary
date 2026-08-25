@@ -1094,6 +1094,50 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
                     "source": "legacy_default", "reason": reason,
                 })
 
+    def test_a_legacy_default_that_cannot_attest_this_project_is_refused_before_any_run(self) -> None:
+        """secretary-1458: the worker asks the same rules the dispatcher's preflight asked.
+
+        A registered project whose adapter declares no `broad_check` inherits Secretary's own
+        default, which imports `secretary`. Where the checkout is not Secretary's sources, that
+        check attests an installed copy of another project and nothing about this one, so it is
+        refused here rather than run to a meaningless green.
+        """
+        shutil.rmtree(self.root / "secretary")
+        (self.root / "codegen_orchestrator").mkdir()
+        (self.root / "codegen_orchestrator" / "__init__.py").write_text("", encoding="utf-8")
+        (self.root / "project_suite.py").write_text("print('suite')\n", encoding="utf-8")
+        _git(self.root, "add", "-A")
+        _git(self.root, "commit", "-q", "-m", "a project that is not Secretary")
+        no_contract = Path(self.tmpdir.name) / "no-contract"
+        (no_contract / "projects").mkdir(parents=True)
+        (no_contract / "adapters").mkdir()
+        (no_contract / "projects" / "example.yaml").write_text(
+            f"id: example\nrepo: {self.root}\nadapter: example\nenabled: true\n", encoding="utf-8"
+        )
+        (no_contract / "adapters" / "example.yaml").write_text(
+            "setup:\n  commands: ['true']\n"
+            "smoke:\n  command: 'true'\n"
+            "validation:\n  ci: github\n"
+            "artifact_policy:\n  write_project_files: false\n",
+            encoding="utf-8",
+        )
+        argv = [
+            "check", "broad", "--root", str(self.root), "--instance", str(no_contract),
+            "--module", "project_suite",
+        ]
+        stdout, stderr = StringIO(), StringIO()
+
+        with mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
+            status = main(argv)
+
+        self.assertEqual(status, 2)
+        self.assertEqual(stdout.getvalue(), "", "no receipt document: nothing ran")
+        error = json.loads(stderr.getvalue())["error"]
+        self.assertEqual(error["code"], "invalid_project_adapter")
+        self.assertIn("secretary", error["message"])
+        self.assertIn(str(self.root), error["message"])
+        self.assertFalse(broad_check.receipt_dir(self.root).exists())
+
     def test_installed_copy_inside_configured_venv_is_not_candidate_provenance(self) -> None:
         # A src-layout project has no top-level package directory for cwd to win. Its configured
         # venv may import an installed copy under the candidate, which must not become reusable.

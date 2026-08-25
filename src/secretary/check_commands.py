@@ -33,25 +33,17 @@ from secretary.broad_check import (
     summarize,
     usable_receipt,
 )
-from secretary.config import ConfigError, load_config, validate
+from secretary.config import ConfigError, load_config
 from secretary.onboarding import DEFAULT_INSTANCE
+from secretary.projects.contract import (
+    LEGACY_IMPORT_PACKAGE,
+    ContractUnusable,
+    ModuleContract,
+    module_contract,
+)
 
 
 _GIT_TIMEOUT = 60
-
-
-class ModuleContract:
-    """The adapter-owned module-check runtime, plus any legacy-default diagnosis."""
-
-    def __init__(self, interpreter: str, import_package: str, reason: str = "") -> None:
-        self.interpreter = interpreter
-        self.import_package = import_package
-        self.reason = reason
-
-    def as_dict(self) -> dict[str, str]:
-        if self.reason:
-            return {"source": "legacy_default", "reason": self.reason}
-        return {"source": "adapter"}
 
 
 class ResolvedCheck:
@@ -139,39 +131,24 @@ def _spec(args: argparse.Namespace) -> ResolvedCheck:
 
 
 def _module_contract(root: Path, instance: Path) -> ModuleContract:
-    """Return the registered project's explicit module-check contract, or the legacy default.
+    """Return the registered project's usable module-check contract, or the legacy default.
 
     A worker's checkout is normally a git worktree, not the registered checkout itself. Comparing
     git common directories identifies the registered repository without guessing from its files;
     an ordinary unregistered checkout keeps the long-standing Secretary default for direct use.
+
+    A registered project's contract is judged by `projects.contract`, the one implementation of
+    those rules, and the dispatcher's preflight asks it the same question before a card is ever
+    given to a worker (secretary-1458). This side maps its refusal onto the CLI error contract and
+    never re-decides what a usable contract is.
     """
     binding, fallback_reason = _binding_for_workspace(root, instance)
     if binding is None:
-        return ModuleContract(sys.executable, "secretary", fallback_reason)
-    adapter_name = binding.get("adapter")
-    if not isinstance(adapter_name, str) or not adapter_name:
-        raise BroadCheckError("invalid_project_adapter", "registered project has no adapter")
+        return ModuleContract(sys.executable, LEGACY_IMPORT_PACKAGE, fallback_reason)
     try:
-        adapter = load_config(instance / "adapters" / f"{adapter_name}.yaml")
-    except ConfigError as exc:
-        raise BroadCheckError("invalid_project_adapter", f"adapter {adapter_name!r} is unavailable") from exc
-    if not isinstance(adapter, dict) or validate(adapter, "adapter", f"{adapter_name}.yaml"):
-        raise BroadCheckError("invalid_project_adapter", f"adapter {adapter_name!r} is invalid")
-    configured = adapter.get("broad_check")
-    if configured is None:
-        return ModuleContract(sys.executable, "secretary", "adapter_missing_broad_check")
-    if not isinstance(configured, dict):  # schema validation above normally catches this.
-        raise BroadCheckError("invalid_project_adapter", f"adapter {adapter_name!r} has no broad-check contract")
-    interpreter = str(configured.get("interpreter") or "").strip()
-    import_package = str(configured.get("import_package") or "").strip()
-    if not interpreter or not import_package:
-        raise BroadCheckError("invalid_project_adapter", f"adapter {adapter_name!r} has no broad-check contract")
-    interpreter_path = Path(interpreter)
-    if not interpreter_path.is_absolute():
-        # Keep a venv's symlink spelling. Resolving the final component would turn
-        # `.venv/bin/python` into the base interpreter and discard that environment's site paths.
-        interpreter = str(root.resolve() / interpreter_path)
-    return ModuleContract(interpreter, import_package)
+        return module_contract(binding, instance=instance, project_root=root)
+    except ContractUnusable as exc:
+        raise BroadCheckError(exc.code, exc.message) from exc
 
 
 def _binding_for_workspace(root: Path, instance: Path) -> tuple[dict[str, object] | None, str]:

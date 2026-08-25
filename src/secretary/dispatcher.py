@@ -121,6 +121,7 @@ from secretary.dispatcher_launch import (
     STAGE_RESPAWN,
     STAGE_REWORK,
     WORKER_ROLE,
+    BringUpFailure,
 )
 from secretary.dispatcher_launch import (
     bring_up_blocked_action as _bring_up_blocked_action,
@@ -396,6 +397,16 @@ from secretary.head_health import (
 )
 from secretary.head_registry import HeadRegistryConfigError, installed_heads
 from secretary.observer_root import OBSERVER_REPO_NAME, observer_root_repo
+from secretary.projects.contract import (
+    CONTRACT_FIT,
+    CONTRACT_REFUSED,
+    CONTRACT_UNDECIDABLE,
+    UNDECIDABLE_NO_REGISTERED_PROJECT,
+    UNDECIDABLE_PROJECT_UNAVAILABLE,
+    ContractUnusable,
+    ContractVerdict,
+)
+from secretary.projects.contract import decide as _decide_broad_check_contract
 from secretary.routing_journal import (
     HEAD_FROM_CARD,
     HEAD_FROM_FALLBACK,
@@ -606,6 +617,22 @@ class InstanceCatalog:
         if not loaded:
             raise HostError(f"adapter {adapter!r} is unavailable")
         return loaded
+
+    def broad_check_verdict(self, project: str) -> ContractVerdict:
+        """This project's broad-check contract as one of the three named states (secretary-1458).
+
+        The rules are `projects.contract`'s, the same implementation the worker's own
+        `secretary check broad --module` resolves through, so a card is never handed out on a
+        contract the worker would then refuse. Reading the binding and the adapter beside it is
+        all this costs: no workspace, no head, no process. There is no candidate workspace at this
+        point, so `workspace=None`: a question that needs one comes back as `undecidable` with its
+        name on it rather than as an approval this side is not entitled to give.
+        """
+        binding = self.binding(project)
+        repo = Path(str(binding.get("repo") or "")).expanduser()
+        return _decide_broad_check_contract(
+            binding, instance=self.instance_dir or Path("."), project_root=repo, workspace=None
+        )
 
     def default_branch(self, project: str, override: str | None) -> str:
         if override:
@@ -3776,6 +3803,141 @@ class DispatcherRuntime:
             request_id=_attempt_request_id(attempt_id, "head-failover-comment", ref),
         )
 
+    def _broad_check_contract_verdict(self, task: dict[str, Any]) -> ContractVerdict:
+        """This card's broad-check contract, as one of the three named states (secretary-1458).
+
+        Offline and cheap: the binding and the adapter beside it, read before anything is claimed.
+        Every way of not getting an answer is a named state rather than a fall-through, because a
+        fall-through is what "nothing came back, so the card may go" was made of. A card that names
+        no registered project, and a project this installation cannot look up at all, are open
+        questions about the registry — the paths that need the binding fail on it in their own
+        words — and they are returned as such, not as approval.
+        """
+        project = str(task.get("project") or "")
+        if not project:
+            return ContractVerdict.as_undecidable(
+                UNDECIDABLE_NO_REGISTERED_PROJECT, "",
+                f"card {task.get('ref')!r} names no registered project, so it has no adapter and "
+                "no broad-check contract to judge",
+            )
+        try:
+            return self.catalog.broad_check_verdict(project)
+        except HostError as exc:
+            return ContractVerdict.as_undecidable(
+                UNDECIDABLE_PROJECT_UNAVAILABLE, "",
+                f"registered project {project!r} could not be read: {exc}",
+            )
+
+    def _contract_preflight_decision(
+        self, task: dict[str, Any], verdict: ContractVerdict, *, attempt_id: str,
+        head: str, review_head: str,
+    ) -> tuple[BringUpFailure, str, ContractUnusable] | None:
+        """What the verdict buys this card: the outcome that stops it, or None to issue it.
+
+        Exhaustive over the three states by name, with no default branch that lets an unrecognised
+        answer through as permission. Which state buys what is `projects.contract`'s decision and
+        is only carried out here:
+
+        * `refused` stops the card before it is issued — that is the guarantee the card exists for;
+        * `undecidable` issues it, because the open question is a documented compatibility promise
+          (a relative interpreter is resolved from a workspace that does not exist yet) and the
+          side that will hold that tree answers it there. It is a decision with a name, not the
+          absence of one;
+        * `fit` issues it, as always.
+        """
+        if verdict.state == CONTRACT_REFUSED and verdict.refusal is not None:
+            failure, reason = self._contract_preflight_outcome(
+                task, attempt_id=attempt_id, head=head, review_head=review_head,
+                refusal=verdict.refusal,
+            )
+            return failure, reason, verdict.refusal
+        if verdict.state in (CONTRACT_FIT, CONTRACT_UNDECIDABLE):
+            return None
+        raise HostError(f"unreadable broad-check contract verdict {verdict.state!r}")
+
+    def _contract_preflight_outcome(
+        self,
+        task: dict[str, Any],
+        *,
+        attempt_id: str,
+        head: str,
+        review_head: str,
+        refusal: ContractUnusable,
+    ) -> tuple[BringUpFailure, str]:
+        """The typed infrastructure outcome for a card nobody can broad-check, decided before claim.
+
+        Pure: it turns the refusal the preflight already read off the registry into the class, the
+        evidence and the card's Blocked reason, and touches neither the board, the host nor the
+        filesystem. That is what lets the claim and the transition it is the door to stand next to
+        each other with nothing that can fail in between.
+
+        This is the same outcome a bring-up that produced no head carries, made by the same
+        classifier and written with the same durable action token: an installation whose registry
+        cannot supply a usable contract is a failure of the host, not a verdict about the card. The
+        two properties the card must have follow from that token alone rather than from anything
+        here — the sprint budget reads it and counts the block as uncharged, and a block is not a
+        retry, so no new attempt is opened and nothing is scheduled to come back.
+        """
+        detail = (
+            f"the broad-check contract of registered project {task.get('project')!r} cannot "
+            f"attest this card: {refusal.detail()}"
+        )
+        # The card has no record and will get none. The classifier reads one only to count the
+        # bring-up attempts of a pane that was never ready, which this failure is not; the claim's
+        # own identity is what the outcome carries.
+        unclaimed = DispatcherRecord(
+            worker=_worker_id(task), workspace="", handle="", head=head, review_head=review_head,
+            attempt_id=attempt_id, comment_baseline=0, review_baseline=0, state="", claimed_at=0.0,
+        )
+        failure = _classify_bring_up_failure(
+            None, unclaimed, WORKER_ROLE, stage=STAGE_CLAIM, attempt_id=attempt_id, detail=detail,
+        )
+        reason = (
+            "the card was not given to a worker: this project's broad-check contract cannot "
+            f"attest it, so no workspace and no head were created. {detail}\n{failure.clause()}"
+        )
+        return failure, reason
+
+    def _contract_preflight_blocked(
+        self,
+        ref: str,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        *,
+        attempt_id: str,
+        refusal: ContractUnusable,
+        failure: BringUpFailure,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Write the outcome decided before the claim, immediately after it.
+
+        Nothing is computed here and nothing is read: the transition is the first statement made
+        about the claimed card, and the dispatcher's own bookkeeping only follows it.
+        """
+        self.writer.move(
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            target="blocked",
+            reason=reason,
+            request_id=_attempt_request_id(
+                attempt_id,
+                _bring_up_blocked_action("contract-preflight-blocked", failure),
+                ref,
+            ),
+        )
+        records.pop(ref, None)
+        self.save_records(payload, records)
+        return {
+            "status": "blocked",
+            "step": "contract-preflight",
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "reason": "broad-check contract preflight failed",
+            "contract_refusal": refusal.evidence(),
+            **failure.outcome_fields(reason),
+        }
+
     def _claim(
         self,
         task: dict[str, Any],
@@ -3809,6 +3971,12 @@ class DispatcherRuntime:
             return dict(collapse, pilot_ref=ref)
         head = worker_choice.head
         review_head = review_choice.head or review_choice.preferred
+        # Beside the head preflight, and for the same reason: whether this card's registered
+        # project can be broad-checked at all is a question about the installation's registry, not
+        # about anything a claim creates, so it is answered here — off the binding and the adapter,
+        # with the card still in Ready and nothing spent (secretary-1458). It is asked after the
+        # heads only because a claim this dispatcher cannot make at all decides nothing.
+        contract_verdict = self._broad_check_contract_verdict(task)
         # A card the dispatcher still holds a record for, back in Ready with its claim already
         # committed under the current attempt, is a re-run. An attempt id otherwise lives as long as
         # the record, so the claim would replay idempotently, return the old event and leave the card
@@ -3825,6 +3993,8 @@ class DispatcherRuntime:
                 "worker-respawn-blocked",
                 "worker-wait-stall",
                 "rework-blocked",
+                # The contract preflight's own block, which a repaired adapter brings back to Ready.
+                "contract-preflight-blocked",
                 "gate-blocked",
                 "gate-red-blocked",
                 "gate-pending-stall",
@@ -3866,6 +4036,15 @@ class DispatcherRuntime:
             payload["attempt_id"] = attempt_id
         claim_request_id = _attempt_request_id(attempt_id, "claim", ref)
         worker_id = _worker_id(task)
+        # Everything a refusal's outcome needs is built here, before the claim: the class, the
+        # evidence and the card's reason are a pure reading of what the verdict already said.
+        # The board protocol gives the dispatcher no Ready-to-Blocked edge, so the claim is the
+        # only door to recording an outcome — and it is a door, not a round. Between it and the
+        # transition below there is no step that can fail and leave the card In progress with no
+        # outcome on it.
+        contract_outcome = self._contract_preflight_decision(
+            task, contract_verdict, attempt_id=attempt_id, head=head, review_head=review_head,
+        )
         self.writer.claim(
             role="dispatcher",
             actor=self.owner,
@@ -3877,6 +4056,12 @@ class DispatcherRuntime:
             base_branch=task.get("workspace", {}).get("base_branch") or "",
             request_id=claim_request_id,
         )
+        if contract_outcome is not None:
+            failure, blocked_reason, refusal = contract_outcome
+            return self._contract_preflight_blocked(
+                ref, records, payload,
+                attempt_id=attempt_id, refusal=refusal, failure=failure, reason=blocked_reason,
+            )
         # Before the card is read back, so the comment is inside the baseline the record takes: a
         # failover head is written onto the card, where the reviewer and the observer read it.
         self._comment_head_failover(ref, attempt_id, worker_choice, review_choice)
