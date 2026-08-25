@@ -49,8 +49,8 @@ init while staying addressable through its socket and its pid file. The head its
 a pty by the supervisor, which puts it in a session of its own with the pty as its controlling
 terminal, so a signal sent to the dispatcher's process group cannot reach it.
 
-**And the terminal it is given is a non-canonical one.** This is the last decision of the route and
-the one with the least room in it. A pty's default line discipline is canonical: it buffers a line,
+**And the terminal it is given is a non-canonical one.** This is the decision with the least room in
+it. A pty's default line discipline is canonical: it buffers a line,
 caps that line at 4095 bytes and discards the rest with no error, no blocking and no sign to the
 writer. A substrate that declares a 64 KiB input limit on top of that discipline has not declared a
 limit at all — the real one is 4095 bytes, unnamed and silent, which is exactly the shape of the
@@ -62,6 +62,19 @@ buffer with `EAGAIN` instead of a silent truncation, so a delivery of any size u
 arrives whole. The mode is set on the pty before the head exists, which closes the window between
 `exec` and an interactive adapter's own `termios` call; an adapter that wants a different mode
 still sets one for itself.
+
+**And a delivery is admitted, not awaited.** The last decision of the route, and the one this card
+made twice. A payload at the input limit does not fit in a pty's buffer, so it can only move as
+fast as the head reads it — and the first answer to that was to finish the write inside the request
+handler, so that the answer and the journal both described bytes that had really landed. The
+accounting was right and the shape was wrong: a single-threaded loop that waits for the head inside
+a request handler stops answering *everybody* for as long as the head is slow, which makes a
+supervisor that cannot say what it is doing — the one thing this substrate exists to prevent. So
+the accounting stays and the waiting goes: `input` accepts or refuses within the loop's own tick,
+the loop writes the payload as the terminal takes it, `input.accepted` is written when the bytes
+land and counts only those, and how far a delivery got is state (`status`, and the journal) that a
+caller reads when it wants to. Answerability is older than completeness: a supervisor that admits a
+delivery is unfinished is better than one that cannot be asked.
 
 ## Identity is the existing launch identity
 
@@ -99,7 +112,9 @@ from .journal import (
 from .protocol import (
     ATTACH_MAX_CLIENTS,
     CONNECTION_MAX_CLIENTS,
+    DELIVERY_STATES,
     FRAME_MAX_BYTES,
+    INPUT_DELIVERY_SECONDS,
     INPUT_MAX_BYTES,
     OUTPUT_BUFFER_BYTES,
     ProtocolError,
@@ -109,11 +124,13 @@ from .protocol import (
 __all__ = [
     "ATTACH_MAX_CLIENTS",
     "CONNECTION_MAX_CLIENTS",
+    "DELIVERY_STATES",
     "DRAIN_REQUESTED",
     "EVENT_KINDS",
     "FRAME_MAX_BYTES",
     "HeadHandle",
     "INPUT_ACCEPTED",
+    "INPUT_DELIVERY_SECONDS",
     "INPUT_MAX_BYTES",
     "JOURNAL_SCHEMA_VERSION",
     "JournalError",

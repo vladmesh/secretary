@@ -10,7 +10,10 @@ addressable afterwards. It does four things and refuses to do a fifth:
     The terminal is sized and taken out of canonical mode before the head exists, so the head never
     observes a half-configured one;
   * it **holds the head's addressable surface**: a Unix socket at a predictable path, owner-only,
-    with bounded input, bounded output and bounded attach. Every bound refuses by name;
+    with bounded input, bounded output and bounded attach. Every bound refuses by name, and no
+    request on that socket ever waits for the head: a delivery is admitted or refused on the spot
+    and then written by this loop, so a head that has stopped reading its terminal changes what
+    `status` says about the delivery and changes nothing about how long anybody is answered in;
   * it **narrates the run** into the versioned append-only journal beside the socket;
   * it **reaps the head**, tells its own death apart from the head's, and writes `run.exited` with
     the exit code or the signal. When the head is gone the socket goes with it: nothing holds an
@@ -30,7 +33,6 @@ import fcntl
 import json
 import os
 import pty
-import select
 import selectors
 import signal
 import socket
@@ -72,15 +74,19 @@ LOOP_TICK_SECONDS = 0.1
 FAREWELL_SECONDS = 0.5
 _READ_CHUNK = 65536
 #: Indices into the list `termios.tcgetattr` returns, named rather than counted at the call site.
+_IFLAG = 0
 _LFLAG = 3
 _CC = 6
 
 EXIT_OK = 0
 EXIT_STARTUP_FAILED = 2
 EXIT_ALREADY_RUNNING = 3
+#: A run that was up and then lost its supervisor. Distinct from a startup failure on purpose.
+EXIT_RUN_FAILED = 4
 
 START_ALREADY_RUNNING = "already_running"
 START_FAILED = "startup_failed"
+RUN_FAILED = "run_failed"
 
 
 class SupervisorStartupError(RuntimeError):
@@ -106,6 +112,51 @@ class _Client:
         self.dropped = 0
         self.closing = False
         self.overflowed = False
+
+
+class _Delivery:
+    """One admitted payload on its way to the head's terminal, and everything said about it.
+
+    A delivery outlives the request that admitted it. That is the whole point: the socket answers
+    "accepted" within its tick, the loop writes the bytes as the head takes them, and how far it
+    got is state — reported by `status`, written down in the journal when it ends — rather than a
+    caller held on the wire.
+    """
+
+    __slots__ = ("id", "payload", "subject", "written", "deadline", "state", "why", "seconds")
+
+    def __init__(self, identifier: int, payload: bytes, subject: str, seconds: float) -> None:
+        self.id = identifier
+        self.payload = payload
+        self.subject = subject
+        self.written = 0
+        self.seconds = seconds
+        self.deadline = time.monotonic() + seconds
+        self.state = protocol.DELIVERY_IN_FLIGHT
+        self.why = ""
+
+    @property
+    def size(self) -> int:
+        return len(self.payload)
+
+    @property
+    def in_flight(self) -> bool:
+        return self.state == protocol.DELIVERY_IN_FLIGHT
+
+    def view(self) -> dict[str, Any]:
+        """What a reader is told about this delivery, whether it is running, done or abandoned."""
+        return {
+            "id": self.id,
+            "state": self.state,
+            "size_bytes": self.size,
+            "written_bytes": self.written,
+            "complete": self.state == protocol.DELIVERY_COMPLETE,
+            "subject": self.subject,
+            "timeout_seconds": self.seconds,
+            "detail": protocol.delivery_detail(
+                self.state, self.size, self.written, self.why, self.seconds
+            ),
+        }
 
 
 class Supervisor:
@@ -161,6 +212,10 @@ class Supervisor:
         self._progress_bytes = 0
         self._progress_at = 0.0
 
+        self._delivery: _Delivery | None = None
+        self._delivery_seq = 0
+
+        self.started = False
         self._draining = False
         self._stopping = False
         self._stop_deadline = 0.0
@@ -294,7 +349,7 @@ class Supervisor:
         return pid
 
     def _prepare_terminal(self, slave: int) -> None:
-        """Size the pty and take its line discipline out of canonical mode, before the head runs.
+        """Size the pty and set the line discipline the head inherits, before the head runs.
 
         The canonical discipline the kernel sets by default is the whole reason this exists. In it
         `N_TTY` buffers a *line*, caps that line at 4095 bytes and **silently discards** everything
@@ -305,15 +360,32 @@ class Supervisor:
 
         Non-canonical is therefore the substrate's default, and it is what makes the declared limit
         real: the kernel gives back-pressure through `EAGAIN` instead of dropping bytes, so a
-        payload of any size up to the limit arrives whole. What is turned off is exactly what
-        loses or rewrites bytes — line buffering and echo — and no more: `ISIG` stays, so a `^C` in
-        a delivery still interrupts the head, and `OPOST` stays, so the head's output keeps the
-        line endings a terminal gives it. An interactive adapter that wants a mode of its own sets
-        one for itself; this is the mode it inherits until it does, not one imposed on it.
+        payload of any size up to the limit arrives whole.
+
+        What is turned off, precisely, and what is left on:
+
+          * **off: `ICANON` and every echo flag**, plus `IEXTEN`. These are what buffer, cap and
+            re-emit a delivery, and they are what the 4095-byte silent truncation lives in;
+          * **off: `IXON`**. Software flow control is not a byte-preserving discipline either: it
+            eats `0x11` and `0x13` out of a delivery, and `0x13` additionally stops the head's
+            output until a `0x11` arrives. A payload with one stray byte in it would then produce
+            a head that answers nothing and looks dead — the exact class of wrong diagnosis this
+            sprint exists to remove — so a payload's bytes are never allowed to mean this;
+          * **on, deliberately: `ICRNL`**, so a carriage return in a delivery reaches the head as a
+            newline. This one *does* rewrite a byte, and it stays because it is what a terminal
+            does and what an interactive adapter reading lines expects; a caller that needs a
+            literal `0x0D` on the head's terminal cannot have it through this mode. It is the only
+            input translation left on;
+          * **on: `ISIG`**, so a `^C` in a delivery still interrupts the head, and **`OPOST`**, so
+            the head's output keeps the line endings a terminal gives it.
+
+        An interactive adapter that wants a mode of its own sets one for itself; this is the mode
+        it inherits until it does, not one imposed on it.
         """
         packed = struct.pack("HHHH", self.rows, self.cols, 0, 0)
         fcntl.ioctl(slave, termios.TIOCSWINSZ, packed)
         attributes = termios.tcgetattr(slave)
+        attributes[_IFLAG] &= ~termios.IXON
         attributes[_LFLAG] &= ~(termios.ICANON | termios.ECHO | termios.ECHOE | termios.ECHOK
                                 | termios.ECHONL | termios.IEXTEN)
         # With ICANON off a read returns as soon as one byte is there, and never waits on a timer.
@@ -371,6 +443,7 @@ class Supervisor:
             output_buffer_bytes=protocol.OUTPUT_BUFFER_BYTES,
             attach_limit=protocol.ATTACH_MAX_CLIENTS,
         )
+        self.started = True
         assert self._listener is not None
         self._selector.register(self._listener, selectors.EVENT_READ, "listener")
         self._selector.register(self._master, selectors.EVENT_READ, "master")
@@ -383,6 +456,11 @@ class Supervisor:
         elif data == "master":
             if mask & selectors.EVENT_READ:
                 self._read_head()
+            if mask & selectors.EVENT_WRITE:
+                # The head's terminal has room: put more of the admitted payload into it. Reading
+                # first is deliberate — a head blocked writing its own output cannot deadlock
+                # against a supervisor with a payload to place.
+                self._pump_delivery()
         elif data == "wakeup":
             try:
                 os.read(self._wakeup_read, 4096)
@@ -411,6 +489,9 @@ class Supervisor:
             self._turn_open = False
         elif self._turn_open and self._progress_bytes and now - self._progress_at >= PROGRESS_COALESCE_SECONDS:
             self._flush_progress()
+        # A terminal that never becomes writable raises no event, so the delivery bound is a thing
+        # the tick notices rather than a thing the selector reports.
+        self._expire_delivery()
         if self._stopping and self._stop_deadline and now >= self._stop_deadline:
             self._stop_deadline = 0.0
             self._signal_head(signal.SIGKILL)
@@ -452,6 +533,9 @@ class Supervisor:
             self._selector.unregister(self._master)
         except (KeyError, ValueError):
             pass
+        self._finish_delivery(
+            protocol.DELIVERY_FAILED, "the head's terminal was closed before the delivery finished"
+        )
         # EIO means every slave end of the pty is closed, which is usually the head's exit
         # arriving early. It is not proof of one: a head may close its terminal and keep running,
         # so the exit itself is still taken from `waitpid`, in the tick, when it really happens.
@@ -487,43 +571,132 @@ class Supervisor:
         self._progress_bytes = 0
         self._progress_at = 0.0
 
-    def _deliver_to_head(self, payload: bytes) -> tuple[int, str]:
-        """Put one whole payload on the head's pty, and say how far it got if it could not.
+    # -- delivery: admitted by the socket, written by the loop -----------------------------
 
-        Delivery is finished before the caller is answered, and that is deliberate. A pty holds a
-        few kilobytes, so a payload at the input limit only moves as fast as the head reads it; the
-        alternative — accept, buffer, answer `ok`, write later — is a promise the supervisor cannot
-        keep, and the failure it hides is exactly the one this card exists to close. Here the
-        answer and the journal both describe bytes that have actually been written.
+    def _admit(self, payload: bytes, subject: str) -> _Delivery:
+        """Take one payload on, and hand it to the loop rather than to the caller's patience."""
+        self._delivery_seq += 1
+        delivery = _Delivery(self._delivery_seq, payload, subject, self.delivery_seconds)
+        self._delivery = delivery
+        self._arm_delivery()
+        return delivery
 
-        Two things make the wait safe. The head's output is read while we wait, so a head blocked
-        writing its own output can never deadlock against a supervisor blocked writing input. And
-        the wait is bounded by `INPUT_DELIVERY_SECONDS`, so a head that has stopped reading costs
-        the loop that long and is then refused by name, with the count of what did land.
+    def _arm_delivery(self) -> None:
+        """Ask the loop to wake when the head's terminal has room, not on a timer.
+
+        A pty master is writable exactly while its buffer has space, so the delivery advances as
+        fast as the head reads and costs nothing at all while the head does not. Watching for it
+        this way is what lets the loop keep answering everybody else in between.
         """
-        written = 0
-        deadline = time.monotonic() + self.delivery_seconds
-        while written < len(payload):
-            if self._head_status is not None:
-                return written, "the head exited"
-            if self._signalled:
-                return written, f"the supervisor was signalled ({self._signalled}) mid-delivery"
-            try:
-                written += os.write(self._master, payload[written : written + _READ_CHUNK])
-                continue
-            except BlockingIOError:
-                pass
-            except OSError as exc:
-                return written, f"the head's terminal refused the write ({exc.strerror})"
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return written, "the head stopped reading its terminal"
-            readable, _writable, _ = select.select(
-                [self._master], [self._master], [], min(remaining, LOOP_TICK_SECONDS)
+        if self._master < 0:
+            return
+        try:
+            self._selector.modify(
+                self._master, selectors.EVENT_READ | selectors.EVENT_WRITE, "master"
             )
-            if readable:
-                self._read_head()
-        return written, ""
+        except (KeyError, ValueError):
+            pass
+
+    def _disarm_delivery(self) -> None:
+        if self._master < 0:
+            return
+        try:
+            self._selector.modify(self._master, selectors.EVENT_READ, "master")
+        except (KeyError, ValueError):
+            pass
+
+    def _pump_delivery(self) -> None:
+        """Write as much of the admitted payload as the terminal will take right now, and no more.
+
+        Every call is bounded by the kernel's own back-pressure: writes continue while they succeed
+        and stop at the first `EAGAIN`. Nothing here waits for the head — the loop returns to the
+        selector and comes back when the pty says there is room — so a head that reads slowly, or
+        not at all, costs the supervisor one non-blocking write attempt per wake-up and costs every
+        other caller nothing.
+        """
+        delivery = self._delivery
+        if delivery is None or not delivery.in_flight:
+            return
+        if self._head_status is not None:
+            self._finish_delivery(protocol.DELIVERY_FAILED, "the head exited")
+            return
+        while delivery.written < delivery.size:
+            chunk = delivery.payload[delivery.written : delivery.written + _READ_CHUNK]
+            try:
+                delivery.written += os.write(self._master, chunk)
+            except BlockingIOError:
+                break
+            except OSError as exc:
+                self._finish_delivery(
+                    protocol.DELIVERY_FAILED,
+                    f"the head's terminal refused the write ({exc.strerror})",
+                )
+                return
+        if delivery.written >= delivery.size:
+            self._finish_delivery(protocol.DELIVERY_COMPLETE, "")
+            return
+        self._expire_delivery()
+
+    def _expire_delivery(self) -> None:
+        """Give up on a payload the head has not taken within the delivery bound, and say so.
+
+        The bound belongs to the supervisor's own memory, not to anybody's patience: it decides how
+        long a payload for a head that stopped reading is carried before the fact is written down.
+        """
+        delivery = self._delivery
+        if delivery is None or not delivery.in_flight:
+            return
+        if self._head_status is not None:
+            # A pty master stays writable after the head is gone, so the end of a delivery to a
+            # dead head is a thing the tick notices rather than one the kernel reports.
+            self._finish_delivery(protocol.DELIVERY_FAILED, "the head exited")
+            return
+        if time.monotonic() >= delivery.deadline:
+            self._finish_delivery(
+                protocol.DELIVERY_STALLED, "the head stopped reading its terminal"
+            )
+
+    def _finish_delivery(self, state: str, why: str) -> None:
+        """Close a delivery out, and write down what actually reached the head's terminal.
+
+        `input.accepted` is written here and only here: its `bytes` is what the kernel took from
+        this process, never what a client handed over. That is the honest accounting the previous
+        round owed — and it is bought by writing the record when the bytes land, rather than by
+        making a caller wait for them to.
+
+        Retry is not this substrate's business: a delivery that stalled leaves a prefix on the
+        terminal that cannot be taken back, and what a caller should do about that belongs to
+        `deliver` on the backend built above this, not here.
+        """
+        delivery = self._delivery
+        if delivery is None or not delivery.in_flight:
+            return
+        delivery.state = state
+        delivery.why = why
+        self._disarm_delivery()
+        if not delivery.written:
+            return
+        self._append(
+            INPUT_ACCEPTED,
+            bytes=delivery.written,
+            offered_bytes=delivery.size,
+            complete=state == protocol.DELIVERY_COMPLETE,
+            delivery=delivery.id,
+            state=state,
+            subject=delivery.subject,
+            detail=protocol.delivery_detail(
+                state, delivery.size, delivery.written, why, delivery.seconds
+            ),
+        )
+        if not self._turn_open:
+            self._turn_id += 1
+            self._turn_open = True
+            self._turn_bytes = 0
+            self._last_output_at = time.time()
+            self._append(TURN_STARTED, turn=self._turn_id, subject=delivery.subject)
+
+    def _delivery_view(self) -> dict[str, Any] | None:
+        return self._delivery.view() if self._delivery is not None else None
 
     def _signal_head(self, number: int) -> None:
         if self._head_pid <= 0:
@@ -608,11 +781,21 @@ class Supervisor:
                 return
 
     def _handle(self, client: _Client, line: bytes) -> None:
+        """Answer one request, entirely from state this process already holds.
+
+        Every handler below returns within this call: `status`, `output` and `attach` read state,
+        `resize` is one ioctl on a descriptor this process owns, `drain` and `stop` set a flag and
+        signal, and `input` admits or refuses. None of them asks the head for anything, so the
+        longest a caller waits is one pass of the loop.
+        """
         try:
             request = protocol.decode_frame(line)
         except protocol.ProtocolError as exc:
+            # Bytes this malformed have no id to answer with, so the frame carries none: a client
+            # reading it can see it is uncorrelated rather than mistake it for its own answer.
             self._send(client, {"ok": False, "error": protocol.ERROR_MALFORMED, "detail": str(exc)})
             return
+        request_id = request.get(protocol.REQUEST_ID)
         op = str(request.get("op") or "")
         handler = {
             protocol.OP_STATUS: self._op_status,
@@ -624,8 +807,9 @@ class Supervisor:
             protocol.OP_STOP: self._op_stop,
         }.get(op)
         if handler is None:
-            self._send(
+            self._answer(
                 client,
+                request_id,
                 {
                     "ok": False,
                     "error": protocol.ERROR_UNKNOWN_OP,
@@ -634,9 +818,24 @@ class Supervisor:
             )
             return
         try:
-            self._send(client, handler(client, request))
+            self._answer(client, request_id, handler(client, request))
         except protocol.ProtocolError as exc:
-            self._send(client, {"ok": False, "error": protocol.ERROR_MALFORMED, "detail": str(exc)})
+            self._answer(
+                client,
+                request_id,
+                {"ok": False, "error": protocol.ERROR_MALFORMED, "detail": str(exc)},
+            )
+
+    def _answer(self, client: _Client, request_id: Any, payload: dict[str, Any]) -> None:
+        """Send one answer, carrying back the id of the question it answers.
+
+        Without this a response is identified only by its position in the stream, and a caller that
+        stopped waiting for one leaves it to be mistaken for the answer to its next question. The
+        id makes that mistake impossible to make silently.
+        """
+        if isinstance(request_id, (str, int)) and not isinstance(request_id, bool):
+            payload = {**payload, protocol.REQUEST_ID: request_id}
+        self._send(client, payload)
 
     def _op_status(self, client: _Client, request: dict[str, Any]) -> dict[str, Any]:
         del client, request
@@ -652,6 +851,7 @@ class Supervisor:
             "stopping": self._stopping,
             "turn_open": self._turn_open,
             "turn": self._turn_id,
+            "delivery": self._delivery_view(),
             "rows": self.rows,
             "cols": self.cols,
             "journal_seq": self._journal.seq if self._journal else 0,
@@ -666,6 +866,16 @@ class Supervisor:
         }
 
     def _op_input(self, client: _Client, request: dict[str, Any]) -> dict[str, Any]:
+        """Admit one payload, or refuse it by name. Either way, within this tick.
+
+        Admission is the whole of what this handler decides, and it decides it from state the
+        supervisor already holds: whether the head is gone, whether admission is closed, whether a
+        payload is already in flight, and whether this one is inside the declared limit. None of
+        those questions is about how fast the head reads its terminal, which is why none of them
+        can make a caller wait on it. `ok` here means *accepted*, and the answer says so; what
+        happened to the bytes afterwards is `status`'s `delivery` and the journal's
+        `input.accepted`, both of which count what the terminal actually took.
+        """
         del client
         payload = protocol.decode_payload(request.get("data"))
         size = len(payload)
@@ -679,31 +889,14 @@ class Supervisor:
                 "error": protocol.ERROR_DRAINING,
                 "detail": "this head's admission is closed; it takes no further input",
             }
-        subject = str(request.get("subject") or "")
-        written, why = self._deliver_to_head(payload)
-        if written:
-            # The journal counts what reached the head's terminal, never what a client handed over:
-            # a record saying more arrived than did is the journal saying something untrue about a
-            # run. A delivery that could not be finished says so here as well as in the answer.
-            self._append(
-                INPUT_ACCEPTED,
-                bytes=written,
-                offered_bytes=size,
-                complete=not why,
-                subject=subject,
-            )
-            if not self._turn_open:
-                self._turn_id += 1
-                self._turn_open = True
-                self._turn_bytes = 0
-                self._last_output_at = time.time()
-                self._append(TURN_STARTED, turn=self._turn_id, subject=subject)
-        if why:
-            return protocol.stalled_refusal(size, written, why, self.delivery_seconds)
+        if self._delivery is not None and self._delivery.in_flight:
+            return protocol.in_flight_refusal(self._delivery.view())
+        delivery = self._admit(payload, str(request.get("subject") or ""))
         return {
             "ok": True,
+            "accepted": True,
             "accepted_bytes": size,
-            "written_bytes": written,
+            "delivery": delivery.view(),
             "turn": self._turn_id,
         }
 
@@ -865,6 +1058,7 @@ class Supervisor:
 
     def _finish(self) -> int:
         status = int(self._head_status or 0)
+        self._finish_delivery(protocol.DELIVERY_FAILED, "the head exited before the delivery finished")
         self._flush_progress()
         if self._turn_open:
             self._append(
@@ -983,10 +1177,24 @@ def _live_head(pid_file: Path, run_id: str) -> int:
     return pid
 
 
-def _write_startup_error(run_dir: Path, reason: str, detail: str) -> None:
+def failure_of(started: bool) -> tuple[str, str, int]:
+    """Which file a failure is left in, what it is called, and what the supervisor exits with.
+
+    A failure before the run was up and a failure after it are different facts about a run
+    directory, and the only honest way to say so is to name them differently: a head that ran for
+    an hour and then lost its supervisor did not fail to *start*, and a reader who finds
+    `startup.error` beside its journal is being told something untrue.
+    """
+    if started:
+        return protocol.SUPERVISOR_ERROR_NAME, RUN_FAILED, EXIT_RUN_FAILED
+    return protocol.STARTUP_ERROR_NAME, START_FAILED, EXIT_STARTUP_FAILED
+
+
+def _write_failure(run_dir: Path, name: str, reason: str, detail: str) -> None:
+    """Leave the reason in the run directory, so a launcher learns it rather than timing out."""
     try:
         run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / protocol.STARTUP_ERROR_NAME).write_text(
+        (run_dir / name).write_text(
             json.dumps({"reason": reason, "detail": detail}, sort_keys=True), encoding="utf-8"
         )
     except OSError:
@@ -1024,6 +1232,7 @@ def main(argv: list[str] | None = None) -> int:
     run_dir = Path(args.run_dir)
     if run_dir.exists():
         (run_dir / protocol.STARTUP_ERROR_NAME).unlink(missing_ok=True)
+        (run_dir / protocol.SUPERVISOR_ERROR_NAME).unlink(missing_ok=True)
     if args.daemonize and os.fork() != 0:
         # The intermediate exits at once. Its parent reaps it, and the supervisor below is
         # reparented to init: addressable through its socket and its pid file, owned by nobody.
@@ -1046,18 +1255,23 @@ def main(argv: list[str] | None = None) -> int:
         supervisor.claim()
     except (SupervisorStartupError, OSError) as exc:
         reason = getattr(exc, "reason", START_FAILED)
-        _write_startup_error(run_dir, reason, str(exc))
+        _write_failure(run_dir, protocol.STARTUP_ERROR_NAME, reason, str(exc))
         print(f"supervisor startup refused ({reason}): {exc}", file=sys.stderr)
         return getattr(exc, "exit_code", EXIT_STARTUP_FAILED)
     try:
         return supervisor.run()
     except Exception as exc:  # noqa: BLE001 - the launcher is owed the reason, whatever it is
-        # A failure here is not a refusal to start — the run may already have been up — but a
-        # launcher still waiting is owed a name for it. Without this it learns nothing until its
-        # own timeout, having been left a socket file that answers nobody.
-        _write_startup_error(run_dir, START_FAILED, f"the supervisor failed: {exc!r}")
+        # A launcher still waiting is owed a name for this, or it learns nothing until its own
+        # timeout, having been left a socket file that answers nobody. Which name depends on what
+        # actually happened: a failure before `run.started` is a run that never came up, and one
+        # after it is a run that was up and lost its supervisor. Calling the second a *startup*
+        # error would leave a head that worked for an hour described by a file that says it never
+        # started, so the two get different names and different exit codes.
+        name, reason, code = failure_of(supervisor.started)
+        where = "after the run was up" if supervisor.started else "on the way up"
+        _write_failure(run_dir, name, reason, f"the supervisor failed {where}: {exc!r}")
         traceback.print_exc()
-        return EXIT_STARTUP_FAILED
+        return code
 
 
 if __name__ == "__main__":  # pragma: no cover - process entry point

@@ -29,8 +29,11 @@ JOURNAL_SCHEMA_VERSION = 1
 
 #: The head's process is up and the supervisor owns it.
 RUN_STARTED = "run.started"
-#: A bounded input was accepted onto the head's pty. An oversized one is refused, and a refusal is
-#: not an event: nothing about the head changed.
+#: A delivery ended, and this is what of it reached the head's pty: `bytes` counts what the kernel
+#: took from the supervisor, `offered_bytes` what the caller handed over, and `complete` says
+#: whether those are the same number. Written when the bytes land, never when they are admitted, so
+#: the record is about arrival rather than intent. A payload refused at admission — oversized,
+#: admission closed, a delivery already in flight — is not an event: nothing about the head changed.
 INPUT_ACCEPTED = "input.accepted"
 #: A turn opened — the first accepted input since the head last went quiet.
 TURN_STARTED = "turn.started"

@@ -9,7 +9,9 @@ and there is no descriptor of the launcher's left to turn the supervisor into a 
 Readiness is read from the run directory rather than from the pipe of a process that has already
 exited: the socket answers, the journal has `run.started`, and the head has written its own launch
 identity. A refusal on the way up is left behind as `startup.error`, so a launcher can tell "the
-supervisor is still coming up" from "another supervisor already owns this run".
+supervisor is still coming up" from "another supervisor already owns this run"; a failure after the
+run was up is `supervisor.error` instead, because a head that ran for an hour and then lost its
+supervisor did not fail to start and must not be described as if it had.
 """
 from __future__ import annotations
 
@@ -111,8 +113,12 @@ def spawn_head(
     run_dir.mkdir(parents=True, exist_ok=True)
     os.chmod(run_dir, 0o700)
     socket_path = protocol.socket_path_for(run_dir)
-    error_path = run_dir / protocol.STARTUP_ERROR_NAME
-    error_path.unlink(missing_ok=True)
+    error_paths = (
+        run_dir / protocol.STARTUP_ERROR_NAME,
+        run_dir / protocol.SUPERVISOR_ERROR_NAME,
+    )
+    for error_path in error_paths:
+        error_path.unlink(missing_ok=True)
     journal_path = run_dir / protocol.JOURNAL_NAME
     already = len(read_events(journal_path).events)
 
@@ -155,11 +161,13 @@ def spawn_head(
 
     deadline = time.monotonic() + timeout
     while True:
-        failure = _startup_error(error_path)
-        if failure is not None:
-            raise LocalPtySpawnError(
-                str(failure.get("reason") or "startup_failed"), str(failure.get("detail") or "")
-            )
+        for error_path in error_paths:
+            failure = _startup_error(error_path)
+            if failure is not None:
+                raise LocalPtySpawnError(
+                    str(failure.get("reason") or "startup_failed"),
+                    str(failure.get("detail") or ""),
+                )
         result = read_events(journal_path)
         started = [
             event for event in result.events[already:] if event.get("kind") == RUN_STARTED
@@ -238,6 +246,9 @@ class SupervisorClient:
     def __init__(self, conn: socket.socket) -> None:
         self._conn = conn
         self._inbox = bytearray()
+        self._request_seq = 0
+        #: Answers to questions this client stopped waiting for, discarded rather than returned.
+        self.stale_frames = 0
         self.attached = False
 
     @classmethod
@@ -280,12 +291,38 @@ class SupervisorClient:
             self._inbox += chunk
 
     def request(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Send one request and return the next answer that is not a pushed stream event."""
-        self._conn.sendall(protocol.encode_frame(payload))
+        """Send one request and return *its* answer, discarding anything that answers something else.
+
+        Three kinds of frame can arrive on this connection, and each is handled by what it is
+        rather than by when it arrived: a pushed stream event, which belongs to `next_event`; the
+        answer to this request, matched by id; and the answer to an earlier request this client
+        stopped waiting for — a timeout, an interrupt — which is discarded and counted here.
+
+        That last case is why the id exists. Without it a stale frame silently becomes the answer
+        to the next question asked, and a connection stays one answer out of step for the rest of
+        its life: a caller asking `status` would be handed the previous `input`'s reply and read a
+        missing `alive` key as a dead head. Nothing in this substrate blocks long enough to make
+        that the normal case any more, but a caller's timeout can fire for reasons of its own, so
+        the recovery is part of the protocol rather than a property of it being fast.
+        """
+        self._request_seq += 1
+        request_id = self._request_seq
+        self._conn.sendall(
+            protocol.encode_frame({**payload, protocol.REQUEST_ID: request_id})
+        )
         while True:
             frame = self._next_frame()
-            if "event" not in frame:
+            if "event" in frame:
+                continue
+            answered = frame.get(protocol.REQUEST_ID)
+            if answered == request_id:
                 return frame
+            if answered is None:
+                # A frame that answers no particular request: a connection refused before anything
+                # was asked, or a refusal of bytes too malformed to carry an id. It is this
+                # caller's news either way.
+                return frame
+            self.stale_frames += 1
 
     # -- verbs -----------------------------------------------------------------------------
 
@@ -293,18 +330,50 @@ class SupervisorClient:
         return self.request({"op": protocol.OP_STATUS})
 
     def send_input(self, data: bytes | str, *, subject: str = "") -> dict[str, Any]:
-        """Put one bounded payload on the head's pty. Oversize is refused, never truncated.
+        """Offer one bounded payload for the head's pty. Oversize is refused, never truncated.
 
-        The size check the supervisor performs is the authority; this end sends the payload as it
-        is so that a caller sees the same named refusal a foreign client would. An `ok` answer
-        means the whole payload reached the head's terminal — `written_bytes` says how much, and
-        it is the payload's own size — and a delivery that could not be finished is a refusal
-        carrying both numbers rather than an `ok` covering a partial write.
+        The answer is about **admission**, and comes back within the supervisor's own tick: `ok`
+        means the payload was taken on and is being written, and it carries the `delivery` — id,
+        size, and the state to ask about later. A refusal names its reason: over the declared limit
+        (with the limit and the actual size), admission closed, the head gone, or another delivery
+        still holding the floor.
+
+        What happened to the bytes afterwards is not in this answer and deliberately so: it is
+        `status()["delivery"]` and the journal's `input.accepted`, both of which count what the
+        head's terminal actually took. `wait_for_delivery` is the convenience for a caller that
+        wants to stand and watch that happen.
         """
         payload = data.encode("utf-8") if isinstance(data, str) else bytes(data)
         return self.request(
             {"op": protocol.OP_INPUT, "data": protocol.encode_payload(payload), "subject": subject}
         )
+
+    def wait_for_delivery(
+        self,
+        delivery_id: int | None = None,
+        *,
+        timeout: float = protocol.INPUT_DELIVERY_SECONDS + 5.0,
+        poll: float = 0.02,
+    ) -> dict[str, Any]:
+        """Ask `status` until the delivery is no longer in flight, and return what became of it.
+
+        The waiting is here, in the caller, where it can be given up on: the supervisor is answering
+        every question in the meantime, including this one. A delivery always leaves the in-flight
+        state — it completes, it stalls at its bound, or it fails with the head — so this returns.
+        """
+        deadline = time.monotonic() + timeout
+        while True:
+            delivery = self.status().get("delivery")
+            if isinstance(delivery, dict) and (
+                delivery_id is None or delivery.get("id") == delivery_id
+            ):
+                if delivery.get("state") != protocol.DELIVERY_IN_FLIGHT:
+                    return delivery
+            if time.monotonic() >= deadline:
+                raise LocalPtyError(
+                    f"delivery {delivery_id} was still in flight after {timeout:g}s: {delivery}"
+                )
+            time.sleep(poll)
 
     def read_output(self, max_bytes: int | None = None) -> dict[str, Any]:
         request: dict[str, Any] = {"op": protocol.OP_OUTPUT}

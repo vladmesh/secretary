@@ -1,8 +1,22 @@
-"""The wire between a supervisor and whoever addresses it, and the four limits that bound it.
+"""The wire between a supervisor and whoever addresses it, and the limits that bound it.
 
 One request per line, one response per line, JSON both ways, payloads base64 so that a head's
 bytes are never assumed to be text. A line is a frame; a frame is bounded; every refusal names the
 limit it hit **and the size that hit it**.
+
+Two properties hold for every exchange, and they are the reason the wire looks like this:
+
+  * **a request carries an id and its answer carries the same id.** Responses are otherwise
+    distinguishable only by their order, so a caller that stopped waiting for one — a timeout, an
+    interrupt — would find that frame sitting in the socket as the answer to its *next* question,
+    and the connection would be one answer out of step for the rest of its life. With an id the
+    caller can see a frame is not its own and discard it explicitly (`SupervisorClient.request`
+    does exactly that, and counts what it discarded);
+  * **no answer waits for the head.** Every operation is either a question about state the
+    supervisor already holds, or an intention it accepts or refuses on the spot. Input is the one
+    that could have been otherwise, and it is deliberately not: a delivery is *admitted* and then
+    written by the supervisor's loop, so how fast the head reads its terminal changes what
+    `status` reports about the delivery, never how long a caller waits for an answer.
 
 The limits are values with reasons, not round numbers:
 
@@ -60,7 +74,11 @@ PID_FILE_NAME = "head.pid"
 SUPERVISOR_PID_NAME = "supervisor.pid"
 SUPERVISOR_LOCK_NAME = "supervisor.lock"
 SUPERVISOR_LOG_NAME = "supervisor.log"
+#: A refusal on the way up: the supervisor never took the run over, and nothing of it is running.
 STARTUP_ERROR_NAME = "startup.error"
+#: A failure *after* the run was up, which is a different fact and deserves a different name: a
+#: head that worked for an hour and then lost its supervisor was never a startup failure.
+SUPERVISOR_ERROR_NAME = "supervisor.error"
 
 #: Request verbs.
 OP_STATUS = "status"
@@ -72,12 +90,28 @@ OP_DRAIN = "drain"
 OP_STOP = "stop"
 OPS = (OP_STATUS, OP_INPUT, OP_OUTPUT, OP_ATTACH, OP_RESIZE, OP_DRAIN, OP_STOP)
 
-#: Refusal tokens. Callers route on these, so they are tokens rather than sentences.
+#: The correlation key. A request may carry one; an answer to a request that carried one repeats it
+#: verbatim. Frames that answer nothing in particular — a connection refused before any request, a
+#: refusal of bytes too malformed to have an id in them — carry none, and say so by its absence.
+REQUEST_ID = "id"
+
+#: What a delivery is doing, as `status` reports it. A delivery is admitted, then written by the
+#: supervisor's loop, so its progress is state a reader asks about rather than a wait it endures.
+DELIVERY_IN_FLIGHT = "in_flight"
+DELIVERY_COMPLETE = "complete"
+DELIVERY_STALLED = "stalled"
+DELIVERY_FAILED = "failed"
+DELIVERY_STATES = (DELIVERY_IN_FLIGHT, DELIVERY_COMPLETE, DELIVERY_STALLED, DELIVERY_FAILED)
+
+#: Refusal tokens. Callers route on these, so they are tokens rather than sentences. A stall is not
+#: among them: a delivery that the head does not take is not a refusal of the request that offered
+#: it — that request was accepted — but a state the delivery reaches, so it is `DELIVERY_STALLED`
+#: in `status` and in the journal rather than an error on a frame nobody is waiting for.
 ERROR_INPUT_TOO_LARGE = "input_too_large"
 ERROR_FRAME_TOO_LARGE = "frame_too_large"
 ERROR_ATTACH_LIMIT = "attach_limit"
 ERROR_CONNECTION_LIMIT = "connection_limit"
-ERROR_INPUT_STALLED = "input_stalled"
+ERROR_INPUT_IN_FLIGHT = "input_in_flight"
 ERROR_DRAINING = "draining"
 ERROR_HEAD_GONE = "head_gone"
 ERROR_MALFORMED = "malformed_request"
@@ -157,32 +191,51 @@ def input_refusal(size: int) -> dict[str, Any]:
     }
 
 
-#: How long the supervisor will keep trying to put one accepted payload onto the head's pty before
-#: it gives up and says how far it got. A pty's own buffer is a few kilobytes, so a payload at the
-#: input limit only fits as fast as the head reads it; a head that has stopped reading must not be
-#: able to hold the supervisor's loop for longer than this.
+#: How long the supervisor's loop keeps an admitted payload in flight before it abandons what is
+#: left and records the stall. A pty's own buffer is a few kilobytes, so a payload at the input
+#: limit only moves as fast as the head reads it; this bounds how long the supervisor carries a
+#: payload for a head that has stopped reading, and it bounds nothing a caller waits for. Raising
+#: or lowering it changes when `status` starts saying `stalled`; it cannot change what any request
+#: costs, because no request waits on a delivery at all.
 INPUT_DELIVERY_SECONDS = 10.0
 
 
-def stalled_refusal(
-    size: int, written: int, why: str, seconds: float = INPUT_DELIVERY_SECONDS
-) -> dict[str, Any]:
-    """The answer a delivery gets when it could not be finished: how much of it did land.
+def in_flight_refusal(delivery: dict[str, Any]) -> dict[str, Any]:
+    """The refusal a delivery gets while the previous one is still being written.
 
-    Never `ok: True`. The point of the whole limit is that a caller is never told a payload arrived
-    when part of it did not, so a partial delivery is a refusal that names both numbers.
+    One payload at a time is what makes a delivery describable: two in flight would interleave on
+    the terminal, and neither caller could be told what the head actually received. The refusal
+    carries the delivery that holds the floor, so the caller learns which one to wait out rather
+    than being told only "no".
     """
     return {
         "ok": False,
-        "error": ERROR_INPUT_STALLED,
-        "size_bytes": size,
-        "written_bytes": written,
-        "timeout_seconds": seconds,
+        "error": ERROR_INPUT_IN_FLIGHT,
+        "delivery": delivery,
         "detail": (
-            f"{written} of {size} bytes reached the head's terminal within "
-            f"{seconds:g}s and the delivery could not be finished: {why}"
+            f"delivery {delivery.get('id')} is still being written "
+            f"({delivery.get('written_bytes')} of {delivery.get('size_bytes')} bytes); "
+            "this head takes one payload at a time"
         ),
     }
+
+
+def delivery_detail(state: str, size: int, written: int, why: str, seconds: float) -> str:
+    """How a finished or unfinished delivery reads in `status` and in the journal.
+
+    A partial delivery is never described as an arrival: the two numbers are always both there, so
+    "all of it landed" and "this much of it landed" cannot be confused for one another.
+    """
+    if state == DELIVERY_COMPLETE:
+        return f"all {written} bytes reached the head's terminal"
+    if state == DELIVERY_IN_FLIGHT:
+        return f"{written} of {size} bytes have reached the head's terminal so far"
+    if state == DELIVERY_STALLED:
+        return (
+            f"{written} of {size} bytes reached the head's terminal within {seconds:g}s and the "
+            f"delivery was abandoned there: {why}"
+        )
+    return f"{written} of {size} bytes reached the head's terminal and the delivery ended: {why}"
 
 
 def connection_refusal(connections: int) -> dict[str, Any]:

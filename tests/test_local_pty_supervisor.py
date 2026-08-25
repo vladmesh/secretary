@@ -28,6 +28,7 @@ from secretary.dispatcher_watchdog import (
     head_process_status,
 )
 from triggered_agents.runtime.head.local_pty import protocol
+from triggered_agents.runtime.head.local_pty import supervisor as supervisor_module
 from triggered_agents.runtime.head.local_pty.client import (
     HeadHandle,
     LocalPtySpawnError,
@@ -53,6 +54,7 @@ from triggered_agents.runtime.head.local_pty.journal import (
 REPO = Path(__file__).resolve().parents[1]
 CHILD = REPO / "tests" / "fixtures" / "local_pty_child.py"
 LAUNCHER = REPO / "tests" / "fixtures" / "local_pty_launcher.py"
+SLOW_READER = REPO / "tests" / "fixtures" / "local_pty_slow_reader.py"
 CHILD_COMMAND = f"{sys.executable} -u {CHILD}"
 
 
@@ -251,7 +253,13 @@ class LocalPtySubstrateTests(unittest.TestCase):
         client = self._client(handle)
         self.assertIn(b"SIZE 37x113", self._await_output(client, b"SIZE 37x113"))
 
-        self.assertEqual(client.resize(41, 132), {"ok": True, "rows": 41, "cols": 132})
+        resized = client.resize(41, 132)
+        self.assertEqual(
+            {key: resized[key] for key in ("ok", "rows", "cols")},
+            {"ok": True, "rows": 41, "cols": 132},
+        )
+        # Every answer carries the id of the request it answers; nothing else is added to this one.
+        self.assertEqual(set(resized) - {protocol.REQUEST_ID}, {"ok", "rows", "cols"})
         self.assertIn(b"WINCH 41x132", self._await_output(client, b"WINCH 41x132"))
 
     # -- bounded input ---------------------------------------------------------------------
@@ -321,12 +329,25 @@ class LocalPtySubstrateTests(unittest.TestCase):
         self.assertEqual(accepted[0]["bytes"], protocol.INPUT_MAX_BYTES)
 
     def _bulk(self, handle: HeadHandle, client: SupervisorClient, size: int, *, index: int) -> int:
-        """Send a payload of exactly `size` bytes and return the length the head says it read."""
+        """Send a payload of exactly `size` bytes and return the length the head says it read.
+
+        The `ok` here is an admission, not an arrival: the supervisor took the payload on within its
+        own tick and is writing it. What actually reached the terminal is asked for afterwards —
+        which is the same number, and the test says so — because that is where the substrate keeps
+        it now.
+        """
         payload = ("bulk " + "a" * (size - 5)).encode("ascii")
         self.assertEqual(len(payload), size)
         answer = client.send_input(payload + b"\n")
         self.assertTrue(answer["ok"], answer)
-        self.assertEqual(answer["written_bytes"], size + 1, "the supervisor wrote less than it took")
+        self.assertTrue(answer["accepted"], answer)
+        self.assertEqual(answer["accepted_bytes"], size + 1)
+        self.assertEqual(answer["delivery"]["state"], protocol.DELIVERY_IN_FLIGHT, answer)
+        delivered = client.wait_for_delivery(answer["delivery"]["id"], timeout=30.0)
+        self.assertEqual(delivered["state"], protocol.DELIVERY_COMPLETE, delivered)
+        self.assertEqual(
+            delivered["written_bytes"], size + 1, "the supervisor wrote less than it took"
+        )
         reports: list[bytes] = []
 
         def reported() -> bool:
@@ -344,41 +365,223 @@ class LocalPtySubstrateTests(unittest.TestCase):
         self.assertTrue(accepted[index]["complete"])
         return int(reports[index])
 
-    def test_a_delivery_a_head_will_not_read_is_refused_with_both_numbers(self) -> None:
-        """A head that has stopped reading its terminal, and the honest answer to writing at it.
+    # -- a delivery is admitted, and never something a caller waits through --------------
+    #
+    # Every test below runs on the shipped defaults. `delivery_seconds` is not overridden by any
+    # of them on purpose: the previous round's stalled-delivery test lowered it to 1.0s, under the
+    # client's own 5s socket timeout, and so could not see what a delivery at the real bound did
+    # to the connection that made it or to anybody else's.
 
-        There is no third option here worth having. Buffering the rest and answering `ok` would be
-        a promise about bytes that are still in the supervisor's memory, and the journal would then
-        record an arrival that never happened — which is the whole shape of the defect this card is
-        closing. So the answer is a refusal that names how much did land, and the journal records
-        that number and no more.
+    def _slow_head(self, run_id: str, *, chunk: int, pause: float, total: int = 0) -> HeadHandle:
+        command = f"{sys.executable} -u {SLOW_READER} --chunk {chunk} --pause {pause}"
+        if total:
+            command += f" --total {total}"
+        return self._start(run_id=run_id, command=command)
+
+    def _prompt(self, call, *, within: float, what: str):
+        """Call something on the socket and fail if it did not answer well inside `within`."""
+        started = time.monotonic()
+        answer = call()
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed, within, f"{what} took {elapsed:.2f}s, over {within:g}s")
+        return answer
+
+    def test_a_head_that_never_reads_keeps_answering_and_makes_its_stall_observable(self) -> None:
+        """The head stops reading its terminal, and nothing about the socket slows down.
+
+        A pty holds a few kilobytes, so a 64 KiB payload to a head that never reads cannot finish:
+        it is carried for the supervisor's delivery bound and then abandoned. What the caller must
+        never get out of that is a wait. It gets an admission inside a tick, an answer to every
+        question it asks while the delivery is stuck — *its own* answer, with `alive` in it, about
+        a head that really is alive — and the stall itself as state, at the moment it happens.
         """
-        handle = self._start(
-            run_id="stalled",
-            delivery_seconds=1.0,
-            command=f"{sys.executable} -u -c "
-            "'import time;print(\"UP\",flush=True);time.sleep(600)'",
-        )
+        handle = self._slow_head("stalled", chunk=4096, pause=600.0)
         client = self._client(handle)
         self._await_output(client, b"UP")
 
         payload = b"z" * protocol.INPUT_MAX_BYTES
-        answer = client.send_input(payload)
-        self.assertFalse(answer["ok"], answer)
-        self.assertEqual(answer["error"], protocol.ERROR_INPUT_STALLED)
-        self.assertEqual(answer["size_bytes"], len(payload))
-        self.assertGreater(answer["written_bytes"], 0)
-        self.assertLess(answer["written_bytes"], len(payload))
-        self.assertIn(str(answer["written_bytes"]), answer["detail"])
-        self.assertIn(str(len(payload)), answer["detail"])
+        answer = self._prompt(
+            lambda: client.send_input(payload, subject="nudge"), within=2.0, what="send_input"
+        )
+        self.assertTrue(answer["ok"], answer)
+        self.assertTrue(answer["accepted"], answer)
+        self.assertEqual(answer["accepted_bytes"], len(payload))
+        delivery_id = answer["delivery"]["id"]
+        self.assertEqual(answer["delivery"]["state"], protocol.DELIVERY_IN_FLIGHT)
 
+        # The whole time the delivery is stuck — longer than the client's own 5s socket timeout —
+        # this connection keeps being answered, and every answer is the answer to the question that
+        # was asked. `alive` is the key that went missing when frames slid by one, and it is here.
+        deadline = time.monotonic() + protocol.INPUT_DELIVERY_SECONDS + 5.0
+        seen_in_flight = False
+        while time.monotonic() < deadline:
+            status = self._prompt(client.status, within=2.0, what="status during a stuck delivery")
+            self.assertTrue(status["ok"], status)
+            self.assertIn("alive", status)
+            self.assertTrue(status["alive"], "a live head was reported dead")
+            self.assertEqual(status["delivery"]["id"], delivery_id)
+            if status["delivery"]["state"] == protocol.DELIVERY_IN_FLIGHT:
+                seen_in_flight = True
+                time.sleep(0.1)
+                continue
+            break
+        else:  # pragma: no cover - only reached if the delivery never leaves the in-flight state
+            self.fail("the delivery never left the in-flight state")
+        self.assertTrue(seen_in_flight, "the delivery finished before it could be observed running")
+        self.assertEqual(client.stale_frames, 0, "a frame answered the wrong request")
+
+        stalled = client.status()["delivery"]
+        self.assertEqual(stalled["state"], protocol.DELIVERY_STALLED)
+        self.assertFalse(stalled["complete"])
+        self.assertGreater(stalled["written_bytes"], 0)
+        self.assertLess(stalled["written_bytes"], len(payload))
+        self.assertIn(str(stalled["written_bytes"]), stalled["detail"])
+        self.assertIn(str(len(payload)), stalled["detail"])
+
+        # The journal says the same thing, and counts only what the terminal took.
         accepted = handle.events().of_kind(INPUT_ACCEPTED)[-1]
-        self.assertEqual(accepted["bytes"], answer["written_bytes"], "the journal overstated it")
+        self.assertEqual(accepted["bytes"], stalled["written_bytes"], "the journal overstated it")
         self.assertEqual(accepted["offered_bytes"], len(payload))
         self.assertFalse(accepted["complete"])
-        # The head is untouched by the refusal, and the supervisor is still answering.
-        self.assertTrue(client.status()["alive"])
+        self.assertEqual(accepted["state"], protocol.DELIVERY_STALLED)
+
+        # The head is untouched by the stall, and admission is open again afterwards.
         self.assertTrue(_alive(handle.head_pid))
+        self.assertTrue(client.status()["alive"])
+        self.assertTrue(client.send_input(b"small\n")["ok"])
+
+    def test_a_delivery_a_head_takes_slowly_still_succeeds_and_says_so_as_itself(self) -> None:
+        """The worst of the three defects: a delivery that entirely succeeds.
+
+        The head reads 8 KiB at a time with a pause between reads, so 40000 bytes — well inside the
+        declared limit, nothing pathological — take seconds to land. The caller is told the truth
+        at every point: admitted at once, in flight while it is, complete when it is, with the
+        payload's own size as the count. Not an exception, and never a stale frame in place of the
+        next answer.
+        """
+        handle = self._slow_head("slow-reader", chunk=8192, pause=0.8, total=40000)
+        client = self._client(handle)
+        self._await_output(client, b"UP")
+
+        payload = b"s" * 40000
+        answer = self._prompt(lambda: client.send_input(payload), within=2.0, what="send_input")
+        self.assertTrue(answer["ok"], answer)
+        delivery_id = answer["delivery"]["id"]
+
+        status = self._prompt(client.status, within=2.0, what="status mid-delivery")
+        self.assertTrue(status["alive"], "a live head was reported dead")
+        self.assertEqual(status["delivery"]["id"], delivery_id)
+
+        delivered = client.wait_for_delivery(delivery_id, timeout=protocol.INPUT_DELIVERY_SECONDS)
+        self.assertEqual(delivered["state"], protocol.DELIVERY_COMPLETE, delivered)
+        self.assertTrue(delivered["complete"])
+        self.assertEqual(delivered["written_bytes"], len(payload))
+        self.assertEqual(client.stale_frames, 0, "a frame answered the wrong request")
+
+        accepted = handle.events().of_kind(INPUT_ACCEPTED)[-1]
+        self.assertEqual(accepted["bytes"], len(payload))
+        self.assertEqual(accepted["offered_bytes"], len(payload))
+        self.assertTrue(accepted["complete"])
+        # The head, not the supervisor, confirms it: every byte was read off the terminal.
+        self._await_output(client, b"READ 40000", timeout=20.0)
+
+    def test_a_bystander_is_answered_and_the_loop_keeps_ticking_during_a_delivery(self) -> None:
+        """A second caller who had nothing to do with the delivery, and the tick behind it.
+
+        A single-threaded loop that waits for the head inside a request handler stops serving
+        everyone, not only the caller that delivered: a bystander's `status` slides, and so do the
+        loop's own duties — the quiet-turn check, the reap, the stop escalation. So the bystander
+        asks repeatedly while a 64 KiB payload is stuck, and then asks the supervisor to stop the
+        head, which is a thing only a loop that is still ticking can do.
+        """
+        handle = self._slow_head("bystander", chunk=4096, pause=600.0)
+        deliverer = self._client(handle)
+        bystander = self._client(handle)
+        self._await_output(deliverer, b"UP")
+
+        accepted = deliverer.send_input(b"z" * protocol.INPUT_MAX_BYTES)
+        self.assertTrue(accepted["ok"], accepted)
+
+        for _ in range(10):
+            status = self._prompt(
+                bystander.status, within=2.0, what="a bystander's status during a delivery"
+            )
+            self.assertTrue(status["ok"], status)
+            self.assertTrue(status["alive"])
+            time.sleep(0.1)
+        self.assertEqual(bystander.stale_frames, 0)
+
+        # The delivering connection is not out of step either: its next question is its own.
+        own = self._prompt(deliverer.status, within=2.0, what="the deliverer's next status")
+        self.assertTrue(own["alive"])
+        self.assertEqual(deliverer.stale_frames, 0)
+
+        # And the loop is still doing its own work: a stop, asked for by the bystander mid-delivery.
+        stop = self._prompt(
+            lambda: bystander.stop(initiator="test"), within=2.0, what="stop mid-delivery"
+        )
+        self.assertTrue(stop["ok"], stop)
+        self._await(
+            lambda: not _alive(handle.head_pid),
+            timeout=10.0,
+            message="a stop asked for during a delivery never reached the head",
+        )
+
+    def test_a_second_delivery_while_one_is_in_flight_is_refused_by_name(self) -> None:
+        """One payload at a time, and the refusal says which one holds the floor.
+
+        Two payloads in flight would interleave on the one terminal, and neither caller could be
+        told what the head received. Refusing is immediate, like every other answer here.
+        """
+        handle = self._slow_head("one-at-a-time", chunk=4096, pause=600.0)
+        client = self._client(handle)
+        self._await_output(client, b"UP")
+
+        first = client.send_input(b"z" * protocol.INPUT_MAX_BYTES)
+        self.assertTrue(first["ok"], first)
+        second = self._prompt(
+            lambda: client.send_input(b"second\n"), within=2.0, what="a second delivery"
+        )
+        self.assertFalse(second["ok"], second)
+        self.assertEqual(second["error"], protocol.ERROR_INPUT_IN_FLIGHT)
+        self.assertEqual(second["delivery"]["id"], first["delivery"]["id"])
+        self.assertIn(str(second["delivery"]["size_bytes"]), second["detail"])
+        # The refused payload is not an event: nothing about the head changed.
+        self.assertEqual(handle.events().of_kind(INPUT_ACCEPTED), ())
+
+    def test_an_answer_carries_the_id_of_the_question_and_a_stale_frame_is_discarded(self) -> None:
+        """The recovery a client owes itself when it stops waiting for an answer.
+
+        Frames are otherwise told apart only by their order, so a caller that abandoned one — a
+        timeout, an interrupt — would find it sitting there as the answer to its *next* question,
+        and stay one answer out of step for good. Here a request is deliberately sent and its
+        answer left unread, exactly as an abandoned one would be, and the next call still gets its
+        own answer — with the discard counted rather than silent.
+        """
+        handle = self._start(run_id="correlated")
+        client = self._client(handle)
+
+        first = client.status()
+        self.assertIn(protocol.REQUEST_ID, first)
+        second = client.status()
+        self.assertNotEqual(second[protocol.REQUEST_ID], first[protocol.REQUEST_ID])
+
+        # A question asked and never listened for: its answer is now waiting in the socket.
+        # Reaching past the client's own API on purpose: the point is a frame it never reads.
+        client._conn.sendall(
+            protocol.encode_frame({"op": protocol.OP_RESIZE, "rows": 11, "cols": 22, "id": "orphan"})
+        )
+        self._await(
+            lambda: client.status()["rows"] == 11,
+            timeout=5.0,
+            message="the abandoned request was never carried out",
+        )
+        self.assertGreaterEqual(client.stale_frames, 1, "the orphaned answer was not discarded")
+        # Not one answer out of step: this is a status, and it says so.
+        answer = client.status()
+        self.assertTrue(answer["ok"])
+        self.assertEqual(answer["run_id"], handle.run_id)
+        self.assertIn("alive", answer)
 
     def test_a_frame_without_an_end_is_refused_with_its_limit_and_its_size(self) -> None:
         handle = self._start(run_id="frame-limit")
@@ -568,6 +771,31 @@ class LocalPtySubstrateTests(unittest.TestCase):
             time.monotonic() - started, 15.0, "the launcher waited out its timeout instead"
         )
         self.assertFalse((run_dir / protocol.SOCKET_NAME).exists(), "an address outlived the run")
+
+    def test_a_failure_once_the_run_is_up_is_not_called_a_startup_failure(self) -> None:
+        """A head that worked for an hour and then lost its supervisor did not fail to start.
+
+        The two failures are different facts about a run directory and are named differently, so a
+        reader is never told a run never started when what happened is that it ended badly. The
+        supervisor knows which it is from whether `run.started` was ever written.
+        """
+        self.assertEqual(
+            supervisor_module.failure_of(False)[:2],
+            (protocol.STARTUP_ERROR_NAME, supervisor_module.START_FAILED),
+        )
+        self.assertEqual(
+            supervisor_module.failure_of(True)[:2],
+            (protocol.SUPERVISOR_ERROR_NAME, supervisor_module.RUN_FAILED),
+        )
+        self.assertNotEqual(protocol.STARTUP_ERROR_NAME, protocol.SUPERVISOR_ERROR_NAME)
+        self.assertNotEqual(supervisor_module.failure_of(True)[2], supervisor_module.failure_of(False)[2])
+
+        # And a run that really is up is on the `started` side of that choice: it has said so in
+        # the journal, and it has left neither failure file behind.
+        handle = self._start(run_id="named-failure")
+        self.assertTrue(handle.events().of_kind(RUN_STARTED))
+        self.assertFalse((handle.run_dir / protocol.STARTUP_ERROR_NAME).exists())
+        self.assertFalse((handle.run_dir / protocol.SUPERVISOR_ERROR_NAME).exists())
 
     def test_a_second_start_over_a_live_run_is_refused_rather_than_doubling_the_head(self) -> None:
         handle = self._start(run_id="double")
