@@ -13646,8 +13646,14 @@ class ReviewPaneTests(unittest.TestCase):
 
     def test_create_terminal_returns_the_leaf_from_its_pane_key(self) -> None:
         host = RecordingReviewHost(self.root)
+        run = head_ops.HeadRun(
+            run_id=head_ops.new_run_id(),
+            spec=head_ops.HeadSpec(profile_id="worker", adapter="codex"),
+            workspace=str(self.workspace),
+            task_ref=head_ops.TaskRef.standing("worker"),
+        )
 
-        pane = host._create_terminal(str(self.workspace), "worker", "run-worker")
+        pane = host._open_head_pane(run, "worker", "run-worker")
 
         self.assertEqual((pane.handle, pane.leaf), ("term-created", "leaf-created"))
 

@@ -21,7 +21,7 @@ from triggered_agents.runtime.claude_sessions import (
 )
 from triggered_agents.runtime.codex_preflight import CODEX_HOME_DEFAULT
 from triggered_agents.runtime.head import HeadRun, HeadRunError
-from triggered_agents.runtime.pane_host import OrcaSessionHost, PaneHost
+from triggered_agents.runtime.pane_host import PaneHost
 from triggered_agents.runtime.tui_delivery import (
     COMPOSER_EMPTY,
     COMPOSER_UNKNOWN,
@@ -72,7 +72,6 @@ __all__ = [
     "TuiDeliveryError",
     "bind_claude_provider_progress_source",
     "claude_project_dir_name",
-    "close_terminal_strict",
     "composer_fingerprint",
     "deliver_interactive_prompt",
     "deliver_tui_prompt",
@@ -120,8 +119,15 @@ def deliver_tui_prompt(
     subject: str = "",
     document_path: str = "",
     before_send: Callable[[], None] | None = None,
+    ack_out_of_band: bool = False,
 ) -> DeliveryOutcome:
-    """Deliver one provider TUI prompt through the shared transport and confirmation path."""
+    """Deliver one provider TUI prompt through the shared transport and confirmation path.
+
+    `ack_out_of_band` is the caller's own statement that its acknowledgement arrives elsewhere -- the
+    observer wake quotes the delivery id in the resume it writes from the turn it just started. It
+    changes nothing about the confirmation this path performs and only says that stage 3 alone is
+    enough evidence for this caller.
+    """
     if prompt_text is not None:
         prompt = prompt_text
     else:
@@ -138,6 +144,7 @@ def deliver_tui_prompt(
         confirm=turn_started_confirm(
             handle, workspace, adapter, run_json=run_json, host=host, session_root=session_root
         ),
+        ack_out_of_band=ack_out_of_band,
         subject=subject,
         document_path=document_path,
         before_send=before_send,
@@ -227,15 +234,6 @@ def terminal_turn_started(
     return _screen_started_turn(
         read_terminal_text(handle, run_json=run_json, host=host), adapter=adapter
     )
-
-
-def close_terminal_strict(handle: str, *, run_json: RunJson) -> None:
-    """Close a terminal and let a refusal reach the caller.
-
-    Cleanup paths swallow the failure because they already have one to report. A caller whose record
-    is the only pointer to the pane cannot: a refused close leaves the head alive.
-    """
-    OrcaSessionHost(run_json).close_pane(handle)
 
 
 def read_terminal_text(

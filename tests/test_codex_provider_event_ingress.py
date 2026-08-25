@@ -1424,6 +1424,9 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         self._assert_bound(record.head_run, role=OBSERVER_ROLE)
         self.assertEqual(record.head_run["fanout_policy"]["events"], [])
         self.assertEqual(record.pending_launch, 1, "the watchdog sees the crash-era intent")
+        # The bring-up's own launch prompt reaches the same session host as everything else since
+        # secretary-1461, so what adoption must not do is measured from where the launch left it.
+        sent_by_the_launch = len(self.session.sent)
         with mock.patch.object(
             dispatcher_observer, "observer_alive", return_value={"alive": True, "pid_known": True},
         ):
@@ -1432,7 +1435,10 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
             )
         self.assertEqual(adopted["action"], "observer-adopted")
         self._assert_bound(observers[record.sprint].head_run, role=OBSERVER_ROLE)
-        self.assertEqual(len(self.session.sent), 0, "watchdog adoption did not redeliver or replace")
+        self.assertEqual(
+            len(self.session.sent), sent_by_the_launch,
+            "watchdog adoption did not redeliver or replace",
+        )
 
 
 if __name__ == "__main__":
