@@ -303,10 +303,12 @@ class DeliverReceipt(HeadReceipt):
     payload lands owes its callers, and it is on the boundary rather than on that backend because a
     consumer must not have to know which backend it is talking to before it can tell "the head has
     it" from "the head has part of it". Its values are the substrate's own — `complete`,
-    `in_flight`, `stalled`, `failed` — and it is empty for a backend whose delivery is finished by
-    the time the verb returns, which is what `HEAD_OK` already meant there. `delivered_bytes` and
-    `offered_bytes` are the two numbers that make a partial arrival impossible to read as a whole
-    one: they are only ever both reported, never one of them.
+    `in_flight`, `stalled`, `failed` — plus `unknown`, which is not a state a delivery is in but
+    the backend saying it could not establish which of the four this one reached; a consumer must
+    not read it as any of them, and least of all as "nothing landed". It is empty for a backend
+    whose delivery is finished by the time the verb returns, which is what `HEAD_OK` already meant
+    there. `delivered_bytes` and `offered_bytes` are the two numbers that make a partial arrival
+    impossible to read as a whole one: they are only ever both reported, never one of them.
     """
 
     delivery: DeliveryOutcome | None = None

@@ -27,6 +27,7 @@ import shutil
 import signal
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -56,14 +57,20 @@ from triggered_agents.runtime.head.local_pty.journal import (
     read_events,
 )
 from triggered_agents.runtime.local_pty_head import (
+    DELIVERY_ARRIVED,
+    DELIVERY_LANDED_NOTHING,
+    DELIVERY_LEFT_A_PREFIX,
+    DELIVERY_STATE_UNKNOWN,
+    DELIVERY_STILL_GOING,
+    DELIVERY_UNESTABLISHED,
     DRAIN_AFTER_PARTIAL_DELIVERY,
+    DRAIN_AFTER_UNESTABLISHED_DELIVERY,
     OBSERVE_HEAD_EXITED,
     OBSERVE_NO_RUN_DIRECTORY,
     OBSERVE_SUPERVISOR_UNREACHABLE,
     STOP_ACTIVITY_SINCE,
     STOP_TURN_IN_FLIGHT,
     AttachedStream,
-    DeliveryReport,
     LocalPtyHeadRuntime,
     LocalPtyRuntimeError,
 )
@@ -311,7 +318,15 @@ class LocalPtyStartTests(LocalPtyRuntimeTestCase):
 
 
 class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
-    """Criterion 3 and 4: admission is not arrival, and a stall is never glued over."""
+    """Criterion 3 and 4: admission is not arrival, and a stall is never glued over.
+
+    One test per name in the backend's delivery vocabulary, and every one of them produced by a
+    real supervisor writing into a real pty rather than by handing the backend a report it made
+    up: arrived, still going, a prefix left behind, nothing landed at all, and a fate that could
+    not be established because the supervisor stopped answering after it had admitted the payload.
+    The last two are the states that used to be reachable only by argument, which is exactly how
+    both of them came to be wrong.
+    """
 
     def _stuck_head(self, **options) -> HeadRun:
         """A head that never reads its terminal, so a payload fills the pty and stops."""
@@ -320,6 +335,81 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
             delivery_seconds=options.pop("delivery_seconds", 1.0),
             **options,
         )
+
+    def _slow_head(self, **options) -> HeadRun:
+        """A head that reads its terminal steadily, so a large payload takes real time to land."""
+        return self.live_run(
+            command=f"{sys.executable} -u {SLOW_READER} --chunk 4096 --pause 0.2",
+            delivery_seconds=options.pop("delivery_seconds", 60.0),
+            **options,
+        )
+
+    def _rebuild_runtime(self, **options) -> None:
+        """The same backend over the same run root, with the delivery knobs a test needs.
+
+        `delivery_timeout` and `delivery_poll` are how long this runtime is willing to watch a
+        delivery and how often it looks; the supervisor's own `delivery_seconds` is a separate
+        knob with a separate default, and the branches below are what happens when the two do not
+        line up. Nothing about the substrate changes with them.
+        """
+        self.runtime = LocalPtyHeadRuntime(
+            self.root, head_process_status=head_process_status, **options
+        )
+
+    def _fill_the_terminal(self, run: HeadRun) -> int:
+        """Stall one payload against this head's pty from outside the runtime, and say how much landed.
+
+        Straight at the socket on purpose: it leaves the pty's buffer full and the head's terminal
+        carrying a fragment, without the runtime having made the delivery and so without the
+        runtime knowing anything about it. That is the only way to reach the next delivery's
+        "the kernel took nothing at all" with a real kernel.
+        """
+        address = self.runtime._address(run)  # noqa: SLF001 - the test is the backend's own
+        with SupervisorClient.connect(address.socket_path, timeout=5.0) as client:
+            answer = client.send_input(b"x" * (protocol.INPUT_MAX_BYTES - 1))
+            self.assertTrue(answer["ok"], answer)
+            final = client.wait_for_delivery(answer["delivery"]["id"], timeout=15.0)
+        self.assertEqual(final["state"], protocol.DELIVERY_STALLED, final)
+        self.assertGreater(final["written_bytes"], 0, "the pty took nothing, so it is not full")
+        return int(final["written_bytes"])
+
+    def _stop_supervisor_once(self, run: HeadRun, ready) -> None:
+        """Stop this head's supervisor with `SIGSTOP` the moment `ready()` holds, from a thread.
+
+        A supervisor that has admitted a payload and then cannot answer is a real thing — a loaded
+        host, an fsync stall on a journal every record of which is fsynced, a process somebody
+        stopped — and this makes it happen on purpose instead of waiting for a bad day. What is
+        stopped is the supervisor's own process: the socket, the journal, the pty and the head are
+        all still exactly what they were.
+        """
+        supervisor = self._supervisor_pid(self.root / run.run_id)
+        self.assertGreater(supervisor, 0, "the run directory names no supervisor")
+        self.addCleanup(_kill, supervisor, signal.SIGCONT)
+
+        def watch() -> None:
+            deadline = time.monotonic() + 30.0
+            while time.monotonic() < deadline:
+                if ready():
+                    _kill(supervisor, signal.SIGSTOP)
+                    return
+                time.sleep(0.005)
+
+        thread = threading.Thread(target=watch, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 10.0)
+
+    def _delivery_in_flight(self, run: HeadRun, size: int):
+        """A predicate that holds once the substrate is carrying a payload of exactly this size."""
+        address = self.runtime._address(run)  # noqa: SLF001 - the test is the backend's own
+
+        def ready() -> bool:
+            delivery = self._status(address.socket_path).get("delivery") or {}
+            return (
+                delivery.get("state") == protocol.DELIVERY_IN_FLIGHT
+                and int(delivery.get("size_bytes") or 0) == size
+            )
+
+        return ready
 
     def test_a_delivery_that_arrived_says_so_with_the_numbers_that_prove_it(self) -> None:
         run = self.live_run()
@@ -337,6 +427,7 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
         self.assertTrue(accepted["complete"])
         self.assertEqual(accepted["bytes"], accepted["offered_bytes"])
         self.assertTrue(receipt.evidence.journalled, "status and the journal both saw it")
+        self.assertEqual(receipt.evidence.outcome, DELIVERY_ARRIVED)
 
     def test_a_delivery_that_stalled_is_not_an_ok_receipt_with_a_delivery_on_it(self) -> None:
         """The wound this card exists not to re-open, one layer above where it was closed."""
@@ -347,6 +438,7 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
         self.assertFalse(receipt.ok, "a stalled delivery reported as a success")
         self.assertFalse(receipt.arrived)
         self.assertEqual(receipt.status, HEAD_ALIVE)
+        self.assertEqual(receipt.evidence.outcome, DELIVERY_LEFT_A_PREFIX)
         self.assertEqual(receipt.delivery_state, protocol.DELIVERY_STALLED)
         self.assertGreater(receipt.delivered_bytes, 0, "nothing landed, so nothing stalled")
         self.assertLess(receipt.delivered_bytes, receipt.offered_bytes)
@@ -382,21 +474,126 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
         A payload of which the kernel took *nothing* left the terminal exactly as it was: there is
         no fragment for a later payload to be glued to, the turn it would have started never
         started, and closing the head over it would be throwing away a working head.
+
+        The zero is produced rather than asserted about: the head's pty is filled from outside
+        this runtime first, so the delivery the runtime then makes finds a terminal with no room
+        in it and the kernel takes none of it.
         """
-        run = self.live_run()
-        lease = self.runtime.activity.grant(run.run_id, "a delivery that landed nothing")
+        run = self._stuck_head()
+        self._fill_the_terminal(run)
 
-        receipt = self.runtime._unfinished_delivery(  # noqa: SLF001 - the branch under test
-            run,
-            DeliveryReport(state=protocol.DELIVERY_STALLED, written=0, offered=64),
-            lease,
-            self.runtime.activity.epoch(run.run_id),
-        )
+        receipt = self.deliver_line(run, "not one byte of this can land")
 
+        self.assertFalse(receipt.ok)
         self.assertEqual(receipt.status, HEAD_ALIVE)
+        self.assertEqual(receipt.evidence.outcome, DELIVERY_LANDED_NOTHING)
+        self.assertEqual(receipt.delivery_state, protocol.DELIVERY_STALLED)
+        self.assertEqual(receipt.delivered_bytes, 0, "something landed, so this is not the case")
+        self.assertEqual(receipt.offered_bytes, len("not one byte of this can land\n"))
         self.assertIsNone(receipt.lease, "no turn was started, so none is held")
         self.assertTrue(self.runtime.activity.admits(run.run_id), "the head was closed for nothing")
-        self.assertEqual(self.deliver_line(run, "still fine").status, HEAD_OK)
+        # The head's own journal carries the delivery that landed nothing, with both counts.
+        accepted = self.events(run).of_kind(INPUT_ACCEPTED)[-1]
+        self.assertEqual(accepted["bytes"], 0)
+        self.assertEqual(accepted["offered_bytes"], receipt.offered_bytes)
+        # And the head is still one this runtime will deliver to: the refusal is not permanent.
+        self.assertNotEqual(self.deliver_line(run, "and again").status, HEAD_DRAINING)
+
+    def test_a_delivery_still_in_flight_is_not_a_head_this_runtime_condemns(self) -> None:
+        """A delivery that is merely still landing is an answer, never a death sentence.
+
+        The supervisor's delivery bound and this runtime's willingness to watch are two knobs with
+        two defaults, and a head that redraws a terminal is exactly where an operator raises the
+        first one. When the wait runs out under a delivery that is going perfectly well, the head
+        must be left alone: admission open, no drain, nothing in the journal about it, and the
+        payload free to finish landing. This is the branch that used to condemn the head.
+        """
+        self._rebuild_runtime(delivery_timeout=0.5)
+        run = self._slow_head()
+        text = "x" * (protocol.INPUT_MAX_BYTES - 1)
+
+        receipt = self.deliver_line(run, text)
+
+        self.assertFalse(receipt.ok, "a delivery that has not finished is not a success")
+        self.assertEqual(receipt.status, HEAD_ALIVE)
+        self.assertEqual(receipt.evidence.outcome, DELIVERY_STILL_GOING)
+        self.assertEqual(receipt.delivery_state, protocol.DELIVERY_IN_FLIGHT)
+        self.assertLess(receipt.delivered_bytes, receipt.offered_bytes)
+        self.assertIsNotNone(receipt.lease, "the head was given something and is working on it")
+        # Nothing about the head was closed, here or at the process that owns it.
+        self.assertTrue(self.runtime.activity.admits(run.run_id), "a live head was condemned")
+        address = self.runtime._address(run)  # noqa: SLF001 - the test is the backend's own
+        self.assertFalse(self._status(address.socket_path)["draining"])
+        self.assertEqual(self.events(run).of_kind(DRAIN_REQUESTED), ())
+        # A second delivery is refused because one turn is running, not because the head is over.
+        second = self.deliver_line(run, "behind it")
+        self.assertEqual(second.status, HEAD_BUSY, second.reason)
+        # And the payload goes on landing until all of it has: the head was never interrupted.
+        self._await(
+            lambda: (self._status(address.socket_path).get("delivery") or {}).get("state")
+            == protocol.DELIVERY_COMPLETE,
+            timeout=30.0,
+            message="the delivery this runtime stopped watching never finished",
+        )
+        accepted = self.events(run).of_kind(INPUT_ACCEPTED)[-1]
+        self.assertTrue(accepted["complete"])
+        self.assertEqual(accepted["bytes"], len(text) + 1)
+        self.assertTrue(self.runtime.activity.admits(run.run_id), "the head was closed after all")
+
+    def test_a_delivery_nobody_could_account_for_is_not_reported_as_one_that_never_started(self) -> None:
+        """Admitted, then unanswerable: the one case where the fate cannot be established.
+
+        `send_input` said `ok`, so the payload is the supervisor's and may be on the terminal
+        already. When that supervisor then stops answering and its journal has nothing to say
+        about the delivery either, the honest report is `unknown` — not `delivered 0 of 0`, which
+        is what "refused before anything reached the terminal" means on this boundary and which
+        would let the next payload be written straight behind a fragment.
+        """
+        self._rebuild_runtime(connect_timeout=1.0, delivery_timeout=30.0)
+        run = self._stuck_head(delivery_seconds=60.0)
+        text = "x" * (protocol.INPUT_MAX_BYTES - 1)
+        self._stop_supervisor_once(run, self._delivery_in_flight(run, len(text) + 1))
+
+        receipt = self.deliver_line(run, text)
+
+        self.assertFalse(receipt.ok)
+        self.assertEqual(receipt.evidence.outcome, DELIVERY_UNESTABLISHED)
+        self.assertEqual(receipt.delivery_state, DELIVERY_STATE_UNKNOWN)
+        self.assertEqual(receipt.offered_bytes, len(text) + 1, "the payload is reported as offered")
+        self.assertEqual(receipt.status, HEAD_ALIVE, "an unanswered socket is not a dead head")
+        # Admission is closed rather than left open over bytes that may be sitting on the terminal.
+        self.assertFalse(self.runtime.activity.admits(run.run_id))
+        landed = self.payloads_delivered()
+        second = self.deliver_line(run, "and now this")
+        self.assertEqual(second.status, HEAD_DRAINING, second.reason)
+        self.assertIn(DRAIN_AFTER_UNESTABLISHED_DELIVERY, second.reason)
+        self.assertEqual(self.payloads_delivered(), landed, "a second payload was offered anyway")
+
+    def test_what_the_journal_still_knows_is_read_when_the_supervisor_cannot_be_asked(self) -> None:
+        """The other witness. A supervisor that stops answering does not take the facts with it.
+
+        Here the delivery really did end — the journal has its `input.accepted`, with a prefix on
+        the terminal — and only the socket is gone. The report is that stall, from the journal,
+        with the head closed for the prefix it left; reporting `unknown` here would be throwing
+        away a fact that is on this host's disk.
+        """
+        self._rebuild_runtime(connect_timeout=1.0, delivery_timeout=30.0, delivery_poll=5.0)
+        run = self._stuck_head(delivery_seconds=1.0)
+        journal = self.root / run.run_id / protocol.JOURNAL_NAME
+        self._stop_supervisor_once(run, lambda: bool(read_events(journal).of_kind(INPUT_ACCEPTED)))
+        text = "x" * (protocol.INPUT_MAX_BYTES - 1)
+
+        receipt = self.deliver_line(run, text)
+
+        accepted = read_events(journal).of_kind(INPUT_ACCEPTED)[-1]
+        self.assertGreater(accepted["bytes"], 0, "nothing landed, so this is a different case")
+        self.assertEqual(receipt.evidence.outcome, DELIVERY_LEFT_A_PREFIX)
+        self.assertTrue(receipt.evidence.journalled, "the journal was not the witness it is")
+        self.assertEqual(receipt.delivery_state, protocol.DELIVERY_STALLED)
+        self.assertEqual(receipt.delivered_bytes, accepted["bytes"])
+        self.assertEqual(receipt.offered_bytes, len(text) + 1)
+        self.assertFalse(self.runtime.activity.admits(run.run_id))
+        self.assertIn(DRAIN_AFTER_PARTIAL_DELIVERY, self.deliver_line(run, "glue").reason)
 
     def test_a_payload_over_the_declared_limit_is_refused_and_the_head_is_untouched(self) -> None:
         run = self.live_run()
@@ -530,6 +727,39 @@ class LocalPtyAttachTests(LocalPtyRuntimeTestCase):
             return True
 
         self._await(rejoined, message="the freed slot was never reusable")
+
+    def test_a_live_head_at_the_connection_bound_is_not_reported_as_one_that_ended(self) -> None:
+        """The collapse this sprint exists to remove, in the one verb that could still make it.
+
+        Both of the substrate's bounds are refusals worth making again the moment somebody lets
+        go. Reporting either of them as `HEAD_GONE` tells a caller that a head which is running,
+        answering and merely popular has ended — and what a caller does with a head that has ended
+        is open another one beside it.
+        """
+        run = self.live_run()
+        head = self.head_pid_of(run)
+        held = []
+        for _ in range(protocol.CONNECTION_MAX_CLIENTS):
+            client = SupervisorClient.connect(self.root / run.run_id / protocol.SOCKET_NAME)
+            held.append(client)
+            self.addCleanup(client.close)
+
+        refused = self.runtime.attach(run)
+
+        self.assertEqual(refused.evidence["error"], protocol.ERROR_CONNECTION_LIMIT)
+        self.assertEqual(refused.status, HEAD_BUSY, "a live head at a bound is not a head that ended")
+        self.assertTrue(refused.deferred, "somebody else letting go makes this worth retrying")
+        self.assertTrue(_alive(head))
+        held.pop().close()
+
+        def rejoined() -> bool:
+            receipt = self.runtime.attach(run)
+            if not receipt.ok:
+                return False
+            receipt.evidence.close()
+            return True
+
+        self._await(rejoined, message="the freed connection was never reusable")
 
 
 

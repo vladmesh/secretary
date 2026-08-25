@@ -24,29 +24,50 @@ What changes is what the backend can honestly do, and it is exactly the two verb
 the substrate `ok` from `input` means *admitted*: the payload was taken on and the supervisor's
 loop writes it into the pty as fast as the head reads. A `deliver` that returned `HEAD_OK` on that
 answer would be reporting an intention as an arrival, which is the wound the substrate closed one
-layer down and this one would re-open. So `deliver` establishes what really reached the terminal —
-from `status`'s own delivery record, corroborated by the journal's `input.accepted` with its two
-byte counts and its `complete` flag — and answers with three different things:
+layer down and this one would re-open. So `deliver` follows the payload and then **decides what
+became of it once**, in `_delivery_report`, out of `status`'s own delivery record and the journal's
+`input.accepted` with its two byte counts and its `complete` flag. That decision is a name, it
+travels on the report, and every branch below reads it by that name:
 
-  * **admitted and arrived**: `HEAD_OK`, `delivery_state` `complete`, and a `DeliveryOutcome`
-    carrying the delivered byte count;
-  * **admitted and still going**: `HEAD_ALIVE`, `delivery_state` `in_flight`. Not `ok`, because
-    nothing about this delivery is finished; not a retry either, because the bytes are landing;
-  * **admitted and stuck**: `HEAD_ALIVE`, `delivery_state` `stalled` or `failed`, with what did
-    land. A caller reading only `.ok` cannot mistake any of the last two for the first.
+  * `DELIVERY_ARRIVED` — all of it landed: `HEAD_OK`, `delivery_state` `complete`, and a
+    `DeliveryOutcome` carrying the delivered byte count;
+  * `DELIVERY_STILL_GOING` — admitted and landing: `HEAD_ALIVE`, `delivery_state` `in_flight`. Not
+    `ok`, because nothing about this delivery is finished; not a retry either, because the bytes
+    are still going in; and **not fatal**, because it cannot glue — the substrate holds one payload
+    at a time, so a second one is refused by the substrate itself rather than interleaved;
+  * `DELIVERY_LEFT_A_PREFIX` — it ended part-way: `HEAD_ALIVE` (or `HEAD_GONE` when the head went
+    with it), `delivery_state` `stalled` or `failed`, with what did land. Fatal, for the reason
+    below;
+  * `DELIVERY_LANDED_NOTHING` — it ended and the kernel took not one byte: the terminal is exactly
+    as it was, no turn was started, and the head is worth delivering to again;
+  * `DELIVERY_UNESTABLISHED` — it was offered, and then the supervisor stopped answering and the
+    journal has no record of it either, so what landed **cannot be established**. Reported as
+    `delivery_state` `unknown` with the last counts anybody could establish, and fatal.
 
-**A stall is fatal to the run, and that is a decision rather than an omission.** A payload that
-reached the head's terminal in part leaves a prefix that nothing can take back: the head has
-already read some of it, so flushing the pty's input queue (`TCIFLUSH` discards only what the head
-has *not* read) repairs nothing, and admission re-opening would let the next payload land against
-that fragment and be read as one line with it. Silently gluing them is the one thing this must not
-do. So a delivery that landed *some* bytes and did not finish closes admission here **and** on the
-substrate, and every later `deliver` for that head is refused `HEAD_DRAINING`: the work belongs to
-a new head, and the receipt says so rather than leaving a caller to discover it from a prompt the
-head read as gibberish. The two neighbouring cases are deliberately not fatal, because neither can
-glue: a delivery that landed *nothing* left the terminal exactly as it was and is worth making
-again on this head, and a delivery still in flight holds the substrate's one-payload-at-a-time
-floor, so a second one is refused `HEAD_BUSY` by the substrate itself rather than interleaved.
+Two of those five are load-bearing corrections and are written here so that they cannot be
+re-derived by accident. A delivery's state is never inferred from a boolean predicate over the byte
+counts, and never inferred from *which exception arrived*: an admitted payload followed by an
+unreachable supervisor is not a refusal at admission — a refusal means the terminal was never
+touched, and here it provably may have been. Both defects this file had were that same shape.
+
+**A prefix left behind is fatal to the run, and that is a decision rather than an omission.** A
+payload that reached the head's terminal in part leaves a prefix that nothing can take back: the
+head has already read some of it, so flushing the pty's input queue (`TCIFLUSH` discards only what
+the head has *not* read) repairs nothing, and admission re-opening would let the next payload land
+against that fragment and be read as one line with it. Silently gluing them is the one thing this
+must not do. So `DELIVERY_LEFT_A_PREFIX` closes admission here **and** on the substrate, and every
+later `deliver` for that head is refused `HEAD_DRAINING` naming the reason. `DELIVERY_UNESTABLISHED`
+closes admission for the same reason and a weaker one: a delivery whose fate is unknown *may* have
+left a prefix, and admission left open over a maybe-prefix is exactly the glue this forbids.
+
+**Ordering of the journal against a drain this runtime sends.** The drain that a fatal delivery
+sends can only be written after that delivery's own `input.accepted`, because the state is only
+fatal once the substrate has said the delivery ended — and the supervisor writes the journal record
+before it answers that. The one exception is `DELIVERY_UNESTABLISHED`, where the supervisor is not
+answering at all: if it recovers, its `drain.requested` can precede the `input.accepted` of the
+payload it was still carrying. That ordering is given up knowingly — closing admission over a
+payload whose fate cannot be established outranks the order of two records — and it is the honest
+remainder of observation 2 of the substrate card's review rather than a claim that it cannot happen.
 
 **Liveness is the launch identity, and there is no second scheme.** `head_process_status` from
 `secretary.dispatcher_watchdog` — the reader the watchdog already applies, unchanged — is passed
@@ -127,18 +148,53 @@ OBSERVE_HEAD_EXITED = "head_exited"
 #: The socket answered something this runtime cannot read as a status. Not an answer about the head.
 OBSERVE_STATUS_UNREADABLE = "status_unreadable"
 
+#: What became of one delivery. The closed vocabulary this backend decides in exactly one place —
+#: `_delivery_report` — and that every branch afterwards reads by name. It is a value on the report
+#: rather than a predicate anybody can re-derive, because both defects this file was sent back for
+#: were a re-derivation: one read "still going" out of a boolean over the byte counts, the other
+#: read "nothing landed" out of which exception had arrived.
+#: All of it reached the head's terminal.
+DELIVERY_ARRIVED = "arrived"
+#: Admitted, landing, and not finished. Never fatal: the substrate takes one payload at a time, so
+#: nothing can be glued behind this one while it is still going.
+DELIVERY_STILL_GOING = "still_going"
+#: It ended part-way. Fatal: the prefix on the terminal cannot be taken back.
+DELIVERY_LEFT_A_PREFIX = "left_a_prefix"
+#: It ended and the kernel took nothing. The terminal is as it was and the head is still worth
+#: delivering to.
+DELIVERY_LANDED_NOTHING = "landed_nothing"
+#: It was admitted and what became of it could not be established from either witness. Fatal,
+#: because a fate that cannot be established may be a prefix.
+DELIVERY_UNESTABLISHED = "unestablished"
+#: The outcomes after which this runtime hands the head no more work, named as a set rather than
+#: recomputed at each site.
+FATAL_DELIVERY_OUTCOMES = frozenset({DELIVERY_LEFT_A_PREFIX, DELIVERY_UNESTABLISHED})
+
+#: `delivery_state` on the receipt for a delivery whose fate could not be established. The
+#: substrate's own four states say what a delivery *did*; this fifth one says that nobody could be
+#: asked, which is a different fact and must not be reported as any of the four.
+DELIVERY_STATE_UNKNOWN = "unknown"
+
 #: Why a `deliver` says what it says, beside the delivery state it carries.
 DELIVER_NOT_ADMITTED = "not_admitted"
 DELIVER_IN_FLIGHT = "delivery_in_flight"
 DELIVER_STALLED = "delivery_stalled"
 DELIVER_FAILED = "delivery_failed"
+DELIVER_UNESTABLISHED = "delivery_unestablished"
 DELIVER_PREFIX_IS_FATAL = "partial_delivery_closed_this_head"
+DELIVER_UNKNOWN_IS_FATAL = "unestablished_delivery_closed_this_head"
 #: A head this runtime will hand no more work because a delivery left an irreversible prefix on its
 #: terminal. The reason travels on every later refusal, so the caller learns why rather than only
 #: that it was refused.
 DRAIN_AFTER_PARTIAL_DELIVERY = (
     "a delivery reached this head's terminal in part and could not be taken back: admission is "
     "closed rather than re-opened over the fragment it left"
+)
+#: The same gate for the same reason, over a delivery whose fate nobody could establish: admission
+#: is not re-opened over a payload that may have left a prefix.
+DRAIN_AFTER_UNESTABLISHED_DELIVERY = (
+    "this head was given a payload and what became of it could not be established: admission is "
+    "closed rather than re-opened over bytes that may be sitting on its terminal"
 )
 #: What a drain on this backend really does, said once so that every receipt can carry it.
 DRAIN_HEAD_SIGNALLED = (
@@ -187,14 +243,22 @@ class AttachedStream:
 
 @dataclass(frozen=True)
 class DeliveryReport:
-    """What one delivery did to the head's terminal, in the substrate's own numbers.
+    """What one delivery did to the head's terminal: the decision, and the numbers behind it.
 
-    `state` is the substrate's delivery state verbatim, `written` is what the kernel took from the
-    supervisor and `offered` is what the caller handed over. `journalled` says whether the
-    journal's own `input.accepted` was found for this delivery, so a reader can tell a fact
-    corroborated in two places from one that only `status` could give.
+    `outcome` is the whole point of this object. It is one of the five names in this module's
+    vocabulary, it is decided once by `_delivery_report`, and nothing downstream re-derives it: a
+    caller — or a branch in this file — asks *which outcome this is*, never "did more than zero
+    bytes land and was it not complete", which is the predicate that made a delivery still in
+    flight look like one that had stalled.
+
+    `state` is what the receipt carries as `delivery_state`: the substrate's own state verbatim,
+    or `unknown` when the fate could not be established. `written` is what the kernel took from the
+    supervisor and `offered` is what the caller handed over — always both, never one. `journalled`
+    says whether the journal's own `input.accepted` was found for this delivery, so a reader can
+    tell a fact corroborated in two places from one that only `status` could give.
     """
 
+    outcome: str
     state: str
     written: int
     offered: int
@@ -203,13 +267,56 @@ class DeliveryReport:
     detail: str = ""
 
     @property
-    def complete(self) -> bool:
-        return self.state == protocol.DELIVERY_COMPLETE and self.written >= self.offered
+    def fatal(self) -> bool:
+        """Whether this outcome closes the head, read from the outcome and from nothing else."""
+        return self.outcome in FATAL_DELIVERY_OUTCOMES
 
-    @property
-    def landed_a_prefix(self) -> bool:
-        """Whether this delivery left bytes on the terminal that it did not finish."""
-        return not self.complete and self.written > 0
+
+def _delivery_report(
+    *,
+    state: str,
+    written: int,
+    offered: int,
+    established: bool,
+    delivery_id: int = 0,
+    journalled: bool = False,
+    detail: str = "",
+) -> DeliveryReport:
+    """Decide what became of one delivery. The only place in this backend that decides it.
+
+    `established` is whether either witness — the supervisor's `status` or the head's journal —
+    actually said what the delivery did. A delivery that was admitted and then went unwitnessed is
+    `DELIVERY_UNESTABLISHED`, and it is deliberately not folded into any of the four states the
+    substrate has words for: "I could not find out" is not "nothing landed", and reporting it as
+    the latter is what let a payload be written straight behind a fragment that had landed.
+    """
+    if not established:
+        return DeliveryReport(
+            outcome=DELIVERY_UNESTABLISHED,
+            state=DELIVERY_STATE_UNKNOWN,
+            written=written,
+            offered=offered,
+            delivery_id=delivery_id,
+            journalled=journalled,
+            detail=detail,
+        )
+    if state == protocol.DELIVERY_COMPLETE and written >= offered:
+        outcome = DELIVERY_ARRIVED
+    elif state == protocol.DELIVERY_IN_FLIGHT:
+        outcome = DELIVERY_STILL_GOING
+    elif written > 0:
+        outcome = DELIVERY_LEFT_A_PREFIX
+    else:
+        outcome = DELIVERY_LANDED_NOTHING
+    return DeliveryReport(
+        outcome=outcome,
+        state=state,
+        written=written,
+        offered=offered,
+        delivery_id=delivery_id,
+        journalled=journalled,
+        detail=detail,
+    )
 
 
 class LocalPtyHeadRuntime:
@@ -239,6 +346,7 @@ class LocalPtyHeadRuntime:
         spawn: Callable[..., local_pty.HeadHandle] = local_pty.spawn_head,
         connect_timeout: float = 5.0,
         delivery_timeout: float = protocol.INPUT_DELIVERY_SECONDS + 5.0,
+        delivery_poll: float = 0.02,
         stop_timeout: float = STOP_CONFIRM_SECONDS,
     ) -> None:
         if not callable(head_process_status):
@@ -252,6 +360,7 @@ class LocalPtyHeadRuntime:
         self._spawn = spawn
         self._connect_timeout = connect_timeout
         self._delivery_timeout = delivery_timeout
+        self._delivery_poll = delivery_poll
         self._stop_timeout = stop_timeout
         # Reentrant, so `stop_if_quiescent` can perform `stop`.
         self._lock = threading.RLock()
@@ -346,8 +455,15 @@ class LocalPtyHeadRuntime:
                     rotation_ready=self.activity.rotatable(identity),
                 )
             lease = self.activity.grant(identity, subject or "head-launch")
-            report, refusal = self._put(live, pointer, subject or "head-launch")
-            if refusal is not None or report is None or not report.complete:
+            try:
+                report, refusal = self._put(live, pointer, subject or "head-launch")
+            except BaseException:
+                # Whatever went wrong, the turn this bring-up handed itself is not running: a
+                # lease left behind here would refuse every later delivery to a head nobody is
+                # working on. `deliver` has guarded this since it was written; this one had not.
+                self.activity.release(identity)
+                raise
+            if refusal is not None or report is None or report.outcome != DELIVERY_ARRIVED:
                 # A bring-up whose prompt did not reach the head is a bring-up that left a head
                 # nobody has given a task to. It is ended here rather than handed back running,
                 # and which of the two refusals this is depends on whether that stop was confirmed
@@ -375,9 +491,10 @@ class LocalPtyHeadRuntime:
         still running. Neither is a queue.
 
         What follows the admission is this backend's own, and it is the reason `ok` can be trusted
-        here: the delivery is followed until it leaves the substrate's in-flight state, and the
-        receipt reports arrival, progress or a stall as three different values. See the module
-        docstring for why a stall that landed a prefix closes this head for good.
+        here: the payload is followed, what became of it is decided once as one of the five names
+        in this module's vocabulary, and the receipt carries that decision as its status, its
+        `delivery_state` and its two byte counts. `ok` is only ever `DELIVERY_ARRIVED`. See the
+        module docstring for which of the outcomes close this head and why.
         """
         del ignored
         with self._lock:
@@ -428,7 +545,7 @@ class LocalPtyHeadRuntime:
                 )
             assert report is not None
             epoch = self.activity.acted(run.run_id)
-            if report.complete:
+            if report.outcome == DELIVERY_ARRIVED:
                 return DeliverReceipt(
                     status=HEAD_OK,
                     run=run.working() if run.running else run,
@@ -652,9 +769,7 @@ class LocalPtyHeadRuntime:
                 client.close()
                 error = str(answer.get("error") or "")
                 return AttachReceipt(
-                    # The attach limit is a refusal worth making again: somebody else's stream ends
-                    # and this one can be joined. A head that has gone is not.
-                    status=HEAD_BUSY if error == protocol.ERROR_ATTACH_LIMIT else HEAD_GONE,
+                    status=_attach_refusal_status(error),
                     run=run,
                     reason=error or "the supervisor refused the attachment",
                     evidence=answer,
@@ -824,10 +939,15 @@ class LocalPtyHeadRuntime:
     def _put(
         self, run: HeadRun, pointer: NudgePointer, subject: str
     ) -> tuple[DeliveryReport | None, _Refusal | None]:
-        """Offer one payload and follow it until the substrate says what became of it.
+        """Offer one payload and follow it until this backend can say what became of it.
 
-        Two answers, and only one of them is ever not `None`: a refusal at admission, in which case
-        nothing reached the terminal, or a report of what did.
+        Two answers, and exactly one of them is ever not `None`. The line between them is
+        **whether the payload can still be known not to have been offered**, and it is drawn
+        deliberately rather than by where an exception happens to be caught. Before the request
+        goes onto the socket, a supervisor that cannot be spoken to is a `_Refusal`: the head's
+        terminal was provably never touched. From that moment on nothing is a refusal any more —
+        every ending is a `DeliveryReport`, and the worst one of those can say is that what
+        became of the payload could not be established.
         """
         address = self._address(run)
         if address is None or not address.socket_path.exists():
@@ -838,44 +958,106 @@ class LocalPtyHeadRuntime:
             )
         payload = _payload_of(pointer)
         try:
-            with self._connect(address) as client:
-                answer = client.send_input(payload, subject=subject)
-                if not answer.get("ok"):
-                    return None, _admission_refusal(answer)
-                admitted = answer.get("delivery") or {}
-                delivery_id = int(admitted.get("id") or 0)
-                try:
-                    final = client.wait_for_delivery(
-                        delivery_id, timeout=self._delivery_timeout
-                    )
-                except _UNREACHABLE:
-                    # The substrate is still carrying it. That is a state, not a refusal: the
-                    # report says `in_flight` and the caller is told the delivery is unfinished.
-                    final = client.status().get("delivery") or dict(admitted)
+            client = self._connect(address)
         except _UNREACHABLE as exc:
-            return None, _Refusal(
-                status=HEAD_ALIVE if self._process_alive(address, run) else HEAD_GONE,
-                reason=OBSERVE_SUPERVISOR_UNREACHABLE,
-                failure=HeadNudgeFailed(f"the head's supervisor could not be reached: {exc}"),
-                evidence=str(exc),
-            )
-        return self._report_of(address, final, len(payload)), None
+            return None, self._unreachable_refusal(address, run, exc)
+        with client:
+            try:
+                # The journal's own sequence, read before this payload is offered, is the second
+                # key that `input.accepted` records are matched on. Delivery ids restart at 1 in
+                # every supervisor incarnation while the journal is append-only across all of
+                # them, so an id alone would let a record from a previous incarnation of a reused
+                # run directory answer for this delivery. Nothing has been offered yet at this
+                # point, so a supervisor that cannot answer here is a refusal.
+                floor = int(client.status().get("journal_seq") or 0)
+            except _UNREACHABLE as exc:
+                return None, self._unreachable_refusal(address, run, exc)
+            try:
+                answer = client.send_input(payload, subject=subject)
+            except _UNREACHABLE as exc:
+                # The request is on the socket and no answer came back. Whether the supervisor
+                # read it and admitted the payload cannot be established from here, and "probably
+                # not" is precisely the assumption that writes the next payload behind a fragment.
+                # So this is an unestablished delivery and not a refusal, even though it is one
+                # step earlier than the case below: the line is drawn at what can be established,
+                # never at how far down the call the failure happened to be.
+                return _delivery_report(
+                    state=DELIVERY_STATE_UNKNOWN,
+                    written=0,
+                    offered=len(payload),
+                    established=False,
+                    detail=f"the head's supervisor stopped answering as it was offered: {exc}",
+                ), None
+            if not answer.get("ok"):
+                return None, _admission_refusal(answer)
+            admitted = dict(answer.get("delivery") or {})
+            return self._follow(address, client, admitted, len(payload), floor), None
+
+    def _follow(
+        self,
+        address: _Address,
+        client: local_pty.SupervisorClient,
+        admitted: Mapping[str, Any],
+        offered: int,
+        floor: int,
+    ) -> DeliveryReport:
+        """Watch an admitted delivery until the substrate says it is no longer in flight.
+
+        The waiting is done here rather than through the client's own `wait_for_delivery` for one
+        reason: that one answers a delivery it could not follow to the end by raising, and a
+        caller then has to read the state of the delivery out of *which exception arrived*. This
+        backend's whole correction is that the state travels as a value, so the polling is done
+        where every ending — arrived, still going when the wait ran out, and the supervisor
+        falling silent — can be turned into one.
+        """
+        delivery_id = int(admitted.get("id") or 0)
+        last: Mapping[str, Any] = admitted
+        deadline = time.monotonic() + self._delivery_timeout
+        while True:
+            try:
+                delivery = client.status().get("delivery")
+            except _UNREACHABLE as exc:
+                # Admitted, and then nobody left to ask. The journal is the other witness and it
+                # is on this host's disk, so it is read before anything is concluded; only if it
+                # has nothing about this delivery either is the fate reported as unestablished.
+                return self._report_of(
+                    address, last, offered, floor, established=False, detail=str(exc)
+                )
+            if isinstance(delivery, dict) and int(delivery.get("id") or 0) == delivery_id:
+                last = delivery
+                if delivery.get("state") != protocol.DELIVERY_IN_FLIGHT:
+                    return self._report_of(address, last, offered, floor, established=True)
+            if time.monotonic() >= deadline:
+                # The wait this runtime was willing to do ran out while the substrate was still
+                # writing. That is `DELIVERY_STILL_GOING` and it is an answer, not a failure: the
+                # supervisor's own delivery bound is what ends a delivery, and it may outlive this
+                # wait by however much an operator set the two knobs to.
+                return self._report_of(address, last, offered, floor, established=True)
+            time.sleep(self._delivery_poll)
 
     def _report_of(
-        self, address: _Address, delivery: Mapping[str, Any], offered: int
+        self,
+        address: _Address,
+        delivery: Mapping[str, Any],
+        offered: int,
+        floor: int,
+        *,
+        established: bool,
+        detail: str = "",
     ) -> DeliveryReport:
         """What reached the head's terminal, from `status` and corroborated by the journal.
 
-        `status` is the authority and the journal is the second witness, in that order and not the
-        other way round: a delivery of which not one byte landed is a real fact about a real
-        payload, and the record of it is in `status`. Reading the journal first would make that
-        delivery look like one that never happened.
+        `status` is the authority while it answers and the journal is the second witness, in that
+        order and not the other way round: a delivery of which not one byte landed is a real fact
+        about a real payload, and the record of it is in `status` first. When `status` cannot be
+        had at all the order reverses of necessity — the journal is then the only witness left,
+        and a journalled delivery is an established one however the socket ended.
         """
         state = str(delivery.get("state") or protocol.DELIVERY_IN_FLIGHT)
         written = int(delivery.get("written_bytes") or 0)
         delivery_id = int(delivery.get("id") or 0)
         journalled = False
-        for event in local_pty.read_events(address.journal_path).of_kind(local_pty.INPUT_ACCEPTED):
+        for event in self._accepted_records(address, floor):
             if int(event.get("delivery") or 0) != delivery_id:
                 continue
             journalled = True
@@ -884,50 +1066,86 @@ class LocalPtyHeadRuntime:
             # journal that has it is a journal that saw the end of it.
             written = int(event.get("bytes") or written)
             state = str(event.get("state") or state)
-        return DeliveryReport(
+        return _delivery_report(
             state=state,
             written=written,
             offered=int(delivery.get("size_bytes") or offered),
+            established=established or journalled,
             delivery_id=delivery_id,
             journalled=journalled,
-            detail=str(delivery.get("detail") or ""),
+            detail=str(delivery.get("detail") or "") or detail,
+        )
+
+    def _accepted_records(self, address: _Address, floor: int) -> tuple[dict[str, Any], ...]:
+        """The journal's `input.accepted` records written after this delivery was offered.
+
+        Bounded by the journal's own sequence rather than matched on the delivery id alone. The id
+        is unique within one supervisor incarnation and the journal outlives incarnations, so in a
+        run directory that was ever reused the id by itself would let an old record answer for a
+        new payload. A journal that cannot be read at all is not evidence of anything and says so
+        by being empty.
+        """
+        try:
+            events = local_pty.read_events(address.journal_path).of_kind(local_pty.INPUT_ACCEPTED)
+        except OSError:
+            return ()
+        return tuple(event for event in events if int(event.get("seq") or 0) > floor)
+
+    def _unreachable_refusal(
+        self, address: _Address, run: HeadRun, exc: Exception
+    ) -> _Refusal:
+        """A payload that was never admitted, because the supervisor could not be spoken to."""
+        return _Refusal(
+            status=HEAD_ALIVE if self._process_alive(address, run) else HEAD_GONE,
+            reason=OBSERVE_SUPERVISOR_UNREACHABLE,
+            failure=HeadNudgeFailed(f"the head's supervisor could not be reached: {exc}"),
+            evidence=str(exc),
         )
 
     def _unfinished_delivery(
         self, run: HeadRun, report: DeliveryReport, lease: Any, epoch: int
     ) -> DeliverReceipt:
-        """A delivery that was admitted and did not arrive, said as the three things it can be.
+        """A delivery that was offered and did not arrive, said as the outcome it is.
 
-        The lease is kept for every case where bytes landed: the head has been given something and
-        is working on the fragment of it that arrived, and pretending otherwise would let a second
-        payload be written on top. It is handed back only when nothing at all reached the terminal,
-        because then no turn was started.
+        Every branch here is keyed on `report.outcome` — the name decided once, upstream — and on
+        nothing else. What each outcome costs the head:
+
+          * `DELIVERY_STILL_GOING`: nothing. The lease stays, admission stays open, and the head
+            goes on receiving the payload it was given. A second delivery cannot interleave with
+            it, because the substrate refuses one while another holds the floor;
+          * `DELIVERY_LEFT_A_PREFIX` and `DELIVERY_UNESTABLISHED`: the head. Admission closes here
+            and at the supervisor, the reason is remembered so that every later refusal carries
+            it, and the lease is kept because the head has been given something and may be working
+            on it;
+          * `DELIVERY_LANDED_NOTHING`: the turn only. Nothing reached the terminal, so no turn was
+            started and the lease is handed back; the head is still worth delivering to.
         """
-        if report.landed_a_prefix:
-            # Fatal, and the reason is in the module docstring: the prefix cannot be taken back,
-            # so admission stays closed rather than re-opening over it.
-            self._fatal[run.run_id] = DRAIN_AFTER_PARTIAL_DELIVERY
+        if report.fatal:
+            self._fatal[run.run_id] = (
+                DRAIN_AFTER_PARTIAL_DELIVERY
+                if report.outcome == DELIVERY_LEFT_A_PREFIX
+                else DRAIN_AFTER_UNESTABLISHED_DELIVERY
+            )
             self.activity.close_admission(run.run_id)
             self._close_substrate_admission(
-                run, StopInitiator(actor="local-pty-runtime", reason=DELIVER_PREFIX_IS_FATAL)
+                run,
+                StopInitiator(
+                    actor="local-pty-runtime",
+                    reason=(
+                        DELIVER_PREFIX_IS_FATAL
+                        if report.outcome == DELIVERY_LEFT_A_PREFIX
+                        else DELIVER_UNKNOWN_IS_FATAL
+                    ),
+                ),
             )
-        elif report.state != protocol.DELIVERY_IN_FLIGHT:
-            # Nothing landed, so nothing was started and nothing can be glued to.
+        elif report.outcome == DELIVERY_LANDED_NOTHING:
             self.activity.release(run.run_id)
             lease = None
-        status = HEAD_GONE if report.state == protocol.DELIVERY_FAILED else HEAD_ALIVE
-        reason = {
-            protocol.DELIVERY_IN_FLIGHT: DELIVER_IN_FLIGHT,
-            protocol.DELIVERY_STALLED: DELIVER_STALLED,
-            protocol.DELIVERY_FAILED: DELIVER_FAILED,
-        }.get(report.state, DELIVER_STALLED)
-        if report.landed_a_prefix:
-            reason = f"{reason}: {DRAIN_AFTER_PARTIAL_DELIVERY}"
         return DeliverReceipt(
-            status=status,
+            status=self._unfinished_status(run, report),
             run=run,
-            reason=reason,
-            failure=HeadNudgeFailed(report.detail or reason),
+            reason=self._unfinished_reason(report),
+            failure=HeadNudgeFailed(report.detail or report.outcome),
             evidence=report,
             delivery_state=report.state,
             delivered_bytes=report.written,
@@ -936,6 +1154,37 @@ class LocalPtyHeadRuntime:
             lease=lease,
             rotation_ready=self.activity.rotatable(run.run_id),
         )
+
+    def _unfinished_status(self, run: HeadRun, report: DeliveryReport) -> str:
+        """`HEAD_GONE` only for a head established to have ended; `HEAD_ALIVE` for the rest.
+
+        A delivery that failed says the head's terminal closed under it, which is the head ending.
+        An unestablished delivery says nothing about the head at all, so the launch identity is
+        asked — and answers `HEAD_ALIVE` for every reading that is not a positive death, because a
+        head that cannot be read about is emphatically not a head that has gone.
+        """
+        if report.state == protocol.DELIVERY_FAILED:
+            return HEAD_GONE
+        if report.outcome == DELIVERY_UNESTABLISHED:
+            address = self._address(run)
+            if address is not None and self._identity_says_dead(address):
+                return HEAD_GONE
+        return HEAD_ALIVE
+
+    def _unfinished_reason(self, report: DeliveryReport) -> str:
+        """Why this delivery says what it says: the outcome first, the substrate's state after."""
+        reason = {
+            DELIVERY_STILL_GOING: DELIVER_IN_FLIGHT,
+            DELIVERY_UNESTABLISHED: DELIVER_UNESTABLISHED,
+        }.get(report.outcome) or {
+            protocol.DELIVERY_STALLED: DELIVER_STALLED,
+            protocol.DELIVERY_FAILED: DELIVER_FAILED,
+        }.get(report.state, DELIVER_STALLED)
+        if report.outcome == DELIVERY_LEFT_A_PREFIX:
+            return f"{reason}: {DRAIN_AFTER_PARTIAL_DELIVERY}"
+        if report.outcome == DELIVERY_UNESTABLISHED:
+            return f"{reason}: {DRAIN_AFTER_UNESTABLISHED_DELIVERY}"
+        return reason
 
     def _abandon_bring_up(
         self,
@@ -1112,6 +1361,23 @@ class _Refusal:
     reason: str
     failure: HeadOperationError | None = None
     evidence: Any = None
+
+
+def _attach_refusal_status(error: str) -> str:
+    """Which status a refused attachment is, by what the supervisor refused it with.
+
+    Only a head the supervisor says has gone is `HEAD_GONE`. Both bounds — the attach limit and
+    the connection limit — are refusals worth making again the moment somebody else lets go, and
+    reporting a live head sitting at one of them as a head that ended is exactly the collapse
+    ("alive looks dead") this sprint exists to remove. Anything else the supervisor can refuse
+    with is an answer *from* a live supervisor about a live head, so it is `HEAD_ALIVE` too: the
+    attachment did not happen, and the head is still the caller's to account for.
+    """
+    if error in (protocol.ERROR_ATTACH_LIMIT, protocol.ERROR_CONNECTION_LIMIT):
+        return HEAD_BUSY
+    if error == protocol.ERROR_HEAD_GONE:
+        return HEAD_GONE
+    return HEAD_ALIVE
 
 
 def _admission_refusal(answer: Mapping[str, Any]) -> _Refusal:
