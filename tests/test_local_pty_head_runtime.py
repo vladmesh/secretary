@@ -82,6 +82,9 @@ CHILD_COMMAND = f"{sys.executable} -u {CHILD}"
 #: A head that keeps running when its terminal is hung up and its supervisor is gone. It is the
 #: orphan case: the one a socket that stopped answering must never be reported as a head that ended.
 ORPHAN = REPO / "tests" / "fixtures" / "local_pty_orphan.py"
+#: A head that reports what its own terminal handed it, record by record. The only witness that
+#: can say whether two payloads reached the head as one sentence; every other one is a receipt.
+LINE_READER = REPO / "tests" / "fixtures" / "local_pty_line_reader.py"
 DEAF_COMMAND = f"{sys.executable} -u {ORPHAN}"
 CODEX = HeadSpec(profile_id="codex-worker", adapter="codex", effort="high", codex_mode="tui")
 #: Long enough that a mid-turn assertion is never racing the child's own silence, short enough
@@ -539,6 +542,143 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
         self.assertTrue(accepted["complete"])
         self.assertEqual(accepted["bytes"], len(text) + 1)
         self.assertTrue(self.runtime.activity.admits(run.run_id), "the head was closed after all")
+
+    def _reporting_head(self, *, pause: float, delivery_seconds: float) -> HeadRun:
+        """A head too slow to be delivered to in time, that says what its terminal handed it.
+
+        Both halves are needed. Reading slowly is what makes a large payload stop part-way and
+        leave a fragment on the terminal; going on reading is what leaves room in the pty for a
+        second payload to be written behind that fragment and taken in with it, in one read. A
+        head that stopped reading altogether would keep its terminal full, and nothing could land
+        behind the fragment whether this runtime allowed it or not — which would prove nothing.
+        """
+        run = self.live_run(
+            command=f"{sys.executable} -u {LINE_READER} --chunk 4096 --pause {pause:g}",
+            delivery_seconds=delivery_seconds,
+        )
+        self._await(
+            lambda: b"UP" in self.output_of(run), message="the head never said it was up"
+        )
+        return run
+
+    def _terminal_records(self, run: HeadRun) -> list[bytes]:
+        """What the head said its own terminal handed it: one record per line or fragment."""
+        return [
+            line
+            for line in self.output_of(run).splitlines()
+            if line.startswith(b"LINE ") or line.startswith(b"FRAG ")
+        ]
+
+    def test_a_delivery_this_runtime_stopped_watching_cannot_glue_the_next_payload(self) -> None:
+        """The head's own terminal, read record by record, is the witness this test believes.
+
+        `DELIVERY_STILL_GOING` is the outcome of a delivery this runtime stopped watching before
+        it ended, and the substrate's own bound ends it afterwards and out of sight. When it ends
+        as a stall, the supervisor stops refusing input, the turn the stall opened closes on its
+        own, and a second payload written then is read by the head as the tail of the first one's
+        sentence — the gluing criterion 4 forbids by name, arriving one delivery after the receipt
+        that reported the first one.
+
+        So the unfinished delivery is carried on the head and settled before anything else is
+        admitted. The receipts below say the second payload was refused; the head's own records
+        say the only thing that actually matters, which is that nothing of it ever reached its
+        terminal to be glued to anything.
+        """
+        # A runtime that gives up watching well before the substrate gives up writing. The two
+        # knobs are independent by design, and this is the direction that makes the outcome
+        # `DELIVERY_STILL_GOING` reachable at all.
+        self._rebuild_runtime(delivery_timeout=0.4)
+        run = self._reporting_head(pause=0.5, delivery_seconds=1.5)
+        journal = self.root / run.run_id / protocol.JOURNAL_NAME
+        address = self.runtime._address(run)  # noqa: SLF001 - the test is the backend's own
+
+        first = self.deliver_line(run, "A" * (protocol.INPUT_MAX_BYTES - 1))
+
+        self.assertEqual(first.evidence.outcome, DELIVERY_STILL_GOING)
+        self.assertFalse(first.ok, "a delivery that has not finished is not a success")
+        # The substrate ends it on its own bound, with a fragment on the terminal, and then goes
+        # back to admitting input: nothing at that layer prevents the next payload.
+        self._await(
+            lambda: bool(read_events(journal).of_kind(INPUT_ACCEPTED)),
+            timeout=20.0,
+            message="the substrate never ended the delivery this runtime stopped watching",
+        )
+        accepted = read_events(journal).of_kind(INPUT_ACCEPTED)[-1]
+        self.assertEqual(accepted["state"], protocol.DELIVERY_STALLED, accepted)
+        self.assertGreater(accepted["bytes"], 0, "nothing landed, so there is no fragment")
+        self.assertFalse(accepted["complete"])
+        self.assertFalse(self._status(address.socket_path)["draining"], "the substrate refuses")
+        # The turn those landed bytes opened closes on its own while the head reads, so the lease
+        # is handed back too: this runtime's own register is the only thing left between the next
+        # payload and the fragment.
+        self.end_turn(run)
+        landed = self.payloads_delivered()
+
+        second = self.deliver_line(run, "B" * 40)
+
+        # Settled before anything was admitted: the fragment closes the head here, and the second
+        # payload meets that refusal instead of the terminal.
+        self.assertEqual(second.status, HEAD_DRAINING, second.reason)
+        self.assertIn(DRAIN_AFTER_PARTIAL_DELIVERY, second.reason)
+        self.assertEqual(self.payloads_delivered(), landed, "a second payload was offered anyway")
+        self.assertFalse(self.runtime.activity.admits(run.run_id))
+        self.assertTrue(self._status(address.socket_path)["draining"], "the substrate still admits")
+        # And now the head itself, off its own descriptor: it takes in what its terminal kept for
+        # it and says what that was. A fragment of the first payload is unavoidable — those bytes
+        # cannot be taken back — but nothing of the second may be anywhere in it, and the fragment
+        # must still be a fragment: a `LINE` here would be that fragment finished by something.
+        self._await(
+            lambda: bool(self._terminal_records(run)),
+            timeout=20.0,
+            message="the head never said what its terminal handed it",
+        )
+        records = self._terminal_records(run)
+        for record in records:
+            kinds = record.split(b"kinds=")[1].split(b" ")[0]
+            self.assertEqual(kinds, b"A", f"the head was handed something else: {record!r}")
+        self.assertTrue(
+            all(record.startswith(b"FRAG ") for record in records),
+            f"the first payload's line was completed by something: {records!r}",
+        )
+
+    def test_a_delivery_this_runtime_stopped_watching_and_that_arrived_costs_the_head_nothing(
+        self,
+    ) -> None:
+        """The other side of settling, and the reason it is not "stopped watching is fatal".
+
+        A delivery this runtime stopped watching usually goes on to arrive whole. Settled, it is
+        an arrival like any other: the head keeps its admission, the register is emptied, and the
+        next payload is delivered normally.
+        """
+        self._rebuild_runtime(delivery_timeout=0.5)
+        text = "x" * (protocol.INPUT_MAX_BYTES - 1)
+        # A head that reads steadily and says so once it has taken the whole payload, so that the
+        # second delivery below is made to a terminal this one has provably finished with.
+        run = self.live_run(
+            command=(
+                f"{sys.executable} -u {SLOW_READER} --chunk 4096 --pause 0.1 "
+                f"--total {len(text) + 1}"
+            ),
+            delivery_seconds=60.0,
+        )
+
+        first = self.deliver_line(run, text)
+
+        self.assertEqual(first.evidence.outcome, DELIVERY_STILL_GOING)
+        self.assertIn(run.run_id, self.runtime._unfinished)  # noqa: SLF001 - the backend's own
+        self._await(
+            lambda: b"READ " in self.output_of(run),
+            timeout=30.0,
+            message="the head never took the delivery this runtime stopped watching",
+        )
+        self.end_turn(run)
+
+        second = self.deliver_line(run, "and now this")
+
+        self.assertEqual(second.status, HEAD_OK, second.reason)
+        self.assertTrue(second.arrived)
+        self.assertNotIn(run.run_id, self.runtime._unfinished)  # noqa: SLF001 - the backend's own
+        self.assertTrue(self.runtime.activity.admits(run.run_id), "an arrival closed the head")
 
     def test_a_delivery_nobody_could_account_for_is_not_reported_as_one_that_never_started(self) -> None:
         """Admitted, then unanswerable: the one case where the fate cannot be established.

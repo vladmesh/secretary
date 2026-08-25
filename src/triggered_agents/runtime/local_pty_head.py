@@ -31,10 +31,11 @@ travels on the report, and every branch below reads it by that name:
 
   * `DELIVERY_ARRIVED` — all of it landed: `HEAD_OK`, `delivery_state` `complete`, and a
     `DeliveryOutcome` carrying the delivered byte count;
-  * `DELIVERY_STILL_GOING` — admitted and landing: `HEAD_ALIVE`, `delivery_state` `in_flight`. Not
-    `ok`, because nothing about this delivery is finished; not a retry either, because the bytes
-    are still going in; and **not fatal**, because it cannot glue — the substrate holds one payload
-    at a time, so a second one is refused by the substrate itself rather than interleaved;
+  * `DELIVERY_STILL_GOING` — admitted, landing, and this runtime stopped watching it before it
+    ended: `HEAD_ALIVE`, `delivery_state` `in_flight`. Not `ok`, because nothing about this
+    delivery is finished, and not fatal, because a delivery that is still going has left no
+    fragment behind it yet. It is the only one of the five that is not an ending, and therefore
+    the only one this runtime **writes down on the head** rather than reports and forgets;
   * `DELIVERY_LEFT_A_PREFIX` — it ended part-way: `HEAD_ALIVE` (or `HEAD_GONE` when the head went
     with it), `delivery_state` `stalled` or `failed`, with what did land. Fatal, for the reason
     below;
@@ -59,6 +60,41 @@ must not do. So `DELIVERY_LEFT_A_PREFIX` closes admission here **and** on the su
 later `deliver` for that head is refused `HEAD_DRAINING` naming the reason. `DELIVERY_UNESTABLISHED`
 closes admission for the same reason and a weaker one: a delivery whose fate is unknown *may* have
 left a prefix, and admission left open over a maybe-prefix is exactly the glue this forbids.
+
+**A delivery this runtime stopped watching is carried on the head until somebody settles it.**
+`DELIVERY_STILL_GOING` is not a delivery that ended well; it is a delivery whose ending this
+runtime did not stay for. The substrate's own delivery bound ends it afterwards, out of sight, and
+it can end as `stalled` with a fragment on the terminal — after which the supervisor stops refusing
+input, the turn that fragment opened closes on its own, and a second payload would be written
+straight behind it and read by the head as the tail of the first one's sentence. That is exactly
+the gluing this file forbids, arriving one delivery later than the receipt that reported it.
+
+So the outcome travels as a value here too. `_unfinished` is this runtime's per-head register of
+admitted deliveries whose fate is not yet known — one entry per head, beside `_fatal` and for the
+same reason: it is this backend's own fact about a head, and it is the only thing that remembers
+that a payload was handed over and never accounted for. **No verb returns having left an admitted
+delivery both unresolved and unrecorded**, and `deliver` **settles the recorded one before it
+admits anything**: `_settle` re-reads `status` and the journal, and only then does the verb decide.
+A delivery that settles as `DELIVERY_LEFT_A_PREFIX` closes the head there exactly as it would have
+closed it inside `deliver`, so the next payload meets `HEAD_DRAINING` naming the fragment rather
+than the terminal it would have been glued to; one that settles as still in flight is `HEAD_BUSY`,
+because the substrate is still carrying the payload this runtime gave it; one that settles as
+arrived or as having landed nothing costs the head nothing and is simply forgotten.
+
+**What `HEAD_OK` / `DELIVERY_ARRIVED` means, and it is stronger than the byte count.** It means
+the head received *this payload as its own message* — not that these bytes were written. What is
+actually on the head's terminal outranks what this runtime managed to observe before it stopped
+looking: a receipt that is true about its own bytes and false about the message they joined is a
+false receipt. That is why settling comes before admission and not after it.
+
+**The two delivery knobs are deliberately not tied to each other.** `delivery_timeout` is how long
+*this runtime* is willing to watch, and the substrate's `delivery_seconds` is how long the
+supervisor will go on writing; `start` takes the second from its caller per head and nothing here
+checks it against the first. Their relation is not validated because the register above makes it
+safe rather than because it does not matter: with the runtime's wait shorter than the substrate's
+bound, `DELIVERY_STILL_GOING` becomes reachable, and the register is what turns that from a hole
+into an entry somebody settles. Tying the knobs together instead would have closed the one way of
+reaching the hole and left the hole.
 
 **Ordering of the journal against a drain this runtime sends.** The drain that a fatal delivery
 sends can only be written after that delivery's own `input.accepted`, because the state is only
@@ -155,8 +191,9 @@ OBSERVE_STATUS_UNREADABLE = "status_unreadable"
 #: read "nothing landed" out of which exception had arrived.
 #: All of it reached the head's terminal.
 DELIVERY_ARRIVED = "arrived"
-#: Admitted, landing, and not finished. Never fatal: the substrate takes one payload at a time, so
-#: nothing can be glued behind this one while it is still going.
+#: Admitted, landing, and this runtime stopped watching before it ended. Not fatal — nothing has
+#: been left behind yet — and not finished either, which is why it is the one outcome that is
+#: written into `_unfinished` and settled before the next delivery is admitted.
 DELIVERY_STILL_GOING = "still_going"
 #: It ended part-way. Fatal: the prefix on the terminal cannot be taken back.
 DELIVERY_LEFT_A_PREFIX = "left_a_prefix"
@@ -183,6 +220,13 @@ DELIVER_FAILED = "delivery_failed"
 DELIVER_UNESTABLISHED = "delivery_unestablished"
 DELIVER_PREFIX_IS_FATAL = "partial_delivery_closed_this_head"
 DELIVER_UNKNOWN_IS_FATAL = "unestablished_delivery_closed_this_head"
+#: A delivery this runtime gave the head and stopped watching is still being written. Said as the
+#: refusal of the *next* delivery, so that a caller reads why it was not admitted rather than only
+#: that the head was busy.
+DELIVER_EARLIER_IN_FLIGHT = (
+    "a payload this runtime already handed this head is still being written into its terminal: "
+    "the next one is refused rather than queued behind it"
+)
 #: A head this runtime will hand no more work because a delivery left an irreversible prefix on its
 #: terminal. The reason travels on every later refusal, so the caller learns why rather than only
 #: that it was refused.
@@ -256,6 +300,10 @@ class DeliveryReport:
     supervisor and `offered` is what the caller handed over — always both, never one. `journalled`
     says whether the journal's own `input.accepted` was found for this delivery, so a reader can
     tell a fact corroborated in two places from one that only `status` could give.
+
+    `floor` is the journal sequence this delivery was offered after. It is on the report because an
+    unfinished report is kept and settled later: asking the journal the same question a second time
+    needs the same bound on which of its records may answer it.
     """
 
     outcome: str
@@ -264,6 +312,7 @@ class DeliveryReport:
     offered: int
     delivery_id: int = 0
     journalled: bool = False
+    floor: int = 0
     detail: str = ""
 
     @property
@@ -280,6 +329,7 @@ def _delivery_report(
     established: bool,
     delivery_id: int = 0,
     journalled: bool = False,
+    floor: int = 0,
     detail: str = "",
 ) -> DeliveryReport:
     """Decide what became of one delivery. The only place in this backend that decides it.
@@ -298,6 +348,7 @@ def _delivery_report(
             offered=offered,
             delivery_id=delivery_id,
             journalled=journalled,
+            floor=floor,
             detail=detail,
         )
     if state == protocol.DELIVERY_COMPLETE and written >= offered:
@@ -315,6 +366,7 @@ def _delivery_report(
         offered=offered,
         delivery_id=delivery_id,
         journalled=journalled,
+        floor=floor,
         detail=detail,
     )
 
@@ -331,6 +383,14 @@ class LocalPtyHeadRuntime:
     `pid`, `boot_id`, `proc_starttime_ticks` written by the head's own shell — and exactly one
     reader of it, in `secretary.dispatcher_watchdog`. Passing it in is what keeps the two from
     drifting apart while `triggered_agents` stays free of a dependency on `secretary`.
+
+    `delivery_timeout` is how long this runtime is willing to watch a delivery, and it is
+    deliberately **not** checked against the substrate's own `delivery_seconds`, which `start`
+    takes per head from its caller. The two are independent on purpose: whichever way round they
+    are set, a delivery this runtime stops watching before the substrate finishes it is recorded
+    on the head and settled before that head is offered anything else. Validating the relation
+    would close one way of reaching an unwatched delivery and leave the delivery unaccounted for
+    every other way.
 
     One lock, as on the legacy backend, and for the same reason: `deliver`, `request_drain`, `stop`
     and `stop_if_quiescent` are the four things that can contradict each other about one head, so
@@ -368,6 +428,11 @@ class LocalPtyHeadRuntime:
         # rather than inside it because it is this backend's fact, not the boundary's: no other
         # backend can leave a head in this state, and a caller reads it as the reason on a receipt.
         self._fatal: dict[str, str] = {}
+        # Heads that were handed a payload whose ending this runtime did not stay for. One entry
+        # per head, for the same reason and in the same place: it is the only thing that remembers
+        # an admitted delivery nobody has accounted for yet, and `deliver` settles it — from
+        # `status` or from the journal — before it admits anything else onto that terminal.
+        self._unfinished: dict[str, DeliveryReport] = {}
 
     # -- the six verbs ------------------------------------------------------------------------
 
@@ -493,11 +558,33 @@ class LocalPtyHeadRuntime:
         What follows the admission is this backend's own, and it is the reason `ok` can be trusted
         here: the payload is followed, what became of it is decided once as one of the five names
         in this module's vocabulary, and the receipt carries that decision as its status, its
-        `delivery_state` and its two byte counts. `ok` is only ever `DELIVERY_ARRIVED`. See the
+        `delivery_state` and its two byte counts. `ok` is only ever `DELIVERY_ARRIVED`, and it
+        means the head received *this payload as its own message* rather than that these bytes were
+        written — which is why the first thing this verb does is settle any earlier delivery it
+        stopped watching, before it decides anything and long before it admits anything. See the
         module docstring for which of the outcomes close this head and why.
         """
         del ignored
         with self._lock:
+            # Before anything is decided, let alone admitted: a delivery this runtime handed this
+            # head and stopped watching is settled now, out of `status` and the journal. What is
+            # actually on the head's terminal outranks what was observed before the watching
+            # stopped, so a settlement that finds a fragment closes the head here and this
+            # delivery meets that refusal below rather than the fragment.
+            unfinished = self._settle(run)
+            if unfinished is not None:
+                return DeliverReceipt(
+                    status=HEAD_BUSY,
+                    run=run,
+                    reason=DELIVER_EARLIER_IN_FLIGHT,
+                    evidence=unfinished,
+                    delivery_state=unfinished.state,
+                    delivered_bytes=unfinished.written,
+                    offered_bytes=unfinished.offered,
+                    epoch=self.activity.epoch(run.run_id),
+                    lease=self.activity.lease(run.run_id),
+                    rotation_ready=self.activity.rotatable(run.run_id),
+                )
             if not self.activity.admits(run.run_id):
                 return DeliverReceipt(
                     status=HEAD_DRAINING,
@@ -719,6 +806,8 @@ class LocalPtyHeadRuntime:
             epoch = self.activity.acted(run.run_id)
             self.activity.forget(run.run_id)
             self._fatal.pop(run.run_id, None)
+            # A delivery to a terminal that no longer exists has no ending left to settle.
+            self._unfinished.pop(run.run_id, None)
             return StopReceipt(
                 status=HEAD_OK, run=finishing.exited(), evidence=asked, epoch=epoch
             )
@@ -878,6 +967,7 @@ class LocalPtyHeadRuntime:
         with self._lock:
             self.activity.forget(run_id)
             self._fatal.pop(run_id, None)
+            self._unfinished.pop(run_id, None)
 
     # -- the substrate ------------------------------------------------------------------------
 
@@ -981,17 +1071,20 @@ class LocalPtyHeadRuntime:
                 # So this is an unestablished delivery and not a refusal, even though it is one
                 # step earlier than the case below: the line is drawn at what can be established,
                 # never at how far down the call the failure happened to be.
-                return _delivery_report(
+                return self._remember(run, _delivery_report(
                     state=DELIVERY_STATE_UNKNOWN,
                     written=0,
                     offered=len(payload),
                     established=False,
+                    floor=floor,
                     detail=f"the head's supervisor stopped answering as it was offered: {exc}",
-                ), None
+                )), None
             if not answer.get("ok"):
                 return None, _admission_refusal(answer)
             admitted = dict(answer.get("delivery") or {})
-            return self._follow(address, client, admitted, len(payload), floor), None
+            return self._remember(
+                run, self._follow(address, client, admitted, len(payload), floor)
+            ), None
 
     def _follow(
         self,
@@ -1031,7 +1124,10 @@ class LocalPtyHeadRuntime:
                 # The wait this runtime was willing to do ran out while the substrate was still
                 # writing. That is `DELIVERY_STILL_GOING` and it is an answer, not a failure: the
                 # supervisor's own delivery bound is what ends a delivery, and it may outlive this
-                # wait by however much an operator set the two knobs to.
+                # wait by however much an operator set the two knobs to. What ends that delivery
+                # afterwards happens out of this runtime's sight, which is precisely why the
+                # outcome is written onto the head by `_remember` and settled before the head is
+                # offered anything else.
                 return self._report_of(address, last, offered, floor, established=True)
             time.sleep(self._delivery_poll)
 
@@ -1073,6 +1169,7 @@ class LocalPtyHeadRuntime:
             established=established or journalled,
             delivery_id=delivery_id,
             journalled=journalled,
+            floor=floor,
             detail=str(delivery.get("detail") or "") or detail,
         )
 
@@ -1110,9 +1207,11 @@ class LocalPtyHeadRuntime:
         Every branch here is keyed on `report.outcome` — the name decided once, upstream — and on
         nothing else. What each outcome costs the head:
 
-          * `DELIVERY_STILL_GOING`: nothing. The lease stays, admission stays open, and the head
-            goes on receiving the payload it was given. A second delivery cannot interleave with
-            it, because the substrate refuses one while another holds the floor;
+          * `DELIVERY_STILL_GOING`: an entry in `_unfinished`, written by `_remember` before this
+            branch is reached. The lease stays and admission stays open, because nothing has been
+            left behind yet — but the payload is now a fact about this head that the next
+            `deliver` settles before it admits anything, rather than an outcome reported and
+            forgotten;
           * `DELIVERY_LEFT_A_PREFIX` and `DELIVERY_UNESTABLISHED`: the head. Admission closes here
             and at the supervisor, the reason is remembered so that every later refusal carries
             it, and the lease is kept because the head has been given something and may be working
@@ -1121,23 +1220,7 @@ class LocalPtyHeadRuntime:
             started and the lease is handed back; the head is still worth delivering to.
         """
         if report.fatal:
-            self._fatal[run.run_id] = (
-                DRAIN_AFTER_PARTIAL_DELIVERY
-                if report.outcome == DELIVERY_LEFT_A_PREFIX
-                else DRAIN_AFTER_UNESTABLISHED_DELIVERY
-            )
-            self.activity.close_admission(run.run_id)
-            self._close_substrate_admission(
-                run,
-                StopInitiator(
-                    actor="local-pty-runtime",
-                    reason=(
-                        DELIVER_PREFIX_IS_FATAL
-                        if report.outcome == DELIVERY_LEFT_A_PREFIX
-                        else DELIVER_UNKNOWN_IS_FATAL
-                    ),
-                ),
-            )
+            self._close_head(run, report)
         elif report.outcome == DELIVERY_LANDED_NOTHING:
             self.activity.release(run.run_id)
             lease = None
@@ -1153,6 +1236,117 @@ class LocalPtyHeadRuntime:
             epoch=epoch,
             lease=lease,
             rotation_ready=self.activity.rotatable(run.run_id),
+        )
+
+    def _remember(self, run: HeadRun, report: DeliveryReport) -> DeliveryReport:
+        """Write an unfinished delivery down on the head, and forget one that has ended.
+
+        The rule this backend keeps: no verb returns having left an admitted delivery both
+        unresolved and unrecorded. Every outcome but one is an ending and is carried on the receipt
+        the verb returns; `DELIVERY_STILL_GOING` is the one that is not, and dropping it was how a
+        payload the substrate later abandoned came to be followed by one written behind its
+        fragment. Recorded here, it is settled by `_settle` before this head is offered anything
+        else. Returned rather than stored silently so that `_put` reads as one expression.
+        """
+        if report.outcome == DELIVERY_STILL_GOING:
+            self._unfinished[run.run_id] = report
+        else:
+            self._unfinished.pop(run.run_id, None)
+        return report
+
+    def _settle(self, run: HeadRun) -> DeliveryReport | None:
+        """Account for a delivery this runtime stopped watching. The answer, or `None`.
+
+        `None` means there is nothing outstanding for this head — either nothing was recorded, or
+        what was recorded has now ended and its consequences have been applied here: a fragment on
+        the terminal closes the head exactly as it would have in `deliver`, and an ending that left
+        the terminal untouched costs it nothing. A report is returned only while the substrate is
+        *still* writing the earlier payload, which is the one case where the caller must be refused
+        rather than admitted.
+        """
+        pending = self._unfinished.get(run.run_id)
+        if pending is None:
+            return None
+        report = self._resolve(run, pending)
+        if report.outcome == DELIVERY_STILL_GOING:
+            # Still going, and now with fresher numbers than the ones it was recorded with.
+            self._unfinished[run.run_id] = report
+            return report
+        self._unfinished.pop(run.run_id, None)
+        if report.fatal:
+            self._close_head(run, report)
+        return None
+
+    def _resolve(self, run: HeadRun, pending: DeliveryReport) -> DeliveryReport:
+        """Ask both witnesses what became of a delivery that was left unfinished.
+
+        The same two witnesses `_report_of` reads at the end of a delivery, in the same order and
+        bounded by the same journal sequence — this is the identical question asked later, not a
+        second way of answering it. A supervisor that has moved on to somebody else's delivery, or
+        that cannot be reached at all, leaves the journal as the only witness; a delivery neither
+        of them can account for is `DELIVERY_UNESTABLISHED`, which closes the head, because a fate
+        that cannot be established may be a fragment.
+        """
+        address = self._address(run)
+        last: Mapping[str, Any] = {
+            "id": pending.delivery_id,
+            "state": pending.state,
+            "written_bytes": pending.written,
+            "size_bytes": pending.offered,
+        }
+        if address is None:
+            return _delivery_report(
+                state=DELIVERY_STATE_UNKNOWN,
+                written=pending.written,
+                offered=pending.offered,
+                established=False,
+                delivery_id=pending.delivery_id,
+                floor=pending.floor,
+                detail="this head has no run directory left to settle its delivery against",
+            )
+        detail = ""
+        established = False
+        try:
+            with self._connect(address) as client:
+                delivery = client.status().get("delivery")
+        except _UNREACHABLE as exc:
+            detail = str(exc)
+        else:
+            if isinstance(delivery, dict) and int(delivery.get("id") or 0) == pending.delivery_id:
+                # A witness answered about this delivery, which is what `established` means — not
+                # that the delivery has ended. A supervisor still writing it says `in_flight`, and
+                # that is an answer: it settles as `DELIVERY_STILL_GOING` again rather than as a
+                # fate nobody could establish.
+                last = delivery
+                established = True
+        return self._report_of(
+            address, last, pending.offered, pending.floor,
+            established=established, detail=detail,
+        )
+
+    def _close_head(self, run: HeadRun, report: DeliveryReport) -> None:
+        """Hand this head no more work, here and at the process that owns it.
+
+        One place for both callers — the delivery that ends fatally inside `deliver`, and the one
+        that is found to have ended fatally when it is settled a delivery later — because they are
+        the same fact about the same terminal and must not be able to drift apart.
+        """
+        self._fatal[run.run_id] = (
+            DRAIN_AFTER_PARTIAL_DELIVERY
+            if report.outcome == DELIVERY_LEFT_A_PREFIX
+            else DRAIN_AFTER_UNESTABLISHED_DELIVERY
+        )
+        self.activity.close_admission(run.run_id)
+        self._close_substrate_admission(
+            run,
+            StopInitiator(
+                actor="local-pty-runtime",
+                reason=(
+                    DELIVER_PREFIX_IS_FATAL
+                    if report.outcome == DELIVERY_LEFT_A_PREFIX
+                    else DELIVER_UNKNOWN_IS_FATAL
+                ),
+            ),
         )
 
     def _unfinished_status(self, run: HeadRun, report: DeliveryReport) -> str:
