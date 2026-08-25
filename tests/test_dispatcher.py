@@ -75,7 +75,10 @@ from secretary.dispatcher_launch import (
 from secretary.projects.contract import (
     CANNOT_ATTEST_PROJECT,
     CONTRACT_REFUSALS,
-    ContractUnusable,
+    UNDECIDABLE_NO_REGISTERED_PROJECT,
+    UNDECIDABLE_PROJECT_UNAVAILABLE,
+    UNDECIDABLE_RELATIVE_INTERPRETER,
+    ContractVerdict,
 )
 from secretary.dispatcher_launcher import (
     claude_launch_model,
@@ -6635,12 +6638,16 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         being answered.
         """
         message = f"adapter 'secretary' is unusable for this project ({shape})"
-        self.catalog.broad_check_refusal = ContractUnusable(shape, "secretary", message)
+        self.catalog.broad_check_state = ContractVerdict.as_refused(shape, "secretary", message)
+        self._watch_the_preflight()
+        return message
+
+    def _watch_the_preflight(self) -> None:
+        """Record what the board and the host looked like each time the verdict was asked for."""
         self.asked_while = []
         self.catalog.broad_check_probe = lambda project: self.asked_while.append(
             (project, self.reader.show(CARD_REF)["state"], list(self.host.calls))
         )
-        return message
 
     def _events_between_claim_and_block(self) -> list[dict]:
         """Everything the audit recorded strictly between this card's claim and its block."""
@@ -6749,12 +6756,13 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         )
 
     def test_a_project_whose_contract_attests_it_is_claimed_exactly_as_before(self) -> None:
-        """AC4, the regression that would stop this very sprint.
+        """AC4 and the `fit` state, the regression that would stop this very sprint.
 
         The pilot project is Secretary, whose adapter declares no `broad_check` — as no adapter in
         the live installation does — so it is dispatched on the legacy default, and that default
         does attest a Secretary checkout.
         """
+        self._watch_the_preflight()
         self.start_dispatcher()
 
         claimed = self.tick()
@@ -6762,7 +6770,65 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(claimed["step"], "claim")
         self.assertEqual(self.reader.show(CARD_REF)["state"], "in_progress")
         self.assertEqual(self.host.prepared, [CARD_REF])
-        self.assertIsNone(self.catalog.broad_check_refusal)
+        self.assertIsNone(self.catalog.broad_check_state, "the fixture answered `fit`")
+        self.assertEqual(
+            [state for _, state, _ in self.asked_while], ["ready"],
+            "and it was asked before the claim, exactly as a refusal is",
+        )
+
+    def test_an_undecidable_contract_issues_the_card_and_says_so_by_name(self) -> None:
+        """AC6, the third state: `undecidable` is a decision with a name, not a silence.
+
+        A relative interpreter is resolved from the candidate workspace, which does not exist at
+        preflight. The observer settled that this resolves in favour of the documented
+        compatibility promise rather than of saving the round: the card is issued, and the side
+        that will hold the tree answers the question there. What is asserted here is that the
+        dispatcher reaches that outcome through the named state — the same path a `fit` takes —
+        and not through a branch that lets an unanswered question pass as approval.
+        """
+        cases = {
+            UNDECIDABLE_RELATIVE_INTERPRETER: "resolved from the candidate workspace",
+            UNDECIDABLE_NO_REGISTERED_PROJECT: "no registered project",
+            UNDECIDABLE_PROJECT_UNAVAILABLE: "could not be read",
+        }
+        for index, (question, detail) in enumerate(cases.items()):
+            with self.subTest(question=question):
+                if index:
+                    self.tearDown()
+                    self.setUp()
+                self.catalog.broad_check_state = ContractVerdict.as_undecidable(
+                    question, "secretary", detail
+                )
+                self._watch_the_preflight()
+                self.start_dispatcher()
+
+                claimed = self.tick()
+
+                self.assertEqual(claimed["step"], "claim", "the card goes to work")
+                self.assertEqual(self.reader.show(CARD_REF)["state"], "in_progress")
+                self.assertEqual(self.host.prepared, [CARD_REF])
+                self.assertNotIn("contract_refusal", claimed)
+                self.assertEqual(
+                    self.reader.show(CARD_REF)["state"], "in_progress",
+                    "no card is blocked on a question nobody was in a position to answer",
+                )
+                self.assertEqual([state for _, state, _ in self.asked_while], ["ready"])
+
+    def test_an_unreadable_contract_state_is_never_a_default_allow(self) -> None:
+        """The hole this card kept re-growing: "nothing came back, so the card may go".
+
+        There is no such branch left. The dispatcher's decision is exhaustive over the three named
+        states, and a verdict it does not recognise stops the pass instead of being waved through.
+        """
+        self.start_dispatcher()
+        self.catalog.broad_check_state = ContractVerdict(state="who-knows", adapter="secretary")
+
+        with self.assertRaises(HostError) as caught:
+            self.tick()
+
+        self.assertIn("who-knows", str(caught.exception))
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "ready", "not claimed either")
+        self.assertEqual(self.host.prepared, [])
 
     def test_a_worker_bringup_this_cards_own_checkout_broke_stays_a_task_outcome(self) -> None:
         """The other half: a checkout this card's claim recorded and that is no longer there is not

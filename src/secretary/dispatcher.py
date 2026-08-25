@@ -397,8 +397,16 @@ from secretary.head_health import (
 )
 from secretary.head_registry import HeadRegistryConfigError, installed_heads
 from secretary.observer_root import OBSERVER_REPO_NAME, observer_root_repo
-from secretary.projects.contract import ContractUnusable
-from secretary.projects.contract import preflight as _broad_check_preflight
+from secretary.projects.contract import (
+    CONTRACT_FIT,
+    CONTRACT_REFUSED,
+    CONTRACT_UNDECIDABLE,
+    UNDECIDABLE_NO_REGISTERED_PROJECT,
+    UNDECIDABLE_PROJECT_UNAVAILABLE,
+    ContractUnusable,
+    ContractVerdict,
+)
+from secretary.projects.contract import decide as _decide_broad_check_contract
 from secretary.routing_journal import (
     HEAD_FROM_CARD,
     HEAD_FROM_FALLBACK,
@@ -610,20 +618,21 @@ class InstanceCatalog:
             raise HostError(f"adapter {adapter!r} is unavailable")
         return loaded
 
-    def broad_check_preflight(self, project: str) -> None:
-        """Whether this project can be broad-checked at all, or `ContractUnusable` (secretary-1458).
+    def broad_check_verdict(self, project: str) -> ContractVerdict:
+        """This project's broad-check contract as one of the three named states (secretary-1458).
 
         The rules are `projects.contract`'s, the same implementation the worker's own
         `secretary check broad --module` resolves through, so a card is never handed out on a
         contract the worker would then refuse. Reading the binding and the adapter beside it is
-        all this costs: no workspace, no head, no process — and because there is no candidate
-        workspace yet, this asks only what one is not needed for. A relative interpreter is
-        resolved from the workspace that will run the check, so this side says nothing about it;
-        the worker, holding that tree, is where that question has an answer.
+        all this costs: no workspace, no head, no process. There is no candidate workspace at this
+        point, so `workspace=None`: a question that needs one comes back as `undecidable` with its
+        name on it rather than as an approval this side is not entitled to give.
         """
         binding = self.binding(project)
         repo = Path(str(binding.get("repo") or "")).expanduser()
-        _broad_check_preflight(binding, instance=self.instance_dir or Path("."), project_root=repo)
+        return _decide_broad_check_contract(
+            binding, instance=self.instance_dir or Path("."), project_root=repo, workspace=None
+        )
 
     def default_branch(self, project: str, override: str | None) -> str:
         if override:
@@ -3794,24 +3803,57 @@ class DispatcherRuntime:
             request_id=_attempt_request_id(attempt_id, "head-failover-comment", ref),
         )
 
-    def _broad_check_contract_refusal(self, task: dict[str, Any]) -> ContractUnusable | None:
-        """Why this card's registered project cannot be broad-checked, or None (secretary-1458).
+    def _broad_check_contract_verdict(self, task: dict[str, Any]) -> ContractVerdict:
+        """This card's broad-check contract, as one of the three named states (secretary-1458).
 
         Offline and cheap: the binding and the adapter beside it, read before anything is claimed.
-        A project this dispatcher cannot even look up is not this preflight's finding — the paths
-        that need the binding fail on it in their own words — so a `HostError` leaves the claim
-        exactly as it was.
+        Every way of not getting an answer is a named state rather than a fall-through, because a
+        fall-through is what "nothing came back, so the card may go" was made of. A card that names
+        no registered project, and a project this installation cannot look up at all, are open
+        questions about the registry — the paths that need the binding fail on it in their own
+        words — and they are returned as such, not as approval.
         """
         project = str(task.get("project") or "")
         if not project:
-            return None
+            return ContractVerdict.as_undecidable(
+                UNDECIDABLE_NO_REGISTERED_PROJECT, "",
+                f"card {task.get('ref')!r} names no registered project, so it has no adapter and "
+                "no broad-check contract to judge",
+            )
         try:
-            self.catalog.broad_check_preflight(project)
-        except ContractUnusable as exc:
-            return exc
-        except HostError:
+            return self.catalog.broad_check_verdict(project)
+        except HostError as exc:
+            return ContractVerdict.as_undecidable(
+                UNDECIDABLE_PROJECT_UNAVAILABLE, "",
+                f"registered project {project!r} could not be read: {exc}",
+            )
+
+    def _contract_preflight_decision(
+        self, task: dict[str, Any], verdict: ContractVerdict, *, attempt_id: str,
+        head: str, review_head: str,
+    ) -> tuple[BringUpFailure, str, ContractUnusable] | None:
+        """What the verdict buys this card: the outcome that stops it, or None to issue it.
+
+        Exhaustive over the three states by name, with no default branch that lets an unrecognised
+        answer through as permission. Which state buys what is `projects.contract`'s decision and
+        is only carried out here:
+
+        * `refused` stops the card before it is issued — that is the guarantee the card exists for;
+        * `undecidable` issues it, because the open question is a documented compatibility promise
+          (a relative interpreter is resolved from a workspace that does not exist yet) and the
+          side that will hold that tree answers it there. It is a decision with a name, not the
+          absence of one;
+        * `fit` issues it, as always.
+        """
+        if verdict.state == CONTRACT_REFUSED and verdict.refusal is not None:
+            failure, reason = self._contract_preflight_outcome(
+                task, attempt_id=attempt_id, head=head, review_head=review_head,
+                refusal=verdict.refusal,
+            )
+            return failure, reason, verdict.refusal
+        if verdict.state in (CONTRACT_FIT, CONTRACT_UNDECIDABLE):
             return None
-        return None
+        raise HostError(f"unreadable broad-check contract verdict {verdict.state!r}")
 
     def _contract_preflight_outcome(
         self,
@@ -3934,7 +3976,7 @@ class DispatcherRuntime:
         # about anything a claim creates, so it is answered here — off the binding and the adapter,
         # with the card still in Ready and nothing spent (secretary-1458). It is asked after the
         # heads only because a claim this dispatcher cannot make at all decides nothing.
-        refusal = self._broad_check_contract_refusal(task)
+        contract_verdict = self._broad_check_contract_verdict(task)
         # A card the dispatcher still holds a record for, back in Ready with its claim already
         # committed under the current attempt, is a re-run. An attempt id otherwise lives as long as
         # the record, so the claim would replay idempotently, return the old event and leave the card
@@ -3994,18 +4036,14 @@ class DispatcherRuntime:
             payload["attempt_id"] = attempt_id
         claim_request_id = _attempt_request_id(attempt_id, "claim", ref)
         worker_id = _worker_id(task)
-        # Everything the refusal's outcome needs is built here, before the claim: the class, the
-        # evidence and the card's reason are a pure reading of what the preflight already found.
+        # Everything a refusal's outcome needs is built here, before the claim: the class, the
+        # evidence and the card's reason are a pure reading of what the verdict already said.
         # The board protocol gives the dispatcher no Ready-to-Blocked edge, so the claim is the
         # only door to recording an outcome — and it is a door, not a round. Between it and the
         # transition below there is no step that can fail and leave the card In progress with no
         # outcome on it.
-        contract_outcome = (
-            self._contract_preflight_outcome(
-                task, attempt_id=attempt_id, head=head, review_head=review_head, refusal=refusal,
-            )
-            if refusal is not None
-            else None
+        contract_outcome = self._contract_preflight_decision(
+            task, contract_verdict, attempt_id=attempt_id, head=head, review_head=review_head,
         )
         self.writer.claim(
             role="dispatcher",
@@ -4019,7 +4057,7 @@ class DispatcherRuntime:
             request_id=claim_request_id,
         )
         if contract_outcome is not None:
-            failure, blocked_reason = contract_outcome
+            failure, blocked_reason, refusal = contract_outcome
             return self._contract_preflight_blocked(
                 ref, records, payload,
                 attempt_id=attempt_id, refusal=refusal, failure=failure, reason=blocked_reason,

@@ -12,25 +12,42 @@ The rules are here, once, so both sides ask the same question of the same regist
 * the worker's own resolution (``secretary check broad --module``, in ``check_commands``), and
 * the dispatcher's preflight before a card is given to a worker at all.
 
-The refusal shapes are enumerated once, below, and neither side may add a sixth on its own.
+`decide` is the single decision point, and it answers with **three** named states, never with two
+and a silence:
 
-The last shape is the one that is not about the file being broken. An adapter that declares no
+* ``fit`` — the contract is declared usably, and here it is;
+* ``refused(shape)`` — one of the enumerated refusal shapes, which are enumerated once, below,
+  and neither side may add a sixth on its own;
+* ``undecidable(question)`` — the question cannot be answered without something the asker does not
+  have. This is a state with a name, an evidence record and tests, not the absence of an answer.
+
+The third one exists because leaving it unnamed is what made this card cost three rounds. The
+adapter schema resolves a *relative* interpreter against the candidate workspace
+(``schemas/adapter.schema.json``), and at preflight there is no candidate workspace. Round one had
+the dispatcher test that interpreter in the registered checkout — an assertion about a different
+directory, which approved contracts the worker then refused. Round two had the dispatcher say
+nothing about it — and a silence is not a decision, so nobody could see or test what the caller
+then did with it. Now the state is returned, and every caller must branch on it by name.
+
+What each state buys a card is settled here and not re-decided by a caller:
+
+* ``refused`` always wins, and always before the card is issued. Its guarantee is the card's:
+  no workspace, no head, no round spent.
+* ``undecidable`` resolves in favour of **compatibility, not of saving the round**: the card goes
+  to work, and the side that holds the tree answers the question there. A relative interpreter is
+  the documented and recommended spelling; breaking that published promise to make an internal
+  check convenient would move the product contract the wrong way, and absolute paths are
+  machine-specific. The live cost of this today is zero: no adapter on the installation declares
+  ``broad_check``, so no project reaches ``undecidable`` at all.
+* ``fit`` goes to work, as it always did.
+
+The other half of usability is asked relative to a project. An adapter that declares no
 ``broad_check`` falls back to the long-standing Secretary default — this interpreter, importing
 ``secretary`` — and for the Secretary project itself that default is a true contract: the checkout
 being attested is exactly the sources that get imported. For any other project the same default
 attests an installed copy of somebody else's package, which is a check that cannot fail for the
-right reason and cannot pass for one either. So usability is asked relative to a project: can this
-contract attest THIS checkout, rather than does the adapter happen to spell the key.
-
-The rules are one implementation; what differs between the two callers is not the rules but the
-set of questions each is in a position to ask. The adapter schema resolves a *relative*
-interpreter against the candidate workspace (``schemas/adapter.schema.json``), and at preflight no
-candidate workspace exists yet — so "does that interpreter exist" is a question only the side
-holding the tree can answer. `preflight` therefore answers everything a workspace is not needed
-for and stops there; `module_contract` is the worker's own resolution, which has the tree and
-answers the rest. Neither side may state something about a tree it is not looking at: testing a
-relative interpreter in the registered checkout would be an assertion about a different directory,
-and it is exactly that assertion which approved contracts the worker then refused.
+right reason and cannot pass for one either. So the question is: can this contract attest THIS
+checkout, rather than does the adapter happen to spell the key.
 """
 
 from __future__ import annotations
@@ -55,6 +72,27 @@ CONTRACT_REFUSALS = (
     BROAD_CHECK_INCOMPLETE,
     INTERPRETER_UNAVAILABLE,
     CANNOT_ATTEST_PROJECT,
+)
+
+# --- The three states of an answer. A caller branches on these by name and on nothing else. ------
+CONTRACT_FIT = "fit"
+CONTRACT_REFUSED = "refused"
+CONTRACT_UNDECIDABLE = "undecidable"
+CONTRACT_STATES = (CONTRACT_FIT, CONTRACT_REFUSED, CONTRACT_UNDECIDABLE)
+
+# --- The enumerated open questions. Each one names something the asker does not hold. ------------
+# The contract is fine as far as the registry can say; the interpreter it names is resolved from a
+# candidate workspace, and there is none yet.
+UNDECIDABLE_RELATIVE_INTERPRETER = "relative_interpreter"
+# The card names no registered project, so there is no adapter to judge and no contract to have.
+UNDECIDABLE_NO_REGISTERED_PROJECT = "no_registered_project"
+# The installation could not even look the project up. The paths that need the binding fail on it
+# in their own words; this decision states nothing about a project it could not read.
+UNDECIDABLE_PROJECT_UNAVAILABLE = "project_unavailable"
+UNDECIDABLE_QUESTIONS = (
+    UNDECIDABLE_RELATIVE_INTERPRETER,
+    UNDECIDABLE_NO_REGISTERED_PROJECT,
+    UNDECIDABLE_PROJECT_UNAVAILABLE,
 )
 
 # The default that predates any adapter contract, and the diagnosis a caller shows for it.
@@ -109,60 +147,116 @@ class ContractUnusable(Exception):
         return f"{self.message} [broad-check contract refusal: {self.shape}]"
 
 
-def module_contract(binding: dict[str, Any], *, instance: Path, project_root: Path) -> ModuleContract:
-    """The worker's own resolution: the contract to run in THIS tree, or ``ContractUnusable``.
+class ContractStateError(Exception):
+    """A verdict reached a caller that cannot act on it. Never a default allow, never a silence."""
 
-    `project_root` is the workspace the check will run in, which is what the adapter schema means
-    when it resolves a relative interpreter. Having that tree, this side answers every question —
-    including whether the interpreter the contract names is actually there.
+
+@dataclass(frozen=True)
+class ContractVerdict:
+    """The answer `decide` gives: one of three named states, each carrying its own evidence.
+
+    Built only through the three constructors below, so a state can never arrive without the thing
+    that makes it readable — a refusal without its shape, or an open question without its name.
     """
-    return _usable_contract(
-        binding, instance=instance, project_root=project_root, workspace=project_root
-    )
+
+    state: str
+    adapter: str = ""
+    contract: ModuleContract | None = None
+    refusal: ContractUnusable | None = None
+    question: str = ""
+    detail: str = ""
+
+    @classmethod
+    def as_fit(cls, contract: ModuleContract, adapter: str) -> ContractVerdict:
+        return cls(state=CONTRACT_FIT, adapter=adapter, contract=contract)
+
+    @classmethod
+    def as_refused(cls, shape: str, adapter: str, message: str) -> ContractVerdict:
+        if shape not in CONTRACT_REFUSALS:
+            raise ContractStateError(f"unknown refusal shape {shape!r}")
+        return cls(
+            state=CONTRACT_REFUSED,
+            adapter=adapter,
+            refusal=ContractUnusable(shape, adapter, message),
+            detail=message,
+        )
+
+    @classmethod
+    def as_undecidable(cls, question: str, adapter: str, detail: str) -> ContractVerdict:
+        if question not in UNDECIDABLE_QUESTIONS:
+            raise ContractStateError(f"unknown open question {question!r}")
+        return cls(state=CONTRACT_UNDECIDABLE, adapter=adapter, question=question, detail=detail)
+
+    @property
+    def fit(self) -> bool:
+        return self.state == CONTRACT_FIT
+
+    @property
+    def refused(self) -> bool:
+        return self.state == CONTRACT_REFUSED
+
+    @property
+    def undecidable(self) -> bool:
+        return self.state == CONTRACT_UNDECIDABLE
+
+    def evidence(self) -> dict[str, str]:
+        """What this verdict says, in the words an outcome or a log carries."""
+        if self.refused and self.refusal is not None:
+            return self.refusal.evidence()
+        record = {"state": self.state, "adapter": self.adapter, "detail": self.detail}
+        if self.undecidable:
+            record["question"] = self.question
+        return record
 
 
-def preflight(binding: dict[str, Any], *, instance: Path, project_root: Path) -> None:
-    """Whether a card may be given to a worker at all, or ``ContractUnusable`` (secretary-1458).
+def decide(
+    binding: dict[str, Any], *, instance: Path, project_root: Path, workspace: Path | None,
+) -> ContractVerdict:
+    """The one decision point about one registered project's broad-check contract.
+
+    `workspace` is the tree the check will actually run in, or ``None`` when no candidate workspace
+    exists yet. The workspace-independent questions are asked first and a refusal among them always
+    wins; only once they are all answered can what is left be `undecidable`.
 
     Cheap and offline by construction: the binding it was handed, the adapter beside it, and the
-    registered checkout's own layout. Nothing here starts a process, creates a workspace or brings
-    up a head, which is what lets the dispatcher ask it before a claim.
-
-    It answers only what a candidate workspace is not needed for. A relative interpreter is
-    resolved from that workspace, and no workspace exists yet, so this side neither approves nor
-    refuses on it: the tree that will run the check is the only place that question has an answer,
-    and the worker's own resolution asks it there.
+    project's own checkout. Nothing here starts a process, creates a workspace or brings up a head,
+    which is what lets the dispatcher ask it before a claim.
     """
-    _usable_contract(binding, instance=instance, project_root=project_root, workspace=None)
-
-
-def _usable_contract(
-    binding: dict[str, Any], *, instance: Path, project_root: Path, workspace: Path | None,
-) -> ModuleContract:
-    """The one implementation of the rules. `workspace` is the tree the check will run in, or None
-    when no candidate workspace exists yet and the workspace-dependent question is not this
-    caller's to answer."""
     adapter_name = binding.get("adapter")
     if not isinstance(adapter_name, str) or not adapter_name:
-        raise ContractUnusable(ADAPTER_UNAVAILABLE, "", "registered project has no adapter")
+        return ContractVerdict.as_refused(
+            ADAPTER_UNAVAILABLE, "", "registered project has no adapter"
+        )
     try:
         adapter = load_config(Path(instance) / "adapters" / f"{adapter_name}.yaml")
-    except ConfigError as exc:
-        raise ContractUnusable(
+    except ConfigError:
+        return ContractVerdict.as_refused(
             ADAPTER_UNAVAILABLE, adapter_name, f"adapter {adapter_name!r} is unavailable"
-        ) from exc
+        )
     if not isinstance(adapter, dict) or validate(adapter, "adapter", f"{adapter_name}.yaml"):
-        raise ContractUnusable(
+        return ContractVerdict.as_refused(
             ADAPTER_INVALID, adapter_name, f"adapter {adapter_name!r} is invalid"
         )
-    contract, interpreter_answerable = _declared_contract(adapter, adapter_name, workspace)
-    if interpreter_answerable and not _executable(contract.interpreter):
-        raise ContractUnusable(
+    configured = adapter.get("broad_check")
+    if configured is None:
+        return _legacy_default(adapter_name, Path(project_root))
+    return _declared_contract(configured, adapter_name, workspace)
+
+
+def _legacy_default(adapter_name: str, project_root: Path) -> ContractVerdict:
+    """The contract an adapter that declares none falls back to, judged against this checkout."""
+    contract = ModuleContract(
+        sys.executable, LEGACY_IMPORT_PACKAGE, LEGACY_REASON_MISSING_BROAD_CHECK
+    )
+    # The default names the interpreter running right now, so it is answerable from either side and
+    # never leaves an open question.
+    if not _executable(contract.interpreter):
+        return ContractVerdict.as_refused(
             INTERPRETER_UNAVAILABLE, adapter_name,
             f"could not start configured interpreter {contract.interpreter!r}: "
             "it is not an executable file",
         )
-    if contract.reason and not _attests(Path(project_root), contract.import_package):
+    if not _attests(project_root, contract.import_package):
         # Only the legacy default is judged against the checkout's own layout. An adapter that
         # declares a contract has stated which package attests that project, and OPERATIONS.md
         # promises that statement is honoured rather than second-guessed by a layout heuristic;
@@ -170,50 +264,83 @@ def _usable_contract(
         # default states nothing about this project: it names Secretary's package for every
         # registered project alike, so for a checkout that does not hold those sources the check it
         # buys attests an installed copy of somebody else's code.
-        raise ContractUnusable(
+        return ContractVerdict.as_refused(
             CANNOT_ATTEST_PROJECT, adapter_name,
             f"adapter {adapter_name!r} declares no broad-check contract, so the legacy default "
             f"attests package {contract.import_package!r}, which is not part of this project's "
-            f"checkout {Path(project_root)}",
+            f"checkout {project_root}",
         )
-    return contract
+    return ContractVerdict.as_fit(contract, adapter_name)
 
 
 def _declared_contract(
-    adapter: dict[str, Any], adapter_name: str, workspace: Path | None,
-) -> tuple[ModuleContract, bool]:
-    """The contract the adapter declares, and whether its interpreter is this caller's to check."""
-    configured = adapter.get("broad_check")
-    if configured is None:
-        # The legacy default names an absolute interpreter — the one running now — so it is fully
-        # answerable from either side.
-        legacy = ModuleContract(
-            sys.executable, LEGACY_IMPORT_PACKAGE, LEGACY_REASON_MISSING_BROAD_CHECK
-        )
-        return legacy, True
+    configured: Any, adapter_name: str, workspace: Path | None,
+) -> ContractVerdict:
+    """The contract an adapter declares for itself: complete, runnable, or an open question."""
     if not isinstance(configured, dict):  # schema validation above normally catches this.
-        raise ContractUnusable(
+        return ContractVerdict.as_refused(
             BROAD_CHECK_INCOMPLETE, adapter_name,
             f"adapter {adapter_name!r} has no broad-check contract",
         )
     interpreter = str(configured.get("interpreter") or "").strip()
     import_package = str(configured.get("import_package") or "").strip()
     if not interpreter or not import_package:
-        raise ContractUnusable(
+        return ContractVerdict.as_refused(
             BROAD_CHECK_INCOMPLETE, adapter_name,
             f"adapter {adapter_name!r} has no broad-check contract",
         )
     interpreter_path = Path(interpreter)
-    if interpreter_path.is_absolute():
-        return ModuleContract(interpreter, import_package), True
-    if workspace is None:
-        # Resolved from the candidate workspace, per the adapter schema, and there is none yet.
-        # Left as the adapter spells it and not tested: the answer belongs to the tree that will
-        # run the check, and any other tree would answer a different question.
-        return ModuleContract(interpreter, import_package), False
-    # Keep a venv's symlink spelling. Resolving the final component would turn
-    # `.venv/bin/python` into the base interpreter and discard that environment's site paths.
-    return ModuleContract(str(Path(workspace).resolve() / interpreter_path), import_package), True
+    if not interpreter_path.is_absolute():
+        if workspace is None:
+            return ContractVerdict.as_undecidable(
+                UNDECIDABLE_RELATIVE_INTERPRETER, adapter_name,
+                f"adapter {adapter_name!r} names interpreter {interpreter!r}, which the adapter "
+                "schema resolves from the candidate workspace; no candidate workspace exists yet, "
+                "so the tree that will run the check is the only side that can answer this",
+            )
+        # Keep a venv's symlink spelling. Resolving the final component would turn
+        # `.venv/bin/python` into the base interpreter and discard that environment's site paths.
+        interpreter = str(Path(workspace).resolve() / interpreter_path)
+    if not _executable(interpreter):
+        return ContractVerdict.as_refused(
+            INTERPRETER_UNAVAILABLE, adapter_name,
+            f"could not start configured interpreter {interpreter!r}: "
+            "it is not an executable file",
+        )
+    return ContractVerdict.as_fit(ModuleContract(interpreter, import_package), adapter_name)
+
+
+def contract_of(verdict: ContractVerdict) -> ModuleContract:
+    """The contract to run, for the side that holds the tree. Exhaustive over the three states.
+
+    There is no branch here that turns an unanswered question into permission: a verdict this side
+    cannot act on raises rather than falling through. `decide` leaves no question open once it is
+    given a workspace, so `undecidable` reaching here is a programming error and is reported as one.
+    """
+    if verdict.refused and verdict.refusal is not None:
+        raise verdict.refusal
+    if verdict.fit and verdict.contract is not None:
+        return verdict.contract
+    if verdict.undecidable:
+        raise ContractStateError(
+            f"the broad-check contract of adapter {verdict.adapter!r} is undecidable "
+            f"({verdict.question}) on a side that holds the tree: {verdict.detail}"
+        )
+    raise ContractStateError(f"unreadable contract verdict {verdict.state!r}")
+
+
+def module_contract(
+    binding: dict[str, Any], *, instance: Path, project_root: Path
+) -> ModuleContract:
+    """The worker's own resolution: the contract to run in THIS tree, or ``ContractUnusable``.
+
+    `project_root` is the workspace the check will run in, which is what the adapter schema means
+    when it resolves a relative interpreter. Having that tree, this side leaves no question open —
+    and it does not re-decide anything either: the state it acts on is the one `decide` returned.
+    """
+    return contract_of(
+        decide(binding, instance=instance, project_root=project_root, workspace=project_root)
+    )
 
 
 def _executable(interpreter: str) -> bool:

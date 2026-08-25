@@ -26,13 +26,23 @@ from secretary.projects.contract import (
     ADAPTER_UNAVAILABLE,
     BROAD_CHECK_INCOMPLETE,
     CANNOT_ATTEST_PROJECT,
+    CONTRACT_FIT,
     CONTRACT_REFUSALS,
+    CONTRACT_REFUSED,
+    CONTRACT_STATES,
+    CONTRACT_UNDECIDABLE,
     INTERPRETER_UNAVAILABLE,
     LEGACY_IMPORT_PACKAGE,
     LEGACY_REASON_MISSING_BROAD_CHECK,
+    UNDECIDABLE_QUESTIONS,
+    UNDECIDABLE_RELATIVE_INTERPRETER,
+    ContractStateError,
     ContractUnusable,
+    ContractVerdict,
+    ModuleContract,
+    contract_of,
+    decide,
     module_contract,
-    preflight,
 )
 
 ADAPTER_BODY = (
@@ -71,12 +81,13 @@ class ProjectContractTests(unittest.TestCase):
     def binding(self) -> dict:
         return {"adapter": "example", "repo": str(self.repo)}
 
-    def ask_preflight(self, project_root: Path | None = None) -> None:
-        """The dispatcher's question, asked of the shared rules directly."""
-        preflight(
+    def ask_preflight(self, project_root: Path | None = None) -> ContractVerdict:
+        """The dispatcher's side: the same rules, asked with no candidate workspace."""
+        return decide(
             self.binding(),
             instance=self.instance,
             project_root=self.repo if project_root is None else project_root,
+            workspace=None,
         )
 
     def relative_interpreter(self, tree: Path) -> Path:
@@ -213,16 +224,18 @@ class ProjectContractTests(unittest.TestCase):
                     "earlier, and never under a second name",
                 )
 
-    def test_the_preflight_never_answers_for_a_relative_interpreter_it_cannot_see(self) -> None:
-        """The boundary this card had to draw: a workspace-dependent question is not the
-        dispatcher's to answer.
+    # --- The third state: named, carried, and the same answer whatever tree is standing there --
+
+    def test_a_relative_interpreter_is_undecidable_without_a_candidate_workspace(self) -> None:
+        """AC6's third state, and the defect this card kept re-growing.
 
         The adapter schema resolves a relative interpreter from the *candidate workspace*, and at
-        preflight there is no candidate workspace. Answering from the registered checkout would be
-        a statement about a different directory — and it is the false approval that statement
-        buys (the checkout has an untracked `.venv`, the fresh worktree does not) that let a card
-        through to a worker who then refused it. So the preflight gives the same answer either
-        way: nothing.
+        preflight there is no candidate workspace. Round one answered from the registered checkout
+        — a statement about a different directory, whose untracked `.venv` approved contracts the
+        fresh worktree then refused. Round two answered with silence, which no caller could see or
+        test. The answer now is a state with a name, and it is the same state whether or not the
+        registered checkout happens to hold that interpreter: the verdict never came from that
+        tree.
         """
         self.adapter(
             ADAPTER_BODY
@@ -230,13 +243,36 @@ class ProjectContractTests(unittest.TestCase):
         )
         interpreter = self.relative_interpreter(self.repo)
 
-        self.ask_preflight()  # no false refusal: the contract is usable as far as anyone can tell
-
+        with_a_venv = self.ask_preflight()
         interpreter.unlink()
-        self.ask_preflight()  # and no false approval either: the answer never came from this tree
+        without_one = self.ask_preflight()
+
+        for verdict in (with_a_venv, without_one):
+            self.assertEqual(verdict.state, CONTRACT_UNDECIDABLE)
+            self.assertTrue(verdict.undecidable)
+            self.assertFalse(verdict.fit)
+            self.assertFalse(verdict.refused)
+            self.assertEqual(verdict.question, UNDECIDABLE_RELATIVE_INTERPRETER)
+            self.assertEqual(verdict.adapter, "example")
+            self.assertIn(".venv/bin/python", verdict.detail)
+            self.assertEqual(
+                verdict.evidence(),
+                {
+                    "state": CONTRACT_UNDECIDABLE,
+                    "adapter": "example",
+                    "detail": verdict.detail,
+                    "question": UNDECIDABLE_RELATIVE_INTERPRETER,
+                },
+                "the state carries what could not be decided and why, for whoever logs it",
+            )
+        self.assertEqual(
+            with_a_venv, without_one,
+            "the registered checkout's contents never entered the answer",
+        )
 
     def test_the_worker_answers_the_relative_interpreter_in_the_tree_that_runs_it(self) -> None:
-        """The other half of the same boundary: the side holding the tree decides, both ways."""
+        """The other half of the same boundary: the side holding the tree decides, both ways, and
+        it never leaves the question open."""
         self.adapter(
             ADAPTER_BODY
             + "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n"
@@ -245,14 +281,19 @@ class ProjectContractTests(unittest.TestCase):
         workspace.mkdir()
         self.relative_interpreter(self.repo)
 
-        with self.assertRaises(ContractUnusable) as caught:
-            module_contract(self.binding(), instance=self.instance, project_root=workspace)
+        refused = decide(
+            self.binding(), instance=self.instance, project_root=workspace, workspace=workspace
+        )
 
-        self.assertEqual(caught.exception.shape, INTERPRETER_UNAVAILABLE)
+        self.assertEqual(refused.state, CONTRACT_REFUSED)
+        self.assertEqual(refused.refusal.shape, INTERPRETER_UNAVAILABLE)
         self.assertIn(
-            str(workspace), caught.exception.message,
+            str(workspace), refused.refusal.message,
             "the worker's refusal is about the worktree it was given, not the registered checkout",
         )
+        with self.assertRaises(ContractUnusable):
+            module_contract(self.binding(), instance=self.instance, project_root=workspace)
+
         in_the_worktree = self.relative_interpreter(workspace)
         resolved = module_contract(
             self.binding(), instance=self.instance, project_root=workspace
@@ -261,6 +302,78 @@ class ProjectContractTests(unittest.TestCase):
             resolved.interpreter, str(in_the_worktree),
             "and the contract it resolves runs that tree's own interpreter, not the checkout's",
         )
+
+    def test_a_side_that_holds_a_tree_is_never_left_with_an_open_question(self) -> None:
+        """AC5's invariant, stated as a property rather than as one example: given a workspace,
+        `decide` answers `fit` or `refused` for every shape a fixture can produce."""
+        workspace = self.root / "worktree"
+        workspace.mkdir()
+        self.package(LEGACY_IMPORT_PACKAGE)
+        bodies = {
+            "no adapter file": None,
+            "invalid adapter": "setup:\n  commands: ['true']\n",
+            "legacy default": ADAPTER_BODY,
+            "blank runtime": ADAPTER_BODY + (
+                "broad_check:\n  interpreter: '   '\n  import_package: thing\n"
+            ),
+            "relative interpreter": ADAPTER_BODY + (
+                "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n"
+            ),
+            "absolute interpreter": ADAPTER_BODY + (
+                f"broad_check:\n  interpreter: {sys.executable}\n  import_package: thing\n"
+            ),
+        }
+        for name, body in bodies.items():
+            with self.subTest(case=name):
+                adapter_file = self.instance / "adapters" / "example.yaml"
+                if body is None:
+                    adapter_file.unlink(missing_ok=True)
+                else:
+                    self.adapter(body)
+
+                verdict = decide(
+                    self.binding(), instance=self.instance, project_root=self.repo,
+                    workspace=workspace,
+                )
+
+                self.assertIn(verdict.state, (CONTRACT_FIT, CONTRACT_REFUSED))
+
+    # --- What each caller does with a state, and the branch that must not exist ----------------
+
+    def test_the_tree_holding_side_acts_on_the_state_and_never_falls_through(self) -> None:
+        """The hole, closed at the shared implementation: no caller turns an unanswered question
+        into permission. `contract_of` is exhaustive over the three states, and the two it cannot
+        act on raise rather than returning something usable."""
+        contract = ModuleContract(sys.executable, "thing")
+
+        self.assertIs(contract_of(ContractVerdict.as_fit(contract, "example")), contract)
+        with self.assertRaises(ContractUnusable):
+            contract_of(ContractVerdict.as_refused(ADAPTER_INVALID, "example", "why"))
+        with self.assertRaises(ContractStateError):
+            contract_of(
+                ContractVerdict.as_undecidable(
+                    UNDECIDABLE_RELATIVE_INTERPRETER, "example", "no workspace"
+                )
+            )
+        with self.assertRaises(ContractStateError):
+            contract_of(ContractVerdict(state="who-knows", adapter="example"))
+
+    def test_a_state_cannot_be_built_without_the_thing_that_makes_it_readable(self) -> None:
+        """The enumerations are the whole list, on both axes, and a constructor refuses anything
+        outside them rather than minting a state nobody can branch on."""
+        self.assertEqual(CONTRACT_STATES, (CONTRACT_FIT, CONTRACT_REFUSED, CONTRACT_UNDECIDABLE))
+        for shape in CONTRACT_REFUSALS:
+            self.assertEqual(
+                ContractVerdict.as_refused(shape, "example", "why").refusal.shape, shape
+            )
+        for question in UNDECIDABLE_QUESTIONS:
+            self.assertEqual(
+                ContractVerdict.as_undecidable(question, "example", "why").question, question
+            )
+        with self.assertRaises(ContractStateError):
+            ContractVerdict.as_refused("invented", "example", "why")
+        with self.assertRaises(ContractStateError):
+            ContractVerdict.as_undecidable("invented", "example", "why")
 
     def test_the_preflight_does_refuse_an_absolute_interpreter_that_is_not_there(self) -> None:
         """AC2 as the observer narrowed it: `interpreter_unavailable` is the preflight's to report
@@ -271,14 +384,14 @@ class ProjectContractTests(unittest.TestCase):
             + "  import_package: thing\n"
         )
 
-        with self.assertRaises(ContractUnusable) as caught:
-            self.ask_preflight()
+        verdict = self.ask_preflight()
 
-        self.assertEqual(caught.exception.shape, INTERPRETER_UNAVAILABLE)
+        self.assertEqual(verdict.state, CONTRACT_REFUSED)
+        self.assertEqual(verdict.refusal.shape, INTERPRETER_UNAVAILABLE)
 
     def test_every_other_shape_is_the_preflights_to_refuse_too(self) -> None:
-        """AC5: one implementation of the rules. What differs is only the workspace-dependent
-        question above, so every shape that does not need a tree stops the card at the dispatcher.
+        """AC1/AC3: a refusal always wins, and always before the card is issued. Every shape that
+        does not need a tree is decided by the dispatcher's side of the same implementation.
         """
         cases = {
             ADAPTER_UNAVAILABLE: None,
@@ -297,10 +410,21 @@ class ProjectContractTests(unittest.TestCase):
                 else:
                     self.adapter(body)
 
-                with self.assertRaises(ContractUnusable) as caught:
-                    self.ask_preflight()
+                verdict = self.ask_preflight()
 
-                self.assertEqual(caught.exception.shape, shape)
+                self.assertEqual(verdict.state, CONTRACT_REFUSED)
+                self.assertEqual(verdict.refusal.shape, shape)
+                self.assertEqual(verdict.evidence()["shape"], shape)
+
+    def test_a_workspace_independent_refusal_wins_over_an_open_question(self) -> None:
+        """Order matters and is fixed here: an adapter that is broken is refused even though its
+        contract would also have left the relative-interpreter question open."""
+        self.adapter("setup:\n  commands: ['true']\nbroad_check:\n  interpreter: .venv/bin/x\n")
+
+        verdict = self.ask_preflight()
+
+        self.assertEqual(verdict.state, CONTRACT_REFUSED)
+        self.assertEqual(verdict.refusal.shape, ADAPTER_INVALID)
 
     def test_the_legacy_default_over_somebody_elses_checkout_cannot_attest_it(self) -> None:
         """The live shape: 13 adapters, none declaring `broad_check`, one Secretary checkout.
@@ -374,16 +498,31 @@ class CatalogContractTests(unittest.TestCase):
             (instance / "adapters" / "example.yaml").write_text(adapter_body, encoding="utf-8")
         return InstanceCatalog(instance / "instance.yaml")
 
-    def test_a_usable_contract_passes_the_preflight_in_silence(self) -> None:
+    def test_a_usable_contract_reaches_the_preflight_as_fit(self) -> None:
         """The live AC4 case, through the dispatcher's own catalog: a Secretary checkout on the
-        legacy default. The preflight answers only whether the card may go out."""
-        self.assertIsNone(self.catalog().broad_check_preflight("example"))
+        legacy default. It is a named state with the contract in it, not an absence of refusal."""
+        verdict = self.catalog().broad_check_verdict("example")
+
+        self.assertEqual(verdict.state, CONTRACT_FIT)
+        self.assertEqual(verdict.contract.import_package, LEGACY_IMPORT_PACKAGE)
+        self.assertEqual(verdict.contract.reason, LEGACY_REASON_MISSING_BROAD_CHECK)
 
     def test_an_unusable_one_reaches_the_preflight_as_the_shared_refusal(self) -> None:
-        with self.assertRaises(ContractUnusable) as caught:
-            self.catalog(adapter_body=None).broad_check_preflight("example")
+        verdict = self.catalog(adapter_body=None).broad_check_verdict("example")
 
-        self.assertEqual(caught.exception.shape, ADAPTER_UNAVAILABLE)
+        self.assertEqual(verdict.state, CONTRACT_REFUSED)
+        self.assertEqual(verdict.refusal.shape, ADAPTER_UNAVAILABLE)
+
+    def test_an_open_question_reaches_the_preflight_as_undecidable(self) -> None:
+        """The third state through the real catalog, with `workspace=None` supplied there and
+        nowhere else: the dispatcher never has a candidate workspace to answer with."""
+        verdict = self.catalog(
+            ADAPTER_BODY
+            + "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n"
+        ).broad_check_verdict("example")
+
+        self.assertEqual(verdict.state, CONTRACT_UNDECIDABLE)
+        self.assertEqual(verdict.question, UNDECIDABLE_RELATIVE_INTERPRETER)
 
 
 if __name__ == "__main__":

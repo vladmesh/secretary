@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import sys
 import tempfile
 import time
 from collections.abc import Callable
@@ -28,7 +29,12 @@ from secretary.dispatcher_types import HeadLaunchAborted, ReviewLaunch
 from secretary.dispatcher_watchdog import head_run_process_status as _head_run_process_status
 from secretary.dispatcher_watchdog import pid_file_path
 from secretary.dispatcher_worker_lifecycle import head_run_binding
-from secretary.projects.contract import ContractUnusable
+from secretary.projects.contract import (
+    LEGACY_IMPORT_PACKAGE,
+    LEGACY_REASON_MISSING_BROAD_CHECK,
+    ContractVerdict,
+    ModuleContract,
+)
 from secretary.routing_journal import HeadRun, head_run_from_profile
 from secretary.sprints import SPRINT_BOARD_NAME
 from secretary.tasks import TaskError
@@ -467,31 +473,37 @@ class FakeCatalog:
         self.role_defaults = {
             "new_card": "codex", "reviewer": "codex-reviewer", "observer": "codex-observer",
         }
-        # None until a test needs a card whose project cannot be broad-checked (secretary-1458),
-        # or needs to watch the moment the preflight asks.
-        self.broad_check_refusal: ContractUnusable | None = None
+        # None until a test needs one of the other two contract states (secretary-1458), or needs
+        # to watch the moment the preflight asks.
+        self.broad_check_state: ContractVerdict | None = None
         self.broad_check_probe: Callable[[str], None] | None = None
 
     def default_branch(self, project: str, override: str | None) -> str:
         # Same precedence as InstanceCatalog: card override, then the binding, then "main".
         return override or self.binding(project).get("default_branch") or "main"
 
-    def broad_check_preflight(self, project: str) -> None:
+    def broad_check_verdict(self, project: str) -> ContractVerdict:
         """The card's project can be broad-checked, as every card in this suite always could.
 
         The pilot project here is Secretary itself, whose adapter declares no `broad_check` and
         whose legacy default therefore does attest it — the live case secretary-1458 must keep
-        working. A test that needs the other answer assigns one of the enumerated refusals to
-        `broad_check_refusal`; what produces each of them from a real adapter is pinned against
-        `InstanceCatalog` and the worker's own resolution, not here.
+        working, so `fit` is the default answer. A test that needs one of the other two named
+        states assigns it to `broad_check_state`; what produces each of them from a real adapter is
+        pinned against `InstanceCatalog` and the worker's own resolution, not here.
 
         `broad_check_probe` is called first, so a test can see what the board looked like at the
         moment the question was asked — which is the whole point of asking it before the claim.
         """
         if self.broad_check_probe is not None:
             self.broad_check_probe(project)
-        if self.broad_check_refusal is not None:
-            raise self.broad_check_refusal
+        if self.broad_check_state is not None:
+            return self.broad_check_state
+        return ContractVerdict.as_fit(
+            ModuleContract(
+                sys.executable, LEGACY_IMPORT_PACKAGE, LEGACY_REASON_MISSING_BROAD_CHECK
+            ),
+            "secretary",
+        )
 
     def adapter(self, project: str) -> dict:
         return self._adapter
