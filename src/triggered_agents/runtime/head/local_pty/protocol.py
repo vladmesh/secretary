@@ -11,7 +11,11 @@ The limits are values with reasons, not round numbers:
     truncated prompt (`issue:d9d049eaad39d02bbb1e`). A continuation payload — a card pointer, a
     reviewer finding, a rendered instruction — is kilobytes, so the limit is set two orders of
     magnitude above the largest one seen rather than at the edge of it. Over the limit is a named
-    refusal: never a truncation, never a silent split into two writes;
+    refusal: never a truncation, never a silent split into two writes. A declared limit is only a
+    limit if the substrate makes it the real one, which is why the supervisor puts the head's pty
+    into a non-canonical mode before the head starts: a canonical line discipline caps a line at
+    4095 bytes and discards the rest **without telling the writer**, which would reproduce exactly
+    the wound this limit exists to answer;
   * `FRAME_MAX_BYTES` bounds the request line itself, so a client cannot make the supervisor
     allocate without bound before it has parsed anything. It is above `INPUT_MAX_BYTES` by the
     slack base64 and the JSON envelope cost, so an input inside the input limit always fits in a
@@ -21,7 +25,11 @@ The limits are values with reasons, not round numbers:
     labelled as one;
   * `ATTACH_MAX_CLIENTS` bounds concurrent attachments. Each attachment costs a socket and an
     outbound buffer, and an unbounded count of them is an unbounded amount of the supervisor's
-    memory held by whoever dials it.
+    memory held by whoever dials it;
+  * `CONNECTION_MAX_CLIENTS` bounds callers that have merely dialled. The socket is owner-only, so
+    this is not a defence against a stranger; it is the bound that keeps a caller which connects
+    without ever attaching — a probe that leaks, a client stuck mid-frame — from costing the
+    supervisor a descriptor plus an inbox of up to `FRAME_MAX_BYTES` without any limit at all.
 """
 from __future__ import annotations
 
@@ -41,6 +49,9 @@ FRAME_MAX_BYTES = (INPUT_MAX_BYTES * 4 + 2) // 3 + _ENVELOPE_SLACK_BYTES
 OUTPUT_BUFFER_BYTES = 256 * 1024
 #: How many callers may hold the head's live stream at once.
 ATTACH_MAX_CLIENTS = 4
+#: How many callers may hold a connection at once, attached or not: every attachment plus room for
+#: the short-lived probes that connect, ask one question and leave.
+CONNECTION_MAX_CLIENTS = ATTACH_MAX_CLIENTS * 4
 
 #: File names inside one run directory. A caller that knows the run directory knows all of them.
 SOCKET_NAME = "head.sock"
@@ -65,6 +76,8 @@ OPS = (OP_STATUS, OP_INPUT, OP_OUTPUT, OP_ATTACH, OP_RESIZE, OP_DRAIN, OP_STOP)
 ERROR_INPUT_TOO_LARGE = "input_too_large"
 ERROR_FRAME_TOO_LARGE = "frame_too_large"
 ERROR_ATTACH_LIMIT = "attach_limit"
+ERROR_CONNECTION_LIMIT = "connection_limit"
+ERROR_INPUT_STALLED = "input_stalled"
 ERROR_DRAINING = "draining"
 ERROR_HEAD_GONE = "head_gone"
 ERROR_MALFORMED = "malformed_request"
@@ -144,23 +157,43 @@ def input_refusal(size: int) -> dict[str, Any]:
     }
 
 
-#: How much accepted-but-not-yet-written input the supervisor will hold for a head whose pty is
-#: not draining. Four inputs deep: enough that a normal delivery never waits on the one before it,
-#: small enough that a head which has stopped reading is refused rather than buffered forever.
-INPUT_BACKLOG_MAX_BYTES = 4 * INPUT_MAX_BYTES
-ERROR_INPUT_BACKLOG = "input_backlog"
+#: How long the supervisor will keep trying to put one accepted payload onto the head's pty before
+#: it gives up and says how far it got. A pty's own buffer is a few kilobytes, so a payload at the
+#: input limit only fits as fast as the head reads it; a head that has stopped reading must not be
+#: able to hold the supervisor's loop for longer than this.
+INPUT_DELIVERY_SECONDS = 10.0
 
 
-def backlog_refusal(size: int, pending: int) -> dict[str, Any]:
-    """The refusal an input gets when the head is not reading: named limit, named actual."""
+def stalled_refusal(
+    size: int, written: int, why: str, seconds: float = INPUT_DELIVERY_SECONDS
+) -> dict[str, Any]:
+    """The answer a delivery gets when it could not be finished: how much of it did land.
+
+    Never `ok: True`. The point of the whole limit is that a caller is never told a payload arrived
+    when part of it did not, so a partial delivery is a refusal that names both numbers.
+    """
     return {
         "ok": False,
-        "error": ERROR_INPUT_BACKLOG,
-        "limit_bytes": INPUT_BACKLOG_MAX_BYTES,
+        "error": ERROR_INPUT_STALLED,
         "size_bytes": size,
-        "pending_bytes": pending,
+        "written_bytes": written,
+        "timeout_seconds": seconds,
         "detail": (
-            f"the head has {pending} bytes of unwritten input; accepting {size} more would exceed "
-            f"the {INPUT_BACKLOG_MAX_BYTES}-byte backlog limit"
+            f"{written} of {size} bytes reached the head's terminal within "
+            f"{seconds:g}s and the delivery could not be finished: {why}"
+        ),
+    }
+
+
+def connection_refusal(connections: int) -> dict[str, Any]:
+    """The refusal a caller gets when the supervisor is already holding all the callers it will."""
+    return {
+        "ok": False,
+        "error": ERROR_CONNECTION_LIMIT,
+        "limit": CONNECTION_MAX_CLIENTS,
+        "connections": connections,
+        "detail": (
+            f"{connections} callers already hold a connection to this head, which is the "
+            f"{CONNECTION_MAX_CLIENTS}-connection limit"
         ),
     }

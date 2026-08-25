@@ -7,6 +7,7 @@ back — and every one of those is visible with a program that echoes lines.
 from __future__ import annotations
 
 import fcntl
+import os
 import signal
 import struct
 import sys
@@ -29,16 +30,27 @@ def main() -> int:
     rows, cols = terminal_size()
     print(f"SIZE {rows}x{cols}", flush=True)
     while True:
-        line = sys.stdin.readline()
-        if not line:
+        raw = sys.stdin.readline()
+        if not raw:
             return 0
-        line = line.strip()
+        line = raw.strip()
+        if line.startswith("bulk "):
+            # The one thing an echo cannot show: how much of a delivery actually arrived. A line
+            # discipline that drops the tail of a long write drops it in silence, so the child says
+            # the length it read and a caller compares it with the length it sent.
+            print(f"BULK {len(raw)}", flush=True)
+            continue
         if line == "quit":
             print("BYE", flush=True)
             return 0
         if line.startswith("exit "):
             print("BYE", flush=True)
             return int(line.split()[1])
+        if line.startswith("die "):
+            # Exit saying nothing at all. A test that needs the *last* thing a head ever produced
+            # to be a particular chunk cannot afford a goodbye after it.
+            sys.stdout.flush()
+            os._exit(int(line.split()[1]))
         if line.startswith("spew "):
             count = int(line.split()[1])
             for index in range(count):

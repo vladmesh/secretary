@@ -4,10 +4,11 @@ The supervisor is the answer to a question the sprint's first card exists to set
 process the product starts itself outlive the dispatcher tick that started it and stay
 addressable afterwards. It does four things and refuses to do a fifth:
 
-  * it **starts the head on a pty of its own**, with `pty.fork`, which puts the head in a new
-    session with the pty as its controlling terminal. A signal sent to the dispatcher's process
-    group therefore cannot reach it, and an interactive adapter gets the terminal it expects,
-    including `SIGWINCH` when the size changes;
+  * it **starts the head on a pty of its own**, in a new session with the pty as its controlling
+    terminal. A signal sent to the dispatcher's process group therefore cannot reach it, and an
+    interactive adapter gets the terminal it expects, including `SIGWINCH` when the size changes.
+    The terminal is sized and taken out of canonical mode before the head exists, so the head never
+    observes a half-configured one;
   * it **holds the head's addressable surface**: a Unix socket at a predictable path, owner-only,
     with bounded input, bounded output and bounded attach. Every bound refuses by name;
   * it **narrates the run** into the versioned append-only journal beside the socket;
@@ -29,6 +30,7 @@ import fcntl
 import json
 import os
 import pty
+import select
 import selectors
 import signal
 import socket
@@ -36,6 +38,7 @@ import struct
 import sys
 import termios
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -68,6 +71,9 @@ LOOP_TICK_SECONDS = 0.1
 #: closes the socket for good.
 FAREWELL_SECONDS = 0.5
 _READ_CHUNK = 65536
+#: Indices into the list `termios.tcgetattr` returns, named rather than counted at the call site.
+_LFLAG = 3
+_CC = 6
 
 EXIT_OK = 0
 EXIT_STARTUP_FAILED = 2
@@ -117,6 +123,7 @@ class Supervisor:
         cols: int = 80,
         term: str = "xterm-256color",
         quiet_seconds: float = TURN_QUIET_SECONDS,
+        delivery_seconds: float = protocol.INPUT_DELIVERY_SECONDS,
     ) -> None:
         self.run_dir = Path(run_dir)
         self.run_id = run_id
@@ -127,6 +134,7 @@ class Supervisor:
         self.cols = max(1, int(cols))
         self.term = term
         self.quiet_seconds = float(quiet_seconds)
+        self.delivery_seconds = float(delivery_seconds)
 
         self.socket_path = protocol.socket_path_for(self.run_dir)
         self.journal_path = self.run_dir / protocol.JOURNAL_NAME
@@ -141,7 +149,6 @@ class Supervisor:
         self._master = -1
         self._head_pid = 0
         self._head_status: int | None = None
-        self._to_head = bytearray()
 
         self._output = bytearray()
         self._output_dropped = 0
@@ -225,7 +232,7 @@ class Supervisor:
         finally:
             os.umask(previous)
         os.chmod(self.socket_path, 0o600)
-        listener.listen(protocol.ATTACH_MAX_CLIENTS + 4)
+        listener.listen(protocol.CONNECTION_MAX_CLIENTS + 4)
         listener.setblocking(False)
         self._listener = listener
 
@@ -246,7 +253,13 @@ class Supervisor:
         return ["/bin/sh", "-c", wrapped]
 
     def start_head(self) -> int:
-        """`pty.fork` the head: new session, controlling pty, and the launch identity it writes.
+        """Fork the head onto a pty of its own: new session, controlling terminal, launch identity.
+
+        This is `pty.fork` written out rather than called, for one reason: the terminal has to be
+        **configured before the head exists**, not after. Its size and its line discipline are
+        properties of the pty, so setting them on the slave before the fork means the head cannot
+        observe anything else — no window where the first `TIOCGWINSZ` sees 0x0, and no window
+        where a payload arrives while the discipline is still the kernel's default.
 
         Everything this process holds is already close-on-exec, so the head's `exec` drops the
         socket, the lock and the journal rather than carrying a copy of them into a process that
@@ -255,20 +268,58 @@ class Supervisor:
         argv = self._head_argv()
         environment = dict(os.environ)
         environment["TERM"] = self.term
-        pid, master = pty.fork()
+        master, slave = pty.openpty()
+        self._prepare_terminal(slave)
+        pid = os.fork()
         if pid == 0:  # pragma: no cover - the child never returns to the test process
             try:
+                os.close(master)
+                os.setsid()
+                fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+                for target in (0, 1, 2):
+                    os.dup2(slave, target)
+                if slave > 2:
+                    os.close(slave)
+                signal.set_wakeup_fd(-1)
                 for number in (signal.SIGINT, signal.SIGTERM, signal.SIGWINCH, signal.SIGHUP):
                     signal.signal(number, signal.SIG_DFL)
                 os.execvpe(argv[0], argv, environment)
             except BaseException:
                 os._exit(127)
+        os.close(slave)
         self._head_pid = pid
         self._master = master
         os.set_blocking(master, False)
         os.set_inheritable(master, False)
-        self.set_winsize(self.rows, self.cols)
         return pid
+
+    def _prepare_terminal(self, slave: int) -> None:
+        """Size the pty and take its line discipline out of canonical mode, before the head runs.
+
+        The canonical discipline the kernel sets by default is the whole reason this exists. In it
+        `N_TTY` buffers a *line*, caps that line at 4095 bytes and **silently discards** everything
+        past the cap: the writer is not blocked, is given no `EAGAIN`, and is told nothing. A
+        supervisor that declares a 64 KiB input limit on top of that discipline is declaring a
+        limit it does not have, and losing the tail of a delivery in silence is precisely the
+        legacy wound (`issue:d9d049eaad39d02bbb1e`) this backend exists not to repeat.
+
+        Non-canonical is therefore the substrate's default, and it is what makes the declared limit
+        real: the kernel gives back-pressure through `EAGAIN` instead of dropping bytes, so a
+        payload of any size up to the limit arrives whole. What is turned off is exactly what
+        loses or rewrites bytes — line buffering and echo — and no more: `ISIG` stays, so a `^C` in
+        a delivery still interrupts the head, and `OPOST` stays, so the head's output keeps the
+        line endings a terminal gives it. An interactive adapter that wants a mode of its own sets
+        one for itself; this is the mode it inherits until it does, not one imposed on it.
+        """
+        packed = struct.pack("HHHH", self.rows, self.cols, 0, 0)
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, packed)
+        attributes = termios.tcgetattr(slave)
+        attributes[_LFLAG] &= ~(termios.ICANON | termios.ECHO | termios.ECHOE | termios.ECHOK
+                                | termios.ECHONL | termios.IEXTEN)
+        # With ICANON off a read returns as soon as one byte is there, and never waits on a timer.
+        attributes[_CC][termios.VMIN] = 1
+        attributes[_CC][termios.VTIME] = 0
+        termios.tcsetattr(slave, termios.TCSANOW, attributes)
 
     def set_winsize(self, rows: int, cols: int) -> None:
         """Set the pty's size. The kernel delivers `SIGWINCH` to the head from here."""
@@ -282,7 +333,25 @@ class Supervisor:
     # -- the loop --------------------------------------------------------------------------
 
     def run(self) -> int:
-        """Own the head until it ends, and say how it ended."""
+        """Own the head until it ends, and say how it ended.
+
+        Everything after `claim` is inside the one `finally`: a failure on the way up — a pty that
+        cannot be opened, a journal that cannot be written — must let go of the socket and the lock
+        it already took, so that what a launcher finds is a named refusal rather than debris that
+        answers nothing.
+        """
+        try:
+            self._begin()
+            while self._head_status is None:
+                for key, mask in self._selector.select(LOOP_TICK_SECONDS):
+                    self._dispatch(key, mask)
+                self._tick()
+            return self._finish()
+        finally:
+            self._shutdown()
+
+    def _begin(self) -> None:
+        """Bring the head up and say so, in the order a reader of the run directory needs."""
         self._journal = JournalWriter(self.journal_path, self.run_id).open()
         self._install_signals()
         self.start_head()
@@ -306,22 +375,12 @@ class Supervisor:
         self._selector.register(self._listener, selectors.EVENT_READ, "listener")
         self._selector.register(self._master, selectors.EVENT_READ, "master")
         self._selector.register(self._wakeup_read, selectors.EVENT_READ, "wakeup")
-        try:
-            while self._head_status is None:
-                for key, mask in self._selector.select(LOOP_TICK_SECONDS):
-                    self._dispatch(key, mask)
-                self._tick()
-            return self._finish()
-        finally:
-            self._shutdown()
 
     def _dispatch(self, key: selectors.SelectorKey, mask: int) -> None:
         data = key.data
         if data == "listener":
             self._accept()
         elif data == "master":
-            if mask & selectors.EVENT_WRITE:
-                self._flush_to_head()
             if mask & selectors.EVENT_READ:
                 self._read_head()
         elif data == "wakeup":
@@ -428,26 +487,43 @@ class Supervisor:
         self._progress_bytes = 0
         self._progress_at = 0.0
 
-    def _flush_to_head(self) -> None:
-        while self._to_head:
-            try:
-                written = os.write(self._master, bytes(self._to_head[:_READ_CHUNK]))
-            except BlockingIOError:
-                break
-            except OSError:
-                self._to_head.clear()
-                break
-            del self._to_head[:written]
-        self._update_master_interest()
+    def _deliver_to_head(self, payload: bytes) -> tuple[int, str]:
+        """Put one whole payload on the head's pty, and say how far it got if it could not.
 
-    def _update_master_interest(self) -> None:
-        if self._master < 0:
-            return
-        events = selectors.EVENT_READ | (selectors.EVENT_WRITE if self._to_head else 0)
-        try:
-            self._selector.modify(self._master, events, "master")
-        except (KeyError, ValueError):
-            pass
+        Delivery is finished before the caller is answered, and that is deliberate. A pty holds a
+        few kilobytes, so a payload at the input limit only moves as fast as the head reads it; the
+        alternative — accept, buffer, answer `ok`, write later — is a promise the supervisor cannot
+        keep, and the failure it hides is exactly the one this card exists to close. Here the
+        answer and the journal both describe bytes that have actually been written.
+
+        Two things make the wait safe. The head's output is read while we wait, so a head blocked
+        writing its own output can never deadlock against a supervisor blocked writing input. And
+        the wait is bounded by `INPUT_DELIVERY_SECONDS`, so a head that has stopped reading costs
+        the loop that long and is then refused by name, with the count of what did land.
+        """
+        written = 0
+        deadline = time.monotonic() + self.delivery_seconds
+        while written < len(payload):
+            if self._head_status is not None:
+                return written, "the head exited"
+            if self._signalled:
+                return written, f"the supervisor was signalled ({self._signalled}) mid-delivery"
+            try:
+                written += os.write(self._master, payload[written : written + _READ_CHUNK])
+                continue
+            except BlockingIOError:
+                pass
+            except OSError as exc:
+                return written, f"the head's terminal refused the write ({exc.strerror})"
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return written, "the head stopped reading its terminal"
+            readable, _writable, _ = select.select(
+                [self._master], [self._master], [], min(remaining, LOOP_TICK_SECONDS)
+            )
+            if readable:
+                self._read_head()
+        return written, ""
 
     def _signal_head(self, number: int) -> None:
         if self._head_pid <= 0:
@@ -472,10 +548,26 @@ class Supervisor:
                 return
             except OSError:
                 return
+            if len(self._clients) >= protocol.CONNECTION_MAX_CLIENTS:
+                self._refuse_connection(conn)
+                continue
             conn.setblocking(False)
             client = _Client(conn)
             self._clients[conn] = client
             self._selector.register(conn, selectors.EVENT_READ, client)
+
+    def _refuse_connection(self, conn: socket.socket) -> None:
+        """Say no to a caller the supervisor will not hold, rather than holding it silently."""
+        try:
+            conn.settimeout(0.2)
+            conn.sendall(protocol.encode_frame(protocol.connection_refusal(len(self._clients))))
+        except OSError:
+            pass
+        finally:
+            try:
+                conn.close()
+            except OSError:
+                pass
 
     def _read_client(self, client: _Client) -> None:
         try:
@@ -567,6 +659,8 @@ class Supervisor:
             "dropped_bytes": self._output_dropped,
             "attached": sum(1 for other in self._clients.values() if other.attached),
             "attach_limit": protocol.ATTACH_MAX_CLIENTS,
+            "connections": len(self._clients),
+            "connection_limit": protocol.CONNECTION_MAX_CLIENTS,
             "input_limit_bytes": protocol.INPUT_MAX_BYTES,
             "output_buffer_bytes": protocol.OUTPUT_BUFFER_BYTES,
         }
@@ -585,18 +679,33 @@ class Supervisor:
                 "error": protocol.ERROR_DRAINING,
                 "detail": "this head's admission is closed; it takes no further input",
             }
-        if len(self._to_head) + size > protocol.INPUT_BACKLOG_MAX_BYTES:
-            return protocol.backlog_refusal(size, len(self._to_head))
-        self._append(INPUT_ACCEPTED, bytes=size, subject=str(request.get("subject") or ""))
-        if not self._turn_open:
-            self._turn_id += 1
-            self._turn_open = True
-            self._turn_bytes = 0
-            self._last_output_at = time.time()
-            self._append(TURN_STARTED, turn=self._turn_id, subject=str(request.get("subject") or ""))
-        self._to_head += payload
-        self._flush_to_head()
-        return {"ok": True, "accepted_bytes": size, "turn": self._turn_id}
+        subject = str(request.get("subject") or "")
+        written, why = self._deliver_to_head(payload)
+        if written:
+            # The journal counts what reached the head's terminal, never what a client handed over:
+            # a record saying more arrived than did is the journal saying something untrue about a
+            # run. A delivery that could not be finished says so here as well as in the answer.
+            self._append(
+                INPUT_ACCEPTED,
+                bytes=written,
+                offered_bytes=size,
+                complete=not why,
+                subject=subject,
+            )
+            if not self._turn_open:
+                self._turn_id += 1
+                self._turn_open = True
+                self._turn_bytes = 0
+                self._last_output_at = time.time()
+                self._append(TURN_STARTED, turn=self._turn_id, subject=subject)
+        if why:
+            return protocol.stalled_refusal(size, written, why, self.delivery_seconds)
+        return {
+            "ok": True,
+            "accepted_bytes": size,
+            "written_bytes": written,
+            "turn": self._turn_id,
+        }
 
     def _op_output(self, client: _Client, request: dict[str, Any]) -> dict[str, Any]:
         del client
@@ -701,15 +810,25 @@ class Supervisor:
             client.dropped += len(chunk)
             client.overflowed = True
             return
-        if client.overflowed:
-            client.pending += protocol.encode_frame(
-                {"event": protocol.EVENT_DROPPED, "bytes": client.dropped}
-            )
-            client.overflowed = False
+        self._announce_dropped(client)
         client.pending += protocol.encode_frame(
             {"event": protocol.EVENT_OUTPUT, "data": protocol.encode_payload(chunk)}
         )
         self._flush(client)
+
+    def _announce_dropped(self, client: _Client) -> None:
+        """Tell an attached client what it missed, before anything else it is told.
+
+        A count that is only ever sent alongside the next chunk that fits is a count that is lost
+        when the overflow happens on the last one, so the same notice is emitted here from the
+        stream's end as well as from the middle of it.
+        """
+        if not client.overflowed:
+            return
+        client.pending += protocol.encode_frame(
+            {"event": protocol.EVENT_DROPPED, "bytes": client.dropped}
+        )
+        client.overflowed = False
 
     def _flush(self, client: _Client) -> None:
         while client.pending:
@@ -767,6 +886,7 @@ class Supervisor:
         record = self._append(RUN_EXITED, **exited)
         for client in list(self._clients.values()):
             if client.attached:
+                self._announce_dropped(client)
                 client.pending += protocol.encode_frame(
                     {"event": protocol.EVENT_EXITED, "record": record}
                 )
@@ -886,6 +1006,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--term", default="xterm-256color")
     parser.add_argument("--quiet-seconds", type=float, default=TURN_QUIET_SECONDS)
     parser.add_argument(
+        "--delivery-seconds", type=float, default=protocol.INPUT_DELIVERY_SECONDS
+    )
+    parser.add_argument(
         "--daemonize",
         action="store_true",
         help=(
@@ -917,6 +1040,7 @@ def main(argv: list[str] | None = None) -> int:
         cols=args.cols,
         term=args.term,
         quiet_seconds=args.quiet_seconds,
+        delivery_seconds=args.delivery_seconds,
     )
     try:
         supervisor.claim()
@@ -925,9 +1049,15 @@ def main(argv: list[str] | None = None) -> int:
         _write_startup_error(run_dir, reason, str(exc))
         print(f"supervisor startup refused ({reason}): {exc}", file=sys.stderr)
         return getattr(exc, "exit_code", EXIT_STARTUP_FAILED)
-    # A failure after this point is not a startup failure: the run directory already says the head
-    # is up, and the traceback belongs in the supervisor's log where the launcher reports it from.
-    return supervisor.run()
+    try:
+        return supervisor.run()
+    except Exception as exc:  # noqa: BLE001 - the launcher is owed the reason, whatever it is
+        # A failure here is not a refusal to start — the run may already have been up — but a
+        # launcher still waiting is owed a name for it. Without this it learns nothing until its
+        # own timeout, having been left a socket file that answers nobody.
+        _write_startup_error(run_dir, START_FAILED, f"the supervisor failed: {exc!r}")
+        traceback.print_exc()
+        return EXIT_STARTUP_FAILED
 
 
 if __name__ == "__main__":  # pragma: no cover - process entry point

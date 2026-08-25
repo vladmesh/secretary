@@ -45,9 +45,23 @@ into "a process we own".
 intermediate in a new session, the intermediate forks the supervisor and exits, and the launcher
 reaps the intermediate immediately. The supervisor is therefore never a child of the dispatcher
 tick — it cannot become a zombie held by a launcher that has gone away, and it is reparented to
-init while staying addressable through its socket and its pid file. The head itself is
-`pty.fork`ed by the supervisor, which puts it in a session of its own with the pty as its
-controlling terminal, so a signal sent to the dispatcher's process group cannot reach it.
+init while staying addressable through its socket and its pid file. The head itself is forked onto
+a pty by the supervisor, which puts it in a session of its own with the pty as its controlling
+terminal, so a signal sent to the dispatcher's process group cannot reach it.
+
+**And the terminal it is given is a non-canonical one.** This is the last decision of the route and
+the one with the least room in it. A pty's default line discipline is canonical: it buffers a line,
+caps that line at 4095 bytes and discards the rest with no error, no blocking and no sign to the
+writer. A substrate that declares a 64 KiB input limit on top of that discipline has not declared a
+limit at all — the real one is 4095 bytes, unnamed and silent, which is exactly the shape of the
+legacy wound (`issue:d9d049eaad39d02bbb1e`) this backend exists not to repeat. The alternative
+considered was to declare the smaller number honestly and refuse at it; it is refused because the
+product has already broken on a limit of that order, and because the substrate owns the pty and can
+therefore make its declared limit the true one. In non-canonical mode the kernel answers a full
+buffer with `EAGAIN` instead of a silent truncation, so a delivery of any size up to the limit
+arrives whole. The mode is set on the pty before the head exists, which closes the window between
+`exec` and an interactive adapter's own `termios` call; an adapter that wants a different mode
+still sets one for itself.
 
 ## Identity is the existing launch identity
 
@@ -84,6 +98,7 @@ from .journal import (
 )
 from .protocol import (
     ATTACH_MAX_CLIENTS,
+    CONNECTION_MAX_CLIENTS,
     FRAME_MAX_BYTES,
     INPUT_MAX_BYTES,
     OUTPUT_BUFFER_BYTES,
@@ -93,6 +108,7 @@ from .protocol import (
 
 __all__ = [
     "ATTACH_MAX_CLIENTS",
+    "CONNECTION_MAX_CLIENTS",
     "DRAIN_REQUESTED",
     "EVENT_KINDS",
     "FRAME_MAX_BYTES",

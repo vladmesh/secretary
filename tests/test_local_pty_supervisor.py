@@ -3,14 +3,15 @@
 Nothing here is faked. The card this suite belongs to exists to settle one architectural
 uncertainty — whether a process the product starts itself can outlive the dispatcher tick that
 started it and stay addressable — and a fake supervisor would settle nothing. So every test starts
-a real supervisor, which `pty.fork`s a real child, and every test takes back what it started, on
-success and on failure alike.
+a real supervisor, which forks a real child onto a real pty, and every test takes back what it
+started, on success and on failure alike.
 """
 from __future__ import annotations
 
 import ast
 import json
 import os
+import re
 import shutil
 import signal
 import socket
@@ -243,9 +244,12 @@ class LocalPtySubstrateTests(unittest.TestCase):
     # -- the terminal ----------------------------------------------------------------------
 
     def test_the_head_runs_on_a_pty_that_can_be_sized_and_resized(self) -> None:
-        handle = self._start(run_id="terminal", rows=24, cols=80)
+        # A size neither the kernel's default (0x0) nor a conventional one (24x80) could be
+        # mistaken for: the head reads it once, at once, so a size set after the fork would be a
+        # race this assertion loses. It is set on the pty before the head exists.
+        handle = self._start(run_id="terminal", rows=37, cols=113)
         client = self._client(handle)
-        self.assertIn(b"SIZE 24x80", self._await_output(client, b"SIZE 24x80"))
+        self.assertIn(b"SIZE 37x113", self._await_output(client, b"SIZE 37x113"))
 
         self.assertEqual(client.resize(41, 132), {"ok": True, "rows": 41, "cols": 132})
         self.assertIn(b"WINCH 41x132", self._await_output(client, b"WINCH 41x132"))
@@ -275,15 +279,106 @@ class LocalPtySubstrateTests(unittest.TestCase):
     def test_the_input_limit_is_far_above_the_legacy_path_that_lost_a_nudge(self) -> None:
         # issue:d9d049eaad39d02bbb1e — a continuation nudge did not fit in the legacy 256-byte cap
         # and was silently truncated. A limit is only a real answer to that if a continuation
-        # payload fits inside it with room to spare.
+        # payload fits inside it with room to spare, and only if the payload *arrives whole*: the
+        # head is asked how many bytes it read, because the loss this is about is a silent one and
+        # the prefix of a truncated delivery looks exactly like a whole one.
         self.assertGreaterEqual(protocol.INPUT_MAX_BYTES, 64 * 1024)
         self.assertGreater(protocol.FRAME_MAX_BYTES, protocol.INPUT_MAX_BYTES)
         handle = self._start(run_id="big-input")
         client = self._client(handle)
         self._await_output(client, b"SIZE ")
-        payload = ("continuation " * 800)[:8192]
-        self.assertTrue(client.send_input(payload + "\n")["ok"])
-        self.assertIn(b"ECHO continuation", self._await_output(client, b"ECHO continuation"))
+        self.assertEqual(self._bulk(handle, client, 8192, index=0), 8193)
+
+    def test_a_delivery_across_the_line_disciplines_edge_arrives_whole(self) -> None:
+        """The 4096-byte edge a canonical line discipline drops the far side of, in silence.
+
+        These sizes are the defect this substrate must not have: `N_TTY` in canonical mode caps a
+        line at 4095 bytes and discards the rest without blocking, erroring or telling anyone. The
+        head reports the length it read, so a truncation is a failed equality rather than a passing
+        prefix match.
+        """
+        handle = self._start(run_id="edge-input")
+        client = self._client(handle)
+        self._await_output(client, b"SIZE ")
+        for index, size in enumerate((4094, 4095, 4096, 4097, 8000)):
+            with self.subTest(size=size):
+                self.assertEqual(self._bulk(handle, client, size, index=index), size + 1)
+
+    def test_a_delivery_at_the_declared_limit_arrives_whole_and_one_over_is_refused(self) -> None:
+        handle = self._start(run_id="limit-input")
+        client = self._client(handle)
+        self._await_output(client, b"SIZE ")
+        # One byte short of the limit plus the newline is exactly the limit: the largest delivery
+        # the supervisor says it takes, taken whole.
+        self.assertEqual(
+            self._bulk(handle, client, protocol.INPUT_MAX_BYTES - 1, index=0),
+            protocol.INPUT_MAX_BYTES,
+        )
+        answer = client.send_input(b"z" * (protocol.INPUT_MAX_BYTES + 1))
+        self.assertEqual(answer["error"], protocol.ERROR_INPUT_TOO_LARGE)
+        accepted = handle.events().of_kind(INPUT_ACCEPTED)
+        self.assertEqual(len(accepted), 1, "the refused delivery was written down as an arrival")
+        self.assertEqual(accepted[0]["bytes"], protocol.INPUT_MAX_BYTES)
+
+    def _bulk(self, handle: HeadHandle, client: SupervisorClient, size: int, *, index: int) -> int:
+        """Send a payload of exactly `size` bytes and return the length the head says it read."""
+        payload = ("bulk " + "a" * (size - 5)).encode("ascii")
+        self.assertEqual(len(payload), size)
+        answer = client.send_input(payload + b"\n")
+        self.assertTrue(answer["ok"], answer)
+        self.assertEqual(answer["written_bytes"], size + 1, "the supervisor wrote less than it took")
+        reports: list[bytes] = []
+
+        def reported() -> bool:
+            nonlocal reports
+            reports = re.findall(rb"BULK (\d+)", client.read_output()["bytes_data"])
+            return len(reports) > index
+
+        self._await(
+            reported, timeout=20.0, message=f"the head never reported a {size}-byte delivery"
+        )
+        # The journal counts what was written, not what was offered.
+        accepted = handle.events().of_kind(INPUT_ACCEPTED)
+        self.assertEqual(accepted[index]["bytes"], size + 1)
+        self.assertEqual(accepted[index]["offered_bytes"], size + 1)
+        self.assertTrue(accepted[index]["complete"])
+        return int(reports[index])
+
+    def test_a_delivery_a_head_will_not_read_is_refused_with_both_numbers(self) -> None:
+        """A head that has stopped reading its terminal, and the honest answer to writing at it.
+
+        There is no third option here worth having. Buffering the rest and answering `ok` would be
+        a promise about bytes that are still in the supervisor's memory, and the journal would then
+        record an arrival that never happened — which is the whole shape of the defect this card is
+        closing. So the answer is a refusal that names how much did land, and the journal records
+        that number and no more.
+        """
+        handle = self._start(
+            run_id="stalled",
+            delivery_seconds=1.0,
+            command=f"{sys.executable} -u -c "
+            "'import time;print(\"UP\",flush=True);time.sleep(600)'",
+        )
+        client = self._client(handle)
+        self._await_output(client, b"UP")
+
+        payload = b"z" * protocol.INPUT_MAX_BYTES
+        answer = client.send_input(payload)
+        self.assertFalse(answer["ok"], answer)
+        self.assertEqual(answer["error"], protocol.ERROR_INPUT_STALLED)
+        self.assertEqual(answer["size_bytes"], len(payload))
+        self.assertGreater(answer["written_bytes"], 0)
+        self.assertLess(answer["written_bytes"], len(payload))
+        self.assertIn(str(answer["written_bytes"]), answer["detail"])
+        self.assertIn(str(len(payload)), answer["detail"])
+
+        accepted = handle.events().of_kind(INPUT_ACCEPTED)[-1]
+        self.assertEqual(accepted["bytes"], answer["written_bytes"], "the journal overstated it")
+        self.assertEqual(accepted["offered_bytes"], len(payload))
+        self.assertFalse(accepted["complete"])
+        # The head is untouched by the refusal, and the supervisor is still answering.
+        self.assertTrue(client.status()["alive"])
+        self.assertTrue(_alive(handle.head_pid))
 
     def test_a_frame_without_an_end_is_refused_with_its_limit_and_its_size(self) -> None:
         handle = self._start(run_id="frame-limit")
@@ -363,6 +458,75 @@ class LocalPtySubstrateTests(unittest.TestCase):
         # The attach slots the departed clients held are given back, not leaked.
         self.assertTrue(surplus.attach()["ok"])
 
+    def test_the_last_thing_dropped_is_still_reported_before_the_stream_ends(self) -> None:
+        """A count of dropped output must not be lost because the overflow was the final chunk.
+
+        The notice used to travel with the next chunk that fit, so a client that overflowed at the
+        very end of a run was told nothing: it saw the stream end with no sign that part of it was
+        missing. Here the head's last act is to exit without a word, so there is no next chunk.
+        """
+        handle = self._start(run_id="dropped-tail")
+        commander = self._client(handle)
+        self._await_output(commander, b"SIZE ")
+        watcher = handle.connect()
+        self.addCleanup(watcher.close)
+        self.assertTrue(watcher.attach()["ok"])
+
+        # Far more than the supervisor will hold for one client, none of it read while it arrives.
+        self.assertTrue(commander.send_input(f"spew {protocol.OUTPUT_BUFFER_BYTES * 8 // 1000}\n")["ok"])
+        self._await_output(commander, b"SPEWDONE", timeout=60.0)
+        while watcher.next_event(0.4) is not None:
+            pass
+
+        self.assertTrue(commander.send_input("die 5\n")["ok"])
+        frames = []
+        while True:
+            event = watcher.next_event(5.0)
+            if event is None:
+                break
+            frames.append(event)
+            if event.get("event") == protocol.EVENT_EXITED:
+                break
+        kinds = [frame.get("event") for frame in frames]
+        self.assertEqual(kinds[-1], protocol.EVENT_EXITED, kinds)
+        self.assertIn(protocol.EVENT_DROPPED, kinds, "the last loss was never reported")
+        dropped = [frame for frame in frames if frame.get("event") == protocol.EVENT_DROPPED][-1]
+        self.assertGreater(dropped["bytes"], 0)
+        self.assertEqual(frames[-1]["record"]["exit_code"], 5)
+
+    def test_connections_are_bounded_as_well_as_attachments(self) -> None:
+        handle = self._start(run_id="connections")
+        held = []
+        for _ in range(protocol.CONNECTION_MAX_CLIENTS):
+            client = handle.connect()
+            self.addCleanup(client.close)
+            # The answer is what proves the supervisor has taken the connection, not just the
+            # kernel's backlog.
+            self.assertTrue(client.status()["ok"])
+            held.append(client)
+        self.assertEqual(held[-1].status()["connections"], protocol.CONNECTION_MAX_CLIENTS)
+
+        surplus = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(surplus.close)
+        surplus.settimeout(5.0)
+        surplus.connect(str(handle.socket_path))
+        answer = json.loads(surplus.recv(65536).split(b"\n")[0])
+        self.assertEqual(answer["error"], protocol.ERROR_CONNECTION_LIMIT)
+        self.assertEqual(answer["limit"], protocol.CONNECTION_MAX_CLIENTS)
+        self.assertEqual(answer["connections"], protocol.CONNECTION_MAX_CLIENTS)
+        self.assertEqual(surplus.recv(65536), b"", "a refused caller was left holding a connection")
+
+        # A refusal is not a wound: the head is untouched and a slot given back is usable.
+        self.assertTrue(_alive(handle.head_pid))
+        held.pop().close()
+        self._await(
+            lambda: held[-1].status()["connections"] == protocol.CONNECTION_MAX_CLIENTS - 1,
+            message="the supervisor never noticed a caller leaving",
+        )
+        replacement = handle.connect()
+        self.addCleanup(replacement.close)
+        self.assertTrue(replacement.status()["ok"])
+
     def _await_event(self, client: SupervisorClient, marker: bytes, *, timeout: float = 8.0) -> None:
         seen = bytearray()
         deadline = time.monotonic() + timeout
@@ -382,6 +546,28 @@ class LocalPtySubstrateTests(unittest.TestCase):
         self.assertEqual(handle.socket_path, self.root / "socket" / protocol.SOCKET_NAME)
         self.assertEqual(handle.socket_path.stat().st_mode & 0o777, 0o600)
         self.assertEqual(handle.run_dir.stat().st_mode & 0o777, 0o700)
+
+    def test_a_failure_after_the_lock_is_named_rather_than_waited_out(self) -> None:
+        """A supervisor that dies on the way up leaves a reason, not a socket file and a timeout.
+
+        The run directory is arranged so that the supervisor fails *after* it has taken the lock
+        and bound the socket: a directory where its own pid file goes. What a launcher must get
+        back is the named failure, quickly, and a run directory with no address left in it.
+        """
+        run_dir = protocol.run_dir_for(self.root, "half-up")
+        run_dir.mkdir(parents=True)
+        (run_dir / protocol.SUPERVISOR_PID_NAME).mkdir()
+        started = time.monotonic()
+        with self.assertRaises(LocalPtySpawnError) as caught:
+            spawn_head(
+                root=self.root, run_id="half-up", role="worker", task="secretary-1463",
+                command=CHILD_COMMAND, timeout=20.0,
+            )
+        self.assertEqual(caught.exception.reason, "startup_failed")
+        self.assertLess(
+            time.monotonic() - started, 15.0, "the launcher waited out its timeout instead"
+        )
+        self.assertFalse((run_dir / protocol.SOCKET_NAME).exists(), "an address outlived the run")
 
     def test_a_second_start_over_a_live_run_is_refused_rather_than_doubling_the_head(self) -> None:
         handle = self._start(run_id="double")
@@ -531,7 +717,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
     def test_the_head_carries_the_existing_launch_identity_and_the_watchdog_reads_it(self) -> None:
         handle = self._start(run_id="identity")
         record = handle.identity()
-        self.assertEqual(record["pid"], handle.head_pid, "the identity belongs to the supervisor")
+        self.assertEqual(record["pid"], handle.head_pid, "the identity belongs to the head")
         for name in ("pid", "boot_id", "proc_starttime_ticks", "run_id", "role", "task"):
             self.assertTrue(str(record.get(name) or ""), f"{name} is missing from the identity")
         self.assertEqual(record["run_id"], "identity")
@@ -551,6 +737,15 @@ class LocalPtySubstrateTests(unittest.TestCase):
         client = self._client(handle)
         client.stop("observer")
         self._await(lambda: not _alive(handle.head_pid), message="the head never stopped")
+        # Waited on the watchdog's own answer rather than on a proxy for it: between a head's exit
+        # and its reaping there is a window in which `/proc/<pid>/stat` can vanish under the
+        # reader, and the reader — which this card does not touch — calls that inconclusive rather
+        # than dead. What is asserted is unchanged; what is removed is a race on the reaper.
+        self._await(
+            lambda: head_process_status(str(handle.pid_file), expected=expected)["state"]
+            == HEARTBEAT_DEAD,
+            message="the watchdog never classified the stopped head as dead",
+        )
         self.assertEqual(
             head_process_status(str(handle.pid_file), expected=expected)["state"], HEARTBEAT_DEAD
         )

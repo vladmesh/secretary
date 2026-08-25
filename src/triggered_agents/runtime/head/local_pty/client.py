@@ -102,6 +102,7 @@ def spawn_head(
     cols: int = 80,
     term: str = "xterm-256color",
     quiet_seconds: float | None = None,
+    delivery_seconds: float | None = None,
     env: Mapping[str, str] | None = None,
     timeout: float = SPAWN_TIMEOUT_SECONDS,
 ) -> HeadHandle:
@@ -134,6 +135,8 @@ def spawn_head(
         argv += ["--cwd", str(cwd)]
     if quiet_seconds is not None:
         argv += ["--quiet-seconds", str(quiet_seconds)]
+    if delivery_seconds is not None:
+        argv += ["--delivery-seconds", str(delivery_seconds)]
     log_path = run_dir / protocol.SUPERVISOR_LOG_NAME
     with open(log_path, "ab", buffering=0) as log:
         intermediate = subprocess.Popen(
@@ -293,7 +296,10 @@ class SupervisorClient:
         """Put one bounded payload on the head's pty. Oversize is refused, never truncated.
 
         The size check the supervisor performs is the authority; this end sends the payload as it
-        is so that a caller sees the same named refusal a foreign client would.
+        is so that a caller sees the same named refusal a foreign client would. An `ok` answer
+        means the whole payload reached the head's terminal — `written_bytes` says how much, and
+        it is the payload's own size — and a delivery that could not be finished is a refusal
+        carrying both numbers rather than an `ok` covering a partial write.
         """
         payload = data.encode("utf-8") if isinstance(data, str) else bytes(data)
         return self.request(
