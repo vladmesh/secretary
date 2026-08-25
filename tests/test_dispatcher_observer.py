@@ -341,6 +341,50 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             {OBSERVER_SPRINT_ENV: "sprint:1", OBSERVER_GENERATION_ENV: record.generation},
         )
 
+    def test_a_rotation_that_finds_the_head_still_working_parks_instead_of_stopping_it(self) -> None:
+        """secretary-1462: the one stop that is conditional, refused because the head is not quiet.
+
+        The relaunch decided this head was finished and is about to take its pane away. The head
+        runtime checks the turn and this head's own epoch under the same lock the delivery takes,
+        so a head that turns out to be mid-turn is not stopped and the sprint waits a tick rather
+        than losing a live head's pane to its replacement.
+        """
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.kill_observer()
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="replacement needed", request_id="replacement-event",
+        )
+        self.host.observer_not_quiescent = True
+
+        result = self.runtime.production_tick()
+
+        self.assertIn("stop_observer_if_quiescent", self.host.calls)
+        self.assertNotIn("stop_observer", self.host.calls)
+        self.assertEqual(self.observers()["sprint:1"].launches, 1, "no replacement was brought up")
+        deferred = [
+            row for row in self.actions(result) if row["action"] == "observer-launch-deferred"
+        ]
+        self.assertTrue(deferred, [row["action"] for row in self.actions(result)])
+        self.assertIn("not quiet", deferred[0]["reason"])
+
+    def test_a_rotation_stops_the_head_it_replaces_once_it_is_quiet(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.kill_observer()
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="replacement needed", request_id="replacement-event",
+        )
+
+        self.runtime.production_tick()
+
+        self.assertIn("stop_observer_if_quiescent", self.host.calls)
+        self.assertEqual(self.observers()["sprint:1"].launches, 2)
+
     def _unbind_record(self, reference: str = "sprint:1") -> None:
         """Rewrite the record the way a state file written before the binding existed reads.
 

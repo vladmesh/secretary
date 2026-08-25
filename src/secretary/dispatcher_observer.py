@@ -2049,10 +2049,18 @@ def _launch_observer(
         # `with_pid_heartbeat` exists to tell apart from a live head. Close it before opening the
         # next one, or every respawn leaves a ghost pane in the observer's workspace. A pane that
         # refuses to close parks the relaunch: two heads on one sprint is worse than none.
-        if not stop_observer_head(runtime, record):
+        #
+        # This is the rotation, so it is the stop that has to be conditional: the head is being
+        # replaced because it was judged finished, and a delivery that reached it after that
+        # judgement would be typed into a pane this line is about to take away. The epoch read here
+        # is what the head runtime compares under its own lock, together with the turn it may still
+        # be holding; a head that is not quiet after all parks the relaunch instead.
+        if not stop_observer_head(
+            runtime, record, expected_activity_epoch=_observer_activity_epoch(runtime, record),
+        ):
             return _defer(
                 runtime, payload, observers, ref, record, head=head,
-                reason="previous observer terminal could not be stopped",
+                reason="the previous observer head was not quiet, or its terminal could not be stopped",
             )
     try:
         # The prompt is rendered from the sprint as it reads right now, never from a copy taken
@@ -2554,6 +2562,19 @@ def _stop_observer(
     return _with_audit(outcome, commit_event(runtime, event))
 
 
+def _observer_activity_epoch(runtime: Any, record: ObserverRecord) -> int:
+    """This head's activity epoch as the head runtime holds it, for a conditional stop to compare.
+
+    Zero when the host cannot answer, which is the same value a head the runtime has never seen
+    has: a stop compares it against what the runtime holds now, so an unknowable epoch refuses the
+    conditional stop rather than widening it into an unconditional one.
+    """
+    try:
+        return int(runtime.host.observer_activity_epoch(record))
+    except (HostError, AttributeError, TypeError, ValueError):
+        return 0
+
+
 def _mark_stop_pending(record: ObserverRecord, state: str, reason: str) -> None:
     """Keep the head on the books after a refused stop, handle included, so the retry can find it."""
     now = time.time()
@@ -2565,11 +2586,26 @@ def _mark_stop_pending(record: ObserverRecord, state: str, reason: str) -> None:
         record.paused_at = now
 
 
-def stop_observer_head(runtime: Any, record: ObserverRecord) -> bool:
+def stop_observer_head(
+    runtime: Any, record: ObserverRecord, *, expected_activity_epoch: int | None = None
+) -> bool:
     """Stop one observer head. True when nothing of it is left running.
 
     False means the host refused the request and the head must be assumed alive, so the caller keeps
     the record and retries.
+
+    `expected_activity_epoch` picks which of the two stops this is, and the choice belongs to the
+    caller because only the caller knows why it is stopping:
+
+      * left out — "end this head now". A freeze, a sprint that is no longer open or no longer
+        declares an observer, a head that predates the sprint binding, a provider-policy refusal, an
+        operator: none of them may be refused because the head happens to be mid-turn, and none of
+        them is followed by a replacement that would race it;
+      * given — "end this head *if it is still quiet*". The rotation before a relaunch is the one
+        that has to say this: it decided the head was finished, and between that decision and the
+        pane closing a delivery must not slip in. The head runtime checks the turn and this epoch,
+        closes admission and stops, all under its own lock, so the pair cannot come apart. A head
+        that turns out not to be quiet is refused here and the caller defers.
     """
     if not _needs_teardown(record):
         return True
@@ -2578,7 +2614,10 @@ def stop_observer_head(runtime: Any, record: ObserverRecord) -> bool:
         # the owned pane rather than signalling or replacing over it.
         return False
     try:
-        runtime.host.stop_observer(record)
+        if expected_activity_epoch is None:
+            runtime.host.stop_observer(record)
+        elif not runtime.host.stop_observer_if_quiescent(record, expected_activity_epoch):
+            return False
     except HostError:
         return False
     record.handle = ""

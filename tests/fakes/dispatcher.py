@@ -717,6 +717,10 @@ class FakeHost:
         self.fail_observer_error: Exception | None = None
         # Orca refusing to close an observer pane: the head must be assumed alive afterwards.
         self.fail_stop_observer_reason = ""
+        # sprint -> the head runtime's activity epoch for that sprint's observer head.
+        self.observer_activity_epochs: dict[str, int] = {}
+        # The head turning out not to be quiet after all, which refuses a conditional stop.
+        self.observer_not_quiescent = False
         # The pid a worker/reviewer bring-up writes to its heartbeat file, the way the real
         # launcher's `with_pid_heartbeat` wrapper does. Launch-intent recovery reads it, so a fake
         # that never wrote one would make every intent look like a head that never came up. None
@@ -1021,6 +1025,25 @@ class FakeHost:
         # Like the real host, this confirms terminal acceptance only. The later durable resume
         # closes the observer delivery during normal reconciliation.
         return "accepted"
+
+    def observer_activity_epoch(self, record) -> int:
+        """Like the real host: this head's own epoch, which a conditional stop compares against."""
+        return int(self.observer_activity_epochs.get(str(record.sprint), 0))
+
+    def stop_observer_if_quiescent(self, record, expected_activity_epoch: int) -> bool:
+        """Like the real host: the head runtime refuses the stop unless the head is still quiet.
+
+        The fake keeps the same two refusals the runtime has — a turn still running, or an epoch
+        that moved since the caller looked — so a test can make a rotation lose the race without
+        needing a second thread.
+        """
+        self.calls.append("stop_observer_if_quiescent")
+        if self.observer_not_quiescent:
+            return False
+        if int(expected_activity_epoch) != self.observer_activity_epoch(record):
+            return False
+        self.stop_observer(record)
+        return True
 
     def stop_observer(self, record) -> None:
         self.calls.append("stop_observer")

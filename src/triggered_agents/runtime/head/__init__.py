@@ -16,8 +16,10 @@ is one head backend as everything above it may see one -- six verbs (`start`, `d
 `request_drain`, `stop`, `attach`), each answering with a typed receipt. The backends that wear them
 live outside this package, because this one names no session manager: the existing path is
 `runtime.orca_legacy_head`, beside the Orca argument vectors it is built on. `runtime` also owns the
-two values that used to be squeezed into a lifecycle state: the `TurnLease` a head runs one turn under, and the activity epoch that moves
-when the backend sees it do something.
+values that used to be squeezed into a lifecycle state, all of them per head: the `TurnLease` a head
+runs one turn under, the activity epoch that moves when the backend sees *that* head do something,
+and whether the head still admits work at all. A backend serialises its own verbs around them, so
+nothing above the boundary has to hold a lock to get one head's delivery, drain and stop in order.
 
 The neighbours are the other two halves of the same boundary: `prompt_document` owns what a head is
 given, `pane_host` owns the pane it runs in — including, since these operations landed, the verbs

@@ -1376,7 +1376,13 @@ class CommandHostRuntime:
                     ),
                     subject="observer-launch",
                 )
-                failure = None if receipt.ok else receipt.failure
+                if not receipt.ok:
+                    # A non-ok receipt does not have to carry a `failure`: `HEAD_DRAINING` is a
+                    # refusal with no operation error behind it, and reading success off
+                    # `failure is None` would have counted it as a delivered launch prompt.
+                    failure = receipt.failure or HostError(
+                        f"the observer launch prompt was refused: {receipt.reason}"
+                    )
             except (TuiDeliveryError, HostError) as exc:
                 failure = exc
             if failure is None:
@@ -1472,6 +1478,36 @@ class CommandHostRuntime:
             "orca", "worktree", "rm", "--worktree", f"path:{workspace}", "--force", "--json"
         ])
 
+    def observer_activity_epoch(self, record: Any) -> int:
+        """This observer head's activity epoch, to hand back to a stop that must only run if quiet.
+
+        Per head, never the runtime's own counter: another sprint's observer doing something must
+        not make this one look busy.
+        """
+        if self.mode == "noop":
+            return 0
+        return self.head_runtime.activity.epoch(self._observer_lifecycle_run(record).run_id)
+
+    def stop_observer_if_quiescent(self, record: Any, expected_activity_epoch: int) -> bool:
+        """End this observer only while it is still quiet. False means it was not, and nothing ran.
+
+        The check and the teardown are one critical section inside the head runtime: no turn
+        outstanding, this head's epoch still where the caller saw it, admission closed, and only
+        then the teardown — so a delivery cannot land between deciding the head is finished and
+        taking its pane away. The teardown itself is `stop_observer` unchanged, because an
+        observer's stop is Orca's whole-worktree teardown plus its pid confirmation, not a pane
+        close; it runs inside that same section rather than after it.
+        """
+        if self.mode == "noop":
+            return True
+        receipt = self.head_runtime.stop_if_quiescent(
+            self._observer_lifecycle_run(record),
+            head_ops.StopInitiator(actor=STOPPED_BY_DISPATCHER),
+            expected_activity_epoch=expected_activity_epoch,
+            teardown=lambda: self.stop_observer(record),
+        )
+        return receipt.ok
+
     def observer_status(self, record: Any) -> dict[str, Any]:
         """Read the observer pane's output clock and whether it is ready for a prompt."""
         if self.mode == "noop":
@@ -1485,8 +1521,10 @@ class CommandHostRuntime:
             # A probe that failed is not a working observer; raising puts it on the bounded failure path.
             raise HostError("observer terminal readiness could not be read")
         if not seen.ok:
-            # Every other way this observation can fail is the pane not being findable in its
-            # workspace, which an unreadable inventory is indistinguishable from here.
+            # What is left once the pane's own answers are handled is the pane not being in the
+            # inventory at all. An inventory that could not be read is no longer folded in here:
+            # the session manager's refusal travels out of the observation as itself, which is what
+            # this path did before the boundary existed and what its callers already classify.
             raise HostError("observer terminal is not in the inventory of its workspace")
         status: dict[str, Any] = {"idle": seen.readiness == READINESS_READY}
         if seen.last_output_at:

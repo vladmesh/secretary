@@ -99,41 +99,81 @@ class TurnLease:
 
 
 class HeadActivity:
-    """The monotonic activity epoch of the heads one runtime owns, and their outstanding leases.
+    """What one runtime knows about each head it owns: its epoch, its turn, and its admission.
 
-    Two values, not one, because they answer different questions. The epoch only ever goes up, and
-    goes up whenever the backend sees a head *do* something — a pane opened, a prompt taken, output
-    printed. It is how a caller tells "nothing has happened since I last looked" from "I cannot
-    tell". The lease says a turn is running, and there is at most one per head.
+    Three facts per head, in one place, because the runtime that owns them takes one lock around all
+    three and a decision made of two of them must not be able to see them at different moments.
 
-    Neither is durable. A runtime that has just been constructed knows nothing, and says so by
-    holding no lease and an epoch of zero rather than by guessing.
+      * the **activity epoch** only ever goes up, and goes up whenever the backend sees *that head*
+        do something — its pane opened, it took a prompt, it printed. It is how a caller tells
+        "nothing has happened since I last looked" from "I cannot tell", and it is per head: a
+        counter shared with every other head would make "this head has been quiet" false the moment
+        any other head did anything;
+      * the **turn lease** says a turn is running, and there is at most one per head;
+      * **admission** is whether this runtime will hand this head further work. A drain closes it;
+        it is not the turn, and closing it never touches the turn that is running.
+
+    `ticks` is the runtime-wide count of everything this runtime has seen any of its heads do. It is
+    kept because it is genuinely useful for diagnostics — how much has happened at all — and it is
+    named separately from `epoch` so that no quiescence decision can be made on it by accident.
+
+    Nothing here is durable, and nothing here locks: a runtime that has just been constructed knows
+    nothing and says so by holding no lease, an epoch of zero and an open admission. Serialising
+    access is the job of the runtime that owns this object.
     """
 
     def __init__(self) -> None:
-        self._epoch = 0
+        self._ticks = 0
+        self._epochs: dict[str, int] = {}
         self._leases: dict[str, TurnLease] = {}
         self._output_marks: dict[str, float] = {}
+        self._closed: set[str] = set()
 
     @property
-    def epoch(self) -> int:
-        """The activity epoch as it now stands, across every head this runtime owns."""
-        return self._epoch
+    def ticks(self) -> int:
+        """Everything this runtime has seen any of its heads do, counted once.
 
-    def observed(self, run_id: str = "", *, output_at: float = 0.0) -> int:
-        """Record that a head was seen doing something, and return the epoch that follows.
-
-        `output_at` is the pane's own output clock when a caller has one. Passing the same clock
-        twice is not new activity and does not move the epoch: an inventory read that keeps
-        returning the same timestamp says the head has been quiet, which is exactly the fact a
-        caller watching for progress needs to keep.
+        Deliberately not what a stop-if-quiescent compares: another head's activity moves this, and
+        a check that used it would read a quiet head as a busy one.
         """
-        if output_at and run_id:
-            if self._output_marks.get(run_id, 0.0) >= output_at:
-                return self._epoch
-            self._output_marks[run_id] = output_at
-        self._epoch += 1
-        return self._epoch
+        return self._ticks
+
+    def epoch(self, run_id: str) -> int:
+        """This head's activity epoch, and zero for a head this runtime has never seen."""
+        return self._epochs.get(run_id, 0)
+
+    def acted(self, run_id: str) -> int:
+        """Record that this head was made to do something, and return the epoch that follows.
+
+        The runtime calls this for the things it performs itself — a pane opened, a prompt taken, a
+        head ended. What a *read* of a pane says goes through `observed`, which is allowed to say
+        nothing happened.
+        """
+        if not run_id:
+            return 0
+        self._ticks += 1
+        epoch = self._epochs.get(run_id, 0) + 1
+        self._epochs[run_id] = epoch
+        return epoch
+
+    def observed(self, run_id: str, *, output_at: float = 0.0) -> int:
+        """Record what a pane read said about this head, and return the epoch that follows.
+
+        `output_at` is the pane's own output clock. Two things are *not* activity here, and both
+        would destroy the one property the epoch exists for:
+
+          * the same clock twice — an inventory that keeps returning the same timestamp says the
+            head has been quiet, which is exactly the fact a caller watching for progress needs;
+          * a pane with no output clock of its own — "I looked and the pane cannot tell me when it
+            last printed" is not "the head printed something", and moving the epoch on it makes
+            "silent" indistinguishable from "unobserved".
+        """
+        if not run_id or not output_at:
+            return self.epoch(run_id)
+        if self._output_marks.get(run_id, 0.0) >= output_at:
+            return self.epoch(run_id)
+        self._output_marks[run_id] = output_at
+        return self.acted(run_id)
 
     def lease(self, run_id: str) -> TurnLease | None:
         """The turn this head is running, when it is running one this runtime granted."""
@@ -144,7 +184,13 @@ class HeadActivity:
         return run_id in self._leases
 
     def grant(self, run_id: str, subject: str = "") -> TurnLease:
-        """Hand this head a turn. Refuses while one is outstanding — a head runs one turn."""
+        """Hand this head a turn. Refuses while one is outstanding — a head runs one turn.
+
+        There is deliberately no `renew`. A grant over an outstanding lease used to release it
+        first, which made the newest delivery the running turn and quietly evicted the one it
+        interrupted; the caller that wanted that has to be refused instead, so this raises and the
+        runtime turns the refusal into a receipt.
+        """
         if not run_id:
             raise TurnLeaseError("a turn lease names the head it was granted to")
         held = self._leases.get(run_id)
@@ -154,29 +200,38 @@ class HeadActivity:
             lease_id=uuid.uuid4().hex,
             run_id=run_id,
             subject=subject,
-            granted_at_epoch=self._epoch,
+            granted_at_epoch=self.epoch(run_id),
         )
         self._leases[run_id] = lease
         return lease
-
-    def renew(self, run_id: str, subject: str = "") -> TurnLease:
-        """Grant a turn, releasing whatever this head was holding first.
-
-        A delivery that this runtime does not itself serialise still starts a turn, and the newest
-        one is the one running. Keeping the older lease would leave the runtime claiming a turn that
-        the delivery it just performed has superseded.
-        """
-        self.release(run_id)
-        return self.grant(run_id, subject)
 
     def release(self, run_id: str) -> TurnLease | None:
         """Close this head's turn, and hand back the lease that was closed, if there was one."""
         return self._leases.pop(run_id, None)
 
+    def admits(self, run_id: str) -> bool:
+        """Whether this runtime will still hand this head work."""
+        return run_id not in self._closed
+
+    def close_admission(self, run_id: str) -> None:
+        """Take this head out of service. Says nothing about the turn it is running."""
+        if run_id:
+            self._closed.add(run_id)
+
+    def open_admission(self, run_id: str) -> None:
+        """Put this head back in service — the undo a refused stop owes its admission."""
+        self._closed.discard(run_id)
+
+    def rotatable(self, run_id: str) -> bool:
+        """Whether this head is done: it takes no more work and the last turn it held has closed."""
+        return not self.admits(run_id) and not self.busy(run_id)
+
     def forget(self, run_id: str) -> None:
         """Drop everything this runtime remembers about a head that has ended."""
         self._leases.pop(run_id, None)
         self._output_marks.pop(run_id, None)
+        self._epochs.pop(run_id, None)
+        self._closed.discard(run_id)
 
 
 @dataclass(frozen=True)
@@ -186,6 +241,13 @@ class HeadReceipt:
     `failure` carries the operation's own refusal object unchanged, so a caller that needs the
     distinction the operation drew — an aborted bring-up is not a failed one — reads it from the
     same type it always did rather than from a re-derived string.
+
+    `epoch` is *this head's* activity epoch, not the runtime's, so it is the value to hand back to a
+    stop that must only happen while the head has stayed quiet. `rotation_ready` is the runtime
+    saying that this head is done — its admission is closed and the last turn it held has ended, so
+    it can be replaced. It is a value rather than something a caller derives from a drain it
+    remembers requesting and a `lease` field that is `None`, because those two are read at different
+    moments and the conjunction of them is not a fact anybody observed.
     """
 
     status: str
@@ -195,6 +257,7 @@ class HeadReceipt:
     evidence: Any = None
     epoch: int = 0
     lease: TurnLease | None = None
+    rotation_ready: bool = False
 
     def __post_init__(self) -> None:
         if self.status not in RECEIPT_STATUSES:

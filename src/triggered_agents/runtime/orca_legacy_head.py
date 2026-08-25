@@ -26,12 +26,27 @@ construction and names no session manager, which is what makes its contract suit
 Orca installed. Orca-specific code lives beside `pane_host`, where the rest of this product's Orca
 argument vectors already do.
 
-`stop_workspace` sits beside the six verbs and is deliberately not one of them: it is the container
-teardown Orca offers, one call for every pane of a worktree, and it names no head. It lives here so
-that no session-manager call for a head's life is made anywhere else.
+One lock sits under all of it. `deliver`, `request_drain`, `stop` and `stop_if_quiescent` are the
+four things that can contradict each other about one head — a delivery that starts a turn a stop is
+about to end, a drain whose gate a delivery reads a moment before it closes — so they run one at a
+time, under a lock this object owns. Nothing above the boundary has to hold anything to get that:
+the dispatcher core keeps no lock of its own and could not, because it does not know which of its
+paths reach the same head.
+
+`stop_workspace` and `stop_if_quiescent` sit beside the six verbs and are deliberately not among
+them. `stop_workspace` is the container teardown Orca offers, one call for every pane of a worktree,
+and it names no head; it lives here so that no session-manager call for a head's life is made
+anywhere else. `stop_if_quiescent` is `stop` under a precondition this runtime alone can check — no
+turn outstanding, and the head's own epoch still where the caller last saw it — with the check, the
+closing of admission and the stop itself inside one critical section, so that none of the three is
+observable without the others. It is not a seventh verb on the protocol: the six are what every
+backend owes, and this is a composition of one of them with state that is the runtime's own. The
+backend that comes next will owe the same composition, and the protocol grows then, once, on
+purpose.
 """
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from typing import Any
 
@@ -83,6 +98,11 @@ DRAIN_UNSUPPORTED = (
     "orca-legacy heads have no wind-down protocol: this runtime stops handing the head work, "
     "and the head itself is not signalled"
 )
+# Why a stop-if-quiescent refused. Tokens rather than sentences, for the same reason the observation
+# reasons are: the two refusals mean different things to a caller and must not be told apart by a
+# substring match. A turn is still running; or the head has done something since the caller looked.
+STOP_TURN_IN_FLIGHT = "turn_in_flight"
+STOP_ACTIVITY_SINCE = "activity_since_expected_epoch"
 
 
 class OrcaLegacyHeadRuntime:
@@ -102,7 +122,12 @@ class OrcaLegacyHeadRuntime:
     ) -> None:
         self._session = session
         self.activity = activity or HeadActivity()
-        self._draining: set[str] = set()
+        # One lock for every verb of every head this runtime owns, held across the session-manager
+        # call each verb makes. Per-head locks would let two heads be worked on at once, which is
+        # true but buys nothing here: a verb is one Orca call, the dispatcher drives them from one
+        # tick, and a single lock is the version of this whose critical sections are obviously
+        # non-overlapping. It is reentrant because `stop_if_quiescent` performs `stop`.
+        self._lock = threading.RLock()
 
     @property
     def host(self) -> SessionHost:
@@ -137,49 +162,53 @@ class OrcaLegacyHeadRuntime:
         terms — an unreadable answer to `terminal create` — still raises, because that is not a
         classified head failure and this boundary must not invent a classification for it.
         """
-        try:
-            outcome = head_ops.spawn(
-                spec,
-                workspace,
-                task_ref,
-                host=self.host,
-                command=command,
-                title=title,
-                pointer=pointer,
-                pid_file=pid_file,
-                split_from=split_from,
-                run_id=run_id,
-                role=role,
-                run=run,
-                preflight=preflight,
-                commit=commit,
-                transport=transport,
-                subject=subject,
-            )
-        except head_ops.HeadOperationError as exc:
+        with self._lock:
+            try:
+                outcome = head_ops.spawn(
+                    spec,
+                    workspace,
+                    task_ref,
+                    host=self.host,
+                    command=command,
+                    title=title,
+                    pointer=pointer,
+                    pid_file=pid_file,
+                    split_from=split_from,
+                    run_id=run_id,
+                    role=role,
+                    run=run,
+                    preflight=preflight,
+                    commit=commit,
+                    transport=transport,
+                    subject=subject,
+                )
+            except head_ops.HeadOperationError as exc:
+                failed = getattr(exc, "run", None)
+                return StartReceipt(
+                    status=_bring_up_status(exc),
+                    run=failed,
+                    reason=str(exc),
+                    failure=exc,
+                    evidence=getattr(exc, "evidence", None),
+                    epoch=self.activity.epoch(failed.run_id if failed is not None else ""),
+                )
+            epoch = self.activity.acted(outcome.run.run_id)
+            lease = None
+            if pointer is not None:
+                # A pointer that was delivered is a turn this head is now running. A head whose
+                # prompt went on its own command line was given no turn *here*, and this runtime
+                # does not claim one it did not hand out. The grant cannot be refused: this run id
+                # was minted by the bring-up above, inside this same critical section.
+                lease = self.activity.grant(outcome.run.run_id, subject or "head-launch")
             return StartReceipt(
-                status=_bring_up_status(exc),
-                run=getattr(exc, "run", None),
-                reason=str(exc),
-                failure=exc,
-                evidence=getattr(exc, "evidence", None),
-                epoch=self.activity.epoch,
+                status=HEAD_OK,
+                run=outcome.run,
+                delivery=outcome.delivery,
+                fallback_reason=outcome.fallback_reason,
+                epoch=epoch,
+                lease=lease,
+                rotation_ready=self.activity.rotatable(outcome.run.run_id),
             )
-        epoch = self.activity.observed(outcome.run.run_id)
-        lease = None
-        if pointer is not None:
-            # A pointer that was delivered is a turn this head is now running. A head whose prompt
-            # went on its own command line was given no turn *here*, and this runtime does not claim
-            # one it did not hand out.
-            lease = self.activity.renew(outcome.run.run_id, subject or "head-launch")
-        return StartReceipt(
-            status=HEAD_OK,
-            run=outcome.run,
-            delivery=outcome.delivery,
-            fallback_reason=outcome.fallback_reason,
-            epoch=epoch,
-            lease=lease,
-        )
 
     def deliver(
         self,
@@ -189,49 +218,87 @@ class OrcaLegacyHeadRuntime:
         subject: str = "",
         transport: HeadTransport | None = None,
     ) -> DeliverReceipt:
-        """Put one prompt in front of a running head.
+        """Put one prompt in front of a running head, or refuse — explicitly — to.
 
-        A head this runtime has been asked to drain is refused here and nowhere else: the refusal is
-        local to the runtime, because Orca has no drain of its own to consult. Note what this does
-        *not* do — it does not refuse a delivery because a turn lease is outstanding. Serialising
-        delivery against the turn it would interrupt is a real change of behaviour and belongs to the
-        card that makes delivery, drain and stop atomic; this one only moves the boundary.
+        Two refusals, and they are different values because a caller does different things with
+        them. `HEAD_DRAINING` says this head takes no more work at all: a drain was requested and
+        nothing this caller does later will make this delivery happen, so the work belongs to
+        another head. `HEAD_BUSY` says a turn this runtime handed out is still running: the head is
+        fine, the delivery is worth making again when that turn ends.
+
+        Neither is a queue. Nothing is held, retried, or delivered later by itself — a refusal here
+        is the end of this delivery, and the caller is told so in the receipt rather than being left
+        to find out from a prompt that arrives on top of a running turn.
+
+        The turn is taken *before* the prompt is put in front of the head, not after the delivery
+        succeeds, and that ordering is the whole serialisation: a second delivery that reaches this
+        runtime while the first is inside its session-manager call finds the lease already held and
+        is refused, instead of typing into the same pane behind it. A delivery that then fails hands
+        the turn back, because a refused delivery started no turn.
         """
-        if run.run_id in self._draining:
+        with self._lock:
+            if not self.activity.admits(run.run_id):
+                return DeliverReceipt(
+                    status=HEAD_DRAINING,
+                    run=run,
+                    reason=f"a drain was requested for this head: {DRAIN_UNSUPPORTED}",
+                    epoch=self.activity.epoch(run.run_id),
+                    lease=self.activity.lease(run.run_id),
+                    rotation_ready=self.activity.rotatable(run.run_id),
+                )
+            held = self.activity.lease(run.run_id)
+            if held is not None:
+                running = self._turn_still_running(run)
+                if running:
+                    return DeliverReceipt(
+                        status=HEAD_BUSY,
+                        run=run,
+                        reason=(
+                            f"this head is running turn {held.lease_id} for "
+                            f"{held.subject or 'a caller'} ({running}): one head runs one turn, and "
+                            "this delivery is not queued behind it"
+                        ),
+                        epoch=self.activity.epoch(run.run_id),
+                        lease=held,
+                    )
+                # The turn this runtime handed out has ended and this is where it learns that,
+                # exactly as `observe` does. Releasing it here is not the eviction `renew` used to
+                # perform: the head is not mid-turn, and the fact that it is not was read from the
+                # backend inside this critical section rather than assumed from the delivery that
+                # was about to happen.
+                self.activity.release(run.run_id)
+            lease = self.activity.grant(run.run_id, subject or "head-nudge")
+            try:
+                outcome = head_ops.nudge(
+                    run,
+                    pointer,
+                    host=self.host,
+                    transport=transport,
+                    subject=subject,
+                )
+            except head_ops.HeadOperationError as exc:
+                # Nothing of this attempt is left, the turn included.
+                self.activity.release(run.run_id)
+                return DeliverReceipt(
+                    status=_delivery_status(exc),
+                    run=getattr(exc, "run", None) or run,
+                    reason=str(exc),
+                    failure=exc,
+                    evidence=getattr(exc, "evidence", None),
+                    epoch=self.activity.epoch(run.run_id),
+                    lease=None,
+                )
+            except BaseException:
+                self.activity.release(run.run_id)
+                raise
+            epoch = self.activity.acted(outcome.run.run_id)
             return DeliverReceipt(
-                status=HEAD_DRAINING,
-                run=run,
-                reason=f"a drain was requested for this head: {DRAIN_UNSUPPORTED}",
-                epoch=self.activity.epoch,
-                lease=self.activity.lease(run.run_id),
+                status=HEAD_OK,
+                run=outcome.run,
+                delivery=outcome.delivery,
+                epoch=epoch,
+                lease=lease,
             )
-        try:
-            outcome = head_ops.nudge(
-                run,
-                pointer,
-                host=self.host,
-                transport=transport,
-                subject=subject,
-            )
-        except head_ops.HeadOperationError as exc:
-            return DeliverReceipt(
-                status=_delivery_status(exc),
-                run=getattr(exc, "run", None) or run,
-                reason=str(exc),
-                failure=exc,
-                evidence=getattr(exc, "evidence", None),
-                epoch=self.activity.epoch,
-                lease=self.activity.lease(run.run_id),
-            )
-        epoch = self.activity.observed(outcome.run.run_id)
-        lease = self.activity.renew(outcome.run.run_id, subject or "head-nudge")
-        return DeliverReceipt(
-            status=HEAD_OK,
-            run=outcome.run,
-            delivery=outcome.delivery,
-            epoch=epoch,
-            lease=lease,
-        )
 
     def observe(self, run: HeadRun) -> ObserveReceipt:
         """What Orca can say about this head now: its pane, that pane's clock, and its idle probe.
@@ -241,77 +308,88 @@ class OrcaLegacyHeadRuntime:
         boundary. So `busy` is read from the turn lease and the pane's readiness, and stays `None`
         whenever neither could be read.
         """
-        epoch = self.activity.epoch
-        lease = self.activity.lease(run.run_id)
-        if not run.workspace or not (run.handle or run.leaf):
-            return _unobservable(run, OBSERVE_NO_ADDRESS, epoch, lease)
-        try:
-            panes = list(self.host.panes(run.workspace))
-        except Exception as exc:  # noqa: BLE001 -- whatever the session manager called its refusal
-            # An observation that raised is an observation that could not be made. It is emphatically
-            # not evidence that the pane is gone: reporting it as absent is how a live head loses its
-            # pane to a replacement opened beside it.
-            return _unobservable(
-                run, OBSERVE_INVENTORY_UNREADABLE, epoch, lease, evidence=str(exc),
-            )
-        pane = _pane_for(panes, run)
-        if pane is None:
+        with self._lock:
+            epoch = self.activity.epoch(run.run_id)
+            lease = self.activity.lease(run.run_id)
+            rotatable = self.activity.rotatable(run.run_id)
+            if not run.workspace or not (run.handle or run.leaf):
+                return _unobservable(run, OBSERVE_NO_ADDRESS, epoch, lease, rotatable)
+            try:
+                panes = list(self.host.panes(run.workspace))
+            except PaneHostError as exc:
+                # An observation that raised is an observation that could not be made. It is
+                # emphatically not evidence that the pane is gone: reporting it as absent is how a
+                # live head loses its pane to a replacement opened beside it. Only the pane host's
+                # own refusal is classified here — a session manager failing on some other terms is
+                # not a fact about this head, and swallowing it would hide it from the caller that
+                # does know what it means.
+                return _unobservable(
+                    run, OBSERVE_INVENTORY_UNREADABLE, epoch, lease, rotatable, evidence=str(exc),
+                )
+            pane = _pane_for(panes, run)
+            if pane is None:
+                return ObserveReceipt(
+                    status=HEAD_GONE,
+                    run=run,
+                    reason=OBSERVE_PANE_ABSENT,
+                    epoch=epoch,
+                    lease=lease,
+                    rotation_ready=rotatable,
+                    leaf=run.leaf,
+                )
+            if not pane.connected:
+                # A pane nothing can be typed into. Not a dead head, and not an observation either.
+                return ObserveReceipt(
+                    status=HEAD_ALIVE,
+                    run=run,
+                    reason=OBSERVE_PANE_DISCONNECTED,
+                    epoch=self.activity.observed(run.run_id, output_at=pane.last_output_at),
+                    lease=lease,
+                    rotation_ready=rotatable,
+                    handle=pane.handle,
+                    leaf=pane.leaf or run.leaf,
+                    connected=False,
+                    last_output_at=pane.last_output_at,
+                )
+            readiness = terminal_readiness(pane.handle, host=self.host)
+            epoch = self.activity.observed(run.run_id, output_at=pane.last_output_at)
+            if readiness == READINESS_UNKNOWN:
+                # The probe failing is the probe failing. It is not a busy head and it is not an
+                # idle one, so nothing about busyness is reported here.
+                return ObserveReceipt(
+                    status=HEAD_UNSUPPORTED,
+                    run=run,
+                    reason=OBSERVE_READINESS_UNKNOWN,
+                    epoch=epoch,
+                    lease=lease,
+                    rotation_ready=rotatable,
+                    handle=pane.handle,
+                    leaf=pane.leaf or run.leaf,
+                    connected=True,
+                    readiness=readiness,
+                    last_output_at=pane.last_output_at,
+                )
+            if readiness == READINESS_READY and lease is not None:
+                # The turn this runtime handed out has ended: the pane will take input again.
+                # Closing the lease here is what keeps "a turn is running" a fact about now rather
+                # than a fact about the last delivery — and it is where a drained head becomes
+                # rotatable, because the last turn it was holding has just closed.
+                self.activity.release(run.run_id)
+                lease = None
+                rotatable = self.activity.rotatable(run.run_id)
             return ObserveReceipt(
-                status=HEAD_GONE,
+                status=HEAD_OK,
                 run=run,
-                reason=OBSERVE_PANE_ABSENT,
                 epoch=epoch,
                 lease=lease,
-                leaf=run.leaf,
-            )
-        if not pane.connected:
-            # A pane nothing can be typed into. Not a dead head, and not an observation either.
-            return ObserveReceipt(
-                status=HEAD_ALIVE,
-                run=run,
-                reason=OBSERVE_PANE_DISCONNECTED,
-                epoch=self.activity.observed(run.run_id, output_at=pane.last_output_at),
-                lease=lease,
-                handle=pane.handle,
-                leaf=pane.leaf or run.leaf,
-                connected=False,
-                last_output_at=pane.last_output_at,
-            )
-        readiness = terminal_readiness(pane.handle, host=self.host)
-        epoch = self.activity.observed(run.run_id, output_at=pane.last_output_at)
-        if readiness == READINESS_UNKNOWN:
-            # The probe failing is the probe failing. It is not a busy head and it is not an idle
-            # one, so nothing about busyness is reported here.
-            return ObserveReceipt(
-                status=HEAD_UNSUPPORTED,
-                run=run,
-                reason=OBSERVE_READINESS_UNKNOWN,
-                epoch=epoch,
-                lease=lease,
+                rotation_ready=rotatable,
                 handle=pane.handle,
                 leaf=pane.leaf or run.leaf,
                 connected=True,
                 readiness=readiness,
                 last_output_at=pane.last_output_at,
+                busy=readiness == READINESS_BUSY or lease is not None,
             )
-        if readiness == READINESS_READY and lease is not None:
-            # The turn this runtime handed out has ended: the pane will take input again. Closing
-            # the lease here is what keeps "a turn is running" a fact about now rather than a fact
-            # about the last delivery.
-            self.activity.release(run.run_id)
-            lease = None
-        return ObserveReceipt(
-            status=HEAD_OK,
-            run=run,
-            epoch=epoch,
-            lease=lease,
-            handle=pane.handle,
-            leaf=pane.leaf or run.leaf,
-            connected=True,
-            readiness=readiness,
-            last_output_at=pane.last_output_at,
-            busy=readiness == READINESS_BUSY or lease is not None,
-        )
 
     def request_drain(self, run: HeadRun, initiator: StopInitiator) -> DrainReceipt:
         """Take this head out of service, as far as a session manager with no drain allows.
@@ -319,19 +397,26 @@ class OrcaLegacyHeadRuntime:
         The gate is real and local: `deliver` refuses for this head from here on. The head itself is
         never told anything, which is why the status is `unsupported` — a caller that needs a head to
         finish its turn before something else happens has not been given that here.
+
+        What a drain closes is admission, not the turn. A head that is mid-turn keeps running it and
+        keeps its lease; nothing is interrupted, cancelled or typed into its pane. When that last
+        turn closes the head is done, and the receipts say so in `rotation_ready` rather than
+        leaving a caller to infer it from a drain it remembers requesting.
         """
         if not isinstance(initiator, StopInitiator):
             raise TypeError("a drain names who requested it")
-        self._draining.add(run.run_id)
-        return DrainReceipt(
-            status=HEAD_UNSUPPORTED,
-            run=run,
-            reason=DRAIN_UNSUPPORTED,
-            draining=True,
-            head_signalled=False,
-            epoch=self.activity.epoch,
-            lease=self.activity.lease(run.run_id),
-        )
+        with self._lock:
+            self.activity.close_admission(run.run_id)
+            return DrainReceipt(
+                status=HEAD_UNSUPPORTED,
+                run=run,
+                reason=DRAIN_UNSUPPORTED,
+                draining=True,
+                head_signalled=False,
+                epoch=self.activity.epoch(run.run_id),
+                lease=self.activity.lease(run.run_id),
+                rotation_ready=self.activity.rotatable(run.run_id),
+            )
 
     def stop(
         self,
@@ -343,47 +428,160 @@ class OrcaLegacyHeadRuntime:
         preflight: LaunchPreflight | None = None,
         confirm_gone: Callable[[str], None] | None = None,
     ) -> StopReceipt:
-        """End this head, through the operation that records who ended it before it acts."""
-        try:
-            outcome = head_ops.stop(
-                run,
-                initiator,
-                host=self.host,
-                transport=transport,
-                commit=commit,
-                preflight=preflight,
-                confirm_gone=confirm_gone,
-            )
-        except head_ops.HeadStopFailed as exc:
-            # A stop that could not be confirmed leaves a head the caller still owns, in `finishing`
-            # and carrying its initiator. That is the whole point of the distinction.
-            return StopReceipt(
-                status=HEAD_ALIVE,
-                run=getattr(exc, "run", None) or run,
-                reason=str(exc),
-                failure=exc,
-                epoch=self.activity.epoch,
-                lease=self.activity.lease(run.run_id),
-            )
-        self._draining.discard(run.run_id)
-        self.activity.forget(run.run_id)
-        return StopReceipt(
-            status=HEAD_OK, run=outcome.run, epoch=self.activity.observed(run.run_id)
-        )
+        """End this head, through the operation that records who ended it before it acts.
+
+        Unconditional, and that is the point of it existing beside `stop_if_quiescent`: a freeze, an
+        operator taking a head down, a bring-up cleaning up after itself all mean "end this now",
+        and they must not be refused because the head happens to be mid-turn. A stop that is only
+        meant to happen while the head is quiet asks for that by name.
+        """
+        with self._lock:
+            try:
+                outcome = head_ops.stop(
+                    run,
+                    initiator,
+                    host=self.host,
+                    transport=transport,
+                    commit=commit,
+                    preflight=preflight,
+                    confirm_gone=confirm_gone,
+                )
+            except head_ops.HeadStopFailed as exc:
+                # A stop that could not be confirmed leaves a head the caller still owns, in
+                # `finishing` and carrying its initiator. That is the whole point of the distinction.
+                return StopReceipt(
+                    status=HEAD_ALIVE,
+                    run=getattr(exc, "run", None) or run,
+                    reason=str(exc),
+                    failure=exc,
+                    epoch=self.activity.epoch(run.run_id),
+                    lease=self.activity.lease(run.run_id),
+                    rotation_ready=self.activity.rotatable(run.run_id),
+                )
+            # The last thing that happened to this head, reported before the runtime forgets it: a
+            # head that has ended has no epoch, no turn and no admission to keep.
+            epoch = self.activity.acted(run.run_id)
+            self.activity.forget(run.run_id)
+            return StopReceipt(status=HEAD_OK, run=outcome.run, epoch=epoch)
 
     def attach(self, run: HeadRun) -> AttachReceipt:
         """Orca has no stream to join. The pane's address travels instead, and says which it is."""
-        return AttachReceipt(
-            status=HEAD_UNSUPPORTED,
-            run=run,
-            reason=ATTACH_UNSUPPORTED,
-            handle=run.handle,
-            leaf=run.leaf,
-            epoch=self.activity.epoch,
-            lease=self.activity.lease(run.run_id),
-        )
+        with self._lock:
+            return AttachReceipt(
+                status=HEAD_UNSUPPORTED,
+                run=run,
+                reason=ATTACH_UNSUPPORTED,
+                handle=run.handle,
+                leaf=run.leaf,
+                epoch=self.activity.epoch(run.run_id),
+                lease=self.activity.lease(run.run_id),
+                rotation_ready=self.activity.rotatable(run.run_id),
+            )
+
+    def _turn_still_running(self, run: HeadRun) -> str:
+        """Whether the turn this runtime is holding a lease for is still running, and how it knows.
+
+        Orca cannot be asked about a head's process, so the honest question is about its pane: a
+        pane that will take input again is a pane whose turn ended. The runtime asks rather than
+        assuming, because a lease it granted three ticks ago and never saw close is stale knowledge,
+        and refusing every later delivery on stale knowledge would strand the head.
+
+        The other three answers all mean the turn has not been seen to end — the pane is working,
+        it is held in a dialog, or it could not be probed at all — and a delivery on top of one of
+        those is exactly what this refuses. "I could not tell" is not permission: it is a refusal
+        the caller is told about and can make again, not a prompt typed over a running turn.
+
+        A head whose lease is outstanding is asked once per delivery. It is the same probe `observe`
+        makes, and it is only made when there is a lease to close.
+        """
+        if not run.handle:
+            return "its pane can no longer be addressed to ask whether the turn ended"
+        readiness = terminal_readiness(run.handle, host=self.host)
+        if readiness == READINESS_READY:
+            return ""
+        if readiness == READINESS_UNKNOWN:
+            return "its pane could not be probed, so the end of that turn was never seen"
+        return f"its pane is {readiness}"
 
     # -- not a verb ---------------------------------------------------------------------------
+
+    def stop_if_quiescent(
+        self,
+        run: HeadRun,
+        initiator: StopInitiator,
+        *,
+        expected_activity_epoch: int,
+        teardown: Callable[[], None] | None = None,
+        transport: HeadTransport | None = None,
+        commit: Commit | None = None,
+        preflight: LaunchPreflight | None = None,
+        confirm_gone: Callable[[str], None] | None = None,
+    ) -> StopReceipt:
+        """End this head only while it is still quiet, with the check and the stop indivisible.
+
+        "Quiet" is two facts, both of them this runtime's own: no turn is outstanding, and the
+        head's activity epoch is still the one the caller last saw. Both are read, admission is
+        closed and the stop is performed inside one critical section, so no delivery can arrive
+        between "it is finished" and "its pane is gone" — which is precisely the window a caller
+        that checked first and stopped second used to leave open.
+
+        A refusal is typed and leaves nothing behind. `HEAD_BUSY` is a turn still running;
+        `HEAD_ALIVE` with `STOP_ACTIVITY_SINCE` is a head that did something since the caller
+        looked. In both cases nothing was stopped, and admission is exactly as it was — including
+        when it was already closed by an earlier drain, which this must not silently re-open.
+
+        `teardown` is for the callers whose stop is not `head_ops.stop`: the observer's is Orca's
+        whole-worktree teardown, because a per-handle close reports a stop that worked as a stop
+        that failed. It runs inside the same critical section and owns its own errors; letting it
+        run outside would re-open the window this method exists to close. A teardown that raises
+        puts admission back and the exception travels to its caller unchanged.
+        """
+        if not isinstance(initiator, StopInitiator):
+            raise TypeError("a stop names who ended the head")
+        with self._lock:
+            held = self.activity.lease(run.run_id)
+            if held is not None:
+                return StopReceipt(
+                    status=HEAD_BUSY,
+                    run=run,
+                    reason=STOP_TURN_IN_FLIGHT,
+                    epoch=self.activity.epoch(run.run_id),
+                    lease=held,
+                )
+            epoch = self.activity.epoch(run.run_id)
+            if epoch != expected_activity_epoch:
+                return StopReceipt(
+                    status=HEAD_ALIVE,
+                    run=run,
+                    reason=STOP_ACTIVITY_SINCE,
+                    evidence={"expected_epoch": expected_activity_epoch, "epoch": epoch},
+                    epoch=epoch,
+                )
+            admitted = self.activity.admits(run.run_id)
+            self.activity.close_admission(run.run_id)
+            try:
+                if teardown is None:
+                    receipt = self.stop(
+                        run,
+                        initiator,
+                        transport=transport,
+                        commit=commit,
+                        preflight=preflight,
+                        confirm_gone=confirm_gone,
+                    )
+                else:
+                    teardown()
+                    ended = self.activity.acted(run.run_id)
+                    self.activity.forget(run.run_id)
+                    return StopReceipt(status=HEAD_OK, run=run, epoch=ended)
+            except BaseException:
+                if admitted:
+                    self.activity.open_admission(run.run_id)
+                raise
+            if not receipt.ok and admitted:
+                # Nothing was stopped, so nothing was taken out of service either.
+                self.activity.open_admission(run.run_id)
+            return receipt
 
     def stop_workspace(self, workspace: str) -> None:
         """Take down every pane of one worktree, which is the only stop Orca has at that scope.
@@ -422,7 +620,7 @@ def _delivery_status(exc: head_ops.HeadOperationError) -> str:
 
 
 def _unobservable(
-    run: HeadRun, reason: str, epoch: int, lease: Any, *, evidence: Any = None,
+    run: HeadRun, reason: str, epoch: int, lease: Any, rotatable: bool, *, evidence: Any = None,
 ) -> ObserveReceipt:
     """An observation Orca could not make, said as that and not as an answer about the head."""
     return ObserveReceipt(
@@ -432,6 +630,7 @@ def _unobservable(
         evidence=evidence,
         epoch=epoch,
         lease=lease,
+        rotation_ready=rotatable,
         handle=run.handle,
         leaf=run.leaf,
     )
