@@ -31,6 +31,7 @@ import unittest
 from typing import Any
 
 from tests.fakes.host import FakeSessionHost
+from tests.support.head_runtime_contract import HeadRuntimeContract
 from triggered_agents.runtime.head import (
     EXITED,
     FINISHING,
@@ -70,10 +71,6 @@ from triggered_agents.runtime.pane_host import Pane, PaneHostError
 
 CODEX = HeadSpec(profile_id="codex-worker", adapter="codex", effort="high", codex_mode="tui")
 WORKSPACE = "/tmp/does-not-need-to-exist/secretary-1461"
-
-# The six verbs, named once. A seventh added without a decision would fail `test_the_boundary_is_six
-# _verbs` rather than quietly widening what every backend has to implement.
-VERBS = ("start", "deliver", "observe", "request_drain", "stop", "attach")
 
 
 def confirmed(_sent_at: float) -> bool:
@@ -154,27 +151,10 @@ class HeadRuntimeContractTests(unittest.TestCase):
         self.assertTrue(receipt.ok)
         return receipt.run
 
-    # the shape of the boundary --------------------------------------------
-    def test_the_boundary_is_six_verbs(self) -> None:
-        """The protocol is the contract a second backend has to meet, so its size is pinned."""
-        declared = tuple(
-            name for name in HeadRuntime.__dict__ if not name.startswith("_")
-        )
-
-        self.assertEqual(sorted(declared), sorted(VERBS))
-        for verb in VERBS:
-            self.assertTrue(callable(getattr(self.runtime, verb)), verb)
-
-    def test_every_verb_answers_with_a_receipt_rather_than_a_bool_or_a_dict(self) -> None:
-        run = self.live_run()
-
-        for receipt in (
-            self.runtime.observe(run),
-            self.runtime.attach(run),
-            self.runtime.request_drain(run, StopInitiator(actor="operator")),
-        ):
-            self.assertNotIsInstance(receipt, (bool, dict))
-            self.assertIn(receipt.status, ("ok", "busy", "draining", "alive", "gone", "unsupported"))
+    # The shape of the boundary — that it is six verbs, and that every one of them answers with a
+    # receipt — is not asserted here any more. It is not a fact about Orca, and secretary-1465
+    # moved it verbatim into `tests.support.head_runtime_contract`, which this file runs against
+    # this backend at the bottom and `test_local_pty_head_runtime` runs against the other one.
 
     # start -----------------------------------------------------------------
     def test_start_brings_a_head_up_through_the_host_and_hands_back_its_run(self) -> None:
@@ -1042,6 +1022,56 @@ class SerialisedHeadTests(unittest.TestCase):
         self.assertTrue(first.ok)
         self.assertEqual(wedged[0].status, HEAD_BUSY)
         self.assertEqual(wedged[0].lease.lease_id, first.lease.lease_id)
+
+
+class OrcaLegacyContractTests(HeadRuntimeContract, unittest.TestCase):
+    """The boundary's own suite, run against the backend this product has always run.
+
+    secretary-1465 is where these expectations stopped being a suite about `OrcaLegacyHeadRuntime`
+    and became the definition of `HeadRuntime`: the same file runs against the local-pty backend in
+    `test_local_pty_head_runtime`, so neither backend can be accepted with weaker behaviour than
+    the other. What stays above is what only Orca can be asked — a pane inventory, an idle probe,
+    the two verbs it has no honest answer for.
+    """
+
+    def setUp(self) -> None:
+        self.host = ProbeHost()
+        self.runtime = OrcaLegacyHeadRuntime(self.host)
+        self.task = TaskRef.card("secretary-1465", document=f"{WORKSPACE}/TASK.md")
+
+    def bring_up(self, *, pointer=None, **options):
+        options.setdefault("transport", CONFIRMING)
+        return self.runtime.start(
+            CODEX,
+            WORKSPACE,
+            self.task,
+            command="run-worker",
+            title="secretary-1465 worker",
+            pointer=pointer,
+            **options,
+        )
+
+    def deliver_line(self, run, text, *, subject=""):
+        return self.runtime.deliver(
+            run, NudgePointer.line(text), transport=CONFIRMING, subject=subject
+        )
+
+    def begin_turn(self, run, *, subject=""):
+        """A pane that is working on the prompt it was just given."""
+        self.host.idle = False
+        receipt = self.deliver_line(run, "do the work", subject=subject)
+        self.assertTrue(receipt.ok, receipt.reason)
+        return receipt.lease
+
+    def end_turn(self, run) -> None:
+        """The pane will take input again, which is the only end of a turn Orca can show."""
+        self.host.idle = True
+
+    def payloads_delivered(self) -> int:
+        return len(self.host.sent)
+
+    def adrift_run(self):
+        return HeadRun(run_id="run-adrift", spec=CODEX, workspace="", task_ref=self.task)
 
 
 if __name__ == "__main__":
