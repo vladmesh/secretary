@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -33,6 +34,14 @@ from secretary.dispatcher_commands import (
 )
 from secretary.dispatcher_pause import ProductionPause
 from secretary.gate import run_gate
+from secretary.head_health import (
+    PROBE_BROKEN,
+    PROBE_TTL_SECONDS,
+    HeadHealth,
+    HeadReadiness,
+    run_probe,
+)
+from secretary.head_registry import HeadRegistryConfigError, installed_heads
 from secretary.host import (
     CollectResult,
     FixtureHostSource,
@@ -96,6 +105,7 @@ class DoctorInspection:
     checkpoint: list[str]
     secret_store: list[str]
     board_transport: list[str]
+    resource_probes: list[HeadReadiness]
     expected: object | None = None
     collected: CollectResult | None = None
     diffs: dict[str, KindDiff] | None = None
@@ -506,6 +516,7 @@ def run_doctor(args: argparse.Namespace) -> int:
     print_dispatcher_status(
         report, inspection.collected, inspect_live=not args.offline, findings=inspection.dispatcher
     )
+    print_resource_probes(inspection.resource_probes)
     print_checkpoint_status(report, findings=inspection.checkpoint)
     print_secret_store_status(report, findings=inspection.secret_store)
     if inspection.board_transport:
@@ -624,14 +635,21 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
     checkpoint = checkpoint_findings(report)
     secret_store = secret_store_findings(report)
     board_transport = _board_transport_findings(report.instance_path.parent)
+    resource_probes = resource_probe_readiness(report, inspect_live=not args.offline)
     findings.extend({"code": "dispatcher", "message": finding} for finding in dispatcher)
     findings.extend({"code": "checkpoint", "message": finding} for finding in checkpoint)
     findings.extend({"code": "secret_store", "message": finding} for finding in secret_store)
     findings.extend({"code": "board_transport", "message": finding} for finding in board_transport)
+    findings.extend(
+        {"code": "resource_probe", "resource": readiness.resource, "message": _probe_finding(readiness)}
+        for readiness in resource_probes
+        if readiness.status == PROBE_BROKEN
+    )
     if args.strict:
         findings.extend({"code": "config_warning", "message": str(warning)} for warning in report.warnings)
     return DoctorInspection(
-        findings, unavailable, restore, dispatcher, checkpoint, secret_store, board_transport, expected, collected, diffs
+        findings, unavailable, restore, dispatcher, checkpoint, secret_store, board_transport,
+        resource_probes, expected, collected, diffs,
     )
 
 
@@ -756,6 +774,91 @@ def _divergence_findings(production: dict[str, object]) -> list[str]:
         divergence_id = str(item.get("id") or "?")
         findings.append(f"unresolved controlled divergence {divergence_id}: ref={ref} reason={reason}")
     return findings
+
+
+def resource_probe_readiness(report, *, inspect_live: bool) -> list[HeadReadiness]:
+    """One verdict per resource this installation's head registry describes a probe for.
+
+    `secretary doctor` asks a different question from the tick. The tick asks whether a claim may
+    be launched; doctor asks whether the gate that answers that is working at all — because a probe
+    that cannot be launched used to be indistinguishable from a resource nobody had an opinion
+    about, and the claims then went through ungated and silently (`issue:6cfbbb9b`, P0).
+
+    Read-only in both directions: a fresh verdict the dispatcher already wrote is reused rather than
+    re-probed (probes cost real provider tokens), a stale or absent one is probed here without ever
+    writing the dispatcher's TTL cache, and `--offline` reports only what is recorded, since a probe
+    cannot be run without reaching the provider. An installation with no head snapshot yet has no
+    resources to report on, and a broken snapshot is already named by `secretary status`.
+    """
+    if report.data_dir is None:
+        return []
+    instance_dir = report.instance_path.parent
+    try:
+        resources = installed_heads(instance_dir).get("resources", {})
+    except HeadRegistryConfigError:
+        return []
+    if not isinstance(resources, dict):
+        return []
+    recorded = HeadHealth(None, report.data_dir).snapshot()
+    now = time.time()
+    verdicts: list[HeadReadiness] = []
+    for name in sorted(resources):
+        entry = resources[name] if isinstance(resources[name], dict) else {}
+        probe = str(entry.get("probe") or "")
+        if not probe:
+            continue
+        cached = _recorded_readiness(str(name), recorded, now)
+        if cached is not None:
+            verdicts.append(cached)
+        elif inspect_live:
+            verdicts.append(run_probe(str(name), probe, now))
+    return verdicts
+
+
+def _recorded_readiness(resource: str, recorded: dict[str, object], now: float) -> HeadReadiness | None:
+    """The dispatcher's own verdict for this resource while it is still inside the probe TTL."""
+    entry = recorded.get(resource)
+    if not isinstance(entry, dict):
+        return None
+    try:
+        checked_at = float(entry.get("checked_at") or 0)
+    except (TypeError, ValueError):
+        return None
+    if now - checked_at >= PROBE_TTL_SECONDS:
+        return None
+    return HeadReadiness(
+        resource, str(entry.get("status") or "unknown"), str(entry.get("reason") or ""), checked_at, True
+    )
+
+
+def _probe_finding(readiness: HeadReadiness) -> str:
+    """Name a broken probe as the gating failure it is, not as a red resource.
+
+    A red resource is an ordinary operational fact and is printed above without becoming a finding.
+    This one is a defect of the installation: while it lasts, every claim on this resource was
+    allowed without the health gate ever having an opinion.
+    """
+    return (
+        f"resource {readiness.resource} probe cannot run ({readiness.reason}); "
+        "claims on this resource are not gated by health until it is repaired"
+    )
+
+
+def print_resource_probes(readiness: list[HeadReadiness]) -> list[HeadReadiness]:
+    """The probe of every resource, and separately the ones that could not be run at all."""
+    if not readiness:
+        return readiness
+    print()
+    print("resource probes: read-only")
+    for verdict in readiness:
+        age = " (recorded)" if verdict.cached else ""
+        print(f"  {verdict.resource}: {verdict.status}{age} - {verdict.reason}")
+    broken = [verdict for verdict in readiness if verdict.status == PROBE_BROKEN]
+    if broken:
+        print("resource probe findings:")
+        for verdict in broken:
+            print(f"  {_probe_finding(verdict)}")
+    return readiness
 
 
 def print_checkpoint_status(report, *, findings: list[str] | None = None) -> list[str]:

@@ -7,14 +7,33 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from secretary.cli import MEMORY_EXIT_PERMISSION, build_parser, main
+from tests.head_registry import write_installed_pair
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_INSTANCE = REPO_ROOT / "examples" / "instance"
+# One resource whose probe answers and one whose probe cannot be started, with a profile so the
+# registry validates. No probe here reaches a provider.
+PROBE_SNAPSHOT = """resources:
+  broken-probe:
+    account: broken-account
+    probe: secretary-1464-no-such-probe --check
+  green-probe:
+    account: green-account
+    probe: 'true'
+profiles:
+  only-head:
+    resource: green-probe
+    adapter: claude
+    fallback: []
+role_defaults:
+  new_card: only-head
+"""
 
 
 def git(cwd: Path, *args: str) -> str:
@@ -185,6 +204,85 @@ class CliTests(unittest.TestCase):
         state.mkdir(parents=True, exist_ok=True)
         (state / "production-state.json").write_text(json.dumps(production), encoding="utf-8")
         return instance_dir
+
+    def seed_probe_instance(self, tmpdir: Path, *, recorded: dict | None = None) -> Path:
+        """An installation whose head registry describes one runnable probe and one broken one.
+
+        Neither probe reaches a provider: `true` stands for a resource that answers, and a command
+        no host has stands for the shape this card is about — a probe that never starts, which is
+        what production had while `python3` resolved to an interpreter without the product on it.
+        """
+        instance_dir = tmpdir / "instance"
+        data_dir = tmpdir / "secretary-data"
+        instance_dir.mkdir()
+        (instance_dir / "instance.yaml").write_text(
+            "version: 1\n"
+            "name: example\n"
+            f"data_dir: {data_dir}\n"
+            "offsite:\n"
+            "  instance_remote: git@example.invalid:x/y.git\n",
+            encoding="utf-8",
+        )
+        write_installed_pair(instance_dir, PROBE_SNAPSHOT)
+        if recorded is not None:
+            state = data_dir / "dispatcher"
+            state.mkdir(parents=True, exist_ok=True)
+            (state / "resource_health.json").write_text(json.dumps(recorded), encoding="utf-8")
+        return instance_dir
+
+    def test_doctor_names_a_probe_that_cannot_run_apart_from_a_red_resource(self):
+        """secretary-1464: the P0 item of `issue:6cfbbb9b` about probes. A resource whose probe
+        cannot be started is a defect of this installation — claims on it went ungated — so it is a
+        doctor finding, while the resource that answered is only reported."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = self.seed_probe_instance(Path(tmpdir))
+            code, output = self.run_cli(["doctor", "--dry-run", "--instance", str(instance_dir)])
+
+        self.assertEqual(code, 1, output)
+        self.assertIn("resource probes: read-only", output)
+        self.assertIn("green-probe: ready", output)
+        self.assertIn("broken-probe: probe_broken", output)
+        self.assertIn("resource probe findings:", output)
+        self.assertIn("resource broken-probe probe cannot run", output)
+        self.assertIn("claims on this resource are not gated by health", output)
+        self.assertNotIn("resource green-probe probe cannot run", output)
+        self.assertIn("status: findings", output)
+
+    def test_doctor_reports_a_recorded_broken_probe_without_running_anything(self):
+        """Offline, and inside the probe TTL, doctor answers from the verdict the dispatcher wrote,
+        so the operator sees the ungated resource without doctor spending a provider call."""
+        recorded = {
+            "broken-probe": {
+                "resource": "broken-probe",
+                "status": "probe_broken",
+                "reason": "probe could not be launched: No module named triggered_agents",
+                "checked_at": time.time(),
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = self.seed_probe_instance(Path(tmpdir), recorded=recorded)
+            with mock.patch("secretary.cli.run_probe") as run:
+                code, output = self.run_cli(
+                    ["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)]
+                )
+
+        run.assert_not_called()
+        self.assertEqual(code, 1, output)
+        self.assertIn("broken-probe: probe_broken (recorded)", output)
+        self.assertIn("No module named triggered_agents", output)
+        self.assertIn("resource broken-probe probe cannot run", output)
+        # Offline cannot answer for the other resource at all, and says nothing rather than green.
+        self.assertNotIn("green-probe", output)
+
+    def test_doctor_says_nothing_about_probes_without_an_installed_registry(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance_dir = self.seed_checkpoint_instance(Path(tmpdir), {"version": 1})
+            code, output = self.run_cli(
+                ["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)]
+            )
+
+        self.assertEqual(code, 0, output)
+        self.assertNotIn("resource probes", output)
 
     def test_doctor_lists_background_automations_but_offline_leaves_them_uninspected(self):
         code, output = self.run_cli(

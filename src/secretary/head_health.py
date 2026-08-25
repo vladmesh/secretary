@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -19,6 +21,51 @@ PROBE_TIMEOUT_SECONDS = 20
 # rather than a silent skip because it is the same kind of fact as a red resource — this head
 # cannot be launched — and the tick has to be able to say so.
 MISSING_HEAD = "missing"
+# A probe that never reached the provider: the command could not be started, or the interpreter it
+# names could not load the package it was asked to run. That is a defect of this installation's
+# configuration, not a fact about the account, so it is neither `unknown` (which means "nothing is
+# known about the resource" and lets a claim through) nor one of the red statuses (which claim the
+# provider said something). It blocks the claim: a resource nobody can probe is a resource nobody
+# has gated, and the fallback chain has to be walked instead of silently trusted.
+PROBE_BROKEN = "probe_broken"
+# The two statuses a claim may be launched on. `unknown` is deliberately here: a timeout or an
+# unclassifiable provider refusal is not evidence that the account is dead, and holding every card
+# on one ambiguous answer costs more than an occasional wasted attempt.
+LAUNCH_ALLOWED_STATUSES = frozenset({"ready", "unknown"})
+# What a failed *launch* of the probe looks like in the output the shell hands back. None of these
+# is something a reachable provider says about an account, so they are read only after the
+# provider-failure markers below have had their say.
+PROBE_LAUNCH_MARKERS = (
+    "no module named",
+    "command not found",
+    "no such file or directory",
+    "can't open file",
+    "cannot execute",
+    "permission denied",
+)
+# `sh` answers a command it could not find with 127 and one it could not execute with 126. Both are
+# the shell speaking, before the probe ever ran.
+PROBE_LAUNCH_EXIT_CODES = (126, 127)
+
+
+def probe_env() -> dict[str, str]:
+    """This process's environment with our own interpreter's directory first on ``PATH``.
+
+    The probe string lives in the head registry (`resources.*.probe`) and stays host-agnostic on
+    purpose — it says `python3 -P -m triggered_agents ...` so the registry restores onto another
+    machine — which only resolves to the dispatcher's own interpreter when that interpreter's
+    directory is on `PATH`. Under systemd it is not: the unit pins a `PATH` without the venv while
+    starting the dispatcher from `.venv/bin/secretary`, so once `691673d` (2026-08-19) moved the
+    package under `src/` and the working directory stopped carrying it, every probe died with
+    `No module named triggered_agents`. Repairing it here rather than in the unit or in the
+    registry keeps both of those portable and fixes every caller of the probe at once.
+    """
+    env = dict(os.environ)
+    if not sys.executable:
+        return env
+    interpreter_dir = str(Path(sys.executable).parent)
+    env["PATH"] = os.pathsep.join((interpreter_dir, env.get("PATH") or os.defpath))
+    return env
 
 
 @dataclass(frozen=True)
@@ -31,7 +78,7 @@ class HeadReadiness:
 
     @property
     def launch_allowed(self) -> bool:
-        return self.status in {"ready", "unknown"}
+        return self.status in LAUNCH_ALLOWED_STATUSES
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -41,6 +88,65 @@ class HeadReadiness:
             "checked_at": self.checked_at,
             "cached": self.cached,
         }
+
+
+def run_probe(resource: str, probe: str, now: float) -> HeadReadiness:
+    """Execute one resource probe and classify what came back. Writes nothing.
+
+    Separate from `HeadHealth` because `secretary doctor` asks the same question read-only: it
+    reports on a probe without owning the dispatcher's TTL cache.
+    """
+    try:
+        completed = subprocess.run(
+            probe, shell=True, text=True, capture_output=True, timeout=PROBE_TIMEOUT_SECONDS,
+            env=probe_env(),
+        )
+    except subprocess.TimeoutExpired:
+        # A probe that started and then hung says nothing about the account either way.
+        return HeadReadiness(resource, "unknown", "probe timed out", now)
+    except OSError as exc:
+        return HeadReadiness(
+            resource, PROBE_BROKEN, f"probe could not be started: {type(exc).__name__}", now)
+    except Exception as exc:  # a broken probe must not turn into a false resource outage
+        return HeadReadiness(resource, "unknown", f"probe could not run: {type(exc).__name__}", now)
+    if completed.returncode == 0:
+        return HeadReadiness(resource, "ready", "probe succeeded", now)
+    text = " ".join((completed.stdout or "", completed.stderr or "")).lower()
+    if any(marker in text for marker in ("login", "not authenticated", "unauthorized", "authentication", " 401", " 403")):
+        return HeadReadiness(resource, "unauthenticated", "resource authentication failed", now)
+    # A spent subscription answers in its own words, and none of them is "rate limit": codex
+    # says "You've hit your usage limit … purchase more credits or try again at <date>".
+    # Classified before the provider-unavailable markers because the two read differently to an
+    # operator — this resource is not flaky, it is out until the quota resets — and because
+    # leaving it unclassified made it `unknown`, which `launch_allowed` treats as usable. On
+    # 2026-08-06 that cost sprint:1200 two launches and a round into a dead resource before the
+    # watchdog ceiling stopped it.
+    if any(marker in text for marker in ("usage limit", "quota", "credits", "insufficient_quota", "billing")):
+        return HeadReadiness(resource, "exhausted", "resource quota is spent", now)
+    if any(marker in text for marker in ("503", "circuit_open", "unavailable", "rate limit", " 429", "connection", "network")):
+        return HeadReadiness(resource, "unavailable", "resource provider is unavailable", now)
+    # Last, so that a provider which happens to word its refusal like a missing file is still read
+    # as the provider talking: everything above is something only a reached provider says.
+    if completed.returncode in PROBE_LAUNCH_EXIT_CODES or any(
+        marker in text for marker in PROBE_LAUNCH_MARKERS
+    ):
+        return HeadReadiness(
+            resource, PROBE_BROKEN, f"probe could not be launched: {_probe_detail(completed)}", now)
+    return HeadReadiness(resource, "unknown", "probe returned an unclassified failure", now)
+
+
+def _probe_detail(completed: subprocess.CompletedProcess[str]) -> str:
+    """The one line an operator needs to fix the probe, bounded so it stays a status reason.
+
+    The last line, not the first: both shapes this sees put the fact there — `sh` prints one line,
+    and an interpreter that could not load the module prints a traceback whose message is its last
+    line.
+    """
+    for stream in (completed.stderr, completed.stdout):
+        lines = [line.strip() for line in (stream or "").splitlines() if line.strip()]
+        if lines:
+            return lines[-1][:200]
+    return f"exit {completed.returncode} with no output"
 
 
 @dataclass(frozen=True)
@@ -156,9 +262,10 @@ def resolve_head_chain(
 class HeadHealth:
     """Store resource verdicts independently from the dispatcher attempt state.
 
-    A failed probe is not proof that the provider is down.  Only a definite authentication or
-    provider failure stops a launch; probe execution failures are recorded as ``unknown`` and
-    retry after the normal TTL.
+    A failed probe is not proof that the provider is down.  A definite authentication or provider
+    failure stops a launch, and so does a probe that could not be launched at all (``PROBE_BROKEN``,
+    a defect of this installation rather than of the account); an ambiguous failure is recorded as
+    ``unknown`` and retries after the normal TTL.
     """
 
     def __init__(self, catalog: Any, data_dir: Path) -> None:
@@ -198,31 +305,7 @@ class HeadHealth:
         return self._load()
 
     def _run(self, resource: str, probe: str, now: float) -> HeadReadiness:
-        try:
-            completed = subprocess.run(
-                probe, shell=True, text=True, capture_output=True, timeout=PROBE_TIMEOUT_SECONDS,
-            )
-        except subprocess.TimeoutExpired:
-            return HeadReadiness(resource, "unknown", "probe timed out", now)
-        except Exception as exc:  # a broken probe must not turn into a false resource outage
-            return HeadReadiness(resource, "unknown", f"probe could not run: {type(exc).__name__}", now)
-        if completed.returncode == 0:
-            return HeadReadiness(resource, "ready", "probe succeeded", now)
-        text = " ".join((completed.stdout or "", completed.stderr or "")).lower()
-        if any(marker in text for marker in ("login", "not authenticated", "unauthorized", "authentication", " 401", " 403")):
-            return HeadReadiness(resource, "unauthenticated", "resource authentication failed", now)
-        # A spent subscription answers in its own words, and none of them is "rate limit": codex
-        # says "You've hit your usage limit … purchase more credits or try again at <date>".
-        # Classified before the provider-unavailable markers because the two read differently to an
-        # operator — this resource is not flaky, it is out until the quota resets — and because
-        # leaving it unclassified made it `unknown`, which `launch_allowed` treats as usable. On
-        # 2026-08-06 that cost sprint:1200 two launches and a round into a dead resource before the
-        # watchdog ceiling stopped it.
-        if any(marker in text for marker in ("usage limit", "quota", "credits", "insufficient_quota", "billing")):
-            return HeadReadiness(resource, "exhausted", "resource quota is spent", now)
-        if any(marker in text for marker in ("503", "circuit_open", "unavailable", "rate limit", " 429", "connection", "network")):
-            return HeadReadiness(resource, "unavailable", "resource provider is unavailable", now)
-        return HeadReadiness(resource, "unknown", "probe returned an unclassified failure", now)
+        return run_probe(resource, probe, now)
 
     def _load(self) -> dict[str, Any]:
         try:
