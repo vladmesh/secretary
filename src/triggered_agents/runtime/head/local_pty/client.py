@@ -290,6 +290,32 @@ class SupervisorClient:
                 raise LocalPtyError("the supervisor closed the connection")
             self._inbox += chunk
 
+    def _refusal_already_sent(self) -> dict[str, Any] | None:
+        """A frame this connection was given before it could be written to, or `None`.
+
+        Only ever consulted when a request could not be sent at all. A stream event is not an
+        answer to anything and is skipped, and so is a frame that carries an id: an id names the
+        request it answers, and the request that just failed to be sent is not that one. Only an
+        uncorrelated frame — a connection refused before anything was asked on it, a refusal of
+        bytes too malformed to carry an id — is this caller's news, and it is the whole of it.
+
+        Skipping the correlated ones is the same rule `request` keeps below, kept here as well
+        because this is the one path that reads the queue without having asked anything: without
+        it, an answer to an abandoned earlier request would become this request's answer, which
+        is exactly the desynchronisation the id exists to prevent.
+        """
+        try:
+            while True:
+                frame = self._next_frame()
+                if "event" in frame:
+                    continue
+                if frame.get(protocol.REQUEST_ID) is not None:
+                    self.stale_frames += 1
+                    continue
+                return frame
+        except (LocalPtyError, OSError):
+            return None
+
     def request(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Send one request and return *its* answer, discarding anything that answers something else.
 
@@ -307,9 +333,21 @@ class SupervisorClient:
         """
         self._request_seq += 1
         request_id = self._request_seq
-        self._conn.sendall(
-            protocol.encode_frame({**payload, protocol.REQUEST_ID: request_id})
-        )
+        try:
+            self._conn.sendall(
+                protocol.encode_frame({**payload, protocol.REQUEST_ID: request_id})
+            )
+        except OSError as exc:
+            # The supervisor may have answered this connection *before* anything was asked on it
+            # and closed it: that is what happens at the connection bound, where the refusal is
+            # written and the socket is let go. A write that then loses the race is `EPIPE`, and
+            # the refusal is still sitting in this end's receive queue. Losing it would turn a
+            # live head at a bound into an exception out of a verb, so the queue is read before
+            # the failure is passed on.
+            refusal = self._refusal_already_sent()
+            if refusal is None:
+                raise
+            return refusal
         while True:
             frame = self._next_frame()
             if "event" in frame:

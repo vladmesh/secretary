@@ -12,6 +12,7 @@ import ast
 import json
 import os
 import re
+import select
 import shutil
 import signal
 import socket
@@ -697,6 +698,82 @@ class LocalPtySubstrateTests(unittest.TestCase):
         self.assertGreater(dropped["bytes"], 0)
         self.assertEqual(frames[-1]["record"]["exit_code"], 5)
 
+    def test_a_refusal_written_before_the_connection_closed_is_not_lost_to_the_write_that_failed(
+        self,
+    ) -> None:
+        """The connection bound answers before it is asked, and the answer must survive.
+
+        A caller the supervisor will not hold is told so and let go immediately, so the refusal is
+        already in the caller's receive queue when the caller writes its first request — and that
+        write fails, because the peer is gone. The kernel keeps the queued bytes readable anyway,
+        which is what makes the refusal recoverable; a client that let the failed write win would
+        turn a live head at a bound into an exception raised out of a verb, which is the "alive
+        looks dead" collapse in another costume.
+
+        A real listening socket rather than the supervisor, because what is being pinned is the
+        order — answered, closed, only then written to — and against a real supervisor that order
+        is a race this test would lose most of the time.
+        """
+        directory = Path(tempfile.mkdtemp(prefix="lp-refusal-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(str(directory / "socket"))
+        listener.listen(1)
+
+        client = SupervisorClient.connect(directory / "socket", timeout=5.0)
+        self.addCleanup(client.close)
+        conn, _ = listener.accept()
+        conn.sendall(protocol.encode_frame(protocol.connection_refusal(8)))
+        conn.close()
+        self._await(
+            lambda: bool(select.select([client._conn], [], [], 0)[0]),  # noqa: SLF001
+            message="the refusal never reached the caller",
+        )
+
+        answer = client.attach()
+
+        self.assertFalse(answer["ok"])
+        self.assertEqual(answer["error"], protocol.ERROR_CONNECTION_LIMIT)
+        self.assertEqual(answer["limit"], protocol.CONNECTION_MAX_CLIENTS)
+
+    def test_an_answer_to_an_abandoned_request_is_not_read_as_this_request_s_refusal(self) -> None:
+        """The queue read after a failed write is subject to the id, like every other read.
+
+        The recovery above reads whatever the supervisor said before it let go. What it must not
+        do is hand back an answer that names a *different* question: an id on a frame says which
+        request it answers, and the request that just failed to be sent is not that one. Without
+        the check, a client that had abandoned an earlier request would take that stale answer as
+        this one's news and stay one answer out of step for the rest of its life — the exact
+        desynchronisation the id exists to prevent, arriving through the one path that reads the
+        queue without having asked anything.
+        """
+        directory = Path(tempfile.mkdtemp(prefix="lp-stale-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(str(directory / "socket"))
+        listener.listen(1)
+
+        client = SupervisorClient.connect(directory / "socket", timeout=5.0)
+        self.addCleanup(client.close)
+        conn, _ = listener.accept()
+        # An answer to a question this client stopped waiting for, and then the news that is
+        # really its own, in that order.
+        conn.sendall(protocol.encode_frame({"ok": True, "alive": False, protocol.REQUEST_ID: 1}))
+        conn.sendall(protocol.encode_frame(protocol.connection_refusal(8)))
+        conn.close()
+        self._await(
+            lambda: bool(select.select([client._conn], [], [], 0)[0]),  # noqa: SLF001
+            message="the frames never reached the caller",
+        )
+
+        answer = client.status()
+
+        self.assertEqual(answer["error"], protocol.ERROR_CONNECTION_LIMIT, "a stale answer won")
+        self.assertNotIn("alive", answer, "the abandoned request's answer became this one's")
+        self.assertEqual(client.stale_frames, 1, "the stale frame was not counted as one")
+
     def test_connections_are_bounded_as_well_as_attachments(self) -> None:
         handle = self._start(run_id="connections")
         held = []
@@ -1026,17 +1103,25 @@ class LocalPtySubstrateTests(unittest.TestCase):
 
 
 class SubstrateIsNotWiredInTests(unittest.TestCase):
-    """This card builds a substrate. Nothing may be standing on it yet."""
+    """This package is a substrate. What stands on it is one backend, and nothing else.
 
-    def test_no_module_outside_the_package_reaches_for_it(self) -> None:
+    secretary-1463 wrote this as "nothing outside the package reaches for it", which was the whole
+    truth while there was no backend. secretary-1465 built `runtime.local_pty_head` on top, so the
+    guard says the same thing about one more module rather than less about all of them: exactly one
+    consumer, named here, and the rest of the product still untouched. That the backend itself is
+    wired into nothing is `TheBackendIsNotWiredInTests` in `test_local_pty_head_runtime`.
+    """
+
+    def test_only_the_one_backend_built_on_it_reaches_for_it(self) -> None:
         package = REPO / "src" / "triggered_agents" / "runtime" / "head" / "local_pty"
+        backend = REPO / "src" / "triggered_agents" / "runtime" / "local_pty_head.py"
         offenders = []
         for path in (REPO / "src").rglob("*.py"):
-            if package in path.parents:
+            if package in path.parents or path == backend:
                 continue
             if "local_pty" in path.read_text(encoding="utf-8"):
                 offenders.append(str(path.relative_to(REPO)))
-        self.assertEqual(offenders, [], "the substrate is not meant to be wired in by this card")
+        self.assertEqual(offenders, [], "the substrate is reached from outside its one backend")
 
     def test_the_substrate_implements_none_of_the_six_verbs_as_a_boundary(self) -> None:
         """Prose about `HeadRuntime` is fine; an implementation of it is what this card excludes."""

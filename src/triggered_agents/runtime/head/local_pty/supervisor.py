@@ -413,7 +413,17 @@ class Supervisor:
         answers nothing.
         """
         try:
-            self._begin()
+            try:
+                self._begin()
+            except BaseException:
+                # The window between forking the head and finishing the bring-up. Everything the
+                # `finally` below does is about letting go, and letting go of a pty master hangs
+                # the head up — which is a request, not an ending: a head that ignores `SIGHUP`
+                # survives its supervisor's failure, orphaned, holding this run id against the
+                # restart that would otherwise take the run over. So the head this process forked
+                # and never took ownership of is ended here, by the supervisor that forked it.
+                self._abandon_head()
+                raise
             while self._head_status is None:
                 for key, mask in self._selector.select(LOOP_TICK_SECONDS):
                     self._dispatch(key, mask)
@@ -448,6 +458,31 @@ class Supervisor:
         self._selector.register(self._listener, selectors.EVENT_READ, "listener")
         self._selector.register(self._master, selectors.EVENT_READ, "master")
         self._selector.register(self._wakeup_read, selectors.EVENT_READ, "wakeup")
+
+    def _abandon_head(self) -> None:
+        """End a head this supervisor forked and then failed to take ownership of.
+
+        Reached only from a failed `_begin`, where there is no loop to escalate a stop through and
+        nobody else who knows the pid: the process group is signalled, given the grace a stop gets,
+        and killed. Reaping it here is what keeps a failed bring-up from leaving a zombie behind
+        for init to collect after this process has already written its refusal.
+        """
+        if self._head_pid <= 0 or self._head_status is not None:
+            return
+        self._signal_head(signal.SIGTERM)
+        deadline = time.monotonic() + STOP_GRACE_SECONDS
+        while time.monotonic() < deadline:
+            self._reap()
+            if self._head_status is not None:
+                return
+            time.sleep(LOOP_TICK_SECONDS)
+        self._signal_head(signal.SIGKILL)
+        try:
+            _pid, status = os.waitpid(self._head_pid, 0)
+        except (ChildProcessError, OSError):
+            self._head_status = 0
+            return
+        self._head_status = status
 
     def _dispatch(self, key: selectors.SelectorKey, mask: int) -> None:
         data = key.data
@@ -664,6 +699,13 @@ class Supervisor:
         round owed — and it is bought by writing the record when the bytes land, rather than by
         making a caller wait for them to.
 
+        A delivery of which **no** byte landed gets a record too, with `bytes` of zero. It is a
+        real thing that happened to a payload this supervisor admitted, and leaving it only in
+        `status` — which the next delivery overwrites — meant a run whose journal could not say
+        that a delivery had been made at all. What it does not do is open a turn: a head that
+        received nothing has not been given anything to work on, and a `turn.started` there would
+        be the journal inventing work.
+
         Retry is not this substrate's business: a delivery that stalled leaves a prefix on the
         terminal that cannot be taken back, and what a caller should do about that belongs to
         `deliver` on the backend built above this, not here.
@@ -674,8 +716,6 @@ class Supervisor:
         delivery.state = state
         delivery.why = why
         self._disarm_delivery()
-        if not delivery.written:
-            return
         self._append(
             INPUT_ACCEPTED,
             bytes=delivery.written,
@@ -688,7 +728,7 @@ class Supervisor:
                 state, delivery.size, delivery.written, why, delivery.seconds
             ),
         )
-        if not self._turn_open:
+        if delivery.written and not self._turn_open:
             self._turn_id += 1
             self._turn_open = True
             self._turn_bytes = 0

@@ -297,9 +297,39 @@ class StartReceipt(HeadReceipt):
 
 @dataclass(frozen=True)
 class DeliverReceipt(HeadReceipt):
-    """One prompt put in front of a running head, and what the delivery boundary saw."""
+    """One prompt put in front of a running head, and what the delivery boundary saw.
+
+    `delivery_state` is the distinction a backend whose transport *admits* a payload before the
+    payload lands owes its callers, and it is on the boundary rather than on that backend because a
+    consumer must not have to know which backend it is talking to before it can tell "the head has
+    it" from "the head has part of it". Its values are the substrate's own words for what a
+    delivery ended as — `complete`, `stalled`, `failed` — plus `unknown`, which is not a state a
+    delivery is in but the backend saying it could not establish which of them this one reached; a
+    consumer must not read it as any of them, and least of all as "nothing landed". A delivery
+    still in flight is deliberately not among them: a backend reports what a delivery *did*, and a
+    backend that could return before its substrate had finished writing is one whose `ok` a
+    consumer would have to second-guess. It is empty for a backend whose delivery is finished by
+    the time the verb returns, which is what `HEAD_OK` already meant there. `delivered_bytes` and
+    `offered_bytes` are the two numbers that make a partial arrival impossible to read as a whole
+    one: they are only ever both reported, never one of them.
+    """
 
     delivery: DeliveryOutcome | None = None
+    delivery_state: str = ""
+    delivered_bytes: int = 0
+    offered_bytes: int = 0
+
+    @property
+    def arrived(self) -> bool:
+        """Whether the whole payload provably reached the head.
+
+        The predicate a caller routes on instead of `ok` when it cares about the bytes rather than
+        about the attempt. A backend that reports no delivery state says so by leaving it empty,
+        and there `ok` is the same statement it always was.
+        """
+        if not self.ok:
+            return False
+        return not self.delivery_state or self.delivery_state == "complete"
 
 
 @dataclass(frozen=True)
