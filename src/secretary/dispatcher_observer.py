@@ -708,13 +708,26 @@ def _reconcile_open_sprint(
             return {"status": "degraded", "step": "observer-reconcile", "sprint": ref,
                     "action": "observer-cursor-unavailable", "head": record.head,
                     "reason": event_state["reason"]}
-    if (
-        record is not None
+    # Whether a head of this record may still be up, and whether it is the live observer of this
+    # sprint. The two are separated because the answer to the second is the tick's judgement that
+    # this head is finished, and that judgement is where the rotation's epoch has to be read: an
+    # epoch read later, in the argument list of the stop, would already contain whatever the head
+    # did after the judgement, and the conditional stop would compare it against itself.
+    head_may_be_running = record is not None and _head_may_be_running(record)
+    head_is_live = (
+        head_may_be_running
         and not unresolved_intent
-        and _head_may_be_running(record)
         and not record.abandoned_handle
         and observer_alive(record)["alive"]
-    ):
+    )
+    # The epoch of the judgement "this head is finished", for the rotation further down to hand to
+    # the conditional stop. Activity between here and there refuses that stop.
+    rotation_epoch = (
+        _observer_activity_epoch(runtime, record)
+        if head_may_be_running and not head_is_live
+        else 0
+    )
+    if head_is_live:
         if record.state in PENDING_STOP_STATES:
             # The sprint is open again and the head that was to be stopped is still the head of
             # this sprint: the pending stop is moot, so the record reads as running once more.
@@ -838,6 +851,10 @@ def _reconcile_open_sprint(
         record,
         pending_event=pending_event,
         head=str(decision["head"]),
+        # The rotation, and the one stop that is conditional: this tick judged the previous head
+        # finished, and `rotation_epoch` is that judgement's epoch rather than one read at the stop.
+        conditional_stop=True,
+        expected_activity_epoch=rotation_epoch,
     )
 
 
@@ -1231,7 +1248,12 @@ def _fail_delivery(
     # The replacement opens its own delivery attempt count: the next failing batch gets the same
     # bounded retries before it costs the sprint another head.
     record.delivery.attempts = 0
-    replaced = _launch_observer(runtime, payload, observers, ref, record, pending_event=event)
+    # An emergency replacement. The head has refused every wake it was given, so it is stuck or
+    # gone; a stop that refused because it looked busy would leave the sprint on the head that is
+    # not working and park the replacement behind a bounded backoff for as long as it stays stuck.
+    replaced = _launch_observer(
+        runtime, payload, observers, ref, record, pending_event=event, conditional_stop=False,
+    )
     unlaunched = str(replaced.get("reason") or "")
     replaced["reason"] = f"{reason}; the observer head was replaced after {attempts} failed wakes"
     if unlaunched:
@@ -1412,7 +1434,11 @@ def _replace_observer_for_no_progress(
             "head": record.head,
             "reason": "observer provider-progress terminal outcome could not be persisted",
         }
-    replaced = _launch_observer(runtime, payload, observers, ref, record, pending_event=event)
+    # An emergency replacement too: the head is up and showing no provider progress, so it is
+    # being taken down for being stuck rather than for being finished.
+    replaced = _launch_observer(
+        runtime, payload, observers, ref, record, pending_event=event, conditional_stop=False,
+    )
     original = str(replaced.get("reason") or "")
     replaced["reason"] = reason + (f"; {original}" if original else "")
     return replaced
@@ -1994,6 +2020,8 @@ def _launch_observer(
     ref: str,
     record: ObserverRecord | None,
     *,
+    conditional_stop: bool,
+    expected_activity_epoch: int = 0,
     pending_event: dict[str, Any] | None = None,
     head: str = "",
 ) -> dict[str, Any]:
@@ -2001,6 +2029,17 @@ def _launch_observer(
 
     `head` is decided by the caller from the sprint's own metadata, so nothing between the
     declaration and the launch can substitute another profile.
+
+    `conditional_stop` says which of the two stops the previous head gets, and the caller owns that
+    choice because only the caller knows why it is replacing the head:
+
+      * `True` — the rotation: the tick read the head, judged it finished, and is opening its
+        successor. A delivery must not slip in between that judgement and the pane closing, so the
+        stop carries `expected_activity_epoch` — the epoch read *at* the judgement — and a head that
+        has done something since is left alone and the relaunch parks for a tick;
+      * `False` — an emergency replacement: the head stopped answering its wakes, or it is up and
+        making no provider progress. Those replacements exist precisely because the head is stuck,
+        and a conditional stop would refuse them for being stuck. The head is ended unconditionally.
     """
     record = record or ObserverRecord(sprint=ref)
     relaunch = record.launches > 0
@@ -2050,17 +2089,25 @@ def _launch_observer(
         # next one, or every respawn leaves a ghost pane in the observer's workspace. A pane that
         # refuses to close parks the relaunch: two heads on one sprint is worse than none.
         #
-        # This is the rotation, so it is the stop that has to be conditional: the head is being
-        # replaced because it was judged finished, and a delivery that reached it after that
-        # judgement would be typed into a pane this line is about to take away. The epoch read here
-        # is what the head runtime compares under its own lock, together with the turn it may still
-        # be holding; a head that is not quiet after all parks the relaunch instead.
+        # Which stop that is belongs to the caller. The rotation's is conditional: the head is
+        # being replaced because it was judged finished, and a delivery that reached it after that
+        # judgement would be typed into a pane this line is about to take away, so the head runtime
+        # compares the judgement's epoch and the turn the head may still be holding under its own
+        # lock, and a head that is not quiet after all parks the relaunch instead. An emergency
+        # replacement's is not: it is here because the head is stuck, which is exactly the state a
+        # conditional stop refuses in.
         if not stop_observer_head(
-            runtime, record, expected_activity_epoch=_observer_activity_epoch(runtime, record),
+            runtime,
+            record,
+            expected_activity_epoch=expected_activity_epoch if conditional_stop else None,
         ):
             return _defer(
                 runtime, payload, observers, ref, record, head=head,
-                reason="the previous observer head was not quiet, or its terminal could not be stopped",
+                reason=(
+                    "the previous observer head was not quiet, or its terminal could not be stopped"
+                    if conditional_stop
+                    else "the previous observer head's terminal could not be stopped"
+                ),
             )
     try:
         # The prompt is rendered from the sprint as it reads right now, never from a copy taken
@@ -2599,13 +2646,16 @@ def stop_observer_head(
 
       * left out — "end this head now". A freeze, a sprint that is no longer open or no longer
         declares an observer, a head that predates the sprint binding, a provider-policy refusal, an
-        operator: none of them may be refused because the head happens to be mid-turn, and none of
-        them is followed by a replacement that would race it;
+        operator, and the two emergency replacements — a head that refused every wake it was given,
+        and a head making no provider progress. None of them may be refused because the head happens
+        to look busy; the last two are taken down *for* looking busy while doing nothing, so making
+        their stop conditional would be refusing them for their own reason;
       * given — "end this head *if it is still quiet*". The rotation before a relaunch is the one
         that has to say this: it decided the head was finished, and between that decision and the
-        pane closing a delivery must not slip in. The head runtime checks the turn and this epoch,
-        closes admission and stops, all under its own lock, so the pair cannot come apart. A head
-        that turns out not to be quiet is refused here and the caller defers.
+        pane closing a delivery must not slip in. The epoch is the one read when that decision was
+        made, not one read here. The head runtime compares it, asks the backend about any turn the
+        head is still holding, closes admission and stops, all under its own lock, so none of it can
+        come apart. A head that turns out not to be quiet is refused here and the caller defers.
     """
     if not _needs_teardown(record):
         return True

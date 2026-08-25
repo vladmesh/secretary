@@ -1430,9 +1430,22 @@ class CommandHostRuntime:
         }
 
     def stop_observer(self, record: Any) -> None:
-        """End one observer head and give back what its bring-up took."""
+        """End one observer head and give back what its bring-up took.
+
+        Unconditional: a freeze, a closed sprint, a policy refusal and an emergency replacement all
+        mean "end this now", and none of them may be refused because the head happens to be busy.
+        What it owes the head runtime afterwards is the forgetting that the `stop` verb does for
+        itself — this teardown is Orca's worktree removal, not that verb, and a runtime that lives
+        as long as the production loop would otherwise keep one epoch, one output mark and one
+        admission entry per head ever launched.
+        """
         if self.mode == "noop":
             return
+        self._stop_observer_head(record)
+        self.head_runtime.forget_head(self._observer_lifecycle_run(record).run_id)
+
+    def _stop_observer_head(self, record: Any) -> None:
+        """Give Orca back the pane, the process and the worktree one observer bring-up took."""
         observer_run = getattr(record, "head_run", {})
         observer_leaf = str(getattr(record, "leaf", "") or "")
         pid_file = str(getattr(record, "pid_file", "") or "")

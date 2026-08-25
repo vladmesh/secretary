@@ -9623,6 +9623,56 @@ class ObserverLaunchDeliveryRefusalTests(unittest.TestCase):
         self.assertEqual(self.stopped, [])
 
 
+class ObserverUnconditionalStopTests(unittest.TestCase):
+    """secretary-1462: the stop that is not the `stop` verb still owes the runtime its cleanup.
+
+    An observer's real stop is Orca's worktree teardown, so it never reaches `HeadRuntime.stop` and
+    never reaches the forgetting that verb does for itself. The head runtime is built once per
+    `CommandHostRuntime` and lives as long as the production loop, so without this every head the
+    loop ever launched leaves an epoch, an output mark and an admission entry behind it.
+    """
+
+    def setUp(self) -> None:
+        from types import SimpleNamespace
+
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        root = Path(self.tmpdir.name)
+        self.host = CommandHostRuntime(FakeCatalog(), root / "data", mode="real")  # type: ignore[arg-type]
+        self.record = SimpleNamespace(
+            sprint="sprint:1462",
+            head="codex-observer",
+            handle="term:observer",
+            leaf="leaf:observer",
+            workspace=str(root / "observer-workspace"),
+            pid_file="",
+            head_run=HeadRun(
+                run_id="observer-run-1462",
+                spec=HeadSpec(profile_id="codex-observer", adapter="codex"),
+                workspace=str(root / "observer-workspace"),
+                task_ref=TaskRef.sprint("sprint:1462"),
+                role="observer",
+                handle="term:observer",
+                leaf="leaf:observer",
+            ).to_json(),
+        )
+        self.torn_down: list[Any] = []
+        self.host._stop_observer_head = self.torn_down.append  # type: ignore[method-assign]
+
+    def test_an_unconditional_observer_stop_leaves_nothing_of_the_head_in_the_runtime(self) -> None:
+        activity = self.host.head_runtime.activity
+        activity.acted("observer-run-1462")
+        activity.grant("observer-run-1462", "observer-wake")
+        activity.close_admission("observer-run-1462")
+
+        self.host.stop_observer(self.record)
+
+        self.assertEqual(self.torn_down, [self.record], "the teardown still ran")
+        self.assertEqual(activity.epoch("observer-run-1462"), 0)
+        self.assertIsNone(activity.lease("observer-run-1462"))
+        self.assertTrue(activity.admits("observer-run-1462"))
+
+
 class ReportPromptDeliveryTests(unittest.TestCase):
     """The host side of the bounded report prompt (secretary-1172), on the real runtime.
 

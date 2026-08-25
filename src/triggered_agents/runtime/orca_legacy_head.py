@@ -36,13 +36,14 @@ paths reach the same head.
 `stop_workspace` and `stop_if_quiescent` sit beside the six verbs and are deliberately not among
 them. `stop_workspace` is the container teardown Orca offers, one call for every pane of a worktree,
 and it names no head; it lives here so that no session-manager call for a head's life is made
-anywhere else. `stop_if_quiescent` is `stop` under a precondition this runtime alone can check — no
-turn outstanding, and the head's own epoch still where the caller last saw it — with the check, the
-closing of admission and the stop itself inside one critical section, so that none of the three is
-observable without the others. It is not a seventh verb on the protocol: the six are what every
-backend owes, and this is a composition of one of them with state that is the runtime's own. The
-backend that comes next will owe the same composition, and the protocol grows then, once, on
-purpose.
+anywhere else. `stop_workspace` takes the same lock as the verbs, so that the teardown an observer's
+stop really is cannot run beside a delivery into one of the panes it is removing. `stop_if_quiescent`
+is `stop` under a precondition this runtime alone can check — the head's own epoch still where the
+caller last saw it, and no turn the backend still shows as running — with the check, the closing of
+admission and the stop itself inside one critical section, so that none of the three is observable
+without the others. It is not a seventh verb on the protocol: the six are what every backend owes,
+and this is a composition of one of them with state that is the runtime's own. The backend that
+comes next will owe the same composition, and the protocol grows then, once, on purpose.
 """
 from __future__ import annotations
 
@@ -161,8 +162,29 @@ class OrcaLegacyHeadRuntime:
         Only the operation's own refusals become receipts. A session manager that fails on its own
         terms — an unreadable answer to `terminal create` — still raises, because that is not a
         classified head failure and this boundary must not invent a classification for it.
+
+        A bring-up that names a run id this runtime is already holding a turn for is refused here,
+        before the session manager is touched. The caller that passes its own run id — the observer
+        bring-up does — would otherwise reach the grant below with a lease outstanding and get a
+        `TurnLeaseError` where every other refusal on this boundary is a receipt. The invariant is
+        the boundary's, not a convention its callers keep.
         """
         with self._lock:
+            claimed = run.run_id if run is not None else run_id
+            if claimed:
+                held = self.activity.lease(claimed)
+                if held is not None:
+                    return StartReceipt(
+                        status=HEAD_BUSY,
+                        run=run,
+                        reason=(
+                            f"this runtime is already running turn {held.lease_id} for "
+                            f"{held.subject or 'a caller'} on run {claimed}: a bring-up over it "
+                            "would claim a head that is already up"
+                        ),
+                        epoch=self.activity.epoch(claimed),
+                        lease=held,
+                    )
             try:
                 outcome = head_ops.spawn(
                     spec,
@@ -197,8 +219,9 @@ class OrcaLegacyHeadRuntime:
             if pointer is not None:
                 # A pointer that was delivered is a turn this head is now running. A head whose
                 # prompt went on its own command line was given no turn *here*, and this runtime
-                # does not claim one it did not hand out. The grant cannot be refused: this run id
-                # was minted by the bring-up above, inside this same critical section.
+                # does not claim one it did not hand out. The grant cannot be refused: either this
+                # run id was minted by the bring-up above inside this same critical section, or it
+                # came from the caller and was checked against the outstanding leases on the way in.
                 lease = self.activity.grant(outcome.run.run_id, subject or "head-launch")
             return StartReceipt(
                 status=HEAD_OK,
@@ -519,16 +542,22 @@ class OrcaLegacyHeadRuntime:
     ) -> StopReceipt:
         """End this head only while it is still quiet, with the check and the stop indivisible.
 
-        "Quiet" is two facts, both of them this runtime's own: no turn is outstanding, and the
-        head's activity epoch is still the one the caller last saw. Both are read, admission is
+        "Quiet" is two facts: the head's activity epoch is still the one the caller last saw, and
+        no turn the backend still shows as running is outstanding. Both are read, admission is
         closed and the stop is performed inside one critical section, so no delivery can arrive
         between "it is finished" and "its pane is gone" — which is precisely the window a caller
         that checked first and stopped second used to leave open.
 
-        A refusal is typed and leaves nothing behind. `HEAD_BUSY` is a turn still running;
-        `HEAD_ALIVE` with `STOP_ACTIVITY_SINCE` is a head that did something since the caller
-        looked. In both cases nothing was stopped, and admission is exactly as it was — including
-        when it was already closed by an earlier drain, which this must not silently re-open.
+        `expected_activity_epoch` is the caller's own reading, and it belongs to the moment the
+        caller decided this head was finished. Read in the argument list of this call it would say
+        nothing: whatever the head did between the decision and the stop would already be in it.
+        Read at the decision, it is what makes that decision expire.
+
+        A refusal is typed and leaves nothing behind. `HEAD_BUSY` is a turn the backend still shows
+        running; `HEAD_ALIVE` with `STOP_ACTIVITY_SINCE` is a head that did something since the
+        caller looked. In both cases nothing was stopped, and admission is exactly as it was —
+        including when it was already closed by an earlier drain, which this must not silently
+        re-open.
 
         `teardown` is for the callers whose stop is not `head_ops.stop`: the observer's is Orca's
         whole-worktree teardown, because a per-handle close reports a stop that worked as a stop
@@ -539,15 +568,13 @@ class OrcaLegacyHeadRuntime:
         if not isinstance(initiator, StopInitiator):
             raise TypeError("a stop names who ended the head")
         with self._lock:
-            held = self.activity.lease(run.run_id)
-            if held is not None:
-                return StopReceipt(
-                    status=HEAD_BUSY,
-                    run=run,
-                    reason=STOP_TURN_IN_FLIGHT,
-                    epoch=self.activity.epoch(run.run_id),
-                    lease=held,
-                )
+            # The epoch is compared first, and it is the thing that actually guards this stop. The
+            # lease below can be reclaimed from the backend, so it is not a barrier a caller can
+            # rely on; the epoch is, because it moves for every prompt this runtime typed and every
+            # line the pane printed since the caller formed its judgement. That is why the caller
+            # owes an epoch read at the moment it decided this head was finished, not one read in
+            # the argument list of this call: activity between the judgement and the stop has to
+            # refuse the stop, and an epoch read here would have already absorbed it.
             epoch = self.activity.epoch(run.run_id)
             if epoch != expected_activity_epoch:
                 return StopReceipt(
@@ -557,6 +584,26 @@ class OrcaLegacyHeadRuntime:
                     evidence={"expected_epoch": expected_activity_epoch, "epoch": epoch},
                     epoch=epoch,
                 )
+            held = self.activity.lease(run.run_id)
+            if held is not None:
+                # The same question `deliver` asks of the same lease, for the same reason: a lease
+                # granted three ticks ago and never seen to close is stale knowledge, and only
+                # `deliver`, `observe` and `stop` ever close one. Neither of the first two runs on
+                # the path that rotates a dead head — its pane is unreadable or its process is gone,
+                # so nothing observes it — and refusing on the lease alone would make the refusal
+                # permanent: the sprint would keep its ghost pane and never get a new observer.
+                # Asking the backend is what turns "nobody saw that turn end" back into a fact.
+                running = self._turn_still_running(run)
+                if running:
+                    return StopReceipt(
+                        status=HEAD_BUSY,
+                        run=run,
+                        reason=STOP_TURN_IN_FLIGHT,
+                        evidence=running,
+                        epoch=epoch,
+                        lease=held,
+                    )
+                self.activity.release(run.run_id)
             admitted = self.activity.admits(run.run_id)
             self.activity.close_admission(run.run_id)
             try:
@@ -590,8 +637,27 @@ class OrcaLegacyHeadRuntime:
         no promise about any individual head's process. Callers that own heads in the workspace fence
         and confirm each of them around this call, exactly as they did when it was a bare session
         call. It lives on this object so that no pane call for a head's life is made outside it.
+
+        It takes the lock anyway. For an observer the real stop *is* this call — its head owns the
+        worktree — so leaving it outside would mean "delivery and stop run one at a time" held for
+        every head except the one whose stop this product actually performs. Reentrant, so the
+        conditional stop that reaches it through its own teardown is unaffected.
         """
-        self.host.stop_workspace(workspace)
+        with self._lock:
+            self.host.stop_workspace(workspace)
+
+    def forget_head(self, run_id: str) -> None:
+        """Drop what this runtime remembers about a head somebody else's stop has ended.
+
+        The six verbs clean up after themselves; an observer's unconditional stop does not go
+        through `stop`, because what ends an observer is Orca's worktree teardown. Without this its
+        epoch, its output mark and its admission would stay in a runtime that lives as long as the
+        production loop, one entry per head ever launched.
+        """
+        if not run_id:
+            return
+        with self._lock:
+            self.activity.forget(run_id)
 
 
 def _bring_up_status(exc: head_ops.HeadOperationError) -> str:

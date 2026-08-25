@@ -638,6 +638,72 @@ class SerialisedHeadTests(unittest.TestCase):
         self.assertEqual(self.host.closed, [], "a head mid-turn keeps its pane")
         self.assertTrue(self.runtime.activity.admits(run.run_id))
 
+    def test_a_stop_if_quiescent_reclaims_a_lease_whose_turn_the_backend_says_has_ended(self) -> None:
+        """secretary-1462 round 5: a lease nobody saw close must not refuse the rotation forever.
+
+        Only `deliver`, `observe` and `stop` ever release a lease, and on the path that rotates a
+        head none of the first two runs — the head is dead or its pane cannot be read, so nothing
+        observes it. Refusing on the lease alone made that refusal permanent: the sprint kept a
+        ghost pane and never got a new observer. The stop asks the backend the same question the
+        delivery asks, and a pane that will take input again is a turn that has ended.
+        """
+        run, _ = self.working()
+        self.host.idle = True
+
+        receipt = self.runtime.stop_if_quiescent(
+            run, self.stopper, expected_activity_epoch=self.epoch(run)
+        )
+
+        self.assertEqual(receipt.status, HEAD_OK)
+        self.assertEqual(self.host.closed, [run.handle])
+        self.assertIsNone(self.runtime.activity.lease(run.run_id))
+
+    def test_a_stop_if_quiescent_refuses_a_turn_the_probe_could_not_say_had_ended(self) -> None:
+        """"I could not tell" is not permission here either: the head keeps its pane."""
+        run, lease = self.working()
+        self.host.idle = None
+
+        receipt = self.runtime.stop_if_quiescent(
+            run, self.stopper, expected_activity_epoch=self.epoch(run)
+        )
+
+        self.assertEqual(receipt.status, HEAD_BUSY)
+        self.assertEqual(receipt.reason, STOP_TURN_IN_FLIGHT)
+        self.assertEqual(receipt.lease, lease)
+        self.assertEqual(self.host.closed, [], "nothing was stopped")
+        self.assertTrue(self.runtime.activity.admits(run.run_id))
+
+    def test_a_stop_if_quiescent_reads_the_epoch_before_it_asks_about_the_turn(self) -> None:
+        """The epoch is what guards this stop, so it is what decides it, and it decides it first.
+
+        The lease can be reclaimed from the backend, so it is not a barrier a caller may lean on.
+        A head that has done something since the caller formed its judgement is refused on that
+        alone — its pane is never even probed, because the answer could not matter.
+        """
+        run = self.bring_up()
+        # The epoch the caller read when it judged this head finished.
+        stale = self.epoch(run)
+        # A delivery lands between that judgement and the stop, and takes a turn.
+        self.host.idle = False
+        self.assertTrue(
+            self.runtime.deliver(
+                run, NudgePointer.line("one more thing"), transport=CONFIRMING
+            ).ok
+        )
+        self.assertNotEqual(self.epoch(run), stale)
+        probed: list[str] = []
+        self.host.on_call = probed.append
+
+        receipt = self.runtime.stop_if_quiescent(run, self.stopper, expected_activity_epoch=stale)
+        self.host.on_call = None
+
+        self.assertEqual(receipt.status, HEAD_ALIVE)
+        self.assertEqual(receipt.reason, STOP_ACTIVITY_SINCE)
+        self.assertEqual(self.host.closed, [], "nothing was stopped")
+        self.assertEqual(
+            probed, [], "a head that moved is refused without asking its pane anything",
+        )
+
     def test_a_stop_that_could_not_be_confirmed_puts_the_head_back_in_service(self) -> None:
         run = self.bring_up()
         self.host.refuse_close = True
@@ -696,6 +762,55 @@ class SerialisedHeadTests(unittest.TestCase):
         self.assertEqual(receipt.status, HEAD_BUSY)
         self.assertEqual(torn, [], "the check and the teardown are one thing, in that order")
 
+    # what the boundary owes rather than its callers ------------------------
+    def test_a_bring_up_over_a_head_that_is_running_a_turn_is_a_receipt_not_an_exception(
+        self,
+    ) -> None:
+        """A caller that mints its own run id gets the boundary's refusal, not a `TurnLeaseError`.
+
+        The observer bring-up passes a run id it persisted. A second bring-up on it while a turn is
+        outstanding used to reach the grant and raise, which is the one thing every other refusal on
+        this boundary does not do. Nothing is opened: the session manager is not reached at all.
+        """
+        run, lease = self.working()
+        opened = len(self.host.panes_by_workspace.get(WORKSPACE, []))
+
+        receipt = self.runtime.start(
+            CODEX,
+            WORKSPACE,
+            self.task,
+            command="run-worker",
+            title="secretary-1462 worker",
+            run=run,
+            transport=CONFIRMING,
+        )
+
+        self.assertEqual(receipt.status, HEAD_BUSY)
+        self.assertEqual(receipt.lease, lease)
+        self.assertEqual(
+            len(self.host.panes_by_workspace.get(WORKSPACE, [])),
+            opened,
+            "nothing was opened for a head that is already up",
+        )
+
+    def test_a_head_ended_by_a_stop_this_runtime_did_not_perform_can_still_be_forgotten(
+        self,
+    ) -> None:
+        """An observer's real stop is Orca's worktree teardown, and it owes the runtime this.
+
+        Without it the epoch, the output mark and the admission of every head the production loop
+        ever launched stay in a runtime that lives as long as the loop does.
+        """
+        run, _ = self.working()
+        self.runtime.request_drain(run, StopInitiator(actor="operator"))
+        self.assertTrue(self.runtime.activity.epoch(run.run_id))
+
+        self.runtime.forget_head(run.run_id)
+
+        self.assertEqual(self.runtime.activity.epoch(run.run_id), 0)
+        self.assertIsNone(self.runtime.activity.lease(run.run_id))
+        self.assertTrue(self.runtime.activity.admits(run.run_id))
+
     # the lock --------------------------------------------------------------
     def test_no_other_thread_is_inside_the_critical_section_of_a_delivery(self) -> None:
         """Deterministic, and no sleep: the wedge runs *inside* the session-manager call."""
@@ -725,6 +840,31 @@ class SerialisedHeadTests(unittest.TestCase):
         self.assertEqual(
             set(got_in), {False}, "the delivery held the lock across every host call it made"
         )
+
+    def test_a_workspace_teardown_is_inside_the_same_critical_section_as_the_verbs(self) -> None:
+        """For an observer head the worktree teardown *is* the stop, so it is serialised too."""
+        self.bring_up()
+        got_in: list[bool] = []
+
+        def probe_from_another_thread(call: str) -> None:
+            if call != "stop_workspace":
+                return
+
+            def attempt() -> None:
+                entered = self.runtime._lock.acquire(blocking=False)
+                got_in.append(entered)
+                if entered:
+                    self.runtime._lock.release()
+
+            other = threading.Thread(target=attempt)
+            other.start()
+            other.join()
+
+        self.host.on_call = probe_from_another_thread
+        self.runtime.stop_workspace(WORKSPACE)
+        self.host.on_call = None
+
+        self.assertEqual(got_in, [False], "the teardown held the lock across the host call")
 
     def test_a_delivery_that_arrives_mid_delivery_is_refused_by_the_state_it_finds(self) -> None:
         """The lock orders them; the turn taken before the host call is what refuses the second."""
