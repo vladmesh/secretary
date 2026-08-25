@@ -204,6 +204,49 @@ def review_infrastructure_failure(
     }
 
 
+def worktree_panes(host: Any, workspace: str) -> list[Any]:
+    """One worktree's pane inventory, for a caller whose decision depends on reading it.
+
+    The dispatcher runtime keeps its own inventory seam; a read-only observer holding nothing but
+    the JSON transport gets the public Orca adapter. Both reach a refusal the same way, as a
+    `HostError`, because an inventory that could not be read is not an empty worktree and neither
+    caller may turn that difference into a missing pane.
+    """
+    inventory = getattr(host, "_worktree_terminals_or_raise", None)
+    if callable(inventory):
+        return list(inventory(workspace))
+    return orca_worktree_panes(host._run_json, workspace)
+
+
+def orca_worktree_panes(run_json: Any, workspace: str) -> list[Any]:
+    """Ask the installed session manager itself, for a caller with no inventory seam of its own."""
+    try:
+        return list(OrcaSessionHost(run_json).panes(workspace))
+    except PaneHostError as exc:
+        raise HostError(str(exc)) from None
+
+
+def pane_matcher(record: DispatcherRecord, *, kind: str, task_ref: str):
+    """The predicate that re-finds one role's pane in a worktree inventory.
+
+    Identity first and the label last: `terminal list` can hand back a different handle alias for
+    the same pty, so the persisted leaf is the strongest token, the handle the next one, and the
+    reviewer's label only the fallback for a pane whose identity was never persisted. Shared with
+    every read-only observer so the pane a status command reports on is exactly the pane the
+    watchdog would have found.
+    """
+    if kind == "review":
+        if record.review_leaf:
+            return lambda pane: pane.leaf == record.review_leaf
+        if record.review_handle:
+            return lambda pane: pane.handle == record.review_handle
+        label = review_pane_label(task_ref)
+        return lambda pane: pane.title == label
+    if record.worker_leaf:
+        return lambda pane: pane.leaf == record.worker_leaf
+    return lambda pane: bool(record.handle and pane.handle == record.handle)
+
+
 def command_terminal_status(
     host: Any, task: dict[str, Any], record: DispatcherRecord, *, kind: str
 ) -> dict[str, Any]:
@@ -218,28 +261,8 @@ def command_terminal_status(
         return {"known": True, "live": True, "reason": "noop"}
     if not record.workspace:
         raise HostError(f"{kind} workspace is unavailable")
-    inventory = getattr(host, "_worktree_terminals_or_raise", None)
-    try:
-        terminals = (
-            inventory(record.workspace)
-            if callable(inventory)
-            else OrcaSessionHost(host._run_json).panes(record.workspace)
-        )
-    except PaneHostError as exc:
-        raise HostError(str(exc)) from None
-    if kind == "review":
-        label = review_pane_label(task["ref"])
-        if record.review_leaf:
-            matches = lambda pane: pane.leaf == record.review_leaf
-        elif record.review_handle:
-            matches = lambda pane: pane.handle == record.review_handle
-        else:
-            matches = lambda pane: pane.title == label
-    else:
-        if record.worker_leaf:
-            matches = lambda pane: pane.leaf == record.worker_leaf
-        else:
-            matches = lambda pane: bool(record.handle and pane.handle == record.handle)
+    terminals = worktree_panes(host, record.workspace)
+    matches = pane_matcher(record, kind=kind, task_ref=str(task["ref"]))
     for terminal in terminals:
         if not matches(terminal):
             continue

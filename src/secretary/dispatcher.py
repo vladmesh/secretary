@@ -28,7 +28,7 @@ from secretary.dispatch.head_vitality import (
     SnapshotSource as _SnapshotSource,
 )
 from secretary.dispatch.head_vitality import (
-    VitalitySnapshot as _VitalitySnapshot,
+    snapshots_from_status as _snapshots_from_status,
 )
 from secretary.dispatch.head_vitality_episode import (
     DEFAULT_VITALITY_THRESHOLDS as _DEFAULT_VITALITY_THRESHOLDS,
@@ -5851,27 +5851,15 @@ class DispatcherRuntime:
             # pre-vitality behaviour for an unobservable head -- while the guard below any
             # destructive step still reads whatever verdict the record already carries.
             return None
-        snapshots = [
-            _VitalitySnapshot.from_pid_heartbeat(
-                pid_status, run_id=run_id, observed_at=now
-            )
-        ] if isinstance(pid_status, dict) else []
-        if isinstance(provider_progress, dict):
-            snapshots.append(
-                _VitalitySnapshot.from_provider_cursor(
-                    provider_progress,
-                    run_id=run_id,
-                    previous_cursor=(
-                        (previous.evidence_cursors or {}).get(_SnapshotSource.PROVIDER_CURSOR.value, "")
-                        if previous is not None else ""
-                    ),
-                    observed_at=now,
-                )
-            )
-        if "idle" in status:
-            snapshots.append(
-                _VitalitySnapshot.from_pane_readiness(status, run_id=run_id, observed_at=now)
-            )
+        snapshots = _snapshots_from_status(
+            status,
+            run_id=run_id,
+            previous_cursor=(
+                (previous.evidence_cursors or {}).get(_SnapshotSource.PROVIDER_CURSOR.value, "")
+                if previous is not None else ""
+            ),
+            observed_at=now,
+        )
         try:
             episode = _reduce_vitality(previous, snapshots, now, _DEFAULT_VITALITY_THRESHOLDS)
         except Exception as exc:  # noqa: BLE001 - shadow mode must never break the hosting tick

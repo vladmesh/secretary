@@ -60,6 +60,13 @@ class Pane:
     # Advisory work liveness for a caller that watches a head for progress; the pid heartbeat is
     # what answers whether a process is there.
     last_output_at: float = 0.0
+    # The runtime pane the session manager currently renders this pty in, `None` when it named
+    # none at all. Orca answers `-1` for a pty that exists, is connected and is writable while no
+    # runtime pane is allocated for it: the tab is in the model, nothing draws it, and an operator
+    # looking at the workspace sees no pane (issue:84c0ae4f796f994a7c1d, measured 2026-08-24 on
+    # pty 106 of secretary-1450 while that head was demonstrably working). Advisory in exactly the
+    # sense `connected` is: it says what the window shows, never whether a process is there.
+    runtime_pane_id: int | None = None
     # Set only by the head-operation recovery path. Pane inventory never supplies it.
     fallback_reason: str = ""
 
@@ -138,6 +145,21 @@ def _epoch_seconds(value: Any) -> float:
         return float(value) / 1000.0
     except (TypeError, ValueError):
         return 0.0
+
+
+def _runtime_pane_id(value: Any) -> int | None:
+    """Read Orca's `paneRuntimeId`, keeping "the host said nothing" apart from "no pane".
+
+    A session manager that never names the field leaves ``None``; only a value it did name becomes
+    a number, because the whole point of the field is telling an unrendered pane apart from an
+    unanswered question.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def _pane_key_leaf(value: Any) -> str:
@@ -220,6 +242,7 @@ class OrcaSessionHost(OrcaPaneHost):
                 title=str(entry.get("title") or ""),
                 connected=entry.get("connected") is not False,
                 last_output_at=_epoch_seconds(entry.get("lastOutputAt")),
+                runtime_pane_id=_runtime_pane_id(entry.get("paneRuntimeId")),
             )
             for entry in terminals
             if isinstance(entry, dict)

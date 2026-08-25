@@ -20,7 +20,7 @@ from triggered_agents.runtime.claude_sessions import (
     claude_session_paths,
 )
 from triggered_agents.runtime.codex_preflight import CODEX_HOME_DEFAULT
-from triggered_agents.runtime.head import HeadRun
+from triggered_agents.runtime.head import HeadRun, HeadRunError
 from triggered_agents.runtime.pane_host import OrcaSessionHost, PaneHost
 from triggered_agents.runtime.tui_delivery import (
     COMPOSER_EMPTY,
@@ -396,6 +396,19 @@ def provider_progress_for_run(run: HeadRun) -> dict[str, str]:
     if run.spec.adapter == "claude":
         return _claude_provider_progress_for_run(run, run_id, fingerprint)
     return {"state": "unavailable", "reason": "provider adapter has no progress source contract"}
+
+
+def provider_progress_for_persisted_run(run: Any) -> dict[str, str]:
+    """The same run-bound cursor read, for a caller holding only a record's HeadRun payload.
+
+    Read-only by construction: a persisted run is promoted and asked for its cursor, and nothing is
+    rebound or written back. A payload that is not a HeadRun is a channel that cannot answer, which
+    is a statement about the channel and never about the head.
+    """
+    try:
+        return provider_progress_for_run(HeadRun.from_json(run))
+    except (HeadRunError, AttributeError, KeyError, TypeError, ValueError):
+        return {"state": "unavailable", "reason": "persisted HeadRun is unavailable"}
 
 
 def _codex_provider_progress_for_run(run: HeadRun, run_id: str, fingerprint: str) -> dict[str, str]:
