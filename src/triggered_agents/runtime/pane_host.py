@@ -16,6 +16,7 @@ it does not cover is worktree registration and removal, which belongs to a works
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -60,15 +61,56 @@ class Pane:
     # Advisory work liveness for a caller that watches a head for progress; the pid heartbeat is
     # what answers whether a process is there.
     last_output_at: float = 0.0
-    # The runtime pane the session manager currently renders this pty in, `None` when it named
-    # none at all. Orca answers `-1` for a pty that exists, is connected and is writable while no
-    # runtime pane is allocated for it: the tab is in the model, nothing draws it, and an operator
-    # looking at the workspace sees no pane (issue:84c0ae4f796f994a7c1d, measured 2026-08-24 on
-    # pty 106 of secretary-1450 while that head was demonstrably working). Advisory in exactly the
-    # sense `connected` is: it says what the window shows, never whether a process is there.
+    # The runtime pane the session manager named for this pty, `None` when it named none -- which
+    # is what `orca terminal list` answers on the build measured on 2026-08-25: its entries carry
+    # no `paneRuntimeId` at all. The symptom `paneRuntimeId: -1` recorded in
+    # issue:84c0ae4f796f994a7c1d came from a different call, so this field is supplementary
+    # evidence to be reported where a host does supply it, and never the basis of an answer about
+    # what the window draws -- `RuntimeLayout` below is that basis. Advisory in exactly the sense
+    # `connected` is: it says what the window shows, never whether a process is there.
     runtime_pane_id: int | None = None
     # Set only by the head-operation recovery path. Pane inventory never supplies it.
     fallback_reason: str = ""
+
+
+@dataclass(frozen=True)
+class RuntimeLayout:
+    """Which ptys the session manager's renderer actually draws in one workspace.
+
+    A pty can be listed, connected and writable while no runtime pane draws it: the tab exists in
+    the model, the window shows nothing, and an operator reads the empty workspace as a head that
+    never started (issue:84c0ae4f796f994a7c1d). The renderer's own answer to "what is drawn" is the
+    visual-layout tree Orca returns beside the terminal list, so membership in that tree -- not a
+    field of the terminal entry -- is what tells the two apart.
+
+    Everything a caller needs to answer honestly is kept apart here. ``supported`` is false when
+    the channel named no tree at all, ``known_workspace`` is false when it named trees but none
+    for this workspace, and ``terminal_nodes`` counts the drawn ptys so that "the tree draws
+    nothing" stays distinguishable from "the tree named no identity this pty can be compared by".
+    None of those is a statement about a head.
+    """
+
+    supported: bool = False
+    reason: str = ""
+    known_workspace: bool = False
+    # The identities the drawn nodes carry. `leafId` is the primary key on purpose: the session
+    # manager can hand back a different handle alias for the same pty (dispatcher_state.py:132),
+    # so a handle that does not match is not evidence of anything.
+    leaves: frozenset[str] = frozenset()
+    handles: frozenset[str] = frozenset()
+    terminal_nodes: int = 0
+
+
+@dataclass(frozen=True)
+class WorkspaceInventory:
+    """One workspace's ptys and, beside them, what its renderer draws.
+
+    Both come from a single answer, so the two halves cannot disagree about which ptys existed at
+    the moment they were read.
+    """
+
+    panes: tuple[Pane, ...] = ()
+    layout: RuntimeLayout = RuntimeLayout()
 
 
 class PaneHost(Protocol):
@@ -162,6 +204,112 @@ def _runtime_pane_id(value: Any) -> int | None:
         return None
 
 
+def _panes_from_payload(payload: dict[str, Any]) -> list[Pane]:
+    """The ptys of one `terminal list` answer, refusing a shape that names none.
+
+    An inventory that cannot be read is not an empty worktree, and the difference decides whether a
+    head is stopped or replaced. An answer this cannot parse says nothing about which panes exist,
+    so it refuses rather than reporting none — the caller that only needs to pick a pane degrades
+    that refusal into [] itself.
+    """
+    terminals = payload.get("terminals")
+    if not isinstance(terminals, list):
+        raise PaneHostError("orca terminal list returned an unsupported shape")
+    return [
+        Pane(
+            handle=str(entry.get("handle") or ""),
+            leaf=str(entry.get("leafId") or ""),
+            title=str(entry.get("title") or ""),
+            connected=entry.get("connected") is not False,
+            last_output_at=_epoch_seconds(entry.get("lastOutputAt")),
+            runtime_pane_id=_runtime_pane_id(entry.get("paneRuntimeId")),
+        )
+        for entry in terminals
+        if isinstance(entry, dict)
+    ]
+
+
+def _runtime_layout(payload: dict[str, Any], workspace: str) -> RuntimeLayout:
+    """What the renderer draws in ``workspace``, or why that could not be read.
+
+    Three answers, kept apart because collapsing any two of them would reproduce the very error
+    this exists to stop. A build that ignores or does not know the option leaves no
+    ``visualLayouts`` key: unsupported. A channel that answered but named no tree for this
+    workspace has said nothing about this workspace: not known. Only a tree that is actually here
+    licenses reading a pty's absence from it as "nothing draws it".
+    """
+    layouts = payload.get("visualLayouts")
+    if not isinstance(layouts, list):
+        return RuntimeLayout(
+            supported=False,
+            reason=(
+                "this session manager's terminal inventory carried no `visualLayouts`, so what "
+                "its renderer draws could not be read"
+            ),
+        )
+    trees = [
+        entry
+        for entry in layouts
+        if isinstance(entry, dict) and _same_workspace(entry.get("worktreePath"), workspace)
+    ]
+    if not trees:
+        return RuntimeLayout(
+            supported=True,
+            reason=(
+                "the session manager's renderer named no layout tree for this workspace, so "
+                "what it draws here could not be read"
+            ),
+        )
+    nodes: list[dict[str, Any]] = []
+    for entry in trees:
+        _visual_terminal_nodes(entry.get("root"), nodes)
+    leaves = {leaf for leaf in (_layout_leaf(node) for node in nodes) if leaf}
+    handles = {str(node.get("handle") or "") for node in nodes}
+    return RuntimeLayout(
+        supported=True,
+        known_workspace=True,
+        reason="",
+        leaves=frozenset(leaves),
+        handles=frozenset(handle for handle in handles if handle),
+        terminal_nodes=len(nodes),
+    )
+
+
+def _layout_leaf(node: dict[str, Any]) -> str:
+    return str(node.get("leafId") or "") or _pane_key_leaf(node.get("paneKey"))
+
+
+def _visual_terminal_nodes(node: Any, out: list[dict[str, Any]], depth: int = 0) -> None:
+    """Every drawn terminal in a renderer tree, without spelling the tree's own grammar.
+
+    Orca nests groups, tabs and split children under keys this module has no reason to know; what
+    it does know is that a drawn pty is a node saying ``type: "terminal"``. Walking generically
+    means a tree that grows a new kind of container keeps answering correctly instead of silently
+    reporting every pty as undrawn.
+    """
+    if depth > 64:
+        return
+    if isinstance(node, dict):
+        if node.get("type") == "terminal":
+            out.append(node)
+            return
+        for value in node.values():
+            if isinstance(value, (dict, list)):
+                _visual_terminal_nodes(value, out, depth + 1)
+    elif isinstance(node, list):
+        for item in node:
+            if isinstance(item, (dict, list)):
+                _visual_terminal_nodes(item, out, depth + 1)
+
+
+def _same_workspace(value: Any, workspace: str) -> bool:
+    if not isinstance(value, str) or not value:
+        return False
+    return os.path.abspath(os.path.expanduser(value)) == os.path.abspath(
+        os.path.expanduser(workspace)
+    )
+
+
 def _pane_key_leaf(value: Any) -> str:
     """Read Orca's stable leaf id from its create-time ``tabId:leafId`` pane key."""
     if not isinstance(value, str):
@@ -219,34 +367,60 @@ class OrcaSessionHost(OrcaPaneHost):
     def close_pane(self, handle: str) -> None:
         self.run_json(["orca", "terminal", "close", "--terminal", handle, "--json"])
 
-    def panes(self, workspace: str) -> list[Pane]:
+    def _list(self, workspace: str, *, with_layout: bool) -> dict[str, Any]:
         if not workspace:
             raise PaneHostError("terminal inventory needs a workspace")
-        data = self.run_json(
-            ["orca", "terminal", "list", "--worktree", f"path:{workspace}", "--json"]
-        )
+        args = ["orca", "terminal", "list", "--worktree", f"path:{workspace}"]
+        if with_layout:
+            # The renderer tree is opt-in and every other caller pays nothing for it: a delivery
+            # tick asking which pty to write into does not need to know what is drawn.
+            args.append("--include-visual-layouts")
+        args.append("--json")
+        data = self.run_json(args)
         if isinstance(data, dict) and data.get("ok") is False:
             raise PaneHostError("orca terminal list failed")
-        payload = data.get("result") if isinstance(data.get("result"), dict) else data
-        terminals = payload.get("terminals") if isinstance(payload, dict) else None
-        # An inventory that cannot be read is not an empty worktree, and the difference decides
-        # whether a head is stopped or replaced. An answer this cannot parse says nothing about
-        # which panes exist, so it refuses rather than reporting none — the caller that only needs
-        # to pick a pane degrades that refusal into [] itself.
-        if not isinstance(terminals, list):
+        payload = (
+            data.get("result")
+            if isinstance(data, dict) and isinstance(data.get("result"), dict)
+            else data
+        )
+        if not isinstance(payload, dict):
             raise PaneHostError("orca terminal list returned an unsupported shape")
-        return [
-            Pane(
-                handle=str(entry.get("handle") or ""),
-                leaf=str(entry.get("leafId") or ""),
-                title=str(entry.get("title") or ""),
-                connected=entry.get("connected") is not False,
-                last_output_at=_epoch_seconds(entry.get("lastOutputAt")),
-                runtime_pane_id=_runtime_pane_id(entry.get("paneRuntimeId")),
+        return payload
+
+    def panes(self, workspace: str) -> list[Pane]:
+        return _panes_from_payload(self._list(workspace, with_layout=False))
+
+    def workspace_inventory(self, workspace: str) -> WorkspaceInventory:
+        """The ptys of one workspace and, from the same answer, the renderer tree that draws them.
+
+        Asks for the visual layouts explicitly, because the terminal entries alone cannot say what
+        is drawn. A session manager too old to know the option refuses the whole call, and refusing
+        the inventory with it would report a live workspace as unreadable -- so that one case falls
+        back to the plain listing and says, in the layout's own ``reason``, that the channel is not
+        supported here. A refusal of the plain listing too is a refusal, and propagates.
+        """
+        try:
+            payload = self._list(workspace, with_layout=True)
+        except Exception as exc:  # The injected runner owns its error type.
+            # Broad on purpose: what distinguishes "this build does not know the option" from "the
+            # session manager is down" is not the exception, it is whether the plain listing below
+            # answers. If it refuses too, that refusal is the one that propagates.
+            return WorkspaceInventory(
+                panes=tuple(self.panes(workspace)),
+                layout=RuntimeLayout(
+                    supported=False,
+                    reason=(
+                        "this session manager did not answer `terminal list "
+                        f"--include-visual-layouts` ({str(exc)[:160]}), so what its renderer "
+                        "draws could not be read"
+                    ),
+                ),
             )
-            for entry in terminals
-            if isinstance(entry, dict)
-        ]
+        return WorkspaceInventory(
+            panes=tuple(_panes_from_payload(payload)),
+            layout=_runtime_layout(payload, workspace),
+        )
 
     def stop_workspace(self, workspace: str) -> None:
         self.run_json(["orca", "terminal", "stop", "--worktree", f"path:{workspace}", "--json"])

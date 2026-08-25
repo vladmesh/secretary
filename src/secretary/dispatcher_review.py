@@ -70,7 +70,11 @@ from secretary.dispatcher_watchdog import (
     wait_cycle_token as _wait_cycle_token,
 )
 from secretary.dispatcher_worker_lifecycle import head_run_binding
-from triggered_agents.runtime.pane_host import OrcaSessionHost, PaneHostError
+from triggered_agents.runtime.pane_host import (
+    OrcaSessionHost,
+    PaneHostError,
+    WorkspaceInventory,
+)
 
 
 def candidate_sha(record: DispatcherRecord) -> str:
@@ -222,6 +226,20 @@ def orca_worktree_panes(run_json: Any, workspace: str) -> list[Any]:
     """Ask the installed session manager itself, for a caller with no inventory seam of its own."""
     try:
         return list(OrcaSessionHost(run_json).panes(workspace))
+    except PaneHostError as exc:
+        raise HostError(str(exc)) from None
+
+
+def orca_workspace_inventory(run_json: Any, workspace: str) -> WorkspaceInventory:
+    """The panes of a worktree together with what the session manager's renderer draws there.
+
+    The same refusal contract as `orca_worktree_panes`: an inventory that could not be read is a
+    `HostError` and never an empty worktree. What the renderer could not answer is carried inside
+    the inventory instead, because a readable pane list beside an unreadable layout is a real state
+    and the caller has to be able to say so.
+    """
+    try:
+        return OrcaSessionHost(run_json).workspace_inventory(workspace)
     except PaneHostError as exc:
         raise HostError(str(exc)) from None
 

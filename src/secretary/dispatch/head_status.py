@@ -3,14 +3,20 @@
 An operator who opens a card's workspace and sees no worker pane reads it as "the worker never
 started" and intervenes by hand -- drops the claim, kills the workspace, restarts the card -- and
 destroys live work. The measurement behind ``issue:84c0ae4f796f994a7c1d`` (2026-08-24, card
-secretary-1450) is the counter-example: pty 106 was listed by Orca with ``connected: true`` and
-``paneRuntimeId: -1``, no runtime pane drew it, and the head behind it was working -- live TUI, a
-growing rollout session, delivery accepted, vitality ``healthy_quiet``.
+secretary-1450) is the counter-example: pty 106 was listed by Orca with ``connected: true``, no
+runtime pane drew it, and the head behind it was working -- live TUI, a growing rollout session,
+delivery accepted, vitality ``healthy_quiet``.
 
 So this module answers two questions per head and keeps them apart:
 
     is the head alive?          from the vitality snapshot, and only from it
-    is its runtime pane shown?  from the pane inventory, and never as evidence about the head
+    is its runtime pane shown?  from the renderer's own tree, never as evidence about the head
+
+The second question is asked of the thing that actually answers it. `orca terminal list` describes
+ptys and says nothing about what is drawn; the visual-layout tree it returns beside them, with
+`--include-visual-layouts`, is the renderer's own inventory of drawn panes. So visibility here is
+membership: a pty the tree names is drawn, and a pty the inventory lists while no leaf of that tree
+names it is the measured case -- listed, connected, drawn by nothing.
 
 The whole point is the second one can never answer the first. ``head_vitality``'s invariant --
 pane and terminal readings are advisory, fill the ``Turn`` axis alone and are never by themselves
@@ -43,14 +49,14 @@ from secretary.dispatch.head_vitality import (
 )
 from secretary.dispatcher_review import (
     command_terminal_status,
-    orca_worktree_panes,
+    orca_workspace_inventory,
     pane_matcher,
-    worktree_panes,
 )
 from secretary.dispatcher_state import DispatcherRecord
 from secretary.dispatcher_tui import provider_progress_for_persisted_run
 from secretary.dispatcher_types import HostError
 from secretary.dispatcher_watchdog import head_run_process_status, pid_file_path
+from triggered_agents.runtime.pane_host import RuntimeLayout, WorkspaceInventory
 
 # What this command may say about a head. Three words, deliberately: the two facts a snapshot can
 # prove, and the honest third that keeps an unanswerable channel from being rounded to either.
@@ -58,9 +64,12 @@ HEAD_ALIVE = "alive"
 HEAD_ABSENT = "absent"
 HEAD_UNPROVEN = "unproven"
 
-# What it may say about that head's runtime pane. "no-runtime-pane" is the case the card exists
-# for and is a distinct word from "no-pane": the first is a pty Orca lists and does not draw, the
-# second is a pty no inventory answers for. Neither is a word about the head.
+# What it may say about that head's runtime pane. Four negative words where one would do, because
+# each names a different fact: "no-runtime-pane" is a pty the inventory lists and the renderer
+# draws nowhere (the case the card exists for), "no-pane" is a pty no inventory answers for at all,
+# "unknown" is a renderer channel that could not decide -- unsupported by this build, silent about
+# this workspace, or naming no identity this pty can be compared by -- and "unavailable" is a pane
+# inventory that refused. None of the four is a word about the head.
 PANE_VISIBLE = "visible"
 PANE_NO_RUNTIME_PANE = "no-runtime-pane"
 PANE_NO_PANE = "no-pane"
@@ -120,12 +129,18 @@ class HeadStatusHost(ReadOnlyOrcaTransport):
     reports "this channel did not answer" instead of performing one.
     """
 
-    _inventory: dict[str, list[Any]] = field(default_factory=dict)
+    _inventory: dict[str, WorkspaceInventory] = field(default_factory=dict)
+
+    def workspace_inventory(self, workspace: str) -> WorkspaceInventory:
+        """One reading of the workspace -- its ptys and its renderer tree -- for every head."""
+        if workspace not in self._inventory:
+            self._inventory[workspace] = orca_workspace_inventory(self._run_json, workspace)
+        return self._inventory[workspace]
 
     def _worktree_terminals_or_raise(self, workspace: str) -> list[Any]:
-        if workspace not in self._inventory:
-            self._inventory[workspace] = orca_worktree_panes(self._run_json, workspace)
-        return list(self._inventory[workspace])
+        # The seam `command_terminal_status` finds by name, answered from the same single reading:
+        # the head axis and the pane axis of one row cannot then disagree about which ptys existed.
+        return list(self.workspace_inventory(workspace).panes)
 
     def provider_progress(
         self, _task: dict[str, Any], record: DispatcherRecord, kind: str
@@ -161,11 +176,12 @@ def head_status(runtime: Any, *, workspace: str, now: float | None = None) -> di
     host = HeadStatusHost()
     payload = runtime.production_state.load()
     records = runtime.production_state.records(payload)
-    panes, pane_channel = _pane_inventory(host, target)
+    panes, pane_channel, layout = _pane_inventory(host, target)
     heads = [
         _head_row(
             host, ref, record,
-            kind=kind, role=role, panes=panes, pane_channel=pane_channel, observed_at=observed_at,
+            kind=kind, role=role, panes=panes, pane_channel=pane_channel, layout=layout,
+            observed_at=observed_at,
         )
         for ref, record in sorted(records.items())
         if _normalised(record.workspace) == target
@@ -177,6 +193,7 @@ def head_status(runtime: Any, *, workspace: str, now: float | None = None) -> di
         "step": "head-status",
         "workspace": target,
         "pane_channel": pane_channel,
+        "runtime_pane_channel": _layout_channel(layout),
         "heads": heads,
         "invariant": PANE_ADVISORY_INVARIANT,
         "summary": (
@@ -187,12 +204,41 @@ def head_status(runtime: Any, *, workspace: str, now: float | None = None) -> di
     }
 
 
-def _pane_inventory(host: Any, workspace: str) -> tuple[list[Any], dict[str, str]]:
-    """One inventory read for the whole answer, with its refusal kept as a channel fact."""
+def _pane_inventory(
+    host: Any, workspace: str
+) -> tuple[list[Any], dict[str, str], RuntimeLayout | None]:
+    """One inventory read for the whole answer, with its refusal kept as a channel fact.
+
+    Two channels come back, not one, and they fail apart: the session manager can list a
+    workspace's ptys perfectly while saying nothing about what its renderer draws. Folding the
+    second refusal into the first would report a readable workspace as unreadable; folding it the
+    other way would report an unread tree as an undrawn pane, which is the same lie this command
+    exists to stop, told from the other side.
+    """
     try:
-        return worktree_panes(host, workspace), {"state": "available", "reason": ""}
+        inventory = host.workspace_inventory(workspace)
     except HostError as exc:
-        return [], {"state": SourceAvailability.UNAVAILABLE.value, "reason": str(exc)[:240]}
+        return [], {"state": SourceAvailability.UNAVAILABLE.value, "reason": str(exc)[:240]}, None
+    return list(inventory.panes), {"state": "available", "reason": ""}, inventory.layout
+
+
+def _layout_channel(layout: RuntimeLayout | None) -> dict[str, Any]:
+    """The renderer channel, in the vitality vocabulary: available, or unavailable and why."""
+    if layout is None or not layout.supported or not layout.known_workspace:
+        return {
+            "state": SourceAvailability.UNAVAILABLE.value,
+            "reason": (
+                (layout.reason if layout is not None else "")
+                or "the pane inventory could not be read, so neither could the renderer tree"
+            )[:240],
+            "supported": bool(layout is not None and layout.supported),
+        }
+    return {
+        "state": SourceAvailability.AVAILABLE.value,
+        "reason": "",
+        "supported": True,
+        "drawn_panes": layout.terminal_nodes,
+    }
 
 
 def _head_row(
@@ -204,12 +250,15 @@ def _head_row(
     role: str,
     panes: list[Any],
     pane_channel: dict[str, str],
+    layout: RuntimeLayout | None,
     observed_at: float,
 ) -> dict[str, Any]:
     """One head: what proved it, what could not answer, and separately what the window shows."""
     run_payload = record.review_head_run if kind == "review" else record.worker_head_run
     run_id = str((run_payload or {}).get("run_id") or "")
-    pane_state, pane_detail = _pane_axis(record, kind=kind, ref=ref, panes=panes, channel=pane_channel)
+    pane_state, pane_detail = _pane_axis(
+        record, kind=kind, ref=ref, panes=panes, channel=pane_channel, layout=layout,
+    )
     row: dict[str, Any] = {
         "ref": ref,
         "role": role,
@@ -376,24 +425,68 @@ def _pane_axis(
     ref: str,
     panes: list[Any],
     channel: dict[str, str],
+    layout: RuntimeLayout | None,
 ) -> tuple[str, dict[str, Any] | None]:
-    """Whether this head's pty is drawn in the workspace, as the inventory itself reports it."""
+    """Whether this head's pty is drawn in the workspace, as the renderer itself reports it."""
     if channel.get("state") != "available":
         return PANE_UNAVAILABLE, None
     matches = pane_matcher(record, kind=kind, task_ref=ref)
     pane = next((candidate for candidate in panes if matches(candidate)), None)
     if pane is None:
         return PANE_NO_PANE, None
+    state, reason = _drawn(pane, layout)
     detail = {
         "handle": pane.handle,
         "leaf": pane.leaf,
         "title": pane.title,
         "connected": bool(pane.connected),
+        # Supplementary only, and usually absent: the build measured on 2026-08-25 returns no
+        # `paneRuntimeId` from this call. Reported where a host does name it, never relied on.
         "runtime_pane_id": pane.runtime_pane_id,
+        "renderer_reason": reason,
     }
-    if pane.runtime_pane_id is None:
-        return PANE_UNKNOWN, detail
-    return (PANE_VISIBLE if pane.runtime_pane_id >= 0 else PANE_NO_RUNTIME_PANE), detail
+    return state, detail
+
+
+def _drawn(pane: Any, layout: RuntimeLayout | None) -> tuple[str, str]:
+    """Membership of this pty in the renderer tree, and the one honest word for each outcome.
+
+    Identity is the whole difficulty. `terminal list` can hand back a different handle alias for
+    the same pty (`dispatcher_state.py:132`), so `leafId` is the primary key and the handle is only
+    a secondary one -- and an identity that cannot be compared at all is `unknown`, never a denial.
+    A negative verdict is therefore licensed only when the key that decides it is usable: a tree
+    that named leaves, or a tree that draws nothing at all.
+    """
+    if layout is None or not layout.supported:
+        return PANE_UNKNOWN, (layout.reason if layout is not None else "") or (
+            "the renderer tree was not read"
+        )
+    if not layout.known_workspace:
+        return PANE_UNKNOWN, layout.reason
+    if pane.leaf and pane.leaf in layout.leaves:
+        return PANE_VISIBLE, (
+            "the renderer tree of this workspace draws a pane with this pty's leaf"
+        )
+    if pane.handle and pane.handle in layout.handles:
+        return PANE_VISIBLE, (
+            "the renderer tree of this workspace draws a pane with this pty's handle"
+        )
+    empty_tree = layout.terminal_nodes == 0
+    if pane.leaf and (layout.leaves or empty_tree):
+        return PANE_NO_RUNTIME_PANE, (
+            f"the inventory lists this pty and no pane of the workspace's renderer tree "
+            f"({layout.terminal_nodes} drawn) names its leaf"
+        )
+    if not pane.leaf and pane.handle and (layout.handles or empty_tree):
+        return PANE_NO_RUNTIME_PANE, (
+            f"no leaf was ever persisted for this pty and no pane of the renderer tree "
+            f"({layout.terminal_nodes} drawn) names its handle"
+        )
+    return PANE_UNKNOWN, (
+        "the renderer tree named no identity this pty can be compared by, and a handle the "
+        "session "
+        "manager may have aliased is not evidence either way"
+    )
 
 
 # What the pane half of a summary says, and what every answer but "visible" ends in. The closing
@@ -405,15 +498,15 @@ _NOT_ABOUT_THE_HEAD = "that is a fact about the window, not about the head"
 def _pane_sentence(row: dict[str, Any]) -> str:
     """The pane half of the answer, always ending in what it does not mean."""
     pane = row.get("pane") or {}
-    runtime_pane_id = pane.get("runtime_pane_id")
+    reason = str(pane.get("renderer_reason") or "")
     state = row["runtime_pane"]
     if state == PANE_VISIBLE:
-        return f"Its runtime pane is visible (paneRuntimeId {runtime_pane_id})."
+        return f"Its runtime pane is visible: {reason}."
     if state == PANE_NO_RUNTIME_PANE:
         return (
-            f"Its runtime pane is NOT visible: the session manager lists the pty "
-            f"(connected={str(bool(pane.get('connected'))).lower()}) with paneRuntimeId "
-            f"{runtime_pane_id}, so nothing draws it in the workspace; {_NOT_ABOUT_THE_HEAD}."
+            f"Its runtime pane is NOT visible: {reason}, and the pty is "
+            f"connected={str(bool(pane.get('connected'))).lower()}, so nothing draws it in the "
+            f"workspace; {_NOT_ABOUT_THE_HEAD}."
         )
     if state == PANE_NO_PANE:
         return (
@@ -425,8 +518,8 @@ def _pane_sentence(row: dict[str, Any]) -> str:
             "that is a fact about that channel, not about the head."
         )
     return (
-        "The session manager named no runtime pane for this pty, so its visibility is unknown; "
-        f"{_NOT_ABOUT_THE_HEAD}."
+        f"Whether its runtime pane is visible is unknown: {reason}; "
+        "that is a fact about that channel, not about the head."
     )
 
 
