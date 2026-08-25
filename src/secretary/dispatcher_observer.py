@@ -180,6 +180,29 @@ class ObserverWakeLiveness(WorkerContinuationLiveness):
     """
 
 
+@dataclass(frozen=True)
+class QuietStopJudgement:
+    """One tick's finding that a head is finished, as the conditional stop is owed it.
+
+    The head runtime decides on its own whether a head may be taken down for a replacement, but two
+    of the facts it decides on are not its to read, and both belong to the moment the tick made up
+    its mind rather than to the moment the stop is performed:
+
+      * `activity_epoch` — this head's own epoch as the tick read it. Read later it would already
+        contain whatever the head did after the judgement, and the comparison would be against
+        itself;
+      * `head_process_alive` — the pid-heartbeat evidence that made the tick decide at all. The
+        runtime cannot produce it: Orca answers about panes, and a pane says `busy` both for a
+        working head and for the wrapper shell a dead one leaves behind.
+
+    They are one value so that neither can be passed without the other, and so that a caller cannot
+    read them a tick apart.
+    """
+
+    activity_epoch: int
+    head_process_alive: bool
+
+
 @dataclass
 class ObserverDelivery:
     """One causal delivery cursor, independent of observer process lifecycle.
@@ -708,13 +731,24 @@ def _reconcile_open_sprint(
             return {"status": "degraded", "step": "observer-reconcile", "sprint": ref,
                     "action": "observer-cursor-unavailable", "head": record.head,
                     "reason": event_state["reason"]}
-    if (
-        record is not None
+    # Whether a head of this record may still be up, and whether it is the live observer of this
+    # sprint. The two are separated because the answer to the second is the tick's judgement that
+    # this head is finished, and everything a rotation further down hands to the conditional stop
+    # is that judgement: the head's epoch, and the pid-heartbeat fact read right here.
+    head_may_be_running = record is not None and _head_may_be_running(record)
+    # The pid-heartbeat answer about this head's process, read once for both readers of it: the
+    # liveness judgement here, and the conditional stop further down, which is owed the fact rather
+    # than allowed to re-derive it from a pane. `head_is_live` is narrower — an unresolved bring-up
+    # intent and an abandoned handle both mean "not the live observer of this sprint" whatever the
+    # process is doing — so the two are kept apart instead of one standing in for the other.
+    head_process_alive = head_may_be_running and bool(observer_alive(record)["alive"])
+    head_is_live = (
+        head_may_be_running
         and not unresolved_intent
-        and _head_may_be_running(record)
         and not record.abandoned_handle
-        and observer_alive(record)["alive"]
-    ):
+        and head_process_alive
+    )
+    if head_is_live:
         if record.state in PENDING_STOP_STATES:
             # The sprint is open again and the head that was to be stopped is still the head of
             # this sprint: the pending stop is moot, so the record reads as running once more.
@@ -830,6 +864,21 @@ def _reconcile_open_sprint(
         baseline = _observer_event_state(runtime, ref, record)
         if baseline.get("pending"):
             record.delivery.acknowledged_through = str(baseline.get("event_id") or "")
+    # The judgement this tick made about the previous head, assembled where its consumer is rather
+    # than at the branch that made it: every path between the two returns without reaching a
+    # launch, and none of them touches the head runtime for this run — `_observer_event_state` and
+    # `_observer_head_or_blank` read the board and the sprint, not the head. What must not happen
+    # is the read sliding *past* here, into the stop itself, where it would already contain
+    # whatever the head did in between; everything `_launch_observer` does before the stop —
+    # `head_readiness`, `observer_skill_delivery`, the wake-liveness write — happens after it.
+    judgement = QuietStopJudgement(
+        activity_epoch=(
+            _observer_activity_epoch(runtime, record)
+            if head_may_be_running and not head_is_live
+            else 0
+        ),
+        head_process_alive=head_process_alive,
+    )
     return _launch_observer(
         runtime,
         payload,
@@ -838,6 +887,10 @@ def _reconcile_open_sprint(
         record,
         pending_event=pending_event,
         head=str(decision["head"]),
+        # The rotation, and the one stop that is conditional: this tick judged the previous head
+        # finished, and it hands that judgement down rather than letting the stop re-read it.
+        conditional_stop=True,
+        judgement=judgement,
     )
 
 
@@ -1231,7 +1284,12 @@ def _fail_delivery(
     # The replacement opens its own delivery attempt count: the next failing batch gets the same
     # bounded retries before it costs the sprint another head.
     record.delivery.attempts = 0
-    replaced = _launch_observer(runtime, payload, observers, ref, record, pending_event=event)
+    # An emergency replacement. The head has refused every wake it was given, so it is stuck or
+    # gone; a stop that refused because it looked busy would leave the sprint on the head that is
+    # not working and park the replacement behind a bounded backoff for as long as it stays stuck.
+    replaced = _launch_observer(
+        runtime, payload, observers, ref, record, pending_event=event, conditional_stop=False,
+    )
     unlaunched = str(replaced.get("reason") or "")
     replaced["reason"] = f"{reason}; the observer head was replaced after {attempts} failed wakes"
     if unlaunched:
@@ -1412,7 +1470,11 @@ def _replace_observer_for_no_progress(
             "head": record.head,
             "reason": "observer provider-progress terminal outcome could not be persisted",
         }
-    replaced = _launch_observer(runtime, payload, observers, ref, record, pending_event=event)
+    # An emergency replacement too: the head is up and showing no provider progress, so it is
+    # being taken down for being stuck rather than for being finished.
+    replaced = _launch_observer(
+        runtime, payload, observers, ref, record, pending_event=event, conditional_stop=False,
+    )
     original = str(replaced.get("reason") or "")
     replaced["reason"] = reason + (f"; {original}" if original else "")
     return replaced
@@ -1994,6 +2056,8 @@ def _launch_observer(
     ref: str,
     record: ObserverRecord | None,
     *,
+    conditional_stop: bool,
+    judgement: QuietStopJudgement | None = None,
     pending_event: dict[str, Any] | None = None,
     head: str = "",
 ) -> dict[str, Any]:
@@ -2001,7 +2065,24 @@ def _launch_observer(
 
     `head` is decided by the caller from the sprint's own metadata, so nothing between the
     declaration and the launch can substitute another profile.
+
+    `conditional_stop` says which of the two stops the previous head gets, and the caller owns that
+    choice because only the caller knows why it is replacing the head:
+
+      * `True` — the rotation: the tick read the head, judged it finished, and is opening its
+        successor. A delivery must not slip in between that judgement and the pane closing, so the
+        stop carries the `judgement` the tick made — this head's epoch and its pid-heartbeat
+        liveness, both read *at* the judgement — and a head that has done something since is left
+        alone and the relaunch parks for a tick;
+      * `False` — an emergency replacement: the head stopped answering its wakes, or it is up and
+        making no provider progress. Those replacements exist precisely because the head is stuck,
+        and a conditional stop would refuse them for being stuck. The head is ended unconditionally.
+
+    A conditional stop with no judgement to make it on would be neither, so it is refused as the
+    programming error it is rather than being quietly made unconditional.
     """
+    if conditional_stop and judgement is None:
+        raise TypeError("a conditional stop is made on the judgement that asked for it")
     record = record or ObserverRecord(sprint=ref)
     relaunch = record.launches > 0
     if not head:
@@ -2049,10 +2130,26 @@ def _launch_observer(
         # `with_pid_heartbeat` exists to tell apart from a live head. Close it before opening the
         # next one, or every respawn leaves a ghost pane in the observer's workspace. A pane that
         # refuses to close parks the relaunch: two heads on one sprint is worse than none.
-        if not stop_observer_head(runtime, record):
+        #
+        # Which stop that is belongs to the caller. The rotation's is conditional: the head is
+        # being replaced because it was judged finished, and a delivery that reached it after that
+        # judgement would be typed into a pane this line is about to take away, so the head runtime
+        # compares the judgement's epoch, and — only for a head the judgement found alive — the turn
+        # it may still be holding, under its own lock, and a head that is not quiet after all parks
+        # the relaunch instead. An emergency replacement's is not: it is here because the head is
+        # stuck, which is exactly the state a conditional stop refuses in.
+        if not stop_observer_head(
+            runtime,
+            record,
+            judgement=judgement if conditional_stop else None,
+        ):
             return _defer(
                 runtime, payload, observers, ref, record, head=head,
-                reason="previous observer terminal could not be stopped",
+                reason=(
+                    "the previous observer head was not quiet, or its terminal could not be stopped"
+                    if conditional_stop
+                    else "the previous observer head's terminal could not be stopped"
+                ),
             )
     try:
         # The prompt is rendered from the sprint as it reads right now, never from a copy taken
@@ -2554,6 +2651,19 @@ def _stop_observer(
     return _with_audit(outcome, commit_event(runtime, event))
 
 
+def _observer_activity_epoch(runtime: Any, record: ObserverRecord) -> int:
+    """This head's activity epoch as the head runtime holds it, for a conditional stop to compare.
+
+    Zero when the host cannot answer, which is the same value a head the runtime has never seen
+    has: a stop compares it against what the runtime holds now, so an unknowable epoch refuses the
+    conditional stop rather than widening it into an unconditional one.
+    """
+    try:
+        return int(runtime.host.observer_activity_epoch(record))
+    except (HostError, AttributeError, TypeError, ValueError):
+        return 0
+
+
 def _mark_stop_pending(record: ObserverRecord, state: str, reason: str) -> None:
     """Keep the head on the books after a refused stop, handle included, so the retry can find it."""
     now = time.time()
@@ -2565,11 +2675,36 @@ def _mark_stop_pending(record: ObserverRecord, state: str, reason: str) -> None:
         record.paused_at = now
 
 
-def stop_observer_head(runtime: Any, record: ObserverRecord) -> bool:
+def stop_observer_head(
+    runtime: Any, record: ObserverRecord, *, judgement: QuietStopJudgement | None = None
+) -> bool:
     """Stop one observer head. True when nothing of it is left running.
 
     False means the host refused the request and the head must be assumed alive, so the caller keeps
     the record and retries.
+
+    `judgement` picks which of the two stops this is, and the choice belongs to the caller because
+    only the caller knows why it is stopping:
+
+      * left out — "end this head now". A freeze, a sprint that is no longer open or no longer
+        declares an observer, a head that predates the sprint binding, a provider-policy refusal, an
+        operator, and the two emergency replacements — a head that refused every wake it was given,
+        and a head making no provider progress. None of them may be refused because the head happens
+        to look busy; the last two are taken down *for* looking busy while doing nothing, so making
+        their stop conditional would be refusing them for their own reason;
+      * given — "end this head *if it is still quiet*". The rotation before a relaunch is the one
+        that has to say this: it decided the head was finished, and between that decision and the
+        pane closing a delivery must not slip in. Both facts in the judgement were read when that
+        decision was made, not here. The head runtime compares the epoch, and for a head the
+        judgement found alive it also asks the backend about the turn it is still holding; then it
+        closes admission and stops, all under its own lock, so none of it can come apart. A head
+        that turns out not to be quiet is refused here and the caller defers.
+
+    The liveness half of the judgement is what keeps that refusal from being permanent. A head that
+    died mid-turn keeps its lease, and its pane — the wrapper shell Orca leaves behind, or no pane
+    at all — answers the runtime's probe with `busy`, which is also what a working head answers.
+    Handing the runtime the pid-heartbeat fact instead of leaving it to read a pane is what lets the
+    replacement of a dead head happen at all.
     """
     if not _needs_teardown(record):
         return True
@@ -2578,7 +2713,12 @@ def stop_observer_head(runtime: Any, record: ObserverRecord) -> bool:
         # the owned pane rather than signalling or replacing over it.
         return False
     try:
-        runtime.host.stop_observer(record)
+        if judgement is None:
+            runtime.host.stop_observer(record)
+        elif not runtime.host.stop_observer_if_quiescent(
+            record, judgement.activity_epoch, judgement.head_process_alive
+        ):
+            return False
     except HostError:
         return False
     record.handle = ""

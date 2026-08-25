@@ -38,6 +38,7 @@ from secretary.dispatcher_observer import (
     observer_pid_file,
     observer_request_id,
     observer_snapshot,
+    observer_wake_max_attempts,
     put_observers,
     render_observer_prompt,
     stop_observer_head,
@@ -340,6 +341,191 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             self.host.observer_identities[-1],
             {OBSERVER_SPRINT_ENV: "sprint:1", OBSERVER_GENERATION_ENV: record.generation},
         )
+
+    def test_a_rotation_that_finds_the_head_still_working_parks_instead_of_stopping_it(self) -> None:
+        """secretary-1462: the one stop that is conditional, refused because the head is not quiet.
+
+        The relaunch decided this head was finished and is about to take its pane away. The head
+        runtime checks the turn and this head's own epoch under the same lock the delivery takes,
+        so a head that turns out to be mid-turn is not stopped and the sprint waits a tick rather
+        than losing a live head's pane to its replacement.
+        """
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.kill_observer()
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="replacement needed", request_id="replacement-event",
+        )
+        self.host.observer_not_quiescent = True
+
+        result = self.runtime.production_tick()
+
+        self.assertIn("stop_observer_if_quiescent", self.host.calls)
+        self.assertNotIn("stop_observer", self.host.calls)
+        self.assertEqual(self.observers()["sprint:1"].launches, 1, "no replacement was brought up")
+        deferred = [
+            row for row in self.actions(result) if row["action"] == "observer-launch-deferred"
+        ]
+        self.assertTrue(deferred, [row["action"] for row in self.actions(result)])
+        self.assertIn("not quiet", deferred[0]["reason"])
+
+    def test_a_rotation_stops_the_head_it_replaces_once_it_is_quiet(self) -> None:
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.kill_observer()
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="replacement needed", request_id="replacement-event",
+        )
+
+        self.runtime.production_tick()
+
+        self.assertIn("stop_observer_if_quiescent", self.host.calls)
+        self.assertEqual(self.observers()["sprint:1"].launches, 2)
+
+    def test_the_rotation_hands_down_the_pid_evidence_that_made_it_judge_the_head_dead(self) -> None:
+        """secretary-1462 round 7: the conditional stop is owed the liveness fact, not left to guess.
+
+        The tick decides to replace this head because its pid heartbeat says the process is gone.
+        The head runtime cannot read that for itself — Orca answers about panes, and a pane says
+        `busy` for the wrapper shell a dead head leaves behind exactly as it does for a working one
+        — so the fact travels with the epoch, read at the same judgement, and the runtime skips the
+        pane probe instead of refusing the rotation on it forever.
+        """
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.kill_observer()
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="replacement needed", request_id="dead-head-event",
+        )
+
+        self.runtime.production_tick()
+
+        self.assertEqual(
+            [(ref, alive) for ref, _epoch, alive in self.host.observer_quiescent_stops],
+            [("sprint:1", False)],
+            "the rotation named the head's process dead, which is why it was rotating it",
+        )
+        self.assertEqual(self.observers()["sprint:1"].launches, 2)
+
+    def test_a_head_that_refused_every_wake_is_replaced_even_when_it_looks_busy(self) -> None:
+        """secretary-1462 round 5: an emergency replacement is not routed through the quiet stop.
+
+        The bounded wake retries are spent, so this head is stuck or gone and the sprint is getting
+        a new one. A conditional stop would refuse exactly here — the head looks busy, which is the
+        reason it is being replaced — and the sprint would sit behind a backoff on a head that
+        takes none of its prompts.
+        """
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="stuck-head-event",
+        )
+        self.host.observer_status_result = {"last_activity": time.time(), "idle": True}
+        # The head runtime would refuse a conditional stop of this head, however it is asked.
+        self.host.observer_not_quiescent = True
+        refusal = HostError("observer wake was not delivered: pane-stayed-ready")
+
+        with mock.patch.object(self.host, "nudge_observer", side_effect=refusal):
+            for _ in range(observer_wake_max_attempts() - 1):
+                self.runtime.production_tick()
+                self.expire_wake_retry()
+            replaced = self.runtime.production_tick()
+
+        action = self.actions(replaced)[0]
+        self.assertEqual(action["action"], "observer-relaunched")
+        self.assertIn("replaced after 3 failed wakes", action["reason"])
+        self.assertIn("stop_observer", self.host.calls)
+        self.assertNotIn("stop_observer_if_quiescent", self.host.calls)
+        self.assertEqual(self.observers()["sprint:1"].launches, 2)
+
+    def test_a_head_making_no_provider_progress_is_replaced_even_when_it_looks_busy(self) -> None:
+        """The other emergency replacement, and it is emergency for the same reason.
+
+        This head is up and its pane is working; what it is not doing is any provider work. It is
+        replaced *because* it looks busy and is not, so the stop that takes it down cannot be the
+        one that refuses a head for looking busy.
+        """
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.install_observer_provider_source()
+        self.host.observer_provider_progress = lambda record: self.observer_progress(  # type: ignore[method-assign]
+            record, "cursor:stalled"
+        )
+        self.host.observer_status_result = {
+            "last_activity": time.time(),
+            "idle": False,
+            "delivery_evidence": {"reason": "payload-left-in-composer"},
+        }
+        self.host.observer_not_quiescent = True
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="stalled-busy-head-event",
+        )
+
+        self.runtime.production_tick()
+        self.runtime.production_tick()
+        self.runtime.production_tick()
+        terminal = self.runtime.production_tick()
+
+        self.assertEqual(
+            [row["action"] for row in self.actions(terminal)], ["observer-relaunched"]
+        )
+        self.assertEqual(self.host.calls.count("stop_observer"), 1)
+        self.assertNotIn("stop_observer_if_quiescent", self.host.calls)
+        self.assertEqual(self.observers()["sprint:1"].launches, 2)
+
+    def test_the_rotation_carries_the_epoch_of_its_judgement_and_not_one_read_at_the_stop(
+        self,
+    ) -> None:
+        """secretary-1462 round 5: activity between the judgement and the stop refuses the stop.
+
+        The tick decides a head is finished long before it takes its pane away — here, from a dead
+        pid. Reading the epoch in the argument list of the stop would fold everything that happened
+        in between into the comparison and make it compare a value against itself. The epoch is
+        read where the judgement is made, so a head that proved itself alive afterwards keeps its
+        pane and the relaunch waits a tick.
+        """
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.kill_observer()
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="replacement needed", request_id="late-activity-event",
+        )
+        readiness = self.runtime.head_readiness
+
+        def head_printed_something(head: str):
+            # A wedge inside the launch, after the tick judged the head finished and before the
+            # stop: the head did something. Deterministic, and it needs no second thread — this is
+            # the one ordering the conditional stop exists to catch.
+            self.host.observer_activity_epochs["sprint:1"] = (
+                self.host.observer_activity_epochs.get("sprint:1", 0) + 1
+            )
+            return readiness(head)
+
+        with mock.patch.object(
+            self.runtime, "head_readiness", side_effect=head_printed_something
+        ):
+            result = self.runtime.production_tick()
+
+        self.assertIn("stop_observer_if_quiescent", self.host.calls)
+        self.assertNotIn("stop_observer", self.host.calls)
+        self.assertEqual(self.observers()["sprint:1"].launches, 1, "no replacement was brought up")
+        deferred = [
+            row for row in self.actions(result) if row["action"] == "observer-launch-deferred"
+        ]
+        self.assertTrue(deferred, [row["action"] for row in self.actions(result)])
+        self.assertIn("not quiet", deferred[0]["reason"])
 
     def _unbind_record(self, reference: str = "sprint:1") -> None:
         """Rewrite the record the way a state file written before the binding existed reads.

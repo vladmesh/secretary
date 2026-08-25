@@ -322,8 +322,6 @@ class CodexFanoutPolicyTests(unittest.TestCase):
 
         catalog = Catalog()
         runtime = CommandHostRuntime(catalog, self.root / "data", mode="noop")  # type: ignore[arg-type]
-        opens: list[object] = []
-        runtime._create_terminal = lambda *_args: opens.append(_args)  # type: ignore[method-assign]
         task = {"ref": "secretary-1428", "project": "secretary"}
         for role in ("worker", "reviewer"):
             with self.subTest(role=role):
@@ -334,7 +332,6 @@ class CodexFanoutPolicyTests(unittest.TestCase):
                 self.assertEqual(launched.head_run["fanout_policy"]["state"], "schema_absent")
         observer = runtime.prepare_observer({"ref": "sprint:1428"}, "codex-extra", prompt="# Sprint")
         self.assertEqual(observer["head_run"]["fanout_policy"]["state"], "schema_absent")
-        self.assertEqual(opens, [])
 
 
 if __name__ == "__main__":

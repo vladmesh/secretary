@@ -15,11 +15,20 @@ What is pinned here:
     and `observe` says `unsupported` for every question Orca genuinely cannot answer;
   * a turn is a `TurnLease` and an activity epoch held by the runtime, not `HeadRun.working`: a run
     that is durably `working` is not busy once the turn it was given has ended.
+
+secretary-1462 adds the order to it, and `SerialisedHeadTests` at the bottom is that: delivery,
+drain and stop for one head are serialised by the runtime itself, a delivery over a running turn or
+a drained head is refused with a value rather than queued, a drain closes admission without touching
+the turn, and `stop_if_quiescent` is a check and a stop that cannot be observed apart. Concurrency is
+pinned by wedging into the critical section through the fake host — `on_call` fires inside the
+session-manager call — never by sleeping and hoping.
 """
 
 from __future__ import annotations
 
+import threading
 import unittest
+from typing import Any
 
 from tests.fakes.host import FakeSessionHost
 from triggered_agents.runtime.head import (
@@ -52,7 +61,11 @@ from triggered_agents.runtime.head import (
     TurnLeaseError,
 )
 from triggered_agents.runtime.head import operations as head_operations
-from triggered_agents.runtime.orca_legacy_head import OrcaLegacyHeadRuntime
+from triggered_agents.runtime.orca_legacy_head import (
+    STOP_ACTIVITY_SINCE,
+    STOP_TURN_IN_FLIGHT,
+    OrcaLegacyHeadRuntime,
+)
 from triggered_agents.runtime.pane_host import Pane, PaneHostError
 
 CODEX = HeadSpec(profile_id="codex-worker", adapter="codex", effort="high", codex_mode="tui")
@@ -218,10 +231,10 @@ class HeadRuntimeContractTests(unittest.TestCase):
 
     def test_a_session_manager_failing_on_its_own_terms_is_not_classified_here(self) -> None:
         """A boundary that invented a classification for it would be guessing about the head."""
+        anchor = self.live_run()
         self.host.inventory_error = PaneHostError("orca terminal list failed")
 
         with self.assertRaises(PaneHostError):
-            anchor = self.live_run()
             self.bring_up(split_from=anchor.handle)
 
     # deliver ---------------------------------------------------------------
@@ -332,7 +345,7 @@ class HeadRuntimeContractTests(unittest.TestCase):
     # the turn lease and the activity epoch ---------------------------------
     def test_the_epoch_grows_when_the_head_is_seen_doing_something(self) -> None:
         run = self.live_run()
-        opened = self.runtime.activity.epoch
+        opened = self.runtime.activity.epoch(run.run_id)
 
         delivered = self.runtime.deliver(
             run, NudgePointer.line("report now"), transport=CONFIRMING
@@ -386,7 +399,12 @@ class HeadRuntimeContractTests(unittest.TestCase):
         with self.assertRaises(TurnLeaseError):
             activity.grant("run-1", "second")
 
-        self.assertEqual(activity.renew("run-1", "third").subject, "third")
+        self.assertFalse(
+            hasattr(activity, "renew"),
+            "a grant that evicts the turn it interrupts is the silent queue this card removed",
+        )
+        self.assertIsNotNone(activity.release("run-1"))
+        self.assertEqual(activity.grant("run-1", "third").subject, "third")
         self.assertIsNotNone(activity.release("run-1"))
         self.assertIsNone(activity.release("run-1"))
 
@@ -452,6 +470,578 @@ class HeadRuntimeContractTests(unittest.TestCase):
         self.assertEqual(receipt.handle, run.handle)
         self.assertEqual(receipt.leaf, run.leaf)
         self.assertEqual(self.host.calls, before, "an unsupported verb asks the host nothing")
+
+
+class SerialisedHeadTests(unittest.TestCase):
+    """secretary-1462: one owner, one lock, and no silent queue behind any of the three verbs."""
+
+    def setUp(self) -> None:
+        self.host = ProbeHost()
+        self.runtime = OrcaLegacyHeadRuntime(self.host)
+        self.task = TaskRef.card("secretary-1462", document=f"{WORKSPACE}/TASK.md")
+        self.stopper = StopInitiator(actor="dispatcher", reason="rotation")
+
+    def bring_up(self) -> HeadRun:
+        receipt = self.runtime.start(
+            CODEX,
+            WORKSPACE,
+            self.task,
+            command="run-worker",
+            title="secretary-1462 worker",
+            transport=CONFIRMING,
+        )
+        self.assertTrue(receipt.ok)
+        return receipt.run
+
+    def working(self) -> tuple[HeadRun, TurnLease]:
+        """A head that is mid-turn: it took a prompt and its pane is working on it."""
+        run = self.bring_up()
+        self.host.idle = False
+        receipt = self.runtime.deliver(
+            run, NudgePointer.line("do the work"), transport=CONFIRMING, subject="worker-nudge"
+        )
+        self.assertTrue(receipt.ok)
+        return run, receipt.lease
+
+    def epoch(self, run: HeadRun) -> int:
+        return self.runtime.activity.epoch(run.run_id)
+
+    # delivery is refused, never queued -------------------------------------
+    def test_a_delivery_on_top_of_a_running_turn_is_refused_and_never_typed(self) -> None:
+        run, lease = self.working()
+        typed = len(self.host.sent)
+
+        second = self.runtime.deliver(
+            run, NudgePointer.line("and this too"), transport=CONFIRMING
+        )
+
+        self.assertEqual(second.status, HEAD_BUSY)
+        self.assertTrue(second.deferred, "a busy head is worth delivering to again, later")
+        self.assertEqual(len(self.host.sent), typed, "nothing was typed on top of the running turn")
+        self.assertEqual(second.lease, lease, "the turn that was running is the one still running")
+
+    def test_a_delivery_after_a_drain_is_refused_as_draining_and_not_as_busy(self) -> None:
+        run = self.bring_up()
+        self.runtime.request_drain(run, StopInitiator(actor="operator"))
+        typed = len(self.host.sent)
+
+        refused = self.runtime.deliver(run, NudgePointer.line("more work"), transport=CONFIRMING)
+
+        self.assertEqual(refused.status, HEAD_DRAINING)
+        self.assertNotEqual(
+            refused.status, HEAD_BUSY, "a head that takes no more work is not a head mid-turn"
+        )
+        self.assertEqual(len(self.host.sent), typed, "a refusal delivers nothing, then or later")
+
+    def test_a_drain_closes_admission_and_leaves_the_running_turn_alone(self) -> None:
+        run, lease = self.working()
+
+        drained = self.runtime.request_drain(run, StopInitiator(actor="operator"))
+        refused = self.runtime.deliver(run, NudgePointer.line("more"), transport=CONFIRMING)
+
+        self.assertEqual(drained.lease, lease, "the drain did not take the turn away")
+        self.assertFalse(drained.rotation_ready, "a head still mid-turn is not ready to be replaced")
+        self.assertEqual(refused.status, HEAD_DRAINING)
+        self.assertEqual(
+            self.runtime.activity.lease(run.run_id), lease, "the refusal left the turn alone too"
+        )
+
+    def test_a_drained_head_is_ready_to_rotate_when_its_last_turn_closes(self) -> None:
+        run, _ = self.working()
+        self.runtime.request_drain(run, StopInitiator(actor="operator"))
+        self.assertFalse(self.runtime.observe(run).rotation_ready)
+
+        self.host.idle = True
+        rotated = self.runtime.observe(run)
+
+        self.assertIsNone(rotated.lease, "the last turn closed")
+        self.assertTrue(rotated.rotation_ready, "and the head is observably ready for its successor")
+
+    # the epoch is per head -------------------------------------------------
+    def test_one_head_s_epoch_does_not_move_when_another_head_works(self) -> None:
+        quiet = self.bring_up()
+        busy = self.bring_up()
+        unchanged = self.epoch(quiet)
+
+        self.runtime.deliver(busy, NudgePointer.line("work"), transport=CONFIRMING)
+
+        self.assertEqual(self.epoch(quiet), unchanged, "another head's turn is not this head's")
+        self.assertGreater(
+            self.runtime.activity.ticks, unchanged, "the runtime-wide counter is a separate value"
+        )
+        self.assertTrue(
+            self.runtime.stop_if_quiescent(
+                quiet, self.stopper, expected_activity_epoch=unchanged, head_process_alive=True
+            ).ok,
+            "a head nobody touched is still stoppable on the epoch its caller last read",
+        )
+
+    def test_an_observation_of_a_pane_with_no_output_clock_is_not_activity(self) -> None:
+        """"I looked and the pane cannot say when it last printed" is not "the head printed"."""
+        run = self.bring_up()
+        self.host.last_output_at = 0.0
+        quiet = self.epoch(run)
+
+        seen = self.runtime.observe(run)
+
+        self.assertEqual(seen.epoch, quiet, "an observation with no clock moved nothing")
+        self.assertEqual(self.epoch(run), quiet)
+        self.assertTrue(
+            self.runtime.stop_if_quiescent(
+                run, self.stopper, expected_activity_epoch=quiet, head_process_alive=True
+            ).ok,
+            "and a head that was only looked at is still quiet",
+        )
+
+    def test_a_pane_that_printed_is_activity(self) -> None:
+        run = self.bring_up()
+        quiet = self.epoch(run)
+        self.host.last_output_at = 2000.0
+
+        self.assertGreater(self.runtime.observe(run).epoch, quiet)
+
+    # stop_if_quiescent -----------------------------------------------------
+    def test_a_stop_if_quiescent_ends_a_head_nothing_has_happened_to(self) -> None:
+        run = self.bring_up()
+
+        receipt = self.runtime.stop_if_quiescent(
+            run, self.stopper, expected_activity_epoch=self.epoch(run), head_process_alive=True
+        )
+
+        self.assertEqual(receipt.status, HEAD_OK)
+        self.assertEqual(self.host.closed, [run.handle])
+
+    def test_a_stop_if_quiescent_refuses_a_stale_epoch_and_closes_nothing(self) -> None:
+        run = self.bring_up()
+        stale = self.epoch(run)
+        self.host.last_output_at = 2000.0
+        self.runtime.observe(run)
+
+        receipt = self.runtime.stop_if_quiescent(
+            run, self.stopper, expected_activity_epoch=stale, head_process_alive=True
+        )
+
+        self.assertEqual(receipt.status, HEAD_ALIVE)
+        self.assertEqual(receipt.reason, STOP_ACTIVITY_SINCE)
+        self.assertEqual(self.host.closed, [], "nothing was stopped")
+        self.assertTrue(
+            self.runtime.deliver(run, NudgePointer.line("carry on"), transport=CONFIRMING).ok,
+            "and admission was left exactly as it was",
+        )
+
+    def test_a_stop_if_quiescent_refuses_a_head_that_is_mid_turn(self) -> None:
+        """A live head that is working is not interrupted: the sprint's own definition of done."""
+        run, lease = self.working()
+
+        receipt = self.runtime.stop_if_quiescent(
+            run, self.stopper, expected_activity_epoch=self.epoch(run), head_process_alive=True
+        )
+
+        self.assertEqual(receipt.status, HEAD_BUSY)
+        self.assertEqual(receipt.reason, STOP_TURN_IN_FLIGHT)
+        self.assertEqual(receipt.lease, lease)
+        self.assertEqual(self.host.closed, [], "a head mid-turn keeps its pane")
+        self.assertTrue(self.runtime.activity.admits(run.run_id))
+
+    def test_a_stop_if_quiescent_reclaims_a_lease_whose_turn_the_backend_says_has_ended(self) -> None:
+        """A lease nobody saw close must not refuse the rotation of a live but finished head.
+
+        Only `deliver`, `observe` and `stop` ever release a lease, and on the path that rotates a
+        head none of the first two runs. For a head whose process the caller found alive, the pane
+        is the honest place to ask, and a pane that will take input again is a turn that has ended:
+        the lease is reclaimed and the stop goes through. What must never depend on that answer is
+        the head whose process is gone — `..._rotates_a_head_that_died_mid_turn` is that one.
+        """
+        run, _ = self.working()
+        self.host.idle = True
+
+        receipt = self.runtime.stop_if_quiescent(
+            run, self.stopper, expected_activity_epoch=self.epoch(run), head_process_alive=True
+        )
+
+        self.assertEqual(receipt.status, HEAD_OK)
+        self.assertEqual(self.host.closed, [run.handle])
+        self.assertIsNone(self.runtime.activity.lease(run.run_id))
+
+    def test_a_stop_if_quiescent_refuses_a_turn_the_probe_could_not_say_had_ended(self) -> None:
+        """"I could not tell" is not permission for a *live* head: it keeps its pane.
+
+        The refusal is bounded by the head being alive, and that is what makes it a refusal a caller
+        can wait out: this head is running and will finish its turn. The same pane answer about a
+        head whose process is gone is not read at all, because it would be a refusal nothing could
+        ever lift.
+        """
+        run, lease = self.working()
+        self.host.idle = None
+
+        receipt = self.runtime.stop_if_quiescent(
+            run, self.stopper, expected_activity_epoch=self.epoch(run), head_process_alive=True
+        )
+
+        self.assertEqual(receipt.status, HEAD_BUSY)
+        self.assertEqual(receipt.reason, STOP_TURN_IN_FLIGHT)
+        self.assertEqual(receipt.lease, lease)
+        self.assertEqual(self.host.closed, [], "nothing was stopped")
+        self.assertTrue(self.runtime.activity.admits(run.run_id))
+
+    def test_a_stop_if_quiescent_rotates_a_head_that_died_mid_turn(self) -> None:
+        """The invariant: a head that is not alive never stops its own replacement happening.
+
+        This is the ordinary way a head fails — it dies while it is working, so its lease is still
+        outstanding and Orca is left holding the wrapper shell `with_pid_heartbeat` puts around it.
+        That shell answers the idle probe exactly as a working agent does, `busy`, because
+        `terminal_readiness` asks about a pane and not about a turn. Reading it here refused the
+        rotation in the one state rotation exists for, and refused it forever: nothing else on this
+        path moves the epoch or closes the lease, so every following tick got the same answer.
+
+        The caller's pid-heartbeat evidence outranks the pane, so the probe is not made at all.
+        """
+        run, _ = self.working()
+        # What the real Orca answers for a bare shell with no agent TUI on it, measured.
+        self.host.idle = False
+        probed: list[str] = []
+        self.host.on_call = probed.append
+
+        receipt = self.runtime.stop_if_quiescent(
+            run, self.stopper, expected_activity_epoch=self.epoch(run), head_process_alive=False
+        )
+        self.host.on_call = None
+
+        self.assertEqual(receipt.status, HEAD_OK)
+        self.assertEqual(self.host.closed, [run.handle], "the ghost pane went with it")
+        self.assertIsNone(
+            self.runtime.activity.lease(run.run_id),
+            "a lease held by a process that is gone named a turn that ended with it",
+        )
+        self.assertNotIn(
+            "wait_idle", probed, "a dead head's pane is not asked to authorise its own replacement"
+        )
+
+    def test_a_dead_head_is_rotated_however_many_ticks_have_asked_before(self) -> None:
+        """The refusal was permanent, so its repair is checked over more than one tick.
+
+        Nothing between two ticks of the rotation changes: the epoch only moves for `acted` and
+        `observed`, and neither runs for a head the tick has judged dead. A repair that only made
+        the first attempt succeed would leave the same trap one tick further along.
+        """
+        run, _ = self.working()
+        self.host.idle = False
+        epoch = self.epoch(run)
+
+        outcomes = [
+            self.runtime.stop_if_quiescent(
+                run, self.stopper, expected_activity_epoch=epoch, head_process_alive=False
+            ).status
+            for _ in range(3)
+        ]
+
+        self.assertEqual(outcomes[0], HEAD_OK, "the first tick already rotated it")
+        self.assertEqual(self.host.closed, [run.handle], "and it was stopped exactly once")
+
+    def test_a_stop_if_quiescent_still_refuses_a_live_head_whose_pane_it_could_not_read(
+        self,
+    ) -> None:
+        """Liveness outranking readiness is not readiness being ignored.
+
+        The pane says nothing useful in both of these, and the difference is entirely the process:
+        the head that is alive keeps its turn, and the head that is gone is replaced.
+        """
+        alive, _ = self.working()
+        self.host.idle = None
+
+        refused = self.runtime.stop_if_quiescent(
+            alive, self.stopper, expected_activity_epoch=self.epoch(alive), head_process_alive=True
+        )
+
+        self.assertEqual(refused.status, HEAD_BUSY)
+        self.assertEqual(self.host.closed, [], "a live head is never interrupted")
+
+        dead, _ = self.working()
+        allowed = self.runtime.stop_if_quiescent(
+            dead, self.stopper, expected_activity_epoch=self.epoch(dead), head_process_alive=False
+        )
+
+        self.assertEqual(allowed.status, HEAD_OK)
+        self.assertEqual(self.host.closed, [dead.handle])
+
+    def test_a_dead_head_that_moved_since_the_judgement_is_still_refused_on_its_epoch(self) -> None:
+        """The liveness fact skips the pane probe. It does not skip the epoch.
+
+        A judgement that has expired has expired whatever it said about the process — the caller
+        reads both at the same moment, so a stale liveness reading travels with a stale epoch and
+        the epoch is what catches it. This refusal is exitable: the next tick judges again.
+        """
+        run = self.bring_up()
+        stale = self.epoch(run)
+        self.host.idle = False
+        self.assertTrue(
+            self.runtime.deliver(run, NudgePointer.line("one more"), transport=CONFIRMING).ok
+        )
+
+        receipt = self.runtime.stop_if_quiescent(
+            run, self.stopper, expected_activity_epoch=stale, head_process_alive=False
+        )
+
+        self.assertEqual(receipt.status, HEAD_ALIVE)
+        self.assertEqual(receipt.reason, STOP_ACTIVITY_SINCE)
+        self.assertEqual(self.host.closed, [], "nothing was stopped")
+        self.assertTrue(
+            self.runtime.stop_if_quiescent(
+                run,
+                self.stopper,
+                expected_activity_epoch=self.epoch(run),
+                head_process_alive=False,
+            ).ok,
+            "and a caller that looks again gets its stop",
+        )
+
+    def test_a_stop_if_quiescent_reads_the_epoch_before_it_asks_about_the_turn(self) -> None:
+        """The epoch is what guards this stop, so it is what decides it, and it decides it first.
+
+        The lease can be reclaimed from the backend, so it is not a barrier a caller may lean on.
+        A head that has done something since the caller formed its judgement is refused on that
+        alone — its pane is never even probed, because the answer could not matter.
+        """
+        run = self.bring_up()
+        # The epoch the caller read when it judged this head finished.
+        stale = self.epoch(run)
+        # A delivery lands between that judgement and the stop, and takes a turn.
+        self.host.idle = False
+        self.assertTrue(
+            self.runtime.deliver(
+                run, NudgePointer.line("one more thing"), transport=CONFIRMING
+            ).ok
+        )
+        self.assertNotEqual(self.epoch(run), stale)
+        probed: list[str] = []
+        self.host.on_call = probed.append
+
+        receipt = self.runtime.stop_if_quiescent(
+            run, self.stopper, expected_activity_epoch=stale, head_process_alive=True
+        )
+        self.host.on_call = None
+
+        self.assertEqual(receipt.status, HEAD_ALIVE)
+        self.assertEqual(receipt.reason, STOP_ACTIVITY_SINCE)
+        self.assertEqual(self.host.closed, [], "nothing was stopped")
+        self.assertEqual(
+            probed, [], "a head that moved is refused without asking its pane anything",
+        )
+
+    def test_a_stop_that_could_not_be_confirmed_puts_the_head_back_in_service(self) -> None:
+        run = self.bring_up()
+        self.host.refuse_close = True
+
+        receipt = self.runtime.stop_if_quiescent(
+            run, self.stopper, expected_activity_epoch=self.epoch(run), head_process_alive=True
+        )
+
+        self.assertEqual(receipt.status, HEAD_ALIVE)
+        self.assertTrue(
+            self.runtime.activity.admits(run.run_id),
+            "nothing was stopped, so nothing was taken out of service either",
+        )
+
+    def test_a_refused_stop_does_not_re_open_an_admission_a_drain_had_closed(self) -> None:
+        run = self.bring_up()
+        self.runtime.request_drain(run, StopInitiator(actor="operator"))
+        self.host.refuse_close = True
+
+        self.runtime.stop_if_quiescent(
+            run, self.stopper, expected_activity_epoch=self.epoch(run), head_process_alive=True
+        )
+
+        self.assertFalse(
+            self.runtime.activity.admits(run.run_id), "the drain outlives the stop that failed"
+        )
+
+    def test_a_teardown_owns_its_own_failure_and_the_head_stays_in_service(self) -> None:
+        """The observer's stop is Orca's worktree teardown, and it runs inside the same section."""
+        run = self.bring_up()
+        torn: list[str] = []
+
+        def teardown() -> None:
+            torn.append("tried")
+            raise RuntimeError("the worktree would not go")
+
+        with self.assertRaises(RuntimeError):
+            self.runtime.stop_if_quiescent(
+                run,
+                self.stopper,
+                expected_activity_epoch=self.epoch(run),
+                head_process_alive=True,
+                teardown=teardown,
+            )
+
+        self.assertEqual(torn, ["tried"])
+        self.assertTrue(self.runtime.activity.admits(run.run_id))
+
+    def test_a_teardown_is_not_reached_at_all_by_a_refused_stop_if_quiescent(self) -> None:
+        run, _ = self.working()
+        torn: list[str] = []
+
+        receipt = self.runtime.stop_if_quiescent(
+            run,
+            self.stopper,
+            expected_activity_epoch=self.epoch(run),
+            head_process_alive=True,
+            teardown=lambda: torn.append("tried"),
+        )
+
+        self.assertEqual(receipt.status, HEAD_BUSY)
+        self.assertEqual(torn, [], "the check and the teardown are one thing, in that order")
+
+    def test_a_teardown_stop_reports_the_epoch_this_head_actually_ended_on(self) -> None:
+        """The observer's teardown forgets the head on its way out, so the epoch is taken first.
+
+        `stop_observer` calls `forget_head`, which is right — it is the cleanup the `stop` verb does
+        for itself. Counting the stop afterwards started from nothing and put `1` on the receipt of
+        a head that had been through several turns.
+        """
+        run = self.bring_up()
+        self.host.idle = True
+        self.assertTrue(
+            self.runtime.deliver(run, NudgePointer.line("work"), transport=CONFIRMING).ok
+        )
+        before = self.epoch(run)
+        self.assertGreater(before, 1)
+
+        receipt = self.runtime.stop_if_quiescent(
+            run,
+            self.stopper,
+            expected_activity_epoch=before,
+            head_process_alive=True,
+            teardown=lambda: self.runtime.forget_head(run.run_id),
+        )
+
+        self.assertEqual(receipt.status, HEAD_OK)
+        self.assertEqual(receipt.epoch, before + 1)
+
+    # what the boundary owes rather than its callers ------------------------
+    def test_a_bring_up_over_a_head_that_is_running_a_turn_is_a_receipt_not_an_exception(
+        self,
+    ) -> None:
+        """A caller that mints its own run id gets the boundary's refusal, not a `TurnLeaseError`.
+
+        The observer bring-up passes a run id it persisted. A second bring-up on it while a turn is
+        outstanding used to reach the grant and raise, which is the one thing every other refusal on
+        this boundary does not do. Nothing is opened: the session manager is not reached at all.
+        """
+        run, lease = self.working()
+        opened = len(self.host.panes_by_workspace.get(WORKSPACE, []))
+
+        receipt = self.runtime.start(
+            CODEX,
+            WORKSPACE,
+            self.task,
+            command="run-worker",
+            title="secretary-1462 worker",
+            run=run,
+            transport=CONFIRMING,
+        )
+
+        self.assertEqual(receipt.status, HEAD_BUSY)
+        self.assertEqual(receipt.lease, lease)
+        self.assertEqual(
+            len(self.host.panes_by_workspace.get(WORKSPACE, [])),
+            opened,
+            "nothing was opened for a head that is already up",
+        )
+
+    def test_a_head_ended_by_a_stop_this_runtime_did_not_perform_can_still_be_forgotten(
+        self,
+    ) -> None:
+        """An observer's real stop is Orca's worktree teardown, and it owes the runtime this.
+
+        Without it the epoch, the output mark and the admission of every head the production loop
+        ever launched stay in a runtime that lives as long as the loop does.
+        """
+        run, _ = self.working()
+        self.runtime.request_drain(run, StopInitiator(actor="operator"))
+        self.assertTrue(self.runtime.activity.epoch(run.run_id))
+
+        self.runtime.forget_head(run.run_id)
+
+        self.assertEqual(self.runtime.activity.epoch(run.run_id), 0)
+        self.assertIsNone(self.runtime.activity.lease(run.run_id))
+        self.assertTrue(self.runtime.activity.admits(run.run_id))
+
+    # the lock --------------------------------------------------------------
+    def test_no_other_thread_is_inside_the_critical_section_of_a_delivery(self) -> None:
+        """Deterministic, and no sleep: the wedge runs *inside* the session-manager call."""
+        run = self.bring_up()
+        got_in: list[bool] = []
+
+        def probe_from_another_thread(call: str) -> None:
+            if call != "send":
+                return
+
+            def attempt() -> None:
+                entered = self.runtime._lock.acquire(blocking=False)
+                got_in.append(entered)
+                if entered:
+                    self.runtime._lock.release()
+
+            other = threading.Thread(target=attempt)
+            other.start()
+            other.join()
+
+        self.host.on_call = probe_from_another_thread
+        receipt = self.runtime.deliver(run, NudgePointer.line("work"), transport=CONFIRMING)
+        self.host.on_call = None
+
+        self.assertTrue(receipt.ok)
+        self.assertTrue(got_in, "the wedge never ran, so this proved nothing")
+        self.assertEqual(
+            set(got_in), {False}, "the delivery held the lock across every host call it made"
+        )
+
+    def test_a_workspace_teardown_is_inside_the_same_critical_section_as_the_verbs(self) -> None:
+        """For an observer head the worktree teardown *is* the stop, so it is serialised too."""
+        self.bring_up()
+        got_in: list[bool] = []
+
+        def probe_from_another_thread(call: str) -> None:
+            if call != "stop_workspace":
+                return
+
+            def attempt() -> None:
+                entered = self.runtime._lock.acquire(blocking=False)
+                got_in.append(entered)
+                if entered:
+                    self.runtime._lock.release()
+
+            other = threading.Thread(target=attempt)
+            other.start()
+            other.join()
+
+        self.host.on_call = probe_from_another_thread
+        self.runtime.stop_workspace(WORKSPACE)
+        self.host.on_call = None
+
+        self.assertEqual(got_in, [False], "the teardown held the lock across the host call")
+
+    def test_a_delivery_that_arrives_mid_delivery_is_refused_by_the_state_it_finds(self) -> None:
+        """The lock orders them; the turn taken before the host call is what refuses the second."""
+        run = self.bring_up()
+        self.host.idle = False
+        wedged: list[Any] = []
+
+        def deliver_again(call: str) -> None:
+            if call != "send" or wedged:
+                return
+            wedged.append(None)
+            wedged[0] = self.runtime.deliver(
+                run, NudgePointer.line("second"), transport=CONFIRMING
+            )
+
+        self.host.on_call = deliver_again
+        first = self.runtime.deliver(run, NudgePointer.line("first"), transport=CONFIRMING)
+        self.host.on_call = None
+
+        self.assertTrue(first.ok)
+        self.assertEqual(wedged[0].status, HEAD_BUSY)
+        self.assertEqual(wedged[0].lease.lease_id, first.lease.lease_id)
 
 
 if __name__ == "__main__":

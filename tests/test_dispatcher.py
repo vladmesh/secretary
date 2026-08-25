@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import inspect
 import json
 import os
@@ -165,6 +166,13 @@ from triggered_agents.runtime.agent_prompt_transport import (
 )
 from triggered_agents.runtime.head import operations as head_ops
 from triggered_agents.runtime.head import (
+    HEAD_DRAINING,
+    HeadCommand,
+    HEAD_OK,
+    DeliverReceipt,
+    HeadRun,
+    HeadSpec,
+    TaskRef,
     render_head_command,
     with_pid_heartbeat,
     wrap_role_command,
@@ -9549,6 +9557,120 @@ class WorkerDurabilityTests(unittest.TestCase):
         nested.write_text("prefix collision, not the runtime tail\n", encoding="utf-8")
         with self.assertRaises(HostError):
             self.host.verify_worker_result({}, self.record)
+
+
+class ObserverLaunchDeliveryRefusalTests(unittest.TestCase):
+    """secretary-1462: a bring-up reads its own receipt, not the absence of an exception.
+
+    `HEAD_DRAINING` is a non-ok receipt with no `failure` on it, and once the drain gate is wired
+    this bring-up can meet one. A launch that decided success from `failure is None` would report a
+    head that was handed its sprint prompt when nothing was ever typed into it.
+    """
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.workspace = self.root / "observer-workspace"
+        self.workspace.mkdir()
+        catalog = FakeCatalog()
+        # Like the real catalog for a TUI observer: the head comes up empty and is handed its
+        # sprint prompt afterwards, which is the delivery this test is about.
+        catalog.head_launch = lambda *_args, **_kwargs: HeadCommand(  # type: ignore[method-assign]
+            "codex", prompt_after_start=True, adapter="codex"
+        )
+        self.host = CommandHostRuntime(catalog, self.root / "data", mode="real")  # type: ignore[arg-type]
+        self.host._create_observer_workspace = lambda _ref: self.workspace  # type: ignore[method-assign]
+        self.host._open_head_pane = lambda run, _title, _command: dataclasses.replace(  # type: ignore[method-assign]
+            run, handle="term:observer", leaf="leaf:observer"
+        )
+        self.stopped: list[str] = []
+        self.host._stop_observer_terminals = (  # type: ignore[method-assign]
+            lambda workspace, **_kwargs: self.stopped.append(workspace)
+        )
+
+    def _refuse(self, receipt) -> None:
+        self.host._head_runtime.deliver = lambda *_args, **_kwargs: receipt  # type: ignore[method-assign]
+
+    def test_a_launch_prompt_refused_by_the_drain_gate_is_not_a_delivered_launch(self) -> None:
+        self._refuse(
+            DeliverReceipt(status=HEAD_DRAINING, reason="a drain was requested for this head")
+        )
+
+        with self.assertRaises(dispatcher_module.ObserverLaunchAborted):
+            self.host.prepare_observer({"ref": "sprint:1462"}, "codex-observer", prompt="# Sprint")
+
+        self.assertEqual(
+            self.stopped, [str(self.workspace)], "the pane it opened was taken back down"
+        )
+
+    def test_a_delivered_launch_prompt_is_still_a_delivered_launch(self) -> None:
+        run = HeadRun(
+            run_id="observer-run-1",
+            spec=HeadSpec(profile_id="codex-observer", adapter="codex"),
+            workspace=str(self.workspace),
+            task_ref=TaskRef.sprint("sprint:1462"),
+            handle="term:observer",
+            leaf="leaf:observer",
+        )
+        self._refuse(DeliverReceipt(status=HEAD_OK, run=run))
+
+        prepared = self.host.prepare_observer(
+            {"ref": "sprint:1462"}, "codex-observer", prompt="# Sprint"
+        )
+
+        self.assertTrue(prepared["prompt_delivered"])
+        self.assertEqual(self.stopped, [])
+
+
+class ObserverUnconditionalStopTests(unittest.TestCase):
+    """secretary-1462: the stop that is not the `stop` verb still owes the runtime its cleanup.
+
+    An observer's real stop is Orca's worktree teardown, so it never reaches `HeadRuntime.stop` and
+    never reaches the forgetting that verb does for itself. The head runtime is built once per
+    `CommandHostRuntime` and lives as long as the production loop, so without this every head the
+    loop ever launched leaves an epoch, an output mark and an admission entry behind it.
+    """
+
+    def setUp(self) -> None:
+        from types import SimpleNamespace
+
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        root = Path(self.tmpdir.name)
+        self.host = CommandHostRuntime(FakeCatalog(), root / "data", mode="real")  # type: ignore[arg-type]
+        self.record = SimpleNamespace(
+            sprint="sprint:1462",
+            head="codex-observer",
+            handle="term:observer",
+            leaf="leaf:observer",
+            workspace=str(root / "observer-workspace"),
+            pid_file="",
+            head_run=HeadRun(
+                run_id="observer-run-1462",
+                spec=HeadSpec(profile_id="codex-observer", adapter="codex"),
+                workspace=str(root / "observer-workspace"),
+                task_ref=TaskRef.sprint("sprint:1462"),
+                role="observer",
+                handle="term:observer",
+                leaf="leaf:observer",
+            ).to_json(),
+        )
+        self.torn_down: list[Any] = []
+        self.host._stop_observer_head = self.torn_down.append  # type: ignore[method-assign]
+
+    def test_an_unconditional_observer_stop_leaves_nothing_of_the_head_in_the_runtime(self) -> None:
+        activity = self.host.head_runtime.activity
+        activity.acted("observer-run-1462")
+        activity.grant("observer-run-1462", "observer-wake")
+        activity.close_admission("observer-run-1462")
+
+        self.host.stop_observer(self.record)
+
+        self.assertEqual(self.torn_down, [self.record], "the teardown still ran")
+        self.assertEqual(activity.epoch("observer-run-1462"), 0)
+        self.assertIsNone(activity.lease("observer-run-1462"))
+        self.assertTrue(activity.admits("observer-run-1462"))
 
 
 class ReportPromptDeliveryTests(unittest.TestCase):
