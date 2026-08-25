@@ -735,6 +735,123 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
         self.assertFalse(self.runtime.activity.admits(run.run_id))
         self.assertIn(DRAIN_AFTER_PARTIAL_DELIVERY, self.deliver_line(run, "glue").reason)
 
+    def test_a_live_head_at_the_connection_bound_is_refused_and_not_closed_for_good(self) -> None:
+        """A bound the substrate calls normal must not end a head in this runtime's memory.
+
+        At its connection bound the supervisor accepts the socket, writes a refusal frame and lets
+        go — without registering the connection, without reading a byte of any request, and having
+        said exactly that in the frame. So the payload below is provably never offered and the
+        head's terminal is never touched. A `deliver` that read that frame for its contents without
+        believing its `ok` went on writing into a socket whose peer had gone, read the `EPIPE` as
+        "admitted, then unanswerable" — which is fatal by design — and closed for the rest of this
+        runtime's life a head that was alive, idle and merely popular. That is the collapse this
+        sprint exists to remove, arriving the other way round: not alive looking dead, but alive
+        being *made* dead by a limit that clears itself.
+        """
+        run = self.live_run()
+        head = self.head_pid_of(run)
+        address = self.runtime._address(run)  # noqa: SLF001 - the test is the backend's own
+        held = []
+        for _ in range(protocol.CONNECTION_MAX_CLIENTS):
+            client = SupervisorClient.connect(address.socket_path)
+            held.append(client)
+            self.addCleanup(client.close)
+            # The supervisor counts the bound, so an answer is what proves this connection is part
+            # of it; connecting only proves the kernel took it.
+            self.assertTrue(client.status()["ok"], "the supervisor never took this connection")
+
+        receipt = self.deliver_line(run, "a nudge nobody was ever offered")
+
+        self.assertEqual(receipt.status, HEAD_BUSY, receipt.reason)
+        self.assertTrue(receipt.deferred, "somebody else letting go makes this worth making again")
+        self.assertEqual(receipt.evidence["error"], protocol.ERROR_CONNECTION_LIMIT)
+        self.assertEqual(receipt.delivered_bytes, 0)
+        self.assertEqual(receipt.offered_bytes, 0, "nothing was offered, so nothing was")
+        self.assertIsNone(receipt.lease, "a refused delivery started no turn")
+        # Nothing about this head was closed: not its admission here, not the register that
+        # remembers a payload nobody could account for, and not its terminal.
+        self.assertTrue(self.runtime.activity.admits(run.run_id), "a live head was closed for good")
+        self.assertNotIn(run.run_id, self.runtime._fatal)  # noqa: SLF001 - the backend's own
+        self.assertNotIn(run.run_id, self.runtime._unfinished)  # noqa: SLF001 - the backend's own
+        self.assertEqual(self.payloads_delivered(), 0, "the terminal was touched after all")
+        self.assertTrue(_alive(head), "the head died of a connection limit")
+        held.pop().close()
+        self.assertFalse(self._status(address.socket_path)["draining"], "the substrate was drained")
+
+        def delivered() -> bool:
+            return self.deliver_line(run, "and now this").status == HEAD_OK
+
+        self._await(delivered, message="the head never took a payload again")
+
+    def test_a_refusal_over_an_unsettled_delivery_is_about_the_payload_it_refuses(self) -> None:
+        """Two things one refusal has to get right: whose numbers it carries, and which name it is.
+
+        A payload refused because an earlier one is still being written was never offered either,
+        so its receipt carries the byte counts every other refusal of this verb carries — none.
+        What the *earlier* delivery did is a fact about that delivery and travels on `evidence`,
+        where a reader asks for it by name instead of reading it off a receipt about somebody else.
+
+        And a head that has been drained is `HEAD_DRAINING` even while a delivery of its own is
+        still unsettled: `HEAD_BUSY` would send a caller back to a head that will never take a
+        payload again.
+        """
+        self._rebuild_runtime(delivery_timeout=0.4)
+        run = self._stuck_head(delivery_seconds=60.0)
+
+        first = self.deliver_line(run, "x" * (protocol.INPUT_MAX_BYTES - 1))
+        self.assertEqual(first.evidence.outcome, DELIVERY_STILL_GOING)
+        self.assertGreater(first.delivered_bytes, 0, "nothing landed, so this is a different case")
+
+        second = self.deliver_line(run, "behind it")
+
+        self.assertEqual(second.status, HEAD_BUSY, second.reason)
+        self.assertEqual(second.delivered_bytes, 0, "the earlier payload's bytes, on this receipt")
+        self.assertEqual(second.offered_bytes, 0, "this payload was never offered")
+        self.assertEqual(second.evidence.outcome, DELIVERY_STILL_GOING, "the earlier delivery")
+        self.assertGreater(second.evidence.written, 0, "what it did is on the evidence, by name")
+
+        self.runtime.request_drain(run, StopInitiator(actor="operator", reason="rotating"))
+        third = self.deliver_line(run, "and after the drain")
+
+        self.assertEqual(third.status, HEAD_DRAINING, third.reason)
+        self.assertEqual(third.evidence.outcome, DELIVERY_STILL_GOING, "the earlier delivery")
+
+    def test_a_delivery_settled_as_having_landed_nothing_hands_its_turn_back(self) -> None:
+        """A settlement draws the consequence `deliver` draws for the same outcome, or it lies.
+
+        `DELIVERY_LANDED_NOTHING` means the kernel took not one byte, so no turn was ever started
+        and the lease granted for it is handed back. That is what the in-line path does, and a
+        settlement is the same question asked later rather than a second way of answering it: a
+        head whose delivery ended this way must not be left holding a turn nobody is running just
+        because this runtime stopped watching before the substrate finished.
+        """
+        self._rebuild_runtime(delivery_timeout=0.3)
+        run = self._stuck_head(delivery_seconds=2.0)
+        self._fill_the_terminal(run)
+
+        first = self.deliver_line(run, "not one byte of this can land")
+
+        self.assertEqual(first.evidence.outcome, DELIVERY_STILL_GOING)
+        self.assertEqual(first.delivered_bytes, 0, "something landed, so this is not the case")
+        self.assertIsNotNone(first.lease, "the delivery was admitted, so a turn was granted")
+        # The substrate ends it on its own bound, with the terminal exactly as it found it.
+        self._await(
+            lambda: len(self.events(run).of_kind(INPUT_ACCEPTED)) >= 2,
+            timeout=20.0,
+            message="the substrate never ended the delivery this runtime stopped watching",
+        )
+        self.assertEqual(self.events(run).of_kind(INPUT_ACCEPTED)[-1]["bytes"], 0)
+
+        settled = self.runtime._settle(run)  # noqa: SLF001 - the test is the backend's own
+
+        self.assertIsNone(settled, "the delivery had ended, so there is nothing outstanding")
+        self.assertIsNone(
+            self.runtime.activity.lease(run.run_id),
+            "a settlement that landed nothing kept a turn the in-line path hands back",
+        )
+        self.assertTrue(self.runtime.activity.admits(run.run_id), "the head was closed for nothing")
+        self.assertNotIn(run.run_id, self.runtime._unfinished)  # noqa: SLF001 - the backend's own
+
     def test_a_payload_over_the_declared_limit_is_refused_and_the_head_is_untouched(self) -> None:
         run = self.live_run()
 
@@ -883,6 +1000,11 @@ class LocalPtyAttachTests(LocalPtyRuntimeTestCase):
             client = SupervisorClient.connect(self.root / run.run_id / protocol.SOCKET_NAME)
             held.append(client)
             self.addCleanup(client.close)
+            # An answer is what proves the supervisor has *registered* this connection. Connecting
+            # only proves the kernel took it, and the bound is counted by the supervisor: without
+            # this, a loaded host reaches the verb below before the last connection is counted and
+            # the test measures the race instead of the bound.
+            self.assertTrue(client.status()["ok"], "the supervisor never took this connection")
 
         refused = self.runtime.attach(run)
 

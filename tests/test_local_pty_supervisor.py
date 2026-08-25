@@ -737,6 +737,43 @@ class LocalPtySubstrateTests(unittest.TestCase):
         self.assertEqual(answer["error"], protocol.ERROR_CONNECTION_LIMIT)
         self.assertEqual(answer["limit"], protocol.CONNECTION_MAX_CLIENTS)
 
+    def test_an_answer_to_an_abandoned_request_is_not_read_as_this_request_s_refusal(self) -> None:
+        """The queue read after a failed write is subject to the id, like every other read.
+
+        The recovery above reads whatever the supervisor said before it let go. What it must not
+        do is hand back an answer that names a *different* question: an id on a frame says which
+        request it answers, and the request that just failed to be sent is not that one. Without
+        the check, a client that had abandoned an earlier request would take that stale answer as
+        this one's news and stay one answer out of step for the rest of its life — the exact
+        desynchronisation the id exists to prevent, arriving through the one path that reads the
+        queue without having asked anything.
+        """
+        directory = Path(tempfile.mkdtemp(prefix="lp-stale-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(str(directory / "socket"))
+        listener.listen(1)
+
+        client = SupervisorClient.connect(directory / "socket", timeout=5.0)
+        self.addCleanup(client.close)
+        conn, _ = listener.accept()
+        # An answer to a question this client stopped waiting for, and then the news that is
+        # really its own, in that order.
+        conn.sendall(protocol.encode_frame({"ok": True, "alive": False, protocol.REQUEST_ID: 1}))
+        conn.sendall(protocol.encode_frame(protocol.connection_refusal(8)))
+        conn.close()
+        self._await(
+            lambda: bool(select.select([client._conn], [], [], 0)[0]),  # noqa: SLF001
+            message="the frames never reached the caller",
+        )
+
+        answer = client.status()
+
+        self.assertEqual(answer["error"], protocol.ERROR_CONNECTION_LIMIT, "a stale answer won")
+        self.assertNotIn("alive", answer, "the abandoned request's answer became this one's")
+        self.assertEqual(client.stale_frames, 1, "the stale frame was not counted as one")
+
     def test_connections_are_bounded_as_well_as_attachments(self) -> None:
         handle = self._start(run_id="connections")
         held = []

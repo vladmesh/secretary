@@ -294,14 +294,25 @@ class SupervisorClient:
         """A frame this connection was given before it could be written to, or `None`.
 
         Only ever consulted when a request could not be sent at all. A stream event is not an
-        answer to anything and is skipped; anything else the supervisor said before letting go is
-        this caller's news, and it is the whole of it.
+        answer to anything and is skipped, and so is a frame that carries an id: an id names the
+        request it answers, and the request that just failed to be sent is not that one. Only an
+        uncorrelated frame — a connection refused before anything was asked on it, a refusal of
+        bytes too malformed to carry an id — is this caller's news, and it is the whole of it.
+
+        Skipping the correlated ones is the same rule `request` keeps below, kept here as well
+        because this is the one path that reads the queue without having asked anything: without
+        it, an answer to an abandoned earlier request would become this request's answer, which
+        is exactly the desynchronisation the id exists to prevent.
         """
         try:
             while True:
                 frame = self._next_frame()
-                if "event" not in frame:
-                    return frame
+                if "event" in frame:
+                    continue
+                if frame.get(protocol.REQUEST_ID) is not None:
+                    self.stale_frames += 1
+                    continue
+                return frame
         except (LocalPtyError, OSError):
             return None
 

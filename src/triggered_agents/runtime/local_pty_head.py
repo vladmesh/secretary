@@ -79,7 +79,9 @@ A delivery that settles as `DELIVERY_LEFT_A_PREFIX` closes the head there exactl
 closed it inside `deliver`, so the next payload meets `HEAD_DRAINING` naming the fragment rather
 than the terminal it would have been glued to; one that settles as still in flight is `HEAD_BUSY`,
 because the substrate is still carrying the payload this runtime gave it; one that settles as
-arrived or as having landed nothing costs the head nothing and is simply forgotten.
+arrived or as having landed nothing costs the head nothing and is simply forgotten. Every one of
+those consequences is the one `deliver` itself draws for that outcome — a settlement is the same
+question asked later, so it must not be able to answer it differently.
 
 **What `HEAD_OK` / `DELIVERY_ARRIVED` means, and it is stronger than the byte count.** It means
 the head received *this payload as its own message* — not that these bytes were written. What is
@@ -572,24 +574,32 @@ class LocalPtyHeadRuntime:
             # stopped, so a settlement that finds a fragment closes the head here and this
             # delivery meets that refusal below rather than the fragment.
             unfinished = self._settle(run)
+            if not self.activity.admits(run.run_id):
+                # Admission is checked before the earlier delivery is reported on, and in this
+                # order deliberately: a head this runtime hands no more work is `HEAD_DRAINING`
+                # whatever else is true of it, and answering `HEAD_BUSY` for a drained head would
+                # tell a caller to come back to a head that will never take a payload again. The
+                # settlement above still had to run first — it is what may have closed admission.
+                return DeliverReceipt(
+                    status=HEAD_DRAINING,
+                    run=run,
+                    reason=self._fatal.get(run.run_id) or DELIVER_NOT_ADMITTED,
+                    evidence=unfinished,
+                    epoch=self.activity.epoch(run.run_id),
+                    lease=self.activity.lease(run.run_id),
+                    rotation_ready=self.activity.rotatable(run.run_id),
+                )
             if unfinished is not None:
+                # Refused, and refused before this payload was offered: the byte counts are left
+                # at zero exactly as they are for every other refusal of this verb. What the
+                # *earlier* delivery did is a fact about that delivery and travels on `evidence`,
+                # because a receipt whose numbers are true of somebody else's payload is a receipt
+                # that reads as true and says the wrong thing.
                 return DeliverReceipt(
                     status=HEAD_BUSY,
                     run=run,
                     reason=DELIVER_EARLIER_IN_FLIGHT,
                     evidence=unfinished,
-                    delivery_state=unfinished.state,
-                    delivered_bytes=unfinished.written,
-                    offered_bytes=unfinished.offered,
-                    epoch=self.activity.epoch(run.run_id),
-                    lease=self.activity.lease(run.run_id),
-                    rotation_ready=self.activity.rotatable(run.run_id),
-                )
-            if not self.activity.admits(run.run_id):
-                return DeliverReceipt(
-                    status=HEAD_DRAINING,
-                    run=run,
-                    reason=self._fatal.get(run.run_id) or DELIVER_NOT_ADMITTED,
                     epoch=self.activity.epoch(run.run_id),
                     lease=self.activity.lease(run.run_id),
                     rotation_ready=self.activity.rotatable(run.run_id),
@@ -876,7 +886,7 @@ class LocalPtyHeadRuntime:
                 client.close()
                 error = str(answer.get("error") or "")
                 return AttachReceipt(
-                    status=_attach_refusal_status(error),
+                    status=_refusal_status(error),
                     run=run,
                     reason=error or "the supervisor refused the attachment",
                     evidence=answer,
@@ -1052,8 +1062,9 @@ class LocalPtyHeadRuntime:
         Two answers, and exactly one of them is ever not `None`. The line between them is
         **whether the payload can still be known not to have been offered**, and it is drawn
         deliberately rather than by where an exception happens to be caught. Before the request
-        goes onto the socket, a supervisor that cannot be spoken to is a `_Refusal`: the head's
-        terminal was provably never touched. From that moment on nothing is a refusal any more —
+        goes onto the socket, a supervisor that cannot be spoken to — or one that answers the
+        question asked there with a refusal of its own — is a `_Refusal`: the head's terminal was
+        provably never touched. From that moment on nothing is a refusal any more —
         every ending is a `DeliveryReport`, and the worst one of those can say is that what
         became of the payload could not be established.
         """
@@ -1077,9 +1088,22 @@ class LocalPtyHeadRuntime:
                 # them, so an id alone would let a record from a previous incarnation of a reused
                 # run directory answer for this delivery. Nothing has been offered yet at this
                 # point, so a supervisor that cannot answer here is a refusal.
-                floor = int(client.status().get("journal_seq") or 0)
+                status = client.status()
             except _UNREACHABLE as exc:
                 return None, self._unreachable_refusal(address, run, exc)
+            if not status.get("ok"):
+                # A refusal the supervisor *stated*, and the frame it stated it in is the whole of
+                # this caller's news. At the connection bound the supervisor accepts the socket,
+                # writes this frame and lets go without registering the connection or reading a
+                # byte of any request — so the payload below was never offered and the head's
+                # terminal was never touched. Believing the frame's contents without believing its
+                # `ok` was how a live head at a self-clearing bound got closed for good: the write
+                # that followed met `EPIPE` and became "admitted, then unanswerable", which is
+                # fatal by design. It also left `floor` at 0, which is the bound this backend
+                # introduced precisely so that a reused run directory's older records cannot
+                # answer for a fresh delivery.
+                return None, _stated_refusal(status)
+            floor = int(status.get("journal_seq") or 0)
             try:
                 answer = client.send_input(payload, subject=subject)
             except _UNREACHABLE as exc:
@@ -1126,7 +1150,7 @@ class LocalPtyHeadRuntime:
         deadline = time.monotonic() + self._delivery_timeout
         while True:
             try:
-                delivery = client.status().get("delivery")
+                status = client.status()
             except _UNREACHABLE as exc:
                 # Admitted, and then nobody left to ask. The journal is the other witness and it
                 # is on this host's disk, so it is read before anything is concluded; only if it
@@ -1134,6 +1158,16 @@ class LocalPtyHeadRuntime:
                 return self._report_of(
                     address, last, offered, floor, established=False, detail=str(exc)
                 )
+            if not status.get("ok"):
+                # A frame that declines the question is not an answer about this delivery, and
+                # believing its (absent) `delivery` key would read a supervisor that refused as a
+                # supervisor that said nothing had landed. It ends this watch the same way a
+                # silent socket does, and for the same reason: the journal is the witness left.
+                return self._report_of(
+                    address, last, offered, floor,
+                    established=False, detail=_refusal_detail(status),
+                )
+            delivery = status.get("delivery")
             if isinstance(delivery, dict) and int(delivery.get("id") or 0) == delivery_id:
                 last = delivery
                 if delivery.get("state") != protocol.DELIVERY_IN_FLIGHT:
@@ -1276,11 +1310,12 @@ class LocalPtyHeadRuntime:
         """Account for a delivery this runtime stopped watching. The answer, or `None`.
 
         `None` means there is nothing outstanding for this head — either nothing was recorded, or
-        what was recorded has now ended and its consequences have been applied here: a fragment on
-        the terminal closes the head exactly as it would have in `deliver`, and an ending that left
-        the terminal untouched costs it nothing. A report is returned only while the substrate is
-        *still* writing the earlier payload, which is the one case where the caller must be refused
-        rather than admitted.
+        what was recorded has now ended and its consequences have been applied here. They are the
+        consequences `deliver` would have drawn for the same outcome, drawn by the same names: a
+        fragment on the terminal closes the head through `_close_head`, an ending that took not one
+        byte hands the turn back, and an arrival costs the head nothing. A report is returned only
+        while the substrate is *still* writing the earlier payload, which is the one case where the
+        caller must be refused rather than admitted.
         """
         pending = self._unfinished.get(run.run_id)
         if pending is None:
@@ -1293,6 +1328,11 @@ class LocalPtyHeadRuntime:
         self._unfinished.pop(run.run_id, None)
         if report.fatal:
             self._close_head(run, report)
+        elif report.outcome == DELIVERY_LANDED_NOTHING:
+            # Nothing reached the terminal, so no turn was ever started by it and the lease that
+            # was granted for it is handed back — the same consequence the in-line path draws for
+            # the same outcome, in one of the two places a delivery can end.
+            self.activity.release(run.run_id)
         return None
 
     def _resolve(self, run: HeadRun, pending: DeliveryReport) -> DeliveryReport:
@@ -1326,17 +1366,26 @@ class LocalPtyHeadRuntime:
         established = False
         try:
             with self._connect(address) as client:
-                delivery = client.status().get("delivery")
+                status = client.status()
         except _UNREACHABLE as exc:
             detail = str(exc)
         else:
-            if isinstance(delivery, dict) and int(delivery.get("id") or 0) == pending.delivery_id:
-                # A witness answered about this delivery, which is what `established` means — not
-                # that the delivery has ended. A supervisor still writing it says `in_flight`, and
-                # that is an answer: it settles as `DELIVERY_STILL_GOING` again rather than as a
-                # fate nobody could establish.
-                last = delivery
-                established = True
+            if not status.get("ok"):
+                # The supervisor declined the question rather than answering it, so it witnessed
+                # nothing here: the journal is left to say what this delivery did.
+                detail = _refusal_detail(status)
+            else:
+                delivery = status.get("delivery")
+                if (
+                    isinstance(delivery, dict)
+                    and int(delivery.get("id") or 0) == pending.delivery_id
+                ):
+                    # A witness answered about this delivery, which is what `established` means —
+                    # not that the delivery has ended. A supervisor still writing it says
+                    # `in_flight`, and that is an answer: it settles as `DELIVERY_STILL_GOING`
+                    # again rather than as a fate nobody could establish.
+                    last = delivery
+                    established = True
         return self._report_of(
             address, last, pending.offered, pending.floor,
             established=established, detail=detail,
@@ -1445,7 +1494,13 @@ class LocalPtyHeadRuntime:
                 answer = client.drain(initiator.actor or "dispatcher")
                 if not answer.get("ok"):
                     return False, answer
-                return bool(client.status().get("draining")), answer
+                status = client.status()
+                if not status.get("ok"):
+                    # The drain was accepted and the read-back was declined. `head_signalled` is
+                    # claimed from what `status` says, so a frame that says nothing about draining
+                    # cannot support the claim — and the refusal it does carry is the evidence.
+                    return False, status
+                return bool(status.get("draining")), answer
         except _UNREACHABLE as exc:
             return False, str(exc)
 
@@ -1456,6 +1511,12 @@ class LocalPtyHeadRuntime:
 
         A head whose supervisor has died is exactly the case where the confirmation below matters:
         nothing was asked, and whether the head is gone is still decided by its launch identity.
+
+        This is the one reader in this file that does not test `ok` before it returns, and that is
+        the point of it rather than an omission: the answer is carried as evidence and is never
+        believed by anything. A refusal, an unknown op and a supervisor that died mid-request all
+        mean the same thing here — the stop was not taken by the socket — and `_await_head_gone`
+        decides the outcome from the launch identity either way.
         """
         try:
             with self._connect(address) as client:
@@ -1575,21 +1636,54 @@ class _Refusal:
     evidence: Any = None
 
 
-def _attach_refusal_status(error: str) -> str:
-    """Which status a refused attachment is, by what the supervisor refused it with.
+def _refusal_status(error: str) -> str:
+    """Which status a refusal the supervisor *stated* is, by what it refused with.
+
+    One mapping for every verb that is refused before it asked for anything, because the fact is
+    the same one whichever verb met it: the supervisor said no, and it said no with a name.
 
     Only a head the supervisor says has gone is `HEAD_GONE`. Both bounds — the attach limit and
     the connection limit — are refusals worth making again the moment somebody else lets go, and
     reporting a live head sitting at one of them as a head that ended is exactly the collapse
     ("alive looks dead") this sprint exists to remove. Anything else the supervisor can refuse
-    with is an answer *from* a live supervisor about a live head, so it is `HEAD_ALIVE` too: the
-    attachment did not happen, and the head is still the caller's to account for.
+    with is an answer *from* a live supervisor about a live head, so it is `HEAD_ALIVE` too: what
+    was asked did not happen, and the head is still the caller's to account for.
     """
     if error in (protocol.ERROR_ATTACH_LIMIT, protocol.ERROR_CONNECTION_LIMIT):
         return HEAD_BUSY
     if error == protocol.ERROR_HEAD_GONE:
         return HEAD_GONE
     return HEAD_ALIVE
+
+
+def _refusal_detail(answer: Mapping[str, Any]) -> str:
+    """What a supervisor's refusal frame says, in the order a reader wants it: detail, then name."""
+    return (
+        str(answer.get("detail") or "")
+        or str(answer.get("error") or "")
+        or "the head's supervisor answered nothing this runtime can read"
+    )
+
+
+def _stated_refusal(answer: Mapping[str, Any]) -> _Refusal:
+    """A refusal the supervisor stated to a question asked *before* any payload was offered.
+
+    The second half of this backend's rule about delivery state, and it is the half a stated
+    refusal makes the difference for: state is never invented, and a state the substrate stated is
+    never thrown away. A frame that is not `ok` is the supervisor declining the question — the
+    connection bound is the reachable one, and it is a bound the substrate itself treats as normal
+    and self-clearing — so it classifies as a refusal *before* the offer, never as an unknown fate
+    after one. Reading such a frame for its contents and going on to write is how a head nothing
+    had touched came to be closed for the rest of this runtime's life.
+    """
+    error = str(answer.get("error") or "")
+    detail = _refusal_detail(answer)
+    return _Refusal(
+        status=_refusal_status(error),
+        reason=detail,
+        failure=HeadNudgeFailed(detail),
+        evidence=answer,
+    )
 
 
 def _admission_refusal(answer: Mapping[str, Any]) -> _Refusal:
