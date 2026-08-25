@@ -28,6 +28,10 @@ from typing import Any
 
 from .. import role_env
 from ..codex_preflight import codex_home, codex_trust_paths
+# The two backend names a profile may choose between. They live beside the backends themselves
+# rather than here, because this package names no session manager and one of them is an Orca
+# backend's name; what this module owns is the *rule* that a profile names one of them.
+from ..head_runtimes import DEFAULT_HEAD_RUNTIME, HEAD_RUNTIMES
 from ..launch_prefix import pythonpath_prefix
 
 # Efforts each adapter accepts, and what its command line calls them. They live here rather than
@@ -95,6 +99,11 @@ def validate_launch_shape(profile_id: str, profile: Mapping[str, Any]) -> None:
     `HeadSpec.from_profile` for a single profile — so a head refused at load time and a head refused
     at bring-up are refused by the same rule. Only the launch shape: whether the resource a profile
     names exists, and whether its fallback chain points anywhere, stay with the registry.
+
+    `runtime` is part of the launch shape and is checked here for the same reason: the name a
+    profile gives its backend has to be refused when the table is read, not when the head is
+    raised. It is checked independently of the adapter, because the two are orthogonal — any of
+    `HEAD_RUNTIMES` may hold any of the adapters — and an absent one is `DEFAULT_HEAD_RUNTIME`.
     """
     adapter = _named(profile.get("adapter"), f"profile {profile_id!r} adapter")
     if adapter not in _ADAPTERS:
@@ -124,6 +133,18 @@ def validate_launch_shape(profile_id: str, profile: Mapping[str, Any]) -> None:
             raise HeadCommandError(
                 f"profile {profile_id!r} has unknown claude effort {effort!r} (known: {known})"
             )
+    # The backend, checked here and nowhere else, and checked for *every* adapter rather than
+    # inside one of the branches above: which backend holds a head is independent of which CLI the
+    # head runs, so there is no combination of the two this rule may accept for one adapter and
+    # refuse for another.
+    runtime = _named(
+        profile.get("runtime", DEFAULT_HEAD_RUNTIME), f"profile {profile_id!r} runtime"
+    )
+    if runtime not in HEAD_RUNTIMES:
+        known = ", ".join(HEAD_RUNTIMES)
+        raise HeadCommandError(
+            f"profile {profile_id!r} has unknown runtime {runtime!r} (known: {known})"
+        )
 
 
 def _named(value: object, what: str) -> str:

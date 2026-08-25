@@ -1249,41 +1249,65 @@ class TheSubstrateSBoundsNeverEndAHeadTests(LocalPtyRuntimeTestCase):
         self.assertTrue(_alive(head))
 
 
-class TheBackendIsNotWiredInTests(unittest.TestCase):
-    """Criterion 10: this card builds a backend. Nothing selects it, and nothing runs on it."""
+class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
+    """What is left of `TheBackendIsNotWiredInTests` once a profile may name this backend.
 
-    def test_the_substrate_has_exactly_one_consumer_and_it_is_this_backend(self) -> None:
+    secretary-1466 built this backend and asserted that nothing selected it: the substrate had one
+    consumer, no product module imported the backend, the dispatcher built `OrcaLegacyHeadRuntime`
+    and only that, and no registry named `local-pty`. secretary-1467 is the card that makes a
+    profile able to name it, so the first three of those are **cancelled on purpose** — the
+    dispatcher now imports this backend and builds it when a profile asks for it, which is the
+    whole point of that card — and they are replaced here by the properties that survive the
+    wiring rather than deleted:
+
+      * the substrate is still reached only through its one backend. The dispatcher names the
+        *backend*; nothing outside it reaches past that into `head.local_pty`;
+      * the dispatcher builds its backends in exactly one place. Per-profile selection is a
+        resolver, not an `if` at each caller, so a second construction site is a defect;
+      * **no profile of the registry this product ships runs on it.** That one is unchanged, and it
+        is the half that still says what secretary-1467 deliberately did not do: the canary is a
+        change to the installation's own canon, not to the product.
+    """
+
+    def test_the_substrate_is_reached_only_through_its_one_backend(self) -> None:
         package = REPO / "src" / "triggered_agents" / "runtime" / "head" / "local_pty"
         backend = REPO / "src" / "triggered_agents" / "runtime" / "local_pty_head.py"
+        substrate = "triggered_agents.runtime.head.local_pty"
         offenders = []
         for path in (REPO / "src").rglob("*.py"):
             if package in path.parents or path == backend:
                 continue
-            if "local_pty" in path.read_text(encoding="utf-8"):
-                offenders.append(str(path.relative_to(REPO)))
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                names = []
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                    names = [node.module]
+                if any(name == substrate or name.startswith(substrate + ".") for name in names):
+                    offenders.append(str(path.relative_to(REPO)))
         self.assertEqual(offenders, [], "the substrate is reached from outside its one backend")
 
-    def test_nothing_in_the_product_imports_this_backend(self) -> None:
-        backend = REPO / "src" / "triggered_agents" / "runtime" / "local_pty_head.py"
-        offenders = []
-        for path in (REPO / "src").rglob("*.py"):
-            if path == backend:
-                continue
-            if "local_pty_head" in path.read_text(encoding="utf-8"):
-                offenders.append(str(path.relative_to(REPO)))
-        self.assertEqual(offenders, [], "a card that only builds a backend wired it in")
-
-    def test_the_dispatcher_still_builds_the_legacy_backend_for_every_head(self) -> None:
+    def test_the_dispatcher_builds_its_backends_in_exactly_one_place(self) -> None:
+        """Criterion 4 of secretary-1467: one resolver, not an `if` in each caller."""
         source = (REPO / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
         tree = ast.parse(source)
-        built = {
-            node.func.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id.endswith("HeadRuntime")
-        }
-        self.assertEqual(built, {"OrcaLegacyHeadRuntime"})
+        sites = {}
+        for holder in ast.walk(tree):
+            if not isinstance(holder, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for node in ast.walk(holder):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id.endswith("HeadRuntime")
+                ):
+                    sites.setdefault(holder.name, set()).add(node.func.id)
+
+        self.assertEqual(sorted(sites), ["_head_runtime_named"], "a second place builds a backend")
+        self.assertEqual(
+            sites["_head_runtime_named"], {"OrcaLegacyHeadRuntime", "LocalPtyHeadRuntime"}
+        )
 
     def test_no_profile_and_no_registry_names_this_backend(self) -> None:
         offenders = []

@@ -31,9 +31,12 @@ from typing import Any
 
 from triggered_agents.runtime.head import (
     EXITED,
+    HEAD_ALIVE,
     HEAD_BUSY,
     HEAD_DRAINING,
+    HEAD_GONE,
     HEAD_OK,
+    HEAD_UNSUPPORTED,
     RECEIPT_STATUSES,
     HeadRun,
     HeadRuntime,
@@ -115,17 +118,52 @@ class HeadRuntimeContract:
             self.assertNotIsInstance(receipt, (bool, dict))
             self.assertIn(receipt.status, RECEIPT_STATUSES)
 
-    def test_a_refusal_is_one_of_the_four_things_it_can_be_and_never_two(self) -> None:
-        """`deferred`, `left_alive` and `unsupported` partition the refusals on both backends."""
-        run = self.live_run()
+    def test_what_a_receipt_says_about_itself_is_read_off_its_status_and_nothing_else(self) -> None:
+        """`ok`, `deferred`, `left_alive` and `unsupported` are each exactly one status class.
 
-        for receipt in (
-            self.runtime.observe(run),
-            self.attached(run),
-            self.runtime.request_drain(run, StopInitiator(actor="operator")),
-        ):
-            flags = [receipt.ok, receipt.deferred, receipt.left_alive, receipt.unsupported]
-            self.assertLessEqual(sum(1 for flag in flags if flag), 1, receipt.status)
+        Strengthened in secretary-1467, and the previous version is why. It asked only for "at most
+        one flag" and it asked it of three receipts against a live head, every one of which is
+        `ok` — so it held for any backend that set `ok` and no other flag, which is every backend
+        that can bring a head up at all. It could not have failed. What is asked here instead is
+        the classification itself, against the same statuses *and* against the refusals a head this
+        backend cannot address produces: each status maps to exactly the flags named below, so a
+        backend that reported a refusal as deferred-and-alive, or a `gone` head as merely deferred,
+        fails — and both halves have to actually occur, or the test says so rather than passing on
+        the half it saw.
+        """
+        expected = {
+            HEAD_OK: {"ok"},
+            HEAD_BUSY: {"deferred"},
+            HEAD_DRAINING: {"deferred"},
+            HEAD_ALIVE: {"left_alive"},
+            HEAD_UNSUPPORTED: {"unsupported"},
+            # A refusal that left nothing behind is the one status with no flag of its own: there
+            # is nothing to come back to and nothing to account for.
+            HEAD_GONE: set(),
+        }
+        live = self.live_run()
+        adrift = self.adrift_run()
+        receipts = [
+            self.runtime.observe(live),
+            self.attached(live),
+            self.runtime.request_drain(live, StopInitiator(actor="operator")),
+            self.deliver_line(live, "and this, after the drain"),
+            self.runtime.observe(adrift),
+            self.runtime.attach(adrift),
+            self.runtime.request_drain(adrift, StopInitiator(actor="operator")),
+        ]
+
+        seen = set()
+        for receipt in receipts:
+            flags = {
+                name
+                for name in ("ok", "deferred", "left_alive", "unsupported")
+                if getattr(receipt, name)
+            }
+            self.assertEqual(flags, expected[receipt.status], f"{receipt.status}: {receipt.reason}")
+            seen.add(receipt.status)
+        self.assertIn(HEAD_OK, seen, "no receipt in this test was an ok one")
+        self.assertTrue(seen - {HEAD_OK}, "no refusal was exercised, so nothing was classified")
 
     # -- start ----------------------------------------------------------------------------------
 

@@ -458,7 +458,14 @@ from triggered_agents.runtime.head import (
 from triggered_agents.runtime.head import (
     OBSERVE_READINESS_UNKNOWN as _OBSERVE_READINESS_UNKNOWN,
 )
+from triggered_agents.runtime.head_runtimes import (
+    DEFAULT_HEAD_RUNTIME,
+    HEAD_RUNTIMES,
+    LOCAL_PTY_RUNTIME,
+    ORCA_LEGACY_RUNTIME,
+)
 from triggered_agents.runtime.launch_prefix import pythonpath_prefix
+from triggered_agents.runtime.local_pty_head import LocalPtyHeadRuntime
 from triggered_agents.runtime.orca_legacy_head import OrcaLegacyHeadRuntime
 from triggered_agents.runtime.pane_host import (
     OrcaSessionHost,
@@ -905,6 +912,24 @@ class DispatcherHeadTransport:
         )
 
 
+def _head_runtime_name(subject: Any) -> str:
+    """Which backend the thing a lifecycle call was given is held by, as a name.
+
+    The one reader of `HeadSpec.runtime` outside the spec itself. Every lifecycle site already
+    holds one of three things — the run it is acting on, the spec that run was launched from, or
+    nothing at all — so this takes all three rather than making each caller reach for the same
+    attribute. `None` (an operation that names no head, such as an Orca workspace teardown) is the
+    product default, and so is anything that carries no runtime of its own: absence has meant
+    `orca-legacy` since before the key existed and goes on meaning it here.
+    """
+    if subject is None:
+        return DEFAULT_HEAD_RUNTIME
+    if isinstance(subject, str):
+        return subject or DEFAULT_HEAD_RUNTIME
+    spec = getattr(subject, "spec", subject)
+    return str(getattr(spec, "runtime", "") or DEFAULT_HEAD_RUNTIME)
+
+
 class CommandHostRuntime:
     def __init__(self, catalog: InstanceCatalog, data_dir: Path, *, mode: str = "real") -> None:
         self.catalog = catalog
@@ -917,10 +942,13 @@ class CommandHostRuntime:
         # The owner installs one entry before it asks this host to open a Codex pane, keyed by the
         # HeadRun id in that intent so a same-workspace respawn cannot inherit a predecessor's source.
         self._codex_provider_ingresses: dict[str, CodexProviderEventIngress] = {}
-        # The one boundary a head's life is lived through. Long-lived, unlike the session host it
-        # builds per call, because the turn leases and the activity epoch are what it holds: a
-        # runtime rebuilt on every access would have no memory of the turns it handed out.
-        self._head_runtime = OrcaLegacyHeadRuntime(lambda: self.session)
+        # The boundaries a head's life is lived through, one per backend a profile can name. Held
+        # rather than rebuilt per access, because the turn leases and the activity epoch are what
+        # they hold: a runtime rebuilt on every access would have no memory of the turns it handed
+        # out. Built lazily and cached by name, so a dispatcher whose registry names only
+        # `orca-legacy` never constructs the other one — which is the whole of what "no profile is
+        # on local-pty" costs at runtime.
+        self._head_runtimes: dict[str, Any] = {}
 
     def configure_codex_provider_ingress(
         self,
@@ -1364,7 +1392,7 @@ class CommandHostRuntime:
 
             failure: Exception | None = None
             try:
-                receipt = self.head_runtime.deliver(
+                receipt = self.head_runtime_for(lifecycle_run).deliver(
                     lifecycle_run,
                     head_ops.NudgePointer(text=_observer_launch_prompt()),
                     transport=self._head_transport(
@@ -1442,7 +1470,8 @@ class CommandHostRuntime:
         if self.mode == "noop":
             return
         self._stop_observer_head(record)
-        self.head_runtime.forget_head(self._observer_lifecycle_run(record).run_id)
+        observer_run = self._observer_lifecycle_run(record)
+        self.head_runtime_for(observer_run).forget_head(observer_run.run_id)
 
     def _stop_observer_head(self, record: Any) -> None:
         """Give Orca back the pane, the process and the worktree one observer bring-up took."""
@@ -1499,7 +1528,8 @@ class CommandHostRuntime:
         """
         if self.mode == "noop":
             return 0
-        return self.head_runtime.activity.epoch(self._observer_lifecycle_run(record).run_id)
+        observer_run = self._observer_lifecycle_run(record)
+        return self.head_runtime_for(observer_run).activity.epoch(observer_run.run_id)
 
     def stop_observer_if_quiescent(
         self, record: Any, expected_activity_epoch: int, head_process_alive: bool
@@ -1520,8 +1550,9 @@ class CommandHostRuntime:
         """
         if self.mode == "noop":
             return True
-        receipt = self.head_runtime.stop_if_quiescent(
-            self._observer_lifecycle_run(record),
+        observer_run = self._observer_lifecycle_run(record)
+        receipt = self.head_runtime_for(observer_run).stop_if_quiescent(
+            observer_run,
             head_ops.StopInitiator(actor=STOPPED_BY_DISPATCHER),
             expected_activity_epoch=expected_activity_epoch,
             head_process_alive=head_process_alive,
@@ -1535,7 +1566,8 @@ class CommandHostRuntime:
             return {}
         if not record.workspace or not (record.handle or record.leaf):
             raise HostError("observer record names no terminal to read")
-        seen = self.head_runtime.observe(self._observer_lifecycle_run(record))
+        observer_run = self._observer_lifecycle_run(record)
+        seen = self.head_runtime_for(observer_run).observe(observer_run)
         if seen.reason == _OBSERVE_PANE_DISCONNECTED:
             raise HostError("observer terminal is not connected")
         if seen.reason == _OBSERVE_READINESS_UNKNOWN:
@@ -1658,8 +1690,9 @@ class CommandHostRuntime:
             # is what a launch has always been confirmed by, and it says the same thing about a
             # wake. What stays out of band is the causal acknowledgement, not the delivery: the
             # observer still quotes the delivery id in the resume it writes from this turn.
-            receipt = self.head_runtime.deliver(
-                replace(self._observer_lifecycle_run(record), handle=current),
+            waking = replace(self._observer_lifecycle_run(record), handle=current)
+            receipt = self.head_runtime_for(waking).deliver(
+                waking,
                 head_ops.NudgePointer(text=message),
                 transport=self._head_transport(
                     workspace, adapter=adapter, role=OBSERVER_ROLE, ack_out_of_band=True,
@@ -1711,7 +1744,7 @@ class CommandHostRuntime:
             run = replace(
                 run, run_id=head_ops.new_run_id(), lifecycle=head_ops.SPAWNED, stopped_by=None,
             )
-        receipt = self.head_runtime.stop(
+        receipt = self.head_runtime_for(run).stop(
             replace(run, handle=handle, leaf=""), head_ops.StopInitiator(actor=STOPPED_BY_DISPATCHER),
         )
         if not receipt.ok:
@@ -1868,7 +1901,7 @@ class CommandHostRuntime:
                 ingress.poll()
         document, nudge = self._review_document(task, record)
         try:
-            receipt = self.head_runtime.deliver(
+            receipt = self.head_runtime_for(run).deliver(
                 run,
                 head_ops.NudgePointer(text=nudge, document=str(document)),
                 transport=self._head_transport(
@@ -2200,7 +2233,7 @@ class CommandHostRuntime:
     ) -> None:
         """End this card's reviewer through the head operation, recording who ended it."""
         run = self.review_lifecycle_run(record)
-        receipt = self.head_runtime.stop(
+        receipt = self.head_runtime_for(run).stop(
             run,
             head_ops.StopInitiator(actor=initiator),
             transport=self._head_transport(record.workspace, role="reviewer"),
@@ -2260,7 +2293,7 @@ class CommandHostRuntime:
     ) -> None:
         """End this card's worker through the head operation, recording who ended it."""
         run = self.worker_lifecycle_run(record)
-        receipt = self.head_runtime.stop(
+        receipt = self.head_runtime_for(run).stop(
             run,
             head_ops.StopInitiator(actor=initiator),
             transport=self._head_transport(record.workspace, role="worker"),
@@ -2700,8 +2733,9 @@ class CommandHostRuntime:
             # pointer text is the legacy shape, not an empty prompt — that head is sent the prompt
             # file's own contents; a caller with a task document passes the bounded line naming it.
             pointer = head_ops.NudgePointer(text=launch_prompt or "", document=prompt_document)
-        receipt = self.head_runtime.start(
-            self._head_spec(head, adapter),
+        spec = self._head_spec(head, adapter)
+        receipt = self.head_runtime_for(spec).start(
+            spec,
             workspace,
             task_ref,
             command=command,
@@ -2898,9 +2932,61 @@ class CommandHostRuntime:
         )
 
     @property
-    def head_runtime(self) -> OrcaLegacyHeadRuntime:
-        """The typed boundary every head lifecycle operation of this dispatcher goes through."""
-        return self._head_runtime
+    def head_runtime(self) -> Any:
+        """The boundary for an operation that names no head: the product's default backend.
+
+        What is left on this property is exactly the work that is not one head's: Orca's own
+        workspace teardown, which names a worktree rather than a head. Everything that acts on a
+        head goes through `head_runtime_for`, which builds the backend that head's own profile
+        named.
+        """
+        return self.head_runtime_for(None)
+
+    def head_runtime_for(self, subject: Any = None) -> Any:
+        """The backend this head is held by — the one place a `runtime` value becomes an object.
+
+        One resolver rather than a branch at each caller: every lifecycle site hands over the head
+        it is acting on (a `HeadRun`, a `HeadSpec`, or the name itself) and is handed back the
+        backend that head's profile named, so no caller has to know that there is more than one.
+        `None` is the operation that names no head at all and gets the product default.
+
+        The value is read off the head rather than re-resolved from the registry, because the
+        registry can be repointed while a head is running: a head raised on one backend has to go
+        on being observed and stopped through that backend until it ends.
+        """
+        return self._head_runtime_named(_head_runtime_name(subject))
+
+    def _head_runtime_named(self, name: str) -> Any:
+        """Build — or hand back — the one instance of the backend called `name`.
+
+        An unknown name cannot arrive from a validated registry (`validate_launch_shape` refuses it
+        when the table loads), so reaching this refusal means a record or a caller invented one,
+        and it fails closed by name rather than falling back to a backend the head is not on.
+        """
+        held = self._head_runtimes.get(name)
+        if held is not None:
+            return held
+        if name == ORCA_LEGACY_RUNTIME:
+            built: Any = OrcaLegacyHeadRuntime(lambda: self.session)
+        elif name == LOCAL_PTY_RUNTIME:
+            built = LocalPtyHeadRuntime(
+                self._local_pty_root(), head_process_status=_head_process_status
+            )
+        else:
+            raise HostError(
+                f"unknown head runtime {name!r} (known: {', '.join(HEAD_RUNTIMES)})"
+            )
+        self._head_runtimes[name] = built
+        return built
+
+    def _local_pty_root(self) -> Path:
+        """Where this dispatcher's supervised heads keep their run directories.
+
+        Deliberately short and directly under the data directory: a run directory holds a Unix
+        socket, whose address the kernel bounds at about a hundred bytes, and the substrate refuses
+        an address it cannot fit rather than failing opaquely later.
+        """
+        return self.data_dir / "heads"
 
     @property
     def session(self) -> OrcaSessionHost:
@@ -2923,7 +3009,7 @@ class CommandHostRuntime:
         accounted for separately. `start` with no pointer is exactly that pane and nothing else.
         """
         try:
-            receipt = self.head_runtime.start(
+            receipt = self.head_runtime_for(run).start(
                 run.spec,
                 run.workspace,
                 run.task_ref,
@@ -3178,7 +3264,7 @@ class CommandHostRuntime:
         """
         run = self.worker_lifecycle_run(record)
         try:
-            receipt = self.head_runtime.deliver(
+            receipt = self.head_runtime_for(run).deliver(
                 run,
                 pointer,
                 transport=self._head_transport(

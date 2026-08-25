@@ -112,7 +112,8 @@ LEGACY_CODEX_HEADS: dict[str, tuple[str, ...]] = {
 
 
 class HeadRegistryError(HeadCommandError):
-    """heads.toml is missing/malformed, or a profile/resource/adapter/fallback it names is unknown.
+    """heads.toml is missing/malformed, or a profile/resource/adapter/runtime/fallback it names is
+    unknown.
     """
 
 
@@ -267,7 +268,8 @@ def validate_registry(resources: dict, profiles: dict) -> None:
         resource = _named(prof.get("resource"), f"profile {pid!r} resource")
         if resource not in resources:
             raise HeadRegistryError(f"profile {pid!r} references unknown resource {resource!r}")
-        # Adapter, effort and Codex launch mode are the renderer's rules, checked by the renderer:
+        # Adapter, effort, Codex launch mode and the backend runtime are the renderer's rules,
+        # checked by the renderer:
         # what a registry may name is exactly what something can be launched from, and a table
         # validated against a second copy of that list is a table that can pass here and fail at
         # bring-up. An absent Codex mode is the interactive one, and a registry that still pins the

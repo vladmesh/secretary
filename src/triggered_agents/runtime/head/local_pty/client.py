@@ -364,6 +364,18 @@ class SupervisorClient:
 
     # -- verbs -----------------------------------------------------------------------------
 
+    def set_timeout(self, timeout: float) -> None:
+        """Rebound how long one request on this connection may take to be answered.
+
+        The connect bound is a bound on reaching a supervisor that has not spoken yet, and it is
+        the right number for that. It is the wrong number for a caller that has since learned how
+        long the thing it is watching may take: a socket left on the connect bound turns a
+        supervisor that is merely slower than that into a supervisor that stopped answering. So the
+        bound is settable, and a caller that knows the substrate's own bound for what it is
+        watching sets it from that rather than from anything of its own.
+        """
+        self._conn.settimeout(timeout)
+
     def status(self) -> dict[str, Any]:
         return self.request({"op": protocol.OP_STATUS})
 

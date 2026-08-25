@@ -36,10 +36,14 @@ travels on the report, and every branch below reads it by that name:
     below;
   * `DELIVERY_LANDED_NOTHING` — it ended and the kernel took not one byte: the terminal is exactly
     as it was, no turn was started, and the head is worth delivering to again;
-  * `DELIVERY_UNESTABLISHED` — it was offered, and what became of it **cannot be established**:
-    the supervisor stopped answering and the journal has no record of it either, or the substrate
-    ran past its own delivery bound without ending it. Reported as `delivery_state` `unknown` with
-    the last counts anybody could establish, and fatal.
+  * `DELIVERY_UNESTABLISHED` — it was offered, and what became of it **cannot be established**.
+    Three ways, and they differ in which witnesses there were to ask:
+    the supervisor stopped answering after admitting it and the journal has no record of it
+    either; the substrate ran past its own delivery bound without ending it, and the journal has
+    nothing either; or the supervisor stopped answering *as the payload was being offered*, before
+    it named a delivery — and there the journal is not asked at all, because a journal record is
+    matched on the delivery id and no id was ever handed back to match one on. Reported as
+    `delivery_state` `unknown` with the last counts anybody could establish, and fatal.
 
 Four outcomes, and there is no fifth. A delivery's state is never inferred from a boolean predicate
 over the byte counts, and never inferred from *which exception arrived*: an admitted payload
@@ -195,9 +199,10 @@ DELIVERY_LEFT_A_PREFIX = "left_a_prefix"
 #: It ended and the kernel took nothing. The terminal is as it was and the head is still worth
 #: delivering to.
 DELIVERY_LANDED_NOTHING = "landed_nothing"
-#: It was admitted and what became of it could not be established from either witness — or the
-#: substrate ran past the delivery bound it declared without ending it, which is the same fact:
-#: nobody witnessed an ending. Fatal, because a fate that cannot be established may be a prefix.
+#: It was offered and what became of it could not be established: neither witness could say, or
+#: the substrate ran past the delivery bound it declared without ending it, or it went unanswered
+#: before a delivery id existed to ask the journal about — all the same fact, that nobody
+#: witnessed an ending. Fatal, because a fate that cannot be established may be a prefix.
 DELIVERY_UNESTABLISHED = "unestablished"
 #: The outcomes after which this runtime hands the head no more work, named as a set rather than
 #: recomputed at each site.
@@ -336,10 +341,10 @@ def _delivery_report(
 ) -> DeliveryReport:
     """Decide what became of one delivery. The only place in this backend that decides it.
 
-    `established` is whether either witness — the supervisor's `status` or the head's journal —
-    actually said what the delivery **ended as**. A delivery that was admitted and then went
-    unwitnessed is `DELIVERY_UNESTABLISHED`, and it is deliberately not folded into any of the four
-    states the substrate has words for: "I could not find out" is not "nothing landed", and
+    `established` is whether a witness — the supervisor's `status`, or the head's journal where
+    there was a delivery id to match a record on — actually said what the delivery **ended as**. A
+    delivery that was offered and then went unwitnessed is `DELIVERY_UNESTABLISHED`, and it is
+    deliberately not folded into any of the four states the substrate has words for: "I could not find out" is not "nothing landed", and
     reporting it as the latter is what let a payload be written straight behind a fragment that had
     landed.
 
@@ -392,6 +397,16 @@ class LocalPtyHeadRuntime:
     reader of it, in `secretary.dispatcher_watchdog`. Passing it in is what keeps the two from
     drifting apart while `triggered_agents` stays free of a dependency on `secretary`.
 
+    `connect_timeout` is what it says and nothing more: how long a supervisor that has not spoken
+    on this connection yet may take to speak. It bounds reaching a head — the connect, and the
+    single question each of `observe`, `attach`, `request_drain` and `stop` asks — and it is
+    deliberately *not* a number that can shorten the watching of a delivery: the moment a delivery
+    is admitted, `_put` rebounds the connection from the bound the substrate declared for that
+    delivery, so every `status` inside `_follow` is bounded by the substrate's number plus the
+    grace rather than by this one. It is named separately from "how long to wait for a delivery"
+    because it answers a different question, and the two were one number only for as long as the
+    second one had no answer of its own.
+
     There is no `delivery_timeout`. How long this runtime watches a delivery is not something it
     is told; it is **derived**, per delivery, from the bound the substrate declared on the delivery
     it admitted — the head's own `delivery_seconds`, the one `start` passed to the supervisor —
@@ -402,9 +417,37 @@ class LocalPtyHeadRuntime:
     a verb could return, and everything that grew to carry such a delivery — a register, a
     settlement, a second place asking witnesses — is gone with it.
 
-    One lock, as on the legacy backend, and for the same reason: `deliver`, `request_drain`, `stop`
-    and `stop_if_quiescent` are the four things that can contradict each other about one head, so
-    they run one at a time under a lock this object owns.
+    **One lock for every head of this runtime, and the limitation that buys is named rather than
+    hidden.** `deliver`, `request_drain`, `stop` and `stop_if_quiescent` are the four things that
+    can contradict each other about one head, so they run one at a time under a lock this object
+    owns — the legacy backend's arrangement, and it is per runtime there too. What is different
+    here is how long the lock is held: a verb on the legacy backend is one session-manager call,
+    while `deliver` holds this lock for the whole reception — up to the substrate's own
+    `delivery_seconds` plus `delivery_grace`. So a slow delivery to one head delays `observe`,
+    `attach`, `stop` and `deliver` for every *other* head this runtime holds, for that long.
+
+    It is accepted here, and these are the terms:
+
+      * **nothing is delayed today.** The dispatcher constructs its backends per tick process and
+        drives every verb from that tick's single thread, so there is no second caller in existence
+        to be made to wait. The delay is a property of a concurrency this product does not yet
+        have;
+      * **the hold is bounded, and by a number no profile can raise.** `delivery_seconds` is an
+        argument of `start`, not a registry key: per-profile runtime selection (secretary-1467) did
+        not give a profile one. Every head therefore comes up on the substrate's default of
+        `protocol.INPUT_DELIVERY_SECONDS`, so the worst hold is that plus `DELIVERY_GRACE_SECONDS`
+        — fifteen seconds — which is under one dispatcher tick;
+      * **when it stops being acceptable**, which is the half a limitation is worth naming for. Two
+        thresholds, either one of which is enough: a second caller — a thread, an operator command
+        sharing one runtime object with a tick, a dispatcher that drives two heads at once — or a
+        `delivery_seconds` a profile can raise. The moment a head's reception can be configured
+        past a tick's own period, one head's delivery can starve another head's `stop`, and a stop
+        that cannot run is how a head gets a second one opened beside it.
+
+    The repair, when either threshold is crossed, is the one this docstring is standing in for: a
+    lock per head held across the verb, with this runtime-wide lock reduced to the bookkeeping
+    `HeadActivity` and `_fatal` need — they are shared across heads and `HeadActivity` explicitly
+    locks nothing of its own, so the per-head lock cannot simply replace this one.
     """
 
     def __init__(
@@ -1108,6 +1151,11 @@ class LocalPtyHeadRuntime:
                 # So this is an unestablished delivery and not a refusal, even though it is one
                 # step earlier than the case below: the line is drawn at what can be established,
                 # never at how far down the call the failure happened to be.
+                #
+                # The journal is not asked here, and that is not an omission: an `input.accepted`
+                # record is matched on the delivery id, and no answer came back to carry one. This
+                # is the one unestablished fate with only one witness, because it is the one that
+                # happens before the second witness has anything to be asked about.
                 return _delivery_report(
                     state=DELIVERY_STATE_UNKNOWN,
                     written=0,
@@ -1119,6 +1167,14 @@ class LocalPtyHeadRuntime:
             if not answer.get("ok"):
                 return None, _admission_refusal(answer)
             admitted = dict(answer.get("delivery") or {})
+            # From here the connection is watching a delivery whose bound the substrate has just
+            # declared, so its own answer bound is derived from that same number rather than left
+            # at the connect bound. `connect_timeout` is how long a supervisor that has not spoken
+            # yet may take to speak; it is not "how long this delivery may take", and leaving it
+            # in force here would let a supervisor slower than it — but well inside the bound it
+            # declared — be read as one that stopped answering, which is a fatal outcome. One
+            # number governs the watching, and it is the substrate's.
+            client.set_timeout(self.delivery_wait_for(_declared_bound(admitted)))
             return self._follow(address, client, admitted, len(payload), floor), None
 
     def _follow(
@@ -1314,6 +1370,11 @@ class LocalPtyHeadRuntime:
         fate nobody could establish are the same fact about the same terminal — this runtime hands
         it no more work — and they must not be able to drift apart. The reason differs and travels
         on every later refusal; the consequence does not.
+
+        It is one place for `start` as well as for `deliver`, and that is the whole of the rule:
+        the payload a bring-up delivers is a payload like any other, so a launch prompt that left a
+        prefix or went unwitnessed closes the head here rather than in a second version of this
+        rule on the abandon path. `_abandon_bring_up` calls it before it stops the head.
         """
         self._fatal[run.run_id] = (
             DRAIN_AFTER_PARTIAL_DELIVERY
@@ -1372,8 +1433,19 @@ class LocalPtyHeadRuntime:
         refusal: _Refusal | None,
         epoch: int,
     ) -> StartReceipt:
-        """End a head whose prompt never arrived, and say what the ending left behind."""
+        """End a head whose prompt never arrived, and say what the ending left behind.
+
+        A bring-up whose launch prompt ended fatally closes admission exactly as a later delivery
+        does, and through the same call: `_close_head` is the one place that rule lives, so `start`
+        and `deliver` cannot come to disagree about what a fatal outcome costs a head. It matters
+        precisely when the stop below does not confirm — the head is then still there, with a
+        prefix of its launch prompt possibly on its terminal, and it must not be delivered to
+        again. A confirmed stop makes the question moot: `stop` forgets the head, admission and
+        fatal reason with it.
+        """
         detail = refusal.reason if refusal is not None else (report.detail if report else "")
+        if report is not None and report.fatal:
+            self._close_head(run, report)
         stopped = self.stop(
             run, StopInitiator(actor="head-launch", reason="the head was never given its task")
         )

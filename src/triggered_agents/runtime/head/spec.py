@@ -6,7 +6,7 @@ command line or is delivered into a live session afterwards. The adapter is *req
 profile without one fails to load: a `HeadSpec` in hand is proof the head is launchable, and
 there is no state in which one exists with the adapter guessed.
 
-The rules the adapter, effort and codex launch mode are checked against live in
+The rules the adapter, effort, codex launch mode and backend runtime are checked against live in
 `command.validate_launch_shape`, beside the renderer that has to spell them. What stays with the
 registry is what only a whole registry can answer: that the resource a profile names exists, and
 that its fallback chain points at profiles that do.
@@ -17,6 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ..head_runtimes import DEFAULT_HEAD_RUNTIME
 from .command import (
     CODEX_TUI_MODE,
     PROMPT_AFTER_START_ADAPTERS,
@@ -63,6 +64,12 @@ class HeadSpec:
     resource: str | None = None
     codex_mode: str | None = None
     fallback: tuple[str, ...] = ()
+    #: Which backend this head's life is lived through, carried by value like everything else here.
+    #: It is the profile's answer and not the caller's: the dispatcher builds the backend named
+    #: here, so a head raised under one backend cannot be observed or stopped through another —
+    #: including on a later tick, because the value travels with the durable run record. Orthogonal
+    #: to `adapter`: this says what holds the head, `adapter` says what the head is.
+    runtime: str = DEFAULT_HEAD_RUNTIME
 
     @property
     def prompt_after_start(self) -> bool:
@@ -99,6 +106,7 @@ class HeadSpec:
                 str(profile.get("codex_mode", CODEX_TUI_MODE)) if adapter == "codex" else None
             ),
             fallback=tuple(str(fb) for fb in fallback) if isinstance(fallback, list) else (),
+            runtime=str(profile.get("runtime", DEFAULT_HEAD_RUNTIME)),
         )
 
 

@@ -23,6 +23,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from ..head_runtimes import DEFAULT_HEAD_RUNTIME
 from .spec import DEFAULT_EFFORT, HeadSpec
 from .task_ref import TaskRef
 
@@ -226,6 +227,14 @@ class HeadRun:
         return {
             "run_id": self.run_id,
             "spec": _spec_json(self.spec),
+            # Beside the spec block rather than inside it, deliberately. That block is hashed whole
+            # as this head's launch identity in two places — `head_run_binding` and the Codex
+            # provider source's own fingerprint — so a value added inside it would change the
+            # identity of every head already running and turn every persisted provider source into
+            # a foreign one at the next upgrade. Which backend holds a head is not part of what
+            # identifies a provider session; it is a launch fact of the run, and it is recorded as
+            # one.
+            "head_runtime": self.spec.runtime,
             "workspace": self.workspace,
             "task_ref": self.task_ref.to_json(),
             "role": self.role,
@@ -243,7 +252,9 @@ class HeadRun:
             raise HeadRunError("a head run is read from an object, and this is not one")
         return cls(
             run_id=str(payload.get("run_id") or ""),
-            spec=_spec_from_json(payload.get("spec")),
+            spec=_spec_from_json(
+                payload.get("spec"), str(payload.get("head_runtime") or "")
+            ),
             workspace=str(payload.get("workspace") or ""),
             task_ref=TaskRef.from_json(payload.get("task_ref")),
             role=str(payload.get("role") or ""),
@@ -265,6 +276,10 @@ def _spec_json(spec: HeadSpec) -> dict[str, Any]:
     """The launch shape the head started with, written out with the run.
 
     Written rather than re-resolved: the registry can be edited while a head is running.
+
+    This block is a head's launch identity as well as its launch shape — two fingerprints hash it
+    whole — so a field is added here only when it really identifies the head. `spec.runtime` does
+    not; `HeadRun.to_json` records it beside this block and says why.
     """
     return {
         "profile_id": spec.profile_id,
@@ -277,7 +292,15 @@ def _spec_json(spec: HeadSpec) -> dict[str, Any]:
     }
 
 
-def _spec_from_json(payload: Any) -> HeadSpec:
+def _spec_from_json(payload: Any, runtime: str = "") -> HeadSpec:
+    """The recorded launch shape, with the backend that held it handed in beside it.
+
+    `runtime` arrives separately because it is written beside the spec block rather than inside it;
+    see `to_json`. An absent one is a record written before heads had a choice of backend, and
+    every such head was an Orca-legacy one. Unlike the adapter it is not repaired by guessing —
+    absence *is* the answer, and it is the same answer the registry gives a profile that names
+    none.
+    """
     if not isinstance(payload, dict):
         raise HeadRunError("a head run carries the spec it was launched from")
     profile_id = str(payload.get("profile_id") or "")
@@ -295,6 +318,7 @@ def _spec_from_json(payload: Any) -> HeadSpec:
         resource=str(payload.get("resource") or "") or None,
         codex_mode=str(payload.get("codex_mode") or "") or None,
         fallback=tuple(str(entry) for entry in fallback) if isinstance(fallback, list) else (),
+        runtime=runtime or DEFAULT_HEAD_RUNTIME,
     )
 
 
