@@ -1915,8 +1915,21 @@ already taken, a repeat worker launch blocks it with the reason, preserving the 
 those verdicts mean a deferred launch: the sprint stays open, the reason is visible in the observer record, and the next
 tick tries again.
 
-`unknown` means the probe itself could not be run or classified reliably. It is visible in the snapshot but does not
-forbid a launch: a failure to observe does not prove the resource is down and must not stop the queue forever.
+`unknown` means the resource answered something nobody could classify, or did not answer in time. It is visible in the
+snapshot but does not forbid a launch: a failure to observe does not prove the resource is down and must not stop the
+queue forever.
+
+`probe_broken` is the separate case where the probe never ran at all — the command does not exist, the interpreter does
+not exist, or the interpreter cannot import the package the probe names. That is a defect of this installation rather
+than a fact about the account, and unlike `unknown` it forbids a launch: a resource nobody can probe is a resource
+nobody has gated, so the claim walks the fallback chain instead. The probe is run with the dispatcher's own interpreter
+directory first on `PATH`, so the host-agnostic `python3 -m triggered_agents ...` in the registry resolves to the
+interpreter the dispatcher itself runs under, whatever `PATH` the unit pins.
+
+`secretary doctor` reports the probe of every resource in the installed registry and names the ones that cannot run as
+their own findings, apart from a red resource: while a probe is broken, every claim on that resource was allowed
+without the health gate having an opinion. It reuses a verdict the dispatcher wrote inside the 300-second window rather
+than re-probing, and `--offline` reports only what is recorded.
 
 For a card still in Ready, a verdict that forbids a launch sends the claim down the fallback chain the registry writes
 for that head, and the card is claimed on the first head whose own resource allows one — normally the other family's
@@ -1935,6 +1948,10 @@ the next TTL and re-read the readiness snapshot. On `exhausted` the wait is unti
 cards that have somewhere to go are already going there, and the ones that stayed in Ready are the ones with nowhere.
 Which chains exist is a canon decision — see the head registry section — and a chain to a head of a lower class buys
 attempts that never reach a report, which is why the shipped chains cross families at comparable class.
+
+On `probe_broken` nothing about the account is wrong and waiting fixes nothing: run the probe string from the registry
+by hand under the dispatcher's own environment and repair what it names. The usual cause is a probe command whose
+interpreter cannot import the product; `secretary doctor` prints the failing line next to the resource.
 
 ### Head status in a live workspace
 
