@@ -12,6 +12,7 @@ import signal
 import struct
 import sys
 import termios
+import time
 
 
 def terminal_size() -> tuple[int, int]:
@@ -51,6 +52,16 @@ def main() -> int:
             # to be a particular chunk cannot afford a goodbye after it.
             sys.stdout.flush()
             os._exit(int(line.split()[1]))
+        if line.startswith("busy "):
+            # A turn that stays open for as long as the caller asked. The substrate closes a turn
+            # when the head goes quiet, so a head that answers instantly cannot be observed
+            # mid-turn without a race; this one keeps printing until its time is up.
+            until = time.monotonic() + float(line.split()[1])
+            while time.monotonic() < until:
+                print("WORKING", flush=True)
+                time.sleep(0.1)
+            print("DONE", flush=True)
+            continue
         if line.startswith("spew "):
             count = int(line.split()[1])
             for index in range(count):

@@ -1026,17 +1026,25 @@ class LocalPtySubstrateTests(unittest.TestCase):
 
 
 class SubstrateIsNotWiredInTests(unittest.TestCase):
-    """This card builds a substrate. Nothing may be standing on it yet."""
+    """This package is a substrate. What stands on it is one backend, and nothing else.
 
-    def test_no_module_outside_the_package_reaches_for_it(self) -> None:
+    secretary-1463 wrote this as "nothing outside the package reaches for it", which was the whole
+    truth while there was no backend. secretary-1465 built `runtime.local_pty_head` on top, so the
+    guard says the same thing about one more module rather than less about all of them: exactly one
+    consumer, named here, and the rest of the product still untouched. That the backend itself is
+    wired into nothing is `TheBackendIsNotWiredInTests` in `test_local_pty_head_runtime`.
+    """
+
+    def test_only_the_one_backend_built_on_it_reaches_for_it(self) -> None:
         package = REPO / "src" / "triggered_agents" / "runtime" / "head" / "local_pty"
+        backend = REPO / "src" / "triggered_agents" / "runtime" / "local_pty_head.py"
         offenders = []
         for path in (REPO / "src").rglob("*.py"):
-            if package in path.parents:
+            if package in path.parents or path == backend:
                 continue
             if "local_pty" in path.read_text(encoding="utf-8"):
                 offenders.append(str(path.relative_to(REPO)))
-        self.assertEqual(offenders, [], "the substrate is not meant to be wired in by this card")
+        self.assertEqual(offenders, [], "the substrate is reached from outside its one backend")
 
     def test_the_substrate_implements_none_of_the_six_verbs_as_a_boundary(self) -> None:
         """Prose about `HeadRuntime` is fine; an implementation of it is what this card excludes."""
