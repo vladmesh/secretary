@@ -42,6 +42,7 @@ from secretary.tasks import (
     is_significant_observer_event,
     standing_decision,
 )
+from tests.fakes.board import BatchedCalls
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
 
 CARD_STATES = ("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done")
@@ -81,7 +82,7 @@ class FakeSprintReader:
         return self.sprint
 
 
-class FakeKanboard:
+class FakeKanboard(BatchedCalls):
     def __init__(self) -> None:
         self.instance_dir = Path(tempfile.gettempdir())
         self.calls: list[tuple[str, dict]] = []

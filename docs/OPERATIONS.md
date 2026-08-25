@@ -261,6 +261,10 @@ workspace, watchdog pane, progress and respawn state, sprint observer heads, pau
 freshness, memory index state, and host disk, memory and load. A live invocation uses the dispatcher's own
 pane probe for watchdog liveness; `--offline` deliberately reports that liveness as unprobed.
 
+Its board reads are a fixed number of round trips: the sprint rows, their metadata in one batched read,
+and the Pipeline listing once for all sprints together. Polling it stays cheap as the board grows, and a
+board holding hundreds of closed sprints costs the same reads as one holding a single sprint.
+
 `secretary doctor --json --instance INSTANCE` evaluates invariants over the same snapshot and returns
 structured findings with a non-zero exit status for a broken or unavailable host. Use `status` to answer
 what is running now, and `doctor` to decide what needs repair. The default human-readable `doctor` output

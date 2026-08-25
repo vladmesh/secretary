@@ -323,6 +323,18 @@ def is_significant_observer_event(
     return kind == "commented" and str(actor.get("role") or "") == "po"
 
 
+# How many calls travel in one batched JSON-RPC request, so a large board does not turn a bulk read
+# into a single oversized one.
+_BATCH_CHUNK = 200
+
+
+def _rpc_request(identifier: int, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    request: dict[str, Any] = {"jsonrpc": "2.0", "id": identifier, "method": method}
+    if params:
+        request["params"] = params
+    return request
+
+
 class KanboardClient:
     """Small JSON-RPC client using local board transport configuration."""
 
@@ -340,9 +352,40 @@ class KanboardClient:
             raise TaskError("backend_unavailable", "Kanboard runtime configuration is unavailable", 1) from None
 
     def call(self, method: str, **params: Any) -> Any:
-        payload: dict[str, Any] = {"jsonrpc": "2.0", "id": 1, "method": method}
-        if params:
-            payload["params"] = params
+        document = self._post(_rpc_request(1, method, params))
+        if not isinstance(document, dict) or "error" in document:
+            raise TaskError("backend_error", "Kanboard rejected the read request", 1)
+        return document.get("result")
+
+    def call_batch(self, calls: Iterable[tuple[str, dict[str, Any]]]) -> list[Any]:
+        """Run `[(method, params), ...]` in one request each chunk; return results in call order.
+
+        Kanboard has no bulk read for per-task metadata or comments, so a view of many tasks
+        otherwise pays one round trip per task. Requests go out in bounded chunks so a large board
+        does not become one oversized request.
+        """
+        calls = list(calls)
+        results: list[Any] = [None] * len(calls)
+        for start in range(0, len(calls), _BATCH_CHUNK):
+            chunk = calls[start:start + _BATCH_CHUNK]
+            document = self._post([
+                _rpc_request(start + offset, method, params)
+                for offset, (method, params) in enumerate(chunk)
+            ])
+            if not isinstance(document, list):
+                raise TaskError("backend_error", "Kanboard rejected the read request", 1)
+            answers: dict[Any, Any] = {}
+            for entry in document:
+                if not isinstance(entry, dict) or "error" in entry:
+                    raise TaskError("backend_error", "Kanboard rejected the read request", 1)
+                answers[entry.get("id")] = entry.get("result")
+            for offset in range(len(chunk)):
+                if start + offset not in answers:
+                    raise TaskError("backend_error", "Kanboard rejected the read request", 1)
+                results[start + offset] = answers[start + offset]
+        return results
+
+    def _post(self, payload: Any) -> Any:
         request = urllib.request.Request(
             self.url,
             data=json.dumps(payload).encode("utf-8"),
@@ -354,12 +397,9 @@ class KanboardClient:
         )
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
-                document = json.loads(response.read().decode("utf-8"))
+                return json.loads(response.read().decode("utf-8"))
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError):
             raise TaskError("backend_unavailable", "Kanboard backend is unavailable", 1) from None
-        if not isinstance(document, dict) or "error" in document:
-            raise TaskError("backend_error", "Kanboard rejected the read request", 1)
-        return document.get("result")
 
 
 def all_project_cards(client: KanboardClient, project_id: int) -> list[dict[str, Any]]:
@@ -368,6 +408,13 @@ def all_project_cards(client: KanboardClient, project_id: int) -> list[dict[str,
         return board_rows(client.call, project_id)
     except BoardRowsUnavailable:
         raise TaskError("backend_error", "Kanboard returned an invalid task list", 1) from None
+
+
+def _task_metadata(answer: Any) -> dict[str, str]:
+    """One task's metadata as the flat str->str map every reader works with."""
+    if answer is not None and not isinstance(answer, dict):
+        raise TaskError("backend_error", "Kanboard returned invalid task metadata", 1)
+    return {str(key): _text(value) for key, value in (answer or {}).items()}
 
 
 def project_card_by_reference(
@@ -427,11 +474,13 @@ class TaskReader:
         cards = self.client.call("getAllTasks", project_id=project_id, status_id=1) or []
         if not isinstance(cards, list):
             raise TaskError("backend_error", "Kanboard returned an invalid task list", 1)
+        rows = [card for card in cards if isinstance(card, dict)]
+        # One batched read for the whole listing: metadata is per task and Kanboard has no bulk
+        # read for it, so asking row by row is what made a board-wide listing a per-row round trip.
+        metadata = self._metadata_of(rows)
         result = []
-        for card in cards:
-            if not isinstance(card, dict):
-                continue
-            normalized = self._normalize(card, columns, swimlanes, comments=None)
+        for card in rows:
+            normalized = self._normalize(card, columns, swimlanes, metadata[_task_number(card)], comments=None)
             if states and normalized["state"] not in states:
                 continue
             if project is not None and normalized["project"] != project:
@@ -469,7 +518,22 @@ class TaskReader:
             for comment in raw_comments
             if isinstance(comment, dict)
         ]
-        return self._normalize(card, columns, swimlanes, comments=comments)
+        return self._normalize(
+            card, columns, swimlanes,
+            _task_metadata(self.client.call("getTaskMetadata", task_id=task_id)),
+            comments=comments,
+        )
+
+    def _metadata_of(self, cards: list[dict[str, Any]]) -> dict[int, dict[str, str]]:
+        """The task metadata of every given row, keyed by Kanboard task id, in one batched read."""
+        task_ids = [_task_number(card) for card in cards]
+        answers = self.client.call_batch(
+            ("getTaskMetadata", {"task_id": task_id}) for task_id in task_ids
+        )
+        return {
+            task_id: _task_metadata(answer)
+            for task_id, answer in zip(task_ids, answers, strict=True)
+        }
 
     def _board(self) -> tuple[int, dict[int, str], dict[int, str]]:
         board = self.client.call("getProjectByName", name=self.board_name)
@@ -492,6 +556,7 @@ class TaskReader:
         card: dict[str, Any],
         columns: dict[int, str],
         swimlanes: dict[int, str],
+        meta: dict[str, str],
         *,
         comments: list[dict[str, Any]] | None,
     ) -> dict[str, Any]:
@@ -499,10 +564,6 @@ class TaskReader:
         column = columns.get(_positive_int(card.get("column_id")) or -1)
         if task_id is None or column not in _STATE_BY_COLUMN:
             raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
-        metadata = self.client.call("getTaskMetadata", task_id=task_id) or {}
-        if not isinstance(metadata, dict):
-            raise TaskError("backend_error", "Kanboard returned invalid task metadata", 1)
-        meta = {str(key): _text(value) for key, value in metadata.items()}
         ref = _text(card.get("reference"))
         result: dict[str, Any] = {
             "id": f"task_kanboard_{task_id}", "ref": ref, "title": _text(card.get("title")),

@@ -458,24 +458,60 @@ class _AuditOnce:
         return self._events
 
 
+def _task_id(raw: dict[str, Any]) -> int:
+    """The Kanboard identifier of a sprint row, which every read of it needs."""
+    task_id = _positive_int(raw.get("id"))
+    if task_id is None:
+        raise TaskError("backend_error", "Kanboard returned an invalid sprint", 1)
+    return task_id
+
+
+def _sprint_metadata(answer: Any) -> dict[str, str]:
+    """One sprint row's metadata, narrowed to the contract fields a sprint is made of."""
+    if answer is not None and not isinstance(answer, dict):
+        raise TaskError("backend_error", "Kanboard returned invalid sprint metadata", 1)
+    return {
+        str(key): _text(value)
+        for key, value in (answer or {}).items()
+        if str(key) in SPRINT_METADATA
+    }
+
+
 class SprintReader:
     def __init__(self, client: KanboardClient, *, data_dir: str | Path | None = None, thresholds: dict[str, int] | None = None) -> None:
         self.client = client
         self.data_dir = Path(data_dir) if data_dir is not None else None
         self.thresholds = budget_thresholds({"sprint_budget": thresholds}) if thresholds else budget_thresholds()
 
+    def _sprint_rows(self, board_id: int) -> list[dict[str, Any]]:
+        """Every row of the sprint board that carries a sprint reference."""
+        rows = self.client.call("getAllTasks", project_id=board_id, status_id=1) or []
+        if not isinstance(rows, list):
+            raise TaskError("backend_error", "Kanboard returned an invalid sprint list", 1)
+        return [raw for raw in rows if _is_sprint_row(raw)]
+
+    def _metadata_of(self, rows: list[dict[str, Any]]) -> dict[int, dict[str, str]]:
+        """The metadata of every given sprint row, keyed by task id, in one batched read."""
+        task_ids = [_task_id(raw) for raw in rows]
+        answers = self.client.call_batch(
+            ("getTaskMetadata", {"task_id": task_id}) for task_id in task_ids
+        )
+        return {
+            task_id: _sprint_metadata(answer)
+            for task_id, answer in zip(task_ids, answers, strict=True)
+        }
+
     def list(self, *, statuses: set[str] | None = None, create: bool = True) -> list[dict[str, Any]]:
         board_id = _sprint_board(self.client, create=create)
         if board_id is None:
             return []
-        raw_sprints = self.client.call("getAllTasks", project_id=board_id, status_id=1) or []
-        if not isinstance(raw_sprints, list):
-            raise TaskError("backend_error", "Kanboard returned an invalid sprint list", 1)
+        rows = self._sprint_rows(board_id)
+        metadata = self._metadata_of(rows)
         result = []
-        for raw in raw_sprints:
-            if not _is_sprint_row(raw):
-                continue
-            sprint = self._normalize(raw, comments=None, include_resume_freshness=False)
+        for raw in rows:
+            sprint = self._normalize(
+                raw, metadata[_task_id(raw)], comments=None, include_resume_freshness=False,
+            )
             # Without live cards this value would claim freshness based on incomplete data.  `show`
             # and `status` populate it after reading the linked cards instead.
             sprint.pop("resume_freshness", None)
@@ -489,22 +525,20 @@ class SprintReader:
         board_id = _sprint_board(self.client, create=False)
         if board_id is None:
             return []
-        raw_sprints = self.client.call("getAllTasks", project_id=board_id, status_id=1) or []
-        if not isinstance(raw_sprints, list):
-            raise TaskError("backend_error", "Kanboard returned an invalid sprint list", 1)
+        rows = self._sprint_rows(board_id)
+        metadata = self._metadata_of(rows)
+        all_comments = self.client.call_batch(
+            ("getAllComments", {"task_id": _task_id(raw)}) for raw in rows
+        )
         result = []
-        for raw in raw_sprints:
-            if not _is_sprint_row(raw):
-                continue
-            task_id = _positive_int(raw.get("id"))
-            if task_id is None:
-                raise TaskError("backend_error", "Kanboard returned an invalid sprint", 1)
-            comments_raw = self.client.call("getAllComments", task_id=task_id) or []
+        for raw, comments_raw in zip(rows, all_comments, strict=True):
             comments = [
                 {"created_at": _rfc3339(comment.get("date_creation")), "body": _text(comment.get("comment"))}
-                for comment in comments_raw if isinstance(comment, dict)
+                for comment in comments_raw or [] if isinstance(comment, dict)
             ]
-            sprint = self._normalize(raw, comments=comments, include_resume_freshness=False)
+            sprint = self._normalize(
+                raw, metadata[_task_id(raw)], comments=comments, include_resume_freshness=False,
+            )
             # Freshness needs the linked cards this view deliberately does not read.
             sprint.pop("resume_freshness", None)
             result.append(sprint)
@@ -518,9 +552,7 @@ class SprintReader:
         raw = self.client.call("getTaskByReference", project_id=board_id, reference=reference)
         if not isinstance(raw, dict):
             raise TaskError("not_found", "sprint was not found", 2)
-        task_id = _positive_int(raw.get("id"))
-        if task_id is None:
-            raise TaskError("backend_error", "Kanboard returned an invalid sprint", 1)
+        task_id = _task_id(raw)
         comments = None
         if include_cards:
             comments_raw = self.client.call("getAllComments", task_id=task_id) or []
@@ -530,7 +562,10 @@ class SprintReader:
             ]
         # Freshness depends on the linked-card set, so computing it in `_normalize` would both
         # scan the audit too early and scan it a second time after the cards are loaded.
-        sprint = self._normalize(raw, comments=comments, include_resume_freshness=False)
+        sprint = self._normalize(
+            raw, _sprint_metadata(self.client.call("getTaskMetadata", task_id=task_id)),
+            comments=comments, include_resume_freshness=False,
+        )
         if include_cards:
             sprint["cards"] = TaskReader(self.client).list(sprint=reference)
         if include_resume_freshness:
@@ -538,20 +573,11 @@ class SprintReader:
         return sprint
 
     def _normalize(
-        self, raw: dict[str, Any], *, comments: list[dict[str, Any]] | None,
+        self, raw: dict[str, Any], meta: dict[str, str], *,
+        comments: list[dict[str, Any]] | None,
         include_resume_freshness: bool = True,
     ) -> dict[str, Any]:
-        task_id = _positive_int(raw.get("id"))
-        if task_id is None:
-            raise TaskError("backend_error", "Kanboard returned an invalid sprint", 1)
-        metadata = self.client.call("getTaskMetadata", task_id=task_id) or {}
-        if not isinstance(metadata, dict):
-            raise TaskError("backend_error", "Kanboard returned invalid sprint metadata", 1)
-        meta = {
-            str(key): _text(value)
-            for key, value in metadata.items()
-            if str(key) in SPRINT_METADATA
-        }
+        task_id = _task_id(raw)
         repositories = _json_list(meta.get("sprint_repositories"))
         budget = _budget(meta.get("sprint_budget"), self.thresholds, meta.get(BUDGET_UNCHARGED_FIELD))
         result: dict[str, Any] = {
@@ -586,19 +612,38 @@ class SprintReader:
     def statuses(
         self, *, observers: dict[str, dict[str, Any]] | None = None, create: bool = False,
     ) -> list[dict[str, Any]]:
-        """Every sprint's status, consuming the committed audit at most once for the call."""
+        """Every sprint's status, reading each part of the board once for the whole call.
+
+        Asking `status` per sprint read the same things over and over: the sprint's metadata, its
+        comments, and the entire Pipeline listing with the metadata of every card on it - once per
+        sprint. That is what kept `secretary status` around a minute on a live board with 72
+        sprints and 1119 cards. Nothing here is per sprint but the assembling: the sprint rows and
+        their metadata are one read each, the cards are one listing shared by every sprint, and the
+        committed audit is consumed at most once.
+        """
         observers = observers or {}
         audit = _AuditOnce(self.data_dir)
-        return [
-            self.status(sprint["ref"], observer=observers.get(sprint["ref"]), audit=audit)
-            for sprint in self.list(create=create)
-        ]
+        sprints = self.list(create=create)
+        linked: dict[str, list[dict[str, Any]]] = {}
+        for card in TaskReader(self.client).list():
+            linked.setdefault(str(card.get("sprint") or ""), []).append(card)
+        result = []
+        for listed in sprints:
+            sprint = {**listed, "cards": linked.get(listed["ref"], [])}
+            sprint["resume_freshness"] = self._resume_freshness(
+                sprint, sprint.get("resume"), audit=audit,
+            )
+            result.append(self._status(sprint, observers.get(sprint["ref"])))
+        return result
 
     def status(
         self, reference: str, *, observer: dict[str, Any] | None = None,
         audit: _AuditOnce | None = None,
     ) -> dict[str, Any]:
-        sprint = self.show(reference, audit=audit)
+        return self._status(self.show(reference, audit=audit), observer)
+
+    def _status(self, sprint: dict[str, Any], observer: dict[str, Any] | None) -> dict[str, Any]:
+        """One sprint's status view over a sprint that has already been read."""
         cards = sprint.get("cards") or []
         states: dict[str, list[str]] = {}
         for card in cards:

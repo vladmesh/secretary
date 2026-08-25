@@ -49,6 +49,7 @@ from secretary.sprints import (
 )
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
 from tests.head_registry import write_installed_pair
+from tests.fakes.board import BatchedCalls
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
 from tests.sprint_close_fixtures import DROP_REASON, KEEP_OPEN_REASON, close_decisions
 
@@ -69,7 +70,7 @@ def drop_cards(*refs: str) -> dict:
     }
 
 
-class SprintKanboard:
+class SprintKanboard(BatchedCalls):
     def __init__(self) -> None:
         self.instance_dir = Path(tempfile.gettempdir())
         self.calls: list[tuple[str, dict]] = []
@@ -2804,6 +2805,69 @@ class SprintAuditTraversalTests(SprintFixture):
 
     def _reader(self) -> SprintReader:
         return SprintReader(self.client, data_dir=self.tmp.name)  # type: ignore[arg-type]
+
+    @contextlib.contextmanager
+    def _round_trips(self):
+        """Count the board round trips a block performs, a batched read counting as the one it is."""
+        trips: list[str] = []
+        client = type(self.client)
+        original_call, original_batch = client.call, client.call_batch
+        batching = False
+
+        def counting_call(fake, method: str, **params: Any) -> Any:
+            if not batching:
+                trips.append(method)
+            return original_call(fake, method, **params)
+
+        def counting_batch(fake, calls: Any) -> Any:
+            nonlocal batching
+            calls = list(calls)
+            trips.append("batch:" + ",".join(sorted({method for method, _ in calls})))
+            batching = True
+            try:
+                return original_batch(fake, calls)
+            finally:
+                batching = False
+
+        with mock.patch.object(client, "call", counting_call), \
+             mock.patch.object(client, "call_batch", counting_batch):
+            yield trips
+
+    def test_mass_sprint_status_costs_the_same_board_round_trips_for_one_and_for_many(self) -> None:
+        """The shape of the reads: what a mass status asks the board for, and how often.
+
+        A per-sprint `status` read that sprint's metadata, its comments and the whole Pipeline
+        listing - every card's metadata included - once per sprint. This pins the call structure
+        that replaced it, over the fake, where a batch stands for the calls it carries. What that
+        costs on the wire is a separate question this cannot answer, because the fake answers a
+        batch by looping: `tests/test_board_batch_transport.py` counts the actual posts.
+        """
+        open_ref = self._resumed("round trips")
+        TaskWriter(self.client, data_dir=self.tmp.name).create(  # type: ignore[arg-type]
+            role="observer", actor="observer", project="secretary", task_type="code", title="linked",
+            target="ready", sprint=open_ref, request_id="round-trip-card",
+        )
+
+        with self._round_trips() as single:
+            self._reader().statuses()
+
+        for index in range(4):
+            self._terminal(f"sprint:round-trip-{index}", status="closed")
+
+        with self._round_trips() as many:
+            self._reader().statuses()
+
+        self.assertEqual(single, [
+            "getProjectByName",   # the sprint board
+            "getAllTasks",        # its rows
+            "batch:getTaskMetadata",
+            "getProjectByName",   # the Pipeline, read once for every sprint together
+            "getColumns",
+            "getActiveSwimlanes",
+            "getAllTasks",
+            "batch:getTaskMetadata",
+        ])
+        self.assertEqual(many, single)
 
     def test_mass_sprint_status_reads_the_audit_once_for_one_and_for_many_sprints(self) -> None:
         open_ref = self._resumed("audit traversal")
