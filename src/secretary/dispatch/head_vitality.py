@@ -394,3 +394,47 @@ class VitalitySnapshot:
             availability=SourceAvailability.UNAVAILABLE,
             reason=reason[:REASON_LIMIT],
         )
+
+
+def snapshots_from_status(
+    status: Any,
+    *,
+    run_id: str,
+    previous_cursor: str = "",
+    observed_at: float,
+) -> list[VitalitySnapshot]:
+    """Every snapshot one ``command_terminal_status`` answer supports, bound to ``run_id``.
+
+    The dispatcher's wait tick and any read-only observer of the same head must see the same
+    evidence, so the mapping from that status shape to this vocabulary lives here rather than at
+    each call site: a channel the status did not carry produces no snapshot at all, which is not
+    the same as a snapshot that reports its channel unavailable. An empty list therefore means
+    "nothing was observed" -- the noop host, a runtime that answered nothing -- and a caller may
+    not read it as evidence about the head.
+
+    Pure, like every other builder in this module: the caller has already made whatever host call
+    produced ``status``.
+    """
+    if not isinstance(status, dict):
+        return []
+    snapshots: list[VitalitySnapshot] = []
+    pid_status = status.get("pid_status")
+    if isinstance(pid_status, dict):
+        snapshots.append(
+            VitalitySnapshot.from_pid_heartbeat(pid_status, run_id=run_id, observed_at=observed_at)
+        )
+    provider_progress = status.get("provider_progress")
+    if isinstance(provider_progress, dict):
+        snapshots.append(
+            VitalitySnapshot.from_provider_cursor(
+                provider_progress,
+                run_id=run_id,
+                previous_cursor=previous_cursor,
+                observed_at=observed_at,
+            )
+        )
+    if "idle" in status:
+        snapshots.append(
+            VitalitySnapshot.from_pane_readiness(status, run_id=run_id, observed_at=observed_at)
+        )
+    return snapshots

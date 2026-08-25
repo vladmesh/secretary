@@ -12,6 +12,7 @@ from secretary.dispatcher import (
     HostError,
     runtime_from_args,
 )
+from secretary.dispatch.head_status import head_status
 from secretary.dispatcher_pause import PAUSE_MODES
 from secretary.tasks import TaskError
 
@@ -73,6 +74,30 @@ def add_pause_commands(subparsers) -> None:
     status = subparsers.add_parser("pause-status", help="read the production dispatcher's pause state")
     add_common(status)
     status.set_defaults(handler=run_pause_status)
+
+
+def add_head_status_command(subparsers) -> None:
+    """The operator's read-only answer to "is there a head in this workspace?".
+
+    Top level, beside `pause-status`, for the same reason that one is: this is a question an
+    operator asks about the pipeline, not a step of the dispatcher's tick, and the person asking it
+    is usually standing in front of a workspace that looks empty. It lives with the dispatcher's
+    commands rather than with `reconcile plan/apply/adopt` because the heads it reports on are
+    dispatcher state -- the records naming which head serves which card in which workspace -- while
+    `host_commands` is about host resources the dispatcher does not own.
+    """
+    command = subparsers.add_parser(
+        "head-status",
+        help="read whether the dispatcher's heads in a workspace are alive, and separately "
+             "whether their runtime panes are visible",
+    )
+    add_common(command)
+    command.add_argument(
+        "--workspace",
+        required=True,
+        help="the live workspace to look at; every head the dispatcher holds there is reported",
+    )
+    command.set_defaults(handler=run_head_status)
 
 
 def add_common(parser: argparse.ArgumentParser) -> None:
@@ -146,6 +171,10 @@ def run_resume(args: argparse.Namespace) -> int:
 
 def run_pause_status(args: argparse.Namespace) -> int:
     return _run_production(args, lambda runtime: runtime.pause_status())
+
+
+def run_head_status(args: argparse.Namespace) -> int:
+    return _run_production(args, lambda runtime: head_status(runtime, workspace=args.workspace))
 
 
 def _run_production(args: argparse.Namespace, operation) -> int:
