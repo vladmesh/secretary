@@ -290,6 +290,21 @@ class SupervisorClient:
                 raise LocalPtyError("the supervisor closed the connection")
             self._inbox += chunk
 
+    def _refusal_already_sent(self) -> dict[str, Any] | None:
+        """A frame this connection was given before it could be written to, or `None`.
+
+        Only ever consulted when a request could not be sent at all. A stream event is not an
+        answer to anything and is skipped; anything else the supervisor said before letting go is
+        this caller's news, and it is the whole of it.
+        """
+        try:
+            while True:
+                frame = self._next_frame()
+                if "event" not in frame:
+                    return frame
+        except (LocalPtyError, OSError):
+            return None
+
     def request(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Send one request and return *its* answer, discarding anything that answers something else.
 
@@ -307,9 +322,21 @@ class SupervisorClient:
         """
         self._request_seq += 1
         request_id = self._request_seq
-        self._conn.sendall(
-            protocol.encode_frame({**payload, protocol.REQUEST_ID: request_id})
-        )
+        try:
+            self._conn.sendall(
+                protocol.encode_frame({**payload, protocol.REQUEST_ID: request_id})
+            )
+        except OSError as exc:
+            # The supervisor may have answered this connection *before* anything was asked on it
+            # and closed it: that is what happens at the connection bound, where the refusal is
+            # written and the socket is let go. A write that then loses the race is `EPIPE`, and
+            # the refusal is still sitting in this end's receive queue. Losing it would turn a
+            # live head at a bound into an exception out of a verb, so the queue is read before
+            # the failure is passed on.
+            refusal = self._refusal_already_sent()
+            if refusal is None:
+                raise
+            return refusal
         while True:
             frame = self._next_frame()
             if "event" in frame:

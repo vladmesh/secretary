@@ -12,6 +12,7 @@ import ast
 import json
 import os
 import re
+import select
 import shutil
 import signal
 import socket
@@ -696,6 +697,45 @@ class LocalPtySubstrateTests(unittest.TestCase):
         dropped = [frame for frame in frames if frame.get("event") == protocol.EVENT_DROPPED][-1]
         self.assertGreater(dropped["bytes"], 0)
         self.assertEqual(frames[-1]["record"]["exit_code"], 5)
+
+    def test_a_refusal_written_before_the_connection_closed_is_not_lost_to_the_write_that_failed(
+        self,
+    ) -> None:
+        """The connection bound answers before it is asked, and the answer must survive.
+
+        A caller the supervisor will not hold is told so and let go immediately, so the refusal is
+        already in the caller's receive queue when the caller writes its first request — and that
+        write fails, because the peer is gone. The kernel keeps the queued bytes readable anyway,
+        which is what makes the refusal recoverable; a client that let the failed write win would
+        turn a live head at a bound into an exception raised out of a verb, which is the "alive
+        looks dead" collapse in another costume.
+
+        A real listening socket rather than the supervisor, because what is being pinned is the
+        order — answered, closed, only then written to — and against a real supervisor that order
+        is a race this test would lose most of the time.
+        """
+        directory = Path(tempfile.mkdtemp(prefix="lp-refusal-"))
+        self.addCleanup(shutil.rmtree, directory, ignore_errors=True)
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.addCleanup(listener.close)
+        listener.bind(str(directory / "socket"))
+        listener.listen(1)
+
+        client = SupervisorClient.connect(directory / "socket", timeout=5.0)
+        self.addCleanup(client.close)
+        conn, _ = listener.accept()
+        conn.sendall(protocol.encode_frame(protocol.connection_refusal(8)))
+        conn.close()
+        self._await(
+            lambda: bool(select.select([client._conn], [], [], 0)[0]),  # noqa: SLF001
+            message="the refusal never reached the caller",
+        )
+
+        answer = client.attach()
+
+        self.assertFalse(answer["ok"])
+        self.assertEqual(answer["error"], protocol.ERROR_CONNECTION_LIMIT)
+        self.assertEqual(answer["limit"], protocol.CONNECTION_MAX_CLIENTS)
 
     def test_connections_are_bounded_as_well_as_attachments(self) -> None:
         handle = self._start(run_id="connections")

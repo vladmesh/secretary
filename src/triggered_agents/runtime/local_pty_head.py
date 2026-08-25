@@ -853,7 +853,25 @@ class LocalPtyHeadRuntime:
                     handle=str(address.socket_path),
                     leaf=run.leaf or run.run_id,
                 )
-            answer = client.attach()
+            try:
+                answer = client.attach()
+            except _UNREACHABLE as exc:
+                # Connected, and then nothing came back. A verb of this boundary answers with a
+                # receipt for that too: an attachment that did not happen against a head that is
+                # still the caller's to account for, classified by the head's process rather than
+                # by the socket that dropped.
+                client.close()
+                return AttachReceipt(
+                    status=HEAD_ALIVE if self._process_alive(address, run) else HEAD_GONE,
+                    run=run,
+                    reason=OBSERVE_SUPERVISOR_UNREACHABLE,
+                    evidence=str(exc),
+                    epoch=epoch,
+                    lease=lease,
+                    rotation_ready=rotatable,
+                    handle=str(address.socket_path),
+                    leaf=run.leaf or run.run_id,
+                )
             if not answer.get("ok"):
                 client.close()
                 error = str(answer.get("error") or "")
