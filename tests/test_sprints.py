@@ -2765,12 +2765,13 @@ class SprintAuditTraversalTests(SprintFixture):
             yield trips
 
     def test_mass_sprint_status_costs_the_same_board_round_trips_for_one_and_for_many(self) -> None:
-        """The other linear multiplier of `secretary status`, measured the way it is paid.
+        """The shape of the reads: what a mass status asks the board for, and how often.
 
         A per-sprint `status` read that sprint's metadata, its comments and the whole Pipeline
-        listing - every card's metadata included - once per sprint. On the live board that was
-        about a minute of round trips; here it is pinned as a count that does not move when the
-        board holds five sprints instead of one.
+        listing - every card's metadata included - once per sprint. This pins the call structure
+        that replaced it, over the fake, where a batch stands for the calls it carries. What that
+        costs on the wire is a separate question this cannot answer, because the fake answers a
+        batch by looping: `tests/test_board_batch_transport.py` counts the actual posts.
         """
         open_ref = self._resumed("round trips")
         TaskWriter(self.client, data_dir=self.tmp.name).create(  # type: ignore[arg-type]
