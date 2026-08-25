@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest import mock
 
+from secretary import tasks
 from secretary.board.card_transitions import CARD_TRANSITIONS
 from secretary.board.host import TransitionRequest
 from secretary.board.kanboard import KanboardBoardHost
@@ -1617,9 +1618,43 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(self.client.metadata[99], {})
         self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
 
+    def test_an_allocated_reference_clears_the_archived_rows_too(self) -> None:
+        """An archived card keeps its reference for good, so the counter has to see it."""
+        self.client.tasks.append({
+            "id": 900, "reference": "secretary-1404", "title": "Archived", "description": "",
+            "column_id": 6, "position": 1, "swimlane_id": 4, "is_active": 0,
+        })
+        self.client.metadata[900] = {"project": "secretary"}
+        self.client.comments[900] = []
+
+        with open_sprint() as sprint:
+            created = self.writer.create(
+                role="observer", actor="observer", project="secretary", task_type="code",
+                title="Next in line", request_id="allocate-above-archived", sprint=sprint,
+            )
+
+        self.assertEqual(created["task"]["ref"], "secretary-1405")
+
+    def test_an_allocated_reference_that_is_claimed_is_refused_not_written(self) -> None:
+        """The claim check is what proves a reference free; allocation only proposes one.
+
+        An enumeration that missed a row is simulated by allocating a reference the board already
+        holds: the card must not be created under someone else's reference.
+        """
+        with mock.patch.object(tasks, "next_project_reference", return_value="secretary-468"):
+            with open_sprint() as sprint:
+                with self.assertRaisesRegex(TaskError, "secretary-468 is already claimed") as raised:
+                    self.writer.create(
+                        role="observer", actor="observer", project="secretary", task_type="code",
+                        title="Collides", request_id="allocated-collision", sprint=sprint,
+                    )
+
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertFalse(any(method == "createTask" for method, _params in self.client.calls))
+
     def test_explicit_reference_collision_is_still_refused(self) -> None:
         with open_sprint() as sprint:
-            with self.assertRaisesRegex(TaskError, "task reference already exists") as raised:
+            with self.assertRaisesRegex(TaskError, "secretary-468 is already claimed") as raised:
                 self.writer.create(
                     role="observer", actor="observer", project="secretary", task_type="code",
                     title="Duplicate", reference="secretary-468", request_id="explicit-collision",

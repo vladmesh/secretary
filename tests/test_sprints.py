@@ -581,6 +581,75 @@ class SprintOwnershipTests(SprintFixture):
         )
         self.assertEqual(winner["ref"], "sprint:shared")
 
+    def test_an_automatic_reference_clears_every_number_the_board_handed_out(self) -> None:
+        """The counter used to be the row's own id, which forgets what it already gave away.
+
+        Live on 2026-08-06 that handed a new sprint `sprint:804`, taken by a sprint closed in July,
+        and `show` then resolved the new reference to the old row.
+        """
+        board = ensure_sprint_board(self.client)  # type: ignore[arg-type]
+        for task_id, reference, closed in ((80, "sprint:804", True), (81, "sprint:1153", False)):
+            self.client.tasks.append({
+                "id": task_id, "project_id": board, "reference": reference, "title": "historical",
+                "description": "", "column_id": board * 10, "position": task_id, "swimlane_id": 0,
+                "is_active": 0 if closed else 1,
+                "date_creation": "1720000000", "date_modification": "1720000000",
+            })
+            self.client.metadata[task_id] = {"sprint_status": "closed"}
+            self.client.comments[task_id] = []
+
+        created = self._create(goal="numbered above every reference")["sprint"]
+
+        self.assertEqual(created["ref"], "sprint:1154")
+        self.assertEqual(SprintReader(self.client).show("sprint:1154")["goal"],  # type: ignore[arg-type]
+                         "numbered above every reference")
+
+    def test_an_automatic_reference_that_is_claimed_is_refused_not_adopted(self) -> None:
+        """Allocation is only as good as the enumeration it counted, so the claim decides.
+
+        An enumeration that missed a row is simulated here by allocating a reference the board
+        already holds: the create must refuse it loudly instead of publishing a second sprint under
+        someone else's reference.
+        """
+        taken = self._create(goal="the sprint that holds it", reference="sprint:900")["sprint"]
+        # Closing it frees the installation to open another sprint; the reference stays taken.
+        self.writer.close(
+            role="po", actor="operator", reference=taken["ref"], decisions=KEEP_THE_ISSUE_OPEN,
+        )
+
+        with mock.patch.object(sprints, "next_reference", return_value="sprint:900"):
+            with self.assertRaisesRegex(TaskError, "sprint:900") as raised:
+                self._create(goal="collides", request_id="collides")
+
+        self.assertEqual(raised.exception.code, "sprint_conflict")
+        self.assertEqual(SprintReader(self.client).show("sprint:900")["goal"], taken["goal"])  # type: ignore[arg-type]
+        self.assertEqual(
+            [event["ref"] for event in self._events() if event["kind"] == "created"], ["sprint:900"],
+        )
+
+    def test_a_restored_sprint_without_a_reference_is_refused_rather_than_given_a_row(self) -> None:
+        """A restore adopts the row it finds under its reference, so it has to name one.
+
+        It is the one create that may take over a row it did not write, because that row is the one
+        it exported and is putting back. An invented reference there would let it adopt a row it has
+        never seen, which is the silent adoption every rule in this area exists to prevent.
+        """
+        held = self._create(
+            goal="already on the board", reference="sprint:900", request_id="held",
+        )["sprint"]
+        rows_before = [dict(row) for row in self._sprint_rows()]
+
+        with self.assertRaisesRegex(TaskError, "must name its own reference") as raised:
+            self.writer.restore_create(
+                reference="", goal="restored without a reference", request_id="restore-no-reference",
+            )
+
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertEqual(self._sprint_rows(), rows_before)
+        self.assertEqual(SprintReader(self.client).show("sprint:900")["goal"], held["goal"])  # type: ignore[arg-type]
+        self.assertEqual([event["request_id"] for event in self._events()], ["held"])
+        self.assertEqual(self._transactions(), [])
+
     def test_a_refused_create_whose_row_survives_is_answered_as_repairable(self) -> None:
         """A refusal is only an answer when the request is left holding nothing.
 

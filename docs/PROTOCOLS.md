@@ -458,7 +458,10 @@ ignored. Execution tasks are created in Ready, never in Issues; the worker, revi
 create nothing but a proposal in Issues, which a PO later triages to Ready.
 
 When `task create` omits `--ref`, Secretary allocates `PROJECT-N` from the project's board-wide
-high-water mark across both open and closed cards. Allocation, staging and `createTask` are one
+high-water mark across both open and closed cards. Whichever way the reference is arrived at, the
+board is asked whether that exact reference is claimed before it is written, and a claimed one is
+refused: an allocation is only as free as the enumeration it was counted from, and an archived card
+holds its reference for good. Allocation, staging and `createTask` are one
 locally serialized operation, so concurrent local creators cannot reserve the same reference. The
 pending audit first records the chosen reference and, once the backend returns it, the Kanboard task id;
 a recovered pending create verifies and repairs only that durable recorded backend task id, including the
@@ -643,6 +646,13 @@ are the two transitions into `open` and both run it, on that same staged-intent 
    the call reports `audit_pending` instead of `created` or `reopened`, the staged intent stays and the
    retry with the same request id finishes that same operation;
 5. commit one audit event, however often the delivery repeats.
+
+A sprint reference passed by the caller is used as given; without one, `sprint:N` is allocated from
+the sprint board's own high-water mark over open and archived rows, by the same rule and with the
+same claim check as a card, and is remembered so a repeat of a stalled create writes the reference
+it was already going to write. It is never derived from the row's Kanboard identifier: row ids and
+references are separate sequences, and a sprint numbered after its row takes a reference the board
+handed out long before.
 
 The sprint reference is written last, and writing it is what publishes the sprint: a row on the sprint
 board counts as a sprint only once it carries one. An interrupted create is therefore never observed as
