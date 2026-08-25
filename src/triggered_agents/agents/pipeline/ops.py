@@ -15,7 +15,12 @@ import os
 import time
 
 from ...runtime.kanboard import KanboardError, call, call_batch
-from ...runtime.references import BoardRowsUnavailable, board_rows, next_reference
+from ...runtime.references import (
+    BoardRowsUnavailable,
+    board_rows,
+    next_reference,
+    reference_allocation_lock,
+)
 from ...runtime.redact import scrub_secrets
 from . import heads, model, naming
 from .state import STATE
@@ -31,21 +36,26 @@ def _all_cards(pid: int) -> list[dict]:
         raise KanboardError(str(exc)) from exc
 
 
-def _reference_to_write(pid: int, project: str, ref: str | None) -> str:
-    """The reference a new card will carry: the caller's, or the next free one of its project.
+def _create_card_row(pid: int, project: str, ref: str | None, **params) -> tuple[int, str]:
+    """Create one card under a reference nothing else holds, and return the row and that reference.
 
-    Both are proven free against the board before anything is written, archived rows included.
-    Deriving it from the Kanboard row id instead is what broke on 2026-08-18: ids had grown into a
-    range of references handed out under an older numbering, so `create` returned a card that
-    `getTaskByReference` resolved to somebody else's archived one, and every later read and write
-    against the new card silently addressed the old row.
+    The reference is the caller's, or the next free one of its project. Both are proven free
+    against the board, archived rows included, and the whole reserve-and-write runs inside the
+    board's one allocation lock: the check is only worth anything while nothing else can create a
+    card between it and the write, and Kanboard accepts duplicate references without complaint.
+
+    Deriving the reference from the Kanboard row id instead is what broke on 2026-08-18: ids had
+    grown into a range of references handed out under an older numbering, so `create` returned a
+    card that `getTaskByReference` resolved to somebody else's archived one, and every later read
+    and write against the new card silently addressed the old row.
     """
-    reference = ref or next_reference(_all_cards(pid), f"{project}-")
-    if call("getTaskByReference", project_id=pid, reference=reference):
-        raise KanboardError(
-            f"reference {reference} is already claimed on the board; no card was created"
-        )
-    return reference
+    with reference_allocation_lock():
+        reference = ref or next_reference(_all_cards(pid), f"{project}-")
+        if call("getTaskByReference", project_id=pid, reference=reference):
+            raise KanboardError(
+                f"reference {reference} is already claimed on the board; no card was created"
+            )
+        return int(call("createTask", project_id=pid, reference=reference, **params)), reference
 
 
 def board_id() -> int:
@@ -422,9 +432,8 @@ def _create_card(*, project: str, task_type: str, title: str, description: str,
     pid = board_id()
     col_id = _column_id(pid, column)
     sw_id = _ensure_swimlane(pid, project)
-    ref = _reference_to_write(pid, project, ref)
-    task_id = int(call("createTask", title=title, project_id=pid, column_id=col_id,
-                       swimlane_id=sw_id, description=description, reference=ref))
+    task_id, ref = _create_card_row(pid, project, ref, title=title, column_id=col_id,
+                                    swimlane_id=sw_id, description=description)
     values = {
         model.META_TASK_TYPE: task_type, model.META_PROJECT: project,
         # Every card this route creates is an execution task, wherever it lands: a card without
@@ -463,9 +472,8 @@ def create_report_card(project: str, title: str, slug: str, description: str = "
     pid = board_id()
     col_id = _column_id(pid, model.IN_PROGRESS)
     sw_id = _ensure_swimlane(pid, project)
-    ref = _reference_to_write(pid, project, None)
-    task_id = int(call("createTask", title=title, project_id=pid, column_id=col_id,
-                       swimlane_id=sw_id, description=description, reference=ref))
+    task_id, ref = _create_card_row(pid, project, None, title=title, column_id=col_id,
+                                    swimlane_id=sw_id, description=description)
     call("saveTaskMetadata", task_id=task_id, values={
         model.META_TASK_TYPE: "research",
         model.META_RECORD_TYPE: model.RECORD_TASK,

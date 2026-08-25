@@ -8,6 +8,9 @@ new card's reference resolved to an archived card belonging to someone else. Eve
 from __future__ import annotations
 
 import contextlib
+import os
+import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -62,6 +65,15 @@ def _rows():
 
 
 class CardReferenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # A create takes the board's allocation lock, which lives in the installation's data plane.
+        # The suite is hermetic, so it points at a temporary one rather than the live host's.
+        data_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(data_dir.cleanup)
+        patched = mock.patch.dict(os.environ, {"SECRETARY_DATA_DIR": data_dir.name})
+        patched.start()
+        self.addCleanup(patched.stop)
+
     def test_a_new_card_is_numbered_above_every_reference_of_its_project(self) -> None:
         calls: list[tuple[str, dict]] = []
         with mock.patch.object(ops, "call", side_effect=_board(_rows(), calls)), \
@@ -99,6 +111,79 @@ class CardReferenceTests(unittest.TestCase):
                         )
 
                 self.assertFalse(any(method == "createTask" for method, _params in calls))
+
+
+class ConcurrentCreateTests(unittest.TestCase):
+    """Two local creators cannot hand out one reference (issue:f32aa04c).
+
+    The claim check only rules out a collision that already existed when it ran. What stops two
+    creators from both allocating the same free number is that the whole allocate-check-write runs
+    inside the board's one allocation lock.
+    """
+
+    def setUp(self) -> None:
+        data_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(data_dir.cleanup)
+        patched = mock.patch.dict(os.environ, {"SECRETARY_DATA_DIR": data_dir.name})
+        patched.start()
+        self.addCleanup(patched.stop)
+
+    def test_two_concurrent_creates_take_different_references(self) -> None:
+        rows = [{"id": 5, "reference": "secretary-902", "is_active": True}]
+        guard = threading.Lock()
+        # Both creators try to meet here while enumerating. Serialized, one of them cannot arrive
+        # until the other has written its card, so the barrier breaks on its timeout instead of
+        # letting the two share a high-water mark - which is the collision this asserts against.
+        rendezvous = threading.Barrier(2, timeout=0.5)
+
+        def call(method, **params):
+            if method == "getAllProjects":
+                return [{"id": 2, "name": ops.model.BOARD_NAME}]
+            if method == "getColumns":
+                return BOARD_COLUMNS
+            if method == "getActiveSwimlanes":
+                return [{"id": 1, "name": "secretary"}]
+            if method == "getAllTasks":
+                with contextlib.suppress(threading.BrokenBarrierError):
+                    rendezvous.wait()
+                with guard:
+                    return [dict(row) for row in rows if row["is_active"] == (params["status_id"] == 1)]
+            if method == "getTaskByReference":
+                with guard:
+                    return next(
+                        (dict(row) for row in rows if row["reference"] == params["reference"]), None,
+                    )
+            if method == "createTask":
+                with guard:
+                    row = {"id": 40 + len(rows), "reference": params["reference"], "is_active": True}
+                    rows.append(row)
+                    return row["id"]
+            if method in ("updateTask", "saveTaskMetadata"):
+                return True
+            if method == "getTaskTags":
+                return {}
+            raise AssertionError(f"unexpected call {method} {params}")
+
+        created: list[str] = []
+
+        def create(title: str) -> None:
+            card = ops.create_card(project="secretary", task_type="code", title=title, role="po")
+            with guard:
+                created.append(card["reference"])
+
+        with mock.patch.object(ops, "call", side_effect=call), \
+             mock.patch.object(ops, "_sync_head_tags"):
+            threads = [threading.Thread(target=create, args=(f"card {index}",)) for index in range(2)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=30)
+
+        self.assertEqual(sorted(created), ["secretary-903", "secretary-904"])
+        self.assertEqual(
+            sorted(row["reference"] for row in rows),
+            ["secretary-902", "secretary-903", "secretary-904"],
+        )
 
 
 if __name__ == "__main__":

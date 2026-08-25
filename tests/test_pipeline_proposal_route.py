@@ -10,6 +10,8 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
+import tempfile
 import unittest
 from unittest import mock
 
@@ -62,6 +64,15 @@ UNKNOWN_FIRST_COLUMN = [dict(BOARD_COLUMNS[0], title="Backlog"), *BOARD_COLUMNS[
 
 
 class ProposalRouteTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # A create takes the board's allocation lock, which lives in the installation's data plane.
+        # The suite is hermetic, so it points at a temporary one rather than the live host's.
+        data_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(data_dir.cleanup)
+        patched = mock.patch.dict(os.environ, {"SECRETARY_DATA_DIR": data_dir.name})
+        patched.start()
+        self.addCleanup(patched.stop)
+
     def test_first_column_takes_agent_proposals_typed_as_tasks(self):
         for file_proposal in (ops.reviewer_idea, ops.retro_idea, ops.steward_idea):
             with self.subTest(route=file_proposal.__name__):

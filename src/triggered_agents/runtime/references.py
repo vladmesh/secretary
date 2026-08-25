@@ -19,9 +19,17 @@ sharing one reference.
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
+import os
 import re
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from pathlib import Path
 from typing import Any
+
+# Where an installation keeps its data plane. The role environment propagates it to every agent
+# process, which is what lets writers in different processes name one lock.
+DATA_DIR_ENV = "SECRETARY_DATA_DIR"
 
 class BoardRowsUnavailable(RuntimeError):
     """A row enumeration answered with something that is not a list of rows."""
@@ -61,3 +69,29 @@ def next_reference(rows: Iterable[Mapping[str, Any]], prefix: str) -> str:
         for row in rows
     )
     return f"{prefix}{max((int(match.group(1)) for match in used if match), default=0) + 1}"
+
+
+@contextlib.contextmanager
+def reference_allocation_lock(data_dir: Path | str | None = None) -> Iterator[None]:
+    """Serialize allocate, claim and write across every local writer of one board.
+
+    Kanboard accepts duplicate references and offers no compare-and-swap, so the three steps are
+    only atomic if one boundary covers all of them. Every local writer of the same board takes this
+    one file, whichever entry point it came through: two processes that each read the high-water
+    mark, each find the reference unclaimed and each create it would otherwise manufacture exactly
+    the duplicate the claim check exists to prevent.
+
+    The lock lives in the installation's data plane, so callers that know their data directory pass
+    it and the rest resolve the same one from the environment.
+    """
+    root = Path(data_dir) if data_dir else Path(
+        os.environ.get(DATA_DIR_ENV) or Path.home() / "secretary-data"
+    )
+    board = root / "board"
+    board.mkdir(parents=True, exist_ok=True)
+    with (board / ".create.lock").open("a+", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)

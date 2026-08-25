@@ -39,7 +39,12 @@ from secretary.board_transport import (
 )
 from secretary.role_env import RUNTIME_ENV_FILE_ENVS, runtime_env_path
 from triggered_agents.runtime.head import CODEX_LAUNCH_MODES
-from triggered_agents.runtime.references import BoardRowsUnavailable, board_rows, next_reference
+from triggered_agents.runtime.references import (
+    BoardRowsUnavailable,
+    board_rows,
+    next_reference,
+    reference_allocation_lock,
+)
 from triggered_agents.runtime.paths import instance_dir as normalize_instance_dir
 from triggered_agents.runtime.redact import redact
 
@@ -394,19 +399,6 @@ def project_card_by_id(
 def next_project_reference(client: KanboardClient, project_id: int, project: str) -> str:
     """Allocate the reference immediately after this project's board-wide high-water mark."""
     return next_reference(all_project_cards(client, project_id), f"{project}-")
-
-
-@contextlib.contextmanager
-def reference_allocation_lock(data_dir: Path) -> Iterator[None]:
-    """Serialize reference allocation across the processes that create cards and sprints."""
-    board_dir = data_dir / "board"
-    board_dir.mkdir(parents=True, exist_ok=True)
-    with (board_dir / ".create.lock").open("a+", encoding="utf-8") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 @contextlib.contextmanager

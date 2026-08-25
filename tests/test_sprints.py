@@ -627,6 +627,29 @@ class SprintOwnershipTests(SprintFixture):
             [event["ref"] for event in self._events() if event["kind"] == "created"], ["sprint:900"],
         )
 
+    def test_a_restored_sprint_without_a_reference_is_refused_rather_than_given_a_row(self) -> None:
+        """A restore adopts the row it finds under its reference, so it has to name one.
+
+        It is the one create that may take over a row it did not write, because that row is the one
+        it exported and is putting back. An invented reference there would let it adopt a row it has
+        never seen, which is the silent adoption every rule in this area exists to prevent.
+        """
+        held = self._create(
+            goal="already on the board", reference="sprint:900", request_id="held",
+        )["sprint"]
+        rows_before = [dict(row) for row in self._sprint_rows()]
+
+        with self.assertRaisesRegex(TaskError, "must name its own reference") as raised:
+            self.writer.restore_create(
+                reference="", goal="restored without a reference", request_id="restore-no-reference",
+            )
+
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertEqual(self._sprint_rows(), rows_before)
+        self.assertEqual(SprintReader(self.client).show("sprint:900")["goal"], held["goal"])  # type: ignore[arg-type]
+        self.assertEqual([event["request_id"] for event in self._events()], ["held"])
+        self.assertEqual(self._transactions(), [])
+
     def test_a_refused_create_whose_row_survives_is_answered_as_repairable(self) -> None:
         """A refusal is only an answer when the request is left holding nothing.
 

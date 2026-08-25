@@ -958,7 +958,7 @@ class SprintWriter:
         event = document["event"]
         progress = document.setdefault("progress", {})
         board_id = ensure_sprint_board(self.client)
-        created_ref = self._reference(document, board_id)
+        created_ref = self._reference(document, board_id, admitted=admitted)
         # A staged create that is being resumed was admitted before the refusal that
         # stalled it, and it held nothing meanwhile.  The installation is measured again
         # here, before anything of this sprint is published, so a repeat that lost the
@@ -995,7 +995,7 @@ class SprintWriter:
         self.transactions.save(document)
         return created_ref
 
-    def _reference(self, document: dict[str, Any], board_id: int) -> str:
+    def _reference(self, document: dict[str, Any], board_id: int, *, admitted: bool) -> str:
         """This request's sprint reference, allocated once and then remembered.
 
         The reference is what publishes a sprint, so a create that stalled and is being repeated
@@ -1005,10 +1005,18 @@ class SprintWriter:
         An automatic reference used to be the row's own Kanboard id, which is not a record of what
         the board handed out. Row ids trail the references by hundreds here, so on 2026-08-06 a new
         sprint took `sprint:804` from a sprint closed in July and became unaddressable behind it.
+
+        Only an admitted create allocates. A restore is the one create that adopts a row it finds
+        under its reference, because that row is the one it exported and is putting back; a
+        reference invented here would let it adopt a row it has never seen. Restoring a sprint
+        therefore means naming it, and a restore without a reference is refused rather than given
+        somebody else's row.
         """
         recorded = str(document["intent"].get("reference") or document.get("reference") or "")
         if recorded:
             return recorded
+        if not admitted:
+            raise TaskError("validation", "a restored sprint must name its own reference", 2)
         with reference_allocation_lock(self.data_dir):
             try:
                 rows = board_rows(self.client.call, board_id)
