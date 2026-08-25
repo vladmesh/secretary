@@ -1108,19 +1108,31 @@ class SubstrateIsNotWiredInTests(unittest.TestCase):
     secretary-1463 wrote this as "nothing outside the package reaches for it", which was the whole
     truth while there was no backend. secretary-1465 built `runtime.local_pty_head` on top, so the
     guard says the same thing about one more module rather than less about all of them: exactly one
-    consumer, named here, and the rest of the product still untouched. That the backend itself is
-    wired into nothing is `TheBackendIsNotWiredInTests` in `test_local_pty_head_runtime`.
+    consumer, named here, and the rest of the product still untouched.
+
+    secretary-1467 wired that backend into the dispatcher, so the dispatcher now names the module
+    `local_pty_head` — and a substring search for `local_pty` cannot tell that from reaching into
+    this package. The property is unchanged and is asked of the imports instead: nothing outside
+    the backend imports this package. `OnlyTheResolverWiresThisBackendIn` in
+    `test_local_pty_head_runtime` is what says which half of that card's own guard survived.
     """
 
     def test_only_the_one_backend_built_on_it_reaches_for_it(self) -> None:
         package = REPO / "src" / "triggered_agents" / "runtime" / "head" / "local_pty"
         backend = REPO / "src" / "triggered_agents" / "runtime" / "local_pty_head.py"
+        substrate = "triggered_agents.runtime.head.local_pty"
         offenders = []
         for path in (REPO / "src").rglob("*.py"):
             if package in path.parents or path == backend:
                 continue
-            if "local_pty" in path.read_text(encoding="utf-8"):
-                offenders.append(str(path.relative_to(REPO)))
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                names = []
+                if isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                    names = [node.module]
+                if any(name == substrate or name.startswith(substrate + ".") for name in names):
+                    offenders.append(str(path.relative_to(REPO)))
         self.assertEqual(offenders, [], "the substrate is reached from outside its one backend")
 
     def test_the_substrate_implements_none_of_the_six_verbs_as_a_boundary(self) -> None:

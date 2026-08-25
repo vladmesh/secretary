@@ -9590,7 +9590,7 @@ class ObserverLaunchDeliveryRefusalTests(unittest.TestCase):
         )
 
     def _refuse(self, receipt) -> None:
-        self.host._head_runtime.deliver = lambda *_args, **_kwargs: receipt  # type: ignore[method-assign]
+        self.host.head_runtime.deliver = lambda *_args, **_kwargs: receipt  # type: ignore[method-assign]
 
     def test_a_launch_prompt_refused_by_the_drain_gate_is_not_a_delivered_launch(self) -> None:
         self._refuse(

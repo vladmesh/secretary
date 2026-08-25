@@ -62,11 +62,26 @@ from tests.fanout_fixtures import accepted_transport_run
 from triggered_agents.agents.pipeline import heads
 from triggered_agents.runtime import dispatch, role_env
 from triggered_agents.runtime.head import (
+    HEAD_ALIVE,
+    HEAD_OK,
     RUNTIME_ROLE_ENV,
     HeadCommandError,
+    HeadRun,
+    HeadSpec,
+    HeadSpecError,
+    StopReceipt,
+    TaskRef,
     render_head_command,
     wrap_role_command,
 )
+from triggered_agents.runtime.head_runtimes import (
+    DEFAULT_HEAD_RUNTIME,
+    HEAD_RUNTIMES,
+    LOCAL_PTY_RUNTIME,
+    ORCA_LEGACY_RUNTIME,
+)
+from triggered_agents.runtime.local_pty_head import LocalPtyHeadRuntime
+from triggered_agents.runtime.orca_legacy_head import OrcaLegacyHeadRuntime
 
 # Modules that reach through a runtime into the host/catalog collaborators.
 _RUNTIME_MODULES = (
@@ -1174,6 +1189,360 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
         for pid in ("claude-default", "hermes"):
             with self.subTest(head=pid):
                 self.assertEqual(registry.resolve(pid), pid)
+
+
+class PerProfileRuntimeTests(unittest.TestCase):
+    """secretary-1467: which backend a head is held by is the profile's own answer.
+
+    The value has to survive four boundaries to be worth anything, and each one is a test here:
+    the registry that names it, the `HeadSpec` that carries it, the durable run record a later
+    tick reads it back from, and the published `heads.yaml` a live installation actually runs off.
+    """
+
+    RESOURCES = {"acct": {"account": "acct", "probe": "true"}}
+
+    def _profiles(self, **profile: object) -> dict:
+        return {"head": {"resource": "acct", **profile}}
+
+    # -- criterion 1: the key, and what its absence means --------------------------------------
+
+    def test_a_profile_may_name_either_runtime_and_naming_none_is_the_legacy_one(self) -> None:
+        for named, expected in (
+            (LOCAL_PTY_RUNTIME, LOCAL_PTY_RUNTIME),
+            (ORCA_LEGACY_RUNTIME, ORCA_LEGACY_RUNTIME),
+            (None, DEFAULT_HEAD_RUNTIME),
+        ):
+            with self.subTest(runtime=named):
+                profile = {"adapter": "claude"}
+                if named is not None:
+                    profile["runtime"] = named
+                profiles = self._profiles(**profile)
+                heads.validate_registry(self.RESOURCES, profiles)
+
+                spec = HeadSpec.from_profile("head", profiles["head"])
+
+                self.assertEqual(spec.runtime, expected)
+        self.assertEqual(DEFAULT_HEAD_RUNTIME, ORCA_LEGACY_RUNTIME, "absence must not change hands")
+
+    # -- criterion 2: one refusal, at both readers of a registry -------------------------------
+
+    def test_an_unknown_runtime_is_refused_by_name_at_the_table_and_at_the_one_profile(self) -> None:
+        """The same rule refuses it, whether a whole table is loaded or one head is raised."""
+        profiles = self._profiles(adapter="claude", runtime="kubernetes")
+
+        with self.assertRaisesRegex(heads.HeadRegistryError, "unknown runtime 'kubernetes'"):
+            heads.validate_registry(self.RESOURCES, profiles)
+        with self.assertRaisesRegex(HeadSpecError, "unknown runtime 'kubernetes'"):
+            HeadSpec.from_profile("head", profiles["head"])
+
+    def test_a_runtime_that_is_not_a_name_is_refused_rather_than_raising_past_the_caller(self) -> None:
+        profiles = self._profiles(adapter="claude", runtime=["local-pty"])
+
+        with self.assertRaisesRegex(heads.HeadRegistryError, "runtime must be a name"):
+            heads.validate_registry(self.RESOURCES, profiles)
+
+    def test_the_check_lives_in_the_one_place_both_readers_go_through(self) -> None:
+        """Not a second validation site: `validate_launch_shape` is where the rule is."""
+        source = inspect.getsource(dispatcher_module.head_ops.command.validate_launch_shape)
+
+        self.assertIn("HEAD_RUNTIMES", source)
+        for holder in (heads.validate_registry, HeadSpec.from_profile):
+            with self.subTest(reader=holder.__qualname__):
+                self.assertNotIn("HEAD_RUNTIMES", inspect.getsource(holder))
+
+    # -- criterion 3: the runtime is independent of the adapter --------------------------------
+
+    def test_every_adapter_may_stand_on_every_runtime(self) -> None:
+        """`runtime` says what holds a head; `adapter` says what the head is. Orthogonal."""
+        for adapter in ("claude", "codex", "hermes"):
+            for runtime in HEAD_RUNTIMES:
+                with self.subTest(adapter=adapter, runtime=runtime):
+                    profiles = self._profiles(adapter=adapter, runtime=runtime)
+                    heads.validate_registry(self.RESOURCES, profiles)
+
+                    spec = HeadSpec.from_profile("head", profiles["head"])
+
+                    self.assertEqual((spec.adapter, spec.runtime), (adapter, runtime))
+
+    # -- criterion 4: it reaches the place the backend is built --------------------------------
+
+    def test_the_run_record_carries_the_runtime_a_head_was_raised_on(self) -> None:
+        """A later tick reads the head back from disk and must reach it through its own backend."""
+        run = HeadRun(
+            run_id="run-1",
+            spec=HeadSpec(profile_id="head", adapter="claude", runtime=LOCAL_PTY_RUNTIME),
+            workspace="/tmp/ws",
+            task_ref=TaskRef.card("card-1"),
+            role="worker",
+        )
+
+        recovered = HeadRun.from_json(run.to_json())
+
+        self.assertEqual(recovered.spec.runtime, LOCAL_PTY_RUNTIME)
+
+    def test_recording_the_runtime_left_every_head_s_launch_identity_where_it_was(self) -> None:
+        """Why it is written beside the spec block and not inside it.
+
+        The spec block is hashed whole as a head's launch identity in two places — the worker
+        lifecycle's `head_run_binding` and the Codex provider source's own fingerprint. A value
+        added inside it changes the identity of every head already running, which at the next
+        upgrade turns every persisted provider source into a foreign one and relaunches the heads
+        reading them. So the two fingerprints have to be indifferent to it, and this is that.
+        """
+        from secretary.dispatcher_worker_lifecycle import head_run_binding
+        from triggered_agents.runtime import codex_preflight
+
+        def run_on(runtime: str) -> HeadRun:
+            return HeadRun(
+                run_id="run-1",
+                spec=HeadSpec(profile_id="head", adapter="codex", codex_mode="tui",
+                              runtime=runtime),
+                workspace="/tmp/ws",
+                task_ref=TaskRef.card("card-1"),
+                role="worker",
+            )
+
+        legacy, supervised = run_on(ORCA_LEGACY_RUNTIME), run_on(LOCAL_PTY_RUNTIME)
+
+        self.assertNotIn("runtime", legacy.to_json()["spec"])
+        self.assertEqual(head_run_binding(legacy.to_json()), head_run_binding(supervised.to_json()))
+        self.assertEqual(
+            codex_preflight.codex_provider_source_descriptor(legacy)["head_run_fingerprint"],
+            codex_preflight.codex_provider_source_descriptor(supervised)["head_run_fingerprint"],
+        )
+
+    def test_a_record_written_before_this_key_existed_is_a_legacy_head(self) -> None:
+        payload = {"profile_id": "head", "adapter": "codex"}
+
+        recovered = HeadRun.from_json({
+            "run_id": "run-1", "spec": payload, "workspace": "/tmp/ws",
+            "task_ref": {"kind": "card", "ref": "card-1"}, "role": "worker",
+        })
+
+        self.assertEqual(recovered.spec.runtime, ORCA_LEGACY_RUNTIME)
+
+    def test_the_dispatcher_builds_the_backend_the_head_named_and_no_other(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        host = CommandHostRuntime(FakeCatalog(), Path(tmp.name), mode="noop")
+
+        legacy = HeadSpec(profile_id="head", adapter="claude")
+        supervised = HeadSpec(profile_id="head", adapter="claude", runtime=LOCAL_PTY_RUNTIME)
+
+        self.assertIsInstance(host.head_runtime_for(legacy), OrcaLegacyHeadRuntime)
+        self.assertIsInstance(host.head_runtime_for(supervised), LocalPtyHeadRuntime)
+        self.assertIsInstance(host.head_runtime, OrcaLegacyHeadRuntime)
+        self.assertIs(
+            host.head_runtime_for(supervised),
+            host.head_runtime_for(supervised),
+            "a rebuilt runtime would forget the turns it handed out",
+        )
+
+    def test_a_runtime_no_validated_registry_could_produce_fails_closed(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        host = CommandHostRuntime(FakeCatalog(), Path(tmp.name), mode="noop")
+
+        with self.assertRaisesRegex(dispatcher_module.HostError, "unknown head runtime"):
+            host.head_runtime_for(HeadSpec(profile_id="head", adapter="claude", runtime="podman"))
+
+    # -- criterion 5: it survives publication ---------------------------------------------------
+
+    def test_the_value_survives_the_snapshot_a_live_tick_reads(self) -> None:
+        """Materialized, not just parsed: `installed_heads` is what the dispatcher runs off."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        product = Path(tmp.name) / "product"
+        canon = product / "src" / "triggered_agents" / "agents" / "pipeline"
+        canon.mkdir(parents=True)
+        (canon / "heads.toml").write_text(
+            "[resources.acct]\naccount = \"acct\"\n\n"
+            "[profiles.supervised]\nresource = \"acct\"\nadapter = \"claude\"\n"
+            "runtime = \"local-pty\"\n\n"
+            "[profiles.legacy]\nresource = \"acct\"\nadapter = \"claude\"\n\n"
+            "[role_defaults]\nnew_card = \"supervised\"\n",
+            encoding="utf-8",
+        )
+        instance = Path(tmp.name) / "instance"
+        (instance / "heads").mkdir(parents=True)
+        (instance / "instance.yaml").write_text(
+            f"version: 1\nname: runtimes\ndata_dir: {instance / 'data'}\n", encoding="utf-8"
+        )
+
+        materialize_snapshot(instance, product)
+        record_source(instance, product)
+        installed = installed_heads(instance)
+
+        self.assertEqual(installed["profiles"]["supervised"].get("runtime"), LOCAL_PTY_RUNTIME)
+        self.assertNotIn("runtime", installed["profiles"]["legacy"])
+        published = heads.load_registry(instance / "heads" / "heads.yaml")
+        self.assertEqual(
+            HeadSpec.from_profile("supervised", published.profile("supervised")).runtime,
+            LOCAL_PTY_RUNTIME,
+        )
+
+    # -- criterion 6: nothing the product ships moves ------------------------------------------
+
+    def test_no_profile_the_product_ships_is_on_the_new_backend(self) -> None:
+        canon = canonical_heads(upgrade.running_product_root())
+
+        for pid, profile in canon["profiles"].items():
+            with self.subTest(profile=pid):
+                self.assertEqual(
+                    profile.get("runtime", DEFAULT_HEAD_RUNTIME), ORCA_LEGACY_RUNTIME
+                )
+
+
+class _RecordingBackend:
+    """A head runtime that answers the two verbs workspace cleanup uses and remembers the asking."""
+
+    def __init__(self, name: str, *, refuses: bool = False) -> None:
+        self.name = name
+        self.refuses = refuses
+        self.calls: list[tuple[str, str]] = []
+
+    def stop(self, run: HeadRun, initiator, **ignored) -> StopReceipt:
+        del ignored
+        self.calls.append(("stop", run.run_id))
+        if self.refuses:
+            return StopReceipt(
+                status=HEAD_ALIVE, run=run, reason="the head's process outlived the stop"
+            )
+        return StopReceipt(status=HEAD_OK, run=run.finishing(initiator).exited())
+
+    def stop_workspace(self, workspace: str) -> None:
+        self.calls.append(("stop_workspace", workspace))
+
+
+class WorkspaceCleanupChoosesTheBackendTheHeadIsHeldByTests(unittest.TestCase):
+    """secretary-1467: workspace-scoped cleanup selects from the run, like every per-head verb.
+
+    Per-head operations already resolved the backend from the head they act on. Workspace cleanup
+    did not: it made one unconditional Orca by-worktree call, which addresses no supervised head at
+    all, and `stop` absorbed the refusal so the caller went on to remove the worktree with the head
+    still running — after which the card's next attempt raises a second head beside the first.
+
+    Every site that picks a backend here picks it from the durable run the record names:
+    `stop_workspace` from `worker_head_run` and `review_head_run`, `_stop_observer_terminals` from
+    the observer record's own `head_run`. A workspace that names no run keeps the Orca call,
+    because panes are then the only thing there can be to stop.
+    """
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.host = CommandHostRuntime(FakeCatalog(), self.root / "data", mode="real")  # type: ignore[arg-type]
+        self.legacy = _RecordingBackend(ORCA_LEGACY_RUNTIME)
+        self.supervised = _RecordingBackend(LOCAL_PTY_RUNTIME)
+        self.host._head_runtimes[ORCA_LEGACY_RUNTIME] = self.legacy
+        self.host._head_runtimes[LOCAL_PTY_RUNTIME] = self.supervised
+        self.removed: list[list[str]] = []
+        self.host._run_json = lambda args: self.removed.append(args) or {}  # type: ignore[assignment]
+
+    def _run(self, role: str, runtime: str, run_id: str) -> dict:
+        return HeadRun(
+            run_id=run_id,
+            spec=HeadSpec(profile_id="head", adapter="claude", runtime=runtime),
+            workspace=str(self.root / "ws"),
+            task_ref=TaskRef.card("secretary-1467"),
+            role=role,
+        ).to_json()
+
+    def _record(self, **fields) -> DispatcherRecord:
+        return DispatcherRecord(
+            worker="secretary-1467-worker",
+            workspace=str(self.root / "ws"),
+            handle="term:1",
+            head="claude",
+            review_head="claude-reviewer",
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="claimed",
+            claimed_at=0.0,
+            **fields,
+        )
+
+    def test_a_supervised_worker_is_stopped_through_its_own_backend(self) -> None:
+        record = self._record(worker_head_run=self._run("worker", LOCAL_PTY_RUNTIME, "run-w"))
+
+        self.host.stop_workspace(record)
+
+        self.assertEqual(self.supervised.calls, [("stop", "run-w")])
+        self.assertEqual(self.legacy.calls, [], "an Orca call cannot reach a supervised head")
+
+    def test_a_supervised_reviewer_is_stopped_through_its_own_backend(self) -> None:
+        record = self._record(review_head_run=self._run("reviewer", LOCAL_PTY_RUNTIME, "run-r"))
+
+        self.host.stop_workspace(record)
+
+        self.assertEqual(self.supervised.calls, [("stop", "run-r")])
+        self.assertEqual(self.legacy.calls, [])
+
+    def test_a_supervised_observer_is_stopped_through_its_own_backend(self) -> None:
+        self.host._stop_observer_terminals(
+            str(self.root / "ws"),
+            run=self._run("observer", LOCAL_PTY_RUNTIME, "run-o"),
+            role="observer",
+        )
+
+        self.assertEqual(self.supervised.calls, [("stop", "run-o")])
+        self.assertEqual(self.legacy.calls, [])
+
+    def test_a_mixed_workspace_stops_each_head_where_that_head_lives(self) -> None:
+        """One supervised, one legacy: the supervised one by name, the legacy one by worktree."""
+        record = self._record(
+            worker_head_run=self._run("worker", LOCAL_PTY_RUNTIME, "run-w"),
+            review_head_run=self._run("reviewer", ORCA_LEGACY_RUNTIME, "run-r"),
+        )
+
+        self.host.stop_workspace(record)
+
+        self.assertEqual(self.supervised.calls, [("stop", "run-w")])
+        self.assertEqual(self.legacy.calls, [("stop_workspace", record.workspace)])
+
+    def test_a_legacy_workspace_is_torn_down_exactly_as_it_was(self) -> None:
+        record = self._record(
+            worker_head_run=self._run("worker", ORCA_LEGACY_RUNTIME, "run-w"),
+            review_head_run=self._run("reviewer", ORCA_LEGACY_RUNTIME, "run-r"),
+        )
+
+        self.host.stop_workspace(record)
+
+        self.assertEqual(self.legacy.calls, [("stop_workspace", record.workspace)])
+        self.assertEqual(self.supervised.calls, [])
+
+    def test_a_workspace_that_names_no_run_keeps_the_orca_teardown(self) -> None:
+        """A bring-up that never got as far as a durable run: panes are all there can be."""
+        self.host.stop_workspace(self._record())
+
+        self.assertEqual(self.legacy.calls, [("stop_workspace", str(self.root / "ws"))])
+        self.assertEqual(self.supervised.calls, [])
+
+    def test_a_head_that_would_not_stop_reaches_the_caller(self) -> None:
+        self.supervised.refuses = True
+        record = self._record(worker_head_run=self._run("worker", LOCAL_PTY_RUNTIME, "run-w"))
+
+        with self.assertRaisesRegex(dispatcher_module.HostError, "was not stopped"):
+            self.host.stop_workspace(record)
+
+    def test_a_teardown_does_not_remove_the_worktree_under_a_head_it_could_not_stop(self) -> None:
+        """The defect this card's own wiring opened: `stop` absorbs a refusal, and a removal made
+        on the strength of an absorbed refusal orphans a live head."""
+        self.supervised.refuses = True
+        record = self._record(worker_head_run=self._run("worker", LOCAL_PTY_RUNTIME, "run-w"))
+
+        self.assertIsNone(self.host.teardown(record), "a green card must still reach Done")
+
+        self.assertEqual(self.removed, [], "the worktree was pulled out from under a live head")
+
+    def test_a_teardown_removes_the_worktree_once_the_heads_are_confirmed_gone(self) -> None:
+        record = self._record(worker_head_run=self._run("worker", LOCAL_PTY_RUNTIME, "run-w"))
+
+        self.host.teardown(record)
+
+        self.assertEqual([args[1] for args in self.removed], ["worktree"])
 
 
 if __name__ == "__main__":
