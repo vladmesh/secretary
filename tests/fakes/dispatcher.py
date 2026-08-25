@@ -40,6 +40,7 @@ from secretary.sprints import SPRINT_BOARD_NAME
 from secretary.tasks import TaskError
 from tests.head_registry import write_installed_pair
 from triggered_agents.runtime.head import operations as head_ops
+from tests.fakes.board import BatchedCalls
 
 
 def _legacy_unbound_v1_run(run_json: dict[str, Any], *, root: Path) -> dict[str, Any]:
@@ -121,7 +122,7 @@ def _configure_production_shaped_codex_relaunch(host: Any, *, root: Path) -> Non
     host.preflight_codex_run = preflight
     host.restart_worker = restart
 
-class FakeKanboard:
+class FakeKanboard(BatchedCalls):
     def __init__(self) -> None:
         self.instance_dir = Path(tempfile.gettempdir())
         self.calls: list[tuple[str, dict]] = []
