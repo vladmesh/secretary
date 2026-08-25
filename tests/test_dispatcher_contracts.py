@@ -62,11 +62,14 @@ from tests.fanout_fixtures import accepted_transport_run
 from triggered_agents.agents.pipeline import heads
 from triggered_agents.runtime import dispatch, role_env
 from triggered_agents.runtime.head import (
+    HEAD_ALIVE,
+    HEAD_OK,
     RUNTIME_ROLE_ENV,
     HeadCommandError,
     HeadRun,
     HeadSpec,
     HeadSpecError,
+    StopReceipt,
     TaskRef,
     render_head_command,
     wrap_role_command,
@@ -1388,6 +1391,158 @@ class PerProfileRuntimeTests(unittest.TestCase):
                 self.assertEqual(
                     profile.get("runtime", DEFAULT_HEAD_RUNTIME), ORCA_LEGACY_RUNTIME
                 )
+
+
+class _RecordingBackend:
+    """A head runtime that answers the two verbs workspace cleanup uses and remembers the asking."""
+
+    def __init__(self, name: str, *, refuses: bool = False) -> None:
+        self.name = name
+        self.refuses = refuses
+        self.calls: list[tuple[str, str]] = []
+
+    def stop(self, run: HeadRun, initiator, **ignored) -> StopReceipt:
+        del ignored
+        self.calls.append(("stop", run.run_id))
+        if self.refuses:
+            return StopReceipt(
+                status=HEAD_ALIVE, run=run, reason="the head's process outlived the stop"
+            )
+        return StopReceipt(status=HEAD_OK, run=run.finishing(initiator).exited())
+
+    def stop_workspace(self, workspace: str) -> None:
+        self.calls.append(("stop_workspace", workspace))
+
+
+class WorkspaceCleanupChoosesTheBackendTheHeadIsHeldByTests(unittest.TestCase):
+    """secretary-1467: workspace-scoped cleanup selects from the run, like every per-head verb.
+
+    Per-head operations already resolved the backend from the head they act on. Workspace cleanup
+    did not: it made one unconditional Orca by-worktree call, which addresses no supervised head at
+    all, and `stop` absorbed the refusal so the caller went on to remove the worktree with the head
+    still running — after which the card's next attempt raises a second head beside the first.
+
+    Every site that picks a backend here picks it from the durable run the record names:
+    `stop_workspace` from `worker_head_run` and `review_head_run`, `_stop_observer_terminals` from
+    the observer record's own `head_run`. A workspace that names no run keeps the Orca call,
+    because panes are then the only thing there can be to stop.
+    """
+
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.host = CommandHostRuntime(FakeCatalog(), self.root / "data", mode="real")  # type: ignore[arg-type]
+        self.legacy = _RecordingBackend(ORCA_LEGACY_RUNTIME)
+        self.supervised = _RecordingBackend(LOCAL_PTY_RUNTIME)
+        self.host._head_runtimes[ORCA_LEGACY_RUNTIME] = self.legacy
+        self.host._head_runtimes[LOCAL_PTY_RUNTIME] = self.supervised
+        self.removed: list[list[str]] = []
+        self.host._run_json = lambda args: self.removed.append(args) or {}  # type: ignore[assignment]
+
+    def _run(self, role: str, runtime: str, run_id: str) -> dict:
+        return HeadRun(
+            run_id=run_id,
+            spec=HeadSpec(profile_id="head", adapter="claude", runtime=runtime),
+            workspace=str(self.root / "ws"),
+            task_ref=TaskRef.card("secretary-1467"),
+            role=role,
+        ).to_json()
+
+    def _record(self, **fields) -> DispatcherRecord:
+        return DispatcherRecord(
+            worker="secretary-1467-worker",
+            workspace=str(self.root / "ws"),
+            handle="term:1",
+            head="claude",
+            review_head="claude-reviewer",
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="claimed",
+            claimed_at=0.0,
+            **fields,
+        )
+
+    def test_a_supervised_worker_is_stopped_through_its_own_backend(self) -> None:
+        record = self._record(worker_head_run=self._run("worker", LOCAL_PTY_RUNTIME, "run-w"))
+
+        self.host.stop_workspace(record)
+
+        self.assertEqual(self.supervised.calls, [("stop", "run-w")])
+        self.assertEqual(self.legacy.calls, [], "an Orca call cannot reach a supervised head")
+
+    def test_a_supervised_reviewer_is_stopped_through_its_own_backend(self) -> None:
+        record = self._record(review_head_run=self._run("reviewer", LOCAL_PTY_RUNTIME, "run-r"))
+
+        self.host.stop_workspace(record)
+
+        self.assertEqual(self.supervised.calls, [("stop", "run-r")])
+        self.assertEqual(self.legacy.calls, [])
+
+    def test_a_supervised_observer_is_stopped_through_its_own_backend(self) -> None:
+        self.host._stop_observer_terminals(
+            str(self.root / "ws"),
+            run=self._run("observer", LOCAL_PTY_RUNTIME, "run-o"),
+            role="observer",
+        )
+
+        self.assertEqual(self.supervised.calls, [("stop", "run-o")])
+        self.assertEqual(self.legacy.calls, [])
+
+    def test_a_mixed_workspace_stops_each_head_where_that_head_lives(self) -> None:
+        """One supervised, one legacy: the supervised one by name, the legacy one by worktree."""
+        record = self._record(
+            worker_head_run=self._run("worker", LOCAL_PTY_RUNTIME, "run-w"),
+            review_head_run=self._run("reviewer", ORCA_LEGACY_RUNTIME, "run-r"),
+        )
+
+        self.host.stop_workspace(record)
+
+        self.assertEqual(self.supervised.calls, [("stop", "run-w")])
+        self.assertEqual(self.legacy.calls, [("stop_workspace", record.workspace)])
+
+    def test_a_legacy_workspace_is_torn_down_exactly_as_it_was(self) -> None:
+        record = self._record(
+            worker_head_run=self._run("worker", ORCA_LEGACY_RUNTIME, "run-w"),
+            review_head_run=self._run("reviewer", ORCA_LEGACY_RUNTIME, "run-r"),
+        )
+
+        self.host.stop_workspace(record)
+
+        self.assertEqual(self.legacy.calls, [("stop_workspace", record.workspace)])
+        self.assertEqual(self.supervised.calls, [])
+
+    def test_a_workspace_that_names_no_run_keeps_the_orca_teardown(self) -> None:
+        """A bring-up that never got as far as a durable run: panes are all there can be."""
+        self.host.stop_workspace(self._record())
+
+        self.assertEqual(self.legacy.calls, [("stop_workspace", str(self.root / "ws"))])
+        self.assertEqual(self.supervised.calls, [])
+
+    def test_a_head_that_would_not_stop_reaches_the_caller(self) -> None:
+        self.supervised.refuses = True
+        record = self._record(worker_head_run=self._run("worker", LOCAL_PTY_RUNTIME, "run-w"))
+
+        with self.assertRaisesRegex(dispatcher_module.HostError, "was not stopped"):
+            self.host.stop_workspace(record)
+
+    def test_a_teardown_does_not_remove_the_worktree_under_a_head_it_could_not_stop(self) -> None:
+        """The defect this card's own wiring opened: `stop` absorbs a refusal, and a removal made
+        on the strength of an absorbed refusal orphans a live head."""
+        self.supervised.refuses = True
+        record = self._record(worker_head_run=self._run("worker", LOCAL_PTY_RUNTIME, "run-w"))
+
+        self.assertIsNone(self.host.teardown(record), "a green card must still reach Done")
+
+        self.assertEqual(self.removed, [], "the worktree was pulled out from under a live head")
+
+    def test_a_teardown_removes_the_worktree_once_the_heads_are_confirmed_gone(self) -> None:
+        record = self._record(worker_head_run=self._run("worker", LOCAL_PTY_RUNTIME, "run-w"))
+
+        self.host.teardown(record)
+
+        self.assertEqual([args[1] for args in self.removed], ["worktree"])
 
 
 if __name__ == "__main__":

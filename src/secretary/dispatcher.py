@@ -9,7 +9,7 @@ import shutil
 import signal
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -930,6 +930,28 @@ def _head_runtime_name(subject: Any) -> str:
     return str(getattr(spec, "runtime", "") or DEFAULT_HEAD_RUNTIME)
 
 
+def _durable_head_run(subject: Any) -> head_ops.HeadRun | None:
+    """The run a record names at a workspace-scoped stop, or `None` when it names none.
+
+    Workspace cleanup reads the run itself rather than a lifecycle run rebuilt around the record:
+    the per-role builders invent a fresh identity for a field that holds nothing, and a stop has to
+    act on the head that was actually raised or on nothing at all. So a field that is empty,
+    unparseable, or carries no run id is `None` here — that is a workspace with no head of that
+    role, not a head to go looking for.
+    """
+    if subject is None:
+        return None
+    if isinstance(subject, head_ops.HeadRun):
+        return subject if subject.run_id else None
+    if not isinstance(subject, dict) or not subject.get("run_id"):
+        return None
+    try:
+        run = head_ops.HeadRun.from_json(subject)
+    except (head_ops.HeadRunError, head_ops.TaskRefError, TypeError, ValueError):
+        return None
+    return run if run.run_id else None
+
+
 class CommandHostRuntime:
     def __init__(self, catalog: InstanceCatalog, data_dir: Path, *, mode: str = "real") -> None:
         self.catalog = catalog
@@ -1721,15 +1743,17 @@ class CommandHostRuntime:
         task: str = "",
         leaf: str = "",
     ) -> None:
-        """Stop every pane of an observer workspace.
+        """End the observer this workspace holds, through the backend that observer is held by.
 
-        One verb for the whole workspace rather than a close per handle: `close_pane` answers
-        `tab_not_found` for a pane the runtime never gave a UI tab, so a per-handle close reports a
-        stop that worked as a stop that failed.
+        For a legacy observer this is still one verb for the whole workspace rather than a close
+        per handle: `close_pane` answers `tab_not_found` for a pane the runtime never gave a UI
+        tab, so a per-handle close reports a stop that worked as a stop that failed. An observer
+        raised on a supervised backend owns no pane at all, and is ended by its own run's stop —
+        which is why the choice is made from the persisted run rather than from a default.
         """
         if run is not None:
             self._guard_head_run(run, role, pid_file=pid_file, task=task, leaf=leaf)
-        self.head_runtime.stop_workspace(workspace)
+        self._stop_recorded_heads(workspace, [(run, role or OBSERVER_ROLE)])
 
     def _close_observer_pane(self, record: Any, handle: str) -> None:
         """End an observer that is nothing but a pane handle, through the head runtime.
@@ -2207,15 +2231,58 @@ class CommandHostRuntime:
         # destructive call, not afterwards when a live process may already have lost its pane.
         for pid_file, run, kind, leaf in heartbeats:
             self._guard_head_run(run, kind, pid_file=pid_file, leaf=leaf)
-        try:
-            self.head_runtime.stop_workspace(record.workspace)
-        except HostError as exc:
-            if "selector_not_found" not in str(exc):
-                raise
+        self._stop_recorded_heads(
+            record.workspace, [(run, kind) for _, run, kind, _ in heartbeats]
+        )
         for pid_file, run, kind, leaf in heartbeats:
             self._confirm_head_process_gone(
                 pid_file, run=run, role=kind, leaf=leaf,
             )
+
+    def _stop_recorded_heads(self, workspace: str, runs: Sequence[tuple[Any, str]]) -> None:
+        """Take one workspace's heads down, each through the backend that head is held by.
+
+        The one place workspace-scoped cleanup chooses a backend, and it chooses from the durable
+        run the record names rather than from the profile a later registry would resolve or from
+        the product default. That is the same rule the per-head verbs follow: a head raised on one
+        backend has to be stopped through that backend, and a registry repointed while it ran must
+        not send its stop somewhere it never lived.
+
+        A supervised head owns no pane, so nothing about a worktree can end it — it is ended by its
+        own run's `stop`, and a refusal is raised rather than absorbed, because the callers of this
+        are exactly the ones that go on to remove the worktree or open a replacement head.
+
+        Orca's own by-worktree teardown is left for what it is for: a workspace whose heads are
+        legacy ones, which is what that call ends, and a workspace that names no run at all — a
+        bring-up that never got as far as a durable run, or a record written before heads were
+        recorded — where the panes Orca knows about are the only thing there can be to stop. A
+        workspace whose every recorded head is supervised has no pane to give back, and asking
+        Orca to tear it down would be a call about a container this product did not put anything in.
+        """
+        named = [(_durable_head_run(run), role) for run, role in runs]
+        live = [(run, role) for run, role in named if run is not None]
+        for run, role in live:
+            if _head_runtime_name(run) == ORCA_LEGACY_RUNTIME:
+                continue
+            if run.settled:
+                # Its own stop already ran and was committed, so its run directory may be gone;
+                # asking a supervisor that no longer exists would only wait out the confirmation
+                # bound to learn what the record already says.
+                continue
+            receipt = self.head_runtime_for(run).stop(
+                run, head_ops.StopInitiator(actor=STOPPED_BY_DISPATCHER),
+            )
+            if not receipt.ok:
+                raise HostError(
+                    f"the {role} head of {workspace} was not stopped: {receipt.reason}"
+                )
+        if live and all(_head_runtime_name(run) != ORCA_LEGACY_RUNTIME for run, _ in live):
+            return
+        try:
+            self.head_runtime_for(ORCA_LEGACY_RUNTIME).stop_workspace(workspace)
+        except HostError as exc:
+            if "selector_not_found" not in str(exc):
+                raise
 
     def stop_head(
         self, record: DispatcherRecord, kind: str, initiator: str = STOPPED_BY_DISPATCHER
@@ -2498,13 +2565,23 @@ class CommandHostRuntime:
         self._freeze_worker(record)
 
     def teardown(self, record: DispatcherRecord) -> None:
-        """Done-path cleanup after a green merge: stop the worktree's terminals (killing
-        the worker and reviewer heads plus their child shells and subagents via the PTY
-        tree) and remove the worktree from Orca and git. Never used on rework, which
-        reuses the workspace."""
+        """Done-path cleanup after a green merge: stop the worktree's heads (killing the
+        worker and reviewer plus their child shells and subagents) and remove the worktree
+        from Orca and git. Never used on rework, which reuses the workspace.
+
+        The stop is the confirmed twin, not the best-effort one, because this is the path that
+        removes the worktree next: `stop` absorbs a refusal, and a removal made on the strength of
+        an absorbed refusal takes the checkout out from under a head that is still running — after
+        which the card's next attempt raises a second head beside the first. The teardown itself
+        still does not escape, so a green card reaches Done either way; what a refusal costs is the
+        removal, and the worktree is left standing for whoever looks at the head that would not go.
+        """
         if self.mode == "noop" or not record.workspace:
             return
-        self.stop(record)
+        try:
+            self.stop_workspace(record)
+        except HostError:
+            return
         try:
             self._run_json(["orca", "worktree", "rm", "--worktree", f"path:{record.workspace}", "--force", "--json"])
         except HostError:
@@ -2933,12 +3010,13 @@ class CommandHostRuntime:
 
     @property
     def head_runtime(self) -> Any:
-        """The boundary for an operation that names no head: the product's default backend.
+        """The product's default backend, for a caller that has no head to name.
 
-        What is left on this property is exactly the work that is not one head's: Orca's own
-        workspace teardown, which names a worktree rather than a head. Everything that acts on a
-        head goes through `head_runtime_for`, which builds the backend that head's own profile
-        named.
+        Every operation of this dispatcher that acts on a head — including the workspace-scoped
+        cleanups, which choose from the durable run the record names — goes through
+        `head_runtime_for` instead. What is left on this property is the reading a caller outside
+        the lifecycle does when it wants the default backend as an object and has nothing to
+        resolve it from.
         """
         return self.head_runtime_for(None)
 
