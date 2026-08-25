@@ -39,6 +39,7 @@ from secretary.board_transport import (
 )
 from secretary.role_env import RUNTIME_ENV_FILE_ENVS, runtime_env_path
 from triggered_agents.runtime.head import CODEX_LAUNCH_MODES
+from triggered_agents.runtime.references import BoardRowsUnavailable, board_rows, next_reference
 from triggered_agents.runtime.paths import instance_dir as normalize_instance_dir
 from triggered_agents.runtime.redact import redact
 
@@ -357,28 +358,11 @@ class KanboardClient:
 
 
 def all_project_cards(client: KanboardClient, project_id: int) -> list[dict[str, Any]]:
-    """Return every Kanboard card by combining its open and closed status sets.
-
-    Kanboard 1.2.52 uses status 1 for open cards and 0 for closed, and has no complete-set status,
-    so the first copy of each task id is retained in case a backend returns a row in both responses.
-    """
-    cards: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-    for status_id in (1, 0):
-        response = client.call("getAllTasks", project_id=project_id, status_id=status_id)
-        if not isinstance(response, list):
-            raise TaskError("backend_error", "Kanboard returned an invalid task list", 1)
-        for card in response:
-            if not isinstance(card, dict):
-                continue
-            identifier = card.get("id")
-            if identifier is not None:
-                key = str(identifier)
-                if key in seen_ids:
-                    continue
-                seen_ids.add(key)
-            cards.append(card)
-    return cards
+    """Return every Kanboard card of one board, open and archived alike."""
+    try:
+        return board_rows(client.call, project_id)
+    except BoardRowsUnavailable:
+        raise TaskError("backend_error", "Kanboard returned an invalid task list", 1) from None
 
 
 def project_card_by_reference(
@@ -409,18 +393,12 @@ def project_card_by_id(
 
 def next_project_reference(client: KanboardClient, project_id: int, project: str) -> str:
     """Allocate the reference immediately after this project's board-wide high-water mark."""
-    pattern = re.compile(rf"^{re.escape(project)}-(\d+)$")
-    highest = 0
-    for card in all_project_cards(client, project_id):
-        match = pattern.fullmatch(str(card.get("reference") or ""))
-        if match:
-            highest = max(highest, int(match.group(1)))
-    return f"{project}-{highest + 1}"
+    return next_reference(all_project_cards(client, project_id), f"{project}-")
 
 
 @contextlib.contextmanager
-def project_reference_allocation_lock(data_dir: Path) -> Iterator[None]:
-    """Serialize allocation and assignment across task-create processes."""
+def reference_allocation_lock(data_dir: Path) -> Iterator[None]:
+    """Serialize reference allocation across the processes that create cards and sprints."""
     board_dir = data_dir / "board"
     board_dir.mkdir(parents=True, exist_ok=True)
     with (board_dir / ".create.lock").open("a+", encoding="utf-8") as lock:
@@ -1371,14 +1349,15 @@ class TaskWriter:
     ) -> str:
         # The board accepts duplicate references, so holding this lock from the high-water
         # read through createTask prevents two local task-create processes assigning one ref.
-        with project_reference_allocation_lock(self.data_dir):
+        with reference_allocation_lock(self.data_dir):
             board_id, columns, swimlanes = self.reader._board()
-            if reference:
-                if project_card_by_reference(self.client, board_id, reference):
-                    raise TaskError("validation", "task reference already exists", 2)
-                created_ref = reference
-            else:
-                created_ref = next_project_reference(self.client, board_id, project)
+            created_ref = reference or next_project_reference(self.client, board_id, project)
+            # One question for both paths. A caller-supplied reference may name a card that
+            # already exists, and an allocated one is only as free as the enumeration it was
+            # counted from, so neither is written before the backend is asked about that exact
+            # reference. Archived rows answer too: they hold their reference for good.
+            if project_card_by_reference(self.client, board_id, created_ref):
+                raise TaskError("validation", f"task reference {created_ref} is already claimed", 2)
             column_id = _target_column_id(columns, target)
             if column_id is None:
                 raise TaskError("backend_error", "Kanboard board schema is invalid", 1)

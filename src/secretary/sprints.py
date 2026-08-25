@@ -34,7 +34,9 @@ from secretary.tasks import (
     _rfc3339,
     _text,
     is_significant_observer_event,
+    reference_allocation_lock,
 )
+from triggered_agents.runtime.references import BoardRowsUnavailable, board_rows, next_reference
 
 SPRINT_BOARD_NAME = "Secretary sprints"
 SPRINT_REFERENCE_PREFIX = "sprint:"
@@ -955,6 +957,8 @@ class SprintWriter:
         intent = document["intent"]
         event = document["event"]
         progress = document.setdefault("progress", {})
+        board_id = ensure_sprint_board(self.client)
+        created_ref = self._reference(document, board_id)
         # A staged create that is being resumed was admitted before the refusal that
         # stalled it, and it held nothing meanwhile.  The installation is measured again
         # here, before anything of this sprint is published, so a repeat that lost the
@@ -962,14 +966,12 @@ class SprintWriter:
         if admitted and not progress.get("reference_done"):
             staged = progress.get("task_id")
             staged_id = staged if isinstance(staged, int) else None
-            self._check_reference_claim(str(intent["reference"]), staged_id)
+            self._check_reference_claim(created_ref, staged_id)
             self._check_conflicts(intent, excluding_id=staged_id)
-        board_id = ensure_sprint_board(self.client)
-        row = self._create_row(document, board_id, admitted=admitted)
+        row = self._create_row(document, board_id, created_ref, admitted=admitted)
         task_id = _positive_int(row.get("id"))
         if task_id is None:
             raise TaskError("backend_error", "Kanboard returned an invalid sprint", 1)
-        created_ref = str(intent["reference"]) or f"{SPRINT_REFERENCE_PREFIX}{task_id}"
         event.update({"ref": created_ref, "task_id": f"sprint_kanboard_{task_id}"})
         event["backend"]["task_id"] = task_id
         progress["task_id"] = task_id
@@ -986,14 +988,42 @@ class SprintWriter:
                 "updateTask", id=task_id, reference=created_ref, description="",
             ):
                 raise TaskError("backend_error", "Kanboard rejected the sprint reference", 1)
-            row = self._create_row(document, board_id, admitted=admitted)
+            row = self._create_row(document, board_id, created_ref, admitted=admitted)
             if str(row.get("reference") or "") != created_ref:
                 raise TaskError("backend_error", "sprint reference remains incomplete", 1)
         progress["reference_done"] = True
         self.transactions.save(document)
         return created_ref
 
-    def _create_row(self, document: dict[str, Any], board_id: int, *, admitted: bool) -> dict[str, Any]:
+    def _reference(self, document: dict[str, Any], board_id: int) -> str:
+        """This request's sprint reference, allocated once and then remembered.
+
+        The reference is what publishes a sprint, so a create that stalled and is being repeated
+        writes the one it was already going to write rather than a second one allocated meanwhile.
+        A repeat that took its row back holds nothing, including this record, and allocates afresh.
+
+        An automatic reference used to be the row's own Kanboard id, which is not a record of what
+        the board handed out. Row ids trail the references by hundreds here, so on 2026-08-06 a new
+        sprint took `sprint:804` from a sprint closed in July and became unaddressable behind it.
+        """
+        recorded = str(document["intent"].get("reference") or document.get("reference") or "")
+        if recorded:
+            return recorded
+        with reference_allocation_lock(self.data_dir):
+            try:
+                rows = board_rows(self.client.call, board_id)
+            except BoardRowsUnavailable:
+                raise TaskError("backend_error", "Kanboard returned an invalid sprint list", 1) from None
+            # Kept beside the staged intent rather than in `progress`, which records what the
+            # request holds on the backend: an allocation holds nothing, and a create discarded
+            # before it wrote a row hands the number straight back.
+            document["reference"] = next_reference(rows, SPRINT_REFERENCE_PREFIX)
+            self.transactions.save(document)
+        return str(document["reference"])
+
+    def _create_row(
+        self, document: dict[str, Any], board_id: int, reference: str, *, admitted: bool,
+    ) -> dict[str, Any]:
         """The row this request created, creating it once when it has none yet.
 
         A row counts as this request's own only when the staged progress names its task id, or, for
@@ -1010,14 +1040,13 @@ class SprintWriter:
             if row is None:
                 raise TaskError("backend_error", "the sprint row of this request was not found", 1)
             return row
-        reference = str(document["intent"].get("reference") or "")
-        if reference and not admitted:
+        if not admitted:
             row = next((row for row in rows if str(row.get("reference") or "") == reference), None)
             if row is not None:
                 return row
-        # A sprint whose reference is derived from its own task id has no identifier
-        # before the row exists, so the request id travels in the description until the
-        # reference is written.
+        # The reference is written last on purpose (see _finish_create), so a row that this
+        # request created but did not get as far as publishing carries no reference to be
+        # found by; the request id travels in the description until it does.
         marker = _create_marker(str(document["request_id"]))
         matches = [row for row in rows if str(row.get("description") or "") == marker]
         if len(matches) > 1:
@@ -1159,13 +1188,13 @@ class SprintWriter:
             )
 
     def _check_reference_claim(self, reference: str, staged_id: int | None) -> None:
-        """Refuse a caller-supplied reference another sprint has taken meanwhile.
+        """Refuse the reference this create is about to write when another sprint holds it.
 
-        A stalled create holds nothing, including its reference, so between its refusal and its repeat
-        another sprint may legitimately open under that reference. The repeat is not its owner.
+        Both paths pass through here. A stalled create holds nothing, including its reference, so
+        between its refusal and its repeat another sprint may legitimately open under that
+        reference; the repeat is not its owner. An allocated reference is only as free as the
+        enumeration it was counted from, and this is where that is proven against the backend.
         """
-        if not reference:
-            return
         board_id = _sprint_board(self.client, create=False)
         if board_id is None:
             return

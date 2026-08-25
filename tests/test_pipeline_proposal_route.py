@@ -16,6 +16,14 @@ from unittest import mock
 from triggered_agents.agents.pipeline import cli, model, ops
 
 
+# The rows a create counts references over: an open card and an archived one, the way the board
+# answers a reference enumeration.
+EXISTING_ROWS = {
+    1: [{"id": 41, "reference": "secretary-901"}],
+    0: [{"id": 12, "reference": "secretary-902"}],
+}
+
+
 def _fake_board(columns, calls):
     def fake_call(method, **params):
         calls.append((method, params))
@@ -25,6 +33,14 @@ def _fake_board(columns, calls):
             return columns
         if method == "getActiveSwimlanes":
             return [{"id": 1, "name": "secretary"}]
+        if method == "getAllTasks":
+            return [dict(row) for row in EXISTING_ROWS[params["status_id"]]]
+        if method == "getTaskByReference":
+            return next(
+                (dict(row) for rows in EXISTING_ROWS.values() for row in rows
+                 if row["reference"] == params["reference"]),
+                None,
+            )
         if method == "createTask":
             return 41
         if method in ("updateTask", "saveTaskMetadata"):
@@ -54,7 +70,7 @@ class ProposalRouteTests(unittest.TestCase):
                      mock.patch.object(ops, "_sync_head_tags"):
                     result = file_proposal(
                         project="secretary", title="retro: looping head",
-                        description="Pattern: looping", ref="secretary-901",
+                        description="Pattern: looping", ref="secretary-950",
                     )
 
                 self.assertEqual(result["action"], "created")
@@ -85,6 +101,9 @@ class ProposalRouteTests(unittest.TestCase):
         }
         metadata = {}
         calls = []
+        # The board holds no such card until this test's create writes it, which is what makes the
+        # reference free to take.
+        rows: list[dict] = []
 
         def fake_call(method, **params):
             calls.append((method, params))
@@ -94,10 +113,15 @@ class ProposalRouteTests(unittest.TestCase):
                 return BOARD_COLUMNS
             if method == "getActiveSwimlanes":
                 return [{"id": 1, "name": "secretary"}]
+            if method == "getAllTasks":
+                return [dict(row) for row in rows] if params["status_id"] == 1 else []
             if method == "createTask":
+                rows.append(task)
                 return 41
             if method == "getTaskByReference":
-                return task if params["reference"] == task["reference"] else None
+                return task if any(
+                    params["reference"] == row["reference"] for row in rows
+                ) else None
             if method == "getTaskMetadata":
                 return metadata.copy()
             if method == "saveTaskMetadata":
