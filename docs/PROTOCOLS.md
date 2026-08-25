@@ -291,7 +291,10 @@ the ceiling is reached the card moves to Blocked with a reason that names the in
 untouched receipt and the candidate SHA, so recovery is another reviewer launch rather than a new
 worker round over the same code. An inventory that will not answer is
 different: it cannot prove whether a reviewer is already live, so it preserves launch ambiguity
-and retries the inventory without launching another head or consuming the headless-failure ceiling.
+and retries the inventory without launching another head or consuming the headless-failure ceiling. Those
+retries and the block that ends them are classified by the one bring-up vocabulary
+[below](#bring-up-outcomes): the retry ceiling is spent before the outcome is written, and spending
+it produces an infrastructure outcome over the held candidate, never a verdict about the card.
 
 When a reviewer pane and heartbeat already exist but its document nudge receives typed `busy`
 evidence before any send, that is a pending delivery rather than a started review. The launch
@@ -337,6 +340,44 @@ the same SHA without a recorded `rerun_reason`; targeted reproduction remains ap
 blocker, uncovered external behaviour, or security/data-loss risk. Re-review
 packets carry the previous reviewed SHA, previous blocker text/IDs, current SHA and changed-path
 delta, so the next reviewer verifies the delta and closure rather than restarting at the original base.
+
+Before a card is given to a worker at all, the dispatcher asks whether the registered project's
+broad-check contract can attest that project, through the same implementation the worker's own
+`secretary check broad --module` resolves through, so a card is never issued on a contract the
+worker would then refuse. The question costs a read of the project binding and of the adapter
+beside it: no workspace, no head, no process. The answer is one of three named states, and every
+caller branches on them by name, with no default branch that lets an unrecognised answer through as
+permission:
+
+- `fit` — the contract is declared usably, and the card is issued as always;
+- `refused(shape)`, one of five enumerated shapes — `adapter_unavailable`, `adapter_invalid`,
+  `broad_check_incomplete`, `interpreter_unavailable`, `cannot_attest_project`. A refusal always
+  wins, and always before the card is put in work: no workspace, no head, no round spent. The card
+  is blocked through the bring-up vocabulary [below](#bring-up-outcomes), because an installation
+  whose registry cannot supply a usable contract is a failure of the host and not a verdict about
+  the card, so it carries the infrastructure class, the `contract-preflight-infrastructure-blocked`
+  action token and the refusal shape as its evidence;
+- `undecidable(question)`, one of three enumerated questions — `relative_interpreter`,
+  `no_registered_project`, `project_unavailable`. The card goes to work.
+
+The two boundaries around that are deliberate. The preflight answers for the *declared* contract
+only. The adapter schema resolves a relative interpreter against the candidate workspace, and at
+preflight there is no candidate workspace, so the question belongs to the side that will hold that
+tree and comes back as `relative_interpreter` rather than being answered against the registered
+checkout, which is a different directory. `undecidable` therefore resolves in favour of
+compatibility rather than of saving the round: it is a named decision to let the card through,
+carrying its own evidence, not the absence of an answer. A relative interpreter is the documented
+and recommended spelling, and breaking that published promise to make an internal check convenient
+would move the product contract the wrong way.
+
+The second boundary is that a declared contract is executed as declared, not checked against a
+layout heuristic. The adapter states which interpreter runs the check and which package that run
+must import; the preflight asks only whether that statement is complete and whether the interpreter
+it names can be started. What such a run actually imported is caught afterwards, by the receipt's
+own import provenance. The one contract judged against a checkout's layout is the legacy default
+that an adapter declaring nothing falls back to: it names Secretary's own package for every
+registered project alike, so for a checkout that does not hold those sources it buys a check of an
+installed copy of somebody else's code, and that is the `cannot_attest_project` refusal.
 
 Observers consume the worker report, reviewer verdict and dispatcher-owned exact-SHA gate receipt
 before code/CI exploration. A valid executed dispatcher-owned exact-SHA gate receipt suppresses its
@@ -563,7 +604,10 @@ types are `red_review`, `blocked`, `red_ci`, `preempt`, `recreated_task` and `ho
 them from durable card audit events: a red review, a move to Blocked, a red mechanical gate, a preempt of
 an active card back to Ready, or a tagged recreation or hotfix creation. The card-event id becomes the
 budget request id, so a repeated tick cannot charge it twice. Green cards and observer activity have no
-matching event and do not move the counter.
+matching event and do not move the counter. Beside those six there is one recorded type that is
+never charged: a bring-up that never produced a head is counted as `infrastructure_blocked`, in its
+own stored field, so that an observer can see how often the host failed to bring a card up while
+counting it can never move a threshold. See [Bring-up outcomes](#bring-up-outcomes).
 
 A new sprint belongs to a Product, serves at least one of its open Issues and reserves at least one
 registered project. `--product` names an existing Product, every `--issue` is an open Issue of that
@@ -1066,6 +1110,13 @@ A recovered stale worker result bearing that infrastructure class is accepted on
 path. A further report of that unchanged SHA is Blocked visibly, naming the class and the prior retry, rather
 than replaying the first report's request id as a quiet tick.
 
+That gate class and the bring-up classes [below](#bring-up-outcomes) are two axes and not one
+vocabulary used twice. The gate sorts a red result over code that exists and calls its other class
+`substantive`; a bring-up is sorted before any line of the card's work has been read, and the
+sprint's word for its other class is `task`. The two names are one correspondence and nothing more,
+so a reader of either side can find the other. What they share is the principle: a failure of the
+host is not a verdict about the card.
+
 The audit trail is always written to the installation's data directory: `--data-dir`, else
 `SECRETARY_DATA_DIR`, else `data_dir` from instance config. A relative `data_dir` resolves against the
 instance file, not the working directory, so a call from another project's workspace does not leave a data
@@ -1262,6 +1313,19 @@ leave the prior run un-attributed and never open a replacement beside it. The sa
 before every destructive pane close, workspace stop and heartbeat signal. Raw command overrides write no heartbeat
 and receive no synthetic identity;
 they retain only the documented launch grace and pane-output fallbacks.
+
+Whether a head is alive and whether its runtime pane is drawn are two questions with two sources,
+and only the first is a statement about the head. A head is alive when its own observation says so:
+the heartbeat above, read as a live matching identity whose process is running or suspended, or a
+provider cursor bound to that same `HeadRun` that advanced, which proves work is being done. Only
+the heartbeat may say a head is gone, because it is the only source that observes the process.
+Anything else is `unproven` — a statement about the observation, not about the head — and a role the
+dispatcher holds a head identity for but no durable `HeadRun` is unproven by construction, since a
+snapshot bound to nothing would have to borrow another run's evidence. Pane and terminal readings
+never enter that answer: a pty the renderer draws nowhere, a disconnected pty, a pty no inventory
+names and a pane channel that refused are four different facts about the window, and none of them is
+evidence that a head is absent. `secretary head-status` is where an operator reads the two halves
+apart; see [Head status in a live workspace](OPERATIONS.md#head-status-in-a-live-workspace).
 
 ### Worker retention through validation and review
 
@@ -1494,6 +1558,73 @@ The systemd timer uses the one-shot `production-tick`. The runtime handles only 
 transitions, persists claim and review state, and checks the live board before recovery. The production
 owner is recorded in dispatcher state; an owner mismatch, a dirty workspace, a missing report or an
 unresolved audit state stops a transition instead of falling back silently.
+
+### Bring-up outcomes
+
+A bring-up is everything between a card being given to a head and that head existing. When one
+produces no head, the outcome is classified in a single place for both paths — the worker's (claim,
+respawn, rework) and the reviewer's (`start_review`) — so what a blocked card says never depends on
+which caller wrote it. There are two classes, and a closed set of causes decides which one an
+outcome has:
+
+- `infrastructure` — `pane_never_ready`, the head's pane was busy or held in a dialog for every
+  attempt this role was given and never took its launch prompt; `launch_aborted`, a launch that may
+  have left a head running and is therefore not turned into a second one; `host_unavailable`,
+  everything else the host could not do, from a pane that would not open or an inventory that would
+  not answer to a registry that cannot supply a usable broad-check contract;
+- `task` — `workspace_contract`, a failure of this card's own bring-up contract: the checkout it was
+  requeued onto is gone, or is not the worktree on the branch its claim recorded.
+
+The cause decides the class, so no raise site and no caller may pair them freely, and a cause
+nobody recognises is ignored rather than trusted. The rule behind the split is what the failure says
+about the card, and a bring-up says almost nothing, because at that point no line of the card's work
+has been read, let alone judged. So a failure of the host leaves the card carrying no verdict, and
+the one family that is a verdict is the card's own contract, which no healthy host survives and no
+later tick repairs.
+
+The class is durable in the action token of the transition the block writes. An infrastructure
+outcome puts `-infrastructure-` in front of `-blocked` — `bringup-infrastructure-blocked`,
+`worker-respawn-infrastructure-blocked`, `rework-infrastructure-blocked`,
+`review-infrastructure-blocked`, `contract-preflight-infrastructure-blocked` — and a task outcome
+keeps byte-for-byte the action token it always had. Reading the class is reading that token back: a
+request id containing `-infrastructure-blocked` is an infrastructure outcome and every other block
+is not. That is a reading which survives the tick, the pane and the log, and it is the only one:
+nothing infers the class from a message, a role or a caller. Deliberately it is not card metadata
+either, for the same reason the block classification of a report is not — a second write that can
+fail on its own would leave a card field silently disagreeing with the audit.
+
+The card's Blocked reason and the tick's outcome are built from one object, so they say the same
+thing in the same words. The reason ends in a clause naming the class, the cause, the stage
+(`claim`, `respawn`, `rework`, `review`), which head it was and the attempt id, followed by the
+sentence the class entails: for an infrastructure outcome, that the head never came up, so this is
+not a verdict about the card. The tick's outcome carries `failure_class`, `failure_cause`, the same
+`failure_reason` string the card was given, and a `bring_up` object with the same fields plus the
+host's own detail and, where the pane was the cause, its readiness and how many attempts it had.
+
+Who decides what happens next is split on purpose. The dispatcher classifies the outcome and
+presents the evidence — what did not come up, at which step, under which `attempt_id` — and stops
+there. After an infrastructure outcome it opens no new attempt, schedules no return and moves the
+card nowhere else. Whether that card is tried again or the sprint is blocked is the observer's
+decision, taken on that evidence and carried out the ordinary way, by moving the card out of
+Blocked; a card that comes back to Ready is claimed again under a fresh attempt id.
+
+The bounded retries that exist are all spent before an outcome is written, and none of them ever
+turns into a verdict about the card. A pane that is busy or held in a dialog parks the bring-up
+instead of failing it: `worker-launch-deferred` or `review-launch-deferred`, one attempt per tick up
+to the configured ceiling, each deferral naming which attempt it is, the counter on the record so a
+deferral nobody wrote down cannot become an unbounded retry, and the counter reset when that role's
+head does come up. A probe nobody answered is deliberately not deferred. When the ceiling is spent,
+the outcome is `pane_never_ready` and therefore infrastructure: exhausting the ceiling ends the
+waiting, it does not convert into a judgement of the card. The reviewer's bounded relaunch over a
+green candidate, in [Candidate history](#candidate-history), ends the same way.
+
+An infrastructure outcome charges the sprint nothing. It is still recorded, because an observer has
+to see how often the host failed to bring a card up, and it is recorded apart: as the uncharged
+event type `infrastructure_blocked`, visible as `budget.uncharged` in `sprint show` and `sprint
+status`, entering neither `total` nor the `signal` and `hard` thresholds. Every other block — a
+worker's own report, the gate, a merge, a release — charges `blocked` exactly as it always did. Both
+families go through the same budget write and are told apart only by the token above. A sprint
+stored before the field existed reads as zero; there is no migration.
 
 ## Pause
 

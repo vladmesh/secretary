@@ -1075,6 +1075,51 @@ action, the reason for a deferred launch, and a delivery object with its stage, 
 causal acknowledgement, deadline, retry state and external-failure reason. It also carries `wake_liveness`,
 the versioned exact-HeadRun provider-progress episode, without terminal or composer text.
 
+### An infrastructure bring-up outcome
+
+A card that goes to Blocked because a head never came up is a different event from a card blocked
+over its own work, and the pipeline says which one it is rather than leaving it to be read out of
+the prose. The vocabulary is in
+[Bring-up outcomes](PROTOCOLS.md#bring-up-outcomes); this is where to read it and what to do.
+
+Where the class and the evidence are:
+
+- on the card — the Blocked reason ends in a clause of the form `[bring-up outcome:
+  class=infrastructure, cause=pane_never_ready, stage=claim, head=worker, attempt=ATTEMPT_ID]`
+  followed by the sentence that the head never came up, so this is not a verdict about the card. The
+  causes are `pane_never_ready`, `launch_aborted` and `host_unavailable` for the infrastructure
+  class, and `workspace_contract` for the task class;
+- in the tick — the outcome carries `failure_class`, `failure_cause`, a `failure_reason` that is the
+  same string as the card's, and a `bring_up` object with the stage, the head, the attempt id and
+  the host's own detail. A card refused by the broad-check contract preflight carries its refusal
+  shape beside them under `contract_refusal`;
+- in the audit — the transition's request id ends in `-infrastructure-blocked`. That token is where
+  the class is durable, and it is what everything downstream reads;
+- in the sprint — `secretary sprint show --ref sprint:ID` and `secretary sprint status --ref
+  sprint:ID` carry `budget.uncharged.infrastructure_blocked`, and a newly launched observer's prompt
+  says how many infrastructure bring-up outcomes are recorded and that they are charged to no
+  threshold.
+
+How it differs from a Blocked card that is the task's fault: nothing about the card was judged, and
+often nothing was even built — a card refused by the contract preflight has no workspace and no head
+at all. It spends none of the sprint's restart budget, so it moves neither the signal nor the hard
+threshold and a bad night on the host cannot stop a sprint by itself. The task-class bring-up
+outcome is the opposite case and the one to look for in the clause: `cause=workspace_contract` means
+the checkout the card was requeued onto is gone or is not the worktree on the branch its claim
+recorded, which no relaunch repairs and which wants a person.
+
+What to do: read the cause and the detail, repair what they name — the pane, the head's resource,
+the project's adapter, the checkout — and then move the card out of Blocked with a reason, the
+ordinary way. Nothing does that for you. After an infrastructure outcome the dispatcher opens no new
+attempt and schedules no return: the decision to retry or to block the sprint belongs to the sprint's
+observer, and the card is only tried again once it is moved back, at which point it is claimed under
+a fresh attempt id. A card standing in Blocked with an infrastructure clause is waiting for that
+decision and not for a timer.
+
+Before concluding that a head is missing at all, ask
+[head-status](#head-status-in-a-live-workspace): a workspace with no visible pane is not a workspace
+with no head.
+
 ## Checkpoint push
 
 The push runs on the same tick but in its own window: every 30 minutes, fast-forward only, never a force push.
@@ -1457,7 +1502,9 @@ its record, the tick reports `worker-launch-deferred` or `review-launch-deferred
 attempt it was, and the next tick makes the same bring-up again. Once the attempts above are spent the card does go
 to Blocked, and the reason names the pane and the state it stayed in rather than saying the bring-up failed. A probe
 Orca does not answer is deliberately not deferred: a pane nothing can ask about is not a busy pane, and it takes the
-ordinary failure path immediately.
+ordinary failure path immediately. That Blocked card carries the infrastructure class of the bring-up
+vocabulary: the spent ceiling ends the waiting and says nothing about the card's work. See
+[An infrastructure bring-up outcome](#an-infrastructure-bring-up-outcome).
 
 A head writes report and verdict bodies to a file outside the workspace
 (`/tmp/secretary-report-<ref>-<round>.md`, `/tmp/secretary-verdict-<ref>-<round>.md`, with the directory overridden
@@ -1795,6 +1842,19 @@ Two check shapes are accepted, and they differ in one promise:
   `origin: unobservable`, claims no import, and is never reused in place of a run. It remains a
   summary to read.
 
+The dispatcher asks the same question of the same registry before it gives a card to a worker at
+all, so a card is not issued on a contract its worker would then refuse. That preflight reads the
+binding and the adapter and nothing else: an adapter that is unavailable or invalid, a `broad_check`
+that is incomplete, an absolute interpreter that cannot be started, and the legacy default in a
+checkout that does not hold Secretary's own sources (`cannot_attest_project`) are refusals, and they
+block the card before a workspace or a head exists, with the infrastructure class of
+[Bring-up outcomes](PROTOCOLS.md#bring-up-outcomes). A relative interpreter is not refused there:
+the schema resolves it from the candidate workspace, which does not exist yet, so the question is
+left to the side that holds the tree and the card goes to work. That is a named decision rather
+than a silence, and it is why the recommended spelling stays relative. The preflight judges the
+declared contract as declared, exactly as promised above; what a run actually imported is caught
+afterwards by the provenance below.
+
 Observed provenance is necessary and not sufficient. A receipt may replace a run only when the
 check process imported the adapter's configured project package *from this workspace*: a missing or
 unreadable record, an empty path, an unresolvable one, and a path outside the candidate are all
@@ -1871,3 +1931,50 @@ the next TTL and re-read the readiness snapshot. On `exhausted` the wait is unti
 cards that have somewhere to go are already going there, and the ones that stayed in Ready are the ones with nowhere.
 Which chains exist is a canon decision — see the head registry section — and a chain to a head of a lower class buys
 attempts that never reach a report, which is why the shipped chains cross families at comparable class.
+
+### Head status in a live workspace
+
+An operator standing in front of a workspace that looks empty asks one question — is there a head
+here? — and the window is not what answers it. This is the read-only answer:
+
+```bash
+secretary head-status --instance <dir> --workspace <path>
+```
+
+It prints JSON: one row per head the dispatcher holds in that workspace, worker and reviewer apart,
+each with a `summary` sentence written to be acted on without interpreting anything else. The exit
+status is 0 for an answer and 3 for a degraded one — no workspace path, or a host in `noop` mode,
+which observes no live workspace and would otherwise answer "live" to every question by
+construction. A workspace the dispatcher holds no head in answers with no rows rather than with a
+guess.
+
+Every row answers two questions and never lets the second qualify the first:
+
+- `head` — `alive`, `absent` or `unproven`, from the vitality snapshot and from nothing else.
+  `alive` is a heartbeat whose process is running or suspended, or a provider cursor bound to this
+  run that advanced. `absent` comes from the heartbeat alone, because it is the only source that
+  observes the process and therefore the only one that may say a head is gone. Everything else is
+  `unproven`, which is a statement about the observation and not about the head: the channels that
+  could not answer are listed in `unavailable_sources` and each one's own reading is in `evidence`.
+  The answer is bound to the head's `run_id`, and a role the dispatcher holds a head identity for
+  but no durable `HeadRun` is `unproven` with that as its reason, because binding another run's
+  evidence to it is the lie that binding exists to prevent.
+- `runtime_pane` — `visible`, `no-runtime-pane`, `no-pane`, `unknown` or `unavailable`, read from
+  the renderer's own tree of drawn panes rather than from the list of ptys, because a pty can be
+  listed and connected while nothing draws it. That is `no-runtime-pane`, and it is the case this
+  command exists for: a pty Orca listed as connected, drawn by no runtime pane, with a live head
+  working behind it (2026-08-24). `no-pane` is a pty no inventory answers for, `unknown` is a
+  renderer channel that could not decide — unsupported by this build, silent about this workspace,
+  or naming no identity the pty can be compared by — and `unavailable` is a pane inventory that
+  refused.
+
+The invariant is printed on the answer and beside every row: pane readings are advisory. A pane with
+no runtime pane, a disconnected pane, a pane no inventory names and an unreadable pane channel are
+all facts about the window, and none of them is evidence that a head is absent. So an empty-looking
+workspace is never on its own a reason to drop the claim, kill the workspace or restart the card —
+read the row first, because that intervention on a live head destroys the round it is in.
+
+The command only reads. It starts nothing, stops nothing and repairs nothing, and it writes neither
+the dispatcher's state nor the head's: its transport carries no lifecycle call, the provider cursor
+comes from the run already persisted rather than being rebound, and a head whose channel cannot
+answer is reported `unproven` instead of being probed harder.
