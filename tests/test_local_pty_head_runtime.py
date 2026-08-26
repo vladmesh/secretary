@@ -244,6 +244,24 @@ class LocalPtyRuntimeTestCase(unittest.TestCase):
         except Exception:  # noqa: BLE001 - a supervisor that cannot be asked answers nothing
             return {}
 
+    def _admitted_status(self, socket_path: Path) -> dict:
+        """The substrate's own state, asked over a connection the supervisor actually took.
+
+        A caller letting go frees its slot in the supervisor's loop, not in its own `close()`, so
+        a question asked at the connection bound in that gap is answered by the refusal frame of
+        the bound instead of by the substrate — an answer that carries no state to read. Only the
+        supervisor can say which of the two arrived, and `ok` is where it says it.
+        """
+        answer: dict = {}
+
+        def taken() -> bool:
+            nonlocal answer
+            answer = self._status(socket_path)
+            return bool(answer.get("ok"))
+
+        self._await(taken, message="the supervisor never took a question about its own state")
+        return answer
+
     def payloads_delivered(self) -> int:
         """Everything every head under this root has actually been given, as its journal counts."""
         total = 0
@@ -861,7 +879,9 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
         self.assertEqual(self.payloads_delivered(), 0, "the terminal was touched after all")
         self.assertTrue(_alive(head), "the head died of a connection limit")
         held.pop().close()
-        self.assertFalse(self._status(address.socket_path)["draining"], "the substrate was drained")
+        self.assertFalse(
+            self._admitted_status(address.socket_path)["draining"], "the substrate was drained"
+        )
 
         def delivered() -> bool:
             return self.deliver_line(run, "and now this").status == HEAD_OK
@@ -1445,7 +1465,7 @@ class TheSubstrateSBoundsNeverEndAHeadTests(LocalPtyRuntimeTestCase):
             client.close()
         # The drain this runtime did keep is its own gate, and a fresh head is unaffected by any
         # of it: the bound is gone the moment the callers let go.
-        self.assertFalse(self._status(address.socket_path)["draining"])
+        self.assertFalse(self._admitted_status(address.socket_path)["draining"])
         second = self.live_run()
         self._await(
             lambda: self.deliver_line(second, "and now this").status == HEAD_OK,
