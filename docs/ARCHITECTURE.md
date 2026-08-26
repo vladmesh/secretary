@@ -190,7 +190,8 @@ board:
   identity that is missing, half-written or unreadable answers nothing, and a bring-up on it would
   open a second head beside a live one. A replacement that is itself found dead is bounded by the
   same persisted backoff a failed launch uses, so a head that dies at every bring-up costs one
-  attempt per backoff window rather than one per tick;
+  attempt per backoff window rather than one per tick, and a bring-up the host refused is retried
+  on that same backoff: the quiet-queue answer never overwrites a record that still owes a launch;
 - closed or vanished sprint: stop the head and drop the record;
 - unreachable sprints board: touch nothing, an unanswered board is not a closed sprint.
 

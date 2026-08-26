@@ -871,6 +871,14 @@ def _reconcile_open_sprint(
                     "reason": event["reason"]}
         if event["pending"]:
             pending_event = event
+        elif record.state == "deferred":
+            # The quiet queue answers only for a record no later branch of this tick still owns.
+            # `deferred` is owned below: it is a bring-up this tick owes, held to the backoff its
+            # last attempt persisted, and the deferral branch is what decides whether the backoff
+            # has run out. Answering `idle` over it dropped that launch and its counter, so a
+            # bring-up whose replacement the host refused was never attempted again — this card's
+            # own deadlock, reached by another route (secretary-1478 round 3).
+            dead_head_bringup = head_is_dead
         elif not head_is_dead:
             _set_observer_state(record, "idle", reason="no unacknowledged significant card event")
             return {

@@ -741,6 +741,97 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "the second cooldown is longer than the first: the backoff is exponential",
         )
 
+    def test_a_bring_up_that_failed_over_a_dead_head_tries_again_when_its_backoff_expires(
+        self,
+    ) -> None:
+        """secretary-1478 round 3: the quiet queue never answers for a record a later branch owns.
+
+        The bring-up over a dead head can fail after the old pane is already gone: the teardown
+        succeeds and the host refuses the replacement, which leaves the ordinary deferral —
+        `deferred`, one attempt, a persisted backoff — and no head this record could call its own.
+        The quiet-queue answer above that branch then read "no head that may be running, so not
+        positively dead" and rewrote the record to `idle`, dropping the launch the deferral still
+        owed. `prepare_observer` was never called again and the fence over this sprint's cards
+        never cleared: the card's own defect, reached by another route.
+        """
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.kill_observer()
+        self.host.fail_observer_reason = "orca refused the replacement terminal"
+
+        deferred = self.runtime.production_tick()
+
+        self.assertEqual(
+            [action["action"] for action in self.actions(deferred)], ["observer-launch-deferred"]
+        )
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.state, "deferred")
+        self.assertEqual(record.launches, 1, "the replacement never came up")
+        self.assertEqual(record.launch_attempts, 1)
+        self.assertGreater(record.launch_next_at, time.time())
+        attempted = self.host.calls.count("prepare_observer")
+
+        self.host.fail_observer_reason = ""
+        self.expire_launch_retry()
+        retried = self.runtime.production_tick()
+
+        self.assertEqual(
+            [action["action"] for action in self.actions(retried)], ["observer-relaunched"]
+        )
+        self.assertEqual(
+            self.host.calls.count("prepare_observer"),
+            attempted + 1,
+            "the expired backoff is a launch this tick owes, not a quiet queue to answer",
+        )
+        after = self.observers()["sprint:1"]
+        self.assertEqual(after.launches, 2)
+        self.assertEqual(after.state, "running")
+
+        cleared = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(cleared)], ["observer-live"])
+        self.assertEqual(
+            [action["action"] for action in cleared["actions"]
+             if action.get("step") == "observer-fence"],
+            ["observer-fence-cleared"],
+            "the sprint the failed bring-up left fenced moves again once the retry is adopted",
+        )
+
+    def test_a_failed_bring_up_over_a_dead_head_is_not_retried_on_every_tick(self) -> None:
+        """secretary-1478 round 3: obligation 1 holds for the unsuccessful bring-up too.
+
+        The retry the branch above restores is the persisted deferral backoff, not a per-tick one:
+        a host that refuses every replacement costs one `prepare_observer` per backoff window.
+        """
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.kill_observer()
+        self.host.fail_observer_reason = "orca refused the replacement terminal"
+
+        self.runtime.production_tick()
+        attempted = self.host.calls.count("prepare_observer")
+        held = self.runtime.production_tick()
+
+        self.assertEqual(
+            [action["action"] for action in self.actions(held)], ["observer-launch-deferred"]
+        )
+        self.assertEqual(self.host.calls.count("prepare_observer"), attempted)
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.state, "deferred")
+        self.assertEqual(record.launch_attempts, 1)
+
+        self.expire_launch_retry()
+        self.runtime.production_tick()
+
+        self.assertEqual(self.host.calls.count("prepare_observer"), attempted + 1)
+        after = self.observers()["sprint:1"]
+        self.assertEqual(after.launch_attempts, 2, "the refused retry continues the same series")
+        self.assertGreater(
+            after.launch_next_at - time.time(),
+            30,
+            "the second window is longer than the first: the backoff is exponential",
+        )
+
     def test_a_replacement_that_stuck_clears_the_cooldown_it_left(self) -> None:
         """secretary-1478: the bound is on heads that keep dying, not on the sprint's whole life."""
         self.open_sprint()
