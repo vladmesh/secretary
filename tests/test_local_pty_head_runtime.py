@@ -2009,6 +2009,161 @@ class TheSubstrateSBoundsNeverEndAHeadTests(LocalPtyRuntimeTestCase):
         self.assertEqual(delivered.status, HEAD_OK, delivered.reason)
         self.assertTrue(_alive(head))
 
+    def test_the_bound_is_still_a_bound_when_the_head_s_journal_is_longer_than_the_window(
+        self,
+    ) -> None:
+        """The bound met by a *rehydrating* runtime, over a journal it cannot read the head out of.
+
+        The three classes of evidence secretary-1479 must keep apart, in the one shape that
+        collapses two of them. A supervised role reuses its run directory, so the journal is
+        append-only across incarnations and grows past `JOURNAL_TAIL_BYTES`; a window that starts
+        mid-history is a `partial_head`, and a `partial_head` is the unknown that closes admission.
+        Here the supervisor is alive, undrained and answering — it simply answered
+        `connection_limit`, which is a refusal of *this caller* that clears the moment somebody
+        lets go. A runtime that reads that typed, self-clearing refusal as "nobody could say
+        anything" falls through to that tail, closes admission on the unknown, and answers
+        `HEAD_DRAINING` for a head nothing has drained — and goes on answering it after the bound
+        has cleared, because admission is never re-opened by rehydration.
+
+        The short-journal bound tests above cannot see this: their window is the whole file, so the
+        fallback they land on states a shape and the collapse is invisible.
+        """
+        run_id = "a-popular-head-with-a-reused-journal"
+        run_dir = self.root / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        path = run_dir / protocol.JOURNAL_NAME
+        with JournalWriter(path, run_id) as journal:
+            journal.append(RUN_STARTED, head_pid=1)
+            while path.stat().st_size <= JOURNAL_TAIL_BYTES:
+                journal.append(PROVIDER_PROGRESSED, turn=1, output_bytes=64)
+            journal.append(RUN_EXITED, code=0)
+
+        run = self.live_run(run_id=run_id)
+        head = self.head_pid_of(run)
+        address = self.runtime._address(run)  # noqa: SLF001 - the test is the backend's own
+        self.assertTrue(read_tail(path).partial_head, "the window can still see this head's start")
+        self.assertGreater(path.stat().st_size, JOURNAL_TAIL_BYTES)
+        held = self._crowd_the_socket(run)
+
+        # A tick that never saw this head, which is what makes it rehydrate before it decides.
+        tick = self.next_tick()
+        refused = tick.deliver(run, NudgePointer.line("a nudge nobody was ever offered"))
+
+        self.assertEqual(refused.status, HEAD_BUSY, refused.reason)
+        self.assertTrue(refused.deferred, "somebody else letting go makes this worth making again")
+        self.assertEqual(refused.evidence["error"], protocol.ERROR_CONNECTION_LIMIT)
+        self.assertTrue(tick.activity.admits(run.run_id), "a live head was drained by a bound")
+        self.assertNotIn(run.run_id, tick._fatal)  # noqa: SLF001 - the backend's own
+        self.assertEqual(self.events(run).of_kind(DRAIN_REQUESTED), (), "the substrate was drained")
+        self.assertTrue(_alive(head), "the head died of a limit that clears itself")
+
+        held.pop().close()
+
+        answered = self._admitted_status(address.socket_path)
+        self.assertTrue(answered["alive"], "the fixture needs a supervisor that is still there")
+        self.assertFalse(answered["draining"], "the substrate was drained after all")
+        self._await(
+            lambda: tick.deliver(run, NudgePointer.line("and now this")).status == HEAD_OK,
+            message="the head never took a payload again once the bound cleared",
+        )
+
+
+class OneStatusFramePerCriticalSectionTests(LocalPtyRuntimeTestCase):
+    """Obligation 3 and criterion 6: a verb spends one status request on deciding, not two.
+
+    The rehydration of secretary-1479 is a second reader of the supervisor's `status`, and the
+    verbs it serves had readers of their own already: `deliver` read a frame before it offered a
+    payload, `stop_if_quiescent` read one to ask whether the adopted turn was still open, and
+    `request_drain` read one back to claim `head_signalled`. Asking twice is not only twice the
+    cost — it is two moments, and a lease adopted at one moment and tested at another is exactly
+    the comparison across time that rehydrating inside the lock exists to remove. So the one frame
+    is taken at the top of the section and passed to everything in it.
+
+    What is counted is what a verb spends *deciding*: every `status` up to the point where the
+    verb acts on the head. The polling that follows an admitted delivery is not that — it is one
+    watch of one delivery, bounded by the substrate's own declared bound, and `_follow` is the
+    single place this backend asks what became of a payload.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        real_status = SupervisorClient.status
+        real_input = SupervisorClient.send_input
+        counter = self
+
+        def status(client: SupervisorClient) -> dict:
+            if not counter.offered:
+                counter.asked += 1
+            return real_status(client)
+
+        def send_input(client: SupervisorClient, data, *, subject: str = "") -> dict:
+            counter.offered = True
+            return real_input(client, data, subject=subject)
+
+        self.asked = 0
+        self.offered = False
+        self.addCleanup(setattr, SupervisorClient, "send_input", real_input)
+        self.addCleanup(setattr, SupervisorClient, "status", real_status)
+        SupervisorClient.status = status
+        SupervisorClient.send_input = send_input
+
+    def counting(self) -> None:
+        """Start counting here: what the fixture asked on its way to this point is not the verb."""
+        self.asked = 0
+        self.offered = False
+
+    def test_a_delivery_decides_on_one_status_frame(self) -> None:
+        run = self.live_run()
+
+        tick = self.next_tick()
+        self.counting()
+        receipt = tick.deliver(run, NudgePointer.line("work"), subject="worker-nudge")
+
+        self.assertEqual(receipt.status, HEAD_OK, receipt.reason)
+        self.assertEqual(self.asked, 1, "the frame that rehydrated is the frame that floored")
+
+    def test_a_delivery_refused_for_a_turn_decides_on_one_status_frame(self) -> None:
+        run = self.live_run()
+        self.begin_turn(run)
+
+        tick = self.next_tick()
+        self.counting()
+        receipt = tick.deliver(run, NudgePointer.line("work"), subject="worker-nudge")
+
+        self.assertEqual(receipt.status, HEAD_BUSY, receipt.reason)
+        self.assertEqual(self.asked, 1, "the frame that adopted the turn is the frame that read it")
+
+    def test_a_drain_decides_and_reads_back_on_one_status_frame(self) -> None:
+        run = self.live_run()
+
+        tick = self.next_tick()
+        self.counting()
+        receipt = tick.request_drain(run, StopInitiator(actor="operator", reason="rotation"))
+
+        self.assertEqual(receipt.status, HEAD_OK, receipt.reason)
+        self.assertTrue(receipt.head_signalled, "the read-back is what this claim is made of")
+        self.assertEqual(self.asked, 1, "the read-back is also what the rehydration is made of")
+
+    def test_a_conditional_stop_over_a_turn_it_did_not_grant_decides_on_one_status_frame(
+        self,
+    ) -> None:
+        run = self.live_run()
+        self.begin_turn(run)
+
+        epoch = self.next_tick().activity_epoch(run)
+        tick = self.next_tick()
+        self.counting()
+        receipt = tick.stop_if_quiescent(
+            run,
+            StopInitiator(actor="dispatcher", reason="rotation"),
+            expected_activity_epoch=epoch,
+            head_process_alive=True,
+        )
+
+        self.assertEqual(receipt.status, HEAD_BUSY, receipt.reason)
+        self.assertEqual(receipt.reason, STOP_TURN_IN_FLIGHT)
+        self.assertEqual(self.asked, 1, "the frame that adopted the lease is the frame that held it")
+
 
 class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
     """What is left of `TheBackendIsNotWiredInTests` once a profile may name this backend.
