@@ -26,8 +26,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from secretary.config import DataDirError, instance_data_dir as _configured_data_dir
-
+from secretary.config import DataDirError
+from secretary.config import instance_data_dir as _configured_data_dir
 from triggered_agents.runtime.paths import default_instance_path
 
 DEFAULT_INSTANCE = default_instance_path()

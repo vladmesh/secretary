@@ -7,12 +7,12 @@ import json
 import os
 from pathlib import Path
 
+from secretary.dispatch.head_status import head_status
 from secretary.dispatcher import (
     DispatcherError,
     HostError,
     runtime_from_args,
 )
-from secretary.dispatch.head_status import head_status
 from secretary.dispatcher_pause import PAUSE_MODES
 from secretary.tasks import TaskError
 

@@ -38,9 +38,9 @@ from secretary.projects.contract import (
 from secretary.routing_journal import HeadRun, head_run_from_profile
 from secretary.sprints import SPRINT_BOARD_NAME
 from secretary.tasks import TaskError
+from tests.fakes.board import BatchedCalls
 from tests.head_registry import write_installed_pair
 from triggered_agents.runtime.head import operations as head_ops
-from tests.fakes.board import BatchedCalls
 
 
 def _legacy_unbound_v1_run(run_json: dict[str, Any], *, root: Path) -> dict[str, Any]:

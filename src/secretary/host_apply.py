@@ -31,8 +31,8 @@ from pathlib import Path
 from typing import Any
 
 from secretary import _proc
-from secretary.config import instance_data_dir
 from secretary._fsutil import directory_lock, write_text_atomic
+from secretary.config import instance_data_dir
 from secretary.head_registry import pinned_product_root
 from secretary.host import (
     HostInventory,

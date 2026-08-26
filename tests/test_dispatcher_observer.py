@@ -23,7 +23,6 @@ from secretary.dispatcher_heartbeat import heartbeat_identity
 from secretary.dispatcher_launch import infrastructure_action
 from secretary.dispatcher_observer import (
     EVENT_DEFERRED,
-    ObserverWakeLiveness,
     EVENT_LAUNCHED,
     EVENT_RELAUNCHED,
     EVENT_STOPPED,
@@ -32,16 +31,17 @@ from secretary.dispatcher_observer import (
     ObserverDelivery,
     ObserverLaunchAborted,
     ObserverRecord,
+    ObserverWakeLiveness,
     _observer_event_state,
     load_observers,
     observer_alive,
-    reconcile_observers,
     observer_launch_prompt,
     observer_pid_file,
     observer_request_id,
     observer_snapshot,
     observer_wake_max_attempts,
     put_observers,
+    reconcile_observers,
     render_observer_prompt,
     stop_observer_head,
 )
@@ -1970,11 +1970,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             request_id="crash-before-nudge-event",
         )
 
-        with mock.patch.object(
-            self.host, "nudge_observer", side_effect=KeyboardInterrupt("crash before nudge")
+        with (
+            mock.patch.object(
+                self.host, "nudge_observer", side_effect=KeyboardInterrupt("crash before nudge")
+            ),
+            self.assertRaisesRegex(KeyboardInterrupt, "crash before nudge"),
         ):
-            with self.assertRaisesRegex(KeyboardInterrupt, "crash before nudge"):
-                self.runtime.production_tick()
+            self.runtime.production_tick()
 
         delivery = self.observers()["sprint:1"].delivery
         self.assertEqual(delivery.stage, DeliveryStage.DELIVERY_INTENT)
@@ -3830,9 +3832,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             return next(seconds, "") or real_clock()
 
         with mock.patch.object(dispatcher_observer_fence, "now_rfc3339", clock):
-            with self.failing_state_save(after=0):
-                with self.assertRaises(OSError):
-                    self.runtime.production_tick()
+            with self.failing_state_save(after=0), self.assertRaises(OSError):
+                self.runtime.production_tick()
 
             with self.broken_stage():
                 result = self.runtime.production_tick()

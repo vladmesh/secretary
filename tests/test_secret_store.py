@@ -387,9 +387,8 @@ class RoundTripCase(SecretStoreCase):
                 "actor": "tester",
                 **override,
             }
-            with self.subTest(override=override):
-                with self.assertRaises(SecretStoreValidationError):
-                    set_secret(self.instance_dir, **request)
+            with self.subTest(override=override), self.assertRaises(SecretStoreValidationError):
+                set_secret(self.instance_dir, **request)
         self.assertEqual(list_secrets(self.instance_dir), ())
 
 
@@ -441,18 +440,20 @@ class InterruptedWriteCase(SecretStoreCase):
         self.assertEqual([entry["id"] for entry in list_secrets(self.instance_dir)], ["first.secret"])
 
     def test_interrupt_before_the_commit_leaves_a_consistent_pair_to_commit(self) -> None:
-        with mock.patch.object(
-            state_repo, "commit", side_effect=state_repo.StateRepoError("commit state failed")
+        with (
+            mock.patch.object(
+                state_repo, "commit", side_effect=state_repo.StateRepoError("commit state failed")
+            ),
+            self.assertRaises(state_repo.StateRepoError),
         ):
-            with self.assertRaises(state_repo.StateRepoError):
-                set_secret(
-                    self.instance_dir,
-                    secret_id="second.secret",
-                    value=b"second",
-                    scope="installation",
-                    purpose="interrupted",
-                    actor="tester",
-                )
+            set_secret(
+                self.instance_dir,
+                secret_id="second.secret",
+                value=b"second",
+                scope="installation",
+                purpose="interrupted",
+                actor="tester",
+            )
         # The commit never happened, so the history still holds only the first
         # secret; the worktree holds a matching catalog and value, so the retry
         # commits a consistent pair rather than half of one.

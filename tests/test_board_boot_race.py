@@ -118,22 +118,26 @@ class ClientRetryTests(unittest.TestCase):
         self.assertEqual(calls, ["http"])
         self.assertEqual(self.slept, [])
 
-        with mock.patch.object(
-            kanboard.urllib.request, "urlopen", lambda *a, **k: Response(b'{"error": {"code": -32601}}')
+        with (
+            mock.patch.object(
+                kanboard.urllib.request, "urlopen", lambda *a, **k: Response(b'{"error": {"code": -32601}}')
+            ),
+            self.assertRaises(kanboard.KanboardError) as rpc,
         ):
-            with self.assertRaises(kanboard.KanboardError) as rpc:
-                kanboard.call("nope")
+            kanboard.call("nope")
         self.assertNotIsInstance(rpc.exception, kanboard.KanboardUnreachable)
 
     def test_a_timeout_is_not_treated_as_a_refused_connection(self):
         """A timeout may mean the request was already delivered; retrying it is not free."""
-        with mock.patch.object(
-            kanboard.urllib.request,
-            "urlopen",
-            mock.Mock(side_effect=urllib.error.URLError(TimeoutError("timed out"))),
+        with (
+            mock.patch.object(
+                kanboard.urllib.request,
+                "urlopen",
+                mock.Mock(side_effect=urllib.error.URLError(TimeoutError("timed out"))),
+            ),
+            self.assertRaises(kanboard.KanboardError) as caught,
         ):
-            with self.assertRaises(kanboard.KanboardError) as caught:
-                kanboard.call("getAllProjects")
+            kanboard.call("getAllProjects")
         self.assertNotIsInstance(caught.exception, kanboard.KanboardUnreachable)
         self.assertEqual(self.slept, [])
 

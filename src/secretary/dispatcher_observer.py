@@ -69,13 +69,13 @@ from secretary.dispatcher_watchdog import (
     initial_output_stall_seconds,
     pid_file_path,
 )
-from secretary.infra.env import positive_int
 from secretary.dispatcher_worker_lifecycle import (
     CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS,
     ContinuationLivenessState,
     WorkerContinuationLiveness,
     head_run_binding,
 )
+from secretary.infra.env import positive_int
 from secretary.role_env import observer_binding
 from secretary.role_skills import skill_delivery
 from secretary.sprint_observer import (

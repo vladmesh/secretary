@@ -243,7 +243,7 @@ class LocalPtyRuntimeTestCase(unittest.TestCase):
         this go on to make their own observation, and an observation made here would be the one
         that closed the lease.
         """
-        address = self.runtime._address(run)  # noqa: SLF001 - the test is the backend's own
+        address = self.runtime._address(run)
         self._await(
             lambda: not self._status(address.socket_path).get("turn_open", True),
             message="the head's turn never closed",
@@ -284,7 +284,7 @@ class LocalPtyRuntimeTestCase(unittest.TestCase):
 
     def output_of(self, run: HeadRun) -> bytes:
         """What the head has printed, read straight from its supervisor."""
-        address = self.runtime._address(run)  # noqa: SLF001 - the test is the backend's own
+        address = self.runtime._address(run)
         try:
             with SupervisorClient.connect(address.socket_path, timeout=5.0) as client:
                 return bytes(client.read_output()["bytes_data"])
@@ -716,7 +716,7 @@ class LocalPtyDurableTurnTests(LocalPtyRuntimeTestCase):
         run = self.live_run()
         self.begin_turn(run)
         self.end_turn(run)
-        address = self.runtime._address(run)  # noqa: SLF001 - the test is the backend's own
+        address = self.runtime._address(run)
         journal_seq = int(self._admitted_status(address.socket_path)["journal_seq"])
 
         reading = self.next_tick().activity_epoch(run)
@@ -742,7 +742,7 @@ class LocalPtyDurableTurnTests(LocalPtyRuntimeTestCase):
         """
         run = self.live_run()
         self._await(lambda: b"SIZE" in self.output_of(run), message="the head never printed")
-        address = self.runtime._address(run)  # noqa: SLF001 - the test is the backend's own
+        address = self.runtime._address(run)
         sequence = int(self._admitted_status(address.socket_path)["journal_seq"])
 
         looking = self.runtime.observe(run)
@@ -959,7 +959,7 @@ class LocalPtyDurableTurnTests(LocalPtyRuntimeTestCase):
         run, path = self._journal_run("a-reused-run-directory", write)
 
         runtime = self.next_tick()
-        runtime._rehydrate(run)  # noqa: SLF001 - the derivation is this backend's own
+        runtime._rehydrate(run)
 
         self.assertLess(path.stat().st_size, JOURNAL_TAIL_BYTES, "this window is the whole file")
         self.assertFalse(read_tail(path).partial_head)
@@ -998,7 +998,7 @@ class LocalPtyDurableTurnTests(LocalPtyRuntimeTestCase):
         run, path = self._journal_run("a-journal-longer-than-the-window", write)
 
         runtime = self.next_tick()
-        runtime._rehydrate(run)  # noqa: SLF001 - the bound is this backend's own
+        runtime._rehydrate(run)
 
         self.assertTrue(read_tail(path).partial_head, "the read was not bounded at all")
         self.assertGreater(path.stat().st_size, JOURNAL_TAIL_BYTES)
@@ -1112,7 +1112,7 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
         runtime knowing anything about it. That is the only way to reach the next delivery's
         "the kernel took nothing at all" with a real kernel.
         """
-        address = self.runtime._address(run)  # noqa: SLF001 - the test is the backend's own
+        address = self.runtime._address(run)
         with SupervisorClient.connect(address.socket_path, timeout=5.0) as client:
             answer = client.send_input(b"x" * (protocol.INPUT_MAX_BYTES - 1))
             self.assertTrue(answer["ok"], answer)
@@ -1158,7 +1158,7 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
 
     def _delivery_in_flight(self, run: HeadRun, size: int):
         """A predicate that holds once the substrate is carrying a payload of exactly this size."""
-        address = self.runtime._address(run)  # noqa: SLF001 - the test is the backend's own
+        address = self.runtime._address(run)
 
         def ready() -> bool:
             delivery = self._status(address.socket_path).get("delivery") or {}
@@ -1218,7 +1218,7 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
         self.assertEqual(self.payloads_delivered(), landed, "a second payload was written anyway")
         # And it is not only this runtime's bookkeeping: the head's own supervisor refuses too, so
         # nothing else that can reach the socket can glue a payload onto the fragment either.
-        address = self.runtime._address(run)  # noqa: SLF001 - the test is the backend's own
+        address = self.runtime._address(run)
         with SupervisorClient.connect(address.socket_path) as client:
             self.assertTrue(client.status()["draining"])
             refused = client.send_input(b"straight at the socket\n")
@@ -1355,7 +1355,7 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
         """
         run = self.live_run()
         head = self.head_pid_of(run)
-        address = self.runtime._address(run)  # noqa: SLF001 - the test is the backend's own
+        address = self.runtime._address(run)
         held = []
         for _ in range(protocol.CONNECTION_MAX_CLIENTS):
             client = SupervisorClient.connect(address.socket_path)
@@ -1376,7 +1376,7 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
         # Nothing about this head was closed: not its admission here, not this runtime's memory of
         # heads it hands no more work, and not its terminal.
         self.assertTrue(self.runtime.activity.admits(run.run_id), "a live head was closed for good")
-        self.assertNotIn(run.run_id, self.runtime._fatal)  # noqa: SLF001 - the backend's own
+        self.assertNotIn(run.run_id, self.runtime._fatal)
         self.assertEqual(self.payloads_delivered(), 0, "the terminal was touched after all")
         self.assertTrue(_alive(head), "the head died of a connection limit")
         held.pop().close()
@@ -1443,7 +1443,7 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
         head is closed and the next `deliver` meets `HEAD_DRAINING` instead of the terminal.
         """
         run = self._reporting_head(pause=0.5, delivery_seconds=1.5)
-        address = self.runtime._address(run)  # noqa: SLF001 - the test is the backend's own
+        address = self.runtime._address(run)
 
         first = self.deliver_line(run, "A" * (protocol.INPUT_MAX_BYTES - 1))
 
@@ -1842,7 +1842,7 @@ class TheWaitIsDerivedFromTheSubstrateTests(LocalPtyRuntimeTestCase):
         # And what the substrate really puts there is the head's own bound, so a head raised with
         # one number is a head every delivery to it is waited out at.
         run = self.live_run(delivery_seconds=17.0)
-        address = self.runtime._address(run)  # noqa: SLF001 - the test is the backend's own
+        address = self.runtime._address(run)
         with SupervisorClient.connect(address.socket_path, timeout=5.0) as client:
             answer = client.send_input(b"hello\n")
         self.assertTrue(answer["ok"], answer)
@@ -1894,7 +1894,7 @@ class TheSubstrateSBoundsNeverEndAHeadTests(LocalPtyRuntimeTestCase):
 
     def _crowd_the_socket(self, run: HeadRun) -> list[SupervisorClient]:
         """Hold every connection the supervisor will hold, so the next caller is refused."""
-        address = self.runtime._address(run)  # noqa: SLF001 - the test is the backend's own
+        address = self.runtime._address(run)
         held = []
         for _ in range(protocol.CONNECTION_MAX_CLIENTS):
             client = SupervisorClient.connect(address.socket_path)
@@ -1910,7 +1910,7 @@ class TheSubstrateSBoundsNeverEndAHeadTests(LocalPtyRuntimeTestCase):
     ) -> None:
         run = self.live_run()
         head = self.head_pid_of(run)
-        address = self.runtime._address(run)  # noqa: SLF001 - the test is the backend's own
+        address = self.runtime._address(run)
         held = self._crowd_the_socket(run)
 
         delivered = self.deliver_line(run, "a nudge nobody was ever offered")
@@ -1946,7 +1946,7 @@ class TheSubstrateSBoundsNeverEndAHeadTests(LocalPtyRuntimeTestCase):
         self.assertEqual(stopped.status, HEAD_ALIVE, stopped.reason)
 
         # None of the five ended this head, in this runtime's memory or on the host.
-        self.assertNotIn(run.run_id, self.runtime._fatal)  # noqa: SLF001 - the backend's own
+        self.assertNotIn(run.run_id, self.runtime._fatal)
         self.assertTrue(_alive(head), "a head died of a limit that clears itself")
         self.assertEqual(self.payloads_delivered(), 0, "the terminal was touched after all")
         self.assertEqual(self.events(run).of_kind(DRAIN_REQUESTED), (), "the substrate was drained")
@@ -1974,7 +1974,7 @@ class TheSubstrateSBoundsNeverEndAHeadTests(LocalPtyRuntimeTestCase):
 
         self.assertEqual(refused.status, HEAD_BUSY, refused.reason)
         self.assertEqual(refused.evidence["error"], protocol.ERROR_ATTACH_LIMIT)
-        self.assertNotIn(run.run_id, self.runtime._fatal)  # noqa: SLF001 - the backend's own
+        self.assertNotIn(run.run_id, self.runtime._fatal)
         self.assertTrue(self.runtime.activity.admits(run.run_id))
         self.assertEqual(delivered.status, HEAD_OK, delivered.reason)
         self.assertTrue(_alive(head))
@@ -2010,7 +2010,7 @@ class TheSubstrateSBoundsNeverEndAHeadTests(LocalPtyRuntimeTestCase):
 
         run = self.live_run(run_id=run_id)
         head = self.head_pid_of(run)
-        address = self.runtime._address(run)  # noqa: SLF001 - the test is the backend's own
+        address = self.runtime._address(run)
         self.assertTrue(read_tail(path).partial_head, "the window can still see this head's start")
         self.assertGreater(path.stat().st_size, JOURNAL_TAIL_BYTES)
         held = self._crowd_the_socket(run)
@@ -2023,7 +2023,7 @@ class TheSubstrateSBoundsNeverEndAHeadTests(LocalPtyRuntimeTestCase):
         self.assertTrue(refused.deferred, "somebody else letting go makes this worth making again")
         self.assertEqual(refused.evidence["error"], protocol.ERROR_CONNECTION_LIMIT)
         self.assertTrue(tick.activity.admits(run.run_id), "a live head was drained by a bound")
-        self.assertNotIn(run.run_id, tick._fatal)  # noqa: SLF001 - the backend's own
+        self.assertNotIn(run.run_id, tick._fatal)
         self.assertEqual(self.events(run).of_kind(DRAIN_REQUESTED), (), "the substrate was drained")
         self.assertTrue(_alive(head), "the head died of a limit that clears itself")
 

@@ -30,8 +30,8 @@ from secretary.dispatcher_watchdog import (
     HEARTBEAT_LIVE_MATCH,
     head_process_status,
 )
-from triggered_agents.runtime.head.local_pty import protocol
 from triggered_agents.runtime.head.local_pty import journal as journal_module
+from triggered_agents.runtime.head.local_pty import protocol
 from triggered_agents.runtime.head.local_pty import supervisor as supervisor_module
 from triggered_agents.runtime.head.local_pty.client import (
     HeadHandle,
@@ -728,7 +728,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
         conn.sendall(protocol.encode_frame(protocol.connection_refusal(8)))
         conn.close()
         self._await(
-            lambda: bool(select.select([client._conn], [], [], 0)[0]),  # noqa: SLF001
+            lambda: bool(select.select([client._conn], [], [], 0)[0]),
             message="the refusal never reached the caller",
         )
 
@@ -765,7 +765,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
         conn.sendall(protocol.encode_frame(protocol.connection_refusal(8)))
         conn.close()
         self._await(
-            lambda: bool(select.select([client._conn], [], [], 0)[0]),  # noqa: SLF001
+            lambda: bool(select.select([client._conn], [], [], 0)[0]),
             message="the frames never reached the caller",
         )
 

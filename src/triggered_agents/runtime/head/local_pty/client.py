@@ -338,7 +338,7 @@ class SupervisorClient:
         request_id = self._request_seq
         try:
             self._conn.sendall(protocol.encode_frame({**payload, protocol.REQUEST_ID: request_id}))
-        except OSError as exc:
+        except OSError:
             # The supervisor may have answered this connection *before* anything was asked on it
             # and closed it: that is what happens at the connection bound, where the refusal is
             # written and the socket is let go. A write that then loses the race is `EPIPE`, and

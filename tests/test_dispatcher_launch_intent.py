@@ -458,9 +458,8 @@ class LaunchIntentTests(unittest.TestCase):
     # worker: after the host call --------------------------------------------
 
     def test_a_worker_launch_that_outlived_its_tick_is_adopted_not_doubled(self) -> None:
-        with self.state_dies_after("prepare_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("prepare_worker"), self.assertRaises(OSError):
+            self.tick()
 
         self.assertEqual(self.host.prepared, [REF])
         intent = self.stored_intent()
@@ -548,9 +547,8 @@ class LaunchIntentTests(unittest.TestCase):
 
     def test_a_worker_intent_whose_head_died_is_relaunched_exactly_once(self) -> None:
         self.host.head_pid = DEAD_PID
-        with self.state_dies_after("prepare_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("prepare_worker"), self.assertRaises(OSError):
+            self.tick()
 
         self.host.head_pid = os.getpid()
         relaunched = self.tick()
@@ -565,9 +563,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.stored_intent(), {})
 
     def test_a_live_foreign_worker_heartbeat_is_fenced_without_a_stop_or_replacement(self) -> None:
-        with self.state_dies_after("prepare_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("prepare_worker"), self.assertRaises(OSError):
+            self.tick()
         self.replace_intent_heartbeat_run()
 
         fenced = self.tick()
@@ -580,9 +577,8 @@ class LaunchIntentTests(unittest.TestCase):
     def test_an_intent_without_a_heartbeat_waits_out_its_grace_window(self) -> None:
         """A head that has been launched but has not written its pid is not a dead head."""
         self.host.head_pid = None
-        with self.state_dies_after("prepare_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("prepare_worker"), self.assertRaises(OSError):
+            self.tick()
 
         pending = self.tick()
 
@@ -607,9 +603,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.verdict("red", "needs work", "verdict-red")
         self.tick()  # the verdict parks the card
         self.decide("rework")
-        with self.state_dies_after("restart_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("restart_worker"), self.assertRaises(OSError):
+            self.tick()
 
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
         self.assertEqual(self.stored_intent()["action"], "review-red-rework")
@@ -633,9 +628,8 @@ class LaunchIntentTests(unittest.TestCase):
             root=self.data_dir / "replacement-sessions",
         )
 
-        with self.state_dies_after("restart_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("restart_worker"), self.assertRaises(OSError):
+            self.tick()
 
         intent = self.stored_intent()
         self.assertEqual(intent["action"], "review-red-rework")
@@ -677,9 +671,8 @@ class LaunchIntentTests(unittest.TestCase):
         # process is gone: the watchdog reclaims it once.
         self.kill_worker_heartbeat()
         self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
-        with self.state_dies_after("restart_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("restart_worker"), self.assertRaises(OSError):
+            self.tick()
 
         self.assertEqual(self.stored_intent()["action"], "worker-respawn")
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
@@ -801,9 +794,8 @@ class LaunchIntentTests(unittest.TestCase):
         verdicts, into one.
         """
         self.rework_after_red_review()
-        with self.state_dies_after("restart_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("restart_worker"), self.assertRaises(OSError):
+            self.tick()
 
         intent = self.stored_intent()
         self.assertEqual((intent["round"], intent["opens_round"]), (2, True))
@@ -822,9 +814,8 @@ class LaunchIntentTests(unittest.TestCase):
     def test_an_adopted_gate_red_rework_lands_on_the_round_it_reserved(self) -> None:
         self.run_to_validate()
         self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
-        with self.state_dies_after("restart_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("restart_worker"), self.assertRaises(OSError):
+            self.tick()
 
         intent = self.stored_intent()
         self.assertEqual(
@@ -941,9 +932,8 @@ class LaunchIntentTests(unittest.TestCase):
                 raise OSError("dispatcher died before board move")
             return real_move(**kwargs)
 
-        with mock.patch.object(self.writer, "move", die_before_move):
-            with self.assertRaises(OSError):
-                self.tick()
+        with mock.patch.object(self.writer, "move", die_before_move), self.assertRaises(OSError):
+            self.tick()
 
         retained = self.record()
         assert retained is not None
@@ -1265,9 +1255,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.host.fail_resume_worker_reason = ""
         self.run_to_validate()
         self.host.gate_results = [GateResult("red", "tests failed", log="boom")]
-        with self.lose_the_suspension_after_the_send():
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.lose_the_suspension_after_the_send(), self.assertRaises(OSError):
+            self.tick()
         pending = self.record()
         assert pending is not None
         self.assertEqual(pending.worker_continuation.stage, WorkerContinuationStage.DELIVERY_PENDING)
@@ -1290,9 +1279,8 @@ class LaunchIntentTests(unittest.TestCase):
     def test_a_pending_review_delivery_that_lost_its_suspension_is_replaced_once(self) -> None:
         self.host.fail_resume_worker_reason = ""
         self.rework_after_red_review()
-        with self.lose_the_suspension_after_the_send():
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.lose_the_suspension_after_the_send(), self.assertRaises(OSError):
+            self.tick()
         confirmations = self.host.calls.count("confirm_worker_retained")
         self.host.retained_worker_alive = False
 
@@ -1450,9 +1438,8 @@ class LaunchIntentTests(unittest.TestCase):
         """
         self.rework_after_red_review()
         self.host.head_pid = DEAD_PID
-        with self.state_dies_after("restart_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("restart_worker"), self.assertRaises(OSError):
+            self.tick()
 
         self.assertEqual((self.stored_intent()["round"], self.stored_intent()["opens_round"]), (2, True))
 
@@ -1495,9 +1482,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.tick()
         self.kill_worker_heartbeat()
         self.host.worker_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
-        with self.state_dies_after("restart_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("restart_worker"), self.assertRaises(OSError):
+            self.tick()
 
         self.assertFalse(self.stored_intent()["opens_round"])
 
@@ -1528,9 +1514,8 @@ class LaunchIntentTests(unittest.TestCase):
         What the refused write costs is the round's routing event, and that is why the intent is
         not spent yet: the next tick adopts the same head and writes it.
         """
-        with self.audit_dies_after("prepare_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.audit_dies_after("prepare_worker"), self.assertRaises(OSError):
+            self.tick()
 
         self.assertEqual(self.host.prepared, [REF])
         record = self.record()
@@ -1551,9 +1536,8 @@ class LaunchIntentTests(unittest.TestCase):
 
     def test_an_audit_that_refuses_after_a_rework_recovers_that_rework_once(self) -> None:
         self.rework_after_red_review()
-        with self.audit_dies_after("restart_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.audit_dies_after("restart_worker"), self.assertRaises(OSError):
+            self.tick()
 
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
         self.assertEqual(self.stored_intent()["action"], "review-red-rework")
@@ -1714,9 +1698,8 @@ class LaunchIntentTests(unittest.TestCase):
         writes one either: without this the round's verdict names only the reviewer, and the
         history reads as a round nobody worked.
         """
-        with self.state_dies_after("prepare_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("prepare_worker"), self.assertRaises(OSError):
+            self.tick()
 
         self.assertEqual(self.tick()["action"], "worker-launch-adopted")
 
@@ -1764,9 +1747,8 @@ class LaunchIntentTests(unittest.TestCase):
         Spending the intent on a round whose history is missing would leave the head with no record
         of its launch at all; keeping it costs one more adoption instead.
         """
-        with self.state_dies_after("prepare_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("prepare_worker"), self.assertRaises(OSError):
+            self.tick()
 
         with self.refuse_audit("routing-worker"):
             deferred = self.tick()
@@ -1788,9 +1770,8 @@ class LaunchIntentTests(unittest.TestCase):
 
     def adopt_worker(self) -> None:
         """Leave the card with a live worker head that no pane handle points at."""
-        with self.state_dies_after("prepare_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("prepare_worker"), self.assertRaises(OSError):
+            self.tick()
         self.assertEqual(self.tick()["action"], "worker-launch-adopted")
         record = self.record()
         assert record is not None
@@ -2728,9 +2709,8 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
 
     @contextlib.contextmanager
     def host_calls(self):
-        with self.orca():
-            with mock.patch.object(self.host, "_run", lambda *a, **k: None):
-                yield
+        with self.orca(), mock.patch.object(self.host, "_run", lambda *a, **k: None):
+            yield
 
     def create(self, worker_id: str = "card-1", expected: str = ""):
         return self.host._create_workspace("codegen-orchestrator", worker_id, "main", expected=expected)
@@ -2767,9 +2747,8 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
         self.repo = self.data_dir / "projects" / "unregistered"
         self.repo.mkdir()
 
-        with self.orca():
-            with self.assertRaisesRegex(HostError, "not registered with orca"):
-                self.host.restore_workspace({"project": "codegen-orchestrator"}, "card-1")
+        with self.orca(), self.assertRaisesRegex(HostError, "not registered with orca"):
+            self.host.restore_workspace({"project": "codegen-orchestrator"}, "card-1")
 
     # which returned worktree may be adopted ----------------------------------
 
@@ -2792,9 +2771,8 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
     def test_a_worktree_of_another_orca_repo_fails_closed_and_is_removed(self) -> None:
         self.created_record = {"repoId": "repo-other", "displayName": "card-1"}
 
-        with self.host_calls():
-            with self.assertRaisesRegex(HostError, "not this project's repo"):
-                self.create(expected=self.created_path)
+        with self.host_calls(), self.assertRaisesRegex(HostError, "not this project's repo"):
+            self.create(expected=self.created_path)
 
         self.assertEqual(self.removed(), [self.created_path])
         self.assertEqual(self.registered, {})
@@ -2802,23 +2780,21 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
     def test_a_worktree_registered_for_another_card_fails_closed_and_is_removed(self) -> None:
         self.created_record = {"repoId": self.REPO_ID, "displayName": "card-2"}
 
-        with self.host_calls():
-            with self.assertRaisesRegex(HostError, "not this card's workspace"):
-                self.create(expected=self.created_path)
+        with self.host_calls(), self.assertRaisesRegex(HostError, "not this card's workspace"):
+            self.create(expected=self.created_path)
 
         self.assertEqual(self.removed(), [self.created_path])
 
     def test_a_worktree_orca_never_registered_fails_closed(self) -> None:
         """`create` answered with a path, `show` does not know it: an arbitrary path is not a
         workspace, and the answer Orca will not give is not read as consent."""
-        with self.orca():
-            with mock.patch.object(self.host, "_run", lambda *a, **k: None):
-                self.created_path = str(self.data_dir / "elsewhere")
-                self.registered.clear()
-                with mock.patch.object(self.host, "_run_json") as run_json:
-                    run_json.side_effect = self.unregistered_create
-                    with self.assertRaisesRegex(HostError, "will not describe"):
-                        self.create(expected=self.created_path)
+        with self.orca(), mock.patch.object(self.host, "_run", lambda *a, **k: None):
+            self.created_path = str(self.data_dir / "elsewhere")
+            self.registered.clear()
+            with mock.patch.object(self.host, "_run_json") as run_json:
+                run_json.side_effect = self.unregistered_create
+                with self.assertRaisesRegex(HostError, "will not describe"):
+                    self.create(expected=self.created_path)
 
     def unregistered_create(self, command: list[str]) -> dict[str, Any]:
         self.json_calls.append(command)
@@ -2845,9 +2821,8 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
         self.created_record = {"repoId": "repo-other", "displayName": "card-1"}
         self.rm_fails = True
 
-        with self.host_calls():
-            with self.assertRaisesRegex(HostError, "could not be removed either"):
-                self.create(expected=self.created_path)
+        with self.host_calls(), self.assertRaisesRegex(HostError, "could not be removed either"):
+            self.create(expected=self.created_path)
 
         self.assertIn(self.created_path, self.registered)
 
@@ -2960,21 +2935,20 @@ class HostLaunchContourTests(unittest.TestCase):
             "worktree show": {"worktree": {"repoId": "repo-1", "displayName": "w1"}},
         }
 
-        with mock.patch.object(self.host, "_run", lambda *a, **k: None):
-            with self.run_json(answers):
-                with self.assertRaisesRegex(HostError, "not "):
-                    self.host._create_workspace(
-                        "secretary", "w1", "main", expected=str(self.data_dir / "intended")
-                    )
-
-                answers["worktree create"]["worktree"]["path"] = str(self.data_dir / "intended")
-
-                self.assertEqual(
-                    self.host._create_workspace(
-                        "secretary", "w1", "main", expected=str(self.data_dir / "intended")
-                    ),
-                    str(self.data_dir / "intended"),
+        with mock.patch.object(self.host, "_run", lambda *a, **k: None), self.run_json(answers):
+            with self.assertRaisesRegex(HostError, "not "):
+                self.host._create_workspace(
+                    "secretary", "w1", "main", expected=str(self.data_dir / "intended")
                 )
+
+            answers["worktree create"]["worktree"]["path"] = str(self.data_dir / "intended")
+
+            self.assertEqual(
+                self.host._create_workspace(
+                    "secretary", "w1", "main", expected=str(self.data_dir / "intended")
+                ),
+                str(self.data_dir / "intended"),
+            )
 
     # a failure raised after the terminal exists -----------------------------
 
@@ -3072,9 +3046,8 @@ class HostLaunchContourTests(unittest.TestCase):
 
     def test_a_delivery_failure_whose_pane_goes_stays_an_ordinary_failure(self) -> None:
         """The other half: nothing is left running, so the caller may block the card as before."""
-        with self.delivery_fails(close=None):
-            with self.assertRaises(HostError) as caught:
-                self.launch_worker()
+        with self.delivery_fails(close=None), self.assertRaises(HostError) as caught:
+            self.launch_worker()
 
         self.assertNotIsInstance(caught.exception, HeadLaunchAborted)
 
@@ -3112,24 +3085,26 @@ class HostLaunchContourTests(unittest.TestCase):
                 error.run = run
                 raise error
 
-            with mock.patch.object(
-                self.host.catalog,
-                "prepare_head_workspace",
-                lambda *_args, **_kwargs: None,
-                create=True,
+            with (
+                mock.patch.object(
+                    self.host.catalog,
+                    "prepare_head_workspace",
+                    lambda *_args, **_kwargs: None,
+                    create=True,
+                ),
+                mock.patch.object(secretary_dispatcher.head_ops, "spawn", side_effect=busy_spawn),
             ):
-                with mock.patch.object(secretary_dispatcher.head_ops, "spawn", side_effect=busy_spawn):
-                    with self.assertRaises(HeadPaneNotReady) as caught:
-                        self.host._launch(
-                            str(self.data_dir),
-                            "title",
-                            "codex",
-                            "TASK.md",
-                            role="worker",
-                            env_name="SECRETARY_UNSET_COMMAND",
-                            task={"ref": REF, "project": "secretary"},
-                            heartbeat_run_id=run_id,
-                        )
+                with self.assertRaises(HeadPaneNotReady) as caught:
+                    self.host._launch(
+                        str(self.data_dir),
+                        "title",
+                        "codex",
+                        "TASK.md",
+                        role="worker",
+                        env_name="SECRETARY_UNSET_COMMAND",
+                        task={"ref": REF, "project": "secretary"},
+                        heartbeat_run_id=run_id,
+                    )
 
         self.assertEqual(caught.exception.readiness, "busy")
         bound = head_process_status(
@@ -3983,9 +3958,8 @@ class ProductionLaunchIntentTests(unittest.TestCase):
 
     def leave_a_post_launch_intent(self) -> None:
         """Claim the card and lose the tick right after the worker head came up."""
-        with self.state_dies_after("prepare_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("prepare_worker"), self.assertRaises(OSError):
+            self.tick()
         self.assertEqual(self.host.prepared, [REF])
         self.assertEqual(self.stored_intent().get("role"), "worker")
 
@@ -4020,9 +3994,8 @@ class ProductionLaunchIntentTests(unittest.TestCase):
             body="observer decision",
             request_id="decision-rework",
         )
-        with self.state_dies_after("restart_worker"):
-            with self.assertRaises(OSError):
-                self.tick()
+        with self.state_dies_after("restart_worker"), self.assertRaises(OSError):
+            self.tick()
         intent = self.stored_intent()
         self.assertEqual(
             (intent["action"], intent["round"], intent["opens_round"]), ("review-red-rework", 2, True)

@@ -18,7 +18,6 @@ from unittest import mock
 
 from triggered_agents.agents.pipeline import cli, model, ops
 
-
 # The rows a create counts references over: an open card and an archived one, the way the board
 # answers a reference enumeration.
 EXISTING_ROWS = {

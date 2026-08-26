@@ -250,13 +250,13 @@ class TaskCliTests(unittest.TestCase):
         # resolved at import, so on the appliance host itself an unnamed run resolves the live
         # installation and reads the production board.
         output, errors = io.StringIO(), io.StringIO()
-        with tempfile.TemporaryDirectory() as tmp:
-            with (
-                mock.patch.dict("os.environ", {}, clear=True),
-                contextlib.redirect_stdout(output),
-                contextlib.redirect_stderr(errors),
-            ):
-                code = main(["task", "show", "--ref", "secretary-468", "--instance", tmp])
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.dict("os.environ", {}, clear=True),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = main(["task", "show", "--ref", "secretary-468", "--instance", tmp])
 
         self.assertEqual(code, 1)
         self.assertEqual(output.getvalue(), "")
@@ -1724,17 +1724,17 @@ class TaskWriterTests(unittest.TestCase):
             mock.patch.object(self.client, "call", side_effect=invalid_task_list),
             mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True),
             open_sprint() as sprint,
+            self.assertRaisesRegex(TaskError, "invalid task list") as raised,
         ):
-            with self.assertRaisesRegex(TaskError, "invalid task list") as raised:
-                self.writer.create(
-                    role="observer",
-                    actor="observer",
-                    project="secretary",
-                    task_type="code",
-                    title="No fallback",
-                    request_id="auto-reference-failure",
-                    sprint=sprint,
-                )
+            self.writer.create(
+                role="observer",
+                actor="observer",
+                project="secretary",
+                task_type="code",
+                title="No fallback",
+                request_id="auto-reference-failure",
+                sprint=sprint,
+            )
 
         self.assertEqual(raised.exception.code, "backend_error")
         self.assertFalse(any(method == "createTask" for method, _params in self.client.calls))
@@ -1754,17 +1754,17 @@ class TaskWriterTests(unittest.TestCase):
                 ),
                 mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True),
                 open_sprint() as sprint,
+                self.assertRaisesRegex(TaskError, "invalid task list") as raised,
             ):
-                with self.assertRaisesRegex(TaskError, "invalid task list") as raised:
-                    self.writer.create(
-                        role="observer",
-                        actor="observer",
-                        project="secretary",
-                        task_type="code",
-                        title="No fallback",
-                        request_id=f"null-reference-{reply}",
-                        sprint=sprint,
-                    )
+                self.writer.create(
+                    role="observer",
+                    actor="observer",
+                    project="secretary",
+                    task_type="code",
+                    title="No fallback",
+                    request_id=f"null-reference-{reply}",
+                    sprint=sprint,
+                )
 
             self.assertEqual(raised.exception.code, "backend_error")
             self.assertFalse(any(method == "createTask" for method, _params in self.client.calls))
@@ -1802,31 +1802,30 @@ class TaskWriterTests(unittest.TestCase):
         with (
             mock.patch.object(self.writer.audit, "stage", side_effect=lose_backend_id_stage),
             open_sprint() as sprint,
+            self.assertRaisesRegex(TaskError, "audit repair"),
         ):
-            with self.assertRaisesRegex(TaskError, "audit repair"):
-                self.writer.create(
-                    role="observer",
-                    actor="observer",
-                    project="secretary",
-                    task_type="code",
-                    title="Crash safe",
-                    request_id="atomic-create-crash",
-                    sprint=sprint,
-                )
+            self.writer.create(
+                role="observer",
+                actor="observer",
+                project="secretary",
+                task_type="code",
+                title="Crash safe",
+                request_id="atomic-create-crash",
+                sprint=sprint,
+            )
 
         self.assertEqual(self.client.tasks[-1]["reference"], "secretary-469")
         self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
-        with open_sprint() as sprint:
-            with self.assertRaisesRegex(TaskError, "audit repair"):
-                self.writer.create(
-                    role="observer",
-                    actor="observer",
-                    project="secretary",
-                    task_type="code",
-                    title="Crash safe",
-                    request_id="atomic-create-crash",
-                    sprint=sprint,
-                )
+        with open_sprint() as sprint, self.assertRaisesRegex(TaskError, "audit repair"):
+            self.writer.create(
+                role="observer",
+                actor="observer",
+                project="secretary",
+                task_type="code",
+                title="Crash safe",
+                request_id="atomic-create-crash",
+                sprint=sprint,
+            )
 
         self.assertEqual(len([call for call in self.client.calls if call[0] == "createTask"]), 1)
         self.assertEqual(self.client.metadata[int(self.client.tasks[-1]["id"])], {})
@@ -1901,18 +1900,17 @@ class TaskWriterTests(unittest.TestCase):
 
     def test_pending_create_does_not_repair_a_different_task_with_its_reference(self) -> None:
         self.client.fail_metadata = True
-        with open_sprint() as sprint:
-            with self.assertRaisesRegex(TaskError, "audit repair"):
-                self.writer.create(
-                    role="observer",
-                    actor="observer",
-                    project="secretary",
-                    task_type="code",
-                    title="Interrupted",
-                    reference="secretary-interrupted",
-                    request_id="interrupted-create",
-                    sprint=sprint,
-                )
+        with open_sprint() as sprint, self.assertRaisesRegex(TaskError, "audit repair"):
+            self.writer.create(
+                role="observer",
+                actor="observer",
+                project="secretary",
+                task_type="code",
+                title="Interrupted",
+                reference="secretary-interrupted",
+                request_id="interrupted-create",
+                sprint=sprint,
+            )
         intended = self.client.tasks[-1]
         intended["reference"] = ""
         self.client.tasks.append(
@@ -3385,16 +3383,15 @@ class AssessmentStateTests(unittest.TestCase):
         self.assertEqual(event["actor"], {"role": "observer", "id": "observer"})
 
         self._park(request_id="park-again")
-        with as_observer("sprint:2000"):
-            with self.assertRaises(TaskError) as stranger:
-                self.writer.decide(
-                    role="observer",
-                    actor="observer",
-                    reference="secretary-468",
-                    kind="release",
-                    body="deciding about a sprint I do not observe",
-                    request_id="decision-from-another-head",
-                )
+        with as_observer("sprint:2000"), self.assertRaises(TaskError) as stranger:
+            self.writer.decide(
+                role="observer",
+                actor="observer",
+                reference="secretary-468",
+                kind="release",
+                body="deciding about a sprint I do not observe",
+                request_id="decision-from-another-head",
+            )
         self.assertEqual(stranger.exception.code, "observer_sprint_mismatch")
         denial = TaskAudit(Path(self.tmpdir.name)).events("secretary-468", kind="sprint_guard_denied")[-1]
         self.assertEqual(denial["payload"]["code"], "observer_sprint_mismatch")

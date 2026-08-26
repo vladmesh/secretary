@@ -203,9 +203,9 @@ class BackupTests(unittest.TestCase):
                     "secretary.backup.raw_kanboard_dump",
                     side_effect=RuntimeError("snapshot reached"),
                 ),
+                self.assertRaisesRegex(RuntimeError, "snapshot reached"),
             ):
-                with self.assertRaisesRegex(RuntimeError, "snapshot reached"):
-                    create_backup(instance)
+                create_backup(instance)
 
     def test_create_rejects_claimed_workspace_when_board_role_is_removed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -379,13 +379,13 @@ class BackupTests(unittest.TestCase):
                     "secretary.backup.raw_kanboard_dump",
                     return_value=SimpleNamespace(dump_dir=data_dir / "board" / "raw"),
                 ),
+                self.assertRaisesRegex(RuntimeError, "stop"),
             ):
-                with self.assertRaisesRegex(RuntimeError, "stop"):
-                    create_backup(
-                        instance,
-                        allow_claimed_worker=True,
-                        caller_workspace=Path("/ws/backup"),
-                    )
+                create_backup(
+                    instance,
+                    allow_claimed_worker=True,
+                    caller_workspace=Path("/ws/backup"),
+                )
 
         self.assertEqual(calls[0], ("pause", Path("/ws/backup")))
         self.assertEqual(calls[1], ("resume", None))

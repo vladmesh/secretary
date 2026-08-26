@@ -11,7 +11,6 @@ from unittest import mock
 from secretary import _env
 from secretary.infra import env
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 # Existing flat modules may leave this set one feature at a time. New modules belong in one of the

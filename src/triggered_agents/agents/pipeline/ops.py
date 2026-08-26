@@ -16,13 +16,13 @@ import os
 import time
 
 from ...runtime.kanboard import KanboardError, call, call_batch
+from ...runtime.redact import scrub_secrets
 from ...runtime.references import (
     BoardRowsUnavailable,
     board_rows,
     next_reference,
     reference_allocation_lock,
 )
-from ...runtime.redact import scrub_secrets
 from . import heads, model, naming
 from .state import STATE
 

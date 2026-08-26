@@ -942,7 +942,7 @@ class _TickReports:
         self.cmd: DispatchCommand | None = None
         self.settled = True
 
-    def __enter__(self) -> "_TickReports":
+    def __enter__(self) -> _TickReports:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
@@ -1049,7 +1049,7 @@ def _spawn_fresh_terminal(
     cmd: DispatchCommand | None = None,
     snapshot: RegistrySnapshot | None = None,
     resolution: LaunchResolution | None = None,
-    reports: "_TickReports | None" = None,
+    reports: _TickReports | None = None,
 ) -> DispatchCommand | int:
     """Bring a fresh head up in `ws`: prepare the workspace, create the pane, deliver the skill.
 
@@ -1104,7 +1104,7 @@ def _send_reuse_dispatch(
     cmd: DispatchCommand | None = None,
     snapshot: RegistrySnapshot | None = None,
     resolution: LaunchResolution | None = None,
-    reports: "_TickReports | None" = None,
+    reports: _TickReports | None = None,
 ) -> DispatchCommand:
     reports = _TickReports(agent, state, event) if reports is None else reports
     cmd = reports.command(variant, snapshot, resolution) if cmd is None else cmd
@@ -1624,7 +1624,7 @@ def _supervised_bring_up(
     cmd: DispatchCommand,
     *,
     host: SessionHost,
-    reports: "_TickReports | None" = None,
+    reports: _TickReports | None = None,
 ) -> int | None:
     """This tick under a supervisor of this product's own, or `None` if `cmd` is not held by one.
 

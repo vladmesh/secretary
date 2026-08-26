@@ -652,7 +652,7 @@ def infrastructure_action(action: str) -> str:
     return f"{action}-{INFRASTRUCTURE_ACTION_TOKEN}"
 
 
-def bring_up_blocked_action(action: str, failure: "BringUpFailure") -> str:
+def bring_up_blocked_action(action: str, failure: BringUpFailure) -> str:
     """The action token a blocked bring-up writes into its transition, per its class."""
     return infrastructure_action(action) if failure.infrastructure else action
 

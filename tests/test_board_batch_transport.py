@@ -180,11 +180,11 @@ class CallBatchTransportTests(unittest.TestCase):
             ({"jsonrpc": "2.0", "id": 0, "result": "single"}, "a server without batch support"),
         ):
             with self.subTest(answer=description):
-                with mock.patch.object(
-                    KanboardClient, "_post", lambda _self, _payload, answer=answer: answer
+                with (
+                    mock.patch.object(KanboardClient, "_post", lambda _self, _payload, answer=answer: answer),
+                    self.assertRaises(TaskError) as raised,
                 ):
-                    with self.assertRaises(TaskError) as raised:
-                        _client().call_batch([("a", {}), ("b", {})])
+                    _client().call_batch([("a", {}), ("b", {})])
                 self.assertEqual(raised.exception.code, "backend_error")
 
 

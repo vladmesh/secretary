@@ -64,22 +64,14 @@ from secretary.dispatcher_helpers import (
     red_review_count,
 )
 from secretary.dispatcher_launch import (
+    BRING_UP_CAUSE_CLASSES,
     CAUSE_HOST_UNAVAILABLE,
     CAUSE_PANE_NEVER_READY,
-    BRING_UP_CAUSE_CLASSES,
     CAUSE_WORKSPACE_CONTRACT,
     FAILURE_CLASS_INFRASTRUCTURE,
     FAILURE_CLASS_TASK,
     bring_up_failure_class,
     classify_bring_up_failure,
-)
-from secretary.projects.contract import (
-    CANNOT_ATTEST_PROJECT,
-    CONTRACT_REFUSALS,
-    UNDECIDABLE_NO_REGISTERED_PROJECT,
-    UNDECIDABLE_PROJECT_UNAVAILABLE,
-    UNDECIDABLE_RELATIVE_INTERPRETER,
-    ContractVerdict,
 )
 from secretary.dispatcher_launcher import (
     claude_launch_model,
@@ -97,7 +89,14 @@ from secretary.dispatcher_state import (
     DispatcherRecord,
     now_rfc3339,
 )
-
+from secretary.projects.contract import (
+    CANNOT_ATTEST_PROJECT,
+    CONTRACT_REFUSALS,
+    UNDECIDABLE_NO_REGISTERED_PROJECT,
+    UNDECIDABLE_PROJECT_UNAVAILABLE,
+    UNDECIDABLE_RELATIVE_INTERPRETER,
+    ContractVerdict,
+)
 
 GITHUB_FAILED_LOG_FIXTURES = Path(__file__).resolve().parent / "fixtures" / "github_actions_failed_logs"
 from secretary.dispatcher_state import (
@@ -164,12 +163,11 @@ from triggered_agents.runtime.agent_prompt_transport import (
     BRACKETED_PASTE_END,
     BRACKETED_PASTE_START,
 )
-from triggered_agents.runtime.head import operations as head_ops
 from triggered_agents.runtime.head import (
     HEAD_DRAINING,
-    HeadCommand,
     HEAD_OK,
     DeliverReceipt,
+    HeadCommand,
     HeadRun,
     HeadSpec,
     TaskRef,
@@ -177,6 +175,7 @@ from triggered_agents.runtime.head import (
     with_pid_heartbeat,
     wrap_role_command,
 )
+from triggered_agents.runtime.head import operations as head_ops
 from triggered_agents.runtime.pane_host import PaneSplitSourceMissing
 from triggered_agents.runtime.prompt_document import (
     NUDGE_FILE_MODE,
@@ -211,9 +210,8 @@ class LegacyDispatcherRecordTests(unittest.TestCase):
             "worker_resume_phase",
             "worker_resume_sent_at",
         ):
-            with self.subTest(field=field_name):
-                with self.assertRaises(DispatcherError):
-                    DispatcherRecord.from_json({"state": "claimed", field_name: ""})
+            with self.subTest(field=field_name), self.assertRaises(DispatcherError):
+                DispatcherRecord.from_json({"state": "claimed", field_name: ""})
 
     def test_a_current_record_still_loads(self) -> None:
         continuation = WorkerContinuation()
@@ -4869,9 +4867,8 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
                 raise OSError("dispatcher died before the park's board move")
             return real_move(**kwargs)
 
-        with mock.patch.object(self.writer, "move", fail_the_park):
-            with self.assertRaises(OSError):
-                self.tick()
+        with mock.patch.object(self.writer, "move", fail_the_park), self.assertRaises(OSError):
+            self.tick()
 
         stranded = self._parked_record()
         self.assertEqual(
@@ -7948,9 +7945,8 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             self.host.calls.append("resume_worker")
             raise DispatcherDied()
 
-        with mock.patch.object(self.host, "resume_worker", die):
-            with self.assertRaises(DispatcherDied):
-                self._park_and_decide("rework")
+        with mock.patch.object(self.host, "resume_worker", die), self.assertRaises(DispatcherDied):
+            self._park_and_decide("rework")
 
         crashed = self._pilot_record()
         self.assertEqual(crashed["report_generation"], 2)
@@ -8296,9 +8292,8 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             self.host.calls.append("resume_worker")
             raise DispatcherDied()
 
-        with mock.patch.object(self.host, "resume_worker", die):
-            with self.assertRaises(DispatcherDied):
-                self._park_and_decide("rework", reason="add a live check")
+        with mock.patch.object(self.host, "resume_worker", die), self.assertRaises(DispatcherDied):
+            self._park_and_decide("rework", reason="add a live check")
 
         crashed = self._pilot_record()
         self.assertEqual(crashed["report_decision"], "add a live check")
@@ -10667,14 +10662,13 @@ class DispatcherLauncherTests(unittest.TestCase):
             ("review", {"routing": {"review_head_override": "codex-terra"}}),
             ("claimed-worker", {"routing": {"resolved_worker_head": "codex-terra"}}),
         ):
-            with self.subTest(route=route):
-                with self.assertRaisesRegex(HostError, "unavailable"):
-                    if route == "worker":
-                        catalog.worker_head(task)  # type: ignore[attr-defined]
-                    elif route == "review":
-                        catalog.review_head(task)  # type: ignore[attr-defined]
-                    else:
-                        catalog.claimed_worker_head(task)  # type: ignore[attr-defined]
+            with self.subTest(route=route), self.assertRaisesRegex(HostError, "unavailable"):
+                if route == "worker":
+                    catalog.worker_head(task)  # type: ignore[attr-defined]
+                elif route == "review":
+                    catalog.review_head(task)  # type: ignore[attr-defined]
+                else:
+                    catalog.claimed_worker_head(task)  # type: ignore[attr-defined]
 
     def test_head_run_snapshots_the_launched_profiles_configuration(self) -> None:
         """The launch record must carry the configuration, not just the profile id: two profiles
@@ -13706,9 +13700,8 @@ class DispatcherGateTests(unittest.TestCase):
             "fatal: something no one has seen before",
         )
         for text in no_answer:
-            with self.subTest(text=text or "(empty)"):
-                with self.assertRaises(GateTransportError):
-                    _backend_call(Stub(1, text), ["gh", "api", "x"], "gate gh api")
+            with self.subTest(text=text or "(empty)"), self.assertRaises(GateTransportError):
+                _backend_call(Stub(1, text), ["gh", "api", "x"], "gate gh api")
         answered = (
             "gh: Not Found (HTTP 404)",
             "gh: Must have admin rights to Repository. (HTTP 403)",
@@ -15228,9 +15221,9 @@ class WorkerLifecycleTests(unittest.TestCase):
                 },
             ),
             mock.patch.object(host, "_signal_head") as signal_head,
+            self.assertRaises(HostError) as raised,
         ):
-            with self.assertRaises(HostError) as raised:
-                host.resume_worker(self.task, record)
+            host.resume_worker(self.task, record)
 
         evidence = raised.exception.evidence
         self.assertEqual(evidence.readiness_state, "busy")

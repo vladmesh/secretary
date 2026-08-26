@@ -43,7 +43,6 @@ from secretary.projects.contract import (
     module_contract,
 )
 
-
 _GIT_TIMEOUT = 60
 
 

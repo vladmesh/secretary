@@ -35,8 +35,8 @@ from unittest import mock
 
 from secretary.dispatcher_watchdog import head_process_status
 from triggered_agents.agents.pipeline import heads as pipeline_heads
-from triggered_agents.agents.pipeline import ops as pipeline_ops
 from triggered_agents.agents.pipeline import health as pipeline_health
+from triggered_agents.agents.pipeline import ops as pipeline_ops
 from triggered_agents.runtime import dispatch
 from triggered_agents.runtime import state as runtime_state
 from triggered_agents.runtime.head import HeadCommand

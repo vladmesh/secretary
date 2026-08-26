@@ -71,6 +71,8 @@ from secretary.dispatcher_gate import (
 )
 from secretary.dispatcher_gate import (
     gate_check as _gate_check,
+)
+from secretary.dispatcher_gate import (
     rerun_failed_ci as _rerun_failed_ci,
 )
 from secretary.dispatcher_gate import (
@@ -444,6 +446,12 @@ from triggered_agents.runtime.head import (
     HeadSpecError,
 )
 from triggered_agents.runtime.head import (
+    OBSERVE_PANE_DISCONNECTED as _OBSERVE_PANE_DISCONNECTED,
+)
+from triggered_agents.runtime.head import (
+    OBSERVE_READINESS_UNKNOWN as _OBSERVE_READINESS_UNKNOWN,
+)
+from triggered_agents.runtime.head import (
     PYTHON_SAFE_PATH_FLAG as _PYTHON_SAFE_PATH_FLAG,
 )
 from triggered_agents.runtime.head import (
@@ -451,12 +459,6 @@ from triggered_agents.runtime.head import (
 )
 from triggered_agents.runtime.head import (
     with_pid_heartbeat as _with_pid_heartbeat,
-)
-from triggered_agents.runtime.head import (
-    OBSERVE_PANE_DISCONNECTED as _OBSERVE_PANE_DISCONNECTED,
-)
-from triggered_agents.runtime.head import (
-    OBSERVE_READINESS_UNKNOWN as _OBSERVE_READINESS_UNKNOWN,
 )
 from triggered_agents.runtime.head_runtime_backends import (
     UnknownHeadRuntimeError,

@@ -349,9 +349,8 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
                 side_effect=lambda *args, **kwargs: moved.append((args, kwargs)),
             ),
         ]
-        with self._running(patches):
-            with self.assertRaises(dispatch.ReuseDeliveryError):
-                dispatch.run("steward", host=host)
+        with self._running(patches), self.assertRaises(dispatch.ReuseDeliveryError):
+            dispatch.run("steward", host=host)
 
         self.assertEqual(moved[0][0], ("steward", "secretary-817", "Done"))
         self.assertIn("dispatch failed", moved[0][1]["reason"])
@@ -493,9 +492,9 @@ class TriggeredCodexHeadTests(unittest.TestCase):
             mock.patch.object(dispatch, "_ensure_claude_ready"),
             mock.patch.object(dispatch, "_create_terminal", return_value="term-codex"),
             mock.patch.object(dispatch, "_stop_and_confirm") as stop,
+            self.assertRaises(RuntimeError),
         ):
-            with self.assertRaises(RuntimeError):
-                dispatch._spawn_fresh_terminal("retro", None, self.workspace, state, "dispatch", host=host)
+            dispatch._spawn_fresh_terminal("retro", None, self.workspace, state, "dispatch", host=host)
 
         self.assertEqual(host.sends, [])
         stop.assert_not_called()
@@ -728,11 +727,11 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
                 "triggered_agents.agents.pipeline.ops.move_card",
                 side_effect=lambda *args, **kwargs: moved.append((args, kwargs)),
             ),
+            self.assertRaises(dispatch.CodexPreflightError),
         ):
-            with self.assertRaises(dispatch.CodexPreflightError):
-                dispatch._spawn_fresh_terminal(
-                    "steward", None, self.workspace, state, "dispatch", host=FakeSessionHost()
-                )
+            dispatch._spawn_fresh_terminal(
+                "steward", None, self.workspace, state, "dispatch", host=FakeSessionHost()
+            )
 
         create.assert_not_called()
         self.assertEqual(moved[0][0], ("steward", "secretary-817", "Blocked"))

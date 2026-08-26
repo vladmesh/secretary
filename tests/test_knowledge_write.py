@@ -165,9 +165,8 @@ class KnowledgeWriteTests(KnowledgeRepoCase):
 
     def test_path_outside_state_knowledge_is_rejected(self):
         for bad in ("../instance.yaml", "/etc/passwd.md", "decisions/../../escape.md", "note.txt"):
-            with self.subTest(path=bad):
-                with self.assertRaises(KnowledgeValidationError):
-                    self.write(document=bad)
+            with self.subTest(path=bad), self.assertRaises(KnowledgeValidationError):
+                self.write(document=bad)
 
     def test_empty_document_is_rejected(self):
         with self.assertRaises(KnowledgeValidationError):

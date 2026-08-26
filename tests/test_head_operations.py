@@ -32,7 +32,6 @@ import unittest
 from pathlib import Path
 
 from tests.fakes.host import FakeSessionHost
-from triggered_agents.runtime.pane_host import PaneSplitSourceMissing
 from triggered_agents.runtime.head import (
     EXITED,
     FINISHING,
@@ -54,6 +53,7 @@ from triggered_agents.runtime.head import (
     stop,
 )
 from triggered_agents.runtime.head import operations as head_operations
+from triggered_agents.runtime.pane_host import PaneSplitSourceMissing
 
 HEAD_PACKAGE = Path(head_operations.__file__).parent
 

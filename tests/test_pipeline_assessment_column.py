@@ -81,9 +81,9 @@ class EnsureStructureTests(unittest.TestCase):
         with (
             mock.patch.object(ops, "call", side_effect=call),
             mock.patch.object(ops, "board_id", return_value=2),
+            self.assertRaises(model.GuardError),
         ):
-            with self.assertRaises(model.GuardError):
-                ops.ensure_structure()
+            ops.ensure_structure()
 
         self.assertEqual([c["title"] for c in columns], [c["title"] for c in LEGACY_COLUMNS])
         for method in _SCHEMA_WRITES:

@@ -192,9 +192,9 @@ class BoardTransportTests(unittest.TestCase):
                 },
                 clear=True,
             ),
+            self.assertRaisesRegex(TaskError, "configuration is unavailable"),
         ):
-            with self.assertRaisesRegex(TaskError, "configuration is unavailable"):
-                KanboardClient.for_instance(Path(tmp))
+            KanboardClient.for_instance(Path(tmp))
 
     def test_existing_instance_without_transport_or_complete_legacy_tuple_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

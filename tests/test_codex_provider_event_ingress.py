@@ -934,7 +934,7 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
         self._open_another_session()
 
         launched = (
-            self.host._preflight_launch_run(  # noqa: SLF001 — the launch path under test
+            self.host._preflight_launch_run(
                 "codex-extra",
                 **self._launch_identity,  # type: ignore[arg-type]
             )
@@ -964,7 +964,7 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
         self._install_ingress(prepared)
         self._open_another_session()
 
-        launched = self.host._launch(  # noqa: SLF001 — the worker/reviewer launch path under test
+        launched = self.host._launch(
             str(self.workspace),
             f"{reference} worker rework",
             "codex-extra",
@@ -1039,7 +1039,7 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
             + "\n",
             encoding="utf-8",
         )
-        ingress = self.host._codex_provider_ingresses[prepared.run_id]  # noqa: SLF001
+        ingress = self.host._codex_provider_ingresses[prepared.run_id]
         ingress.bind_before_delivery()
         return ingress.run, journal
 
@@ -1052,7 +1052,7 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
         self._open_another_session()
 
         launched = (
-            self.host._preflight_launch_run(  # noqa: SLF001
+            self.host._preflight_launch_run(
                 "codex-extra",
                 **self._launch_identity,  # type: ignore[arg-type]
             )
@@ -1082,7 +1082,7 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
         record = self._record(foreign)
         self._open_another_session()
 
-        launched = self.host._preflight_launch_run(  # noqa: SLF001
+        launched = self.host._preflight_launch_run(
             "codex-extra",
             **self._launch_identity,  # type: ignore[arg-type]
         )
@@ -1124,7 +1124,7 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
                     )
                 )
 
-                launched = self.host._preflight_launch_run(  # noqa: SLF001
+                launched = self.host._preflight_launch_run(
                     "codex-extra",
                     **self._launch_identity,  # type: ignore[arg-type]
                 )
@@ -1523,21 +1523,23 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
                 raise OSError("dispatcher crashed after reviewer confirmation")
 
         runtime.record_review_routing = crash_after_confirm
-        with mock.patch.object(
-            codex_preflight.CodexProviderEventRecorder,
-            "record",
-            new=self._fail_recorder,
+        with (
+            mock.patch.object(
+                codex_preflight.CodexProviderEventRecorder,
+                "record",
+                new=self._fail_recorder,
+            ),
+            self.assertRaisesRegex(OSError, "crashed after reviewer confirmation"),
         ):
-            with self.assertRaisesRegex(OSError, "crashed after reviewer confirmation"):
-                dispatcher_review.start_review(
-                    runtime,
-                    task,
-                    records,
-                    record,
-                    record.attempt_id,
-                    action="review-started",
-                    payload=payload,
-                )
+            dispatcher_review.start_review(
+                runtime,
+                task,
+                records,
+                record,
+                record.attempt_id,
+                action="review-started",
+                payload=payload,
+            )
 
         self._assert_bound(record.review_head_run, role="reviewer")
         self.assertEqual(record.review_head_run["fanout_policy"]["events"], [])

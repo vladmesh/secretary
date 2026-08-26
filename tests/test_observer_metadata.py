@@ -160,9 +160,8 @@ class SprintDeclarationTests(SprintFixture):
                 with self.assertRaisesRegex(TaskError, "migration provenance"):
                     self._create(goal="provenance", observer=observer)
         for observer in ({"kind": "default"}, {"kind": "head", "profile": ""}, ""):
-            with self.subTest(observer=observer):
-                with self.assertRaises(TaskError):
-                    self._create(goal="not a value", observer=observer)
+            with self.subTest(observer=observer), self.assertRaises(TaskError):
+                self._create(goal="not a value", observer=observer)
 
     def test_create_refuses_a_head_the_registry_does_not_have(self) -> None:
         """A sprint may not be opened on a head that does not exist.

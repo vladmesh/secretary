@@ -48,8 +48,8 @@ from secretary.sprints import (
     sprint_admission_lock,
 )
 from secretary.tasks import TaskAudit, TaskError, TaskReader, TaskWriter
-from tests.head_registry import write_installed_pair
 from tests.fakes.board import BatchedCalls
+from tests.head_registry import write_installed_pair
 from tests.observer_identity import as_observer, bind_observer, unbound_observer
 from tests.sprint_close_fixtures import DROP_REASON, KEEP_OPEN_REASON, close_decisions
 
@@ -802,9 +802,8 @@ class SprintOwnershipTests(SprintFixture):
             projects=["secretary-instance"],
         )["sprint"]["ref"]
 
-        with self._reject_removal():
-            with self.assertRaisesRegex(TaskError, "pending repair") as pending:
-                self._create(goal="kept row", reference="sprint:kept", request_id="kept")
+        with self._reject_removal(), self.assertRaisesRegex(TaskError, "pending repair") as pending:
+            self._create(goal="kept row", reference="sprint:kept", request_id="kept")
 
         self.assertEqual(pending.exception.code, "audit_pending")
         # The refusal was not answered, so the repair the caller is told to retry is still

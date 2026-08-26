@@ -39,14 +39,14 @@ from secretary.board_transport import (
 )
 from secretary.role_env import RUNTIME_ENV_FILE_ENVS, runtime_env_path
 from triggered_agents.runtime.head import CODEX_LAUNCH_MODES
+from triggered_agents.runtime.paths import instance_dir as normalize_instance_dir
+from triggered_agents.runtime.redact import redact
 from triggered_agents.runtime.references import (
     BoardRowsUnavailable,
     board_rows,
     next_reference,
     reference_allocation_lock,
 )
-from triggered_agents.runtime.paths import instance_dir as normalize_instance_dir
-from triggered_agents.runtime.redact import redact
 
 
 class TaskError(Exception):

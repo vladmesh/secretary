@@ -50,7 +50,6 @@ from triggered_agents.runtime.head import (
     HeadActivity,
     HeadPaneBusy,
     HeadRun,
-    HeadRuntime,
     HeadSpawnAborted,
     HeadSpawnFailed,
     HeadSpec,

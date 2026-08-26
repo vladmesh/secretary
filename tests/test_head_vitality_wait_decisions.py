@@ -19,9 +19,9 @@ from unittest import mock
 
 os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
-from secretary.dispatcher_types import HostError  # noqa: E402
-from secretary.dispatcher_worker_lifecycle import head_run_binding  # noqa: E402
-from tests.test_dispatcher import CARD_REF, DispatcherRuntimeFixture  # noqa: E402
+from secretary.dispatcher_types import HostError
+from secretary.dispatcher_worker_lifecycle import head_run_binding
+from tests.test_dispatcher import CARD_REF, DispatcherRuntimeFixture
 
 #: A live pid whose /proc state says it is parked on a stop signal (state `T`).
 STOPPED_STATUS = {
@@ -401,13 +401,15 @@ class UnobservableWaitEscalationTests(DispatcherRuntimeFixture, unittest.TestCas
         record_payload["worker_waiting_since"] -= stall_seconds("worker") + 60
         self.runtime.production_state.save(payload)
 
-        with mock.patch.object(
-            type(self.runtime),
-            "_escalate_unobservable_wait",
-            side_effect=AssertionError("the escalation arm was disabled"),
+        with (
+            mock.patch.object(
+                type(self.runtime),
+                "_escalate_unobservable_wait",
+                side_effect=AssertionError("the escalation arm was disabled"),
+            ),
+            self.assertRaises(AssertionError),
         ):
-            with self.assertRaises(AssertionError):
-                self.tick()
+            self.tick()
 
     def test_a_turning_the_escalation_destructive_is_caught(self) -> None:
         """The escalation may not grow a stop: any host call fails this test."""
