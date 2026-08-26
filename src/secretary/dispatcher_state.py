@@ -45,6 +45,45 @@ def is_claim_skip(outcome: dict[str, Any]) -> bool:
 
 
 @dataclass
+class VitalityVerdictIntent:
+    """One vitality verdict comment this dispatcher has begun and not yet confirmed.
+
+    The claim and the comment are two durable operations, and a tick can die between them. The
+    marker alone cannot bridge that gap in either direction: recorded before the write it reads
+    as commented when nothing was ever sent, and recorded after it hands the retry a stable
+    request id over a body that has moved on, which is the refusal this whole record exists to
+    prevent. So the intent carries the exact body it claimed the id for. A later tick replays
+    that body under that id -- which the writer answers as the same operation, whether the first
+    attempt reached the board or never started -- and only then is the transition written.
+
+    Only one intent is ever open: it is opened immediately before its write and closed by the
+    write's success or its reported failure, so the next one cannot begin until this one is gone.
+    """
+
+    marker: str = ""
+    request_id: str = ""
+    body: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        if not self.marker:
+            return {}
+        return {"marker": self.marker, "request_id": self.request_id, "body": self.body}
+
+    @classmethod
+    def from_json(cls, value: Any) -> VitalityVerdictIntent | None:
+        if not isinstance(value, dict) or not value:
+            return None
+        marker = str(value.get("marker") or "")
+        if not marker:
+            return None
+        return cls(
+            marker=marker,
+            request_id=str(value.get("request_id") or ""),
+            body=str(value.get("body") or ""),
+        )
+
+
+@dataclass
 class DispatcherRecord:
     worker: str
     workspace: str
@@ -206,8 +245,14 @@ class DispatcherRecord:
     # excuse any dispatcher comment on the card, including one a caller of `secretary task comment`
     # put under this id. Entries of an older generation are dropped when a new one writes: the
     # generation is in the key and never goes backwards, so the set stays bounded by one round's
-    # transitions rather than growing with the card's life.
+    # transitions rather than growing with the card's life. A transition lands here only once its
+    # comment write has been confirmed; the window between claiming the id and confirming the
+    # write is ``vitality_verdict_pending`` below, and it is that intent, not this list, that a
+    # tick which died in the middle leaves behind.
     vitality_verdicts_written: list[str] = field(default_factory=list)
+    # The one verdict comment whose id has been claimed and whose write has not been confirmed
+    # (secretary-1471). ``None`` outside that window, which is every record a tick left cleanly.
+    vitality_verdict_pending: VitalityVerdictIntent | None = None
     review_waiting_since: float = 0.0
     review_respawns: int = 0
     review_started_at: float = 0.0
@@ -361,6 +406,10 @@ class DispatcherRecord:
                 if self.review_vitality_episode is not None else None
             ),
             "vitality_verdicts_written": list(self.vitality_verdicts_written),
+            "vitality_verdict_pending": (
+                self.vitality_verdict_pending.to_json()
+                if self.vitality_verdict_pending is not None else {}
+            ),
             "worker_respawns": self.worker_respawns,
             "worker_started_at": self.worker_started_at,
             "worker_head_run": dict(self.worker_head_run),
@@ -488,6 +537,11 @@ class DispatcherRecord:
                 str(item) for item in (payload.get("vitality_verdicts_written") or [])
                 if isinstance(item, str)
             ],
+            # Absent on every record written before the intent existed, which is exactly a
+            # record with no open write: the empty value loads as no intent at all.
+            vitality_verdict_pending=VitalityVerdictIntent.from_json(
+                payload.get("vitality_verdict_pending")
+            ),
             worker_continuation=WorkerContinuation.from_json(
                 payload.get("worker_continuation")
             ),

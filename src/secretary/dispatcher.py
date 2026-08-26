@@ -257,6 +257,7 @@ from secretary.dispatcher_state import (
     CLAIM_SKIP_FAILOVER_COLLAPSE,
     CLAIM_SKIP_RESOURCE_NOT_READY,
     DispatcherRecord,
+    VitalityVerdictIntent,
     now_rfc3339,
 )
 from secretary.dispatcher_state import (
@@ -6143,6 +6144,13 @@ class DispatcherRuntime:
           previous cursor persisted on the episode.
         * ``pane_advisory`` -- from the same status's ``idle`` flag, advisory by construction.
         """
+        # Before anything is observed: an intent this card left open is a verdict comment whose
+        # id was claimed and whose write nobody confirmed, and it has to be resolved before this
+        # tick can claim another one. It is resolved here rather than further down because most
+        # ticks never reach the comment path at all -- an unobservable head returns above it, and
+        # an unchanged verdict returns before it -- and an intent parked behind those returns is
+        # exactly the record the card would never get.
+        self._settle_vitality_verdict_intent(task, record, records, payload)
         field_name = f"{kind}_vitality_episode"
         previous = getattr(record, field_name)
         run_payload = record.review_head_run if kind == "review" else record.worker_head_run
@@ -6223,43 +6231,99 @@ class DispatcherRuntime:
         )
         if marker in record.vitality_verdicts_written:
             return episode
-        request_id = _attempt_request_id(
-            record.attempt_id or "", f"{kind}-vitality-verdict", task["ref"],
-            suffix=_request_token(marker),
+        # The intent -- the id and the exact body it is claimed for -- goes to disk before the
+        # write, and the transition is only written down once the write has answered. That order
+        # is what makes a tick that dies in the middle recoverable in both directions: the next
+        # tick replays this body under this id, which the writer answers as the same operation
+        # whether the first attempt reached the board or never started, so the comment is neither
+        # lost nor duplicated. Claiming the transition itself before the write would instead have
+        # the record say "recorded" about a comment that was never sent, and there is nothing
+        # left afterwards that could tell.
+        body = (
+            f"Vitality ({kind}): {episode.verdict.value}"
+            + (f" (was {previous.verdict.value})" if previous is not None else " (first observation)")
+            + f"; basis {', '.join(episode.basis) if episode.basis else 'none'}."
+            + (
+                "" if episode.verdict in DESTRUCTIVE_VERDICTS
+                else " Recorded only - does not authorise destruction."
+            )
         )
-        # The claim on the id goes to disk before the write, so a tick that dies in the middle of
-        # it leaves the transition reading as recorded: the comment may well be on the card, and
-        # erring the other way would hand the next repeat the very refusal this exists to prevent.
-        # A write that fails and says so is different -- it never spent the id -- so it gives the
-        # claim back before the failure travels on.
-        written = list(record.vitality_verdicts_written)
-        record.vitality_verdicts_written = [
-            item for item in written if item.startswith(f"{record.report_generation}:")
-        ] + [marker]
+        intent = VitalityVerdictIntent(
+            marker=marker,
+            request_id=_attempt_request_id(
+                record.attempt_id or "", f"{kind}-vitality-verdict", task["ref"],
+                suffix=_request_token(marker),
+            ),
+            body=body,
+        )
+        record.vitality_verdict_pending = intent
         records[task["ref"]] = record
         self.save_records(payload, records)
+        self._write_vitality_verdict_comment(task, record, records, payload, intent)
+        return episode
+
+    def _write_vitality_verdict_comment(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        intent: VitalityVerdictIntent,
+    ) -> None:
+        """Spend an open intent: write its comment, then record the transition it names.
+
+        A failure the writer reports is a write that did not happen and an id it did not spend,
+        so the intent is closed again before the failure travels on -- the next observation of the
+        same transition is then free to claim it afresh with whatever it measures then. Nothing is
+        swallowed: every write failure still raises out of the tick, which is what keeps a genuine
+        idempotency violation an incident rather than a silently skipped record.
+        """
         try:
             self.writer.comment(
                 role="dispatcher",
                 actor=self.owner,
                 reference=task["ref"],
-                body=(
-                    f"Vitality ({kind}): {episode.verdict.value}"
-                    + (f" (was {previous.verdict.value})" if previous is not None else " (first observation)")
-                    + f"; basis {', '.join(episode.basis) if episode.basis else 'none'}."
-                    + (
-                        "" if episode.verdict in DESTRUCTIVE_VERDICTS
-                        else " Recorded only - does not authorise destruction."
-                    )
-                ),
-                request_id=request_id,
+                body=intent.body,
+                request_id=intent.request_id,
             )
         except Exception:
-            record.vitality_verdicts_written = written
+            record.vitality_verdict_pending = None
             records[task["ref"]] = record
             self.save_records(payload, records)
             raise
-        return episode
+        generation = f"{record.report_generation}:"
+        record.vitality_verdicts_written = [
+            item for item in record.vitality_verdicts_written if item.startswith(generation)
+        ] + [intent.marker]
+        record.vitality_verdict_pending = None
+        records[task["ref"]] = record
+        self.save_records(payload, records)
+
+    def _settle_vitality_verdict_intent(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+    ) -> None:
+        """Finish the one verdict comment a previous tick may have died in the middle of.
+
+        Replaying the stored body under the stored id is the whole recovery: the writer treats a
+        repeat of the same operation and payload as that same operation, so this either completes
+        a write that never started, adopts one that reached the board, or fails the way the
+        original would have. Only after it answers does the transition count as recorded.
+        """
+        intent = record.vitality_verdict_pending
+        if intent is None or not intent.marker:
+            return
+        if intent.marker in record.vitality_verdicts_written:
+            # Nothing to replay: some earlier tick already confirmed this one. Closing the intent
+            # is all that is left, and it must happen before any new claim can be made.
+            record.vitality_verdict_pending = None
+            records[task["ref"]] = record
+            self.save_records(payload, records)
+            return
+        self._write_vitality_verdict_comment(task, record, records, payload, intent)
 
     def _prompt_worker_report(
         self,

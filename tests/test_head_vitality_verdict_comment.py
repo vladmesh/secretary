@@ -13,6 +13,12 @@ walk of the ladder instead of losing it, and the repeat that remains -- one pair
 twice inside one round -- is recognised before the write, from the dispatcher's own durable
 record of the transitions it has commented on. No write failure is swallowed: a request id
 claimed by anything else still raises out of the tick.
+
+That record is kept in two steps, because the claim and the comment are two durable
+operations and a tick can die between them. The intent -- the id and the exact body claimed
+for it -- is written first; the transition counts as recorded only once the write has
+answered; and a later tick replays the stored body under the stored id, which the writer
+answers as the same operation whether the first attempt reached the board or never started.
 """
 
 from __future__ import annotations
@@ -212,6 +218,116 @@ class VitalityVerdictCommentTests(DispatcherRuntimeFixture, unittest.TestCase):
             f"{record['report_generation']}:worker:none->healthy_quiet",
             self._pilot_record()["vitality_verdicts_written"],
             "a failed write must not leave the transition claimed",
+        )
+
+    def _die_on_the_next_vitality_write(self, kind: str = "worker") -> tuple:
+        """A writer whose first vitality comment for `kind` dies the way a killed tick does.
+
+        ``SystemExit`` is the point: a process that is being torn down does not run the
+        caller's ``except Exception``, so this is the window between the two durable
+        operations rather than a mocked backend refusal.
+        """
+        real = self.writer.comment
+        seen: dict[str, str] = {}
+
+        def comment(*, role: str, actor: str, reference: str, body: str, request_id: str | None = None):
+            if "body" not in seen and body.startswith(f"Vitality ({kind}):"):
+                seen["body"] = body
+                seen["request_id"] = str(request_id)
+                raise SystemExit("the tick died between the claim and the write")
+            return real(role=role, actor=actor, reference=reference, body=body, request_id=request_id)
+
+        return comment, seen
+
+    def test_a_tick_killed_before_the_write_still_records_the_transition(self) -> None:
+        """The interrupted write is finished later, with the body it was claimed for.
+
+        A claim taken before the comment used to end the story: the record said the
+        transition was written, no comment existed, and no later tick would try again.
+        """
+        killer, seen = self._die_on_the_next_vitality_write()
+        with mock.patch.object(self.writer, "comment", killer):
+            with self.assertRaises(SystemExit):
+                self._advance()
+
+        record = self._pilot_record()
+        self.assertEqual(vitality_comments(self), [], "the write never reached the board")
+        self.assertEqual(
+            record["vitality_verdicts_written"], [],
+            "a write nobody confirmed must not read as a recorded transition",
+        )
+        self.assertEqual(record["vitality_verdict_pending"]["marker"], "1:worker:none->healthy_quiet")
+
+        self._quiet(aged=120.0)  # an unchanged verdict: it never reaches the comment path itself
+
+        recorded = vitality_comments(self)
+        self.assertEqual(len(recorded), 1, "the interrupted transition was lost, or recovered twice")
+        self.assertTrue(
+            recorded[0].endswith(seen["body"]), recorded[0],
+        )
+        recovered = self._pilot_record()
+        self.assertEqual(recovered["vitality_verdicts_written"], ["1:worker:none->healthy_quiet"])
+        self.assertEqual(recovered["vitality_verdict_pending"], {})
+
+    def test_a_killed_review_write_is_recovered_the_same_way(self) -> None:
+        """AC5: the recovery is on the shared path, so the review head gets it too."""
+        self._report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["action"], "review-started")
+        self._head_at_its_prompt("review")
+
+        killer, seen = self._die_on_the_next_vitality_write("review")
+        with mock.patch.object(self.writer, "comment", killer):
+            with self.assertRaises(SystemExit):
+                self._advance("review")
+        self.assertEqual(vitality_comments(self, "review"), [])
+
+        self._quiet("review", aged=120.0)
+
+        recovered = vitality_comments(self, "review")
+        self.assertEqual(len(recovered), 1)
+        self.assertTrue(recovered[0].endswith(seen["body"]), recovered[0])
+        self.assertEqual(self._pilot_record()["vitality_verdict_pending"], {})
+
+    def test_a_recovered_write_replays_the_body_it_claimed_the_id_for(self) -> None:
+        """The replay is the same operation, not a fresh one over a moved measurement.
+
+        The board's identity for a comment is its body digest, so recovering the write with
+        this tick's ``basis`` would be a stable id over a changed payload -- the refusal the
+        whole record exists to prevent, arriving now out of the recovery itself.
+        """
+        killer, seen = self._die_on_the_next_vitality_write()
+        with mock.patch.object(self.writer, "comment", killer):
+            with self.assertRaises(SystemExit):
+                self._advance()
+
+        written: list[tuple[str, str]] = []
+        real = self.writer.comment
+
+        def recording(*, role: str, actor: str, reference: str, body: str, request_id: str | None = None):
+            written.append((body, str(request_id)))
+            return real(role=role, actor=actor, reference=reference, body=body, request_id=request_id)
+
+        with mock.patch.object(self.writer, "comment", recording):
+            self._quiet(aged=300.0)
+
+        self.assertIn((seen["body"], seen["request_id"]), written)
+
+    def test_a_recovery_that_the_writer_refuses_still_raises(self) -> None:
+        """AC4 across the window: a refused replay is an incident, and is not left to loop."""
+        killer, _ = self._die_on_the_next_vitality_write()
+        with mock.patch.object(self.writer, "comment", killer):
+            with self.assertRaises(SystemExit):
+                self._advance()
+
+        refusal = TaskError("validation", "request id belongs to another operation or payload", 2)
+        with mock.patch.object(self.writer, "comment", side_effect=refusal):
+            with self.assertRaises(TaskError) as raised:
+                self._quiet()
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertEqual(
+            self._pilot_record()["vitality_verdict_pending"], {},
+            "a reported failure spends no id, so it must not leave the intent open forever",
         )
 
     def test_the_written_record_is_bounded_by_the_round(self) -> None:
