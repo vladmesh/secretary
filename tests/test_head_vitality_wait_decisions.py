@@ -413,5 +413,138 @@ class UnobservableWaitEscalationTests(DispatcherRuntimeFixture, unittest.TestCas
         )
 
 
+class VitalityVerdictCommentIdempotencyTests(DispatcherRuntimeFixture, unittest.TestCase):
+    """The verdict comment's body must be a function of exactly what its request id names.
+
+    secretary-1477. The id keys the transition pair alone -- deliberately, so a flapping
+    verdict cannot mint a fresh key every tick -- while the board's identity for a comment
+    is the digest of its body. Quoting the reduction's live ``basis`` (``quiet:<n>s@...``)
+    in that body therefore made the SECOND visit to one pair a different payload under the
+    same key, which the write path answers with
+    ``validation: request id belongs to another operation or payload``. That exception
+    leaves ``_reduce_and_store_vitality_episode`` before ``_decide_wait_by_verdict`` ever
+    runs, so the card loses its whole per-card advance for the tick.
+
+    These tests drive the real writer (no stub, no patched ``TaskWriter``): the second visit
+    to a pair has to be an honest idempotent replay.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.start_dispatcher()
+        self.tick()  # claim + launch: the worker heartbeat binds a live pid
+
+    def _cursor_status(self, cursor: str) -> dict:
+        """A live head whose provider cursor reads exactly ``cursor``.
+
+        Repeating a cursor is what makes the source read Quiet rather than Advancing, which
+        is how these tests flap one head between the two healthy verdicts on demand.
+        """
+        record = self._pilot_record()
+        run_id, fingerprint = head_run_binding(record["worker_head_run"])
+        status = dict(RUNNING_STATUS)
+        status["provider_progress"] = {
+            "state": "observed", "admission": "accepted", "source": "fake-bound-session",
+            "source_fingerprint": "f" * 32, "cursor": cursor,
+            "head_run_id": run_id, "head_run_fingerprint": fingerprint,
+        }
+        return status
+
+    def _age_progress_reference(self, seconds: float) -> None:
+        """Move the episode's quiet reference back, so the next quiet reduction measures more.
+
+        The live measurement this card is about is ``now - last_progress_at``; two ticks in one
+        test process are milliseconds apart, so without this the two visits to a pair would
+        agree by accident and prove nothing.
+        """
+        payload = self.runtime.production_state.load()
+        episode = payload["records"][CARD_REF]["worker_vitality_episode"]
+        for name in ("started_at", "last_progress_at"):
+            if episode.get(name):
+                episode[name] -= seconds
+        self.runtime.production_state.save(payload)
+
+    def _flap_twice_through_one_pair(self) -> tuple[list, list]:
+        """Visit ``healthy_active -> healthy_quiet`` twice with different quiet measurements.
+
+        Hands back (every comment call the ticks made, the two calls that share the repeated
+        pair's request id). The ticks run through the real ``TaskWriter``; the spy wraps it
+        rather than replacing it, so the idempotency journal is exercised exactly as in
+        production.
+        """
+        with mock.patch.object(
+            self.writer, "comment", wraps=self.writer.comment,
+        ) as spy:
+            self.host.worker_status_result = self._cursor_status("rollout:1")
+            self.tick()  # first observation: the cursor is stored, nothing advanced yet
+            self.host.worker_status_result = self._cursor_status("rollout:2")
+            self.tick()  # the cursor moved: healthy_active
+            self.host.worker_status_result = self._cursor_status("rollout:2")
+            self.tick()  # the same cursor: healthy_quiet, quiet measured from the move
+            self.host.worker_status_result = self._cursor_status("rollout:3")
+            self.tick()  # advancing again: back to healthy_active
+            self._age_progress_reference(41)
+            self.host.worker_status_result = self._cursor_status("rollout:3")
+            # The second visit to healthy_active -> healthy_quiet, with a quiet span that is
+            # 41s longer than the first visit's. Before the fix this raised.
+            self.tick()
+        calls = list(spy.call_args_list)
+        repeated = [
+            call for call in calls
+            if str(call.kwargs.get("request_id") or "").endswith(
+                "worker-vitality-verdict-" + CARD_REF + "-healthy_active--healthy_quiet"
+            )
+        ]
+        return calls, repeated
+
+    def test_one_transition_pair_writes_one_body_byte_for_byte(self) -> None:
+        """Acceptance 1: the same pair in a later tick produces an identical body."""
+        _, repeated = self._flap_twice_through_one_pair()
+
+        self.assertEqual(
+            len(repeated), 2,
+            "the flap must visit healthy_active -> healthy_quiet twice for this to prove anything",
+        )
+        first, second = (str(call.kwargs["body"]) for call in repeated)
+        self.assertEqual(first, second)
+        self.assertNotIn("quiet:", first, "a live measurement in the body is what broke the key")
+
+    def test_the_repeat_is_an_idempotent_replay_not_a_validation_refusal(self) -> None:
+        """Acceptance 2: the real write path answers the repeat without raising.
+
+        Nothing is stubbed here -- the fixture's own ``TaskWriter`` and audit journal decide.
+        A refusal would surface as ``TaskError('validation', ...)`` escaping ``self.tick()``.
+        """
+        self._flap_twice_through_one_pair()
+
+        bodies = [
+            str(comment.get("body") or "")
+            for comment in self.reader.show(CARD_REF)["comments"]
+            if "Vitality (worker):" in str(comment.get("body") or "")
+        ]
+        # Three distinct pairs were visited (none->quiet, quiet->active, active->quiet) and the
+        # fourth and fifth ticks revisited two of them: the board holds one comment per pair.
+        self.assertEqual(len(bodies), 3, bodies)
+
+    def test_every_repeated_key_carries_the_same_payload(self) -> None:
+        """Acceptance 3 (anti-flood): the key is unchanged, so the pair set still bounds the
+        stream -- and no key on this path is ever re-used for a different payload."""
+        calls, _ = self._flap_twice_through_one_pair()
+
+        by_request: dict[str, set[str]] = {}
+        for call in calls:
+            request_id = str(call.kwargs.get("request_id") or "")
+            if "-vitality-verdict-" not in request_id:
+                continue
+            by_request.setdefault(request_id, set()).add(str(call.kwargs.get("body") or ""))
+        self.assertTrue(by_request)
+        for request_id, seen in by_request.items():
+            self.assertEqual(len(seen), 1, f"{request_id} was written with two payloads: {seen}")
+        self.assertEqual(
+            len(by_request), 3,
+            "five ticks may only ever name the pairs they actually visited",
+        )
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

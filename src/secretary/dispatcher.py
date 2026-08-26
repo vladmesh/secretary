@@ -6185,6 +6185,19 @@ class DispatcherRuntime:
         # The request id names only what the comment claims -- the verdict transition itself --
         # so a flapping verdict cannot mint a fresh idempotency key every tick and turn shadow
         # logging into an unbounded comment stream.
+        #
+        # THE BODY IS A FUNCTION OF EXACTLY WHAT THE KEY NAMES (secretary-1477). The board's
+        # identity for a comment is the digest of its body, so a stable key over a body that
+        # moved is not an idempotent replay: it is
+        # `validation: request id belongs to another operation or payload`, raised out of the
+        # wait tick before it ever decides, costing the card its whole per-card advance for
+        # that tick. This body therefore says only what `(kind, prev->cur)` already fixes.
+        # The live measurement is NOT dropped, only unquoted here: the reduction's `basis` --
+        # `quiet:<n>s@<source>`, `advisory:<active|idle>@pane_advisory` and the rest -- is
+        # persisted on the episode this method just saved (`record.{kind}_vitality_episode`
+        # in `dispatcher/production-state.json`) and is reported verbatim by
+        # `secretary head-status` (`dispatch/head_status.py`, the row's `episode.basis`).
+        # Anything a future edit wants to add here has to enter the suffix above with it.
         request_id = _attempt_request_id(
             record.attempt_id or "", f"{kind}-vitality-verdict", task["ref"],
             suffix=_request_token(f"{previous.verdict.value if previous else 'none'}->{episode.verdict.value}"),
@@ -6196,7 +6209,8 @@ class DispatcherRuntime:
             body=(
                 f"Vitality ({kind}): {episode.verdict.value}"
                 + (f" (was {previous.verdict.value})" if previous is not None else " (first observation)")
-                + f"; basis {', '.join(episode.basis) if episode.basis else 'none'}."
+                + ". The basis and the live measurement behind this verdict stay on the"
+                + " durable vitality episode; read them with `secretary head-status`."
                 + (
                     "" if episode.verdict in DESTRUCTIVE_VERDICTS
                     else " Recorded only - does not authorise destruction."
