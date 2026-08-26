@@ -9,9 +9,10 @@ tick (production, secretary-1468 on 2026-08-26: three ticks lost, no action entr
 
 The route taken here is (a)+(c) of the card: the round joins the key the way
 ``_review_prompt`` already puts it in the verdict ids, so the second round records its own
-walk of the ladder instead of losing it, and the refusal that remains -- one pair repeating
-inside one round -- is answered as the no-op it is, but only when the audit says the
-recorded event under that id really is this dispatcher's comment on this card.
+walk of the ladder instead of losing it, and the repeat that remains -- one pair walked
+twice inside one round -- is recognised before the write, from the dispatcher's own durable
+record of the transitions it has commented on. No write failure is swallowed: a request id
+claimed by anything else still raises out of the tick.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from unittest import mock
 
 os.environ.setdefault("SECRETARY_DISPATCHER_BODY_DIR", tempfile.mkdtemp())
 
+from secretary.dispatcher_state import attempt_request_id, request_token  # noqa: E402
 from secretary.tasks import TaskError  # noqa: E402
 from tests.test_dispatcher import CARD_REF, DispatcherRuntimeFixture  # noqa: E402
 
@@ -166,12 +168,8 @@ class VitalityVerdictCommentTests(DispatcherRuntimeFixture, unittest.TestCase):
             "a review flap wrote the same body twice",
         )
 
-    def test_a_validation_refusal_the_audit_cannot_vouch_for_still_raises(self) -> None:
-        """AC4: only a recorded vitality comment is a no-op; a real violation propagates.
-
-        The writer is made to refuse with the exact idempotency error while the audit holds
-        no event under that id -- the shape of a request id that belongs to somebody else.
-        """
+    def test_a_validation_refusal_from_the_writer_still_raises(self) -> None:
+        """AC4: an unforeseen refusal is not a no-op; only a known repeat is skipped."""
         refusal = TaskError("validation", "request id belongs to another operation or payload", 2)
         with mock.patch.object(self.writer, "comment", side_effect=refusal):
             with self.assertRaises(TaskError) as raised:
@@ -179,41 +177,62 @@ class VitalityVerdictCommentTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(raised.exception.code, "validation")
 
     def test_a_non_validation_write_failure_still_raises(self) -> None:
-        """AC4: the catch is the idempotency no-op, not a swallow of every write error."""
+        """AC4: nothing here catches a write error at all."""
         broken = TaskError("audit_pending", "backend write committed; audit repair is required", 4)
         with mock.patch.object(self.writer, "comment", side_effect=broken):
             with self.assertRaises(TaskError) as raised:
                 self._advance()
         self.assertEqual(raised.exception.code, "audit_pending")
 
-    def test_the_no_op_predicate_answers_only_for_this_dispatcher_comment(self) -> None:
-        """AC4, at the predicate: what the audit has to say before a refusal is a no-op."""
-        validation = TaskError("validation", "request id belongs to another operation or payload", 2)
-        recorded = self.runtime._vitality_verdict_recorded
+    def test_a_foreign_claim_on_the_derived_request_id_still_raises(self) -> None:
+        """AC4: another operation holding this id is a genuine violation, not a repeat.
 
-        self.assertFalse(recorded(validation, "no-such-request-id", CARD_REF))
-        self.writer.comment(
-            role="worker", actor="worker", reference=CARD_REF,
-            body="a worker's own note", request_id="someone-elses-id",
-        )
-        self.assertFalse(
-            recorded(validation, "someone-elses-id", CARD_REF),
-            "another role's comment must not license a silent no-op",
+        ``secretary task comment`` takes both the role and the request id from its caller, so a
+        dispatcher-marked comment can be put on the card under the id this transition derives.
+        The vitality write then collides with a body that is not its own; reading the refusal
+        back out of the comment audit could not tell the two apart, because the audit records a
+        role marker and a body digest and neither names the operation.
+        """
+        record = self._pilot_record()
+        request_id = attempt_request_id(
+            str(record["attempt_id"]), "worker-vitality-verdict", CARD_REF,
+            suffix=request_token(f"{record['report_generation']}:worker:none->healthy_quiet"),
         )
         self.writer.comment(
             role="dispatcher", actor=self.runtime.owner, reference=CARD_REF,
-            body="Vitality (worker): healthy_quiet (first observation); basis none.",
-            request_id="a-dispatcher-comment",
+            body="a foreign dispatcher comment holding that id", request_id=request_id,
         )
-        self.assertTrue(recorded(validation, "a-dispatcher-comment", CARD_REF))
-        self.assertFalse(
-            recorded(validation, "a-dispatcher-comment", "secretary-other"),
-            "a record on another card must not license a no-op here",
+
+        with self.assertRaises(TaskError) as raised:
+            self._advance()
+
+        self.assertEqual(raised.exception.code, "validation")
+        self.assertEqual(vitality_comments(self), [], "the vitality comment was never written")
+        self.assertNotIn(
+            f"{record['report_generation']}:worker:none->healthy_quiet",
+            self._pilot_record()["vitality_verdicts_written"],
+            "a failed write must not leave the transition claimed",
         )
-        self.assertFalse(
-            recorded(TaskError("role_forbidden", "no", 3), "a-dispatcher-comment", CARD_REF),
-            "only the idempotency refusal is the dedup working",
-        )
+
+    def test_the_written_record_is_bounded_by_the_round(self) -> None:
+        """AC3, at the record: the durable set covers one round, not the card's whole life."""
+        self._flap_to_a_repeated_transition()
+        first_round = list(self._pilot_record()["vitality_verdicts_written"])
+        self.assertTrue(all(item.startswith("1:") for item in first_round), first_round)
+        self.assertEqual(len(first_round), len(set(first_round)))
+
+        self._report_done()
+        self.assertEqual(self.tick()["to"], "validate")
+        self.tick()
+        self._review_red()
+        self._park_and_decide("rework")
+        self._head_at_its_prompt()
+        self._advance()
+        self._quiet(aged=200.0)
+
+        second_round = list(self._pilot_record()["vitality_verdicts_written"])
+        self.assertTrue(second_round, "round 2 recorded no transition of its own")
+        self.assertTrue(all(item.startswith("2:") for item in second_round), second_round)
 
 
 if __name__ == "__main__":  # pragma: no cover

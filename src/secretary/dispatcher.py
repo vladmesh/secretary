@@ -6198,20 +6198,46 @@ class DispatcherRuntime:
         self.save_records(payload, records)
         if not changed:
             return episode
-        # The request id names only what the comment claims -- this round's verdict transition --
-        # so a flapping verdict cannot mint a fresh idempotency key every tick and turn shadow
-        # logging into an unbounded comment stream. The round is part of that name for the reason
-        # ``_review_prompt`` puts it in the verdict ids: ``attempt_id`` does not move when a card
-        # goes back to rework, so a round-less key spends each transition once per attempt and the
-        # second round's walk through the same ladder is never recorded -- least of all the step
-        # into ``suspected_stall``, which is the one an operator most wants to read.
+        # The comment is deduped on the transition itself, so a flapping verdict cannot mint a
+        # fresh idempotency key every tick and turn shadow logging into an unbounded comment
+        # stream. The round is part of that name for the reason ``_review_prompt`` puts it in the
+        # verdict ids: ``attempt_id`` does not move when a card goes back to rework, so a
+        # round-less key spends each transition once per attempt and the second round's walk
+        # through the same ladder is never recorded -- least of all the step into
+        # ``suspected_stall``, which is the one an operator most wants to read.
+        #
+        # A transition can still repeat inside one round, and the body is not stable for it: it
+        # carries the live ``basis`` measurement while the board's identity for a comment is that
+        # body's digest, so the second write is a stable id over a moving payload and the writer
+        # refuses it as a payload mismatch. That refusal must not reach the tick -- shadow logging
+        # may never break the tick that hosts it, the same invariant the reduction failure above is
+        # caught for -- so the repeat is recognised here, before the write, from this dispatcher's
+        # own durable record of which transitions it has already commented on. Recognising it from
+        # the refusal instead would mean asking the comment audit, which records only a role marker
+        # and a body digest: that says nothing about which operation minted the id, and would
+        # excuse a genuine collision with any other dispatcher comment on the card. Nothing here
+        # swallows a write failure; every one of them still raises.
+        marker = (
+            f"{record.report_generation}:{kind}:"
+            f"{previous.verdict.value if previous else 'none'}->{episode.verdict.value}"
+        )
+        if marker in record.vitality_verdicts_written:
+            return episode
         request_id = _attempt_request_id(
             record.attempt_id or "", f"{kind}-vitality-verdict", task["ref"],
-            suffix=_request_token(
-                f"{record.report_generation}"
-                f"-{previous.verdict.value if previous else 'none'}->{episode.verdict.value}"
-            ),
+            suffix=_request_token(marker),
         )
+        # The claim on the id goes to disk before the write, so a tick that dies in the middle of
+        # it leaves the transition reading as recorded: the comment may well be on the card, and
+        # erring the other way would hand the next repeat the very refusal this exists to prevent.
+        # A write that fails and says so is different -- it never spent the id -- so it gives the
+        # claim back before the failure travels on.
+        written = list(record.vitality_verdicts_written)
+        record.vitality_verdicts_written = [
+            item for item in written if item.startswith(f"{record.report_generation}:")
+        ] + [marker]
+        records[task["ref"]] = record
+        self.save_records(payload, records)
         try:
             self.writer.comment(
                 role="dispatcher",
@@ -6228,33 +6254,12 @@ class DispatcherRuntime:
                 ),
                 request_id=request_id,
             )
-        except TaskError as exc:
-            if not self._vitality_verdict_recorded(exc, request_id, task["ref"]):
-                raise
+        except Exception:
+            record.vitality_verdicts_written = written
+            records[task["ref"]] = record
+            self.save_records(payload, records)
+            raise
         return episode
-
-    def _vitality_verdict_recorded(self, exc: TaskError, request_id: str, reference: str) -> bool:
-        """Is this refused write just this round's verdict transition, already on the card?
-
-        A comment's idempotency identity is its body digest, and the body carries the live
-        ``basis`` measurement, so one transition observed twice inside a single round is a stable
-        key over a moving payload and the writer refuses it as a payload mismatch. That refusal is
-        the dedup doing its job, not a fault: the transition is recorded, and shadow logging may
-        never break the tick that hosts it -- the same invariant the reduction failure above is
-        caught for. It is answered as a no-op only when the audit says so. Nothing else mints this
-        id, so a validation refusal whose recorded event is not a dispatcher comment on this card
-        -- another operation, another card, another marker -- is a real idempotency violation and
-        still raises, as does any non-validation failure of the write.
-        """
-        if exc.code != "validation":
-            return False
-        recorded = self.audit.committed_event(request_id) or self.audit.pending_event(request_id)
-        if not isinstance(recorded, dict):
-            return False
-        if str(recorded.get("kind") or "") != "commented" or str(recorded.get("ref") or "") != reference:
-            return False
-        payload = recorded.get("payload")
-        return isinstance(payload, dict) and payload.get("marker") == "dispatcher"
 
     def _prompt_worker_report(
         self,

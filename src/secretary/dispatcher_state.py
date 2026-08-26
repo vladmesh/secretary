@@ -194,6 +194,20 @@ class DispatcherRecord:
     # field existed loads as exactly that, not as an empty verdict.
     worker_vitality_episode: VitalityEpisode | None = None
     review_vitality_episode: VitalityEpisode | None = None
+    # Which vitality verdict transitions this dispatcher has already written a comment for
+    # (secretary-1471), as ``"<report_generation>:<kind>:<from>-><to>"``. The comment is deduped on
+    # the transition, but its body carries the live ``basis`` measurement and the board's identity
+    # for a comment is that body's digest, so one transition observed twice is a stable request id
+    # over a moving payload and the writer refuses it. This is the dispatcher's own record of what
+    # it spent that id on, and it is durable for the reason the report nudge is: a repeat has to
+    # read as already-recorded across ticks and across a restart. It is deliberately not inferred
+    # from the comment audit -- the audit's payload for a comment holds a role marker and a body
+    # digest, neither of which says which operation minted the id, so a refusal read that way would
+    # excuse any dispatcher comment on the card, including one a caller of `secretary task comment`
+    # put under this id. Entries of an older generation are dropped when a new one writes: the
+    # generation is in the key and never goes backwards, so the set stays bounded by one round's
+    # transitions rather than growing with the card's life.
+    vitality_verdicts_written: list[str] = field(default_factory=list)
     review_waiting_since: float = 0.0
     review_respawns: int = 0
     review_started_at: float = 0.0
@@ -346,6 +360,7 @@ class DispatcherRecord:
                 self.review_vitality_episode.to_json()
                 if self.review_vitality_episode is not None else None
             ),
+            "vitality_verdicts_written": list(self.vitality_verdicts_written),
             "worker_respawns": self.worker_respawns,
             "worker_started_at": self.worker_started_at,
             "worker_head_run": dict(self.worker_head_run),
@@ -469,6 +484,10 @@ class DispatcherRecord:
             # Absent on every record written before the prompt existed, which is exactly a round
             # that has not spent one: the empty value opens the same single prompt for it.
             worker_report_nudge=WorkerReportNudge.from_json(payload.get("worker_report_nudge")),
+            vitality_verdicts_written=[
+                str(item) for item in (payload.get("vitality_verdicts_written") or [])
+                if isinstance(item, str)
+            ],
             worker_continuation=WorkerContinuation.from_json(
                 payload.get("worker_continuation")
             ),
