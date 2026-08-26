@@ -781,7 +781,12 @@ The tick's decision per sprint is visible in its actions under an `observer-reco
   retries; the observer row carries its reason and bounded retry. After
   `SECRETARY_OBSERVER_WAKE_MAX_ATTEMPTS` (3 by default) such failures the batch is delivered by
   replacing the head instead, which reads as `observer-relaunched` with the failure as its reason;
-- `observer-relaunched` — a head with unacknowledged work had a dead pid and was replaced;
+- `observer-relaunched` — the head was replaced: it had a dead pid, either with unacknowledged work
+  owed to it or with a quiet queue, since an open sprint's head is brought up on the evidence that
+  the previous one died rather than on the queue. A replacement over a quiet queue leaves a cooldown
+  on the record (`launch_attempts`/`launch_next_at`, the ordinary launch backoff), so a head that
+  dies again reads as `observer-launch-deferred` until that window passes; a head seen alive on a
+  later tick clears it;
 - `observer-stopped` — the sprint is closed or gone from the board, the head was stopped, the record dropped;
 - `observer-stop-failed` — the host rejected the stop, so the head counts as alive: the record stays in
   `stop-pending` with its handle, no stop event is written, and the next tick retries. This also covers the

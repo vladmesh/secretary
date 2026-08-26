@@ -29,7 +29,11 @@ than putting a second head on it, and a tick that dies mid-launch leaves an inte
 resolves from the pid file.
 
 Liveness is the same pid heartbeat the worker and reviewer get. A pid file that does not exist
-yet is not evidence of death: an unknown pid counts as alive for a short grace window.
+yet is not evidence of death: an unknown pid counts as alive for a short grace window. Neither is
+one that cannot be read: the relaunch above is made on positive death — a readable record whose
+process is gone — because a bring-up made on an unreadable one is how a second head ends up beside
+a live one. That relaunch does not wait for a card event; an empty queue is a reason not to wake a
+head that is there, not a reason to leave an open sprint without one.
 
 The acknowledgement deadline says how long one sent delivery may stay unacknowledged before it
 is sent again; it is armed by the delivery and never compared against the age of the event. A
@@ -59,6 +63,7 @@ from secretary.dispatcher_tui import (
 from secretary.dispatcher_types import HostError
 from secretary.dispatcher_watchdog import (
     head_run_process_status,
+    heartbeat_is_dead,
     heartbeat_is_live_match,
     heartbeat_is_mismatch,
     initial_output_stall_seconds,
@@ -489,20 +494,50 @@ def put_observers(payload: dict[str, Any], observers: dict[str, ObserverRecord])
     payload["observers"] = {ref: record.to_json() for ref, record in sorted(observers.items())}
 
 
-def observer_alive(record: ObserverRecord, *, now: float | None = None) -> dict[str, Any]:
-    """Whether the head recorded here is still running, and on what evidence.
+def observer_head_status(record: ObserverRecord) -> dict[str, Any]:
+    """This record's launch identity as the product's one reader classifies it.
 
-    `known: False` means the pid file is not readable, which a head that has just been launched has
-    not written yet. That is not death, so it reads as alive until the grace window has passed.
+    Separated from `observer_alive` because a tick that has to decide whether to bring a head up
+    needs more than the boolean: "not alive" covers both a record that says the process is gone
+    and a record nobody can read, and only the first of those is evidence a replacement may be
+    started on. One read answers both questions, so the two never disagree within a tick.
     """
-    now = time.time() if now is None else now
-    status = head_run_process_status(
+    return head_run_process_status(
         record.pid_file or observer_pid_file(record.sprint),
         run=record.head_run,
         role="observer",
         task=f"sprint:{record.sprint}",
         leaf=record.leaf,
     )
+
+
+def observer_head_is_dead(status: dict[str, Any]) -> bool:
+    """Whether this launch identity is positively dead, so a replacement may be brought up.
+
+    Only `dead` counts: the record was readable, it named a pid, and that pid is gone or unreaped
+    on this boot. Missing, half-written, unreadable and legacy pid-only records are inconclusive
+    and deliberately answer False — a bring-up on unreadable evidence is how a second head ends up
+    beside a live one, which is the same asymmetry `LocalPtyHeadRuntime.start` keeps at the other
+    end of this decision (secretary-1468). An identity mismatch is left out for a different
+    reason: the pid names a live foreign process, and `stop_observer_head` refuses to signal or
+    replace over one, so reading it as death would only defer forever.
+    """
+    return heartbeat_is_dead(status)
+
+
+def observer_alive(
+    record: ObserverRecord, *, now: float | None = None, status: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Whether the head recorded here is still running, and on what evidence.
+
+    `known: False` means the pid file is not readable, which a head that has just been launched has
+    not written yet. That is not death, so it reads as alive until the grace window has passed.
+
+    `status` is the already-read classification, for a caller that also needs the state behind the
+    boolean; left out, this reads it itself.
+    """
+    now = time.time() if now is None else now
+    status = observer_head_status(record) if status is None else status
     if heartbeat_is_mismatch(status):
         return {
             "alive": False,
@@ -718,6 +753,9 @@ def _reconcile_open_sprint(
     # forever on a head that is doing nothing.
     pending_event: dict[str, Any] | None = None
     event_state: dict[str, Any] | None = None
+    # Whether this tick's launch, if it reaches one, is the replacement of a head that is
+    # positively dead with nothing owed to it. Only that launch leaves a cooldown behind.
+    dead_head_bringup = False
     # A durable cursor is a prerequisite for every existing head path, including a legacy record
     # left in `pending`. Otherwise a dead/missing head can be relaunched from an unknowable point
     # and replay or skip board work before the normal recovery branch gets a chance to validate it.
@@ -741,7 +779,15 @@ def _reconcile_open_sprint(
     # than allowed to re-derive it from a pane. `head_is_live` is narrower — an unresolved bring-up
     # intent and an abandoned handle both mean "not the live observer of this sprint" whatever the
     # process is doing — so the two are kept apart instead of one standing in for the other.
-    head_process_alive = head_may_be_running and bool(observer_alive(record)["alive"])
+    head_status = observer_head_status(record) if head_may_be_running else {}
+    head_process_alive = head_may_be_running and bool(
+        observer_alive(record, status=head_status)["alive"]
+    )
+    # Positive death of this record's launch identity, from the same reading. It is what makes a
+    # bring-up over a headless open sprint conditional on the head rather than on the queue: a
+    # process that is provably gone cannot be woken and cannot be the second head a launch would
+    # put beside a live one.
+    head_is_dead = head_may_be_running and observer_head_is_dead(head_status)
     head_is_live = (
         head_may_be_running
         and not unresolved_intent
@@ -755,6 +801,15 @@ def _reconcile_open_sprint(
             record.state = "running"
             record.stopped_reason = ""
             record.paused_at = 0.0
+        if record.launch_next_at and record.state not in {"deferred", "launching", "pending"}:
+            # A replacement that stuck: this head was seen alive on a tick after its bring-up, so
+            # the cooldown that bring-up left behind has done its job and the next dead head of
+            # this sprint starts its own series rather than inheriting this one's. A record whose
+            # state says a launch is still owed keeps its deadline: that one is a launch this tick
+            # has yet to make, not a bound on the head it is looking at.
+            record.launch_attempts = 0
+            record.launch_next_at = 0.0
+            record.deferred_reason = ""
         event = event_state or _observer_event_state(runtime, ref, record)
         if not event.get("known", True):
             _set_observer_state(record, "degraded", reason=event["reason"])
@@ -795,8 +850,12 @@ def _reconcile_open_sprint(
             "head": record.head,
             "launches": record.launches,
         }
-    # A process recovery still happens, but only for work that an observer has not durably
-    # acknowledged.  A completed, quiet queue with no new card event is deliberately left alone.
+    # A process recovery happens for work an observer has not durably acknowledged, and — since
+    # secretary-1478 — for a head whose own launch identity says it is dead, queue or no queue.
+    # A quiet queue is a reason not to *wake* a head that is there; it is not a reason to leave an
+    # open sprint without one. The fence over this sprint's cards asks the same pid heartbeat and
+    # holds until a head is adopted, so leaving a positively dead head alone here fenced the sprint
+    # until an operator commented on one of its cards (issue:5733409d4a74ad3ce8a8).
     if (
         record is not None
         and not unresolved_intent
@@ -810,7 +869,17 @@ def _reconcile_open_sprint(
             return {"status": "degraded", "step": "observer-reconcile", "sprint": ref,
                     "action": "observer-cursor-unavailable", "head": record.head,
                     "reason": event["reason"]}
-        if not event["pending"]:
+        if event["pending"]:
+            pending_event = event
+        elif record.state == "deferred":
+            # The quiet queue answers only for a record no later branch of this tick still owns.
+            # `deferred` is owned below: it is a bring-up this tick owes, held to the backoff its
+            # last attempt persisted, and the deferral branch is what decides whether the backoff
+            # has run out. Answering `idle` over it dropped that launch and its counter, so a
+            # bring-up whose replacement the host refused was never attempted again — this card's
+            # own deadlock, reached by another route (secretary-1478 round 3).
+            dead_head_bringup = head_is_dead
+        elif not head_is_dead:
             _set_observer_state(record, "idle", reason="no unacknowledged significant card event")
             return {
                 "status": "ok",
@@ -821,7 +890,26 @@ def _reconcile_open_sprint(
                 "launches": record.launches,
                 "reason": event["reason"],
             }
-        pending_event = event
+        elif time.time() < record.launch_next_at:
+            # A dead head with nothing owed to it, replaced recently enough that the cooldown that
+            # replacement left has not run out. It is what keeps a head that dies the moment it
+            # comes up to one attempt per backoff window instead of one per tick.
+            return {
+                "status": "degraded",
+                "step": "observer-reconcile",
+                "sprint": ref,
+                "action": "observer-launch-deferred",
+                "head": record.head,
+                "reason": record.deferred_reason
+                or "the replacement of this dead observer head is waiting out its backoff",
+            }
+        else:
+            # The bring-up over a dead head with nothing owed to it. It carries no batch: there is
+            # no unacknowledged event to hand the replacement, and inventing one would replay work
+            # the previous head already acknowledged. Everything below it is the ordinary launch
+            # path — the drain, the deferral backoff, the conditional stop — because a dead head is
+            # not a reason to skip any of them.
+            dead_head_bringup = True
     if pause_mode == "drain":
         # A drain claims nothing new. A dead observer is a bring-up, so it waits for the resume
         # exactly like a Ready card does. The record is still written: an open sprint has to be
@@ -879,7 +967,8 @@ def _reconcile_open_sprint(
         ),
         head_process_alive=head_process_alive,
     )
-    return _launch_observer(
+    attempted = record.launch_attempts
+    outcome = _launch_observer(
         runtime,
         payload,
         observers,
@@ -892,6 +981,17 @@ def _reconcile_open_sprint(
         conditional_stop=True,
         judgement=judgement,
     )
+    if dead_head_bringup and outcome.get("action") in {"observer-launched", "observer-relaunched"}:
+        # A launch that fails is already on the persisted backoff `_defer` keeps, and its counter
+        # is the one this attempt continued. A launch that *succeeds* clears that counter, which
+        # is right for every other caller and wrong for exactly this one: the head this tick
+        # replaced was dead with no work owed to it, so nothing but the passage of time separates
+        # this bring-up from the next one over a head that dies the same way. The cooldown is what
+        # that time is, and a head seen alive on a later tick clears it again.
+        _hold_dead_head_bringup(record, attempts=attempted + 1)
+        observers[ref] = record
+        _persist_quietly(runtime, payload, observers)
+    return outcome
 
 
 def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dict[str, Any]:
@@ -2545,6 +2645,30 @@ def _clear_launch_intent(record: ObserverRecord, *, head_possible: bool) -> None
     record.state = "pending"
 
 
+def _observer_launch_backoff(attempts: int) -> int:
+    """The persisted delay one bring-up attempt of an observer head buys. One series, one place."""
+    return min(
+        OBSERVER_WAKE_RETRY_INITIAL_SECONDS * (2 ** (max(attempts, 1) - 1)),
+        OBSERVER_WAKE_RETRY_MAX_SECONDS,
+    )
+
+
+def _hold_dead_head_bringup(record: ObserverRecord, *, attempts: int) -> None:
+    """Stamp the cooldown a successful replacement of a dead head leaves on its record.
+
+    The same two fields every other deferral uses, so there is one bound and one clock, but the
+    state is left alone: this head *is* up, and calling it deferred would fence its own sprint's
+    cards behind `REASON_DEFERRED` for as long as the cooldown lasts.
+    """
+    delay = _observer_launch_backoff(attempts)
+    record.launch_attempts = attempts
+    record.launch_next_at = time.time() + delay
+    record.deferred_reason = (
+        "the observer head was replaced after its launch identity said it had died; "
+        f"another replacement no sooner than {delay}s"
+    )
+
+
 def _defer(
     runtime: Any,
     payload: dict[str, Any],
@@ -2577,10 +2701,7 @@ def _defer(
         record.state = "deferred"
     if retry:
         record.launch_attempts += 1
-        delay = min(
-            OBSERVER_WAKE_RETRY_INITIAL_SECONDS * (2 ** (record.launch_attempts - 1)),
-            OBSERVER_WAKE_RETRY_MAX_SECONDS,
-        )
+        delay = _observer_launch_backoff(record.launch_attempts)
         record.launch_next_at = time.time() + delay
         record.deferred_reason = f"{reason}; retry in {delay}s"
     else:

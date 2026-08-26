@@ -182,6 +182,16 @@ board:
 
 - open sprint with no live head: launch one;
 - open sprint with a live head: do nothing, exactly one head per sprint;
+- open sprint whose head's own launch identity says the process is dead: launch a replacement,
+  whether or not a card event is waiting for it. A quiet queue is a reason not to wake a head that
+  is there, never a reason to leave the sprint without one — the fence over that sprint's cards
+  reads the same heartbeat and holds until a head is adopted, so leaving a dead one alone stopped
+  the sprint until an operator commented on one of its cards. Only positive death counts: a launch
+  identity that is missing, half-written or unreadable answers nothing, and a bring-up on it would
+  open a second head beside a live one. A replacement that is itself found dead is bounded by the
+  same persisted backoff a failed launch uses, so a head that dies at every bring-up costs one
+  attempt per backoff window rather than one per tick, and a bring-up the host refused is retried
+  on that same backoff: the quiet-queue answer never overwrites a record that still owes a launch;
 - closed or vanished sprint: stop the head and drop the record;
 - unreachable sprints board: touch nothing, an unanswered board is not a closed sprint.
 
