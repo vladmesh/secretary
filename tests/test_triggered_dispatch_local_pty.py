@@ -34,6 +34,7 @@ from unittest import mock
 
 from secretary.dispatcher_watchdog import head_process_status
 from triggered_agents.agents.pipeline import heads as pipeline_heads
+from triggered_agents.agents.pipeline import ops as pipeline_ops
 from triggered_agents.agents.pipeline import health as pipeline_health
 from triggered_agents.runtime import dispatch
 from triggered_agents.runtime import state as runtime_state
@@ -806,6 +807,207 @@ class BackendHandoverTests(MechanicalRoleBackendTestCase):
         self.assertEqual(self.actions(),
                          ["supervised-started", "handover-owner-gone", "created"])
 
+
+class StewardBoard:
+    """The pipeline board a steward tick writes to, as much of it as a tick can tell apart.
+
+    A report card is created In progress and moved out of it, and the whole question these tests
+    ask is which cards exist and which column they end in — so this is the board reduced to
+    exactly that, with no transport under it.
+    """
+
+    def __init__(self) -> None:
+        self.cards: list[dict] = []
+        self.moves: list[tuple[str, str, str]] = []
+
+    def create_report_card(self, *, project: str, title: str, slug: str) -> dict:
+        card = {
+            "reference": f"secretary-report-{len(self.cards) + 1}",
+            "column": "In progress",
+            "steward_report": "1",
+            "date_moved": time.time(),
+            "title": title,
+            "slug": slug,
+            "project": project,
+        }
+        self.cards.append(card)
+        return card
+
+    def list_cards(self, *, column: str | None = None, project: str | None = None) -> list[dict]:
+        return [card for card in self.cards if column is None or card["column"] == column]
+
+    def move_card(self, agent: str, reference: str, column: str, *, reason: str = "") -> dict:
+        for card in self.cards:
+            if card["reference"] == reference:
+                card["column"] = column
+                card["date_moved"] = time.time()
+                self.moves.append((agent, reference, column))
+                return card
+        raise AssertionError(f"a tick moved a card that was never created: {reference}")
+
+    def in_progress(self) -> list[str]:
+        return [card["reference"] for card in self.cards if card["column"] == "In progress"]
+
+
+class StewardBackendHandoverTests(MechanicalRoleBackendTestCase):
+    """The handover of the one mechanical role that reports on itself.
+
+    `retro` has no reporting contract, so the handover tests above can say nothing about it: a
+    steward dispatch creates a report card as it renders the skill naming it, hands it to the head
+    it launches, and records in `active_report.json` which head is writing which card. A handover
+    stops that head. Everything below is about what that owes the card.
+
+    Two things, and this is the case that used to get both wrong. The card the stopped head was
+    writing is nobody else's to finish, so it is closed as part of stopping its writer — a card
+    left In progress under a head this driver has just ended is a sweep later steward reporting
+    reads as still under way, and the record naming its writer is about to be forgotten, so no
+    later tick could even tell. And the handover creates no card of its own: it is decided before
+    a command is built, so the tick that dispatches nothing never files a report to discover it.
+    """
+
+    AGENT = "steward"
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.board = StewardBoard()
+
+    @contextlib.contextmanager
+    def _tick(self, registry, *, host):
+        with super()._tick(registry, host=host) as running, \
+                mock.patch.object(dispatch, "_load_spec", return_value={"skill": "/steward"}), \
+                mock.patch.object(pipeline_ops, "create_report_card",
+                                  side_effect=self.board.create_report_card), \
+                mock.patch.object(pipeline_ops, "list_cards", side_effect=self.board.list_cards), \
+                mock.patch.object(pipeline_ops, "move_card", side_effect=self.board.move_card):
+            yield running
+
+    def _pane_tick(self, registry, host):
+        with mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)):
+            return self.run_tick(registry, host=host)
+
+    def _standing_report(self) -> str:
+        """The card the head this role currently has is writing, as the record names it."""
+        record = self.state.load_active_report() or {}
+        reference = record.get("reference")
+        self.assertTrue(reference, "the tick that raised this role's head recorded no report card")
+        self.assertEqual(self.board.in_progress(), [reference])
+        return reference
+
+    def _assert_the_handover_owed_nothing(self, standing: str) -> None:
+        """What a handover tick leaves behind, in both directions and for both cards."""
+        self.assertEqual(len(self.board.cards), 1,
+                         "the handover tick created a report card of its own")
+        self.assertEqual(self.board.in_progress(), [],
+                         "the card the stopped head was writing was left In progress")
+        self.assertIn((self.AGENT, standing, "Done"), self.board.moves,
+                      "the card of the head this tick stopped was never closed")
+        self.assertIsNone(self.state.load_active_report(),
+                          "a record of a head that no longer exists was left standing")
+
+    def test_a_pane_head_hands_its_report_over_with_the_role(self) -> None:
+        """`orca-legacy -> local-pty`, the direction the live installation's steward is in."""
+        host = RecordingSessionHost()
+        self.assertEqual(self._pane_tick(self._registry(), host=host), 0)
+        standing = self._standing_report()
+
+        self.assertEqual(
+            self._pane_tick(self._registry(runtime=LOCAL_PTY_RUNTIME), host=host), 0
+        )
+
+        self._assert_the_handover_owed_nothing(standing)
+        self.assertEqual(len(host.opened), 1, "the handover tick opened a second pane")
+        self.assertEqual(host.stopped, [str(self.workspace)])
+        self.assertEqual(self.run_dirs(), [], "the handover tick raised a supervised head")
+        self.assertIsNone(self.state.load_terminal_handle())
+        self.assertEqual(self.actions()[-2:], ["owner-report-release", "handover-to-supervised"])
+
+        # The tick after it raises the head on the new backend, and files exactly one card for it.
+        with self._orca_banned() as made:
+            self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
+
+        self.assertEqual(made, [], "the bring-up after the handover reached Orca")
+        self.assertEqual(len(self.run_dirs()), 1, "the tick after the handover raised no head")
+        self.assertTrue(_alive(self.head_pid(self.run_dirs()[0])))
+        self.assertEqual(len(self.board.cards), 2,
+                         "the tick that raised the head filed no card, or filed more than one")
+        self.assertEqual(self.board.in_progress(), [self.board.cards[-1]["reference"]])
+        self.assertEqual((self.state.load_active_report() or {}).get("reference"),
+                         self.board.cards[-1]["reference"],
+                         "the head that was raised is not recorded as writing the new card")
+
+    def test_a_supervised_head_hands_its_report_back_with_the_role(self) -> None:
+        """`local-pty -> orca-legacy`, closed across the boundary that raised the head."""
+        self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
+        run_dir = self.run_dirs()[0]
+        head = self.head_pid(run_dir)
+        self.assertTrue(_alive(head), "the first tick raised no live head")
+        standing = self._standing_report()
+
+        host = RecordingSessionHost()
+        self.assertEqual(
+            self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0
+        )
+
+        self._assert_the_handover_owed_nothing(standing)
+        self.assertEqual(host.opened, [],
+                         "the handover tick opened a pane beside a live supervised head")
+        self.await_(lambda: not _alive(head),
+                    message="the supervised head outlived the tick that handed the role back")
+        self.assertIsNone(self.state.load_head_run())
+        self.assertEqual(self.actions()[-2:], ["owner-report-release", "handover-to-pane"])
+
+        # The tick after it opens the pane, and files exactly one card for it.
+        self.assertEqual(
+            self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0
+        )
+
+        self.assertEqual([title for _ws, title, _cmd in host.opened],
+                         [f"triggered-agent:{self.AGENT}"])
+        self.assertEqual(self.run_dirs(), [run_dir],
+                         "the tick after the handover raised another supervised head")
+        self.assertEqual(len(self.board.cards), 2,
+                         "the tick that opened the pane filed no card, or filed more than one")
+        self.assertEqual(self.board.in_progress(), [self.board.cards[-1]["reference"]])
+        self.assertEqual((self.state.load_active_report() or {}).get("reference"),
+                         self.board.cards[-1]["reference"],
+                         "the head that was opened is not recorded as writing the new card")
+
+    def test_a_pane_that_will_not_confirm_it_stopped_keeps_its_head_and_its_report(self) -> None:
+        """Fail-closed is fail-closed for the card too: the writer is still up, so it still owns
+        the report, and the record still says which head has it."""
+        host = RecordingSessionHost()
+        self.assertEqual(self._pane_tick(self._registry(), host=host), 0)
+        standing = self._standing_report()
+
+        with mock.patch.object(dispatch, "_stop_and_confirm", return_value=False):
+            self.assertEqual(
+                self._pane_tick(self._registry(runtime=LOCAL_PTY_RUNTIME), host=host), 0
+            )
+
+        self.assertEqual(len(self.board.cards), 1, "the refused handover created a report card")
+        self.assertEqual(self.board.in_progress(), [standing],
+                         "the card of a head that is still up was closed")
+        self.assertEqual((self.state.load_active_report() or {}).get("reference"), standing)
+        self.assertIsNotNone(self.state.load_terminal_handle())
+        self.assertEqual(self.run_dirs(), [])
+        self.assertEqual(self.actions(), ["created", "handover-stop-failed"])
+
+    def test_a_working_supervised_head_keeps_the_report_it_is_writing(self) -> None:
+        """The busy-skip is the other tick that dispatches nothing, and it is not a handover: the
+        head that is up is the one writing the standing card, so that card is untouched and the
+        card this tick made is the one that is closed."""
+        self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
+        standing = self._standing_report()
+
+        self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
+
+        self.assertEqual(len(self.board.cards), 2, "the busy tick filed no card of its own")
+        self.assertEqual(self.board.in_progress(), [standing],
+                         "the busy head's own report was closed under it")
+        self.assertIn((self.AGENT, self.board.cards[-1]["reference"], "Done"), self.board.moves)
+        self.assertEqual((self.state.load_active_report() or {}).get("reference"), standing,
+                         "the record stopped naming the card the live head is writing")
+        self.assertEqual(self.actions()[-1], "supervised-busy-skip")
 
 if __name__ == "__main__":
     unittest.main()
