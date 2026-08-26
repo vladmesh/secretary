@@ -16,8 +16,13 @@ the intended contract in an issue or pull request will make it easier to work th
 
 ```bash
 python3 -m pip install -e '.[memory]'
+python3 -m pip install -e '.[dev]'
 python3 -m unittest
+ruff check .
 ```
+
+The `dev` extra is the pinned `ruff`. The pin is enforced by `required-version` in
+`pyproject.toml`: another version refuses to run instead of reporting a different set of findings.
 
 Keep the package installed in editable mode: tests and runtime commands resolve deployment assets
 from the repository checkout.
