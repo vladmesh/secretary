@@ -222,9 +222,7 @@ def publish_component_entries(
     label: str,
 ) -> None:
     try:
-        backup = Path(
-            tempfile.mkdtemp(prefix=f".{destination.name}-old-", suffix=".tmp", dir=destination)
-        )
+        backup = Path(tempfile.mkdtemp(prefix=f".{destination.name}-old-", suffix=".tmp", dir=destination))
     except OSError as exc:
         raise RuntimeError(f"could not publish {label}: {exc}") from None
 
@@ -245,9 +243,7 @@ def publish_component_entries(
         try:
             restore_component_entries(destination, backup, entries)
         except OSError as restore_exc:
-            raise RuntimeError(
-                f"could not publish {label}: {exc}; rollback failed: {restore_exc}"
-            ) from None
+            raise RuntimeError(f"could not publish {label}: {exc}; rollback failed: {restore_exc}") from None
         raise RuntimeError(f"could not publish {label}: {exc}") from None
     finally:
         shutil.rmtree(backup, ignore_errors=True)

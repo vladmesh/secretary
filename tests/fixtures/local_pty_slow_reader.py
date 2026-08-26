@@ -9,6 +9,7 @@ taken so far.
 With a pause longer than any test, it is also the head that never reads at all: it prints `UP`,
 sleeps, and its terminal fills.
 """
+
 from __future__ import annotations
 
 import argparse

@@ -151,24 +151,25 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         if not test_wake:
             return result
         reference = str(kwargs["reference"])
-        self.audit.append(request_id + ":semantic", {
-            "event_id": "evt_" + request_id + "_semantic",
-            "request_id": request_id + ":semantic",
-            "ref": reference,
-            "kind": "moved",
-            "outcome": "success",
-            "actor": {"role": "dispatcher", "id": "dispatcher"},
-            "payload": {"to": "assessment"},
-            "occurred_at": _now(),
-        })
+        self.audit.append(
+            request_id + ":semantic",
+            {
+                "event_id": "evt_" + request_id + "_semantic",
+                "request_id": request_id + ":semantic",
+                "ref": reference,
+                "kind": "moved",
+                "outcome": "success",
+                "actor": {"role": "dispatcher", "id": "dispatcher"},
+                "payload": {"to": "assessment"},
+                "occurred_at": _now(),
+            },
+        )
         return result
 
     def open_sprint(self, reference: str = "sprint:1", **metadata: object) -> None:
         # Every row declares its observer, so the fixture declares one too: the registry default,
         # which is the head these tests expect the dispatcher to bring up.
-        metadata.setdefault(
-            "sprint_observer", encode_observer(head_choice(self.catalog.observer_head()))
-        )
+        metadata.setdefault("sprint_observer", encode_observer(head_choice(self.catalog.observer_head())))
         self.board.add_sprint(reference, status="open", **metadata)
 
     def close_sprint(self, reference: str = "sprint:1") -> None:
@@ -193,15 +194,21 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         record = self.observers()[reference]
         path = Path(record.pid_file)
         heartbeat = json.loads(path.read_text(encoding="utf-8"))
-        heartbeat.update({
-            "pid": DEAD_PID,
-            "boot_id": "dead-process",
-            "proc_starttime_ticks": "0",
-        })
+        heartbeat.update(
+            {
+                "pid": DEAD_PID,
+                "boot_id": "dead-process",
+                "proc_starttime_ticks": "0",
+            }
+        )
         path.write_text(json.dumps(heartbeat), encoding="utf-8")
 
     def acknowledge_delivery(
-        self, entry: dict[str, str], *, request_id: str, reference: str = "sprint:1",
+        self,
+        entry: dict[str, str],
+        *,
+        request_id: str,
+        reference: str = "sprint:1",
     ) -> None:
         delivery = self.observers()[reference].delivery
         # The acknowledgement is this sprint's own head answering for what it was sent.
@@ -224,9 +231,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         put_observers(payload, observers)
         self.runtime.production_state.save(payload)
 
-    def age_delivery(
-        self, seconds: float, reference: str = "sprint:1", *, deadline: bool = False
-    ) -> None:
+    def age_delivery(self, seconds: float, reference: str = "sprint:1", *, deadline: bool = False) -> None:
         """Put this delivery's send and hold that far in the past, as a slow head would.
 
         The acknowledgement deadline is left where it is unless `deadline` says otherwise, so a
@@ -272,11 +277,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         }
         if not precontract:
             source.update(codex_preflight.codex_provider_source_descriptor(current))
-        record.head_run = current.with_fanout_policy({
-            **policy,
-            "provider_source_required": True,
-            "provider_source": source,
-        }).to_json()
+        record.head_run = current.with_fanout_policy(
+            {
+                **policy,
+                "provider_source_required": True,
+                "provider_source": source,
+            }
+        ).to_json()
         put_observers(payload, {"sprint:1": record})
         self.runtime.production_state.save(payload)
 
@@ -331,8 +338,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.kill_observer()
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="replacement needed", request_id="replacement-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="replacement needed",
+            request_id="replacement-event",
         )
         self.runtime.production_tick()
 
@@ -357,8 +367,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.kill_observer()
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="replacement needed", request_id="replacement-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="replacement needed",
+            request_id="replacement-event",
         )
         self.host.observer_not_quiescent = True
 
@@ -367,9 +380,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertIn("stop_observer_if_quiescent", self.host.calls)
         self.assertNotIn("stop_observer", self.host.calls)
         self.assertEqual(self.observers()["sprint:1"].launches, 1, "no replacement was brought up")
-        deferred = [
-            row for row in self.actions(result) if row["action"] == "observer-launch-deferred"
-        ]
+        deferred = [row for row in self.actions(result) if row["action"] == "observer-launch-deferred"]
         self.assertTrue(deferred, [row["action"] for row in self.actions(result)])
         self.assertIn("not quiet", deferred[0]["reason"])
 
@@ -379,8 +390,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.kill_observer()
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="replacement needed", request_id="replacement-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="replacement needed",
+            request_id="replacement-event",
         )
 
         self.runtime.production_tick()
@@ -402,8 +416,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.kill_observer()
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="replacement needed", request_id="dead-head-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="replacement needed",
+            request_id="dead-head-event",
         )
 
         self.runtime.production_tick()
@@ -427,8 +444,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="stuck-head-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="stuck-head-event",
         )
         self.host.observer_status_result = {"last_activity": time.time(), "idle": True}
         # The head runtime would refuse a conditional stop of this head, however it is asked.
@@ -469,8 +489,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         }
         self.host.observer_not_quiescent = True
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="stalled-busy-head-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="stalled-busy-head-event",
         )
 
         self.runtime.production_tick()
@@ -478,9 +501,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         terminal = self.runtime.production_tick()
 
-        self.assertEqual(
-            [row["action"] for row in self.actions(terminal)], ["observer-relaunched"]
-        )
+        self.assertEqual([row["action"] for row in self.actions(terminal)], ["observer-relaunched"])
         self.assertEqual(self.host.calls.count("stop_observer"), 1)
         self.assertNotIn("stop_observer_if_quiescent", self.host.calls)
         self.assertEqual(self.observers()["sprint:1"].launches, 2)
@@ -501,8 +522,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.kill_observer()
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="replacement needed", request_id="late-activity-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="replacement needed",
+            request_id="late-activity-event",
         )
         readiness = self.runtime.head_readiness
 
@@ -515,17 +539,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             )
             return readiness(head)
 
-        with mock.patch.object(
-            self.runtime, "head_readiness", side_effect=head_printed_something
-        ):
+        with mock.patch.object(self.runtime, "head_readiness", side_effect=head_printed_something):
             result = self.runtime.production_tick()
 
         self.assertIn("stop_observer_if_quiescent", self.host.calls)
         self.assertNotIn("stop_observer", self.host.calls)
         self.assertEqual(self.observers()["sprint:1"].launches, 1, "no replacement was brought up")
-        deferred = [
-            row for row in self.actions(result) if row["action"] == "observer-launch-deferred"
-        ]
+        deferred = [row for row in self.actions(result) if row["action"] == "observer-launch-deferred"]
         self.assertTrue(deferred, [row["action"] for row in self.actions(result)])
         self.assertIn("not quiet", deferred[0]["reason"])
 
@@ -572,7 +592,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         relaunched = self.runtime.production_tick()
 
         self.assertEqual(
-            [action["action"] for action in self.actions(relaunched)], ["observer-launched"],
+            [action["action"] for action in self.actions(relaunched)],
+            ["observer-launched"],
         )
         record = self.observers()["sprint:1"]
         self.assertTrue(record.bound)
@@ -620,9 +641,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         result = self.runtime.production_tick()
 
-        self.assertEqual(
-            [action["action"] for action in self.actions(result)], ["observer-relaunched"]
-        )
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-relaunched"])
         record = self.observers()["sprint:1"]
         self.assertEqual(record.launches, 2)
         self.assertEqual(record.state, "running")
@@ -643,8 +662,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         self.assertEqual([action["action"] for action in self.actions(cleared)], ["observer-live"])
         self.assertEqual(
-            [action["action"] for action in cleared["actions"]
-             if action.get("step") == "observer-fence"],
+            [action["action"] for action in cleared["actions"] if action.get("step") == "observer-fence"],
             ["observer-fence-cleared"],
             "the fence this sprint sat behind is lifted by the adopted replacement",
         )
@@ -719,9 +737,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         held = self.runtime.production_tick()
 
-        self.assertEqual(
-            [action["action"] for action in self.actions(held)], ["observer-launch-deferred"]
-        )
+        self.assertEqual([action["action"] for action in self.actions(held)], ["observer-launch-deferred"])
         record = self.observers()["sprint:1"]
         self.assertEqual(record.launches, 2, "the second bring-up waits out its backoff")
         self.assertGreater(record.launch_next_at, time.time())
@@ -729,9 +745,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.expire_launch_retry()
         retried = self.runtime.production_tick()
 
-        self.assertEqual(
-            [action["action"] for action in self.actions(retried)], ["observer-relaunched"]
-        )
+        self.assertEqual([action["action"] for action in self.actions(retried)], ["observer-relaunched"])
         after = self.observers()["sprint:1"]
         self.assertEqual(after.launches, 3)
         self.assertEqual(after.launch_attempts, 2)
@@ -775,9 +789,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.expire_launch_retry()
         retried = self.runtime.production_tick()
 
-        self.assertEqual(
-            [action["action"] for action in self.actions(retried)], ["observer-relaunched"]
-        )
+        self.assertEqual([action["action"] for action in self.actions(retried)], ["observer-relaunched"])
         self.assertEqual(
             self.host.calls.count("prepare_observer"),
             attempted + 1,
@@ -791,8 +803,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         self.assertEqual([action["action"] for action in self.actions(cleared)], ["observer-live"])
         self.assertEqual(
-            [action["action"] for action in cleared["actions"]
-             if action.get("step") == "observer-fence"],
+            [action["action"] for action in cleared["actions"] if action.get("step") == "observer-fence"],
             ["observer-fence-cleared"],
             "the sprint the failed bring-up left fenced moves again once the retry is adopted",
         )
@@ -812,9 +823,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         attempted = self.host.calls.count("prepare_observer")
         held = self.runtime.production_tick()
 
-        self.assertEqual(
-            [action["action"] for action in self.actions(held)], ["observer-launch-deferred"]
-        )
+        self.assertEqual([action["action"] for action in self.actions(held)], ["observer-launch-deferred"])
         self.assertEqual(self.host.calls.count("prepare_observer"), attempted)
         record = self.observers()["sprint:1"]
         self.assertEqual(record.state, "deferred")
@@ -855,9 +864,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         result = self.runtime.production_tick()
 
-        self.assertEqual(
-            [action["action"] for action in self.actions(result)], ["observer-launch-skipped"]
-        )
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launch-skipped"])
         record = self.observers()["sprint:1"]
         self.assertEqual(record.launches, 1)
         self.assertEqual(record.deferred_reason, "pipeline is draining")
@@ -927,7 +934,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         observer's own resume naming this delivery.
         """
         self.catalog.profiles["claude-observer"] = {
-            "adapter": "claude", "model": "opus", "resource": "claude-sub",
+            "adapter": "claude",
+            "model": "opus",
+            "resource": "claude-sub",
         }
         self.catalog.role_defaults["observer"] = "claude-observer"
         self.open_sprint()
@@ -941,10 +950,16 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         def run_json(args: list[str]) -> dict:
             if args[1:3] == ["terminal", "list"]:
-                return {"terminals": [{
-                    "handle": record.handle, "leafId": record.leaf,
-                    "connected": True, "lastOutputAt": int((time.time() - 2) * 1000),
-                }]}
+                return {
+                    "terminals": [
+                        {
+                            "handle": record.handle,
+                            "leafId": record.leaf,
+                            "connected": True,
+                            "lastOutputAt": int((time.time() - 2) * 1000),
+                        }
+                    ]
+                }
             if args[1:3] == ["terminal", "send"]:
                 sends.append(args)
                 busy[0] = True
@@ -955,8 +970,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             raise AssertionError(args)
 
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="claude-observer-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="claude-observer-event",
         )
 
         with mock.patch.object(real_host, "_run_json", side_effect=run_json):
@@ -972,9 +990,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             self.assertIn(f"--through-event {delivery.through_event}", message)
 
             entry = {
-                "selected_step": "read board", "selected_why": "card changed",
-                "rejected_alternatives": "wait", "current_task": "secretary-510-pilot",
-                "dod_state": "open", "next_safe_step": "resume",
+                "selected_step": "read board",
+                "selected_why": "card changed",
+                "rejected_alternatives": "wait",
+                "current_task": "secretary-510-pilot",
+                "dod_state": "open",
+                "next_safe_step": "resume",
             }
             self.acknowledge_delivery(entry, request_id="claude-observer-ack")
             busy[0] = False
@@ -1000,10 +1021,16 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         def run_json(args: list[str]) -> dict:
             if args[1:3] == ["terminal", "list"]:
-                return {"terminals": [{
-                    "handle": record.handle, "leafId": record.leaf,
-                    "connected": True, "lastOutputAt": int((time.time() - 2) * 1000),
-                }]}
+                return {
+                    "terminals": [
+                        {
+                            "handle": record.handle,
+                            "leafId": record.leaf,
+                            "connected": True,
+                            "lastOutputAt": int((time.time() - 2) * 1000),
+                        }
+                    ]
+                }
             if args[1:3] == ["terminal", "send"]:
                 sends.append(args)
                 return {}
@@ -1013,8 +1040,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             raise AssertionError(args)
 
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="swallowed-wake-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="swallowed-wake-event",
         )
 
         # Drive the bounded resend loop without giving process scheduling a chance to consume its
@@ -1032,12 +1062,14 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         delivery_time.sleep.side_effect = sleep
         delivery_time.time.side_effect = time.time
 
-        with mock.patch.object(real_host, "_run_json", side_effect=run_json), \
-             mock.patch.object(tui_delivery, "time", delivery_time), \
-             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3), \
-             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01), \
-             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0), \
-             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2):
+        with (
+            mock.patch.object(real_host, "_run_json", side_effect=run_json),
+            mock.patch.object(tui_delivery, "time", delivery_time),
+            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3),
+            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
+            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
+            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2),
+        ):
             self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
             self.host.nudge_observer = real_host.nudge_observer  # type: ignore[method-assign]
             result = self.runtime.production_tick()
@@ -1066,9 +1098,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             # growing the backoff on a head that takes none of its prompts.
             self.expire_wake_retry()
             second = self.runtime.production_tick()
-            self.assertEqual(
-                [row["action"] for row in self.actions(second)], ["observer-wake-deferred"]
-            )
+            self.assertEqual([row["action"] for row in self.actions(second)], ["observer-wake-deferred"])
             self.assertEqual(self.observers()["sprint:1"].delivery.attempts, 2)
 
             self.expire_wake_retry()
@@ -1105,15 +1135,21 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="evidence-first-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="evidence-first-event",
         )
         # The head is standing at its prompt: a wake is delivered rather than waited for.
         self.host.observer_status_result = {"last_activity": time.time(), "idle": True}
         refusal = HostError("observer wake was not delivered: pane-stayed-ready")
         refusal.evidence = {
-            "subject": "observer-wake", "stage": "payload_written", "payload_bytes": 1315,
-            "payload_sha256": "0123456789abcdef", "reason": "payload-left-in-composer",
+            "subject": "observer-wake",
+            "stage": "payload_written",
+            "payload_bytes": 1315,
+            "payload_sha256": "0123456789abcdef",
+            "reason": "payload-left-in-composer",
         }
 
         with mock.patch.object(self.host, "nudge_observer", side_effect=refusal):
@@ -1135,9 +1171,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         woke = self.runtime.production_tick()
         self.assertEqual([row["action"] for row in self.actions(woke)], ["observer-nudged"])
         entry = {
-            "selected_step": "read board", "selected_why": "card changed",
-            "rejected_alternatives": "wait", "current_task": "secretary-510-pilot",
-            "dod_state": "open", "next_safe_step": "resume",
+            "selected_step": "read board",
+            "selected_why": "card changed",
+            "rejected_alternatives": "wait",
+            "current_task": "secretary-510-pilot",
+            "dod_state": "open",
+            "next_safe_step": "resume",
         }
         self.acknowledge_delivery(entry, request_id="evidence-ack")
         acknowledged = self.runtime.production_tick()
@@ -1159,9 +1198,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertIn("observer-wake:", operator["delivery_last_failure"])
         row = observer_snapshot(self.runtime.production_state.load())[0]
         self.assertEqual(
-            self.runtime.sprints.status("sprint:1", observer=row)["observer"]["delivery"][
-                "wake_failures"
-            ],
+            self.runtime.sprints.status("sprint:1", observer=row)["observer"]["delivery"]["wake_failures"],
             1,
         )
 
@@ -1177,8 +1214,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="closeout-evidence-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="closeout-evidence-event",
         )
         # The head is standing at its prompt: a wake is delivered rather than waited for.
         self.host.observer_status_result = {"last_activity": time.time(), "idle": True}
@@ -1194,10 +1234,16 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         def run_json(args: list[str]) -> dict:
             if args[1:3] == ["terminal", "list"]:
-                return {"terminals": [{
-                    "handle": record.handle, "leafId": record.leaf,
-                    "connected": True, "lastOutputAt": int((time.time() - 2) * 1000),
-                }]}
+                return {
+                    "terminals": [
+                        {
+                            "handle": record.handle,
+                            "leafId": record.leaf,
+                            "connected": True,
+                            "lastOutputAt": int((time.time() - 2) * 1000),
+                        }
+                    ]
+                }
             if args[1:3] == ["terminal", "send"]:
                 sends.append(args)
                 busy[0] = True
@@ -1222,8 +1268,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertIn("closing resume", message)
 
         document = render_observer_prompt(
-            self.runtime.sprints.show("sprint:1", include_cards=False,
-                                      include_resume_freshness=False),
+            self.runtime.sprints.show("sprint:1", include_cards=False, include_resume_freshness=False),
             delivery=self.observers()["sprint:1"].delivery,
         )
         self.assertIn("## Delivery evidence", document)
@@ -1240,19 +1285,21 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         """
         self.open_sprint()
         evidence = {
-            "subject": "observer-launch", "handle": "observer:sprint:1",
-            "stage": "payload_written", "payload_bytes": 512,
-            "payload_sha256": "abcdef0123456789", "reason": "payload-left-in-composer",
+            "subject": "observer-launch",
+            "handle": "observer:sprint:1",
+            "stage": "payload_written",
+            "payload_bytes": 512,
+            "payload_sha256": "abcdef0123456789",
+            "reason": "payload-left-in-composer",
         }
         with mock.patch.object(
-            self.host, "prepare_observer",
+            self.host,
+            "prepare_observer",
             side_effect=ObserverLaunchAborted("observer bring-up failed", evidence=evidence),
         ):
             failed = self.runtime.production_tick()
 
-        self.assertEqual(
-            [row["action"] for row in self.actions(failed)], ["observer-launch-deferred"]
-        )
+        self.assertEqual([row["action"] for row in self.actions(failed)], ["observer-launch-deferred"])
         delivery = self.observers()["sprint:1"].delivery
         self.assertEqual((delivery.launch_delivery_attempts, delivery.launch_delivery_failures), (1, 1))
         self.assertEqual((delivery.wake_attempts, delivery.wake_failures), (0, 0))
@@ -1267,9 +1314,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual([row["action"] for row in self.actions(launched)], ["observer-launched"])
         delivery = self.observers()["sprint:1"].delivery
         self.assertEqual((delivery.launch_delivery_attempts, delivery.launch_delivery_failures), (2, 1))
-        self.assertEqual(
-            status_observers(self.runtime.production_state.load())[0]["delivery_failures"], 1
-        )
+        self.assertEqual(status_observers(self.runtime.production_state.load())[0]["delivery_failures"], 1)
 
     def test_a_wake_whose_transport_was_refused_keeps_its_evidence(self) -> None:
         """A `terminal send` the host refuses is a prompt that did not land, evidenced like one.
@@ -1282,8 +1327,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="transport-refusal-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="transport-refusal-event",
         )
         self.host.observer_status_result = {"last_activity": time.time(), "idle": True}
         real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
@@ -1291,10 +1339,16 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         def run_json(args: list[str]) -> dict:
             if args[1:3] == ["terminal", "list"]:
-                return {"terminals": [{
-                    "handle": record.handle, "leafId": record.leaf,
-                    "connected": True, "lastOutputAt": int((time.time() - 2) * 1000),
-                }]}
+                return {
+                    "terminals": [
+                        {
+                            "handle": record.handle,
+                            "leafId": record.leaf,
+                            "connected": True,
+                            "lastOutputAt": int((time.time() - 2) * 1000),
+                        }
+                    ]
+                }
             if args[1:3] == ["terminal", "send"]:
                 raise HostError("orca terminal send failed: synthetic transport refusal")
             if args[1:3] == ["terminal", "read"]:
@@ -1327,8 +1381,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="busy-wake-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="busy-wake-event",
         )
         real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
         record = self.observers()["sprint:1"]
@@ -1340,10 +1397,16 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         def run_json(args: list[str]) -> dict:
             if args[1:3] == ["terminal", "list"]:
-                return {"terminals": [{
-                    "handle": record.handle, "leafId": record.leaf,
-                    "connected": True, "lastOutputAt": int((time.time() - 2) * 1000),
-                }]}
+                return {
+                    "terminals": [
+                        {
+                            "handle": record.handle,
+                            "leafId": record.leaf,
+                            "connected": True,
+                            "lastOutputAt": int((time.time() - 2) * 1000),
+                        }
+                    ]
+                }
             if args[1:3] == ["terminal", "wait"]:
                 answer = waits.pop(0)
                 if isinstance(answer, Exception):
@@ -1364,8 +1427,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.host.observers, ["sprint:1"])
         self.assertEqual(self.host.stopped_observers, [])
         after = self.observers()["sprint:1"]
-        self.assertEqual((after.handle, after.leaf, after.workspace),
-                         (record.handle, record.leaf, record.workspace))
+        self.assertEqual(
+            (after.handle, after.leaf, after.workspace), (record.handle, record.leaf, record.workspace)
+        )
         self.assertEqual(after.delivery.stage, DeliveryStage.WAITING_FOR_IDLE)
         self.assertTrue(after.delivery.delivery_id)
         self.assertTrue(after.delivery.through_event)
@@ -1378,10 +1442,16 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         def deliver_after_busy(args: list[str]) -> dict:
             if args[1:3] == ["terminal", "list"]:
-                return {"terminals": [{
-                    "handle": record.handle, "leafId": record.leaf,
-                    "connected": True, "lastOutputAt": int((time.time() - 2) * 1000),
-                }]}
+                return {
+                    "terminals": [
+                        {
+                            "handle": record.handle,
+                            "leafId": record.leaf,
+                            "connected": True,
+                            "lastOutputAt": int((time.time() - 2) * 1000),
+                        }
+                    ]
+                }
             if args[1:3] == ["terminal", "wait"]:
                 return {"wait": {"condition": "tui-idle", "satisfied": not working[0]}}
             if args[1:3] == ["terminal", "read"]:
@@ -1417,10 +1487,16 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         def run_json(args: list[str]) -> dict:
             if args[1:3] == ["terminal", "list"]:
-                return {"terminals": [{
-                    "handle": record.handle, "leafId": record.leaf,
-                    "connected": True, "lastOutputAt": int((time.time() - 2) * 1000),
-                }]}
+                return {
+                    "terminals": [
+                        {
+                            "handle": record.handle,
+                            "leafId": record.leaf,
+                            "connected": True,
+                            "lastOutputAt": int((time.time() - 2) * 1000),
+                        }
+                    ]
+                }
             if args[1:3] == ["terminal", "send"]:
                 sends.append(args)
                 unanswerable[0] = True
@@ -1432,8 +1508,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             raise AssertionError(args)
 
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="post-send-refusal-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="post-send-refusal-event",
         )
 
         with mock.patch.object(real_host, "_run_json", side_effect=run_json):
@@ -1441,18 +1520,19 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             self.host.nudge_observer = real_host.nudge_observer  # type: ignore[method-assign]
             refused = self.runtime.production_tick()
 
-            self.assertEqual(
-                [row["action"] for row in self.actions(refused)], ["observer-wake-deferred"]
-            )
+            self.assertEqual([row["action"] for row in self.actions(refused)], ["observer-wake-deferred"])
             delivery = self.observers()["sprint:1"].delivery
             self.assertEqual(delivery.stage, DeliveryStage.RETRY_DEFERRED)
             self.assertEqual(len(sends), 2)
 
             # The head had the prompt after all, and says so with this delivery's own markers.
             entry = {
-                "selected_step": "read board", "selected_why": "card changed",
-                "rejected_alternatives": "wait", "current_task": "secretary-510-pilot",
-                "dod_state": "open", "next_safe_step": "resume",
+                "selected_step": "read board",
+                "selected_why": "card changed",
+                "rejected_alternatives": "wait",
+                "current_task": "secretary-510-pilot",
+                "dod_state": "open",
+                "next_safe_step": "resume",
             }
             self.acknowledge_delivery(entry, request_id="post-send-refusal-ack")
             unanswerable[0] = False
@@ -1481,17 +1561,26 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         def run_json(args: list[str]) -> dict:
             if args[1:3] == ["terminal", "list"]:
-                return {"terminals": [{
-                    "handle": record.handle, "leafId": record.leaf,
-                    "connected": True, "lastOutputAt": int((time.time() - 2) * 1000),
-                }]}
+                return {
+                    "terminals": [
+                        {
+                            "handle": record.handle,
+                            "leafId": record.leaf,
+                            "connected": True,
+                            "lastOutputAt": int((time.time() - 2) * 1000),
+                        }
+                    ]
+                }
             if args[1:3] == ["terminal", "wait"]:
                 raise HostError(STALE_HANDLE_WAIT_FAILURE)
             raise AssertionError(args)
 
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="unprobeable-pane-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="unprobeable-pane-event",
         )
 
         with mock.patch.object(real_host, "_run_json", side_effect=run_json):
@@ -1533,8 +1622,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="real")
 
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="unaddressable-head-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="unaddressable-head-event",
         )
         self.host.observer_status = real_host.observer_status  # type: ignore[method-assign]
 
@@ -1568,17 +1660,26 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         def run_json(args: list[str]) -> dict:
             if args[1:3] == ["terminal", "list"]:
-                return {"terminals": [{
-                    "handle": record.handle, "leafId": record.leaf,
-                    "connected": True, "lastOutputAt": int((time.time() - 2) * 1000),
-                }]}
+                return {
+                    "terminals": [
+                        {
+                            "handle": record.handle,
+                            "leafId": record.leaf,
+                            "connected": True,
+                            "lastOutputAt": int((time.time() - 2) * 1000),
+                        }
+                    ]
+                }
             if args[1:3] == ["terminal", "wait"]:
                 raise HostError(TIMEOUT_WAIT_FAILURE)
             raise AssertionError(args)
 
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="busy-pane-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="busy-pane-event",
         )
 
         with mock.patch.object(real_host, "_run_json", side_effect=run_json):
@@ -1588,9 +1689,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             still_waiting = self.runtime.production_tick()
 
         self.assertEqual([row["action"] for row in self.actions(waiting)], ["observer-wake-waiting"])
-        self.assertEqual(
-            [row["action"] for row in self.actions(still_waiting)], ["observer-wake-waiting"]
-        )
+        self.assertEqual([row["action"] for row in self.actions(still_waiting)], ["observer-wake-waiting"])
         delivery = self.observers()["sprint:1"].delivery
         self.assertEqual(delivery.stage, DeliveryStage.WAITING_FOR_IDLE)
         self.assertEqual(delivery.attempts, 0)
@@ -1602,17 +1701,18 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="unreadable-terminal-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="unreadable-terminal-event",
         )
 
         with mock.patch.object(
             self.host, "observer_status", side_effect=HostError("orca terminal list failed")
         ):
             first = self.runtime.production_tick()
-            self.assertEqual(
-                [row["action"] for row in self.actions(first)], ["observer-wake-deferred"]
-            )
+            self.assertEqual([row["action"] for row in self.actions(first)], ["observer-wake-deferred"])
             self.expire_wake_retry()
             self.runtime.production_tick()
             self.expire_wake_retry()
@@ -1630,8 +1730,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="failed-replacement-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="failed-replacement-event",
         )
 
         with mock.patch.object(
@@ -1673,12 +1776,16 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         put_observers(payload, {"sprint:1": record})
         self.runtime.production_state.save(payload)
         self.host.observer_provider_progress = lambda _record: {  # type: ignore[method-assign]
-            "state": "unavailable", "reason": "Claude provider source has no bound v1 baseline",
+            "state": "unavailable",
+            "reason": "Claude provider source has no bound v1 baseline",
         }
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="observer-no-source-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="observer-no-source-event",
         )
 
         result = self.runtime.production_tick()
@@ -1696,8 +1803,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "idle": True,
         }
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="observer-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="observer-event",
         )
 
         result = self.runtime.production_tick()
@@ -1723,8 +1833,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time(), "idle": False}
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed while observer was working", request_id="event-during-active-turn",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed while observer was working",
+            request_id="event-during-active-turn",
         )
 
         waiting = self.runtime.production_tick()
@@ -1740,9 +1853,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         self.assertEqual([row["action"] for row in self.actions(delivered)], ["observer-nudged"])
         self.assertEqual(self.host.observer_nudges, ["sprint:1"])
-        self.assertEqual(
-            self.observers()["sprint:1"].delivery.stage, DeliveryStage.AWAITING_ACK
-        )
+        self.assertEqual(self.observers()["sprint:1"].delivery.stage, DeliveryStage.AWAITING_ACK)
 
     def test_resume_acknowledges_the_event_and_prevents_a_second_wake_after_restart(self) -> None:
         self.open_sprint()
@@ -1750,15 +1861,22 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="ack-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="ack-event",
         )
         self.runtime.production_tick()
         delivery_id = self.observers()["sprint:1"].delivery.delivery_id
         event_id = self.observers()["sprint:1"].delivery.through_event
         entry = {
-            "selected_step": "check board", "selected_why": "card changed", "rejected_alternatives": "wait",
-            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "resume",
+            "selected_step": "check board",
+            "selected_why": "card changed",
+            "rejected_alternatives": "wait",
+            "current_task": "secretary-510-pilot",
+            "dod_state": "open",
+            "next_safe_step": "resume",
         }
         self.acknowledge_delivery(entry, request_id="ack-resume")
 
@@ -1780,27 +1898,47 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="marker-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="marker-event",
         )
         self.runtime.production_tick()
         delivery = self.observers()["sprint:1"].delivery
         entry = {
-            "selected_step": "read board", "selected_why": "card changed", "rejected_alternatives": "wait",
-            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "resume",
+            "selected_step": "read board",
+            "selected_why": "card changed",
+            "rejected_alternatives": "wait",
+            "current_task": "secretary-510-pilot",
+            "dod_state": "open",
+            "next_safe_step": "resume",
         }
         writer = SprintWriter(self.board, data_dir=self.data_dir)  # type: ignore[arg-type]
         writer.resume(
-            role="observer", actor="observer", reference="sprint:1", entry=entry,
+            role="observer",
+            actor="observer",
+            reference="sprint:1",
+            entry=entry,
             request_id="unrelated-resume",
         )
         writer.resume(
-            role="observer", actor="observer", reference="sprint:1", entry=entry,
-            request_id="wrong-delivery", delivery_id="delivery-old", through_event=delivery.through_event,
+            role="observer",
+            actor="observer",
+            reference="sprint:1",
+            entry=entry,
+            request_id="wrong-delivery",
+            delivery_id="delivery-old",
+            through_event=delivery.through_event,
         )
         writer.resume(
-            role="observer", actor="observer", reference="sprint:1", entry=entry,
-            request_id="wrong-through", delivery_id=delivery.delivery_id, through_event="evt-old",
+            role="observer",
+            actor="observer",
+            reference="sprint:1",
+            entry=entry,
+            request_id="wrong-through",
+            delivery_id=delivery.delivery_id,
+            through_event="evt-old",
         )
         # The head is mid-turn writing these resumes, so nothing here is idle evidence.
         self.host.observer_status_result = {"last_activity": time.time(), "idle": False}
@@ -1825,8 +1963,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="crash-before-nudge-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="crash-before-nudge-event",
         )
 
         with mock.patch.object(
@@ -1839,11 +1980,18 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(delivery.stage, DeliveryStage.DELIVERY_INTENT)
         self.assertEqual(self.host.observer_nudges, [])
         entry = {
-            "selected_step": "wait", "selected_why": "the board is quiet", "rejected_alternatives": "relaunch",
-            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "wait",
+            "selected_step": "wait",
+            "selected_why": "the board is quiet",
+            "rejected_alternatives": "relaunch",
+            "current_task": "secretary-510-pilot",
+            "dod_state": "open",
+            "next_safe_step": "wait",
         }
         SprintWriter(self.board, data_dir=self.data_dir).resume(  # type: ignore[arg-type]
-            role="observer", actor="observer", reference="sprint:1", entry=entry,
+            role="observer",
+            actor="observer",
+            reference="sprint:1",
+            entry=entry,
             request_id="old-turn-resume",
         )
 
@@ -1862,19 +2010,34 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         same_second = _now()
         entry = {
-            "selected_step": "wait", "selected_why": "board is quiet", "rejected_alternatives": "relaunch",
-            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "wait",
+            "selected_step": "wait",
+            "selected_why": "board is quiet",
+            "rejected_alternatives": "relaunch",
+            "current_task": "secretary-510-pilot",
+            "dod_state": "open",
+            "next_safe_step": "wait",
             "recorded_at": same_second,
         }
         SprintWriter(self.board, data_dir=self.data_dir).resume(  # type: ignore[arg-type]
-            role="observer", actor="observer", reference="sprint:1", entry=entry, request_id="same-second-resume",
+            role="observer",
+            actor="observer",
+            reference="sprint:1",
+            entry=entry,
+            request_id="same-second-resume",
         )
-        self.audit.append("same-second-card-event", {
-            "event_id": "evt_same_second_card", "request_id": "same-second-card-event",
-            "ref": "secretary-510-pilot", "kind": "moved", "outcome": "success",
-            "actor": {"role": "dispatcher"}, "payload": {"to": "assessment"},
-            "occurred_at": same_second,
-        })
+        self.audit.append(
+            "same-second-card-event",
+            {
+                "event_id": "evt_same_second_card",
+                "request_id": "same-second-card-event",
+                "ref": "secretary-510-pilot",
+                "kind": "moved",
+                "outcome": "success",
+                "actor": {"role": "dispatcher"},
+                "payload": {"to": "assessment"},
+                "occurred_at": same_second,
+            },
+        )
 
         result = self.runtime.production_tick()
 
@@ -1890,18 +2053,28 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="first", request_id="first-wake-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="first",
+            request_id="first-wake-event",
         )
         self.runtime.production_tick()
         entry = {
-            "selected_step": "read board", "selected_why": "first event", "rejected_alternatives": "wait",
-            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "wait",
+            "selected_step": "read board",
+            "selected_why": "first event",
+            "rejected_alternatives": "wait",
+            "current_task": "secretary-510-pilot",
+            "dod_state": "open",
+            "next_safe_step": "wait",
         }
         self.acknowledge_delivery(entry, request_id="first-wake-resume")
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="second", request_id="second-wake-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="second",
+            request_id="second-wake-event",
         )
 
         result = self.runtime.production_tick()
@@ -1916,14 +2089,20 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="first", request_id="burst-first",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="first",
+            request_id="burst-first",
         )
         self.runtime.production_tick()
         first_id = self.observers()["sprint:1"].delivery.through_event
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="coalesced", request_id="burst-second",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="coalesced",
+            request_id="burst-second",
         )
         # B lands while the head is still working A's batch.
         self.host.observer_status_result = {"last_activity": time.time(), "idle": False}
@@ -1934,13 +2113,20 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertNotEqual(first_id, second_id)
         self.assertEqual(self.observers()["sprint:1"].delivery.through_event, first_id)
         entry = {
-            "selected_step": "read board", "selected_why": "coalesced burst", "rejected_alternatives": "wait",
-            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "wait",
+            "selected_step": "read board",
+            "selected_why": "coalesced burst",
+            "rejected_alternatives": "wait",
+            "current_task": "secretary-510-pilot",
+            "dod_state": "open",
+            "next_safe_step": "wait",
         }
         self.acknowledge_delivery(entry, request_id="burst-resume")
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="after resume", request_id="after-burst-resume",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="after resume",
+            request_id="after-burst-resume",
         )
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
 
@@ -1958,8 +2144,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         self.kill_observer()
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="replacement needed", request_id="replacement-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="replacement needed",
+            request_id="replacement-event",
         )
         pending_id = self.audit.events()[-1]["event_id"]
 
@@ -1990,8 +2179,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         for request_id in ("burst-one", "burst-two"):
             self.writer.comment(
-                role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-                body=request_id, request_id=request_id,
+                role="dispatcher",
+                actor="dispatcher",
+                reference="secretary-510-pilot",
+                body=request_id,
+                request_id=request_id,
             )
 
         result = self.runtime.production_tick()
@@ -2011,8 +2203,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             batch_events[-1],
         )
         entry = {
-            "selected_step": "read board", "selected_why": "coalesced batch", "rejected_alternatives": "wait",
-            "current_task": "secretary-510-pilot", "dod_state": "open", "next_safe_step": "wait",
+            "selected_step": "read board",
+            "selected_why": "coalesced batch",
+            "rejected_alternatives": "wait",
+            "current_task": "secretary-510-pilot",
+            "dod_state": "open",
+            "next_safe_step": "wait",
         }
         self.acknowledge_delivery(entry, request_id="burst-ack")
 
@@ -2028,14 +2224,19 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "evt_burst-two_semantic",
         )
 
-    def test_persisted_nudge_intent_recovers_after_crash_without_a_duplicate_before_the_deadline(self) -> None:
+    def test_persisted_nudge_intent_recovers_after_crash_without_a_duplicate_before_the_deadline(
+        self,
+    ) -> None:
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="crash boundary", request_id="crash-boundary-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="crash boundary",
+            request_id="crash-boundary-event",
         )
 
         def crash_after_send(record, *, confirm=None) -> None:
@@ -2073,8 +2274,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="retry delivery", request_id="retry-delivery-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="retry delivery",
+            request_id="retry-delivery-event",
         )
         self.host.fail_observer_reason = "terminal transport failed"
 
@@ -2112,11 +2316,19 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
-        self.audit.append("old-event", {
-            "event_id": "evt_old_event", "request_id": "old-event", "ref": "secretary-510-pilot",
-            "kind": "moved", "outcome": "success", "actor": {"role": "dispatcher"},
-            "payload": {"to": "assessment"}, "occurred_at": "2000-01-01T00:00:00Z",
-        })
+        self.audit.append(
+            "old-event",
+            {
+                "event_id": "evt_old_event",
+                "request_id": "old-event",
+                "ref": "secretary-510-pilot",
+                "kind": "moved",
+                "outcome": "success",
+                "actor": {"role": "dispatcher"},
+                "payload": {"to": "assessment"},
+                "occurred_at": "2000-01-01T00:00:00Z",
+            },
+        )
 
         first = self.runtime.production_tick()
         # The head is working the batch. The event it names is decades old, and that alone is
@@ -2135,8 +2347,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="idle-redelivery-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="idle-redelivery-event",
         )
         self.runtime.production_tick()
         delivery = self.observers()["sprint:1"].delivery
@@ -2170,8 +2385,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="mid-sentence-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="mid-sentence-event",
         )
         self.runtime.production_tick()
 
@@ -2185,9 +2403,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         ):
             self.host.observer_status_result = status
             result = self.runtime.production_tick()
-            self.assertEqual(
-                [row["action"] for row in self.actions(result)], ["observer-wake-pending"]
-            )
+            self.assertEqual([row["action"] for row in self.actions(result)], ["observer-wake-pending"])
         self.assertEqual(self.host.observer_nudges, ["sprint:1"])
         self.assertEqual(self.observers()["sprint:1"].delivery.stage, DeliveryStage.AWAITING_ACK)
 
@@ -2197,8 +2413,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time(), "idle": False}
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed while the observer was working", request_id="turn-ceiling-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed while the observer was working",
+            request_id="turn-ceiling-event",
         )
         waiting = self.runtime.production_tick()
         self.assertEqual([row["action"] for row in self.actions(waiting)], ["observer-wake-waiting"])
@@ -2236,8 +2455,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         )
         self.host.observer_status_result = {"last_activity": time.time(), "idle": False}
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="observer-progress-precedence-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="observer-progress-precedence-event",
         )
 
         baseline = self.runtime.production_tick()
@@ -2262,8 +2484,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         old = self.observers()["sprint:1"]
         self.host.observer_status_result = {"last_activity": time.time(), "idle": False}
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="rollout complete", request_id="observer-precontract-unbound-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="rollout complete",
+            request_id="observer-precontract-unbound-event",
         )
         event_id = next(
             event["event_id"]
@@ -2304,9 +2529,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         restored = self.observers()["sprint:1"]
         self.assertEqual(restored.wake_liveness.head_run_id, restored.head_run["run_id"])
         entry = {
-            "selected_step": "read board", "selected_why": "rollout complete",
-            "rejected_alternatives": "wait", "current_task": "secretary-510-pilot",
-            "dod_state": "open", "next_safe_step": "resume",
+            "selected_step": "read board",
+            "selected_why": "rollout complete",
+            "rejected_alternatives": "wait",
+            "current_task": "secretary-510-pilot",
+            "dod_state": "open",
+            "next_safe_step": "resume",
         }
         self.acknowledge_delivery(entry, request_id="observer-precontract-replacement-ack")
         self.host.observer_status_result = {"last_activity": time.time(), "idle": True}
@@ -2329,8 +2557,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "delivery_evidence": {"reason": "payload-left-in-composer"},
         }
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="observer-stalled-composer-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="observer-stalled-composer-event",
         )
 
         self.assertEqual(
@@ -2361,16 +2592,22 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         self.install_observer_provider_source()
         self.host.observer_provider_progress = lambda _record: {  # type: ignore[method-assign]
-            "state": "identity_mismatch", "reason": "foreign observer HeadRun",
+            "state": "identity_mismatch",
+            "reason": "foreign observer HeadRun",
         }
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="observer-foreign-provider-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="observer-foreign-provider-event",
         )
 
         outcome = self.runtime.production_tick()
 
-        self.assertEqual([row["action"] for row in self.actions(outcome)], ["observer-wake-liveness-unavailable"])
+        self.assertEqual(
+            [row["action"] for row in self.actions(outcome)], ["observer-wake-liveness-unavailable"]
+        )
         liveness = self.observers()["sprint:1"].wake_liveness
         self.assertEqual(liveness.state.value, "unknown")
         self.assertTrue(liveness.source_rejected)
@@ -2384,11 +2621,15 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         self.install_observer_provider_source()
         self.host.observer_provider_progress = lambda _record: {  # type: ignore[method-assign]
-            "state": "unavailable", "reason": "bound provider journal cannot be verified",
+            "state": "unavailable",
+            "reason": "bound provider journal cannot be verified",
         }
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="provider journal disappeared", request_id="observer-unavailable-reload-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="provider journal disappeared",
+            request_id="observer-unavailable-reload-event",
         )
 
         unavailable = self.runtime.production_tick()
@@ -2413,7 +2654,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(reloaded.last_provider_observed_at, before_reload.last_provider_observed_at)
         self.assertEqual(reloaded.first_observed_at, before_reload.first_observed_at)
         self.host.observer_provider_progress = lambda record: self.observer_progress(  # type: ignore[method-assign]
-            record, "cursor:must-not-baseline-after-reload",
+            record,
+            "cursor:must-not-baseline-after-reload",
         )
 
         rejected = self.runtime.production_tick()
@@ -2436,8 +2678,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="a long card to work through", request_id="long-turn-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="a long card to work through",
+            request_id="long-turn-event",
         )
         self.runtime.production_tick()
         delivery = self.observers()["sprint:1"].delivery
@@ -2467,8 +2712,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card changed", request_id="redelivery-ack-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed",
+            request_id="redelivery-ack-event",
         )
         self.runtime.production_tick()
         first = self.observers()["sprint:1"].delivery
@@ -2480,15 +2728,22 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(second.through_event, first.through_event)
 
         entry = {
-            "selected_step": "read board", "selected_why": "card changed",
-            "rejected_alternatives": "wait", "current_task": "secretary-510-pilot",
-            "dod_state": "open", "next_safe_step": "resume",
+            "selected_step": "read board",
+            "selected_why": "card changed",
+            "rejected_alternatives": "wait",
+            "current_task": "secretary-510-pilot",
+            "dod_state": "open",
+            "next_safe_step": "resume",
         }
         # The first turn finishes after the second intent was persisted. It names the delivery it
         # was given, which is no longer the active one, so it credits nothing.
         SprintWriter(self.board, data_dir=self.data_dir).resume(  # type: ignore[arg-type]
-            role="observer", actor="observer", reference="sprint:1", entry=entry,
-            request_id="older-turn-resume", delivery_id=first.delivery_id,
+            role="observer",
+            actor="observer",
+            reference="sprint:1",
+            entry=entry,
+            request_id="older-turn-resume",
+            delivery_id=first.delivery_id,
             through_event=first.through_event,
         )
         # The head is working the redelivered batch, so this tick is only about the stale resume.
@@ -2521,10 +2776,17 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(
             [row["action"] for row in self.actions(self.runtime.production_tick())], ["observer-idle"]
         )
-        self.audit.append("routing-only", {
-            "event_id": "evt_routing_only", "request_id": "routing-only", "ref": "secretary-510-pilot",
-            "kind": "routing", "outcome": "success", "occurred_at": "2026-07-29T12:00:00Z",
-        })
+        self.audit.append(
+            "routing-only",
+            {
+                "event_id": "evt_routing_only",
+                "request_id": "routing-only",
+                "ref": "secretary-510-pilot",
+                "kind": "routing",
+                "outcome": "success",
+                "occurred_at": "2026-07-29T12:00:00Z",
+            },
+        )
 
         routing = self.runtime.production_tick()
         self.close_sprint()
@@ -2546,9 +2808,14 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         )
 
         moved = self.writer.move(
-            role="po", actor="operator", reference="secretary-510-pilot", target="issues",
-            reason="return this cut to triage", sprint_override=True,
-            sprint_override_reason="operator removes the parked cut", request_id="po-assessment-issues",
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            target="issues",
+            reason="return this cut to triage",
+            sprint_override=True,
+            sprint_override_reason="operator removes the parked cut",
+            request_id="po-assessment-issues",
         )
         woke = self.runtime.production_tick()
 
@@ -2556,12 +2823,19 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.host.observer_nudges, ["sprint:1"])
         self.assertEqual(self.observers()["sprint:1"].delivery.through_event, moved["event_id"])
 
-        self.audit.append("dispatcher-routine-routing", {
-            "event_id": "evt_dispatcher_routine_routing", "request_id": "dispatcher-routine-routing",
-            "ref": "secretary-510-pilot", "kind": "moved", "outcome": "success",
-            "actor": {"role": "dispatcher", "id": "dispatcher"},
-            "payload": {"from": "validate", "to": "in_progress"}, "occurred_at": _now(),
-        })
+        self.audit.append(
+            "dispatcher-routine-routing",
+            {
+                "event_id": "evt_dispatcher_routine_routing",
+                "request_id": "dispatcher-routine-routing",
+                "ref": "secretary-510-pilot",
+                "kind": "moved",
+                "outcome": "success",
+                "actor": {"role": "dispatcher", "id": "dispatcher"},
+                "payload": {"from": "validate", "to": "in_progress"},
+                "occurred_at": _now(),
+            },
+        )
         self.host.observer_status_result = {"last_activity": time.time(), "idle": False}
         repeated = self.runtime.production_tick()
 
@@ -2580,14 +2854,17 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             ("failed-card-event", "commented", "failed"),
             ("missing-outcome-event", "commented", ""),
         ):
-            self.audit.append(request_id, {
-                "event_id": "evt_" + request_id,
-                "request_id": request_id,
-                "ref": "secretary-510-pilot",
-                "kind": kind,
-                "outcome": outcome,
-                "occurred_at": "2099-01-01T00:00:00Z",
-            })
+            self.audit.append(
+                request_id,
+                {
+                    "event_id": "evt_" + request_id,
+                    "request_id": request_id,
+                    "ref": "secretary-510-pilot",
+                    "kind": kind,
+                    "outcome": outcome,
+                    "occurred_at": "2099-01-01T00:00:00Z",
+                },
+            )
 
         result = self.runtime.production_tick()
 
@@ -2603,11 +2880,19 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             ("semantic-assessment", "moved", {"to": "assessment"}),
             ("legacy-active-noise", "routing", {}),
         ):
-            self.audit.append(request, {
-                "event_id": "evt_" + request, "request_id": request,
-                "ref": "secretary-510-pilot", "kind": kind, "outcome": "success",
-                "actor": {"role": "dispatcher"}, "payload": payload, "occurred_at": _now(),
-            })
+            self.audit.append(
+                request,
+                {
+                    "event_id": "evt_" + request,
+                    "request_id": request,
+                    "ref": "secretary-510-pilot",
+                    "kind": kind,
+                    "outcome": "success",
+                    "actor": {"role": "dispatcher"},
+                    "payload": payload,
+                    "occurred_at": _now(),
+                },
+            )
         payload = self.runtime.production_state.load()
         observers = load_observers(payload)
         delivery = observers["sprint:1"].delivery
@@ -2719,8 +3004,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         for task in self.board.tasks:
             task["column_id"] = 6
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="card entered assessment", request_id="single-audit-snapshot-event",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card entered assessment",
+            request_id="single-audit-snapshot-event",
         )
         real_events = TaskAudit.events
         calls: list[TaskAudit] = []
@@ -2733,17 +3021,25 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             self.host.observer_nudges.append(str(record.sprint))
             return "accepted"
 
-        with mock.patch.object(TaskAudit, "events", new=counted), mock.patch.object(
-            self.host, "nudge_observer", side_effect=accept_while_ready,
-        ), mock.patch(
-            "secretary.dispatcher_production._reconcile_sprint_budget", return_value=[],
+        with (
+            mock.patch.object(TaskAudit, "events", new=counted),
+            mock.patch.object(
+                self.host,
+                "nudge_observer",
+                side_effect=accept_while_ready,
+            ),
+            mock.patch(
+                "secretary.dispatcher_production._reconcile_sprint_budget",
+                return_value=[],
+            ),
         ):
             result = self.runtime.production_tick()
 
         self.assertEqual([row["action"] for row in self.actions(result)], ["observer-nudged"])
         self.assertEqual(len(calls), 1)
         self.assertEqual(
-            self.observers()["sprint:1"].delivery.stage, DeliveryStage.AWAITING_ACK,
+            self.observers()["sprint:1"].delivery.stage,
+            DeliveryStage.AWAITING_ACK,
         )
 
     def test_rotated_observer_handle_is_still_probed_for_readiness(self) -> None:
@@ -2759,10 +3055,16 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         def run_json(args: list[str]) -> dict:
             calls.append(args)
             if args[1:3] == ["terminal", "list"]:
-                return {"terminals": [{
-                    "handle": "observer:rotated", "leafId": record.leaf,
-                    "connected": True, "lastOutputAt": stale_output,
-                }]}
+                return {
+                    "terminals": [
+                        {
+                            "handle": "observer:rotated",
+                            "leafId": record.leaf,
+                            "connected": True,
+                            "lastOutputAt": stale_output,
+                        }
+                    ]
+                }
             if args[1:3] == ["terminal", "wait"]:
                 return {"wait": {"condition": "tui-idle", "satisfied": True}}
             raise AssertionError(args)
@@ -2845,8 +3147,14 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(
             [event["kind"] for event in events],
             [
-                EVENT_FENCED, EVENT_LAUNCHED, EVENT_CLEARED, EVENT_STOPPED,
-                EVENT_FENCED, EVENT_LAUNCHED, EVENT_CLEARED, EVENT_STOPPED,
+                EVENT_FENCED,
+                EVENT_LAUNCHED,
+                EVENT_CLEARED,
+                EVENT_STOPPED,
+                EVENT_FENCED,
+                EVENT_LAUNCHED,
+                EVENT_CLEARED,
+                EVENT_STOPPED,
             ],
         )
         # The second lifecycle is its own request, not a retry of the first one.
@@ -2864,12 +3172,18 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def test_budget_is_charged_from_card_events_once_and_hard_limit_stops_observer(self) -> None:
         self.catalog.instance = {"sprint_budget": {"signal": 1, "hard": 2}}
-        self.runtime.sprints = SprintReader(self.board, data_dir=self.data_dir, thresholds={"signal": 1, "hard": 2})  # type: ignore[arg-type]
+        self.runtime.sprints = SprintReader(
+            self.board, data_dir=self.data_dir, thresholds={"signal": 1, "hard": 2}
+        )  # type: ignore[arg-type]
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.writer.verdict(
-            role="reviewer", actor="reviewer", reference="secretary-510-pilot", kind="red",
-            body="fix it", request_id="red-review",
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="red",
+            body="fix it",
+            request_id="red-review",
         )
         first = self.runtime.production_tick()
         self.assertEqual(self.runtime.sprints.show("sprint:1")["budget"]["total"], 1)
@@ -2879,17 +3193,21 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.runtime.sprints.show("sprint:1")["budget"]["total"], 1)
         self.assertEqual([row for row in repeated["actions"] if row.get("step") == "sprint-budget"], [])
         self.writer.move(
-            role="po", actor="operator", reference="secretary-510-pilot", target="blocked",
-            reason="operator stop", sprint_override=True,
-            sprint_override_reason="operator stop", request_id="blocked-card",
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            target="blocked",
+            reason="operator stop",
+            sprint_override=True,
+            sprint_override_reason="operator stop",
+            request_id="blocked-card",
         )
         result = self.runtime.production_tick()
         sprint = self.runtime.sprints.show("sprint:1")
         self.assertEqual(sprint["status"], "stopped")
         self.assertEqual(sprint["budget"]["by_type"]["blocked"], 1)
         hard_stop_events = [
-            event for event in self.audit.events("sprint:1")
-            if event.get("kind") == "budget_hard_stopped"
+            event for event in self.audit.events("sprint:1") if event.get("kind") == "budget_hard_stopped"
         ]
         self.assertEqual(len(hard_stop_events), 1)
         self.assertEqual(hard_stop_events[0]["payload"]["reason"], "budget_hard_limit")
@@ -2898,12 +3216,18 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def test_an_infrastructure_block_is_recorded_on_the_sprint_without_charging_it(self) -> None:
         """End to end: the tick reads the class off the transition and counts it apart."""
         self.catalog.instance = {"sprint_budget": {"signal": 1, "hard": 2}}
-        self.runtime.sprints = SprintReader(self.board, data_dir=self.data_dir, thresholds={"signal": 1, "hard": 2})  # type: ignore[arg-type]
+        self.runtime.sprints = SprintReader(
+            self.board, data_dir=self.data_dir, thresholds={"signal": 1, "hard": 2}
+        )  # type: ignore[arg-type]
         self.open_sprint()
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
         self.writer.move(
-            role="po", actor="operator", reference="secretary-510-pilot", target="blocked",
-            reason="the worker head never came up", sprint_override=True,
+            role="po",
+            actor="operator",
+            reference="secretary-510-pilot",
+            target="blocked",
+            reason="the worker head never came up",
+            sprint_override=True,
             sprint_override_reason="the worker head never came up",
             request_id=infrastructure_action("dispatcher-attempt-1-bringup-blocked"),
         )
@@ -2914,7 +3238,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(sprint["budget"]["total"], 0)
         self.assertEqual(sprint["budget"]["by_type"]["blocked"], 0)
         self.assertEqual(
-            sprint["budget"]["uncharged"], {BUDGET_UNCHARGED_INFRASTRUCTURE: 1},
+            sprint["budget"]["uncharged"],
+            {BUDGET_UNCHARGED_INFRASTRUCTURE: 1},
         )
         self.assertFalse(sprint["budget"]["signal_reached"])
         self.assertEqual(sprint["status"], "open")
@@ -2930,7 +3255,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "recreated_task": {"kind": "created", "payload": {"budget_event": "recreated_task"}},
             "hotfix": {"kind": "created", "payload": {"budget_event": "hotfix"}},
         }
-        self.assertEqual({name: _budget_event_type(event) for name, event in cases.items()}, {name: name for name in cases})
+        self.assertEqual(
+            {name: _budget_event_type(event) for name, event in cases.items()}, {name: name for name in cases}
+        )
         self.assertIsNone(_budget_event_type({"kind": "verdict", "payload": {"marker": "review:green"}}))
         self.assertIsNone(_budget_event_type({"kind": "moved", "payload": {"to": "done"}}))
 
@@ -2947,7 +3274,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             "",
         )
         uncharged = tuple(
-            infrastructure_action(action) for action in (
+            infrastructure_action(action)
+            for action in (
                 "dispatcher-attempt-1-bringup-blocked",
                 "dispatcher-attempt-1-worker-respawn-blocked",
                 "dispatcher-attempt-1-rework-blocked",
@@ -2965,10 +3293,13 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         )
         # The other budget-shaped events keep their type whatever the request id spells.
         self.assertEqual(
-            _budget_event_type({
-                "kind": "moved", "payload": {"from": "validate", "to": "ready"},
-                "request_id": uncharged[0],
-            }),
+            _budget_event_type(
+                {
+                    "kind": "moved",
+                    "payload": {"from": "validate", "to": "ready"},
+                    "request_id": uncharged[0],
+                }
+            ),
             "preempt",
         )
 
@@ -2977,20 +3308,35 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.board.metadata[12]["sprint_ref"] = "sprint:1"
 
         self.writer.claim(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            worker="worker", request_id="green-claim",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            worker="worker",
+            request_id="green-claim",
         )
         self.writer.move(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            target="validate", reason="worker completed", request_id="green-validate",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            target="validate",
+            reason="worker completed",
+            request_id="green-validate",
         )
         self.writer.verdict(
-            role="reviewer", actor="reviewer", reference="secretary-510-pilot",
-            kind="green", body="looks good", request_id="green-verdict",
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="green",
+            body="looks good",
+            request_id="green-verdict",
         )
         self.writer.move(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            target="done", reason="review passed", request_id="green-done",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            target="done",
+            reason="review passed",
+            request_id="green-done",
         )
 
         result = self.runtime.production_tick()
@@ -3002,34 +3348,51 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         for index in range(20):
             task_id = 1000 + index
             reference = f"secretary-historical-{index}"
-            self.board.tasks.append({
-                "id": task_id, "reference": reference, "title": reference, "description": "",
-                "column_id": 2, "position": task_id, "swimlane_id": 4,
-                "date_creation": 1720000000, "date_modification": 1720000000,
-            })
+            self.board.tasks.append(
+                {
+                    "id": task_id,
+                    "reference": reference,
+                    "title": reference,
+                    "description": "",
+                    "column_id": 2,
+                    "position": task_id,
+                    "swimlane_id": 4,
+                    "date_creation": 1720000000,
+                    "date_modification": 1720000000,
+                }
+            )
             self.board.metadata[task_id] = {"project": "secretary", "task_type": "code"}
             self.board.comments[task_id] = []
-            self.audit.append(f"historical-red-{index}", {
-                "event_id": f"evt_historical_red_{index}", "request_id": f"historical-red-{index}",
-                "ref": reference, "kind": "verdict", "occurred_at": "2026-07-27T00:00:00Z",
-                "payload": {"marker": "review:red"},
-            })
+            self.audit.append(
+                f"historical-red-{index}",
+                {
+                    "event_id": f"evt_historical_red_{index}",
+                    "request_id": f"historical-red-{index}",
+                    "ref": reference,
+                    "kind": "verdict",
+                    "occurred_at": "2026-07-27T00:00:00Z",
+                    "payload": {"marker": "review:red"},
+                },
+            )
 
         self.board.calls.clear()
         self.assertEqual(_reconcile_sprint_budget(self.runtime), [])
         first_reads = [
-            params for method, params in self.board.calls
+            params
+            for method, params in self.board.calls
             if method == "getTaskByReference" and params.get("project_id") == 7
         ]
         self.assertEqual(len(first_reads), 20)
         self.assertEqual(
-            len([event for event in self.audit.events() if event.get("kind") == "budget_unlinked"]), 20,
+            len([event for event in self.audit.events() if event.get("kind") == "budget_unlinked"]),
+            20,
         )
 
         self.board.calls.clear()
         self.assertEqual(_reconcile_sprint_budget(self.runtime), [])
         repeated_reads = [
-            params for method, params in self.board.calls
+            params
+            for method, params in self.board.calls
             if method == "getTaskByReference" and params.get("project_id") == 7
         ]
         self.assertEqual(repeated_reads, [])
@@ -3040,11 +3403,15 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             {"ref": "broken-2", "sprint": "sprint:broken", "type": "code", "project": "two"},
             {"ref": "claimable", "sprint": None, "type": "code", "project": "three"},
         ]
-        with mock.patch("secretary.dispatcher_production._production_tasks", side_effect=[[], ready]), \
-             mock.patch.object(
-                 self.runtime.sprints, "show", side_effect=TaskError("backend_error", "sprint board is down", 1)
-             ) as show, \
-             mock.patch.object(self.runtime, "_claim", return_value={"action": "claimed"}) as claim:
+        with (
+            mock.patch("secretary.dispatcher_production._production_tasks", side_effect=[[], ready]),
+            mock.patch.object(
+                self.runtime.sprints,
+                "show",
+                side_effect=TaskError("backend_error", "sprint board is down", 1),
+            ) as show,
+            mock.patch.object(self.runtime, "_claim", return_value={"action": "claimed"}) as claim,
+        ):
             result = _production_claim_ready(self.runtime, {}, {})
 
         self.assertEqual(show.call_count, 1)
@@ -3061,9 +3428,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         with mock.patch.object(self.runtime.sprints, "list", explode):
             result = self.runtime.production_tick()
 
-        self.assertEqual(
-            [action["action"] for action in self.actions(result)], ["sprint-board-unavailable"]
-        )
+        self.assertEqual([action["action"] for action in self.actions(result)], ["sprint-board-unavailable"])
         self.assertEqual(self.host.stopped_observers, [])
         self.assertIn("sprint:1", self.observers())
 
@@ -3075,9 +3440,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         result = self.runtime.production_tick()
 
-        self.assertEqual(
-            [action["action"] for action in self.actions(result)], ["observer-stop-failed"]
-        )
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-stop-failed"])
         record = self.observers()["sprint:1"]
         self.assertEqual(record.state, "stop-pending")
         self.assertEqual(record.handle, "observer:sprint:1")
@@ -3090,9 +3453,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.host.fail_stop_observer_reason = ""
         retry = self.runtime.production_tick()
 
-        self.assertEqual(
-            [action["action"] for action in self.actions(retry)], ["observer-stopped"]
-        )
+        self.assertEqual([action["action"] for action in self.actions(retry)], ["observer-stopped"])
         self.assertEqual(self.observers(), {})
         self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
         self.assertEqual(
@@ -3132,9 +3493,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         result = self.runtime.production_tick()
 
-        self.assertEqual(
-            [action["action"] for action in self.actions(result)], ["observer-launch-deferred"]
-        )
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launch-deferred"])
         self.assertEqual(self.host.observers, ["sprint:1"])
         record = self.observers()["sprint:1"]
         self.assertEqual(record.launches, 1)
@@ -3156,9 +3515,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         result = self.runtime.production_tick()
 
-        self.assertEqual(
-            [action["action"] for action in self.actions(result)], ["observer-launch-deferred"]
-        )
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launch-deferred"])
         record = self.observers()["sprint:1"]
         self.assertEqual(record.handle, "observer:sprint:1")
         self.assertTrue(record.abandoned_handle)
@@ -3188,9 +3545,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         # Not "observer-live": the pid behind that handle belongs to a head that never got its
         # sprint. The tick retries the close and brings nothing new up until it succeeds.
-        self.assertEqual(
-            [action["action"] for action in self.actions(result)], ["observer-launch-deferred"]
-        )
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launch-deferred"])
         self.assertEqual(self.host.calls.count("prepare_observer"), 1)
         self.assertEqual(self.host.observers, [])
         record = self.observers()["sprint:1"]
@@ -3279,7 +3634,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             [EVENT_FENCED, EVENT_DEFERRED],
         )
         # The same reason has to be readable from outside, or the sprint just looks headless.
-        self.assertIn("observe-sprint", status_observers(self.runtime.production_state.load())[0]["deferred_reason"])
+        self.assertIn(
+            "observe-sprint", status_observers(self.runtime.production_state.load())[0]["deferred_reason"]
+        )
 
     def test_a_delivered_skill_launches_after_the_deferred_retry_deadline(self) -> None:
         self.observer_skill.unlink()
@@ -3369,7 +3726,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         repeated = self.runtime.production_tick()
 
-        self.assertEqual([action["action"] for action in self.actions(repeated)], ["observer-launch-deferred"])
+        self.assertEqual(
+            [action["action"] for action in self.actions(repeated)], ["observer-launch-deferred"]
+        )
         self.assertEqual(self.host.calls.count("prepare_observer"), 1)
         record = self.observers()["sprint:1"]
         self.assertEqual(record.launch_attempts, 1)
@@ -3379,6 +3738,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def broken_append(self):
         """Audit storage that takes a staged event but refuses to commit it."""
+
         def explode(_request_id, _event):
             raise OSError("audit log is not writable")
 
@@ -3386,6 +3746,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
     def broken_stage(self):
         """Audit storage that cannot even take the staged event."""
+
         def explode(_request_id, _event):
             raise OSError("pending audit directory is not writable")
 
@@ -3407,9 +3768,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertTrue(record.handle)
         # The event is not lost: it waits on disk for the repair pass.
         pending = self.audit.pending_events()
-        self.assertEqual(
-            sorted(event["kind"] for event in pending), sorted([EVENT_FENCED, EVENT_LAUNCHED])
-        )
+        self.assertEqual(sorted(event["kind"] for event in pending), sorted([EVENT_FENCED, EVENT_LAUNCHED]))
         launched = next(event for event in pending if event["kind"] == EVENT_LAUNCHED)
         self.assertEqual(launched["payload"]["workspace"], record.workspace)
         self.audit.reconcile()
@@ -3438,9 +3797,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         with self.broken_stage():
             result = self.runtime.production_tick()
 
-        self.assertEqual(
-            [action["action"] for action in self.actions(result)], ["observer-launch-deferred"]
-        )
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launch-deferred"])
         self.assertEqual(self.host.observers, [])
         record = self.observers()["sprint:1"]
         self.assertEqual(record.launches, 0)
@@ -3482,12 +3839,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         # The second pass reached the observer instead of dying at the fence, and it wrote no
         # second fence event: one episode, one durable line, one request id.
-        self.assertEqual(
-            [action["action"] for action in self.actions(result)], ["observer-launch-deferred"]
-        )
-        fenced = [
-            event for event in self.audit.events("sprint:1") if event["kind"] == EVENT_FENCED
-        ]
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launch-deferred"])
+        fenced = [event for event in self.audit.events("sprint:1") if event["kind"] == EVENT_FENCED]
         self.assertEqual(len(fenced), 1)
 
     # crash-safe launch intent ------------------------------------------------
@@ -3627,9 +3980,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.observers()["sprint:1"].state, "launching")
 
         actions = [
-            action["action"]
-            for _ in range(3)
-            for action in self.actions(self.runtime.production_tick())
+            action["action"] for _ in range(3) for action in self.actions(self.runtime.production_tick())
         ]
 
         self.assertEqual(actions, ["observer-adopted", "observer-live", "observer-live"])
@@ -3654,9 +4005,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             self.runtime.production_tick()
         self.runtime.production_tick()
 
-        status = self.runtime.pause_pipeline(
-            mode="freeze", actor="operator", reason="host maintenance"
-        )
+        status = self.runtime.pause_pipeline(mode="freeze", actor="operator", reason="host maintenance")
 
         self.assertEqual(status["stopped_observer"], ["sprint:1"])
         self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
@@ -3672,9 +4021,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.host.observer_pid = os.getpid()
         result = self.runtime.production_tick()
 
-        self.assertEqual(
-            [action["action"] for action in self.actions(result)], ["observer-relaunched"]
-        )
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-relaunched"])
         # Whatever the lost tick opened is closed before the replacement head opens.
         self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
         self.assertEqual(self.host.observers, ["sprint:1", "sprint:1"])
@@ -3727,9 +4074,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         result = self.runtime.production_tick()
 
-        self.assertEqual(
-            [action["action"] for action in self.actions(result)], ["observer-launch-pending"]
-        )
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-launch-pending"])
         self.assertNotIn("prepare_observer", self.host.calls)
         self.assertNotIn("stop_observer", self.host.calls)
         intent = self.observers()["sprint:1"]
@@ -3749,9 +4094,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         waiting = self.runtime.production_tick()
 
-        self.assertEqual(
-            [action["action"] for action in self.actions(waiting)], ["observer-launch-pending"]
-        )
+        self.assertEqual([action["action"] for action in self.actions(waiting)], ["observer-launch-pending"])
 
         pid_file.write_text(written, encoding="utf-8")
         result = self.runtime.production_tick()
@@ -3794,9 +4137,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         with self.broken_stage():
             result = self.runtime.production_tick()
 
-        self.assertEqual(
-            [action["action"] for action in self.actions(result)], ["observer-stop-failed"]
-        )
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-stop-failed"])
         self.assertEqual(self.host.stopped_observers, [])
         record = self.observers()["sprint:1"]
         self.assertEqual(record.state, "stop-pending")
@@ -3831,9 +4172,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
 
         with self.broken_append():
-            status = self.runtime.pause_pipeline(
-                mode="freeze", actor="operator", reason="host maintenance"
-            )
+            status = self.runtime.pause_pipeline(mode="freeze", actor="operator", reason="host maintenance")
 
         self.assertEqual(status["stopped_observer"], ["sprint:1"])
         self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
@@ -3847,9 +4186,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
 
         with self.broken_stage():
-            status = self.runtime.pause_pipeline(
-                mode="freeze", actor="operator", reason="host maintenance"
-            )
+            status = self.runtime.pause_pipeline(mode="freeze", actor="operator", reason="host maintenance")
 
         self.assertEqual(status["stopped_observer"], [])
         self.assertEqual(self.host.stopped_observers, [])
@@ -3859,9 +4196,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         result = self.runtime.production_tick()
 
-        self.assertEqual(
-            [row["action"] for row in result["observer_stops"]], ["observer-stopped-by-pause"]
-        )
+        self.assertEqual([row["action"] for row in result["observer_stops"]], ["observer-stopped-by-pause"])
         self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
 
     # pause -------------------------------------------------------------------
@@ -3870,9 +4205,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.open_sprint()
         self.runtime.production_tick()
 
-        status = self.runtime.pause_pipeline(
-            mode="freeze", actor="operator", reason="host maintenance"
-        )
+        status = self.runtime.pause_pipeline(mode="freeze", actor="operator", reason="host maintenance")
 
         self.assertEqual(status["stopped_observer"], ["sprint:1"])
         self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
@@ -3887,9 +4220,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.runtime.production_tick()
         self.host.fail_stop_observer_reason = "orca refused to close the pane"
 
-        status = self.runtime.pause_pipeline(
-            mode="freeze", actor="operator", reason="host maintenance"
-        )
+        status = self.runtime.pause_pipeline(mode="freeze", actor="operator", reason="host maintenance")
 
         self.assertEqual(status["stopped_observer"], [])
         self.assertTrue(any("sprint:1" in warning for warning in status["warnings"]))
@@ -3904,9 +4235,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.host.fail_stop_observer_reason = ""
         result = self.runtime.production_tick()
 
-        self.assertEqual(
-            [row["action"] for row in result["observer_stops"]], ["observer-stopped-by-pause"]
-        )
+        self.assertEqual([row["action"] for row in result["observer_stops"]], ["observer-stopped-by-pause"])
         record = self.observers()["sprint:1"]
         self.assertEqual(record.state, "stopped-by-pause")
         self.assertEqual(record.handle, "")
@@ -4087,7 +4416,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def open_disjoint_pair(self, *, second_observer=None) -> None:
         """The admitted pair, with one card in each of the four reserved projects."""
         self.sprint_writer = self.admit_two_open_sprints(
-            observer=head_choice("codex-observer"), second_observer=second_observer,
+            observer=head_choice("codex-observer"),
+            second_observer=second_observer,
         )
         self.link_pair_cards()
 
@@ -4109,7 +4439,8 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         """Both heads up and one card of each sprint claimed, one claim per tick."""
         self.observed_pair()
         self.assertEqual(
-            self.claimed(self.runtime.production_tick())[0]["pilot_ref"], "secretary-510-neighbor",
+            self.claimed(self.runtime.production_tick())[0]["pilot_ref"],
+            "secretary-510-neighbor",
         )
 
     def budget_of(self, reference: str) -> dict:
@@ -4118,9 +4449,14 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
     def charge(self, reference: str, request_id: str) -> None:
         """Put one budget-shaped card event on the board card of `reference`'s sprint."""
         self.writer.move(
-            role="po", actor="operator", reference=reference, target="blocked",
-            reason="operator stop", sprint_override=True,
-            sprint_override_reason="operator stop", request_id=request_id,
+            role="po",
+            actor="operator",
+            reference=reference,
+            target="blocked",
+            reason="operator stop",
+            sprint_override=True,
+            sprint_override_reason="operator stop",
+            request_id=request_id,
         )
 
     def claimed(self, result: dict) -> list[dict]:
@@ -4133,14 +4469,14 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         return []
 
     def advanced(self, result: dict) -> list[str]:
-        return [
-            action["pilot_ref"] for action in result["actions"] if action["step"] == "advance"
-        ]
+        return [action["pilot_ref"] for action in result["actions"] if action["step"] == "advance"]
 
     def with_thresholds(self, signal: int, hard: int) -> None:
         self.catalog.instance = {"sprint_budget": {"signal": signal, "hard": hard}}
         self.runtime.sprints = SprintReader(  # type: ignore[arg-type]
-            self.board, data_dir=self.data_dir, thresholds={"signal": signal, "hard": hard},
+            self.board,
+            data_dir=self.data_dir,
+            thresholds={"signal": signal, "hard": hard},
         )
 
     def settled_pair(self) -> None:
@@ -4151,18 +4487,24 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         """
         self.open_disjoint_pair()
         self.assertEqual(
-            self.claimed(self.runtime.production_tick())[0]["pilot_ref"], "secretary-510-neighbor",
+            self.claimed(self.runtime.production_tick())[0]["pilot_ref"],
+            "secretary-510-neighbor",
         )
         self.assertEqual(
-            self.claimed(self.runtime.production_tick())[0]["pilot_ref"], "secretary-510-pilot",
+            self.claimed(self.runtime.production_tick())[0]["pilot_ref"],
+            "secretary-510-pilot",
         )
 
     def test_a_card_event_charges_the_sprint_it_is_linked_to_and_no_other(self) -> None:
         self.with_thresholds(1, 3)
         self.settled_pair()
         self.writer.verdict(
-            role="reviewer", actor="reviewer", reference="secretary-510-pilot", kind="red",
-            body="fix it", request_id="red-review-first-sprint",
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="red",
+            body="fix it",
+            request_id="red-review-first-sprint",
         )
 
         result = self.runtime.production_tick()
@@ -4184,26 +4526,38 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.with_thresholds(1, 6)
         self.open_disjoint_pair()
         self.assertEqual(
-            self.claimed(self.runtime.production_tick())[0]["pilot_ref"], "secretary-510-neighbor",
+            self.claimed(self.runtime.production_tick())[0]["pilot_ref"],
+            "secretary-510-neighbor",
         )
         # Through the command in the checkout: that id is what attributes the report to the round
         # the dispatcher is waiting for (secretary-1063).
-        workspace = (self.runtime.production_state.load()["records"]
-                     ["secretary-510-neighbor"]["workspace"])
+        workspace = self.runtime.production_state.load()["records"]["secretary-510-neighbor"]["workspace"]
         document = (Path(workspace) / "TASK.md").read_text(encoding="utf-8")
-        done_command = next(
-            line for line in document.splitlines() if "--kind done" in line
-        )
+        done_command = next(line for line in document.splitlines() if "--kind done" in line)
         self.writer.report(
-            role="worker", actor="worker", reference="secretary-510-neighbor", kind="done",
+            role="worker",
+            actor="worker",
+            reference="secretary-510-neighbor",
+            kind="done",
             body="ready for validation",
             request_id=done_command.split("--request-id ", 1)[1].split()[0],
         )
         self.assertEqual(self.runtime.production_tick()["status"], "ok")  # moved to validate
-        self.assertIn("review-started", [action["action"] for action in self.runtime.production_tick()["actions"] if action["step"] == "review"])
+        self.assertIn(
+            "review-started",
+            [
+                action["action"]
+                for action in self.runtime.production_tick()["actions"]
+                if action["step"] == "review"
+            ],
+        )
         self.writer.verdict(
-            role="reviewer", actor="reviewer", reference="secretary-510-neighbor", kind="red",
-            body="needs work", request_id="rework-red-verdict",
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-neighbor",
+            kind="red",
+            body="needs work",
+            request_id="rework-red-verdict",
         )
 
         result = self.runtime.production_tick()
@@ -4228,8 +4582,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.with_thresholds(1, 2)
         self.settled_pair()
         self.writer.verdict(
-            role="reviewer", actor="reviewer", reference="secretary-510-pilot", kind="red",
-            body="fix it", request_id="red-first-sprint",
+            role="reviewer",
+            actor="reviewer",
+            reference="secretary-510-pilot",
+            kind="red",
+            body="fix it",
+            request_id="red-first-sprint",
         )
         self.charge("secretary-510-pilot", "blocked-first-sprint")
 
@@ -4240,10 +4598,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.budget_of("sprint:1")["total"], 2)
         self.assertEqual(self.budget_of("sprint:2")["total"], 0)
         self.assertEqual(
-            [
-                event["ref"] for event in self.audit.events()
-                if event["kind"] == "budget_hard_stopped"
-            ],
+            [event["ref"] for event in self.audit.events() if event["kind"] == "budget_hard_stopped"],
             ["sprint:1"],
         )
         # The stopped sprint's head is stopped and its remaining Ready card is left alone; the
@@ -4266,7 +4621,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             [card["ref"] for card in self.runtime.sprints.show(self.FIRST)["cards"]],
         )
         self.sprint_writer.close(
-            role="po", actor="operator", reference=self.FIRST,
+            role="po",
+            actor="operator",
+            reference=self.FIRST,
             decisions=close_decisions(self.sprint_writer, self.FIRST),
         )
         result = self.runtime.production_tick()
@@ -4292,7 +4649,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             [card["ref"] for card in self.runtime.sprints.show(self.SECOND)["cards"]],
         )
         self.sprint_writer.close(
-            role="po", actor="operator", reference=self.SECOND,
+            role="po",
+            actor="operator",
+            reference=self.SECOND,
             decisions=close_decisions(self.sprint_writer, self.SECOND),
         )
         result = self.runtime.production_tick()
@@ -4322,9 +4681,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         self.assertEqual(sorted(self.host.observers), [self.FIRST, self.SECOND])
         self.assertEqual(
-            sorted(
-                identity[OBSERVER_SPRINT_ENV] for identity in self.host.observer_identities
-            ),
+            sorted(identity[OBSERVER_SPRINT_ENV] for identity in self.host.observer_identities),
             [self.FIRST, self.SECOND],
         )
         # One generation per head, and the record of each sprint carries its own.
@@ -4341,15 +4698,19 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertNotEqual(records[self.FIRST].workspace, records[self.SECOND].workspace)
         self.assertNotEqual(records[self.FIRST].handle, records[self.SECOND].handle)
         self.assertEqual(
-            {action["sprint"] for action in self.actions(result)}, {self.FIRST, self.SECOND},
+            {action["sprint"] for action in self.actions(result)},
+            {self.FIRST, self.SECOND},
         )
 
     def test_each_head_is_woken_only_by_the_card_events_of_its_own_sprint(self) -> None:
         """One tick, one event per sprint, two deliveries that never touch each other."""
         self.observed_pair()
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
-            body="the first sprint's card changed", request_id="event-of-first-sprint",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="the first sprint's card changed",
+            request_id="event-of-first-sprint",
         )
 
         first = self.runtime.production_tick()
@@ -4367,8 +4728,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(records[self.SECOND].delivery.through_event, "")
 
         self.writer.comment(
-            role="dispatcher", actor="dispatcher", reference="secretary-510-neighbor",
-            body="the second sprint's card changed", request_id="event-of-second-sprint",
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-neighbor",
+            body="the second sprint's card changed",
+            request_id="event-of-second-sprint",
         )
 
         second = self.runtime.production_tick()
@@ -4382,10 +4746,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         )
         records = self.observers()
         self.assertNotEqual(
-            records[self.FIRST].delivery.delivery_id, records[self.SECOND].delivery.delivery_id,
+            records[self.FIRST].delivery.delivery_id,
+            records[self.SECOND].delivery.delivery_id,
         )
         self.assertNotEqual(
-            records[self.FIRST].delivery.through_event, records[self.SECOND].delivery.through_event,
+            records[self.FIRST].delivery.through_event,
+            records[self.SECOND].delivery.through_event,
         )
 
     def test_one_heads_acknowledgement_does_not_clear_the_others_delivery(self) -> None:
@@ -4396,8 +4762,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             ("secretary-510-neighbor", "second changed", "cursor-event-second"),
         ):
             self.writer.comment(
-                role="dispatcher", actor="dispatcher", reference=reference,
-                body=body, request_id=request,
+                role="dispatcher",
+                actor="dispatcher",
+                reference=reference,
+                body=body,
+                request_id=request,
             )
         self.runtime.production_tick()
         self.assertEqual(sorted(self.host.observer_nudges), [self.FIRST, self.SECOND])
@@ -4405,9 +4774,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         self.acknowledge_delivery(
             {
-                "selected_step": "read the board", "selected_why": "a card changed",
-                "rejected_alternatives": "wait", "current_task": "secretary-510-pilot",
-                "dod_state": "open", "next_safe_step": "resume",
+                "selected_step": "read the board",
+                "selected_why": "a card changed",
+                "rejected_alternatives": "wait",
+                "current_task": "secretary-510-pilot",
+                "dod_state": "open",
+                "next_safe_step": "resume",
             },
             request_id="ack-of-first-sprint",
             reference=self.FIRST,
@@ -4448,8 +4820,12 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.claimed(result)[0]["pilot_ref"], "third-1")
         self.assertEqual(
             self.skipped(result),
-            [{"ref": "fourth-1", "reason": "the sprint holding this project has no working "
-                                           "declared observer"}],
+            [
+                {
+                    "ref": "fourth-1",
+                    "reason": "the sprint holding this project has no working declared observer",
+                }
+            ],
         )
         self.assertEqual(self.reader.show("fourth-1")["state"], "ready")
         self.assertEqual(self.reader.show("third-1")["state"], "in_progress")
@@ -4474,8 +4850,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             ("secretary-510-neighbor", "hung-event-second"),
         ):
             self.writer.comment(
-                role="dispatcher", actor="dispatcher", reference=reference,
-                body="card changed", request_id=request,
+                role="dispatcher",
+                actor="dispatcher",
+                reference=reference,
+                body="card changed",
+                request_id=request,
             )
         nudge = self.host.nudge_observer
         self.host.observer_nudges.clear()
@@ -4485,9 +4864,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
                 raise HostError("the pane never took the prompt")
             return nudge(record)
 
-        with mock.patch.object(
-            self.host, "nudge_observer", side_effect=refuse_the_first_sprints_wake
-        ):
+        with mock.patch.object(self.host, "nudge_observer", side_effect=refuse_the_first_sprints_wake):
             result = self.runtime.production_tick()
 
         self.assertEqual(
@@ -4500,12 +4877,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(records[self.SECOND].delivery.stage, DeliveryStage.AWAITING_ACK)
         # A deferred wake is not a fence: both sprints keep advancing and claiming.
         self.assertEqual(
-            [action for action in result["actions"] if action["step"] == "observer-fence"], [],
+            [action for action in result["actions"] if action["step"] == "observer-fence"],
+            [],
         )
         self.assertEqual(
-            sorted(
-                action["pilot_ref"] for action in result["actions"] if action["step"] == "advance"
-            ),
+            sorted(action["pilot_ref"] for action in result["actions"] if action["step"] == "advance"),
             ["secretary-510-neighbor", "secretary-510-pilot"],
         )
 
@@ -4579,10 +4955,12 @@ class ObserverConfigurationTests(unittest.TestCase):
         self.assertEqual(observer_binding("sprint:1126", ""), {})
         self.assertEqual(observer_binding("", "abc123"), {})
         self.assertEqual(
-            declared_observer_sprint({OBSERVER_SPRINT_ENV: "sprint:1126"}), "",
+            declared_observer_sprint({OBSERVER_SPRINT_ENV: "sprint:1126"}),
+            "",
         )
         self.assertEqual(
-            declared_observer_sprint(observer_binding("sprint:1126", "abc123")), "sprint:1126",
+            declared_observer_sprint(observer_binding("sprint:1126", "abc123")),
+            "sprint:1126",
         )
 
     def test_the_prompt_is_rendered_from_the_live_sprint(self) -> None:
@@ -4624,7 +5002,11 @@ class ObserverConfigurationTests(unittest.TestCase):
         )
         canonical = (
             Path(__file__).resolve().parents[1]
-            / "skills" / "roles" / "observer" / "observe-sprint" / "SKILL.md"
+            / "skills"
+            / "roles"
+            / "observer"
+            / "observe-sprint"
+            / "SKILL.md"
         ).read_text(encoding="utf-8")
 
         # Every heading the skill owns is a section the prompt must not carry a second copy of.
@@ -4663,12 +5045,20 @@ class ObserverConfigurationTests(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as root:
             host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
-            record = ObserverRecord(
-                sprint="sprint:1", workspace="/workspace", handle="observer:sprint:1"
+            record = ObserverRecord(sprint="sprint:1", workspace="/workspace", handle="observer:sprint:1")
+            listed = json.dumps(
+                {
+                    "result": {
+                        "terminals": [
+                            {
+                                "handle": "observer:sprint:1",
+                                "connected": True,
+                                "lastOutputAt": 1_753_456_789_123,
+                            }
+                        ]
+                    }
+                }
             )
-            listed = json.dumps({"result": {"terminals": [{
-                "handle": "observer:sprint:1", "connected": True, "lastOutputAt": 1_753_456_789_123,
-            }]}})
 
             def run(args, **kwargs):
                 if args[1:3] == ["terminal", "list"]:
@@ -4676,9 +5066,7 @@ class ObserverConfigurationTests(unittest.TestCase):
                 if args[1:3] == ["terminal", "wait"]:
                     # Exactly what the CLI does with a pane it found working: non-zero exit, and
                     # the answer on stdout.
-                    return subprocess.CompletedProcess(
-                        args, 1, stdout=BLOCKED_PANE_WAIT_BODY, stderr=""
-                    )
+                    return subprocess.CompletedProcess(args, 1, stdout=BLOCKED_PANE_WAIT_BODY, stderr="")
                 raise AssertionError(args)
 
             with mock.patch.object(dispatcher_module.subprocess, "run", side_effect=run):
@@ -4696,20 +5084,18 @@ class ObserverConfigurationTests(unittest.TestCase):
             with self.assertRaises(HostError):
                 host.observer_status(adopted)
 
-            record = ObserverRecord(
-                sprint="sprint:1", workspace="/workspace", handle="observer:sprint:1"
-            )
+            record = ObserverRecord(sprint="sprint:1", workspace="/workspace", handle="observer:sprint:1")
             for terminals in (
                 [],
                 [{"handle": "observer:sprint:1", "connected": False}],
             ):
+
                 def run_json(args: list[str], answer=terminals) -> dict:
                     if args[1:3] == ["terminal", "list"]:
                         return {"terminals": answer}
                     raise AssertionError(args)
 
-                with mock.patch.object(host, "_run_json", side_effect=run_json), \
-                     self.assertRaises(HostError):
+                with mock.patch.object(host, "_run_json", side_effect=run_json), self.assertRaises(HostError):
                     host.observer_status(record)
 
     def test_real_host_nudge_carries_the_active_delivery_marker(self) -> None:
@@ -4721,7 +5107,8 @@ class ObserverConfigurationTests(unittest.TestCase):
                 workspace="/workspace",
                 handle="observer:sprint:1",
                 delivery=ObserverDelivery(
-                    delivery_id="delivery-1", through_event="evt-card-1",
+                    delivery_id="delivery-1",
+                    through_event="evt-card-1",
                 ),
             )
             calls: list[list[str]] = []
@@ -4747,7 +5134,7 @@ class ObserverConfigurationTests(unittest.TestCase):
         wire_body = sent[sent.index("--text") + 1]
         self.assertTrue(wire_body.startswith(BRACKETED_PASTE_START))
         self.assertTrue(wire_body.endswith(BRACKETED_PASTE_END))
-        message = wire_body[len(BRACKETED_PASTE_START):-len(BRACKETED_PASTE_END)]
+        message = wire_body[len(BRACKETED_PASTE_START) : -len(BRACKETED_PASTE_END)]
         self.assertIn("--delivery-id delivery-1", message)
         self.assertIn("--through-event evt-card-1", message)
         self.assertIn("only when that receipt exists", message)
@@ -4839,26 +5226,38 @@ class ObserverConfigurationTests(unittest.TestCase):
 
             def record_the_turn() -> None:
                 """Codex persists the submitted prompt a few seconds after the send."""
-                (sessions / "rollout.jsonl").write_text("\n".join([
-                    json.dumps({
-                        "type": "session_meta",
-                        "payload": {"cwd": str(workspace.resolve()), "originator": "codex-tui"},
-                    }),
-                    json.dumps({
-                        "type": "response_item",
-                        "timestamp": "2099-01-02T03:04:05Z",
-                        "payload": {
-                            "type": "message", "role": "user",
-                            "content": [{"text": "A linked card changed."}],
-                        },
-                    }),
-                ]), encoding="utf-8")
+                (sessions / "rollout.jsonl").write_text(
+                    "\n".join(
+                        [
+                            json.dumps(
+                                {
+                                    "type": "session_meta",
+                                    "payload": {"cwd": str(workspace.resolve()), "originator": "codex-tui"},
+                                }
+                            ),
+                            json.dumps(
+                                {
+                                    "type": "response_item",
+                                    "timestamp": "2099-01-02T03:04:05Z",
+                                    "payload": {
+                                        "type": "message",
+                                        "role": "user",
+                                        "content": [{"text": "A linked card changed."}],
+                                    },
+                                }
+                            ),
+                        ]
+                    ),
+                    encoding="utf-8",
+                )
 
             def run_json(args: list[str]) -> dict:
                 if args[1:3] == ["terminal", "list"]:
-                    return {"terminals": [
-                        {"handle": "observer:sprint:1089", "connected": True},
-                    ]}
+                    return {
+                        "terminals": [
+                            {"handle": "observer:sprint:1089", "connected": True},
+                        ]
+                    }
                 if args[1:3] == ["terminal", "send"]:
                     return {"send": {"accepted": True, "bytesWritten": 858}}
                 if args[1:3] == ["terminal", "wait"]:
@@ -4868,9 +5267,11 @@ class ObserverConfigurationTests(unittest.TestCase):
                     reads[0] += 1
                     # One read before the send, then a probe per pass of the confirmation loop.
                     # The timer in the footer moves and nothing else does.
-                    screen = [f"› {footer}"] if reads[0] == 1 else [
-                        f"› {footer} Working ({reads[0]}s · esc to interrupt)"
-                    ]
+                    screen = (
+                        [f"› {footer}"]
+                        if reads[0] == 1
+                        else [f"› {footer} Working ({reads[0]}s · esc to interrupt)"]
+                    )
                     if reads[0] == 3:
                         record_the_turn()
                     # The cursor stands still: repainting the bottom block commits no lines.
@@ -4883,15 +5284,19 @@ class ObserverConfigurationTests(unittest.TestCase):
             def advance_clock(seconds: float) -> None:
                 clock[0] += seconds
 
-            with mock.patch.dict(os.environ, environment), \
-                 mock.patch.object(host, "_run_json", side_effect=run_json), \
-                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01), \
-                 mock.patch("triggered_agents.runtime.tui_delivery.time.monotonic", side_effect=lambda: clock[0]), \
-                 mock.patch("triggered_agents.runtime.tui_delivery.time.sleep", side_effect=advance_clock), \
-                 mock.patch(
-                     "triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S",
-                     0,
-                 ):
+            with (
+                mock.patch.dict(os.environ, environment),
+                mock.patch.object(host, "_run_json", side_effect=run_json),
+                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
+                mock.patch(
+                    "triggered_agents.runtime.tui_delivery.time.monotonic", side_effect=lambda: clock[0]
+                ),
+                mock.patch("triggered_agents.runtime.tui_delivery.time.sleep", side_effect=advance_clock),
+                mock.patch(
+                    "triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S",
+                    0,
+                ),
+            ):
                 # Two passes of the loop with nothing but the pane to go on, and the pane says
                 # nothing on either. Then Codex writes the turn down and the wake is confirmed.
                 outcome = host.nudge_observer(record)
@@ -4925,9 +5330,15 @@ class ObserverConfigurationTests(unittest.TestCase):
             def run_json(args: list[str]) -> dict:
                 calls.append(args)
                 if args[1:3] == ["terminal", "list"]:
-                    return {"terminals": [{
-                        "handle": "observer:alias", "leafId": "leaf-observer", "connected": True,
-                    }]}
+                    return {
+                        "terminals": [
+                            {
+                                "handle": "observer:alias",
+                                "leafId": "leaf-observer",
+                                "connected": True,
+                            }
+                        ]
+                    }
                 if args[1:3] == ["terminal", "send"]:
                     return {}
                 if args[1:3] == ["terminal", "wait"]:
@@ -4985,12 +5396,14 @@ class ObserverConfigurationTests(unittest.TestCase):
                     return {"wait": {"condition": "tui-idle", "satisfied": True}}
                 raise AssertionError(args)
 
-            with mock.patch.object(host, "_run_json", side_effect=run_json), \
-                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3), \
-                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01), \
-                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0), \
-                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2), \
-                 self.assertRaises(HostError) as raised:
+            with (
+                mock.patch.object(host, "_run_json", side_effect=run_json),
+                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3),
+                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
+                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
+                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2),
+                self.assertRaises(HostError) as raised,
+            ):
                 host.nudge_observer(record)
 
         self.assertIn("observer wake was not delivered", str(raised.exception))
@@ -5004,9 +5417,7 @@ class ObserverConfigurationTests(unittest.TestCase):
     def test_real_host_reads_readiness_from_tui_idle_and_the_output_timestamp(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             host = CommandHostRuntime(FakeCatalog(), Path(root), mode="real")
-            record = ObserverRecord(
-                sprint="sprint:1", workspace="/workspace", handle="observer:sprint:1"
-            )
+            record = ObserverRecord(sprint="sprint:1", workspace="/workspace", handle="observer:sprint:1")
             calls: list[list[str]] = []
 
             def run_json(args: list[str]) -> dict:
@@ -5041,8 +5452,11 @@ class RealHostStopObserverTests(unittest.TestCase):
         self.root = Path(self.tmpdir.name)
         self.host = CommandHostRuntime(FakeCatalog(), self.root / "data", mode="real")  # type: ignore[arg-type]
         self.record = ObserverRecord(
-            sprint="sprint:1", head="observer", handle="term-1",
-            workspace="/ws/observers/sprint-1", head_possible=True,
+            sprint="sprint:1",
+            head="observer",
+            handle="term-1",
+            workspace="/ws/observers/sprint-1",
+            head_possible=True,
         )
         self.calls: list[list[str]] = []
 
@@ -5062,25 +5476,36 @@ class RealHostStopObserverTests(unittest.TestCase):
     def test_the_head_and_the_workspace_it_was_given_are_both_stopped(self) -> None:
         """What the bring-up registered, the stop gives back: Orca is left with neither a terminal
         of this observer nor a worktree for it."""
-        with mock.patch.object(
-            CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)
-        ):
+        with mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)):
             self.host.stop_observer(self.record)
 
         self.assertEqual(
             self.calls,
             [
                 [
-                    "orca", "worktree", "show",
-                    "--worktree", "path:/ws/observers/sprint-1", "--json",
+                    "orca",
+                    "worktree",
+                    "show",
+                    "--worktree",
+                    "path:/ws/observers/sprint-1",
+                    "--json",
                 ],
                 [
-                    "orca", "terminal", "stop",
-                    "--worktree", "path:/ws/observers/sprint-1", "--json",
+                    "orca",
+                    "terminal",
+                    "stop",
+                    "--worktree",
+                    "path:/ws/observers/sprint-1",
+                    "--json",
                 ],
                 [
-                    "orca", "worktree", "rm",
-                    "--worktree", "path:/ws/observers/sprint-1", "--force", "--json",
+                    "orca",
+                    "worktree",
+                    "rm",
+                    "--worktree",
+                    "path:/ws/observers/sprint-1",
+                    "--force",
+                    "--json",
                 ],
             ],
         )
@@ -5089,12 +5514,12 @@ class RealHostStopObserverTests(unittest.TestCase):
         """A head adopted from a launch intent: the handle died with the tick that opened it, and
         the observer workspace is the only pointer left to its terminals."""
         adopted = ObserverRecord(
-            sprint="sprint:1", head="observer", workspace="/ws/observers/sprint-1",
+            sprint="sprint:1",
+            head="observer",
+            workspace="/ws/observers/sprint-1",
             head_possible=True,
         )
-        with mock.patch.object(
-            CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)
-        ):
+        with mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)):
             self.host.stop_observer(adopted)
 
         self.assertEqual(
@@ -5105,14 +5530,19 @@ class RealHostStopObserverTests(unittest.TestCase):
     def test_a_session_wrapped_observer_is_confirmed_dead_before_its_worktree_is_removed(self) -> None:
         """Terminal stop cannot kill a `setsid` head by tty alone."""
         record = ObserverRecord(
-            sprint="sprint:1", head="observer", handle="term-1",
-            workspace="/ws/observers/sprint-1", head_possible=True, pid_file="/tmp/observer.pid",
+            sprint="sprint:1",
+            head="observer",
+            handle="term-1",
+            workspace="/ws/observers/sprint-1",
+            head_possible=True,
+            pid_file="/tmp/observer.pid",
         )
         confirmed: list[str] = []
-        with mock.patch.object(
-            CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)
-        ), mock.patch.object(
-            self.host, "_confirm_head_process_gone", lambda path, **kwargs: confirmed.append(path)
+        with (
+            mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)),
+            mock.patch.object(
+                self.host, "_confirm_head_process_gone", lambda path, **kwargs: confirmed.append(path)
+            ),
         ):
             self.host.stop_observer(record)
 
@@ -5122,26 +5552,37 @@ class RealHostStopObserverTests(unittest.TestCase):
     def test_a_live_foreign_observer_heartbeat_fences_workspace_stop_and_worktree_removal(self) -> None:
         pid_file = self.root / "foreign-observer.pid"
         foreign = subprocess.Popen(["sleep", "5"])
+
         def reap_foreign() -> None:
             if foreign.poll() is None:
                 foreign.terminate()
             foreign.wait()
+
         self.addCleanup(reap_foreign)
         stat = Path(f"/proc/{foreign.pid}/stat").read_text(encoding="utf-8")
         heartbeat = heartbeat_identity(
-            run_id="foreign-observer-run", role="observer", task="sprint:sprint:1",
+            run_id="foreign-observer-run",
+            role="observer",
+            task="sprint:sprint:1",
             leaf="leaf-observer",
         )
-        heartbeat.update({
-            "version": 1,
-            "pid": foreign.pid,
-            "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip(),
-            "proc_starttime_ticks": stat[stat.rfind(")") + 2:].split()[19],
-        })
+        heartbeat.update(
+            {
+                "version": 1,
+                "pid": foreign.pid,
+                "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip(),
+                "proc_starttime_ticks": stat[stat.rfind(")") + 2 :].split()[19],
+            }
+        )
         pid_file.write_text(json.dumps(heartbeat), encoding="utf-8")
         record = ObserverRecord(
-            sprint="sprint:1", head="observer", handle="term-1", leaf="leaf-observer",
-            workspace="/ws/observers/sprint-1", head_possible=True, pid_file=str(pid_file),
+            sprint="sprint:1",
+            head="observer",
+            handle="term-1",
+            leaf="leaf-observer",
+            workspace="/ws/observers/sprint-1",
+            head_possible=True,
+            pid_file=str(pid_file),
             head_run={
                 "run_id": "observer-owned-run",
                 "task_ref": {"kind": "sprint", "ref": "sprint:1", "document": ""},
@@ -5160,14 +5601,10 @@ class RealHostStopObserverTests(unittest.TestCase):
     def test_a_record_without_a_workspace_still_closes_its_pane(self) -> None:
         """Records written before the launch intent named a workspace: the handle is all there is."""
         legacy = ObserverRecord(sprint="sprint:1", head="observer", handle="term-1")
-        with mock.patch.object(
-            CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)
-        ):
+        with mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: self._run_json(args)):
             self.host.stop_observer(legacy)
 
-        self.assertEqual(
-            self.calls, [["orca", "terminal", "close", "--terminal", "term-1", "--json"]]
-        )
+        self.assertEqual(self.calls, [["orca", "terminal", "close", "--terminal", "term-1", "--json"]])
 
     def test_a_refused_stop_raises_instead_of_reporting_success(self) -> None:
         run_json = self._refusing(["terminal", "stop"], "orca terminal stop failed: pane is busy")
@@ -5200,9 +5637,7 @@ class RealHostStopObserverTests(unittest.TestCase):
 
     def test_a_workspace_orca_does_not_know_is_a_head_that_is_already_gone(self) -> None:
         """What makes the retry of a half-finished stop terminate."""
-        run_json = self._refusing(
-            ["worktree", "show"], "orca worktree show failed: selector_not_found"
-        )
+        run_json = self._refusing(["worktree", "show"], "orca worktree show failed: selector_not_found")
         with mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: run_json(args)):
             self.host.stop_observer(self.record)
 
@@ -5213,9 +5648,7 @@ class RealHostStopObserverTests(unittest.TestCase):
         record, and the next time the sprint opens a second head is put beside it."""
         runtime = mock.Mock()
         runtime.host = self.host
-        run_json = self._refusing(
-            ["worktree", "show"], "orca worktree show failed: daemon is unreachable"
-        )
+        run_json = self._refusing(["worktree", "show"], "orca worktree show failed: daemon is unreachable")
         with mock.patch.object(CommandHostRuntime, "_run_json", lambda _self, args: run_json(args)):
             self.assertFalse(stop_observer_head(runtime, self.record))
 
@@ -5223,9 +5656,7 @@ class RealHostStopObserverTests(unittest.TestCase):
         self.assertEqual(self.record.workspace, "/ws/observers/sprint-1")
 
     def test_the_pid_file_is_named_before_the_head_exists(self) -> None:
-        self.assertEqual(
-            self.host.observer_pid_file("sprint:1"), observer_pid_file("sprint:1")
-        )
+        self.assertEqual(self.host.observer_pid_file("sprint:1"), observer_pid_file("sprint:1"))
 
 
 class RealHostObserverWorkspaceTests(unittest.TestCase):
@@ -5306,19 +5737,23 @@ class RealHostObserverWorkspaceTests(unittest.TestCase):
         self.assertEqual(
             self.calls[2],
             [
-                "orca", "worktree", "create",
-                "--repo", f"path:{repo}",
-                "--name", Path(self.workspace).name,
-                "--base-branch", "observers",
-                "--setup", "skip",
+                "orca",
+                "worktree",
+                "create",
+                "--repo",
+                f"path:{repo}",
+                "--name",
+                Path(self.workspace).name,
+                "--base-branch",
+                "observers",
+                "--setup",
+                "skip",
                 "--no-parent",
                 "--json",
             ],
         )
         self.assertIn("--worktree", self.calls[3])
-        self.assertEqual(
-            self.calls[3][self.calls[3].index("--worktree") + 1], f"path:{self.workspace}"
-        )
+        self.assertEqual(self.calls[3][self.calls[3].index("--worktree") + 1], f"path:{self.workspace}")
         self.assertEqual(launched["workspace"], self.workspace)
         self.assertEqual(launched["handle"], "term-obs")
         self.assertEqual(launched["leaf"], "leaf-obs")
@@ -5357,9 +5792,7 @@ class RealHostObserverWorkspaceTests(unittest.TestCase):
 
         self._prepare()
 
-        self.assertEqual(
-            (stale / "SPRINT.md").read_text(encoding="utf-8").splitlines()[0], "# Sprint"
-        )
+        self.assertEqual((stale / "SPRINT.md").read_text(encoding="utf-8").splitlines()[0], "# Sprint")
 
     def test_a_workspace_placed_somewhere_else_fails_the_bring_up(self) -> None:
         """The launch intent already names the workspace, and a tick that dies now can only find
@@ -5485,9 +5918,7 @@ class RealHostObserverTeardownTests(unittest.TestCase):
 
     def actions(self, result: dict) -> list[str]:
         return [
-            action["action"]
-            for action in result["actions"]
-            if action.get("step") == "observer-reconcile"
+            action["action"] for action in result["actions"] if action.get("step") == "observer-reconcile"
         ]
 
     def close_sprint(self) -> None:
@@ -5496,7 +5927,8 @@ class RealHostObserverTeardownTests(unittest.TestCase):
 
     def test_a_bring_up_that_dies_after_the_worktree_still_gives_it_back_on_closure(self) -> None:
         self.board.add_sprint(
-            "sprint:1", status="open",
+            "sprint:1",
+            status="open",
             sprint_observer=encode_observer(head_choice(self.catalog.observer_head())),
         )
         self.terminal_create_fails = True
@@ -5520,8 +5952,13 @@ class RealHostObserverTeardownTests(unittest.TestCase):
                 ["orca", "worktree", "show", "--worktree", f"path:{self.workspace}", "--json"],
                 ["orca", "terminal", "stop", "--worktree", f"path:{self.workspace}", "--json"],
                 [
-                    "orca", "worktree", "rm",
-                    "--worktree", f"path:{self.workspace}", "--force", "--json",
+                    "orca",
+                    "worktree",
+                    "rm",
+                    "--worktree",
+                    f"path:{self.workspace}",
+                    "--force",
+                    "--json",
                 ],
             ],
         )
@@ -5532,7 +5969,8 @@ class RealHostObserverTeardownTests(unittest.TestCase):
         """The other side of it: the stop asks Orca and takes its answer, rather than removing a
         worktree on the strength of a path the record computed before the host was ever called."""
         self.board.add_sprint(
-            "sprint:1", status="open",
+            "sprint:1",
+            status="open",
             sprint_observer=encode_observer(head_choice(self.catalog.observer_head())),
         )
         self.worktree_create_fails = True
@@ -5550,7 +5988,8 @@ class RealHostObserverTeardownTests(unittest.TestCase):
         """A refused teardown of a workspace with no head behind it is still a failed stop: the
         record survives as `stop-pending` and the next tick comes back to it."""
         self.board.add_sprint(
-            "sprint:1", status="open",
+            "sprint:1",
+            status="open",
             sprint_observer=encode_observer(head_choice(self.catalog.observer_head())),
         )
         self.terminal_create_fails = True
@@ -5640,14 +6079,20 @@ class RealHostTuiObserverLaunchTests(unittest.TestCase):
         failed is not a wake that failed, and neither is a reviewer that would not come up.
         """
         evidence = DeliveryEvidence(
-            handle="term-obs", stage="payload_written", payload_bytes=420,
-            payload_sha256="feedfacefeedface", reason="payload-left-in-composer",
+            handle="term-obs",
+            stage="payload_written",
+            payload_bytes=420,
+            payload_sha256="feedfacefeedface",
+            reason="payload-left-in-composer",
         )
-        with mock.patch.object(
-            dispatcher_module,
-            "_deliver_tui_prompt",
-            mock.Mock(side_effect=TuiDeliveryError("TUI prompt was not delivered", evidence=evidence)),
-        ), self.assertRaises(ObserverLaunchAborted) as caught:
+        with (
+            mock.patch.object(
+                dispatcher_module,
+                "_deliver_tui_prompt",
+                mock.Mock(side_effect=TuiDeliveryError("TUI prompt was not delivered", evidence=evidence)),
+            ),
+            self.assertRaises(ObserverLaunchAborted) as caught,
+        ):
             self._prepare()
 
         self.assertEqual(caught.exception.evidence["subject"], "observer-launch")
@@ -5785,9 +6230,7 @@ class ObserverCodexTrustTests(unittest.TestCase):
 
         for head, role in (("codex", "worker"), ("codex-reviewer", "reviewer")):
             with self.subTest(role=role):
-                launch = self.host.catalog.head_launch(
-                    head, "TASK.md", workspace=str(workspace), role=role
-                )
+                launch = self.host.catalog.head_launch(head, "TASK.md", workspace=str(workspace), role=role)
                 self.assertIn(
                     f"CODEX_HOME={self.codex_home} codex --dangerously-bypass-approvals-and-sandbox",
                     launch.command,
@@ -5795,9 +6238,7 @@ class ObserverCodexTrustTests(unittest.TestCase):
                 self.assertNotIn("codex exec", launch.command)
                 self.assertIn(f"--role {role}", launch.command)
                 trusted = tomllib.loads((self.codex_home / "config.toml").read_text(encoding="utf-8"))
-                self.assertEqual(
-                    trusted["projects"][str(workspace.resolve())]["trust_level"], "trusted"
-                )
+                self.assertEqual(trusted["projects"][str(workspace.resolve())]["trust_level"], "trusted")
 
 
 class _ObserverCatalog(FakeCatalog):

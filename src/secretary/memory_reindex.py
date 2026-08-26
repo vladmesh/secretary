@@ -34,11 +34,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--model", required=True, help="fastembed model id")
     parser.add_argument("--dim", required=True, type=int, help="embedding dimension")
     parser.add_argument(
-        "--cache-dir", type=Path, default=memory_service.MODEL_CACHE_DIR,
+        "--cache-dir",
+        type=Path,
+        default=memory_service.MODEL_CACHE_DIR,
         help="persistent fastembed cache directory",
     )
     parser.add_argument(
-        "--threads", type=int, default=memory_service.THREADS,
+        "--threads",
+        type=int,
+        default=memory_service.THREADS,
         help="maximum ONNX Runtime inference threads",
     )
     parser.add_argument("--allow-empty", action="store_true")

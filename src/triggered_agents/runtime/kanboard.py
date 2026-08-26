@@ -10,6 +10,7 @@ window and then raised as KanboardUnreachable, the one failure a caller may trea
 for read paths that would otherwise be one round trip per task. Higher-level board
 operations live in agents/pipeline/ops.py.
 """
+
 from __future__ import annotations
 
 import json
@@ -87,7 +88,8 @@ def _post(payload, label: str):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise KanboardUnreachable(
-                    f"{label}: board unreachable after {_CONNECT_RETRY_WINDOW_S:g}s: {e}") from e
+                    f"{label}: board unreachable after {_CONNECT_RETRY_WINDOW_S:g}s: {e}"
+                ) from e
             time.sleep(min(_CONNECT_RETRY_SLEEP_S, remaining))
     try:
         return json.loads(raw)
@@ -116,7 +118,7 @@ def call_batch(calls):
     calls = list(calls)
     results = [None] * len(calls)
     for start in range(0, len(calls), _BATCH_CHUNK):
-        chunk = calls[start:start + _BATCH_CHUNK]
+        chunk = calls[start : start + _BATCH_CHUNK]
         payload = []
         for offset, (method, params) in enumerate(chunk):
             request = {"jsonrpc": "2.0", "id": start + offset, "method": method}

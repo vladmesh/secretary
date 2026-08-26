@@ -315,9 +315,11 @@ class PortableFixture(unittest.TestCase):
         )
         for key, value in overrides.items():
             setattr(args, key, value)
-        with mock.patch.object(upgrade, "SystemdUnitInstaller", return_value=self.units), \
-                mock.patch.object(upgrade, "LiveOrcaRegistrar", FakeRegistrar), \
-                mock.patch.object(upgrade, "OrcaAutomationClient", FakeAutomations):
+        with (
+            mock.patch.object(upgrade, "SystemdUnitInstaller", return_value=self.units),
+            mock.patch.object(upgrade, "LiveOrcaRegistrar", FakeRegistrar),
+            mock.patch.object(upgrade, "OrcaAutomationClient", FakeAutomations),
+        ):
             return upgrade.run_upgrade(args)
 
     def run_cli(self, argv: list[str]) -> tuple[int, str]:
@@ -362,9 +364,7 @@ class PortableInstallationTests(PortableFixture):
         # The running checkout's own manifest targets `~/.claude/skills` and `~/.hermes/...`. It
         # was never named here, so a step that read it would leave those directories behind in
         # this fixture's home, and nothing else in the run would say so.
-        self.assertEqual(
-            sorted(path.name for path in self.home.iterdir()), ["bin", "shells"]
-        )
+        self.assertEqual(sorted(path.name for path in self.home.iterdir()), ["bin", "shells"])
         self.assert_invoker_home_untouched()
         self.assert_hermetic(result.render())
 
@@ -421,9 +421,7 @@ class PortableInstallationTests(PortableFixture):
     def test_offline_doctor_reads_the_fresh_installation_without_the_live_host(self) -> None:
         self.run_upgrade()
 
-        code, report = self.run_json_cli(
-            ["doctor", "--instance", str(self.instance), "--offline", "--json"]
-        )
+        code, report = self.run_json_cli(["doctor", "--instance", str(self.instance), "--offline", "--json"])
 
         registry = report["status"]["installation"]["head_registry"]
         self.assertEqual(code, 0, report)
@@ -442,9 +440,7 @@ class PortableInstallationTests(PortableFixture):
         """
         self.run_upgrade()
 
-        code, report = self.run_json_cli(
-            ["doctor", "--instance", str(self.instance), "--offline", "--json"]
-        )
+        code, report = self.run_json_cli(["doctor", "--instance", str(self.instance), "--offline", "--json"])
 
         self.assertEqual(code, 0, report)
         self.assertEqual(
@@ -478,15 +474,17 @@ class PortableInstallationTests(PortableFixture):
         with mock.patch.object(
             upgrade, "run_steps", side_effect=lambda context: seen.append(context) or upgrade.UpgradeResult()
         ):
-            code = upgrade.run_upgrade(SimpleNamespace(
-                instance=str(self.instance),
-                product_root=str(self.product),
-                base_branch="main",
-                dry_run=True,
-                no_pull=True,
-                host_fixture=str(self.host_fixture),
-                json=False,
-            ))
+            code = upgrade.run_upgrade(
+                SimpleNamespace(
+                    instance=str(self.instance),
+                    product_root=str(self.product),
+                    base_branch="main",
+                    dry_run=True,
+                    no_pull=True,
+                    host_fixture=str(self.host_fixture),
+                    json=False,
+                )
+            )
 
         self.assertEqual(code, 0)
         self.assertEqual(seen[0].product_root, self.product)
@@ -502,18 +500,21 @@ class PortableInstallationTests(PortableFixture):
         audit = role_skills.audit(instance_path=self.instance, product_manifest=manifest)
 
         self.assertEqual([source["path"] for source in audit["manifests"]], [str(manifest)])
-        self.assertEqual(
-            sorted({item["skill"] for item in audit["missing"]}), ["portable-skill"]
-        )
+        self.assertEqual(sorted({item["skill"] for item in audit["missing"]}), ["portable-skill"])
         self.assertNotEqual(manifest, role_skills.manifest_path())
 
     def test_the_command_line_delivers_the_named_checkouts_skills(self) -> None:
         """A hand-run sync has no installation owner to resolve and uses the caller's own home."""
-        code, output = self.run_cli([
-            "role-skills", "sync",
-            "--instance", str(self.instance),
-            "--product-root", str(self.product),
-        ])
+        code, output = self.run_cli(
+            [
+                "role-skills",
+                "sync",
+                "--instance",
+                str(self.instance),
+                "--product-root",
+                str(self.product),
+            ]
+        )
 
         self.assertTrue(self.shell_skill("codex", "portable-skill", self.invoker_home).is_file())
         self.assertEqual(code, 0, output)
@@ -545,9 +546,14 @@ class InstallationOwnerTests(PortableFixture):
     def test_an_explicit_runtime_user_wins_over_the_directory_owner(self) -> None:
         seen: list[upgrade.UpgradeContext] = []
 
-        with mock.patch.object(
-            upgrade, "run_steps", side_effect=lambda context: seen.append(context) or upgrade.UpgradeResult()
-        ), mock.patch("secretary.host_apply.pwd.getpwuid", side_effect=AssertionError("owner probed")):
+        with (
+            mock.patch.object(
+                upgrade,
+                "run_steps",
+                side_effect=lambda context: seen.append(context) or upgrade.UpgradeResult(),
+            ),
+            mock.patch("secretary.host_apply.pwd.getpwuid", side_effect=AssertionError("owner probed")),
+        ):
             code = self.run_upgrade_command(dry_run=True, runtime_user="named")
 
         self.assertEqual(code, 0)
@@ -570,9 +576,7 @@ class InstallationOwnerTests(PortableFixture):
         """Neither is written here; both are decided from a home, and it must be the owner's."""
         agent = self.product / "src" / "triggered_agents" / "agents" / "curator"
         agent.mkdir(parents=True, exist_ok=True)
-        (agent / "automation.toml").write_text(
-            'name = "curator"\nskill = "curate"\n', encoding="utf-8"
-        )
+        (agent / "automation.toml").write_text('name = "curator"\nskill = "curate"\n', encoding="utf-8")
 
         worktrees = upgrade.desired_role_worktrees(self.product, self.home)
         specs = upgrade.load_specs(self.product, home=self.home)
@@ -764,7 +768,7 @@ class RefusedBeforeAnyWriteTests(PortableFixture):
 
     def test_a_malformed_instance_overlay_is_named_before_anything_is_materialized(self) -> None:
         overlay = self.own_a_skill()
-        overlay.write_text('[roles.secretary]\nskills = [1]\n', encoding="utf-8")
+        overlay.write_text("[roles.secretary]\nskills = [1]\n", encoding="utf-8")
 
         self.assert_refused(self.run_upgrade(), overlay)
 
@@ -809,9 +813,7 @@ class RefusedBeforeAnyWriteTests(PortableFixture):
         failed = [step for step in result.steps if step.failed]
         self.assertEqual([step.name for step in failed], ["registries"], result.render())
         self.assertIn(str(occupied), failed[0].detail)
-        self.assertEqual(
-            occupied.read_text(encoding="utf-8"), "#!/bin/sh\necho the operator's own\n"
-        )
+        self.assertEqual(occupied.read_text(encoding="utf-8"), "#!/bin/sh\necho the operator's own\n")
         self.assertFalse((self.home / "shells").exists())
 
     def test_a_bad_registry_stops_the_run_before_the_checkout_is_reinstalled(self) -> None:
@@ -824,18 +826,14 @@ class RefusedBeforeAnyWriteTests(PortableFixture):
         venv_python = self.product / ".venv" / "bin" / "python"
         venv_python.parent.mkdir(parents=True)
         marker = self.root / "pip-ran"
-        venv_python.write_text(
-            f"#!/bin/sh\nprintf '' > {marker}\nexit 0\n", encoding="utf-8"
-        )
+        venv_python.write_text(f"#!/bin/sh\nprintf '' > {marker}\nexit 0\n", encoding="utf-8")
         venv_python.chmod(0o755)
         manifest = role_skills.product_manifest_path(self.product)
         manifest.write_text("[roles.secretary\n", encoding="utf-8")
 
         result = self.run_upgrade(changed_paths=("pyproject.toml",))
 
-        self.assertEqual(
-            [step.name for step in result.steps], ["pull", "registries"], result.render()
-        )
+        self.assertEqual([step.name for step in result.steps], ["pull", "registries"], result.render())
         self.assertFalse(marker.exists(), "the checkout was reinstalled before the refusal")
         self.wrote_nothing()
 

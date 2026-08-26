@@ -56,11 +56,13 @@ from tests.sprint_close_fixtures import close_decisions
 def mark_observer_heartbeat_dead(record: ObserverRecord) -> None:
     path = Path(record.pid_file)
     heartbeat = json.loads(path.read_text(encoding="utf-8"))
-    heartbeat.update({
-        "pid": DEAD_PID,
-        "boot_id": "dead-process",
-        "proc_starttime_ticks": "0",
-    })
+    heartbeat.update(
+        {
+            "pid": DEAD_PID,
+            "boot_id": "dead-process",
+            "proc_starttime_ticks": "0",
+        }
+    )
     path.write_text(json.dumps(heartbeat), encoding="utf-8")
 
 
@@ -79,16 +81,22 @@ class ObserverValueTests(unittest.TestCase):
 
     def test_absent_null_empty_default_and_inherited_are_not_values(self) -> None:
         for raw in (
-            None, "", "null", "{}", "default", "inherited",
-            {"kind": "default"}, {"kind": "inherited"},
-            {"kind": "head"}, {"kind": "head", "profile": ""},
+            None,
+            "",
+            "null",
+            "{}",
+            "default",
+            "inherited",
+            {"kind": "default"},
+            {"kind": "inherited"},
+            {"kind": "head"},
+            {"kind": "head", "profile": ""},
             {"kind": "none", "profile": "codex-observer"},
             # An extra key is a shape nobody audited, not the form it resembles.
             {"kind": "head", "profile": "codex-observer", "note": "why"},
             {"kind": "historical", "profile": None, "source": "observer_lifecycle_audit"},
             {"kind": "historical", "profile": "codex-observer", "source": "migration_unknown"},
-            {"kind": "historical", "profile": "x", "source": "observer_lifecycle_audit",
-             "event_id": ""},
+            {"kind": "historical", "profile": "x", "source": "observer_lifecycle_audit", "event_id": ""},
         ):
             with self.subTest(raw=raw):
                 self.assertIsNone(parse_observer(raw))
@@ -124,8 +132,12 @@ class SprintDeclarationTests(SprintFixture):
     def test_create_without_an_observer_is_refused_before_any_write(self) -> None:
         with self.assertRaisesRegex(TaskError, "requires an explicit observer"):
             self.writer.create(
-                role="po", actor="operator", goal="no observer", product="secretary",
-                issues=["issue:open"], projects=["secretary"],
+                role="po",
+                actor="operator",
+                goal="no observer",
+                product="secretary",
+                issues=["issue:open"],
+                projects=["secretary"],
             )
 
         self.assertEqual(TaskAudit(self.tmp.name).events(), [])
@@ -166,19 +178,23 @@ class SprintDeclarationTests(SprintFixture):
     def test_reopen_refuses_a_head_the_registry_does_not_have(self) -> None:
         reference = self._create(goal="reopen onto a ghost")["sprint"]["ref"]
         self.writer.close(
-            role="po", actor="operator", reference=reference, request_id="close",
+            role="po",
+            actor="operator",
+            reference=reference,
+            request_id="close",
             decisions=close_decisions(self.writer, reference),
         )
 
         with self.assertRaisesRegex(TaskError, "not a profile of this installation"):
             self.writer.reopen(
-                role="po", actor="operator", reference=reference,
-                observer=head_choice("retired-observer"), request_id="reopen",
+                role="po",
+                actor="operator",
+                reference=reference,
+                observer=head_choice("retired-observer"),
+                request_id="reopen",
             )
 
-        self.assertEqual(
-            self.writer.reader.show(reference, include_cards=False)["status"], "closed"
-        )
+        self.assertEqual(self.writer.reader.show(reference, include_cards=False)["status"], "closed")
 
     def test_an_unreadable_registry_refuses_rather_than_accepting_the_declaration(self) -> None:
         (self.instance / "heads" / "heads.yaml").write_text("profiles: []\n", encoding="utf-8")
@@ -197,7 +213,8 @@ class SprintDeclarationTests(SprintFixture):
         self._create(goal="ordered", reference="sprint:ordered")
 
         order = [
-            method for method, params in self.client.calls
+            method
+            for method, params in self.client.calls
             if (method == "saveTaskMetadata" and "sprint_observer" in dict(params["values"]))
             or (method == "updateTask" and params.get("reference") == "sprint:ordered")
         ]
@@ -206,7 +223,10 @@ class SprintDeclarationTests(SprintFixture):
     def test_reopen_requires_a_fresh_choice_and_never_inherits_the_closed_one(self) -> None:
         reference = self._create(goal="reopened", observer=head_choice("codex-observer"))["sprint"]["ref"]
         self.writer.close(
-            role="po", actor="operator", reference=reference, request_id="close",
+            role="po",
+            actor="operator",
+            reference=reference,
+            request_id="close",
             decisions=close_decisions(self.writer, reference),
         )
 
@@ -214,7 +234,10 @@ class SprintDeclarationTests(SprintFixture):
             self.writer.reopen(role="po", actor="operator", reference=reference)
 
         reopened = self.writer.reopen(
-            role="po", actor="operator", reference=reference, observer=none_choice(),
+            role="po",
+            actor="operator",
+            reference=reference,
+            observer=none_choice(),
             request_id="reopen",
         )
         self.assertEqual(reopened["sprint"]["observer"], none_choice())
@@ -223,14 +246,20 @@ class SprintDeclarationTests(SprintFixture):
     def test_reopen_writes_the_choice_while_the_sprint_is_still_closed(self) -> None:
         reference = self._create(goal="ordered reopen")["sprint"]["ref"]
         self.writer.close(
-            role="po", actor="operator", reference=reference, request_id="close",
+            role="po",
+            actor="operator",
+            reference=reference,
+            request_id="close",
             decisions=close_decisions(self.writer, reference),
         )
         self.client.calls.clear()
 
         self.writer.reopen(
-            role="po", actor="operator", reference=reference,
-            observer=head_choice("claude-observer"), request_id="reopen",
+            role="po",
+            actor="operator",
+            reference=reference,
+            observer=head_choice("claude-observer"),
+            request_id="reopen",
         )
 
         written = [
@@ -244,24 +273,36 @@ class SprintDeclarationTests(SprintFixture):
     def test_a_reopen_repeated_with_another_observer_is_refused(self) -> None:
         reference = self._create(goal="one reopen")["sprint"]["ref"]
         self.writer.close(
-            role="po", actor="operator", reference=reference, request_id="close",
+            role="po",
+            actor="operator",
+            reference=reference,
+            request_id="close",
             decisions=close_decisions(self.writer, reference),
         )
         first = self.writer.reopen(
-            role="po", actor="operator", reference=reference,
-            observer=head_choice("codex-observer"), request_id="reopen-once",
+            role="po",
+            actor="operator",
+            reference=reference,
+            observer=head_choice("codex-observer"),
+            request_id="reopen-once",
         )
 
         replay = self.writer.reopen(
-            role="po", actor="operator", reference=reference,
-            observer=head_choice("codex-observer"), request_id="reopen-once",
+            role="po",
+            actor="operator",
+            reference=reference,
+            observer=head_choice("codex-observer"),
+            request_id="reopen-once",
         )
         self.assertEqual(replay["event_id"], first["event_id"])
 
         with self.assertRaises(TaskError):
             self.writer.reopen(
-                role="po", actor="operator", reference=reference,
-                observer=none_choice(), request_id="reopen-once",
+                role="po",
+                actor="operator",
+                reference=reference,
+                observer=none_choice(),
+                request_id="reopen-once",
             )
 
 
@@ -288,7 +329,9 @@ class ObserverFenceFixture(unittest.TestCase):
         self.board = FakeKanboard()
         self.catalog = FakeCatalog(instance_dir=self.data_dir)
         self.catalog.profiles["claude-observer"] = {
-            "adapter": "claude", "model": "opus", "resource": "claude-sub",
+            "adapter": "claude",
+            "model": "opus",
+            "resource": "claude-sub",
         }
         self.host = FakeHost(self.data_dir / "workspaces", self.catalog)
         self.runtime = DispatcherRuntime(
@@ -379,9 +422,16 @@ class ObserverFenceTests(ObserverFenceFixture):
         payload = self.runtime.production_state.load()
         payload["records"] = {
             "secretary-510-neighbor": {
-                "worker": "w1", "workspace": "/tmp/w1", "handle": "term_w", "head": "codex",
-                "review_head": "codex-reviewer", "attempt_id": "att-1", "comment_baseline": 0,
-                "review_baseline": 0, "state": "adopted", "claimed_at": time.time(),
+                "worker": "w1",
+                "workspace": "/tmp/w1",
+                "handle": "term_w",
+                "head": "codex",
+                "review_head": "codex-reviewer",
+                "attempt_id": "att-1",
+                "comment_baseline": 0,
+                "review_baseline": 0,
+                "state": "adopted",
+                "claimed_at": time.time(),
             }
         }
         self.runtime.production_state.save(payload)
@@ -425,9 +475,7 @@ class ObserverFenceTests(ObserverFenceFixture):
         fenced = [action for action in result["actions"] if action["step"] == "observer-fence"]
         self.assertEqual([action["observer_reason"] for action in fenced], [REASON_UNKNOWN_PROFILE])
         self.assertEqual(self.host.observers, [])
-        reconcile = [
-            action for action in result["actions"] if action["step"] == "observer-reconcile"
-        ]
+        reconcile = [action for action in result["actions"] if action["step"] == "observer-reconcile"]
         self.assertEqual([action["action"] for action in reconcile], ["observer-declaration-invalid"])
 
     def test_a_declared_head_launches_on_its_own_profile_and_clears_on_a_later_tick(self) -> None:
@@ -481,7 +529,8 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.board.tasks[0]["column_id"] = 3
 
         with mock.patch(
-            "secretary.dispatcher_observer_fence.stage_event", side_effect=OSError("disk full"),
+            "secretary.dispatcher_observer_fence.stage_event",
+            side_effect=OSError("disk full"),
         ):
             result = self.runtime.production_tick()
 
@@ -509,9 +558,16 @@ class ObserverFenceTests(ObserverFenceFixture):
         payload = self.runtime.production_state.load()
         payload["records"] = {
             "secretary-510-neighbor": {
-                "worker": "w1", "workspace": "/tmp/w1", "handle": "term_w", "head": "codex",
-                "review_head": "codex-reviewer", "attempt_id": "att-1", "comment_baseline": 0,
-                "review_baseline": 0, "state": "adopted", "claimed_at": time.time(),
+                "worker": "w1",
+                "workspace": "/tmp/w1",
+                "handle": "term_w",
+                "head": "codex",
+                "review_head": "codex-reviewer",
+                "attempt_id": "att-1",
+                "comment_baseline": 0,
+                "review_baseline": 0,
+                "state": "adopted",
+                "claimed_at": time.time(),
             }
         }
         self.runtime.production_state.save(payload)
@@ -528,9 +584,7 @@ class ObserverFenceTests(ObserverFenceFixture):
 
         self.assertEqual(result["status"], "critical")
         self.assertEqual(result["action"], "observer-fence-unavailable")
-        self.assertIn(
-            "secretary-510-neighbor", self.runtime.production_state.load()["records"]
-        )
+        self.assertIn("secretary-510-neighbor", self.runtime.production_state.load()["records"])
         self.assertEqual(
             [action for action in result["actions"] if action.get("step") == "production-reconcile"],
             [],
@@ -544,9 +598,16 @@ class ObserverFenceTests(ObserverFenceFixture):
         payload = self.runtime.production_state.load()
         payload["records"] = {
             "secretary-510-neighbor": {
-                "worker": "w1", "workspace": "/tmp/w1", "handle": "term_w", "head": "codex",
-                "review_head": "codex-reviewer", "attempt_id": "att-1", "comment_baseline": 0,
-                "review_baseline": 0, "state": "adopted", "claimed_at": time.time(),
+                "worker": "w1",
+                "workspace": "/tmp/w1",
+                "handle": "term_w",
+                "head": "codex",
+                "review_head": "codex-reviewer",
+                "attempt_id": "att-1",
+                "comment_baseline": 0,
+                "review_baseline": 0,
+                "state": "adopted",
+                "claimed_at": time.time(),
             }
         }
         self.runtime.production_state.save(payload)
@@ -554,8 +615,12 @@ class ObserverFenceTests(ObserverFenceFixture):
         fence["refs"] = set()  # the inventory misses it; the sprint link still holds
 
         outcomes = _reconcile_production(
-            self.runtime, self.runtime.production_state.records(payload), payload,
-            set(), fenced_refs=set(), fence=fence,
+            self.runtime,
+            self.runtime.production_state.records(payload),
+            payload,
+            set(),
+            fenced_refs=set(),
+            fence=fence,
         )
 
         self.assertEqual(outcomes, [])
@@ -583,12 +648,19 @@ class ObserverFenceTests(ObserverFenceFixture):
     def test_a_record_that_names_no_head_is_a_mismatch(self) -> None:
         self.declare(encode_observer(head_choice("claude-observer")))
         payload = self.runtime.production_state.load()
-        put_observers(payload, {
-            "sprint:1": ObserverRecord(
-                sprint="sprint:1", head="", handle="term_x", state="running",
-                launches=1, launched_at=time.time(),
-            )
-        })
+        put_observers(
+            payload,
+            {
+                "sprint:1": ObserverRecord(
+                    sprint="sprint:1",
+                    head="",
+                    handle="term_x",
+                    state="running",
+                    launches=1,
+                    launched_at=time.time(),
+                )
+            },
+        )
         self.runtime.production_state.save(payload)
 
         fence = observer_fence(self.runtime, self.runtime.production_state.load())
@@ -596,9 +668,7 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.assertEqual(fence["outcomes"][0]["observer_reason"], "observer_head_mismatch")
 
     def test_the_card_of_an_unadopted_observer_does_not_advance(self) -> None:
-        actions = self._tick_twice_with_an_active_card(
-            encode_observer(head_choice("claude-observer"))
-        )
+        actions = self._tick_twice_with_an_active_card(encode_observer(head_choice("claude-observer")))
         self.assertEqual(
             [action["action"] for action in actions if action["step"] == "advance"],
             ["waiting-worker-report"],
@@ -624,7 +694,8 @@ class ObserverFenceTests(ObserverFenceFixture):
         telemetry = self.runtime.production_state.load()["tick_telemetry"]
         self.assertFalse(telemetry["last"]["healthy"])
         self.assertIn(
-            "sprint:1", [row["ref"] for row in telemetry["last"]["degradations"]],
+            "sprint:1",
+            [row["ref"] for row in telemetry["last"]["degradations"]],
         )
 
     def test_a_fence_writes_its_reason_durably_once_per_reason(self) -> None:
@@ -634,7 +705,8 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.runtime.production_tick()
 
         raised = [
-            event for event in self.runtime.audit.events("sprint:1")
+            event
+            for event in self.runtime.audit.events("sprint:1")
             if event["kind"] == "observer_fence_raised"
         ]
         self.assertEqual(len(raised), 1)
@@ -677,9 +749,7 @@ class ObserverFenceTests(ObserverFenceFixture):
         self.assertFalse(fenced_task(fence, {"ref": "secretary-510-neighbor", "project": "other"}))
 
     def test_an_unreadable_sprint_board_does_not_advance_the_sprints_cards(self) -> None:
-        actions = self._tick_twice_with_an_active_card(
-            encode_observer(head_choice("claude-observer"))
-        )
+        actions = self._tick_twice_with_an_active_card(encode_observer(head_choice("claude-observer")))
         self.assertEqual(
             [action["action"] for action in actions if action["step"] == "advance"],
             ["waiting-worker-report"],
@@ -720,12 +790,19 @@ class ObserverRecordFenceStateTests(ObserverFenceFixture):
     def test_a_head_that_is_not_the_declared_one_fences(self) -> None:
         self.declare(encode_observer(head_choice("claude-observer")))
         payload = self.runtime.production_state.load()
-        put_observers(payload, {
-            "sprint:1": ObserverRecord(
-                sprint="sprint:1", head="codex-observer", handle="term_x",
-                state="running", launches=1, launched_at=time.time(),
-            )
-        })
+        put_observers(
+            payload,
+            {
+                "sprint:1": ObserverRecord(
+                    sprint="sprint:1",
+                    head="codex-observer",
+                    handle="term_x",
+                    state="running",
+                    launches=1,
+                    launched_at=time.time(),
+                )
+            },
+        )
         self.runtime.production_state.save(payload)
 
         fence = observer_fence(self.runtime, self.runtime.production_state.load())
@@ -804,12 +881,18 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
         self.assertEqual(fence["sprints"], {self.FIRST})
         self.assertEqual(fence["projects"], {"secretary", "fourth"})
         self.assertEqual(fence["refs"], {"secretary-510-pilot", "fourth-1"})
-        self.assertTrue(fenced_task(
-            fence, {"ref": "secretary-510-pilot", "sprint": self.FIRST, "project": "secretary"},
-        ))
-        self.assertFalse(fenced_task(
-            fence, {"ref": "secretary-510-neighbor", "sprint": self.SECOND, "project": "other"},
-        ))
+        self.assertTrue(
+            fenced_task(
+                fence,
+                {"ref": "secretary-510-pilot", "sprint": self.FIRST, "project": "secretary"},
+            )
+        )
+        self.assertFalse(
+            fenced_task(
+                fence,
+                {"ref": "secretary-510-neighbor", "sprint": self.SECOND, "project": "other"},
+            )
+        )
 
     def test_an_unresolvable_profile_holds_its_own_sprint_only(self) -> None:
         """The declared head left the registry after the sprint was opened on it."""
@@ -821,7 +904,8 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
         self.assert_only_the_first_sprint_is_held(result, REASON_UNKNOWN_PROFILE)
         self.assertEqual(
             [
-                action["action"] for action in result["actions"]
+                action["action"]
+                for action in result["actions"]
                 if action["step"] == "observer-reconcile" and action.get("sprint") == self.FIRST
             ],
             ["observer-declaration-invalid"],
@@ -844,10 +928,7 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
         payload = self.runtime.production_state.load()
         self.assertEqual(set(payload["observer_fence"]), {self.FIRST})
         self.assertEqual(payload["observer_fence"][self.FIRST]["reason"], REASON_MALFORMED)
-        raised = [
-            event for event in self.runtime.audit.events()
-            if event["kind"] == "observer_fence_raised"
-        ]
+        raised = [event for event in self.runtime.audit.events() if event["kind"] == "observer_fence_raised"]
         # One sprint, however many reasons it has been fenced for: the first tick fenced it on
         # its unlaunched head, this one on the declaration that was broken since.
         self.assertEqual({event["ref"] for event in raised}, {self.FIRST})
@@ -897,9 +978,15 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
         payload = self.runtime.production_state.load()
         payload["records"] = {
             reference: {
-                "worker": "w", "workspace": "/tmp/w", "handle": "term_" + reference, "head": "codex",
-                "review_head": "codex-reviewer", "attempt_id": "att-" + reference,
-                "comment_baseline": 0, "review_baseline": 0, "state": "adopted",
+                "worker": "w",
+                "workspace": "/tmp/w",
+                "handle": "term_" + reference,
+                "head": "codex",
+                "review_head": "codex-reviewer",
+                "attempt_id": "att-" + reference,
+                "comment_baseline": 0,
+                "review_baseline": 0,
+                "state": "adopted",
                 "claimed_at": time.time(),
             }
             for reference in ("secretary-510-pilot", "secretary-510-neighbor")
@@ -914,9 +1001,7 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
 
         result = self.runtime.production_tick()
 
-        reconciled = [
-            action for action in result["actions"] if action["step"] == "production-reconcile"
-        ]
+        reconciled = [action for action in result["actions"] if action["step"] == "production-reconcile"]
         self.assertEqual(
             [(action["ref"], action["action"]) for action in reconciled],
             [("secretary-510-neighbor", "record-removed")],
@@ -933,10 +1018,7 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
         result = self.runtime.production_tick()
 
         self.assertEqual(
-            sorted(
-                action["ref"] for action in result["actions"]
-                if action["step"] == "production-reconcile"
-            ),
+            sorted(action["ref"] for action in result["actions"] if action["step"] == "production-reconcile"),
             ["secretary-510-neighbor", "secretary-510-pilot"],
         )
         records = set(self.runtime.production_state.load()["records"])
@@ -959,16 +1041,22 @@ class TwoOpenSprintFenceTests(ObserverFenceFixture, TwoOpenSprintAdmission):
         self.assertEqual(fence["projects"], {"secretary", "fourth"})
         self.assertEqual(fence["refs"], {"secretary-510-pilot", "fourth-1"})
         self.assertEqual(fence["outcomes"][0]["observer_reason"], REASON_MALFORMED)
-        self.assertFalse(fenced_task(
-            fence, {"ref": "secretary-510-neighbor", "sprint": self.SECOND, "project": "other"},
-        ))
-        self.assertFalse(fenced_task(
-            fence, {"ref": "third-1", "sprint": self.SECOND, "project": "third"},
-        ))
+        self.assertFalse(
+            fenced_task(
+                fence,
+                {"ref": "secretary-510-neighbor", "sprint": self.SECOND, "project": "other"},
+            )
+        )
+        self.assertFalse(
+            fenced_task(
+                fence,
+                {"ref": "third-1", "sprint": self.SECOND, "project": "third"},
+            )
+        )
         # The second sprint's head is not what the fence was about, and it is still alive.
-        self.assertTrue(observer_alive(load_observers(self.runtime.production_state.load())[
-            self.SECOND
-        ])["alive"])
+        self.assertTrue(
+            observer_alive(load_observers(self.runtime.production_state.load())[self.SECOND])["alive"]
+        )
 
 
 if __name__ == "__main__":

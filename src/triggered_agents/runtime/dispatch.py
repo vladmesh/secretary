@@ -113,6 +113,7 @@ acts on "may I send into it" and not on why it may not. The calls whose outcome 
 never checked (`/clear`, the warm-reuse send, the by-worktree stop, closing a legacy duplicate)
 still ignore a refusal, and the ones that gate a spawn still raise.
 """
+
 from __future__ import annotations
 
 import json
@@ -163,8 +164,8 @@ from .tui_delivery import (
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 CLAUDE_JSON = Path(os.environ.get("TA_CLAUDE_JSON", str(Path.home() / ".claude.json")))
 WATCHDOG_SECONDS = int(os.environ.get("TA_WATCHDOG_SECONDS", "1200"))  # busy + this quiet = stuck
-IDLE_PROBE_MS = 2500        # tui-idle satisfied within this = idle; timeout = busy
-ORCA_TIMEOUT_S = 20         # never let a hung orca call wedge dispatch while it holds the lock
+IDLE_PROBE_MS = 2500  # tui-idle satisfied within this = idle; timeout = busy
+ORCA_TIMEOUT_S = 20  # never let a hung orca call wedge dispatch while it holds the lock
 # How long a just-created terminal gets the benefit of the doubt before "not visible in `terminal
 # list` yet" (triggered-agents-445, PR #95 review B2) is read the same as "nothing was ever
 # spawned". Generous relative to the lag this guards against (Orca registering a brand new pty),
@@ -197,8 +198,6 @@ _AGENT_REPL_MARKERS = ("Claude Code", "Codex", "Hermes", "❯", "›")
 
 
 @dataclass(frozen=True)
-
-
 class DispatchCommand:
     skill: str
     launch: str
@@ -316,6 +315,7 @@ def _codex_turn_after(workspace: str, since: float) -> bool:
     """Whether the Codex session for this workspace wrote anything after ``since``."""
     try:
         from ..agents.pipeline import codex_sessions
+
         latest = codex_sessions.latest_activity_for(workspace)
     except Exception:
         return False
@@ -339,8 +339,7 @@ def _confirm_delivery(handle: str, workspace: str, sent_at: float, *, host: Sess
             last_reason = "agent-repl-not-visible"
         time.sleep(max(REUSE_DELIVERY_POLL_S, 0.01))
     raise ReuseDeliveryError(
-        f"delivery was not confirmed after {REUSE_DELIVERY_TIMEOUT_S:.1f}s "
-        f"(reason={last_reason})"
+        f"delivery was not confirmed after {REUSE_DELIVERY_TIMEOUT_S:.1f}s (reason={last_reason})"
     )
 
 
@@ -367,19 +366,17 @@ def _pipeline_paused() -> bool:
     The warning goes to the service log every affected tick until the state is repaired."""
     try:
         from ..agents.pipeline import pause as pipeline_pause
+
         return pipeline_pause.is_paused()
     except Exception as exc:
         print(
-            "dispatch: pipeline pause state is unreadable; refusing dispatch "
-            f"({type(exc).__name__}: {exc})",
+            f"dispatch: pipeline pause state is unreadable; refusing dispatch ({type(exc).__name__}: {exc})",
             file=sys.stderr,
         )
         return True
 
 
 @dataclass(frozen=True)
-
-
 class RegistrySnapshot:
     """The head registry as one tick read it, once.
 
@@ -407,13 +404,13 @@ def _registry_snapshot() -> RegistrySnapshot:
     """
     try:
         from ..agents.pipeline import heads as pipeline_heads
+
         return RegistrySnapshot(pipeline_heads.load_registry())
     except Exception:
         return RegistrySnapshot(None)
 
 
-def _preferred_head(agent: str, spec: dict,
-                    snapshot: RegistrySnapshot | None = None) -> str | None:
+def _preferred_head(agent: str, spec: dict, snapshot: RegistrySnapshot | None = None) -> str | None:
     """The head this agent launches on: the selected registry's role default for it.
 
     The spec's own `head` is the last resort for a registry that routes this role nowhere, and it
@@ -434,8 +431,7 @@ def _preferred_head(agent: str, spec: dict,
     return registry.resolve(fallback) if fallback else fallback
 
 
-def _reuse_head_is_red(agent: str, state: AgentState,
-                       snapshot: RegistrySnapshot | None = None) -> bool:
+def _reuse_head_is_red(agent: str, state: AgentState, snapshot: RegistrySnapshot | None = None) -> bool:
     """Whether the profile the idle terminal was ACTUALLY launched with is currently sitting on a
     red resource — the check idle-reuse needs before sending into an already-warm terminal, since
     that terminal keeps whatever profile it was spawned with and never re-resolves on its own
@@ -455,6 +451,7 @@ def _reuse_head_is_red(agent: str, state: AgentState,
             return False
         profile = state.load_head_profile() or head
         from ..agents.pipeline import health as pipeline_health
+
         statuses = pipeline_health.refresh(snapshot.registry)
         resource = pipeline_health.resource_of(profile, snapshot.registry)
         return resource is not None and statuses.get(resource, pipeline_health.GREEN) == pipeline_health.RED
@@ -463,8 +460,6 @@ def _reuse_head_is_red(agent: str, state: AgentState,
 
 
 @dataclass(frozen=True)
-
-
 class LaunchResolution:
     """Which head this agent gets this tick, and which backend holds it.
 
@@ -474,6 +469,7 @@ class LaunchResolution:
     tick is a handover between backends — must be able to decide it without rendering anything, or
     the deciding itself files a report nobody is ever going to write.
     """
+
     #: The role's skill text as its spec has it, with no `--card` argument yet.
     skill: str
     #: The profile this launch resolved onto, and its data as the registry gave it. Both None for
@@ -484,8 +480,9 @@ class LaunchResolution:
     runtime: str
 
 
-def _resolve_launch(agent: str, variant: str | None = None,
-                    snapshot: RegistrySnapshot | None = None) -> LaunchResolution:
+def _resolve_launch(
+    agent: str, variant: str | None = None, snapshot: RegistrySnapshot | None = None
+) -> LaunchResolution:
     """Resolve this agent's head against this run's live resource health.
 
     The head comes from `_preferred_head` and resolves through the same registry machinery a
@@ -507,6 +504,7 @@ def _resolve_launch(agent: str, variant: str | None = None,
         return LaunchResolution(skill, None, None, DEFAULT_HEAD_RUNTIME)
     try:
         from ..agents.pipeline import health as pipeline_health
+
         statuses = pipeline_health.refresh(registry)
         resolved = pipeline_health.resolve_head(head, statuses, registry) or head
         profile = registry.profile(resolved)
@@ -515,8 +513,11 @@ def _resolve_launch(agent: str, variant: str | None = None,
     return LaunchResolution(skill, resolved, profile, _profile_runtime(resolved, profile))
 
 
-def _render_launch(agent: str, resolution: LaunchResolution, card_ref: str | None = None,
-                   ) -> tuple[str, str, bool, LaunchResolution]:
+def _render_launch(
+    agent: str,
+    resolution: LaunchResolution,
+    card_ref: str | None = None,
+) -> tuple[str, str, bool, LaunchResolution]:
     """(skill, launch command, prompt-after-start, the resolution the command was rendered from).
 
     `card_ref` appends `--card <ref>` to the skill text BEFORE it is handed to the head, so the
@@ -533,13 +534,19 @@ def _render_launch(agent: str, resolution: LaunchResolution, card_ref: str | Non
     skill = f"{resolution.skill} --card {card_ref}" if card_ref else resolution.skill
     bare = LaunchResolution(resolution.skill, None, None, DEFAULT_HEAD_RUNTIME)
     bare_claude = render_head_command(
-        {"adapter": "claude"}, prompt=skill, role=agent, binding=RUNTIME_ROLE_ENV,
+        {"adapter": "claude"},
+        prompt=skill,
+        role=agent,
+        binding=RUNTIME_ROLE_ENV,
     ).command
     if resolution.head_profile is None:
         return skill, bare_claude, False, bare
     try:
         rendered = render_head_command(
-            resolution.head_profile, prompt=skill, role=agent, workspace=_workspace(agent),
+            resolution.head_profile,
+            prompt=skill,
+            role=agent,
+            workspace=_workspace(agent),
             binding=RUNTIME_ROLE_ENV,
         )
     except Exception:
@@ -547,9 +554,12 @@ def _render_launch(agent: str, resolution: LaunchResolution, card_ref: str | Non
     return skill, rendered.command, rendered.prompt_after_start, resolution
 
 
-def _launch_cmd(agent: str, variant: str | None = None,
-                card_ref: str | None = None, snapshot: RegistrySnapshot | None = None,
-                ) -> tuple[str, str, str | None, bool, dict | None]:
+def _launch_cmd(
+    agent: str,
+    variant: str | None = None,
+    card_ref: str | None = None,
+    snapshot: RegistrySnapshot | None = None,
+) -> tuple[str, str, str | None, bool, dict | None]:
     """(skill, full launch command, resolved head profile, prompt-after-start, profile data) from
     the agent's automation.toml: `_resolve_launch` and then `_render_launch`, for a caller that
     wants both halves at once.
@@ -577,6 +587,7 @@ def _steward_report_card(agent: str, variant: str | None) -> str | None:
     if agent != "steward":
         return None
     from ..agents.pipeline import ops as pipeline_ops
+
     now = datetime.now(UTC)
     kind = variant or "hourly"
     slug = f"steward-sweep-{now:%Y%m%d-%H%M%S}"
@@ -606,9 +617,12 @@ def _is_ephemeral(agent: str) -> bool:
         return True
 
 
-def _dispatch_command(agent: str, variant: str | None,
-                      snapshot: RegistrySnapshot | None = None,
-                      resolution: LaunchResolution | None = None) -> DispatchCommand:
+def _dispatch_command(
+    agent: str,
+    variant: str | None,
+    snapshot: RegistrySnapshot | None = None,
+    resolution: LaunchResolution | None = None,
+) -> DispatchCommand:
     """(skill, launch, resolved head profile) for a dispatch about to actually reach the head —
     the one spot that also creates the steward's report card, so every real dispatch (fresh
     create, watchdog restart, idle reuse) carries one and a tick that dispatches nothing never
@@ -625,8 +639,9 @@ def _dispatch_command(agent: str, variant: str | None,
     resolution = _resolve_launch(agent, variant, snapshot) if resolution is None else resolution
     card_ref = _steward_report_card(agent, variant)
     skill, launch, after_start, used = _render_launch(agent, resolution, card_ref)
-    return DispatchCommand(skill, launch, used.profile, card_ref, prompt_after_start=after_start,
-                           head_profile=used.head_profile)
+    return DispatchCommand(
+        skill, launch, used.profile, card_ref, prompt_after_start=after_start, head_profile=used.head_profile
+    )
 
 
 def _terminal_handle_live(ws: str, handle: str, *, host: SessionHost) -> bool:
@@ -637,8 +652,9 @@ def _terminal_handle_live(ws: str, handle: str, *, host: SessionHost) -> bool:
     return any(pane.handle == handle for pane in panes)
 
 
-def _fresh_steward_report_in_progress(agent: str, now: float, ws: str, state: AgentState, *,
-                                      host: SessionHost) -> dict | None:
+def _fresh_steward_report_in_progress(
+    agent: str, now: float, ws: str, state: AgentState, *, host: SessionHost
+) -> dict | None:
     """A secondary run guard for steward dispatch.
 
     Orca terminal creation is not immediately visible in `terminal list` on every host, so two
@@ -663,8 +679,7 @@ def _fresh_steward_report_in_progress(agent: str, now: float, ws: str, state: Ag
             if active.get("reference") != card.get("reference") or not handle:
                 state.clear_active_report(card.get("reference"))
                 continue
-            if _terminal_handle_live(ws, handle, host=host) \
-                    or now - moved < REPORT_VISIBILITY_GAP_SECONDS:
+            if _terminal_handle_live(ws, handle, host=host) or now - moved < REPORT_VISIBILITY_GAP_SECONDS:
                 return card
             state.clear_active_report(card.get("reference"))
     except Exception:
@@ -715,8 +730,7 @@ def _ensure_claude_ready(ws: str) -> None:
         print(f"dispatch: claude config prep failed ({e})")
 
 
-def _agent_terminals(ws: str, state: AgentState | None = None, *,
-                     host: SessionHost) -> list[Pane] | None:
+def _agent_terminals(ws: str, state: AgentState | None = None, *, host: SessionHost) -> list[Pane] | None:
     """Live terminals in the workspace running this singleton agent.
 
     New spawns get an explicit `triggered-agent:<name>` title. The legacy `Claude` match keeps
@@ -732,7 +746,8 @@ def _agent_terminals(ws: str, state: AgentState | None = None, *,
         return None
     saved_handle = state.load_terminal_handle() if state else None
     return [
-        pane for pane in panes
+        pane
+        for pane in panes
         if (saved_handle and pane.handle == saved_handle)
         or pane.title.startswith("triggered-agent:")
         or "Claude" in pane.title
@@ -763,8 +778,9 @@ spawn_finalizer = finalizer.spawn_finalizer
 finalize = finalizer.finalize
 
 
-def _create_terminal(agent: str, ws: str, launch: str, state: AgentState,
-                     profile: str | None, *, host: SessionHost) -> str:
+def _create_terminal(
+    agent: str, ws: str, launch: str, state: AgentState, profile: str | None, *, host: SessionHost
+) -> str:
     """Open this agent's pane and record what was opened.
 
     `open_pane` refuses a create Orca answered without a handle, so a spawn that could not be
@@ -780,31 +796,35 @@ def _create_terminal(agent: str, ws: str, launch: str, state: AgentState,
     pane = host.open_pane(ws, f"triggered-agent:{agent}", launch)
     # created_at only here (never on a plain warm-reuse re-save): see save_terminal_handle's own
     # docstring and the "no terminal" branch's visibility-gap guard below.
-    state.save_terminal_handle(pane.handle, created_at=time.time(),
-                               generation=generation)
+    state.save_terminal_handle(pane.handle, created_at=time.time(), generation=generation)
     state.save_head_profile(profile)
     return pane.handle
 
 
-def _recover_steward_dispatch_failure(state: AgentState, event: str, cmd: DispatchCommand,
-                                      failure: BaseException) -> None:
+def _recover_steward_dispatch_failure(
+    state: AgentState, event: str, cmd: DispatchCommand, failure: BaseException
+) -> None:
     """Close out a steward report card whose head was brought up but never took the run."""
     if not cmd.card_ref:
         return
     state.clear_active_report(cmd.card_ref)
-    body = "steward dispatch failed before the head accepted the report-card run.\n\n" \
-           f"failure: {failure}"
+    body = f"steward dispatch failed before the head accepted the report-card run.\n\nfailure: {failure}"
     try:
         from ..agents.pipeline import ops as pipeline_ops
+
         pipeline_ops.move_card("steward", cmd.card_ref, "Done", reason=body)
         state.log_run(event, action="dispatch-recovery", result="done", reference=cmd.card_ref)
     except Exception as recovery_error:
-        state.log_run(event, action="dispatch-recovery", result="failed",
-                      reference=cmd.card_ref, error=str(recovery_error))
+        state.log_run(
+            event,
+            action="dispatch-recovery",
+            result="failed",
+            reference=cmd.card_ref,
+            error=str(recovery_error),
+        )
 
 
-def _release_steward_report(state: AgentState, event: str, cmd: DispatchCommand,
-                            note: str) -> None:
+def _release_steward_report(state: AgentState, event: str, cmd: DispatchCommand, note: str) -> None:
     """Close a steward report card whose tick turned out to dispatch nothing after all.
 
     The card is created by the same call that renders the skill naming it, so a tick cannot know
@@ -816,15 +836,18 @@ def _release_steward_report(state: AgentState, event: str, cmd: DispatchCommand,
     state.clear_active_report(cmd.card_ref)
     try:
         from ..agents.pipeline import ops as pipeline_ops
+
         pipeline_ops.move_card("steward", cmd.card_ref, "Done", reason=note)
         state.log_run(event, action="dispatch-release", result="done", reference=cmd.card_ref)
     except Exception as error:
-        state.log_run(event, action="dispatch-release", result="failed", reference=cmd.card_ref,
-                      error=str(error))
+        state.log_run(
+            event, action="dispatch-release", result="failed", reference=cmd.card_ref, error=str(error)
+        )
 
 
-def _escalate_steward_preflight_failure(state: AgentState, event: str, cmd: DispatchCommand,
-                                        failure: BaseException) -> None:
+def _escalate_steward_preflight_failure(
+    state: AgentState, event: str, cmd: DispatchCommand, failure: BaseException
+) -> None:
     """Put a steward report card in front of a human when its workspace could not be prepared.
 
     The preflight fails before any pane is created, so no head has seen this card. Closing it as
@@ -836,17 +859,26 @@ def _escalate_steward_preflight_failure(state: AgentState, event: str, cmd: Disp
     if not cmd.card_ref:
         return
     state.clear_active_report(cmd.card_ref)
-    body = "steward dispatch could not prepare the head workspace, so no head was started " \
-           "and no sweep ran.\n\n" \
-           f"failure: {failure}"
+    body = (
+        "steward dispatch could not prepare the head workspace, so no head was started "
+        "and no sweep ran.\n\n"
+        f"failure: {failure}"
+    )
     try:
         from ..agents.pipeline import ops as pipeline_ops
+
         pipeline_ops.move_card("steward", cmd.card_ref, "Blocked", reason=body)
-        state.log_run(event, action="dispatch-preflight", result="blocked", reference=cmd.card_ref,
-                      error=str(failure))
+        state.log_run(
+            event, action="dispatch-preflight", result="blocked", reference=cmd.card_ref, error=str(failure)
+        )
     except Exception as escalation_error:
-        state.log_run(event, action="dispatch-preflight", result="failed", reference=cmd.card_ref,
-                      error=f"{failure} (escalation failed: {escalation_error})")
+        state.log_run(
+            event,
+            action="dispatch-preflight",
+            result="failed",
+            reference=cmd.card_ref,
+            error=f"{failure} (escalation failed: {escalation_error})",
+        )
 
 
 def _release_standing_report(state: AgentState, event: str, note: str) -> None:
@@ -867,11 +899,13 @@ def _release_standing_report(state: AgentState, event: str, note: str) -> None:
     state.clear_active_report(reference)
     try:
         from ..agents.pipeline import ops as pipeline_ops
+
         pipeline_ops.move_card("steward", reference, "Done", reason=note)
         state.log_run(event, action="owner-report-release", result="done", reference=reference)
     except Exception as error:
-        state.log_run(event, action="owner-report-release", result="failed", reference=reference,
-                      error=str(error))
+        state.log_run(
+            event, action="owner-report-release", result="failed", reference=reference, error=str(error)
+        )
 
 
 class _TickReports:
@@ -895,8 +929,9 @@ class _TickReports:
     head at all (`preflight_failed`). Anything still unsettled when the tick ends is closed here.
     """
 
-    NOTHING_DISPATCHED = "this tick dispatched nothing after all, so the report card it made is " \
-                         "closed unwritten."
+    NOTHING_DISPATCHED = (
+        "this tick dispatched nothing after all, so the report card it made is closed unwritten."
+    )
 
     def __init__(self, agent: str, state: AgentState, event: str) -> None:
         self.agent = agent
@@ -921,8 +956,12 @@ class _TickReports:
         self._close_an_orphan()
         return False
 
-    def command(self, variant: str | None, snapshot: RegistrySnapshot | None = None,
-                resolution: LaunchResolution | None = None) -> DispatchCommand:
+    def command(
+        self,
+        variant: str | None,
+        snapshot: RegistrySnapshot | None = None,
+        resolution: LaunchResolution | None = None,
+    ) -> DispatchCommand:
         """This tick's dispatch command, and the card it carries, recorded as outstanding."""
         cmd = _dispatch_command(self.agent, variant, snapshot, resolution)
         self.cmd = cmd
@@ -974,14 +1013,14 @@ class _TickReports:
         except Exception:
             return
         _release_standing_report(
-            self.state, self.event,
+            self.state,
+            self.event,
             "the head that was writing this report is no longer this role's recorded head, so "
             "the report was closed unwritten by the tick that found it ownerless.",
         )
 
 
-def _deliver_interactive_skill(handle: str, workspace: str, skill: str, *,
-                               host: SessionHost) -> None:
+def _deliver_interactive_skill(handle: str, workspace: str, skill: str, *, host: SessionHost) -> None:
     """Put a service head's skill in front of it, on the product's one interactive delivery path.
 
     A Codex head starts with an empty composer, fresh or warm, so the dispatch is not finished when
@@ -999,12 +1038,19 @@ def _deliver_interactive_skill(handle: str, workspace: str, skill: str, *,
     )
 
 
-def _spawn_fresh_terminal(agent: str, variant: str | None, ws: str, state: AgentState,
-                          event: str, *, host: SessionHost,
-                          cmd: DispatchCommand | None = None,
-                          snapshot: RegistrySnapshot | None = None,
-                          resolution: LaunchResolution | None = None,
-                          reports: "_TickReports | None" = None) -> DispatchCommand | int:
+def _spawn_fresh_terminal(
+    agent: str,
+    variant: str | None,
+    ws: str,
+    state: AgentState,
+    event: str,
+    *,
+    host: SessionHost,
+    cmd: DispatchCommand | None = None,
+    snapshot: RegistrySnapshot | None = None,
+    resolution: LaunchResolution | None = None,
+    reports: "_TickReports | None" = None,
+) -> DispatchCommand | int:
     """Bring a fresh head up in `ws`: prepare the workspace, create the pane, deliver the skill.
 
     The preparation is deliberately outside the recovery below: once a pane exists the head may
@@ -1046,12 +1092,20 @@ def _spawn_fresh_terminal(agent: str, variant: str | None, ws: str, state: Agent
     return cmd
 
 
-def _send_reuse_dispatch(agent: str, variant: str | None, terminal_handle: str, workspace: str,
-                         state: AgentState, event: str, *, host: SessionHost,
-                         cmd: DispatchCommand | None = None,
-                         snapshot: RegistrySnapshot | None = None,
-                         resolution: LaunchResolution | None = None,
-                         reports: "_TickReports | None" = None) -> DispatchCommand:
+def _send_reuse_dispatch(
+    agent: str,
+    variant: str | None,
+    terminal_handle: str,
+    workspace: str,
+    state: AgentState,
+    event: str,
+    *,
+    host: SessionHost,
+    cmd: DispatchCommand | None = None,
+    snapshot: RegistrySnapshot | None = None,
+    resolution: LaunchResolution | None = None,
+    reports: "_TickReports | None" = None,
+) -> DispatchCommand:
     reports = _TickReports(agent, state, event) if reports is None else reports
     cmd = reports.command(variant, snapshot, resolution) if cmd is None else cmd
     try:
@@ -1158,7 +1212,9 @@ def _reap_ghosts(ws: str) -> tuple[int, bool]:
         for tab in snap.get("tabs", []) or []:
             if tab.get("status") != "ready":
                 try:
-                    orca_rpc.call("session.tabs.close", {"worktree": snap["worktree"], "tabId": tab["parentTabId"]})
+                    orca_rpc.call(
+                        "session.tabs.close", {"worktree": snap["worktree"], "tabId": tab["parentTabId"]}
+                    )
                     closed += 1
                 except Exception as e:
                     # A tab that fails to close is exactly the leftover the idempotent-cleanup
@@ -1185,8 +1241,9 @@ def _reap_ghosts(ws: str) -> tuple[int, bool]:
     return closed, ok
 
 
-def _cleanup_only(agent: str, ws: str, state: AgentState, event: str, terms: list[Pane], *,
-                  host: SessionHost) -> int:
+def _cleanup_only(
+    agent: str, ws: str, state: AgentState, event: str, terms: list[Pane], *, host: SessionHost
+) -> int:
     """Tear-down-only pass for an ephemeral agent's finished or stuck terminal, run in place of a
     real dispatch when precheck signalled no new work (triggered-agents-445, PR #95 review B1):
     `ta-gate.sh` skips `dispatch` entirely on a precheck skip, so without this a finished
@@ -1209,24 +1266,32 @@ def _cleanup_only(agent: str, ws: str, state: AgentState, event: str, terms: lis
             # workspace clean off an Orca hiccup would log a healthy no-op over a stray that is
             # actually still live -- leave it for the next tick to re-check.
             state.log_run(event, action="cleanup-stray-check-failed")
-            print(f"dispatch[{agent}]: cleanup — terminal list unavailable, cannot confirm the "
-                  "workspace is clear; leaving it for the next tick")
+            print(
+                f"dispatch[{agent}]: cleanup — terminal list unavailable, cannot confirm the "
+                "workspace is clear; leaving it for the next tick"
+            )
             return 0
         if raw > 0:
             if not _stop_and_confirm_workspace_empty(ws, host=host):
                 state.log_run(event, action="cleanup-stray-sweep-failed")
-                print(f"dispatch[{agent}]: cleanup could not confirm the workspace is clear of "
-                      "stray terminals — leaving it for the next tick")
+                print(
+                    f"dispatch[{agent}]: cleanup could not confirm the workspace is clear of "
+                    "stray terminals — leaving it for the next tick"
+                )
                 return 0
             reaped, ok = _reap_ghosts(ws)
             if not ok:
                 state.log_run(event, action="cleanup-stray-swept-tab-failed")
-                print(f"dispatch[{agent}]: cleanup — stopped stray terminal(s) but a ghost tab "
-                      "would not close; next tick re-reaps")
+                print(
+                    f"dispatch[{agent}]: cleanup — stopped stray terminal(s) but a ghost tab "
+                    "would not close; next tick re-reaps"
+                )
                 return 0
             state.log_run(event, action="cleanup-stray-swept")
-            print(f"dispatch[{agent}]: cleanup — swept stray unrecognized terminal(s)"
-                  f"{f'; reaped {reaped} ghost(s)' if reaped else ''}, no new work to dispatch")
+            print(
+                f"dispatch[{agent}]: cleanup — swept stray unrecognized terminal(s)"
+                f"{f'; reaped {reaped} ghost(s)' if reaped else ''}, no new work to dispatch"
+            )
         return 0
     survivor = max(terms, key=lambda pane: pane.last_output_at)
     if not _is_idle(survivor.handle, host=host):
@@ -1235,14 +1300,18 @@ def _cleanup_only(agent: str, ws: str, state: AgentState, event: str, terms: lis
             return 0  # still working -- a no-work tick must never touch a live run
         if not _stop_and_confirm(ws, state, host=host):
             state.log_run(event, action="cleanup-stop-failed")
-            print(f"dispatch[{agent}]: cleanup could not confirm the stuck terminal stopped "
-                  "— leaving it for the next tick")
+            print(
+                f"dispatch[{agent}]: cleanup could not confirm the stuck terminal stopped "
+                "— leaving it for the next tick"
+            )
             return 0
         _, ok = _reap_ghosts(ws)
         if not ok:
             state.log_run(event, action="cleanup-watchdog-tab-failed")
-            print(f"dispatch[{agent}]: cleanup — stopped stuck terminal but a ghost tab would not "
-                  "close; next tick re-reaps")
+            print(
+                f"dispatch[{agent}]: cleanup — stopped stuck terminal but a ghost tab would not "
+                "close; next tick re-reaps"
+            )
             return 0
         state.log_run(event, action="cleanup-watchdog-stop")
         print(f"dispatch[{agent}]: cleanup — stopped stuck terminal, no new work to dispatch")
@@ -1252,14 +1321,18 @@ def _cleanup_only(agent: str, ws: str, state: AgentState, event: str, terms: lis
     # is no new work this tick to hand a fresh session to
     if not _stop_and_confirm(ws, state, host=host):
         state.log_run(event, action="cleanup-stop-failed")
-        print(f"dispatch[{agent}]: cleanup could not confirm the finished terminal stopped "
-              "— leaving it for the next tick")
+        print(
+            f"dispatch[{agent}]: cleanup could not confirm the finished terminal stopped "
+            "— leaving it for the next tick"
+        )
         return 0
     _, ok = _reap_ghosts(ws)
     if not ok:
         state.log_run(event, action="cleanup-teardown-tab-failed")
-        print(f"dispatch[{agent}]: cleanup — stopped finished terminal but a ghost tab would not "
-              "close; next tick re-reaps")
+        print(
+            f"dispatch[{agent}]: cleanup — stopped finished terminal but a ghost tab would not "
+            "close; next tick re-reaps"
+        )
         return 0
     state.log_run(event, action="cleanup-teardown")
     print(f"dispatch[{agent}]: cleanup — torn down finished terminal, no new work to dispatch")
@@ -1368,8 +1441,16 @@ HANDOVER_INITIATOR = "triggered-agent-dispatch"
 HANDOVER_REASON = "this role's resolved profile now names another backend"
 
 
-def _hand_over_backend(agent: str, ws: str, state: AgentState, event: str, backend: str,
-                       reports: _TickReports, *, host: SessionHost) -> int | None:
+def _hand_over_backend(
+    agent: str,
+    ws: str,
+    state: AgentState,
+    event: str,
+    backend: str,
+    reports: _TickReports,
+    *,
+    host: SessionHost,
+) -> int | None:
     """This tick as a handover between backends, or `None` if it is an ordinary tick.
 
     One role, one owner of its head, and the owner is written down here rather than looked for in
@@ -1394,8 +1475,9 @@ def _hand_over_backend(agent: str, ws: str, state: AgentState, event: str, backe
     return _hand_back_supervised_head(agent, ws, state, event, reports)
 
 
-def _hand_over_from_pane(agent: str, ws: str, state: AgentState, event: str,
-                         reports: _TickReports, *, host: SessionHost) -> int:
+def _hand_over_from_pane(
+    agent: str, ws: str, state: AgentState, event: str, reports: _TickReports, *, host: SessionHost
+) -> int:
     """The handover tick of a role whose head is a pane and whose profile now names a supervisor.
 
     Not a supervised tick, and the distinction is the whole point of having a separate name for it:
@@ -1418,10 +1500,16 @@ def _hand_over_from_pane(agent: str, ws: str, state: AgentState, event: str,
     nothing, so the next tick is the handover again rather than a second head beside the first.
     """
     if not _stop_and_confirm(ws, state, host=host):
-        state.log_run(event, action="handover-stop-failed", result="error",
-                      error="the pane holding this role's head could not be confirmed stopped")
-        print(f"dispatch[{agent}]: the pane holding this head would not confirm it stopped — "
-              "not handing this role to a supervisor this tick")
+        state.log_run(
+            event,
+            action="handover-stop-failed",
+            result="error",
+            error="the pane holding this role's head could not be confirmed stopped",
+        )
+        print(
+            f"dispatch[{agent}]: the pane holding this head would not confirm it stopped — "
+            "not handing this role to a supervisor this tick"
+        )
         return 0
     reaped, reap_ok = _reap_ghosts(ws)
     reports.owner_stopped(
@@ -1429,17 +1517,23 @@ def _hand_over_from_pane(agent: str, ws: str, state: AgentState, event: str,
         "product's own, so the report that head was writing is closed unwritten.",
     )
     state.save_terminal_handle(None)
-    state.log_run(event, action="handover-to-supervised",
-                  result="done" if reap_ok else "partial",
-                  error="" if reap_ok else "a ghost tab of the stopped pane would not close")
+    state.log_run(
+        event,
+        action="handover-to-supervised",
+        result="done" if reap_ok else "partial",
+        error="" if reap_ok else "a ghost tab of the stopped pane would not close",
+    )
     tail = f"; reaped {reaped} ghost(s)" if reaped else ""
-    print(f"dispatch[{agent}]: this role's profile now names a supervisor — stopped the pane that "
-          f"held its head and dispatched nothing{tail}")
+    print(
+        f"dispatch[{agent}]: this role's profile now names a supervisor — stopped the pane that "
+        f"held its head and dispatched nothing{tail}"
+    )
     return 0
 
 
-def _hand_back_supervised_head(agent: str, ws: str, state: AgentState, event: str,
-                               reports: _TickReports) -> int | None:
+def _hand_back_supervised_head(
+    agent: str, ws: str, state: AgentState, event: str, reports: _TickReports
+) -> int | None:
     """The handover tick of a role whose head is supervised and whose profile now names a pane.
 
     `None` when there is nothing to hand back — no supervised head was ever written down for this
@@ -1464,8 +1558,10 @@ def _hand_back_supervised_head(agent: str, ws: str, state: AgentState, event: st
         run = HeadRun.from_json(record)
     except (HeadRunError, ValueError, TypeError) as exc:
         state.log_run(event, action="handover-owner-unreadable", result="error", error=str(exc))
-        print(f"dispatch[{agent}]: the record of this role's supervised head does not name a run "
-              f"({exc}) — raising nothing this tick")
+        print(
+            f"dispatch[{agent}]: the record of this role's supervised head does not name a run "
+            f"({exc}) — raising nothing this tick"
+        )
         return 0
     runtime = _local_pty_runtime()
     seen = runtime.observe(run)
@@ -1478,19 +1574,34 @@ def _hand_back_supervised_head(agent: str, ws: str, state: AgentState, event: st
         state.log_run(event, action="handover-owner-gone", reference=run.run_id)
         return None
     if not seen.ok and seen.status != HEAD_ALIVE:
-        state.log_run(event, action="handover-owner-unreadable", result="error",
-                      reference=run.run_id, error=seen.reason or seen.status)
-        print(f"dispatch[{agent}]: the backend holding this role's head cannot say whether it is "
-              f"up ({seen.reason or seen.status}) — raising nothing this tick")
+        state.log_run(
+            event,
+            action="handover-owner-unreadable",
+            result="error",
+            reference=run.run_id,
+            error=seen.reason or seen.status,
+        )
+        print(
+            f"dispatch[{agent}]: the backend holding this role's head cannot say whether it is "
+            f"up ({seen.reason or seen.status}) — raising nothing this tick"
+        )
         return 0
     receipt = runtime.stop(
-        run, StopInitiator(actor=HANDOVER_INITIATOR, reason=HANDOVER_REASON),
+        run,
+        StopInitiator(actor=HANDOVER_INITIATOR, reason=HANDOVER_REASON),
     )
     if not receipt.ok:
-        state.log_run(event, action="handover-stop-failed", result="error",
-                      reference=run.run_id, error=receipt.reason or receipt.status)
-        print(f"dispatch[{agent}]: the supervised head {run.run_id} would not confirm it stopped "
-              "— not handing this role back to a pane this tick")
+        state.log_run(
+            event,
+            action="handover-stop-failed",
+            result="error",
+            reference=run.run_id,
+            error=receipt.reason or receipt.status,
+        )
+        print(
+            f"dispatch[{agent}]: the supervised head {run.run_id} would not confirm it stopped "
+            "— not handing this role back to a pane this tick"
+        )
         return 0
     reports.owner_stopped(
         "the supervised head of this role was stopped to hand the role back to a pane, so the "
@@ -1498,14 +1609,23 @@ def _hand_back_supervised_head(agent: str, ws: str, state: AgentState, event: st
     )
     state.save_head_run(None)
     state.log_run(event, action="handover-to-pane", reference=run.run_id)
-    print(f"dispatch[{agent}]: this role's profile now names a pane — stopped the supervised head "
-          f"{run.run_id} and dispatched nothing")
+    print(
+        f"dispatch[{agent}]: this role's profile now names a pane — stopped the supervised head "
+        f"{run.run_id} and dispatched nothing"
+    )
     return 0
 
 
-def _supervised_bring_up(agent: str, ws: str, state: AgentState, event: str,
-                         cmd: DispatchCommand, *, host: SessionHost,
-                         reports: "_TickReports | None" = None) -> int | None:
+def _supervised_bring_up(
+    agent: str,
+    ws: str,
+    state: AgentState,
+    event: str,
+    cmd: DispatchCommand,
+    *,
+    host: SessionHost,
+    reports: "_TickReports | None" = None,
+) -> int | None:
     """This tick under a supervisor of this product's own, or `None` if `cmd` is not held by one.
 
     The bring-up, and only the bring-up. Which backend holds this role's head, and whether this
@@ -1544,10 +1664,16 @@ def _supervised_bring_up(agent: str, ws: str, state: AgentState, event: str,
             "this role is still recorded as holding a pane, so no head was raised under a "
             "supervisor and this tick dispatched nothing.",
         )
-        state.log_run(event, action="supervised-owner-conflict", result="error",
-                      error="a pane is still recorded as this role's head")
-        print(f"dispatch[{agent}]: a pane is still recorded as this role's head — raising no "
-              "supervised head this tick")
+        state.log_run(
+            event,
+            action="supervised-owner-conflict",
+            result="error",
+            error="a pane is still recorded as this role's head",
+        )
+        print(
+            f"dispatch[{agent}]: a pane is still recorded as this role's head — raising no "
+            "supervised head this tick"
+        )
         return 0
     try:
         _ensure_head_ready(ws, cmd, role=agent)
@@ -1608,8 +1734,9 @@ def _supervised_bring_up(agent: str, ws: str, state: AgentState, event: str,
     return 0
 
 
-def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
-        host: SessionHost | None = None) -> int:
+def run(
+    agent: str, variant: str | None = None, cleanup_only: bool = False, *, host: SessionHost | None = None
+) -> int:
     """`variant` selects a differently-scheduled mode of the same agent: a different prompt from
     `_launch_cmd`, and its own runs.jsonl event name so the two wake-up kinds stay distinguishable
     in the agent's own telemetry.
@@ -1643,12 +1770,20 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
     # open a second route to Orca of its own.
     host = session_host(_run_json) if host is None else host
     with state.lock(), _TickReports(agent, state, event) as reports:
-        return _tick(agent, variant, ws, state, event, reports,
-                     cleanup_only=cleanup_only, host=host)
+        return _tick(agent, variant, ws, state, event, reports, cleanup_only=cleanup_only, host=host)
 
 
-def _tick(agent: str, variant: str | None, ws: str, state: AgentState, event: str,
-          reports: _TickReports, *, cleanup_only: bool, host: SessionHost) -> int:
+def _tick(
+    agent: str,
+    variant: str | None,
+    ws: str,
+    state: AgentState,
+    event: str,
+    reports: _TickReports,
+    *,
+    cleanup_only: bool,
+    host: SessionHost,
+) -> int:
     """One dispatch tick, under the run lock and inside `reports`.
 
     The order of the first three questions is the contract. The registry is read once; which
@@ -1721,8 +1856,7 @@ def _tick(agent: str, variant: str | None, ws: str, state: AgentState, event: st
             # closed through the same place every other outcome of this tick goes through.
             reports.undispatched(
                 pending,
-                "an earlier steward report of this role is still fresh, so this tick "
-                "dispatched nothing.",
+                "an earlier steward report of this role is still fresh, so this tick dispatched nothing.",
             )
         state.log_run(event, action="active-report-skip", reference=active_report["reference"])
         print(
@@ -1750,8 +1884,10 @@ def _tick(agent: str, variant: str | None, ws: str, state: AgentState, event: st
         last_created = state.load_terminal_created_at()
         if last_created is not None and (time.time() - last_created) < CREATE_VISIBILITY_GRACE_S:
             state.log_run(event, action="recent-create-guard")
-            print(f"dispatch[{agent}]: no terminal visible yet but one was created "
-                  f"{time.time() - last_created:.1f}s ago — skipping to avoid a duplicate")
+            print(
+                f"dispatch[{agent}]: no terminal visible yet but one was created "
+                f"{time.time() - last_created:.1f}s ago — skipping to avoid a duplicate"
+            )
             return 0
         if _is_ephemeral(agent):
             if not reap_ok:
@@ -1765,8 +1901,10 @@ def _tick(agent: str, variant: str | None, ws: str, state: AgentState, event: st
                 # next tick re-reaps before it creates. Restart paths above already do this;
                 # this is the same guard for the no-live-terminal create path.
                 state.log_run(event, action="reap-tab-failed")
-                print(f"dispatch[{agent}]: a ghost tab would not close (or tab list "
-                      "unavailable) — not creating a fresh session this tick, next tick re-reaps")
+                print(
+                    f"dispatch[{agent}]: a ghost tab would not close (or tab list "
+                    "unavailable) — not creating a fresh session this tick, next tick re-reaps"
+                )
                 return 0
             raw = _raw_terminal_count(ws, host=host)
             if raw is None:
@@ -1774,8 +1912,10 @@ def _tick(agent: str, variant: str | None, ws: str, state: AgentState, event: st
                 # can't rule out a stray we'd be piling a fresh session on top of, so don't
                 # create this tick -- the next one retries once Orca answers again.
                 state.log_run(event, action="stray-check-failed")
-                print(f"dispatch[{agent}]: terminal list unavailable — skipping create to "
-                      "avoid piling a fresh session on a possible stray")
+                print(
+                    f"dispatch[{agent}]: terminal list unavailable — skipping create to "
+                    "avoid piling a fresh session on a possible stray"
+                )
                 return 0
             if raw > 0:
                 # `_agent_terminals` recognized nothing, but Orca still lists a live terminal in
@@ -1785,8 +1925,10 @@ def _tick(agent: str, variant: str | None, ws: str, state: AgentState, event: st
                 # fresh session on top of an orphan that would otherwise run forever.
                 if not _stop_and_confirm_workspace_empty(ws, host=host):
                     state.log_run(event, action="stray-sweep-failed")
-                    print(f"dispatch[{agent}]: could not confirm the workspace is clear of "
-                          "stray terminals before creating — leaving it for the next tick")
+                    print(
+                        f"dispatch[{agent}]: could not confirm the workspace is clear of "
+                        "stray terminals before creating — leaving it for the next tick"
+                    )
                     return 0
                 _, ok = _reap_ghosts(ws)
                 if not ok:
@@ -1794,12 +1936,23 @@ def _tick(agent: str, variant: str | None, ws: str, state: AgentState, event: st
                     # session now would leave the workspace above zero tabs, so bail and let the
                     # next tick re-reap before it creates (review B1, round 6).
                     state.log_run(event, action="stray-sweep-tab-failed")
-                    print(f"dispatch[{agent}]: swept stray terminal but a ghost tab would not "
-                          "close; not creating this tick, next tick re-reaps")
+                    print(
+                        f"dispatch[{agent}]: swept stray terminal but a ghost tab would not "
+                        "close; not creating this tick, next tick re-reaps"
+                    )
                     return 0
-        spawned = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
-                                        cmd=pending, snapshot=registry,
-                                        resolution=resolution, reports=reports)
+        spawned = _spawn_fresh_terminal(
+            agent,
+            variant,
+            ws,
+            state,
+            event,
+            host=host,
+            cmd=pending,
+            snapshot=registry,
+            resolution=resolution,
+            reports=reports,
+        )
         if isinstance(spawned, int):
             return spawned
         cmd = spawned
@@ -1820,20 +1973,33 @@ def _tick(agent: str, variant: str | None, ws: str, state: AgentState, event: st
         # live session alongside a stuck one that never actually died (review B3).
         if not _stop_and_confirm(ws, state, host=host):
             state.log_run(event, action="watchdog-stop-failed")
-            print(f"dispatch[{agent}]: watchdog stop could not confirm the stuck terminal "
-                  "is gone — leaving it for the next tick")
+            print(
+                f"dispatch[{agent}]: watchdog stop could not confirm the stuck terminal "
+                "is gone — leaving it for the next tick"
+            )
             return 0
         _, ok = _reap_ghosts(ws)
         if not ok:
             # Stopped the stuck pty but its ghost tab wouldn't close: don't spawn a replacement
             # next to a lingering tab, bail and let the next tick re-reap first (review B1).
             state.log_run(event, action="watchdog-restart-tab-failed")
-            print(f"dispatch[{agent}]: watchdog stopped the stuck terminal but a ghost tab "
-                  "would not close; not restarting this tick, next tick re-reaps")
+            print(
+                f"dispatch[{agent}]: watchdog stopped the stuck terminal but a ghost tab "
+                "would not close; not restarting this tick, next tick re-reaps"
+            )
             return 0
-        spawned = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
-                                        cmd=pending, snapshot=registry,
-                                        resolution=resolution, reports=reports)
+        spawned = _spawn_fresh_terminal(
+            agent,
+            variant,
+            ws,
+            state,
+            event,
+            host=host,
+            cmd=pending,
+            snapshot=registry,
+            resolution=resolution,
+            reports=reports,
+        )
         if isinstance(spawned, int):
             return spawned
         cmd = spawned
@@ -1849,8 +2015,10 @@ def _tick(agent: str, variant: str | None, ws: str, state: AgentState, event: st
     if _is_ephemeral(agent):
         if not _stop_and_confirm(ws, state, host=host):
             state.log_run(event, action="ephemeral-stop-failed")
-            print(f"dispatch[{agent}]: ephemeral teardown could not confirm the finished "
-                  "terminal stopped — leaving it for the next tick")
+            print(
+                f"dispatch[{agent}]: ephemeral teardown could not confirm the finished "
+                "terminal stopped — leaving it for the next tick"
+            )
             return 0
         reaped, ok = _reap_ghosts(ws)
         if not ok:
@@ -1859,18 +2027,31 @@ def _tick(agent: str, variant: str | None, ws: str, state: AgentState, event: st
             # finished head's own finalizer trailer is the usual teardown path anyway; this
             # idle-restart branch is a backstop (review B1, round 6).
             state.log_run(event, action="ephemeral-restart-tab-failed")
-            print(f"dispatch[{agent}]: ephemeral teardown stopped the finished terminal but a "
-                  "ghost tab would not close; not restarting this tick, next tick re-reaps")
+            print(
+                f"dispatch[{agent}]: ephemeral teardown stopped the finished terminal but a "
+                "ghost tab would not close; not restarting this tick, next tick re-reaps"
+            )
             return 0
-        spawned = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
-                                        cmd=pending, snapshot=registry,
-                                        resolution=resolution, reports=reports)
+        spawned = _spawn_fresh_terminal(
+            agent,
+            variant,
+            ws,
+            state,
+            event,
+            host=host,
+            cmd=pending,
+            snapshot=registry,
+            resolution=resolution,
+            reports=reports,
+        )
         if isinstance(spawned, int):
             return spawned
         cmd = spawned
         state.log_run(event, action="ephemeral-restart")
         tail = f"; reaped {reaped} ghost(s)" if reaped else ""
-        print(f"dispatch[{agent}]: ephemeral — torn down finished terminal, fresh session -> {cmd.skill}{tail}")
+        print(
+            f"dispatch[{agent}]: ephemeral — torn down finished terminal, fresh session -> {cmd.skill}{tail}"
+        )
         return 0
 
     # idle: a warm terminal keeps whatever profile it was spawned with, so a resource that's
@@ -1882,17 +2063,30 @@ def _tick(agent: str, variant: str | None, ws: str, state: AgentState, event: st
     if _reuse_head_is_red(agent, state, registry):
         if not _stop_and_confirm(ws, state, host=host):
             state.log_run(event, action="red-fallback-stop-failed")
-            print(f"dispatch[{agent}]: red-fallback stop could not confirm the idle terminal "
-                  "stopped — leaving it for the next tick")
+            print(
+                f"dispatch[{agent}]: red-fallback stop could not confirm the idle terminal "
+                "stopped — leaving it for the next tick"
+            )
             return 0
-        spawned = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
-                                        cmd=pending, snapshot=registry,
-                                        resolution=resolution, reports=reports)
+        spawned = _spawn_fresh_terminal(
+            agent,
+            variant,
+            ws,
+            state,
+            event,
+            host=host,
+            cmd=pending,
+            snapshot=registry,
+            resolution=resolution,
+            reports=reports,
+        )
         if isinstance(spawned, int):
             return spawned
         cmd = spawned
         state.log_run(event, action="reused-red-fallback")
-        print(f"dispatch[{agent}]: idle terminal's head is red — stopped, fresh fallback terminal -> {cmd.skill}")
+        print(
+            f"dispatch[{agent}]: idle terminal's head is red — stopped, fresh fallback terminal -> {cmd.skill}"
+        )
         return 0
 
     # idle: a terminal can remain live after its agent exits, leaving bash in the same pane.
@@ -1902,24 +2096,36 @@ def _tick(agent: str, variant: str | None, ws: str, state: AgentState, event: st
     if not _agent_repl_visible(survivor.handle, host=host):
         if not _stop_and_confirm(ws, state, host=host):
             state.log_run(event, action="warm-repl-stop-failed")
-            print(f"dispatch[{agent}]: idle terminal has no live agent REPL, but its stop "
-                  "could not be confirmed — leaving it for the next tick")
+            print(
+                f"dispatch[{agent}]: idle terminal has no live agent REPL, but its stop "
+                "could not be confirmed — leaving it for the next tick"
+            )
             return 0
         _, ok = _reap_ghosts(ws)
         if not ok:
             state.log_run(event, action="warm-repl-restart-tab-failed")
-            print(f"dispatch[{agent}]: idle terminal had no live agent REPL; stopped it but "
-                  "a ghost tab would not close, not restarting this tick")
+            print(
+                f"dispatch[{agent}]: idle terminal had no live agent REPL; stopped it but "
+                "a ghost tab would not close, not restarting this tick"
+            )
             return 0
-        spawned = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
-                                        cmd=pending, snapshot=registry,
-                                        resolution=resolution, reports=reports)
+        spawned = _spawn_fresh_terminal(
+            agent,
+            variant,
+            ws,
+            state,
+            event,
+            host=host,
+            cmd=pending,
+            snapshot=registry,
+            resolution=resolution,
+            reports=reports,
+        )
         if isinstance(spawned, int):
             return spawned
         cmd = spawned
         state.log_run(event, action="warm-repl-restart")
-        print(f"dispatch[{agent}]: idle terminal had no live agent REPL: fresh terminal -> "
-              f"{cmd.skill}")
+        print(f"dispatch[{agent}]: idle terminal had no live agent REPL: fresh terminal -> {cmd.skill}")
         return 0
 
     # idle: warm reuse, killing nothing -> no ghost. Close only legacy duplicates (one-time).
@@ -1929,8 +2135,7 @@ def _tick(agent: str, variant: str | None, ws: str, state: AgentState, event: st
     # handed down rather than resolved inside the delivery, which keeps the tick to the one
     # resolution and the one report card it always had.
     pending = reports.command(variant, registry, resolution) if pending is None else pending
-    supervised = _supervised_bring_up(agent, ws, state, event, pending, host=host,
-                                      reports=reports)
+    supervised = _supervised_bring_up(agent, ws, state, event, pending, host=host, reports=reports)
     if supervised is not None:
         return supervised
     state.save_terminal_handle(survivor.handle)
@@ -1940,9 +2145,19 @@ def _tick(agent: str, variant: str | None, ws: str, state: AgentState, event: st
     _unchecked(lambda: host.send(survivor.handle, "/clear", enter=True))
     time.sleep(1.0)  # let /clear settle before the skill lands
     try:
-        cmd = _send_reuse_dispatch(agent, variant, survivor.handle, ws, state, event,
-                                   host=host, cmd=pending, snapshot=registry,
-                                   resolution=resolution, reports=reports)
+        cmd = _send_reuse_dispatch(
+            agent,
+            variant,
+            survivor.handle,
+            ws,
+            state,
+            event,
+            host=host,
+            cmd=pending,
+            snapshot=registry,
+            resolution=resolution,
+            reports=reports,
+        )
     except TuiDeliveryError as exc:
         # Both shapes of unconfirmed delivery — a seeded head's own record never appearing and
         # the interactive path never proving the prompt landed — are the same warm-reuse

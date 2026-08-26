@@ -89,7 +89,7 @@ def add_head_status_command(subparsers) -> None:
     command = subparsers.add_parser(
         "head-status",
         help="read whether the dispatcher's heads in a workspace are alive, and separately "
-             "whether their runtime panes are visible",
+        "whether their runtime panes are visible",
     )
     add_common(command)
     command.add_argument(
@@ -108,7 +108,9 @@ def add_common(parser: argparse.ArgumentParser) -> None:
     # and its readers together, or health and steward scan would report a file nobody writes
     # (secretary-833 review, round 3).
     parser.add_argument("--data-dir", default=os.environ.get("SECRETARY_DATA_DIR"))
-    parser.add_argument("--owner", default=os.environ.get("SECRETARY_DISPATCHER_OWNER", "secretary-dispatcher"))
+    parser.add_argument(
+        "--owner", default=os.environ.get("SECRETARY_DISPATCHER_OWNER", "secretary-dispatcher")
+    )
     parser.add_argument("--actor", default=os.environ.get("BOARD_ACTOR", "operator"))
     parser.add_argument(
         "--host-mode",
@@ -133,9 +135,14 @@ def run_dispatcher_production_observe(args: argparse.Namespace) -> int:
 
 
 def run_dispatcher_resource_health(args: argparse.Namespace) -> int:
-    return _run_production(args, lambda runtime: {
-        "status": "ok", "step": "resource-health", "resources": runtime.head_health.snapshot(),
-    })
+    return _run_production(
+        args,
+        lambda runtime: {
+            "status": "ok",
+            "step": "resource-health",
+            "resources": runtime.head_health.snapshot(),
+        },
+    )
 
 
 def run_dispatcher_production_run(args: argparse.Namespace) -> int:
@@ -182,10 +189,18 @@ def _run_production(args: argparse.Namespace, operation) -> int:
         runtime = runtime_from_args(args.instance, args.data_dir, host_mode=args.host_mode, owner=args.owner)
         result = operation(runtime)
     except (DispatcherError, TaskError) as exc:
-        print(json.dumps({"error": {"code": exc.code, "message": exc.message}}, sort_keys=True, separators=(",", ":")))
+        print(
+            json.dumps(
+                {"error": {"code": exc.code, "message": exc.message}}, sort_keys=True, separators=(",", ":")
+            )
+        )
         return exc.exit_code
     except HostError as exc:
-        print(json.dumps({"error": {"code": "host_error", "message": str(exc)}}, sort_keys=True, separators=(",", ":")))
+        print(
+            json.dumps(
+                {"error": {"code": "host_error", "message": str(exc)}}, sort_keys=True, separators=(",", ":")
+            )
+        )
         return 1
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0 if result.get("status") in {"ok", "skipped"} else 3

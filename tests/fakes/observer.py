@@ -61,7 +61,11 @@ def install_skill_registry(root: Path, *, delivered: bool = True) -> Path:
             target.write_text("# canonical observer skill\n", encoding="utf-8")
     return skill
 
+
 __all__ = [
-    "BLOCKED_PANE_WAIT_BODY", "DEAD_PID", "STALE_HANDLE_WAIT_FAILURE", "TIMEOUT_WAIT_FAILURE",
+    "BLOCKED_PANE_WAIT_BODY",
+    "DEAD_PID",
+    "STALE_HANDLE_WAIT_FAILURE",
+    "TIMEOUT_WAIT_FAILURE",
     "install_skill_registry",
 ]

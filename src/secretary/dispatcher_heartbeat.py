@@ -31,8 +31,12 @@ def task_binding(task_ref: Mapping[str, Any] | None, fallback: str = "") -> str:
 
 
 def heartbeat_identity(
-    *, run_id: str, role: str, task_ref: Mapping[str, Any] | None = None,
-    task: str = "", leaf: str = "",
+    *,
+    run_id: str,
+    role: str,
+    task_ref: Mapping[str, Any] | None = None,
+    task: str = "",
+    leaf: str = "",
 ) -> dict[str, str]:
     """The non-kernel facts a heartbeat writer and reader must agree on."""
     return {

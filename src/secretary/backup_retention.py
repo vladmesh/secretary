@@ -28,9 +28,7 @@ def apply_retention(backups_dir: Path, *, keep: set[Path], now: datetime) -> Non
 
 
 def backup_archives(backups_dir: Path) -> list[Path]:
-    return sorted(
-        path for path in backups_dir.iterdir() if path.name.endswith(".tar") and path.is_file()
-    )
+    return sorted(path for path in backups_dir.iterdir() if path.name.endswith(".tar") and path.is_file())
 
 
 def archive_kind_from_name(path: Path) -> BackupKind:

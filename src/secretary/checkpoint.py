@@ -95,9 +95,7 @@ def _canonical_run_journals(path: Path, label: str) -> dict[str, list[str]]:
             source = record.get("source") if isinstance(record, dict) else None
             if not isinstance(source, str) or not source:
                 raise ValueError("run record has no source")
-            journals.setdefault(source, []).append(
-                json.dumps(record, ensure_ascii=False, sort_keys=True)
-            )
+            journals.setdefault(source, []).append(json.dumps(record, ensure_ascii=False, sort_keys=True))
         return journals
     except FileNotFoundError:
         raise
@@ -151,9 +149,7 @@ class CheckpointWriter:
     def _write(self) -> CheckpointResult:
         audit = TaskAudit(self.data_dir).status()
         if not audit["ok"]:
-            raise CheckpointBlocked(
-                f"task audit has {audit['pending']} unresolved pending record(s)"
-            )
+            raise CheckpointBlocked(f"task audit has {audit['pending']} unresolved pending record(s)")
         product_issue = ProductIssueTransaction(self.data_dir, TaskAudit(self.data_dir)).status()
         if not product_issue["ok"]:
             raise CheckpointBlocked(
@@ -169,12 +165,19 @@ class CheckpointWriter:
         except SecretStoreError as exc:
             raise CheckpointBlocked(f"could not load checkpoint redaction values: {exc}") from None
         self._publish(
-            "board", BOARD_ENTRIES, BOARD_REQUIRED, BOARD_IGNORE,
+            "board",
+            BOARD_ENTRIES,
+            BOARD_REQUIRED,
+            BOARD_IGNORE,
             lambda staging: _validate_board(staging, instance=self.instance_dir),
             secret_values=secret_values,
         )
         self._publish(
-            "runs", RUNS_ENTRIES, RUNS_REQUIRED, RUNS_IGNORE, _validate_runs,
+            "runs",
+            RUNS_ENTRIES,
+            RUNS_REQUIRED,
+            RUNS_IGNORE,
+            _validate_runs,
             secret_values=secret_values,
         )
         return self._commit(board_cards=board, run_records=runs)
@@ -211,7 +214,7 @@ class CheckpointWriter:
             raise CheckpointBlocked(f"could not inspect canonical run history: {exc}") from None
         for source, canonical_history in existing.items():
             live_history = current.get(source, [])
-            if live_history[:len(canonical_history)] != canonical_history:
+            if live_history[: len(canonical_history)] != canonical_history:
                 raise CheckpointBlocked(
                     "refusing to truncate or rewrite non-empty canonical run history "
                     f"for {source} from the live export"
@@ -319,9 +322,7 @@ class CheckpointWriter:
         tracked = self._git(["ls-files", "--", *canon], "checkpoint tracked").stdout.split()
         missing = [path for path in canon if path not in tracked]
         if missing:
-            raise CheckpointBlocked(
-                f"checkpoint is not tracked by the instance repo: {', '.join(missing)}"
-            )
+            raise CheckpointBlocked(f"checkpoint is not tracked by the instance repo: {', '.join(missing)}")
 
     def _identity(self) -> list[str]:
         return state_repo.commit_identity(self.instance_dir)
@@ -423,9 +424,7 @@ class CheckpointPusher:
                 return PushOutcome("diverged", str(exc))
             return PushOutcome("failed", str(exc))
 
-    def _record(
-        self, state: dict[str, Any], outcome: PushOutcome, now: float
-    ) -> dict[str, Any]:
+    def _record(self, state: dict[str, Any], outcome: PushOutcome, now: float) -> dict[str, Any]:
         state.update(
             {
                 "remote": self.remote,
@@ -602,9 +601,10 @@ def _unpushed(instance_dir: Path, pushed: str) -> tuple[int | None, str]:
     """Count the commits the remote lacks and stamp the oldest of them."""
     # A recorded tip this history no longer holds leaves every commit unpushed,
     # which is the honest reading: nothing local is known to be on the remote.
-    known = pushed and _read_git(
-        instance_dir, ["cat-file", "-e", f"{pushed}^{{commit}}"], ok_only=True
-    ) is not None
+    known = (
+        pushed
+        and _read_git(instance_dir, ["cat-file", "-e", f"{pushed}^{{commit}}"], ok_only=True) is not None
+    )
     scope = [f"{pushed}..HEAD"] if known else ["HEAD"]
     out = _read_git(instance_dir, ["log", "--format=%cI", *scope], ok_only=True)
     if out is None:
@@ -663,9 +663,7 @@ def _drop_vanished(destination: Path, entries: tuple[str, ...], staged: tuple[st
         try:
             _remove_path(stale)
         except OSError as exc:
-            raise CheckpointBlocked(
-                f"could not drop stale {destination.name}/{entry}: {exc}"
-            ) from None
+            raise CheckpointBlocked(f"could not drop stale {destination.name}/{entry}: {exc}") from None
 
 
 def _scan_for_secrets(
@@ -701,9 +699,7 @@ def _validate_board(
     declared = _int_field(summary, "card_count", "board export.json")
     actual = _count_lines(staging / "cards.ndjson", "board cards.ndjson")
     if declared != actual:
-        raise CheckpointBlocked(
-            f"board export count mismatch: export.json={declared} cards.ndjson={actual}"
-        )
+        raise CheckpointBlocked(f"board export count mismatch: export.json={declared} cards.ndjson={actual}")
     try:
         cards = _read_ndjson(staging / "cards.ndjson", "board cards.ndjson")
         typed_records = any(
@@ -723,8 +719,7 @@ def _validate_board(
     actual_sprints = _count_lines(staging / "sprints.ndjson", "board sprints.ndjson")
     if declared_sprints != actual_sprints:
         raise CheckpointBlocked(
-            f"board sprint count mismatch: export.json={declared_sprints} "
-            f"sprints.ndjson={actual_sprints}"
+            f"board sprint count mismatch: export.json={declared_sprints} sprints.ndjson={actual_sprints}"
         )
     events_path = staging / "events.ndjson"
     if events_path.exists():
@@ -749,9 +744,7 @@ def _validate_runs(staging: Path) -> None:
     declared = _int_field(summary, "run_record_count", "runs export.json")
     actual = _count_lines(staging / "runs.ndjson", "runs runs.ndjson")
     if declared != actual:
-        raise CheckpointBlocked(
-            f"runs export count mismatch: export.json={declared} runs.ndjson={actual}"
-        )
+        raise CheckpointBlocked(f"runs export count mismatch: export.json={declared} runs.ndjson={actual}")
 
     watermarks = _read_json(staging / "watermarks.json", "runs watermarks.json")
     files = watermarks.get("files")

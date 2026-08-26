@@ -38,10 +38,15 @@ class _EmptyWriteKanboard(WriteKanboard):
             self.next_task_id += 1
             self.tasks.append(
                 {
-                    "id": task_id, "reference": params.get("reference", ""), "title": params["title"],
-                    "description": params.get("description", ""), "column_id": params["column_id"],
-                    "position": 1, "swimlane_id": params.get("swimlane_id") or 0,
-                    "date_creation": "1720000200", "date_modification": "1720000200",
+                    "id": task_id,
+                    "reference": params.get("reference", ""),
+                    "title": params["title"],
+                    "description": params.get("description", ""),
+                    "column_id": params["column_id"],
+                    "position": 1,
+                    "swimlane_id": params.get("swimlane_id") or 0,
+                    "date_creation": "1720000200",
+                    "date_modification": "1720000200",
                 }
             )
             self.metadata[task_id] = {}
@@ -72,11 +77,16 @@ class _EmptyBoardsKanboard(SprintKanboard):
             self.next_task_id += 1
             self.tasks.append(
                 {
-                    "id": task_id, "project_id": int(params["project_id"]), "reference": params.get("reference", ""),
-                    "title": params["title"], "description": params.get("description", ""),
-                    "column_id": params["column_id"], "position": len(self.tasks) + 1,
+                    "id": task_id,
+                    "project_id": int(params["project_id"]),
+                    "reference": params.get("reference", ""),
+                    "title": params["title"],
+                    "description": params.get("description", ""),
+                    "column_id": params["column_id"],
+                    "position": len(self.tasks) + 1,
                     "swimlane_id": params.get("swimlane_id") or 0,
-                    "date_creation": "1780000000", "date_modification": "1780000000",
+                    "date_creation": "1780000000",
+                    "date_modification": "1780000000",
                 }
             )
             self.metadata[task_id] = {}
@@ -90,7 +100,12 @@ def _write_instance(root: Path, name: str) -> Path:
 
 
 def _write_instance_to(
-    instance: Path, name: str, data_dir: Path, *, host: bool = False, heads: bool = False,
+    instance: Path,
+    name: str,
+    data_dir: Path,
+    *,
+    host: bool = False,
+    heads: bool = False,
     reindex: dict[str, object] | None = None,
 ) -> Path:
     instance.mkdir()
@@ -102,9 +117,7 @@ def _write_instance_to(
         "version: 1\n"
         f"name: {name}\n"
         f"data_dir: {data_dir}\n"
-        "offsite:\n  instance_remote: git@example.invalid:test/instance.git\n"
-        + host_block
-        + heads_block
+        "offsite:\n  instance_remote: git@example.invalid:test/instance.git\n" + host_block + heads_block
     )
     (instance / "instance.yaml").write_text(text, encoding="utf-8")
     return instance
@@ -122,21 +135,40 @@ def _seed_instance_facts(instance_dir: Path, facts: dict[str, str]) -> Path:
 
 
 def _restore_card(
-    *, task_id: int = 12, reference: str = "secretary-1", title: str = "Restore",
-    description: str = "body", column: str = "Ready", swimlane: str = "Secretary",
-    position: int = 1, comments: list[dict[str, str]] | None = None,
+    *,
+    task_id: int = 12,
+    reference: str = "secretary-1",
+    title: str = "Restore",
+    description: str = "body",
+    column: str = "Ready",
+    swimlane: str = "Secretary",
+    position: int = 1,
+    comments: list[dict[str, str]] | None = None,
 ) -> dict[str, object]:
     return normalize_board_card(
         {
-            "id": task_id, "reference": reference, "title": title, "column": column,
-            "swimlane": swimlane, "position": position, "task_type": "code", "project": "secretary",
+            "id": task_id,
+            "reference": reference,
+            "title": title,
+            "column": column,
+            "swimlane": swimlane,
+            "position": position,
+            "task_type": "code",
+            "project": "secretary",
         },
         {
-            "id": task_id, "reference": reference, "title": title, "description": description,
-            "column": column, "task_type": "code", "project": "secretary",
+            "id": task_id,
+            "reference": reference,
+            "title": title,
+            "description": description,
+            "column": column,
+            "task_type": "code",
+            "project": "secretary",
             "comments": comments or [],
             "metadata": {
-                "record_type": "task", "complexity": "standard", "family_preference": "auto",
+                "record_type": "task",
+                "complexity": "standard",
+                "family_preference": "auto",
             },
         },
     )
@@ -167,7 +199,12 @@ def _prepare_producer_data(data_dir: Path, instance_dir: Path) -> None:
 
 
 def _producer_exports(
-    data_dir: Path, *, board: int = 1, memory: int = 1, artifacts: int = 1, source: str = "test",
+    data_dir: Path,
+    *,
+    board: int = 1,
+    memory: int = 1,
+    artifacts: int = 1,
+    source: str = "test",
 ) -> dict[str, DataExport]:
     return {
         "board": DataExport(data_dir / "board" / "cards.json", board, source),
@@ -202,9 +239,7 @@ def _core_archive(root: Path, name: str) -> Path:
     (payload / "secretary-data" / "data-manifest.json").write_text("{}", encoding="utf-8")
     cards = [{"reference": "secretary-1", "column": "Ready"}]
     (board / "cards.json").write_text(json.dumps({"cards": cards}), encoding="utf-8")
-    (board / "cards.ndjson").write_text(
-        "".join(json.dumps(card) + "\n" for card in cards), encoding="utf-8"
-    )
+    (board / "cards.ndjson").write_text("".join(json.dumps(card) + "\n" for card in cards), encoding="utf-8")
     (board / "export.json").write_text("{}", encoding="utf-8")
     (payload / "secretary-data" / "memory" / "export.ndjson").write_text(
         '{"id":"fact"}\n{"id":"second-fact"}\n', encoding="utf-8"
@@ -255,7 +290,11 @@ def _full_archive(root: Path, name: str) -> Path:
         "raw_board": {"path": "board/kanboard-raw-test"},
         "board": {"path": "board/cards.json"},
         "memory": {"path": "memory/export.ndjson"},
-        "runs_state": {"path": "runs/watermarks.json", "cards": "runs/cards.json", "claims": "runs/claims.json"},
+        "runs_state": {
+            "path": "runs/watermarks.json",
+            "cards": "runs/cards.json",
+            "claims": "runs/claims.json",
+        },
         "runs": {"path": "runs/runs.ndjson"},
         "transcripts": {"path": "transcripts/inventory.json"},
         "artifacts": {"path": "artifacts/inventory.json"},

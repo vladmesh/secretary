@@ -62,10 +62,19 @@ PROVIDER_EVENT_TYPES = (
 
 # These are classifiers, never allow evidence.  A schema may call a collaboration tool something
 # new tomorrow; that is why a tool not in this set is treated as unknown when an event calls it.
-KNOWN_COLLABORATION_TOOLS = frozenset({
-    "spawn_agent", "create_agent", "create_child_thread", "fork_thread", "delegate",
-    "collaboration", "collaboration_call", "wait", "wait_agent",
-})
+KNOWN_COLLABORATION_TOOLS = frozenset(
+    {
+        "spawn_agent",
+        "create_agent",
+        "create_child_thread",
+        "fork_thread",
+        "delegate",
+        "collaboration",
+        "collaboration_call",
+        "wait",
+        "wait_agent",
+    }
+)
 
 
 class CodexPreflightError(RuntimeError):
@@ -178,7 +187,7 @@ def ensure_codex_workspace_trusted(
         return
     body = text if text.endswith("\n") or not text else f"{text}\n"
     for target in additions:
-        body += f"\n[projects.{json.dumps(target)}]\ntrust_level = \"trusted\"\n"
+        body += f'\n[projects.{json.dumps(target)}]\ntrust_level = "trusted"\n'
     _save_codex_config(config_path, body)
 
 
@@ -198,7 +207,10 @@ def preflight_codex_launch(
     baseline can be enumerated, because it fences later provider progress to this exact HeadRun.
     """
     attested = attest_codex_fanout(
-        profile, run, schema_attestation=schema_attestation, binary_path=binary_path,
+        profile,
+        run,
+        schema_attestation=schema_attestation,
+        binary_path=binary_path,
     )
     # The source is bound only after the newly created pane has made its own Codex session.  Its
     # pre-pane baseline is nevertheless durable now: a session file that already existed before
@@ -208,9 +220,7 @@ def preflight_codex_launch(
     except OSError as exc:
         # A source baseline is telemetry plumbing.  Keep the typed diagnostic, but never turn
         # recorder availability into an authority over terminal creation or prompt delivery.
-        attested = _unknown_run(
-            attested, f"cannot establish Codex provider event source baseline: {exc}"
-        )
+        attested = _unknown_run(attested, f"cannot establish Codex provider event source baseline: {exc}")
     try:
         ensure_codex_workspace_trusted(profile, workspace, config)
     except CodexPreflightError as exc:
@@ -275,9 +285,7 @@ def attest_codex_fanout(
     if str(schema.get("cli_version") or "") != observed_version:
         return _unknown_run(run, "provider-schema CLI version does not match launched Codex")
     tool_names = {
-        str(tool.get("name") or "").strip().lower()
-        for tool in tools
-        if str(tool.get("name") or "").strip()
+        str(tool.get("name") or "").strip().lower() for tool in tools if str(tool.get("name") or "").strip()
     }
     verdict = str(schema.get("provider_schema_verdict") or "")
     if verdict != FANOUT_SCHEMA_ALLOWED:
@@ -367,7 +375,9 @@ class CodexProviderEventRecorder:
         except Exception as exc:
             failed_policy = dict(updated.fanout_policy)
             failed_policy["terminal_state"] = FANOUT_TERMINAL_UNKNOWN
-            failed_policy["reason"] = f"provider event could not be durably recorded: {type(exc).__name__}: {exc}"
+            failed_policy["reason"] = (
+                f"provider event could not be durably recorded: {type(exc).__name__}: {exc}"
+            )
             failed = updated.with_fanout_policy(failed_policy)
             self.run = failed
             raise CodexFanoutRecordingError(str(failed_policy["reason"]), run=failed, event=event) from None
@@ -542,21 +552,23 @@ def _policy_run(
     tool_schema_digest: str = "",
     provider_schema_verdict: str = "",
 ) -> HeadRun:
-    return run.with_fanout_policy({
-        "version": FANOUT_ATTESTATION_VERSION,
-        "state": state,
-        "terminal_state": terminal_state,
-        "reason": reason,
-        "run_id": run.run_id,
-        "role": run.role,
-        "model": run.spec.model or "",
-        "binary_path": binary_path,
-        "binary_digest": binary_digest,
-        "cli_version": cli_version,
-        "tool_schema_digest": tool_schema_digest,
-        "provider_schema_verdict": provider_schema_verdict,
-        "events": [],
-    })
+    return run.with_fanout_policy(
+        {
+            "version": FANOUT_ATTESTATION_VERSION,
+            "state": state,
+            "terminal_state": terminal_state,
+            "reason": reason,
+            "run_id": run.run_id,
+            "role": run.role,
+            "model": run.spec.model or "",
+            "binary_path": binary_path,
+            "binary_digest": binary_digest,
+            "cli_version": cli_version,
+            "tool_schema_digest": tool_schema_digest,
+            "provider_schema_verdict": provider_schema_verdict,
+            "events": [],
+        }
+    )
 
 
 def _with_unbound_provider_source(profile: Mapping[str, Any], run: HeadRun) -> HeadRun:
@@ -573,9 +585,7 @@ def _with_unbound_provider_source(profile: Mapping[str, Any], run: HeadRun) -> H
     if root.is_dir():
         try:
             baseline = sorted(
-                str(path.resolve(strict=False))
-                for path in root.rglob("*.jsonl")
-                if path.is_file()
+                str(path.resolve(strict=False)) for path in root.rglob("*.jsonl") if path.is_file()
             )
         except OSError as exc:
             raise OSError(f"cannot enumerate Codex session root {root}: {exc}") from None
@@ -691,7 +701,9 @@ def _json_digest(value: Any) -> str:
 
 def _same_digest(supplied: Any, observed: str) -> bool:
     value = str(supplied or "").lower()
-    return value == observed.lower() and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+    return (
+        value == observed.lower() and len(value) == 64 and all(char in "0123456789abcdef" for char in value)
+    )
 
 
 def _has_child_spawn_surface(tool_names: set[str]) -> bool:
@@ -699,7 +711,10 @@ def _has_child_spawn_surface(tool_names: set[str]) -> bool:
         compact = name.replace("-", "_")
         if name in KNOWN_COLLABORATION_TOOLS:
             return True
-        if any(fragment in compact for fragment in ("spawn", "child_thread", "childagent", "subagent", "delegate")):
+        if any(
+            fragment in compact
+            for fragment in ("spawn", "child_thread", "childagent", "subagent", "delegate")
+        ):
             return True
     return False
 
@@ -719,10 +734,11 @@ def _typed_provider_event(
     """
     captured = captured_at or datetime.now(UTC).isoformat().replace("+00:00", "Z")
     supplied_digest = (
-        str(raw_event.get("_secretary_raw_event_digest") or "")
-        if isinstance(raw_event, Mapping) else ""
+        str(raw_event.get("_secretary_raw_event_digest") or "") if isinstance(raw_event, Mapping) else ""
     )
-    raw_digest = supplied_digest if re.fullmatch(r"[0-9a-f]{64}", supplied_digest) else _raw_event_digest(raw_event)
+    raw_digest = (
+        supplied_digest if re.fullmatch(r"[0-9a-f]{64}", supplied_digest) else _raw_event_digest(raw_event)
+    )
     base = {
         "raw_event_digest": raw_digest,
         "source_sequence": source_sequence,
@@ -733,11 +749,19 @@ def _typed_provider_event(
         "tool_name": "",
     }
     if source_sequence is None or not str(source_location or ""):
-        return dict(base, type=EVENT_UNPARSEABLE_PROVIDER_EVENT, policy_outcome=FANOUT_TERMINAL_UNKNOWN,
-                    reason="provider event has no source sequence or location")
+        return dict(
+            base,
+            type=EVENT_UNPARSEABLE_PROVIDER_EVENT,
+            policy_outcome=FANOUT_TERMINAL_UNKNOWN,
+            reason="provider event has no source sequence or location",
+        )
     if not isinstance(raw_event, Mapping):
-        return dict(base, type=EVENT_UNPARSEABLE_PROVIDER_EVENT, policy_outcome=FANOUT_TERMINAL_UNKNOWN,
-                    reason="provider event is not an object")
+        return dict(
+            base,
+            type=EVENT_UNPARSEABLE_PROVIDER_EVENT,
+            policy_outcome=FANOUT_TERMINAL_UNKNOWN,
+            reason="provider event is not an object",
+        )
     raw = dict(raw_event)
     parent = str(raw.get("parent_thread_id") or raw.get("parentThreadId") or "")
     child = str(raw.get("child_thread_id") or raw.get("childThreadId") or "")
@@ -756,30 +780,62 @@ def _typed_provider_event(
     elif tool or child:
         declared = EVENT_COLLABORATION_CALL if tool else EVENT_CHILD_THREAD_EDGE
     else:
-        return dict(base, type=EVENT_UNPARSEABLE_PROVIDER_EVENT, policy_outcome=FANOUT_TERMINAL_UNKNOWN,
-                    reason="provider event has no recognised collaboration shape")
+        return dict(
+            base,
+            type=EVENT_UNPARSEABLE_PROVIDER_EVENT,
+            policy_outcome=FANOUT_TERMINAL_UNKNOWN,
+            reason="provider event has no recognised collaboration shape",
+        )
     if declared == EVENT_UNPARSEABLE_PROVIDER_EVENT:
-        return dict(base, type=declared, policy_outcome=FANOUT_TERMINAL_UNKNOWN,
-                    reason="provider emitted an unparseable collaboration event")
+        return dict(
+            base,
+            type=declared,
+            policy_outcome=FANOUT_TERMINAL_UNKNOWN,
+            reason="provider emitted an unparseable collaboration event",
+        )
     if not expected_parent_thread_id or not parent or parent != expected_parent_thread_id:
-        return dict(base, type=EVENT_UNKNOWN_THREAD_EDGE, policy_outcome=FANOUT_TERMINAL_UNKNOWN,
-                    reason="provider event parent identity is absent or does not match this HeadRun")
+        return dict(
+            base,
+            type=EVENT_UNKNOWN_THREAD_EDGE,
+            policy_outcome=FANOUT_TERMINAL_UNKNOWN,
+            reason="provider event parent identity is absent or does not match this HeadRun",
+        )
     if declared == EVENT_UNKNOWN_THREAD_EDGE:
-        return dict(base, type=declared, policy_outcome=FANOUT_TERMINAL_UNKNOWN,
-                    reason="provider reported an unknown parent or child thread relation")
+        return dict(
+            base,
+            type=declared,
+            policy_outcome=FANOUT_TERMINAL_UNKNOWN,
+            reason="provider reported an unknown parent or child thread relation",
+        )
     if declared == EVENT_COLLABORATION_CALL:
         if not tool or tool.lower() not in KNOWN_COLLABORATION_TOOLS:
-            return dict(base, type=EVENT_COLLABORATION_CALL, policy_outcome=FANOUT_TERMINAL_UNKNOWN,
-                        reason="provider called an unknown collaboration tool")
-        return dict(base, type=EVENT_COLLABORATION_CALL, policy_outcome=FANOUT_TERMINAL_VIOLATION,
-                    reason="provider collaboration call observed")
+            return dict(
+                base,
+                type=EVENT_COLLABORATION_CALL,
+                policy_outcome=FANOUT_TERMINAL_UNKNOWN,
+                reason="provider called an unknown collaboration tool",
+            )
+        return dict(
+            base,
+            type=EVENT_COLLABORATION_CALL,
+            policy_outcome=FANOUT_TERMINAL_VIOLATION,
+            reason="provider collaboration call observed",
+        )
     # A declared child-edge result with a relation is a violation even if the child identity is
     # redacted by the provider.  An empty relation cannot be clean: it is unknown.
     if not child:
-        return dict(base, type=EVENT_UNKNOWN_THREAD_EDGE, policy_outcome=FANOUT_TERMINAL_UNKNOWN,
-                    reason="provider child-thread edge has no child identity")
-    return dict(base, type=EVENT_CHILD_THREAD_EDGE, policy_outcome=FANOUT_TERMINAL_VIOLATION,
-                reason="provider child-thread edge observed")
+        return dict(
+            base,
+            type=EVENT_UNKNOWN_THREAD_EDGE,
+            policy_outcome=FANOUT_TERMINAL_UNKNOWN,
+            reason="provider child-thread edge has no child identity",
+        )
+    return dict(
+        base,
+        type=EVENT_CHILD_THREAD_EDGE,
+        policy_outcome=FANOUT_TERMINAL_VIOLATION,
+        reason="provider child-thread edge observed",
+    )
 
 
 def _raw_event_digest(raw_event: Any) -> str:

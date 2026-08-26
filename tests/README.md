@@ -40,7 +40,8 @@ from tests import _find_orca_patcher
 real_find_orca_executable = _find_orca_patcher.temp_original
 with legacy_orca_runtime(root) as discoverable:
     with mock.patch(
-        "secretary.host_apply.find_orca_executable", side_effect=real_find_orca_executable,
+        "secretary.host_apply.find_orca_executable",
+        side_effect=real_find_orca_executable,
     ):
         ...  # exercises the real filesystem probe against the fixture-owned home
 ```

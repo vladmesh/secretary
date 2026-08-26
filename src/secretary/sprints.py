@@ -228,7 +228,8 @@ def _write_guard_index(data_dir: str | Path, projects: dict[str, list[str]]) -> 
     temporary.write_text(
         json.dumps(
             {"version": _GUARD_INDEX_VERSION, "projects": projects},
-            sort_keys=True, separators=(",", ":"),
+            sort_keys=True,
+            separators=(",", ":"),
         ),
         encoding="utf-8",
     )
@@ -305,9 +306,7 @@ def open_sprint_admission_error(rows: list[dict[str, Any]], *, limit: int) -> st
     return None
 
 
-def _refuse_open_sprint(
-    candidate: dict[str, Any], others: list[dict[str, Any]], *, limit: int
-) -> None:
+def _refuse_open_sprint(candidate: dict[str, Any], others: list[dict[str, Any]], *, limit: int) -> None:
     """Refuse a sprint this installation has no room, or no disjoint room, for.
 
     Every collision the caller can act on is reported before the generic count refusal, because a
@@ -316,7 +315,8 @@ def _refuse_open_sprint(
     """
     saturated = len(others) >= limit
     _refuse_shared_reservations(
-        [str(project) for project in candidate.get("reservations") or []], others,
+        [str(project) for project in candidate.get("reservations") or []],
+        others,
     )
     if limit > DEFAULT_OPEN_SPRINT_LIMIT:
         _refuse_shared_resources(candidate, others)
@@ -470,18 +470,22 @@ def _sprint_metadata(answer: Any) -> dict[str, str]:
     """One sprint row's metadata, narrowed to the contract fields a sprint is made of."""
     if answer is not None and not isinstance(answer, dict):
         raise TaskError("backend_error", "Kanboard returned invalid sprint metadata", 1)
-    return {
-        str(key): _text(value)
-        for key, value in (answer or {}).items()
-        if str(key) in SPRINT_METADATA
-    }
+    return {str(key): _text(value) for key, value in (answer or {}).items() if str(key) in SPRINT_METADATA}
 
 
 class SprintReader:
-    def __init__(self, client: KanboardClient, *, data_dir: str | Path | None = None, thresholds: dict[str, int] | None = None) -> None:
+    def __init__(
+        self,
+        client: KanboardClient,
+        *,
+        data_dir: str | Path | None = None,
+        thresholds: dict[str, int] | None = None,
+    ) -> None:
         self.client = client
         self.data_dir = Path(data_dir) if data_dir is not None else None
-        self.thresholds = budget_thresholds({"sprint_budget": thresholds}) if thresholds else budget_thresholds()
+        self.thresholds = (
+            budget_thresholds({"sprint_budget": thresholds}) if thresholds else budget_thresholds()
+        )
 
     def _sprint_rows(self, board_id: int) -> list[dict[str, Any]]:
         """Every row of the sprint board that carries a sprint reference."""
@@ -493,13 +497,8 @@ class SprintReader:
     def _metadata_of(self, rows: list[dict[str, Any]]) -> dict[int, dict[str, str]]:
         """The metadata of every given sprint row, keyed by task id, in one batched read."""
         task_ids = [_task_id(raw) for raw in rows]
-        answers = self.client.call_batch(
-            ("getTaskMetadata", {"task_id": task_id}) for task_id in task_ids
-        )
-        return {
-            task_id: _sprint_metadata(answer)
-            for task_id, answer in zip(task_ids, answers, strict=True)
-        }
+        answers = self.client.call_batch(("getTaskMetadata", {"task_id": task_id}) for task_id in task_ids)
+        return {task_id: _sprint_metadata(answer) for task_id, answer in zip(task_ids, answers, strict=True)}
 
     def list(self, *, statuses: set[str] | None = None, create: bool = True) -> list[dict[str, Any]]:
         board_id = _sprint_board(self.client, create=create)
@@ -510,7 +509,10 @@ class SprintReader:
         result = []
         for raw in rows:
             sprint = self._normalize(
-                raw, metadata[_task_id(raw)], comments=None, include_resume_freshness=False,
+                raw,
+                metadata[_task_id(raw)],
+                comments=None,
+                include_resume_freshness=False,
             )
             # Without live cards this value would claim freshness based on incomplete data.  `show`
             # and `status` populate it after reading the linked cards instead.
@@ -527,17 +529,19 @@ class SprintReader:
             return []
         rows = self._sprint_rows(board_id)
         metadata = self._metadata_of(rows)
-        all_comments = self.client.call_batch(
-            ("getAllComments", {"task_id": _task_id(raw)}) for raw in rows
-        )
+        all_comments = self.client.call_batch(("getAllComments", {"task_id": _task_id(raw)}) for raw in rows)
         result = []
         for raw, comments_raw in zip(rows, all_comments, strict=True):
             comments = [
                 {"created_at": _rfc3339(comment.get("date_creation")), "body": _text(comment.get("comment"))}
-                for comment in comments_raw or [] if isinstance(comment, dict)
+                for comment in comments_raw or []
+                if isinstance(comment, dict)
             ]
             sprint = self._normalize(
-                raw, metadata[_task_id(raw)], comments=comments, include_resume_freshness=False,
+                raw,
+                metadata[_task_id(raw)],
+                comments=comments,
+                include_resume_freshness=False,
             )
             # Freshness needs the linked cards this view deliberately does not read.
             sprint.pop("resume_freshness", None)
@@ -545,7 +549,11 @@ class SprintReader:
         return sorted(result, key=lambda sprint: (sprint["ref"], sprint["id"]))
 
     def show(
-        self, reference: str, *, include_cards: bool = True, include_resume_freshness: bool = True,
+        self,
+        reference: str,
+        *,
+        include_cards: bool = True,
+        include_resume_freshness: bool = True,
         audit: _AuditOnce | None = None,
     ) -> dict[str, Any]:
         board_id = ensure_sprint_board(self.client)
@@ -558,13 +566,16 @@ class SprintReader:
             comments_raw = self.client.call("getAllComments", task_id=task_id) or []
             comments = [
                 {"created_at": _rfc3339(comment.get("date_creation")), "body": _text(comment.get("comment"))}
-                for comment in comments_raw if isinstance(comment, dict)
+                for comment in comments_raw
+                if isinstance(comment, dict)
             ]
         # Freshness depends on the linked-card set, so computing it in `_normalize` would both
         # scan the audit too early and scan it a second time after the cards are loaded.
         sprint = self._normalize(
-            raw, _sprint_metadata(self.client.call("getTaskMetadata", task_id=task_id)),
-            comments=comments, include_resume_freshness=False,
+            raw,
+            _sprint_metadata(self.client.call("getTaskMetadata", task_id=task_id)),
+            comments=comments,
+            include_resume_freshness=False,
         )
         if include_cards:
             sprint["cards"] = TaskReader(self.client).list(sprint=reference)
@@ -573,7 +584,10 @@ class SprintReader:
         return sprint
 
     def _normalize(
-        self, raw: dict[str, Any], meta: dict[str, str], *,
+        self,
+        raw: dict[str, Any],
+        meta: dict[str, str],
+        *,
         comments: list[dict[str, Any]] | None,
         include_resume_freshness: bool = True,
     ) -> dict[str, Any]:
@@ -610,7 +624,10 @@ class SprintReader:
         return result
 
     def statuses(
-        self, *, observers: dict[str, dict[str, Any]] | None = None, create: bool = False,
+        self,
+        *,
+        observers: dict[str, dict[str, Any]] | None = None,
+        create: bool = False,
     ) -> list[dict[str, Any]]:
         """Every sprint's status, reading each part of the board once for the whole call.
 
@@ -631,13 +648,18 @@ class SprintReader:
         for listed in sprints:
             sprint = {**listed, "cards": linked.get(listed["ref"], [])}
             sprint["resume_freshness"] = self._resume_freshness(
-                sprint, sprint.get("resume"), audit=audit,
+                sprint,
+                sprint.get("resume"),
+                audit=audit,
             )
             result.append(self._status(sprint, observers.get(sprint["ref"])))
         return result
 
     def status(
-        self, reference: str, *, observer: dict[str, Any] | None = None,
+        self,
+        reference: str,
+        *,
+        observer: dict[str, Any] | None = None,
         audit: _AuditOnce | None = None,
     ) -> dict[str, Any]:
         return self._status(self.show(reference, audit=audit), observer)
@@ -650,16 +672,24 @@ class SprintReader:
             if isinstance(card, dict):
                 states.setdefault(str(card.get("state") or "unknown"), []).append(str(card.get("ref") or ""))
         return {
-            "ref": sprint["ref"], "goal": sprint["goal"], "status": sprint["status"],
+            "ref": sprint["ref"],
+            "goal": sprint["goal"],
+            "status": sprint["status"],
             **{field: sprint[field] for field in ("product", "issues", "reservations") if field in sprint},
-            "current_task": sprint["current_task"], "cards": {key: sorted(value) for key, value in sorted(states.items())},
-            "budget": sprint["budget"], "resume_freshness": sprint["resume_freshness"],
+            "current_task": sprint["current_task"],
+            "cards": {key: sorted(value) for key, value in sorted(states.items())},
+            "budget": sprint["budget"],
+            "resume_freshness": sprint["resume_freshness"],
             "stop_reason": "budget_hard_limit" if sprint["status"] == "stopped" else None,
             "observer": observer or {"state": "unknown"},
         }
 
     def _resume_freshness(
-        self, sprint: dict[str, Any], resume: dict[str, Any] | None, *, audit: _AuditOnce | None = None,
+        self,
+        sprint: dict[str, Any],
+        resume: dict[str, Any] | None,
+        *,
+        audit: _AuditOnce | None = None,
     ) -> dict[str, Any]:
         """The freshness of a sprint's resume, read here and nowhere else.
 
@@ -669,8 +699,11 @@ class SprintReader:
         """
         if not resume:
             return {
-                "fresh": False, "error": "resume_missing", "recorded_at": None,
-                "last_event_at": None, "lag_seconds": None,
+                "fresh": False,
+                "error": "resume_missing",
+                "recorded_at": None,
+                "last_event_at": None,
+                "lag_seconds": None,
                 "threshold_seconds": RESUME_FRESHNESS_GRACE_SECONDS,
             }
         last_event = ""
@@ -704,13 +737,19 @@ class SprintWriter:
     """Sprint mutations with the task protocol's durable audit semantics."""
 
     def __init__(
-        self, client: KanboardClient, *, data_dir: str | Path, thresholds: dict[str, int] | None = None,
+        self,
+        client: KanboardClient,
+        *,
+        data_dir: str | Path,
+        thresholds: dict[str, int] | None = None,
         instance: str | Path | None = None,
     ) -> None:
         from secretary.product_issues import ProductIssueTransaction
 
         self.client = client
-        self.thresholds = budget_thresholds({"sprint_budget": thresholds}) if thresholds else budget_thresholds()
+        self.thresholds = (
+            budget_thresholds({"sprint_budget": thresholds}) if thresholds else budget_thresholds()
+        )
         self.reader = SprintReader(client, data_dir=data_dir, thresholds=self.thresholds)
         self.audit = TaskAudit(data_dir)
         # Opening a sprint has the semantics the Product/Issue transaction already
@@ -724,8 +763,11 @@ class SprintWriter:
     def _host(self):
         """Construct the normalized host lazily to keep reader imports acyclic."""
         from secretary.board.kanboard import KanboardBoardHost
+
         return KanboardBoardHost(
-            self.client, data_dir=str(self.data_dir), instance=str(self.instance) if self.instance else None,
+            self.client,
+            data_dir=str(self.data_dir),
+            instance=str(self.instance) if self.instance else None,
             audit=self.audit,
         )
 
@@ -733,8 +775,11 @@ class SprintWriter:
     def _host_error(exc: Exception) -> TaskError:
         from secretary.board.events import BoardEventPending
         from secretary.board.transitions import BoardProtocolError
+
         if isinstance(exc, BoardEventPending):
-            return TaskError("audit_pending", "Sprint lifecycle write is pending repair; retry with the same request id", 4)
+            return TaskError(
+                "audit_pending", "Sprint lifecycle write is pending repair; retry with the same request id", 4
+            )
         if isinstance(exc, BoardProtocolError) and ("rejected" in str(exc) or "refused" in str(exc)):
             return TaskError("backend_error", str(exc), 1)
         if isinstance(exc, TaskError):
@@ -742,8 +787,16 @@ class SprintWriter:
         return TaskError("validation", str(exc), 2)
 
     def _transition_host(
-        self, *, role: str, actor: str, reference: str, target: str, reason: str,
-        request_id: str, observer: str | None = None, budget_by_type: tuple[tuple[str, int], ...] = (),
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        target: str,
+        reason: str,
+        request_id: str,
+        observer: str | None = None,
+        budget_by_type: tuple[tuple[str, int], ...] = (),
     ) -> None:
         from secretary.board import (
             Actor,
@@ -753,29 +806,54 @@ class SprintWriter:
             SprintSupplement,
             TransitionRequest,
         )
+
         try:
             host = self._host()
             supplement = SprintSupplement(observer=observer, budget_by_type=budget_by_type)
-            host.transition(TransitionRequest(
-                EntityKind.SPRINT, reference, SprintState(target), Actor(role, actor), reason,
-                RelatedRefs(), request_id, supplement if (observer is not None or budget_by_type) else None,
-            ))
+            host.transition(
+                TransitionRequest(
+                    EntityKind.SPRINT,
+                    reference,
+                    SprintState(target),
+                    Actor(role, actor),
+                    reason,
+                    RelatedRefs(),
+                    request_id,
+                    supplement if (observer is not None or budget_by_type) else None,
+                )
+            )
         except Exception as exc:
             raise self._host_error(exc) from None
 
     def create(
-        self, *, role: str, actor: str, goal: str, definition_of_done: str = "",
-        repositories: list[str] | None = None, product: str = "", issues: list[str] | None = None,
-        projects: list[str] | None = None, reference: str = "", request_id: str | None = None,
+        self,
+        *,
+        role: str,
+        actor: str,
+        goal: str,
+        definition_of_done: str = "",
+        repositories: list[str] | None = None,
+        product: str = "",
+        issues: list[str] | None = None,
+        projects: list[str] | None = None,
+        reference: str = "",
+        request_id: str | None = None,
         observer: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._role(role, {"po", "steward"})
         request_id = request_id or str(uuid.uuid4())
         self.audit.require_pending_layout()
         intent = self._create_intent(
-            role=role, actor=actor, goal=goal, definition_of_done=definition_of_done,
-            repositories=repositories or [], product=product, issues=issues or [],
-            reservations=projects or [], reference=reference, observer=observer,
+            role=role,
+            actor=actor,
+            goal=goal,
+            definition_of_done=definition_of_done,
+            repositories=repositories or [],
+            product=product,
+            issues=issues or [],
+            reservations=projects or [],
+            reference=reference,
+            observer=observer,
         )
         # Admission and the row it admits are one transition on this installation: a
         # concurrent create that only read before this one wrote would open a second
@@ -783,9 +861,7 @@ class SprintWriter:
         # of one delivery resumes its own staged intent, and only a request nobody has
         # seen yet is measured against live product, issue and conflict state.
         with sprint_admission_lock(self.data_dir):
-            document, committed = self.transactions.existing(
-                request_id, kind=SPRINT_CREATED, intent=intent
-            )
+            document, committed = self.transactions.existing(request_id, kind=SPRINT_CREATED, intent=intent)
             if committed is not None:
                 return self._committed_result(SPRINT_CREATED, committed)
             if document is None:
@@ -797,9 +873,15 @@ class SprintWriter:
             return self._run_create(document, admitted=True)
 
     def restore_create(
-        self, *, reference: str, goal: str, definition_of_done: str = "",
-        repositories: list[str] | None = None, request_id: str | None = None,
-        observer: dict[str, Any] | None = None, status: str = "open",
+        self,
+        *,
+        reference: str,
+        goal: str,
+        definition_of_done: str = "",
+        repositories: list[str] | None = None,
+        request_id: str | None = None,
+        observer: dict[str, Any] | None = None,
+        status: str = "open",
     ) -> dict[str, Any]:
         """Recreate one exported sprint row, without the rules for opening a sprint.
 
@@ -813,15 +895,22 @@ class SprintWriter:
         request_id = request_id or str(uuid.uuid4())
         self.audit.require_pending_layout()
         intent = self._create_intent(
-            role="steward", actor="restore", goal=goal, definition_of_done=definition_of_done,
-            repositories=repositories or [], product="", issues=[], reservations=[],
-            reference=reference, require_goal=False, observer=observer,
-            status=status, require_executable_observer=False,
+            role="steward",
+            actor="restore",
+            goal=goal,
+            definition_of_done=definition_of_done,
+            repositories=repositories or [],
+            product="",
+            issues=[],
+            reservations=[],
+            reference=reference,
+            require_goal=False,
+            observer=observer,
+            status=status,
+            require_executable_observer=False,
             canonical_repositories=False,
         )
-        document, committed = self.transactions.existing(
-            request_id, kind=SPRINT_CREATED, intent=intent
-        )
+        document, committed = self.transactions.existing(request_id, kind=SPRINT_CREATED, intent=intent)
         if committed is not None:
             return self._committed_result(SPRINT_CREATED, committed)
         if document is None:
@@ -831,10 +920,21 @@ class SprintWriter:
         return self._run_create(document, admitted=False)
 
     def _create_intent(
-        self, *, role: str, actor: str, goal: str, definition_of_done: str,
-        repositories: list[str], product: str, issues: list[str], reservations: list[str],
-        reference: str, require_goal: bool = True, observer: dict[str, Any] | None = None,
-        status: str = "open", require_executable_observer: bool = True,
+        self,
+        *,
+        role: str,
+        actor: str,
+        goal: str,
+        definition_of_done: str,
+        repositories: list[str],
+        product: str,
+        issues: list[str],
+        reservations: list[str],
+        reference: str,
+        require_goal: bool = True,
+        observer: dict[str, Any] | None = None,
+        status: str = "open",
+        require_executable_observer: bool = True,
         canonical_repositories: bool = True,
     ) -> dict[str, Any]:
         """The normalized request, which is both the replay key and the repair recipe.
@@ -856,21 +956,31 @@ class SprintWriter:
         if status not in SPRINT_STATUSES:
             raise TaskError("validation", f"unknown sprint status {status!r}", 2)
         return {
-            "role": role, "actor": actor, "goal": goal, "definition_of_done": definition_of_done,
+            "role": role,
+            "actor": actor,
+            "goal": goal,
+            "definition_of_done": definition_of_done,
             "repositories": (
-                canonical_repository_roots(repositories) if canonical_repositories
+                canonical_repository_roots(repositories)
+                if canonical_repositories
                 else _unique_strings(repositories)
             ),
             "product": product.strip(),
-            "issues": _unique_strings(issues), "reservations": _unique_strings(reservations),
-            "reference": reference, "status": status,
+            "issues": _unique_strings(issues),
+            "reservations": _unique_strings(reservations),
+            "reference": reference,
+            "status": status,
             "observer": self._observer_intent(
-                observer, executable=require_executable_observer,
+                observer,
+                executable=require_executable_observer,
             ),
         }
 
     def _observer_intent(
-        self, observer: dict[str, Any] | None, *, executable: bool,
+        self,
+        observer: dict[str, Any] | None,
+        *,
+        executable: bool,
     ) -> dict[str, Any] | None:
         """The observer value a create writes, refused here rather than at the backend.
 
@@ -885,8 +995,7 @@ class SprintWriter:
             if executable:
                 raise TaskError(
                     "validation",
-                    "sprint requires an explicit observer; pass --observer <profile> or "
-                    "--observer none",
+                    "sprint requires an explicit observer; pass --observer <profile> or --observer none",
                     2,
                 )
             return None
@@ -907,13 +1016,17 @@ class SprintWriter:
             # that runs without an observer is not held up by a registry it never asks about.
             try:
                 check_observer_profile(
-                    value, installed_observer_profiles(self.instance), subject="sprint",
+                    value,
+                    installed_observer_profiles(self.instance),
+                    subject="sprint",
                 )
             except ObserverMetadataError as exc:
                 raise TaskError("validation", exc.message, 2) from None
         return value
 
-    def _begin_create(self, request_id: str, intent: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    def _begin_create(
+        self, request_id: str, intent: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any] | None]:
         """Claim the request id after the mutable preconditions have passed."""
         reference = str(intent["reference"])
         if reference:
@@ -930,7 +1043,11 @@ class SprintWriter:
             else:
                 raise TaskError("validation", "sprint reference already belongs to a Pipeline card", 2)
         event = self._event(
-            SPRINT_CREATED, str(intent["role"]), str(intent["actor"]), reference, request_id,
+            SPRINT_CREATED,
+            str(intent["role"]),
+            str(intent["actor"]),
+            reference,
+            request_id,
             {"intent": intent},
         )
         document, committed = self.transactions.begin(
@@ -967,12 +1084,16 @@ class SprintWriter:
                 self.transactions.discard(document)
                 raise
             raise TaskError(
-                "audit_pending", "sprint create is pending repair; retry with the same request id", 4,
+                "audit_pending",
+                "sprint create is pending repair; retry with the same request id",
+                4,
             ) from None
         except (OSError, KeyError, TypeError):
             self._compensate_create(document)
             raise TaskError(
-                "audit_pending", "sprint create is pending repair; retry with the same request id", 4,
+                "audit_pending",
+                "sprint create is pending repair; retry with the same request id",
+                4,
             ) from None
 
     def _compensate_create(self, document: dict[str, Any]) -> bool:
@@ -1030,7 +1151,10 @@ class SprintWriter:
             progress["reference_started"] = True
             self.transactions.save(document)
             if not self.client.call(
-                "updateTask", id=task_id, reference=created_ref, description="",
+                "updateTask",
+                id=task_id,
+                reference=created_ref,
+                description="",
             ):
                 raise TaskError("backend_error", "Kanboard rejected the sprint reference", 1)
             row = self._create_row(document, board_id, created_ref, admitted=admitted)
@@ -1075,7 +1199,12 @@ class SprintWriter:
         return str(document["reference"])
 
     def _create_row(
-        self, document: dict[str, Any], board_id: int, reference: str, *, admitted: bool,
+        self,
+        document: dict[str, Any],
+        board_id: int,
+        reference: str,
+        *,
+        admitted: bool,
     ) -> dict[str, Any]:
         """The row this request created, creating it once when it has none yet.
 
@@ -1084,7 +1213,8 @@ class SprintWriter:
         a row it merely shares a reference with.
         """
         rows = [
-            row for row in self.client.call("getAllTasks", project_id=board_id, status_id=1) or []
+            row
+            for row in self.client.call("getAllTasks", project_id=board_id, status_id=1) or []
             if isinstance(row, dict)
         ]
         staged = (document.get("progress") or {}).get("task_id")
@@ -1114,16 +1244,22 @@ class SprintWriter:
             raise TaskError("backend_error", "sprint board has no column", 1)
         document.setdefault("progress", {})["create_started"] = True
         self.transactions.save(document)
-        created = _positive_int(self.client.call(
-            "createTask", project_id=board_id, title=str(document["intent"]["goal"]),
-            description=marker, column_id=column_id,
-        ))
+        created = _positive_int(
+            self.client.call(
+                "createTask",
+                project_id=board_id,
+                title=str(document["intent"]["goal"]),
+                description=marker,
+                column_id=column_id,
+            )
+        )
         if created is None:
             raise TaskError("backend_error", "Kanboard rejected the sprint write", 1)
         document["progress"]["task_id"] = created
         self.transactions.save(document)
         rows = [
-            row for row in self.client.call("getAllTasks", project_id=board_id, status_id=1) or []
+            row
+            for row in self.client.call("getAllTasks", project_id=board_id, status_id=1) or []
             if isinstance(row, dict)
         ]
         row = next((row for row in rows if _positive_int(row.get("id")) == created), None)
@@ -1153,13 +1289,16 @@ class SprintWriter:
         if intent["issues"]:
             values["sprint_issues"] = json.dumps(list(intent["issues"]), separators=(",", ":"))
         if intent["reservations"]:
-            values["sprint_reservations"] = json.dumps(
-                list(intent["reservations"]), separators=(",", ":")
-            )
+            values["sprint_reservations"] = json.dumps(list(intent["reservations"]), separators=(",", ":"))
         return values
 
     def _ensure_metadata(
-        self, document: dict[str, Any], task_id: int, values: dict[str, str], *, step: str,
+        self,
+        document: dict[str, Any],
+        task_id: int,
+        values: dict[str, str],
+        *,
+        step: str,
     ) -> None:
         """Write one step of the sprint's fields once, and prove the backend kept it.
 
@@ -1188,7 +1327,8 @@ class SprintWriter:
 
     def _committed_result(self, action: str, committed: dict[str, Any]) -> dict[str, Any]:
         return {
-            "action": action, "sprint": self.reader.show(str(committed["ref"])),
+            "action": action,
+            "sprint": self.reader.show(str(committed["ref"])),
             "event_id": str(committed["event_id"]),
         }
 
@@ -1206,9 +1346,7 @@ class SprintWriter:
         if not reservations:
             raise TaskError("validation", "sprint requires at least one reserved project; pass --project", 2)
         if self.instance is None:
-            raise TaskError(
-                "validation", "sprint ownership needs the instance directory; pass --instance", 2
-            )
+            raise TaskError("validation", "sprint ownership needs the instance directory; pass --instance", 2)
         from secretary.product_issues import ProductIssueStore, registered_projects
 
         store = ProductIssueStore(self.client, data_dir=self.data_dir, instance=self.instance)
@@ -1236,9 +1374,7 @@ class SprintWriter:
                 )
         unknown = sorted(set(reservations) - registered_projects(self.instance))
         if unknown:
-            raise TaskError(
-                "validation", "unknown registered project(s): " + ", ".join(unknown), 2
-            )
+            raise TaskError("validation", "unknown registered project(s): " + ", ".join(unknown), 2)
 
     def _check_reference_claim(self, reference: str, staged_id: int | None) -> None:
         """Refuse the reference this create is about to write when another sprint holds it.
@@ -1270,7 +1406,11 @@ class SprintWriter:
         return instance_open_sprint_limit(self.instance)
 
     def _check_conflicts(
-        self, candidate: dict[str, Any], *, excluding: str = "", excluding_id: int | None = None,
+        self,
+        candidate: dict[str, Any],
+        *,
+        excluding: str = "",
+        excluding_id: int | None = None,
     ) -> None:
         """Refuse a sprint this installation has no room, or no disjoint room, for.
 
@@ -1280,7 +1420,8 @@ class SprintWriter:
         reference alone proves nothing.
         """
         others = [
-            sprint for sprint in self.reader.list(statuses={"open"}, create=False)
+            sprint
+            for sprint in self.reader.list(statuses={"open"}, create=False)
             if not (
                 (excluding and sprint["ref"] == excluding)
                 or (excluding_id is not None and _sprint_number(sprint) == excluding_id)
@@ -1288,13 +1429,27 @@ class SprintWriter:
         ]
         _refuse_open_sprint(candidate, others, limit=self._open_sprint_limit())
 
-    def comment(self, *, role: str, actor: str, reference: str, body: str, request_id: str | None = None) -> dict[str, Any]:
+    def comment(
+        self, *, role: str, actor: str, reference: str, body: str, request_id: str | None = None
+    ) -> dict[str, Any]:
         self._role(role, {"po", "dispatcher", "worker", "reviewer", "steward", "retro"})
         if not body.strip():
             raise TaskError("validation", "comment requires a non-empty body", 2)
-        return self._write("commented", role, actor, reference, request_id, {"body_sha256": _digest(body)}, lambda sprint: self.client.call("createComment", task_id=_sprint_number(sprint), user_id=0, content=f"[{role}]\n{body}"))
+        return self._write(
+            "commented",
+            role,
+            actor,
+            reference,
+            request_id,
+            {"body_sha256": _digest(body)},
+            lambda sprint: self.client.call(
+                "createComment", task_id=_sprint_number(sprint), user_id=0, content=f"[{role}]\n{body}"
+            ),
+        )
 
-    def set_current_task(self, *, role: str, actor: str, reference: str, task_reference: str, request_id: str | None = None) -> dict[str, Any]:
+    def set_current_task(
+        self, *, role: str, actor: str, reference: str, task_reference: str, request_id: str | None = None
+    ) -> dict[str, Any]:
         self._role(role, {"po", "dispatcher", "observer", "steward"})
         task_reference = task_reference.strip()
         if not task_reference:
@@ -1305,16 +1460,36 @@ class SprintWriter:
         # that sprint's head resumes from.
         request_id = request_id or str(uuid.uuid4())
         self._guard_observer_identity(
-            role=role, actor=actor, reference=reference, request_id=request_id,
+            role=role,
+            actor=actor,
+            reference=reference,
+            request_id=request_id,
         )
+
         def mutation(sprint: dict[str, Any]) -> None:
             task = TaskReader(self.client).show(task_reference)
             if task.get("sprint") != reference:
                 raise TaskError("validation", "current task is not linked to this sprint", 2)
-            self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values={"sprint_current_task": task_reference})
-        return self._write("current_task_set", role, actor, reference, request_id, {"task": task_reference}, mutation)
+            self.client.call(
+                "saveTaskMetadata",
+                task_id=_sprint_number(sprint),
+                values={"sprint_current_task": task_reference},
+            )
 
-    def record_budget(self, *, role: str, actor: str, reference: str, event_type: str, request_id: str | None = None, source_event_id: str = "") -> dict[str, Any]:
+        return self._write(
+            "current_task_set", role, actor, reference, request_id, {"task": task_reference}, mutation
+        )
+
+    def record_budget(
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        event_type: str,
+        request_id: str | None = None,
+        source_event_id: str = "",
+    ) -> dict[str, Any]:
         self._role(role, {"po", "dispatcher", "steward"})
         if event_type not in BUDGET_RECORDED_EVENT_TYPES:
             raise TaskError("validation", "unknown budget event type " + repr(event_type), 2)
@@ -1335,28 +1510,57 @@ class SprintWriter:
                 raise TaskError("validation", "request id belongs to another operation or payload", 2)
             if bool(payload.get("hard_limit_stop")):
                 return self._finish_hard_budget(
-                    role=role, actor=actor, reference=reference, event_type=event_type,
-                    request_id=request_id, source_event_id=source_event_id, event=existing,
+                    role=role,
+                    actor=actor,
+                    reference=reference,
+                    event_type=event_type,
+                    request_id=request_id,
+                    source_event_id=source_event_id,
+                    event=existing,
                 )
-            return self._committed("budget_recorded", existing) if self.audit.committed_event(request_id) else self._pending("budget_recorded", existing)
+            return (
+                self._committed("budget_recorded", existing)
+                if self.audit.committed_event(request_id)
+                else self._pending("budget_recorded", existing)
+            )
         before = self.reader.show(reference)
         before_budget = _budget(before.get("budget"), self.thresholds)
-        hard_stop = charged and before["status"] == "open" and before_budget["total"] + 1 >= self.thresholds["hard"]
+        hard_stop = (
+            charged and before["status"] == "open" and before_budget["total"] + 1 >= self.thresholds["hard"]
+        )
         if hard_stop:
-            budget = _budget({"by_type": dict(before_budget["by_type"]) | {event_type: before_budget["by_type"][event_type] + 1}}, self.thresholds)
-            event = self._event(
-                "budget_recorded", role, actor, reference, request_id,
+            budget = _budget(
                 {
-                    "event_type": event_type, "source_event_id": source_event_id or None,
-                    "hard_limit_stop": True, "budget": {"by_type": budget["by_type"]},
+                    "by_type": dict(before_budget["by_type"])
+                    | {event_type: before_budget["by_type"][event_type] + 1}
+                },
+                self.thresholds,
+            )
+            event = self._event(
+                "budget_recorded",
+                role,
+                actor,
+                reference,
+                request_id,
+                {
+                    "event_type": event_type,
+                    "source_event_id": source_event_id or None,
+                    "hard_limit_stop": True,
+                    "budget": {"by_type": budget["by_type"]},
                 },
                 before,
             )
             self.audit.stage(request_id, event)
             return self._finish_hard_budget(
-                role=role, actor=actor, reference=reference, event_type=event_type,
-                request_id=request_id, source_event_id=source_event_id, event=event,
+                role=role,
+                actor=actor,
+                reference=reference,
+                event_type=event_type,
+                request_id=request_id,
+                source_event_id=source_event_id,
+                event=event,
             )
+
         def mutation(sprint: dict[str, Any]) -> None:
             budget = _budget(sprint.get("budget"), self.thresholds)
             if charged:
@@ -1365,10 +1569,19 @@ class SprintWriter:
                 values = {"sprint_budget": _budget_json(budget)}
             else:
                 budget["uncharged"][event_type] += 1
-                values = {BUDGET_UNCHARGED_FIELD: json.dumps(budget["uncharged"], sort_keys=True, separators=(",", ":"))}
+                values = {
+                    BUDGET_UNCHARGED_FIELD: json.dumps(
+                        budget["uncharged"], sort_keys=True, separators=(",", ":")
+                    )
+                }
             self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values=values)
+
         result = self._write(
-            "budget_recorded", role, actor, reference, request_id,
+            "budget_recorded",
+            role,
+            actor,
+            reference,
+            request_id,
             {
                 "event_type": event_type,
                 "source_event_id": source_event_id or None,
@@ -1379,8 +1592,15 @@ class SprintWriter:
         return result
 
     def _finish_hard_budget(
-        self, *, role: str, actor: str, reference: str, event_type: str, request_id: str,
-        source_event_id: str, event: dict[str, Any],
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        event_type: str,
+        request_id: str,
+        source_event_id: str,
+        event: dict[str, Any],
     ) -> dict[str, Any]:
         """Finish one hard charge and its stopped state as one host-owned effect.
 
@@ -1390,7 +1610,8 @@ class SprintWriter:
         """
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         if (
-            event.get("kind") != "budget_recorded" or event.get("ref") != reference
+            event.get("kind") != "budget_recorded"
+            or event.get("ref") != reference
             or event.get("actor") != {"role": role, "id": actor}
             or payload.get("event_type") != event_type
             or payload.get("source_event_id") != (source_event_id or None)
@@ -1406,8 +1627,12 @@ class SprintWriter:
             raise TaskError("audit_pending", "hard-budget record has an invalid normalized budget", 4)
         try:
             self._transition_host(
-                role=role, actor=actor, reference=reference, target="stopped",
-                reason="budget hard limit reached", request_id=request_id + ":typed-hard-stop",
+                role=role,
+                actor=actor,
+                reference=reference,
+                target="stopped",
+                reason="budget hard limit reached",
+                request_id=request_id + ":typed-hard-stop",
                 budget_by_type=counts,
             )
         except TaskError:
@@ -1421,10 +1646,18 @@ class SprintWriter:
             if self.audit.event(typed_request_id) is None:
                 self.audit.discard(request_id, event)
             raise
-        result = self._committed("budget_recorded", event) if self.audit.committed_event(request_id) else self._pending("budget_recorded", event)
+        result = (
+            self._committed("budget_recorded", event)
+            if self.audit.committed_event(request_id)
+            else self._pending("budget_recorded", event)
+        )
         self._record_hard_stop(
-            role=role, actor=actor, reference=reference, request_id=request_id,
-            budget_event_id=str(event.get("event_id") or ""), event_type=event_type,
+            role=role,
+            actor=actor,
+            reference=reference,
+            request_id=request_id,
+            budget_event_id=str(event.get("event_id") or ""),
+            event_type=event_type,
             source_event_id=source_event_id,
         )
         # The generic event is deliberately returned only after the typed host
@@ -1433,8 +1666,15 @@ class SprintWriter:
         return result
 
     def _record_hard_stop(
-        self, *, role: str, actor: str, reference: str, request_id: str,
-        budget_event_id: str, event_type: str, source_event_id: str,
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        request_id: str,
+        budget_event_id: str,
+        event_type: str,
+        source_event_id: str,
     ) -> None:
         """Record the state transition separately from the charge that caused it."""
         stop_request_id = request_id + ":budget-hard-stop"
@@ -1442,7 +1682,11 @@ class SprintWriter:
             return
         sprint = self.reader.show(reference)
         event = self._event(
-            "budget_hard_stopped", role, actor, reference, stop_request_id,
+            "budget_hard_stopped",
+            role,
+            actor,
+            reference,
+            stop_request_id,
             {
                 "reason": "budget_hard_limit",
                 "budget_event_id": budget_event_id or None,
@@ -1484,18 +1728,36 @@ class SprintWriter:
         # acknowledgement, because the entry is the sprint's own recovery state.
         request_id = request_id or str(uuid.uuid4())
         self._guard_observer_identity(
-            role=role, actor=actor, reference=reference, request_id=request_id,
+            role=role,
+            actor=actor,
+            reference=reference,
+            request_id=request_id,
         )
+
         def mutation(sprint: dict[str, Any]) -> None:
-            self.client.call("saveTaskMetadata", task_id=_sprint_number(sprint), values={"sprint_resume": json.dumps(normalized, separators=(",", ":"))})
-            self.client.call("createComment", task_id=_sprint_number(sprint), user_id=0, content="[sprint:resume]\n" + normalized["selected_step"])
+            self.client.call(
+                "saveTaskMetadata",
+                task_id=_sprint_number(sprint),
+                values={"sprint_resume": json.dumps(normalized, separators=(",", ":"))},
+            )
+            self.client.call(
+                "createComment",
+                task_id=_sprint_number(sprint),
+                user_id=0,
+                content="[sprint:resume]\n" + normalized["selected_step"],
+            )
+
         payload = {"fields": list(RESUME_FIELDS)}
         if delivery_id:
             payload.update({"delivery_id": delivery_id, "through_event": through_event})
         return self._write("resume_recorded", role, actor, reference, request_id, payload, mutation)
 
     def close(
-        self, *, role: str, actor: str, reference: str,
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
         decisions: dict[str, list[dict[str, str]]] | None = None,
         request_id: str | None = None,
     ) -> dict[str, Any]:
@@ -1520,7 +1782,9 @@ class SprintWriter:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
                 document, committed = self.transactions.existing(
-                    request_id, kind=SPRINT_CLOSED, intent=intent,
+                    request_id,
+                    kind=SPRINT_CLOSED,
+                    intent=intent,
                 )
                 if committed is not None:
                     return self._close_result(committed)
@@ -1541,7 +1805,11 @@ class SprintWriter:
                     )
                     self._check_close_decisions_are_writable(plan)
                     event = self._event(
-                        SPRINT_CLOSED, role, actor, reference, request_id,
+                        SPRINT_CLOSED,
+                        role,
+                        actor,
+                        reference,
+                        request_id,
                         {
                             "intent": intent,
                             "targets": targets,
@@ -1556,7 +1824,10 @@ class SprintWriter:
                         sprint,
                     )
                     document, committed = self.transactions.begin(
-                        request_id, kind=SPRINT_CLOSED, intent=intent, event=event,
+                        request_id,
+                        kind=SPRINT_CLOSED,
+                        intent=intent,
+                        event=event,
                     )
                     if committed is not None:
                         return self._close_result(committed)
@@ -1610,12 +1881,21 @@ class SprintWriter:
         """A step is only over once its own event is committed, whatever the backend shows."""
         if self._close_step_status(request_id) != "done":
             raise TaskError(
-                "audit_pending", "sprint close step is pending repair; retry with the same request id", 4,
+                "audit_pending",
+                "sprint close step is pending repair; retry with the same request id",
+                4,
             )
 
     def _close_conflict(
-        self, document: dict[str, Any], payload: dict[str, Any], *,
-        section: str, reference: str, verdict: str, actual: str, message: str,
+        self,
+        document: dict[str, Any],
+        payload: dict[str, Any],
+        *,
+        section: str,
+        reference: str,
+        verdict: str,
+        actual: str,
+        message: str,
     ) -> None:
         """Stop on somebody else's change, recoverably, naming what has to be decided again.
 
@@ -1643,21 +1923,21 @@ class SprintWriter:
         if "reservations" not in sprint:
             return {"archive": [], "remaining": [], "remaining_states": {}}
         cards = TaskReader(self.client).list(sprint=str(sprint["ref"]))
-        tasks = [
-            card for card in cards
-            if card.get("record_type") not in {"product", "issue"}
-        ]
+        tasks = [card for card in cards if card.get("record_type") not in {"product", "issue"}]
         return {
             "archive": sorted(str(card["ref"]) for card in tasks if card.get("state") == "done"),
             "remaining": sorted(str(card["ref"]) for card in tasks if card.get("state") != "done"),
             "remaining_states": {
                 str(card["ref"]): str(card.get("state") or "unknown")
-                for card in tasks if card.get("state") != "done"
+                for card in tasks
+                if card.get("state") != "done"
             },
         }
 
     def _check_staged_decisions(
-        self, document: dict[str, Any], decisions: dict[str, list[dict[str, str]]] | None,
+        self,
+        document: dict[str, Any],
+        decisions: dict[str, list[dict[str, str]]] | None,
     ) -> None:
         """A retry of a staged close carries the decisions that close was staged with.
 
@@ -1684,9 +1964,7 @@ class SprintWriter:
 
         confirmation = {"issues": ALREADY_CLOSED, "cards": ALREADY_MOVED}
         conflicts = {
-            str(item.get("ref")): item
-            for item in (payload.get("conflicts") or [])
-            if isinstance(item, dict)
+            str(item.get("ref")): item for item in (payload.get("conflicts") or []) if isinstance(item, dict)
         }
         amended: list[dict[str, Any]] = []
         for section in sections:
@@ -1708,10 +1986,7 @@ class SprintWriter:
         if not amended:
             self._refuse_restated_decisions()
         staged.update(offered)
-        payload["conflicts"] = [
-            item for item in (payload.get("conflicts") or [])
-            if item not in amended
-        ]
+        payload["conflicts"] = [item for item in (payload.get("conflicts") or []) if item not in amended]
         self.transactions.save(document)
 
     def _refuse_restated_decisions(self) -> None:
@@ -1732,10 +2007,7 @@ class SprintWriter:
         from secretary.sprint_close import ALREADY_CLOSED, KEEP_OPEN
 
         # A verdict that writes nothing to the issue needs nothing of the installation either.
-        closing = [
-            entry for entry in plan["issues"]
-            if entry["verdict"] not in {KEEP_OPEN, ALREADY_CLOSED}
-        ]
+        closing = [entry for entry in plan["issues"] if entry["verdict"] not in {KEEP_OPEN, ALREADY_CLOSED}]
         if closing and self.instance is None:
             raise TaskError(
                 "validation",
@@ -1818,8 +2090,11 @@ class SprintWriter:
                 document.setdefault("progress", {})["status_started"] = True
                 self.transactions.save(document)
                 self._transition_host(
-                    role=str(document["intent"]["role"]), actor=str(document["intent"]["actor"]),
-                    reference=str(event["ref"]), target="closed", reason="Sprint closed",
+                    role=str(document["intent"]["role"]),
+                    actor=str(document["intent"]["actor"]),
+                    reference=str(event["ref"]),
+                    target="closed",
+                    reason="Sprint closed",
                     request_id=typed_request_id,
                 )
             document.setdefault("progress", {})["status_done"] = True
@@ -1830,17 +2105,31 @@ class SprintWriter:
                 # Recoverable by construction: the conflict is on the record, and the retry of
                 # this request id may answer exactly it. Saying so is the point of the refusal.
                 raise
-            if exc.code in {"validation", "closed", "not_found", "transition_forbidden", "live_work", "role_forbidden"} and not _close_progressed(document, payload):
+            if exc.code in {
+                "validation",
+                "closed",
+                "not_found",
+                "transition_forbidden",
+                "live_work",
+                "role_forbidden",
+            } and not _close_progressed(document, payload):
                 self.transactions.discard(document)
                 raise
-            raise TaskError("audit_pending", "sprint close is pending repair; retry with the same request id", 4) from None
+            raise TaskError(
+                "audit_pending", "sprint close is pending repair; retry with the same request id", 4
+            ) from None
         except (OSError, KeyError, TypeError):
-            raise TaskError("audit_pending", "sprint close is pending repair; retry with the same request id", 4) from None
+            raise TaskError(
+                "audit_pending", "sprint close is pending repair; retry with the same request id", 4
+            ) from None
         update_active_sprint_projects(self.data_dir, self.reader.show(str(event["ref"]), include_cards=False))
         return self._close_result(event)
 
     def _close_declared_issues(
-        self, document: dict[str, Any], event: dict[str, Any], payload: dict[str, Any],
+        self,
+        document: dict[str, Any],
+        event: dict[str, Any],
+        payload: dict[str, Any],
         decisions: dict[str, Any],
     ) -> None:
         """Perform the closing verdicts, one issue at a time, through the close's progress.
@@ -1859,7 +2148,8 @@ class SprintWriter:
         if not isinstance(closed, list):
             raise TaskError("audit_pending", "sprint close transaction has invalid issue progress", 4)
         pending = [
-            entry for entry in verdicts
+            entry
+            for entry in verdicts
             if isinstance(entry, dict)
             and entry.get("verdict") not in {KEEP_OPEN, ALREADY_CLOSED}
             and entry.get("ref") not in closed
@@ -1888,8 +2178,12 @@ class SprintWriter:
                 if status == "todo" and current.get("closed"):
                     carried = str(current.get("close_reason") or "unknown")
                     self._close_conflict(
-                        document, payload, section="issues", reference=reference,
-                        verdict=str(entry["verdict"]), actual=carried,
+                        document,
+                        payload,
+                        section="issues",
+                        reference=reference,
+                        verdict=str(entry["verdict"]),
+                        actual=carried,
                         message=(
                             f"issue {reference} was closed as {carried} by somebody else, and this "
                             f"close states {entry['verdict']}; retry with that decision amended to "
@@ -1909,7 +2203,10 @@ class SprintWriter:
             self.transactions.save(document)
 
     def _dispose_remaining_cards(
-        self, document: dict[str, Any], event: dict[str, Any], payload: dict[str, Any],
+        self,
+        document: dict[str, Any],
+        event: dict[str, Any],
+        payload: dict[str, Any],
         decisions: dict[str, Any],
     ) -> None:
         """Take every card that was not done into the recorded end its disposition names.
@@ -1945,14 +2242,20 @@ class SprintWriter:
             target = "" if verdict == ALREADY_MOVED else DISPOSITION_TARGETS[verdict]
             if target and str(planned.get(reference) or "") != target:
                 move_request_id = _close_step_request_id(
-                    str(document["request_id"]), "dispose-move", reference,
+                    str(document["request_id"]),
+                    "dispose-move",
+                    reference,
                 )
                 status = self._close_step_status(move_request_id)
                 if status != "done":
                     if status == "todo" and reader.show(reference)["state"] == target:
                         self._close_conflict(
-                            document, payload, section="cards", reference=reference,
-                            verdict=verdict, actual=target,
+                            document,
+                            payload,
+                            section="cards",
+                            reference=reference,
+                            verdict=verdict,
+                            actual=target,
                             message=(
                                 f"card {reference} was moved to {target} by somebody else, not by "
                                 f"this close; retry with that disposition amended to already_moved "
@@ -1960,7 +2263,10 @@ class SprintWriter:
                             ),
                         )
                     writer.move(
-                        role="po", actor=actor, reference=reference, target=target,
+                        role="po",
+                        actor=actor,
+                        reference=reference,
+                        target=target,
                         reason=f"{verdict} when sprint {event['ref']} closed: {reason}",
                         sprint_override=True,
                         sprint_override_reason=f"disposed by the close of {event['ref']}: {reason}",
@@ -1971,11 +2277,15 @@ class SprintWriter:
                 moved.append(reference)
                 self.transactions.save(document)
             archive_request_id = _close_step_request_id(
-                str(document["request_id"]), "dispose-archive", reference,
+                str(document["request_id"]),
+                "dispose-archive",
+                reference,
             )
             if self._close_step_status(archive_request_id) != "done":
                 writer.archive(
-                    role="po", actor=actor, reference=reference,
+                    role="po",
+                    actor=actor,
+                    reference=reference,
                     reason=f"archived when sprint {event['ref']} closed: {reason}",
                     request_id=archive_request_id,
                 )
@@ -2000,7 +2310,12 @@ class SprintWriter:
         }
 
     def reopen(
-        self, *, role: str, actor: str, reference: str, request_id: str | None = None,
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        request_id: str | None = None,
         observer: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Reopen a sprint that still satisfies every rule for an open sprint.
@@ -2015,20 +2330,26 @@ class SprintWriter:
         request_id = request_id or str(uuid.uuid4())
         self.audit.require_pending_layout()
         intent = {
-            "role": role, "actor": actor, "reference": reference,
+            "role": role,
+            "actor": actor,
+            "reference": reference,
             "observer": self._observer_intent(observer, executable=True),
         }
         with sprint_admission_lock(self.data_dir):
-            document, committed = self.transactions.existing(
-                request_id, kind=SPRINT_REOPENED, intent=intent
-            )
+            document, committed = self.transactions.existing(request_id, kind=SPRINT_REOPENED, intent=intent)
             if committed is not None:
                 return self._committed_result(SPRINT_REOPENED, committed)
             if document is None:
                 sprint = self.reader.show(reference, include_cards=False)
                 self._check_reopen(sprint, reference, intent["observer"])
                 event = self._event(
-                    SPRINT_REOPENED, role, actor, reference, request_id, {"intent": intent}, sprint,
+                    SPRINT_REOPENED,
+                    role,
+                    actor,
+                    reference,
+                    request_id,
+                    {"intent": intent},
+                    sprint,
                 )
                 document, committed = self.transactions.begin(
                     request_id, kind=SPRINT_REOPENED, intent=intent, event=event
@@ -2040,7 +2361,10 @@ class SprintWriter:
             return self._run_reopen(document)
 
     def _check_reopen(
-        self, sprint: dict[str, Any], reference: str, observer: dict[str, Any] | None,
+        self,
+        sprint: dict[str, Any],
+        reference: str,
+        observer: dict[str, Any] | None,
     ) -> None:
         """Every rule an open sprint has to satisfy, read live before any write.
 
@@ -2048,11 +2372,13 @@ class SprintWriter:
         one the closed row happens to carry.
         """
         missing = [
-            name for name, value in (
+            name
+            for name, value in (
                 ("product", sprint.get("product")),
                 ("issues", sprint.get("issues")),
                 ("reservations", sprint.get("reservations")),
-            ) if not value
+            )
+            if not value
         ]
         if missing:
             raise TaskError(
@@ -2092,8 +2418,11 @@ class SprintWriter:
             document.setdefault("progress", {})["observer_started"] = True
             self.transactions.save(document)
             self._transition_host(
-                role=str(document["intent"]["role"]), actor=str(document["intent"]["actor"]),
-                reference=reference, target="open", reason="Sprint reopened",
+                role=str(document["intent"]["role"]),
+                actor=str(document["intent"]["actor"]),
+                reference=reference,
+                target="open",
+                reason="Sprint reopened",
                 request_id=str(document["request_id"]) + ":typed-reopen",
                 observer=encode_observer(document["intent"]["observer"]),
             )
@@ -2119,11 +2448,15 @@ class SprintWriter:
             if answer and self._compensate_reopen(document, reference):
                 raise
             raise TaskError(
-                "audit_pending", "sprint reopen is pending repair; retry with the same request id", 4,
+                "audit_pending",
+                "sprint reopen is pending repair; retry with the same request id",
+                4,
             ) from None
         except (OSError, KeyError, TypeError):
             raise TaskError(
-                "audit_pending", "sprint reopen is pending repair; retry with the same request id", 4,
+                "audit_pending",
+                "sprint reopen is pending repair; retry with the same request id",
+                4,
             ) from None
 
     def _record_observer_preimage(self, document: dict[str, Any], sprint: dict[str, Any]) -> None:
@@ -2163,11 +2496,14 @@ class SprintWriter:
                 preimage = progress.get("observer_preimage")
                 if not isinstance(preimage, str):
                     return False
-                if self.client.call(
-                    "saveTaskMetadata",
-                    task_id=_sprint_number(sprint),
-                    values={OBSERVER_FIELD: preimage},
-                ) is not True:
+                if (
+                    self.client.call(
+                        "saveTaskMetadata",
+                        task_id=_sprint_number(sprint),
+                        values={OBSERVER_FIELD: preimage},
+                    )
+                    is not True
+                ):
                     return False
         except (TaskError, OSError, KeyError, TypeError):
             return False
@@ -2176,7 +2512,9 @@ class SprintWriter:
         self.transactions.discard(document)
         return True
 
-    def restore(self, *, reference: str, values: dict[str, str], request_id: str | None = None) -> dict[str, Any]:
+    def restore(
+        self, *, reference: str, values: dict[str, str], request_id: str | None = None
+    ) -> dict[str, Any]:
         """Rewrite one sprint entity's fields verbatim from a checkpoint export.
 
         Not a sprint mutation an operator makes, so it is not refused on status the way `comment` or
@@ -2193,10 +2531,16 @@ class SprintWriter:
             "restored", "steward", "restore", reference, request_id, {"fields": sorted(values)}, mutation
         )
 
-    def restore_comment(self, *, reference: str, body: str, occurrence: int, request_id: str | None = None) -> dict[str, Any]:
+    def restore_comment(
+        self, *, reference: str, body: str, occurrence: int, request_id: str | None = None
+    ) -> dict[str, Any]:
         """Append one exported record back to the entity, verbatim."""
         return self._write(
-            "restored_comment", "steward", "restore", reference, request_id,
+            "restored_comment",
+            "steward",
+            "restore",
+            reference,
+            request_id,
             {"body_sha256": _digest(body), "restore_occurrence": occurrence},
             lambda sprint: self.client.call(
                 "createComment", task_id=_sprint_number(sprint), user_id=0, content=body
@@ -2220,20 +2564,31 @@ class SprintWriter:
         if declared == reference:
             return
         code, message = (
-            ("observer_identity_unbound",
-             "this observer names no sprint, so its writes cannot be authenticated; "
-             "it has to be launched by the dispatcher for one sprint")
-            if not declared else
-            ("observer_sprint_mismatch",
-             f"this observer belongs to sprint {declared}, not to {reference}")
+            (
+                "observer_identity_unbound",
+                "this observer names no sprint, so its writes cannot be authenticated; "
+                "it has to be launched by the dispatcher for one sprint",
+            )
+            if not declared
+            else (
+                "observer_sprint_mismatch",
+                f"this observer belongs to sprint {declared}, not to {reference}",
+            )
         )
         denial_request_id = _sprint_guard_denial_request_id(request_id)
         event = self.audit.committed_event(denial_request_id)
         if event is None:
             event = self._event(
-                "sprint_guard_denied", role, actor, reference, denial_request_id,
+                "sprint_guard_denied",
+                role,
+                actor,
+                reference,
+                denial_request_id,
                 {
-                    "code": code, "message": message, "project": "", "sprint": declared,
+                    "code": code,
+                    "message": message,
+                    "project": "",
+                    "sprint": declared,
                     "operation_request_id": request_id,
                 },
             )
@@ -2244,12 +2599,23 @@ class SprintWriter:
                 self.audit.append(denial_request_id, event)
             except OSError:
                 raise TaskError(
-                    "audit_pending", "sprint write was denied but audit repair is required", 4,
+                    "audit_pending",
+                    "sprint write was denied but audit repair is required",
+                    4,
                 ) from None
         payload = event.get("payload") if isinstance(event, dict) else {}
         raise TaskError(str(payload.get("code") or code), str(payload.get("message") or message), 3)
 
-    def _write(self, kind: str, role: str, actor: str, reference: str, request_id: str | None, payload: dict[str, Any], mutation: Callable[[dict[str, Any]], Any]) -> dict[str, Any]:
+    def _write(
+        self,
+        kind: str,
+        role: str,
+        actor: str,
+        reference: str,
+        request_id: str | None,
+        payload: dict[str, Any],
+        mutation: Callable[[dict[str, Any]], Any],
+    ) -> dict[str, Any]:
         request_id = request_id or str(uuid.uuid4())
         committed = self.audit.committed_event(request_id)
         if committed is not None:
@@ -2264,7 +2630,11 @@ class SprintWriter:
                 )
             return self._pending(kind, pending)
         sprint = self.reader.show(reference)
-        if sprint["status"] in {"closed", "stopped"} and kind in {"commented", "current_task_set", "resume_recorded"}:
+        if sprint["status"] in {"closed", "stopped"} and kind in {
+            "commented",
+            "current_task_set",
+            "resume_recorded",
+        }:
             raise TaskError("closed", "sprint is closed", 3)
         event = self._event(kind, role, actor, reference, request_id, payload, sprint)
         self.audit.stage(request_id, event)
@@ -2286,7 +2656,11 @@ class SprintWriter:
         return {"action": kind, "sprint": sprint, "event_id": event_id}
 
     def _committed(self, kind: str, event: dict[str, Any]) -> dict[str, Any]:
-        return {"action": kind, "sprint": self.reader.show(str(event["ref"])), "event_id": self.audit.append(str(event["request_id"]), event)}
+        return {
+            "action": kind,
+            "sprint": self.reader.show(str(event["ref"])),
+            "event_id": self.audit.append(str(event["request_id"]), event),
+        }
 
     def _pending(self, kind: str, event: dict[str, Any]) -> dict[str, Any]:
         # The staged event is only retained after a successful backend mutation in the
@@ -2300,13 +2674,31 @@ class SprintWriter:
         return {"action": kind, "sprint": sprint, "event_id": event_id}
 
     @staticmethod
-    def _event(kind: str, role: str, actor: str, reference: str, request_id: str, payload: dict[str, Any], sprint: dict[str, Any] | None = None) -> dict[str, Any]:
+    def _event(
+        kind: str,
+        role: str,
+        actor: str,
+        reference: str,
+        request_id: str,
+        payload: dict[str, Any],
+        sprint: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         return {
-            "event_id": "evt_" + uuid.uuid4().hex, "schema_version": 1, "occurred_at": _now(),
-            "actor": {"role": role, "id": actor}, "kind": kind, "outcome": "success",
-            "task_id": sprint["id"] if sprint else "", "ref": reference,
-            "backend": {"kind": "kanboard", "task_id": _sprint_number(sprint) if sprint else None, "revision": "pending"},
-            "request_id": request_id, "payload": payload,
+            "event_id": "evt_" + uuid.uuid4().hex,
+            "schema_version": 1,
+            "occurred_at": _now(),
+            "actor": {"role": role, "id": actor},
+            "kind": kind,
+            "outcome": "success",
+            "task_id": sprint["id"] if sprint else "",
+            "ref": reference,
+            "backend": {
+                "kind": "kanboard",
+                "task_id": _sprint_number(sprint) if sprint else None,
+                "revision": "pending",
+            },
+            "request_id": request_id,
+            "payload": payload,
         }
 
     @staticmethod
@@ -2341,7 +2733,11 @@ def _close_archive_request_id(request_id: str, reference: str) -> str:
 
 
 _CLOSE_PROGRESS_STEPS = (
-    "closed_issues", "archived_tasks", "moved_tasks", "disposed_tasks", "conflicts",
+    "closed_issues",
+    "archived_tasks",
+    "moved_tasks",
+    "disposed_tasks",
+    "conflicts",
 )
 
 
@@ -2478,7 +2874,9 @@ def _json_list(value: str | None) -> list[str]:
 
 
 def _budget(
-    value: Any = None, thresholds: dict[str, int] | None = None, uncharged: Any = None,
+    value: Any = None,
+    thresholds: dict[str, int] | None = None,
+    uncharged: Any = None,
 ) -> dict[str, Any]:
     """The normalized budget: charged counts that move the thresholds, uncharged counts beside them.
 
@@ -2505,7 +2903,14 @@ def _budget(
     limits = thresholds or budget_thresholds()
     # Deliberately only the charged counts: an uncharged outcome is visible, and moves nothing.
     total = sum(counts.values())
-    return {"total": total, "by_type": counts, "uncharged": spare, "thresholds": limits, "signal_reached": total >= limits["signal"], "hard_reached": total >= limits["hard"]}
+    return {
+        "total": total,
+        "by_type": counts,
+        "uncharged": spare,
+        "thresholds": limits,
+        "signal_reached": total >= limits["signal"],
+        "hard_reached": total >= limits["hard"],
+    }
 
 
 def _budget_count(counts: Any, event_type: str) -> int:
@@ -2519,7 +2924,9 @@ def _budget_count(counts: Any, event_type: str) -> int:
 
 def _budget_json(budget: dict[str, Any]) -> str:
     """The `sprint_budget` field's value. The uncharged counts have their own field and stay out."""
-    return json.dumps({key: value for key, value in budget.items() if key != "uncharged"}, separators=(",", ":"))
+    return json.dumps(
+        {key: value for key, value in budget.items() if key != "uncharged"}, separators=(",", ":")
+    )
 
 
 def _source_audit(value: Any) -> dict[str, str] | None:
@@ -2547,7 +2954,11 @@ def _resume(value: Any, *, required: bool = False) -> dict[str, Any] | None:
         if required:
             raise TaskError("validation", "resume entry must be a JSON object", 2)
         return None
-    missing = [field for field in RESUME_FIELDS if not isinstance(source.get(field), str) or not source[field].strip()]
+    missing = [
+        field
+        for field in RESUME_FIELDS
+        if not isinstance(source.get(field), str) or not source[field].strip()
+    ]
     if missing:
         if required:
             raise TaskError("validation", "resume entry is missing required fields: " + ", ".join(missing), 2)

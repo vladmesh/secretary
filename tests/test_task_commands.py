@@ -86,9 +86,7 @@ class ResolveDataDirTest(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {"SECRETARY_DATA_DIR": "/env/data"}):
             parser = build_parser()
-            args = parser.parse_args(
-                ["task", "report", "--ref", "x-1", "--role", "worker", "--kind", "done"]
-            )
+            args = parser.parse_args(["task", "report", "--ref", "x-1", "--role", "worker", "--kind", "done"])
         self.assertEqual(resolve_data_dir(args), "/env/data")
 
 

@@ -36,7 +36,11 @@ DIM = int(os.environ.get("MEMORY_DIM", "1024"))
 MODEL_CACHE_DIR = Path(os.environ.get("MEMORY_CACHE_DIR", str(DEFAULT_MEMORY_DIR / "fastembed-cache")))
 THREADS = int(os.environ.get("MEMORY_THREADS", "1"))
 SEARCH_LOG = os.environ.get("MEMORY_SEARCH_LOG", str(Path(DB_PATH).parent / "search-log.jsonl"))
-CANON_EXPORT = Path(os.environ["MEMORY_CANON_EXPORT"]) if "MEMORY_CANON_EXPORT" in os.environ else CANON.parent / "export.ndjson"
+CANON_EXPORT = (
+    Path(os.environ["MEMORY_CANON_EXPORT"])
+    if "MEMORY_CANON_EXPORT" in os.environ
+    else CANON.parent / "export.ndjson"
+)
 WATCH_INTERVAL = float(os.environ.get("MEMORY_WATCH_INTERVAL", "10"))
 
 _embedder = None
@@ -90,12 +94,8 @@ def create_schema(conn: sqlite3.Connection, dim: int | None = None) -> None:
         "id INTEGER PRIMARY KEY AUTOINCREMENT, fact_id TEXT UNIQUE, content_hash TEXT, "
         "text TEXT NOT NULL, scope TEXT, tags TEXT, source TEXT, created_at TEXT)"
     )
-    conn.execute(
-        f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(embedding float[{dim}])"
-    )
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS index_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
-    )
+    conn.execute(f"CREATE VIRTUAL TABLE IF NOT EXISTS vec_memories USING vec0(embedding float[{dim}])")
+    conn.execute("CREATE TABLE IF NOT EXISTS index_metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
 
 
 class NotReadyError(RuntimeError):
@@ -182,8 +182,9 @@ def search_memory(query: str, k: int = 5, scope: str | None = None) -> list:
     ]
 
 
-def log_search(query: str, k: int, results: list,
-               scope: str | None = None, caller: str | None = None) -> None:
+def log_search(
+    query: str, k: int, results: list, scope: str | None = None, caller: str | None = None
+) -> None:
     """Append one jsonl line per memory_search call. Best-effort telemetry:
     any failure here is swallowed. Logging must never break the search.
     caller is self-reported by the agent (role name), attribution, not auth."""
@@ -351,10 +352,7 @@ def build_document_embedder(model: str, cache_dir: str | Path, threads: int):
             return self.embed_many([text])[0]
 
         def embed_many(self, texts: list[str]) -> list[np.ndarray]:
-            return [
-                _unit(vector)
-                for vector in embedding_model.embed(texts, batch_size=2)
-            ]
+            return [_unit(vector) for vector in embedding_model.embed(texts, batch_size=2)]
 
     return DocumentEmbedder()
 
@@ -390,9 +388,7 @@ def write_index(facts: list[dict], target: Path, model: str, dim: int, document_
         else [document_embed(fact["text"]) for fact in facts]
     )
     if len(vectors) != len(facts):
-        raise RuntimeError(
-            f"embedder returned {len(vectors)} vectors for {len(facts)} facts"
-        )
+        raise RuntimeError(f"embedder returned {len(vectors)} vectors for {len(facts)} facts")
     rows = list(zip(facts, vectors))
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
@@ -411,8 +407,13 @@ def write_index(facts: list[dict], target: Path, model: str, dim: int, document_
                 "INSERT INTO memories(fact_id, content_hash, text, scope, tags, source, created_at) "
                 "VALUES (?,?,?,?,?,?,?)",
                 (
-                    f["id"], fact_content_hash(f), f["text"], f["scope"], f["tags"],
-                    f["source"], f["created_at"],
+                    f["id"],
+                    fact_content_hash(f),
+                    f["text"],
+                    f["scope"],
+                    f["tags"],
+                    f["source"],
+                    f["created_at"],
                 ),
             )
             conn.execute(
@@ -494,7 +495,9 @@ def offline_rebuild(
         )
     facts = load_canon_entries(canon_path, export_path)
     if not facts and not allow_empty:
-        raise RuntimeError("canon snapshot has no current facts; pass allow_empty=True to publish an empty index")
+        raise RuntimeError(
+            "canon snapshot has no current facts; pass allow_empty=True to publish an empty index"
+        )
     document_embed = document_embed or build_document_embedder(model, cache_dir, threads)
     indexed = write_index(facts, target, model, int(dim), document_embed)
     parity = {"expected": len(facts), "indexed": indexed, "ok": indexed == len(facts)}
@@ -536,12 +539,23 @@ def incremental_update(
     compatibility, _ = index_compatibility(target, model, int(dim))
     if compatibility != "compatible":
         rebuilt = offline_rebuild(
-            canon_path, export_path, target, model, int(dim), document_embed, allow_empty,
-            cache_dir, threads,
+            canon_path,
+            export_path,
+            target,
+            model,
+            int(dim),
+            document_embed,
+            allow_empty,
+            cache_dir,
+            threads,
         )
         return {
-            **rebuilt, "mode": "rebuild", "added": len(facts), "updated": 0,
-            "deleted": 0, "reused": 0,
+            **rebuilt,
+            "mode": "rebuild",
+            "added": len(facts),
+            "updated": 0,
+            "deleted": 0,
+            "reused": 0,
         }
 
     conn = db(target)
@@ -550,31 +564,34 @@ def incremental_update(
         if not {"fact_id", "content_hash"}.issubset(columns):
             conn.close()
             rebuilt = offline_rebuild(
-                canon_path, export_path, target, model, int(dim), document_embed, allow_empty,
-                cache_dir, threads,
+                canon_path,
+                export_path,
+                target,
+                model,
+                int(dim),
+                document_embed,
+                allow_empty,
+                cache_dir,
+                threads,
             )
             return {
-                **rebuilt, "mode": "rebuild", "added": len(facts), "updated": 0,
-                "deleted": 0, "reused": 0,
+                **rebuilt,
+                "mode": "rebuild",
+                "added": len(facts),
+                "updated": 0,
+                "deleted": 0,
+                "reused": 0,
             }
         existing = {
             fact_id: (rowid, content_hash)
-            for rowid, fact_id, content_hash in conn.execute(
-                "SELECT id, fact_id, content_hash FROM memories"
-            )
+            for rowid, fact_id, content_hash in conn.execute("SELECT id, fact_id, content_hash FROM memories")
         }
         desired = {fact["id"]: (fact, fact_content_hash(fact)) for fact in facts}
         added = [item for key, item in desired.items() if key not in existing]
-        changed = [
-            item for key, item in desired.items()
-            if key in existing and existing[key][1] != item[1]
-        ]
+        changed = [item for key, item in desired.items() if key in existing and existing[key][1] != item[1]]
         deleted = [key for key in existing if key not in desired]
         document_embed = document_embed or build_document_embedder(model, cache_dir, threads)
-        vectors = {
-            fact["id"]: document_embed(fact["text"])
-            for fact, _ in (*added, *changed)
-        }
+        vectors = {fact["id"]: document_embed(fact["text"]) for fact, _ in (*added, *changed)}
         with _reindex_lock:
             conn.execute("BEGIN IMMEDIATE")
             for fact_id in deleted:
@@ -588,8 +605,13 @@ def incremental_update(
                     "UPDATE memories SET content_hash=?, text=?, scope=?, tags=?, source=?, "
                     "created_at=? WHERE id=?",
                     (
-                        digest, fact["text"], fact["scope"], fact["tags"], fact["source"],
-                        fact["created_at"], rowid,
+                        digest,
+                        fact["text"],
+                        fact["scope"],
+                        fact["tags"],
+                        fact["source"],
+                        fact["created_at"],
+                        rowid,
                     ),
                 )
                 conn.execute(
@@ -601,8 +623,13 @@ def incremental_update(
                     "INSERT INTO memories(fact_id, content_hash, text, scope, tags, source, "
                     "created_at) VALUES (?,?,?,?,?,?,?)",
                     (
-                        fact["id"], digest, fact["text"], fact["scope"], fact["tags"],
-                        fact["source"], fact["created_at"],
+                        fact["id"],
+                        digest,
+                        fact["text"],
+                        fact["scope"],
+                        fact["tags"],
+                        fact["source"],
+                        fact["created_at"],
                     ),
                 )
                 conn.execute(
@@ -619,10 +646,17 @@ def incremental_update(
     if indexed != len(facts):
         raise RuntimeError(f"incremental index parity failed: expected {len(facts)}, got {indexed}")
     return {
-        "ok": True, "mode": "incremental", "canon": str(canon_path),
-        "export": str(export_path), "target_db": str(target), "model": model,
-        "dimension": int(dim), "added": len(added), "updated": len(changed),
-        "deleted": len(deleted), "reused": len(facts) - len(added) - len(changed),
+        "ok": True,
+        "mode": "incremental",
+        "canon": str(canon_path),
+        "export": str(export_path),
+        "target_db": str(target),
+        "model": model,
+        "dimension": int(dim),
+        "added": len(added),
+        "updated": len(changed),
+        "deleted": len(deleted),
+        "reused": len(facts) - len(added) - len(changed),
         "parity": {"expected": len(facts), "indexed": indexed, "ok": True},
     }
 
@@ -686,6 +720,7 @@ def start_background_bootstrap() -> None:
 
 def start_canon_watcher() -> None:
     """Background thread: rebuild the index whenever the canon changes on disk."""
+
     def loop():
         last = canon_signature()
         while True:

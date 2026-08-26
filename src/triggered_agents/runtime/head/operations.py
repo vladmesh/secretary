@@ -19,6 +19,7 @@ matters is where they reach:
     holding a live head, so the caller keeps its launch intent; `HeadSpawnFailed` means nothing of
     the bring-up survived. Treating the first as the second is how live heads get killed.
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -58,7 +59,11 @@ class HeadOperationError(RuntimeError):
     """Any refusal from one of the three operations, with the delivery evidence there was."""
 
     def __init__(
-        self, message: str, *, evidence: Any = None, run: HeadRun | None = None,
+        self,
+        message: str,
+        *,
+        evidence: Any = None,
+        run: HeadRun | None = None,
     ) -> None:
         super().__init__(message)
         self.evidence = evidence
@@ -268,7 +273,13 @@ def spawn(
         # run before a process can write its heartbeat.
         commit(run)
     pane = _open_pane(
-        host, workspace, title, command, split_from=split_from, transport=transport, run=run,
+        host,
+        workspace,
+        title,
+        command,
+        split_from=split_from,
+        transport=transport,
+        run=run,
     )
     run = run.rebound(pane.handle, leaf=pane.leaf)
     if commit is not None:
@@ -304,9 +315,7 @@ def nudge(
     live = _relocated(host, run)
     if not live.handle:
         raise HeadNudgeFailed("the head's pane can no longer be addressed")
-    delivery = _deliver(
-        transport or HostTransport(), host, live, pointer, subject=subject or "head-nudge"
-    )
+    delivery = _deliver(transport or HostTransport(), host, live, pointer, subject=subject or "head-nudge")
     return HeadOutcome(delivery.run.working(), delivery.outcome)
 
 
@@ -425,15 +434,15 @@ def _open_pane(
             raise _cleanup(host, run.rebound(pane.handle), transport, str(exc)) from None
         if not pane.leaf:
             raise _cleanup(
-                host, run.rebound(pane.handle), transport,
+                host,
+                run.rebound(pane.handle),
+                transport,
                 "the session manager exposed no stable leaf for the split pane",
             )
     try:
         host.rename_pane(pane.handle, title)
     except Exception as exc:  # noqa: BLE001
-        raise _cleanup(
-            host, run.rebound(pane.handle, leaf=pane.leaf), transport, str(exc)
-        ) from None
+        raise _cleanup(host, run.rebound(pane.handle, leaf=pane.leaf), transport, str(exc)) from None
     return pane
 
 
@@ -453,8 +462,9 @@ def _cleanup(
     try:
         transport.close(run, host=host)
     except Exception as exc:  # noqa: BLE001
-        return HeadSpawnAborted(f"{reason}; the head's pane would not close: {exc}", run=run,
-                                evidence=evidence)
+        return HeadSpawnAborted(
+            f"{reason}; the head's pane would not close: {exc}", run=run, evidence=evidence
+        )
     return HeadSpawnFailed(reason, evidence=evidence)
 
 
@@ -483,8 +493,7 @@ def _spawn_delivery_failure(
     evidence = getattr(exc, "evidence", None)
     if pointer.document:
         return HeadSpawnAborted(
-            f"the launch nudge was not confirmed delivered, and the pane may have taken it "
-            f"anyway: {exc}",
+            f"the launch nudge was not confirmed delivered, and the pane may have taken it anyway: {exc}",
             run=run,
             evidence=evidence,
         )
@@ -519,7 +528,9 @@ def _deliver(
         delivery = transport.deliver(run, pointer, host=host, subject=subject)
     except TuiDeliveryError as exc:
         raise HeadNudgeFailed(
-            str(exc), evidence=getattr(exc, "evidence", None), run=getattr(exc, "head_run", run),
+            str(exc),
+            evidence=getattr(exc, "evidence", None),
+            run=getattr(exc, "head_run", run),
         ) from None
     return HeadDelivery(post_delivery_run(run, delivery.run), delivery.outcome)
 

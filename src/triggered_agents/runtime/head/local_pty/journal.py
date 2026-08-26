@@ -15,6 +15,7 @@ Records are single-line JSON appended to a file opened `O_APPEND`, one `write()`
 `fsync`. A `SIGKILL` can therefore leave at most one partial trailing line, and `read_events`
 reports that as a truncated tail instead of failing: everything before it is complete and ordered.
 """
+
 from __future__ import annotations
 
 import json
@@ -222,9 +223,7 @@ def read_events(path: str | os.PathLike[str]) -> JournalReadResult:
     return _parsed(raw, partial_head=False)
 
 
-def read_tail(
-    path: str | os.PathLike[str], *, max_bytes: int = JOURNAL_TAIL_BYTES
-) -> JournalReadResult:
+def read_tail(path: str | os.PathLike[str], *, max_bytes: int = JOURNAL_TAIL_BYTES) -> JournalReadResult:
     """Read at most `max_bytes` bytes off the end of a journal, and say that the read was bounded.
 
     The read a caller that asks "what is this head doing now" makes. The first line of the window
@@ -256,7 +255,7 @@ def read_tail(
     if start <= 0:
         return _parsed(raw, partial_head=False)
     cut = raw.find(b"\n")
-    return _parsed(b"" if cut < 0 else raw[cut + 1:], partial_head=True)
+    return _parsed(b"" if cut < 0 else raw[cut + 1 :], partial_head=True)
 
 
 def _parsed(raw: bytes, *, partial_head: bool) -> JournalReadResult:
@@ -283,8 +282,7 @@ def _parsed(raw: bytes, *, partial_head: bool) -> JournalReadResult:
             continue
         events.append(record)
     ordered = all(
-        int(later["seq"]) > int(earlier["seq"])
-        for earlier, later in zip(events, events[1:], strict=False)
+        int(later["seq"]) > int(earlier["seq"]) for earlier, later in zip(events, events[1:], strict=False)
     )
     return JournalReadResult(
         events=tuple(events),

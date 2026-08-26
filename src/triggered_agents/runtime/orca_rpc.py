@@ -9,6 +9,7 @@ Frame format mirrors src/cli/runtime/transport.ts: one newline-terminated JSON r
 {id, authToken, method, params} to the unix endpoint from ~/.config/orca/orca-runtime.json;
 the reply is newline-delimited JSON, possibly interleaved with {"_keepalive":true} frames.
 """
+
 from __future__ import annotations
 
 import codecs
@@ -35,7 +36,9 @@ def call(method: str, params=None, timeout: float = 20.0) -> dict:
     s.settimeout(timeout)
     try:
         s.connect(endpoint)
-        s.sendall((json.dumps({"id": rid, "authToken": token, "method": method, "params": params}) + "\n").encode())
+        s.sendall(
+            (json.dumps({"id": rid, "authToken": token, "method": method, "params": params}) + "\n").encode()
+        )
         decoder = codecs.getincrementaldecoder("utf-8")()
         buf = ""
         while True:

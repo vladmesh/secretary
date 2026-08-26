@@ -33,6 +33,7 @@ Three decisions make this a boundary rather than a namespace:
     A record read back from disk cannot answer a question about the present, and this is where that
     stops being pretended.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -320,8 +321,7 @@ class HeadReceipt:
     def __post_init__(self) -> None:
         if self.status not in RECEIPT_STATUSES:
             raise ValueError(
-                f"a head receipt's status is one of {', '.join(RECEIPT_STATUSES)}, "
-                f"not {self.status!r}"
+                f"a head receipt's status is one of {', '.join(RECEIPT_STATUSES)}, not {self.status!r}"
             )
 
     @property

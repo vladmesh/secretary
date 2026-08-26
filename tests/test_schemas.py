@@ -149,7 +149,10 @@ class SchemaInvalidTests(unittest.TestCase):
         data = copy.deepcopy(VALID_INSTANCE)
         data["data_dir"] = 3
         errors = validate(data, "instance", "instance.yaml")
-        self.assertTrue(any(error.path == "data_dir" and "expected type string" in error.message for error in errors), errors)
+        self.assertTrue(
+            any(error.path == "data_dir" and "expected type string" in error.message for error in errors),
+            errors,
+        )
 
     def test_instance_missing_offsite_remote(self):
         data = copy.deepcopy(VALID_INSTANCE)
@@ -300,7 +303,9 @@ class SchemaInvalidTests(unittest.TestCase):
     def test_onboarding_rejects_enabled_binding_before_gate(self):
         data = json.loads((ONBOARDING_FIXTURES / "enabled-before-gate.json").read_text(encoding="utf-8"))
         errors = validate(data, "onboarding-contract", "enabled-before-gate.json")
-        self.assertTrue(any(e.path in {"draft.binding.enabled", "provision.binding.enabled"} for e in errors), errors)
+        self.assertTrue(
+            any(e.path in {"draft.binding.enabled", "provision.binding.enabled"} for e in errors), errors
+        )
 
     def test_onboarding_rejects_passed_gate_with_failed_validation(self):
         data = json.loads((ONBOARDING_FIXTURES / "happy-path.json").read_text(encoding="utf-8"))
@@ -428,16 +433,13 @@ class OnboardingIdentityTests(unittest.TestCase):
                     data = self._happy()
                     data[stage]["binding"][field] = value
                     errors = validate(data, "onboarding-contract", f"{stage}-{field}.json")
-                    self.assertTrue(
-                        any(e.path == f"{stage}.binding" for e in errors), errors
-                    )
+                    self.assertTrue(any(e.path == f"{stage}.binding" for e in errors), errors)
 
     def test_scanner_cannot_name_its_own_repo_or_branch(self):
         # The scanned target is identity.repo at identity.default_branch. The
         # scanner reports observations only; it cannot carry a repo path or
         # branch that disagrees with identity, in either direction.
-        for field, value in (("input", "/srv/projects/other-project"),
-                             ("default_branch", "release")):
+        for field, value in (("input", "/srv/projects/other-project"), ("default_branch", "release")):
             with self.subTest(field=field):
                 data = self._happy()
                 data["scanner"]["repo"][field] = value
@@ -502,9 +504,7 @@ class ExampleInstanceTests(unittest.TestCase):
 
     def test_examples_have_no_live_owner_bindings(self):
         blob = "\n".join(
-            p.read_text(encoding="utf-8")
-            for p in EXAMPLE_INSTANCE.rglob("*")
-            if p.is_file()
+            p.read_text(encoding="utf-8") for p in EXAMPLE_INSTANCE.rglob("*") if p.is_file()
         ).lower()
         for needle in ("/home/dev", "dnd-simulator", "personal_site"):
             self.assertNotIn(needle, blob, f"example config leaks {needle!r}")

@@ -25,6 +25,7 @@ The head's identity is not this process's business either. The head's command is
 `with_pid_heartbeat`, so the record under `head.pid` is written by the head's own process and is
 the same launch identity `secretary.dispatcher_watchdog` already reads.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -153,9 +154,7 @@ class _Delivery:
             "complete": self.state == protocol.DELIVERY_COMPLETE,
             "subject": self.subject,
             "timeout_seconds": self.seconds,
-            "detail": protocol.delivery_detail(
-                self.state, self.size, self.written, self.why, self.seconds
-            ),
+            "detail": protocol.delivery_detail(self.state, self.size, self.written, self.why, self.seconds),
         }
 
 
@@ -386,8 +385,9 @@ class Supervisor:
         fcntl.ioctl(slave, termios.TIOCSWINSZ, packed)
         attributes = termios.tcgetattr(slave)
         attributes[_IFLAG] &= ~termios.IXON
-        attributes[_LFLAG] &= ~(termios.ICANON | termios.ECHO | termios.ECHOE | termios.ECHOK
-                                | termios.ECHONL | termios.IEXTEN)
+        attributes[_LFLAG] &= ~(
+            termios.ICANON | termios.ECHO | termios.ECHOE | termios.ECHOK | termios.ECHONL | termios.IEXTEN
+        )
         # With ICANON off a read returns as soon as one byte is there, and never waits on a timer.
         attributes[_CC][termios.VMIN] = 1
         attributes[_CC][termios.VTIME] = 0
@@ -522,7 +522,9 @@ class Supervisor:
                 output_bytes=self._turn_bytes,
             )
             self._turn_open = False
-        elif self._turn_open and self._progress_bytes and now - self._progress_at >= PROGRESS_COALESCE_SECONDS:
+        elif (
+            self._turn_open and self._progress_bytes and now - self._progress_at >= PROGRESS_COALESCE_SECONDS
+        ):
             self._flush_progress()
         # A terminal that never becomes writable raises no event, so the delivery bound is a thing
         # the tick notices rather than a thing the selector reports.
@@ -626,9 +628,7 @@ class Supervisor:
         if self._master < 0:
             return
         try:
-            self._selector.modify(
-                self._master, selectors.EVENT_READ | selectors.EVENT_WRITE, "master"
-            )
+            self._selector.modify(self._master, selectors.EVENT_READ | selectors.EVENT_WRITE, "master")
         except (KeyError, ValueError):
             pass
 
@@ -687,9 +687,7 @@ class Supervisor:
             self._finish_delivery(protocol.DELIVERY_FAILED, "the head exited")
             return
         if time.monotonic() >= delivery.deadline:
-            self._finish_delivery(
-                protocol.DELIVERY_STALLED, "the head stopped reading its terminal"
-            )
+            self._finish_delivery(protocol.DELIVERY_STALLED, "the head stopped reading its terminal")
 
     def _finish_delivery(self, state: str, why: str) -> None:
         """Close a delivery out, and write down what actually reached the head's terminal.
@@ -724,9 +722,7 @@ class Supervisor:
             delivery=delivery.id,
             state=state,
             subject=delivery.subject,
-            detail=protocol.delivery_detail(
-                state, delivery.size, delivery.written, why, delivery.seconds
-            ),
+            detail=protocol.delivery_detail(state, delivery.size, delivery.written, why, delivery.seconds),
         )
         if delivery.written and not self._turn_open:
             self._turn_id += 1
@@ -1007,7 +1003,9 @@ class Supervisor:
         del client
         initiator = str(request.get("initiator") or "client")
         name = str(request.get("signal") or "TERM").upper()
-        number = getattr(signal, f"SIG{name}", None) if not name.startswith("SIG") else getattr(signal, name, None)
+        number = (
+            getattr(signal, f"SIG{name}", None) if not name.startswith("SIG") else getattr(signal, name, None)
+        )
         if not isinstance(number, signal.Signals):
             raise protocol.ProtocolError(f"unknown signal {name!r}")
         if self._head_status is not None:
@@ -1058,9 +1056,7 @@ class Supervisor:
         """
         if not client.overflowed:
             return
-        client.pending += protocol.encode_frame(
-            {"event": protocol.EVENT_DROPPED, "bytes": client.dropped}
-        )
+        client.pending += protocol.encode_frame({"event": protocol.EVENT_DROPPED, "bytes": client.dropped})
         client.overflowed = False
 
     def _flush(self, client: _Client) -> None:
@@ -1121,9 +1117,7 @@ class Supervisor:
         for client in list(self._clients.values()):
             if client.attached:
                 self._announce_dropped(client)
-                client.pending += protocol.encode_frame(
-                    {"event": protocol.EVENT_EXITED, "record": record}
-                )
+                client.pending += protocol.encode_frame({"event": protocol.EVENT_EXITED, "record": record})
             self._flush(client)
         deadline = time.time() + FAREWELL_SECONDS
         while time.time() < deadline and any(c.pending for c in self._clients.values()):
@@ -1205,7 +1199,7 @@ def _live_head(pid_file: Path, run_id: str) -> int:
     except OSError:
         return 0
     close = stat.rfind(")")
-    fields = stat[close + 2:].split()
+    fields = stat[close + 2 :].split()
     if close < 0 or len(fields) <= 19:
         return 0
     if fields[0] == "Z":
@@ -1253,9 +1247,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cols", type=int, default=80)
     parser.add_argument("--term", default="xterm-256color")
     parser.add_argument("--quiet-seconds", type=float, default=TURN_QUIET_SECONDS)
-    parser.add_argument(
-        "--delivery-seconds", type=float, default=protocol.INPUT_DELIVERY_SECONDS
-    )
+    parser.add_argument("--delivery-seconds", type=float, default=protocol.INPUT_DELIVERY_SECONDS)
     parser.add_argument(
         "--daemonize",
         action="store_true",

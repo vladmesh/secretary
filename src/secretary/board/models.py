@@ -315,7 +315,8 @@ class Event:
                 entity_kind=EntityKind(_string_field(subject, "kind")),
                 ref=_string_field(subject, "ref"),
                 actor=Actor(
-                    _string_field(actor, "role"), _string_field(actor, "id"),
+                    _string_field(actor, "role"),
+                    _string_field(actor, "id"),
                     _optional_string_field(actor, "head_run_ref"),
                 ),
                 reason=_string_field(record, "reason"),
@@ -351,11 +352,16 @@ def _optional_string_field(document: dict[str, Any], name: str) -> str | None:
 
 
 def _validate_control_marker_event(
-    kind: EventKind, entity_kind: EntityKind, reason: str, data: dict[str, Any],
+    kind: EventKind,
+    entity_kind: EntityKind,
+    reason: str,
+    data: dict[str, Any],
 ) -> None:
     """Keep the three declared marker kinds complete at the typed boundary."""
     marker_kinds = {
-        EventKind.CARD_REPORTED, EventKind.CARD_VERDICTED, EventKind.CARD_DECIDED,
+        EventKind.CARD_REPORTED,
+        EventKind.CARD_VERDICTED,
+        EventKind.CARD_DECIDED,
     }
     if kind not in marker_kinds:
         return

@@ -89,36 +89,28 @@ class UnitInstaller(ABC):
     """The systemd side of a reconcile. Only this talks to the host."""
 
     @abstractmethod
-    def installed(self, name: str) -> bytes | None:
-        ...
+    def installed(self, name: str) -> bytes | None: ...
 
     @abstractmethod
-    def install(self, unit: PackagedUnit) -> None:
-        ...
+    def install(self, unit: PackagedUnit) -> None: ...
 
     @abstractmethod
-    def remove(self, name: str) -> None:
-        ...
+    def remove(self, name: str) -> None: ...
 
     @abstractmethod
-    def daemon_reload(self) -> None:
-        ...
+    def daemon_reload(self) -> None: ...
 
     @abstractmethod
-    def enable(self, name: str) -> None:
-        ...
+    def enable(self, name: str) -> None: ...
 
     @abstractmethod
-    def disable(self, name: str) -> None:
-        ...
+    def disable(self, name: str) -> None: ...
 
     @abstractmethod
-    def restart(self, name: str) -> None:
-        ...
+    def restart(self, name: str) -> None: ...
 
     @abstractmethod
-    def is_active(self, name: str) -> bool:
-        ...
+    def is_active(self, name: str) -> bool: ...
 
 
 class HostCommandError(RuntimeError):
@@ -156,7 +148,15 @@ class SystemdUnitInstaller(UnitInstaller):
 
     def install(self, unit: PackagedUnit) -> None:
         argv = (["sudo", "-n"] if self.sudo else []) + [
-            "install", "-m", "0644", "-o", "root", "-g", "root", "/dev/stdin", str(self.unit_dir / unit.name),
+            "install",
+            "-m",
+            "0644",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            "/dev/stdin",
+            str(self.unit_dir / unit.name),
         ]
         try:
             result = _proc.run(argv, input=unit.content, text=False, timeout=self.timeout_seconds)
@@ -195,8 +195,7 @@ class SystemdUnitInstaller(UnitInstaller):
 
 class OrcaRegistrar(ABC):
     @abstractmethod
-    def add(self, name: str, repo: str) -> None:
-        ...
+    def add(self, name: str, repo: str) -> None: ...
 
 
 class LiveOrcaRegistrar(OrcaRegistrar):
@@ -260,7 +259,10 @@ def resolve_packaged(
 
 
 def resolve_installed_packaged(
-    instance: dict[str, Any], *, instance_path: Path, data_dir: Path | None = None,
+    instance: dict[str, Any],
+    *,
+    instance_path: Path,
+    data_dir: Path | None = None,
 ) -> list[PackagedUnit]:
     """Compile the units of the checkout this installation was installed from.
 
@@ -306,9 +308,7 @@ def _is_executable(path: Path) -> bool:
         return False
 
 
-def resolve_runtime_owner(
-    instance_path: Path, runtime_user: str | None = None
-) -> tuple[str, Path]:
+def resolve_runtime_owner(instance_path: Path, runtime_user: str | None = None) -> tuple[str, Path]:
     """The account that owns an installation, and the home its paths hang off.
 
     The instance checkout is durable installation state. When a command runs
@@ -401,7 +401,9 @@ def apply_host(
     unshipped = sorted(
         change.name
         for change in changes
-        if change.kind == "unit" and change.action in {"create", "update"} and change.name not in packaged_by_name
+        if change.kind == "unit"
+        and change.action in {"create", "update"}
+        and change.name not in packaged_by_name
     )
     if unshipped:
         result.errors.append("no unit file is shipped for: " + ", ".join(unshipped))
@@ -465,7 +467,9 @@ def _apply_change(
         if change.action == "delete":
             # Orca has no repo-removal command, so pretending to delete would
             # silently leave the registration in place and record it as gone.
-            raise HostCommandError(f"unregister {change.name}: Orca has no repo removal command; remove it by hand")
+            raise HostCommandError(
+                f"unregister {change.name}: Orca has no repo removal command; remove it by hand"
+            )
         resource = desired_by_id[change.logical_id]
         orca.add(change.name, _repo_of(resource))
         return False

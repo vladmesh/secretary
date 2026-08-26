@@ -160,8 +160,9 @@ class SuspendedLadderTests(unittest.TestCase):
             with self.subTest(now=bad_now):
                 degraded = decide_recovery(stored, stored, bad_now, THRESHOLDS)
                 self.assertIs(degraded.intent, RecoveryIntent.OBSERVE)
-                self.assertEqual(degraded.rung, RUNG_RESPONSE_WINDOW,
-                                 "a malformed tick must not rewind a spent span")
+                self.assertEqual(
+                    degraded.rung, RUNG_RESPONSE_WINDOW, "a malformed tick must not rewind a spent span"
+                )
 
     def test_window_expiry_escalates_to_the_operator_not_a_kill(self) -> None:
         first = decide_recovery(episode(), None, NOW, THRESHOLDS)
@@ -184,8 +185,9 @@ class SuspendedLadderTests(unittest.TestCase):
 
         holding = decide_recovery(escalated, escalated, NOW + WINDOW + 120.0, THRESHOLDS)
 
-        self.assertIs(holding.intent, RecoveryIntent.OBSERVE,
-                      "repeating the escalation per tick would flood the card")
+        self.assertIs(
+            holding.intent, RecoveryIntent.OBSERVE, "repeating the escalation per tick would flood the card"
+        )
         self.assertEqual(holding.rung, RUNG_ESCALATED)
 
     def test_a_new_span_restarts_the_ladder(self) -> None:
@@ -197,20 +199,25 @@ class SuspendedLadderTests(unittest.TestCase):
             episode(verdict=VitalityVerdict.HEALTHY_QUIET),
         )
         cleared = persisted(resumed, decide_recovery(resumed, resumed, NOW, THRESHOLDS))
-        refrozen = dataclasses.replace(cleared, verdict=VitalityVerdict.SUSPENDED,
-                                       stall_frozen_since=NOW + 3_600.0)
+        refrozen = dataclasses.replace(
+            cleared, verdict=VitalityVerdict.SUSPENDED, stall_frozen_since=NOW + 3_600.0
+        )
 
         fresh_span = decide_recovery(refrozen, expired, NOW + 3_600.0, THRESHOLDS)
 
         self.assertIs(fresh_span.intent, RecoveryIntent.SIGCONT)
-        self.assertEqual(fresh_span.rung, RUNG_RESPONSE_WINDOW,
-                         "a second suspension must earn its own rungs, not inherit rung 4")
+        self.assertEqual(
+            fresh_span.rung,
+            RUNG_RESPONSE_WINDOW,
+            "a second suspension must earn its own rungs, not inherit rung 4",
+        )
 
     def test_recovery_clears_the_ladder(self) -> None:
         first = decide_recovery(episode(), None, NOW, THRESHOLDS)
         stored = persisted(episode(), first)
-        recovered = dataclasses.replace(stored, verdict=VitalityVerdict.HEALTHY_ACTIVE,
-                                        stall_frozen_since=0.0)
+        recovered = dataclasses.replace(
+            stored, verdict=VitalityVerdict.HEALTHY_ACTIVE, stall_frozen_since=0.0
+        )
 
         cleared = decide_recovery(recovered, stored, NOW + 1.0, THRESHOLDS)
 
@@ -236,9 +243,13 @@ class SuspectedStallRungTests(unittest.TestCase):
         # the policy only records that this suspicion was consumed.
 
     def test_below_threshold_verdicts_observe_and_reset(self) -> None:
-        for verdict in (VitalityVerdict.HEALTHY_ACTIVE, VitalityVerdict.HEALTHY_QUIET,
-                        VitalityVerdict.UNVERIFIABLE, VitalityVerdict.DEAD,
-                        VitalityVerdict.CONFIRMED_STALL):
+        for verdict in (
+            VitalityVerdict.HEALTHY_ACTIVE,
+            VitalityVerdict.HEALTHY_QUIET,
+            VitalityVerdict.UNVERIFIABLE,
+            VitalityVerdict.DEAD,
+            VitalityVerdict.CONFIRMED_STALL,
+        ):
             with self.subTest(verdict=verdict.value):
                 decision = decide_recovery(episode(verdict), None, NOW, THRESHOLDS)
                 self.assertIs(decision.intent, RecoveryIntent.OBSERVE)
@@ -261,8 +272,12 @@ class DeterministicEscalationTests(unittest.TestCase):
 
         self.assertEqual(
             intents,
-            [RecoveryIntent.OBSERVE, RecoveryIntent.OBSERVE,
-             RecoveryIntent.ESCALATE_OPERATOR, RecoveryIntent.ESCALATE_OPERATOR],
+            [
+                RecoveryIntent.OBSERVE,
+                RecoveryIntent.OBSERVE,
+                RecoveryIntent.ESCALATE_OPERATOR,
+                RecoveryIntent.ESCALATE_OPERATOR,
+            ],
         )
         self.assertEqual(stored is not None and stored.deterministic_refusals, 4)
 
@@ -291,17 +306,21 @@ class DeterministicEscalationTests(unittest.TestCase):
         # count must not survive into the next refusal loop.
         healthy = dataclasses.replace(
             stored or refusing,
-            verdict=VitalityVerdict.HEALTHY_ACTIVE, reason="",
+            verdict=VitalityVerdict.HEALTHY_ACTIVE,
+            reason="",
         )
         reset = persisted(healthy, decide_recovery(healthy, stored, NOW + 1.0, THRESHOLDS))
 
         again = decide_recovery(
             dataclasses.replace(reset, verdict=VitalityVerdict.UNVERIFIABLE, reason=self.REASON),
-            reset, NOW + 2.0, THRESHOLDS,
+            reset,
+            NOW + 2.0,
+            THRESHOLDS,
         )
 
-        self.assertIs(again.intent, RecoveryIntent.OBSERVE,
-                      "a changed attempt starts counting from one again")
+        self.assertIs(
+            again.intent, RecoveryIntent.OBSERVE, "a changed attempt starts counting from one again"
+        )
 
     def test_heuristic_repetition_is_never_evidence(self) -> None:
         heuristic = episode(
@@ -319,7 +338,8 @@ class DeterministicEscalationTests(unittest.TestCase):
         # Even a SUSPENDED episode carrying an authoritative refusal escalates fast rather
         # than sitting through a response window everyone agrees cannot succeed.
         suspended_refusing = episode(
-            VitalityVerdict.SUSPENDED, reason=self.REASON,
+            VitalityVerdict.SUSPENDED,
+            reason=self.REASON,
         )
 
         stored = None
@@ -372,7 +392,8 @@ class SerialisationTests(unittest.TestCase):
 
     def test_pre_policy_episodes_load_with_zero_state(self) -> None:
         legacy = {
-            key: value for key, value in episode().to_json().items()
+            key: value
+            for key, value in episode().to_json().items()
             if key not in ("recovery_span_started_at", "deterministic_refusals")
         }
 

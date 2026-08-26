@@ -8,6 +8,7 @@ worker/reviewer heads stay narrowly scoped through role_env; the operator delibe
 The env is injected at the launch boundary, not by the head, so switching heads never changes
 whether the credentials are there.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -90,9 +91,7 @@ def render_interactive(
     reg = registry or head_registry.load_registry()
     profile = reg.profile(profile_id)
     try:
-        return render_head_command(
-            profile, prompt=None, workspace=workspace or os.getcwd()
-        ).command
+        return render_head_command(profile, prompt=None, workspace=workspace or os.getcwd()).command
     except HeadCommandError as exc:
         raise SessionError(str(exc)) from None
 

@@ -142,9 +142,7 @@ class HeadStatusHost(ReadOnlyOrcaTransport):
         # the head axis and the pane axis of one row cannot then disagree about which ptys existed.
         return list(self.workspace_inventory(workspace).panes)
 
-    def provider_progress(
-        self, _task: dict[str, Any], record: DispatcherRecord, kind: str
-    ) -> dict[str, str]:
+    def provider_progress(self, _task: dict[str, Any], record: DispatcherRecord, kind: str) -> dict[str, str]:
         run = record.review_head_run if kind == "review" else record.worker_head_run
         return provider_progress_for_persisted_run(run)
 
@@ -161,15 +159,22 @@ def head_status(runtime: Any, *, workspace: str, now: float | None = None) -> di
     target = _normalised(workspace)
     if not target:
         return {
-            "status": "degraded", "step": "head-status", "reason": "a workspace path is required",
-            "workspace": "", "heads": [], "invariant": PANE_ADVISORY_INVARIANT,
+            "status": "degraded",
+            "step": "head-status",
+            "reason": "a workspace path is required",
+            "workspace": "",
+            "heads": [],
+            "invariant": PANE_ADVISORY_INVARIANT,
         }
     mode = str(getattr(runtime.host, "mode", "real") or "real")
     if mode == "noop":
         # A noop host answers "live" to every question by construction. Reporting that as a head
         # would be exactly the fabricated observation the vitality vocabulary refuses to make.
         return {
-            "status": "degraded", "step": "head-status", "workspace": target, "heads": [],
+            "status": "degraded",
+            "step": "head-status",
+            "workspace": target,
+            "heads": [],
             "reason": "this dispatcher host is in noop mode and observes no live workspace",
             "invariant": PANE_ADVISORY_INVARIANT,
         }
@@ -179,8 +184,14 @@ def head_status(runtime: Any, *, workspace: str, now: float | None = None) -> di
     panes, pane_channel, layout = _pane_inventory(host, target)
     heads = [
         _head_row(
-            host, ref, record,
-            kind=kind, role=role, panes=panes, pane_channel=pane_channel, layout=layout,
+            host,
+            ref,
+            record,
+            kind=kind,
+            role=role,
+            panes=panes,
+            pane_channel=pane_channel,
+            layout=layout,
             observed_at=observed_at,
         )
         for ref, record in sorted(records.items())
@@ -204,9 +215,7 @@ def head_status(runtime: Any, *, workspace: str, now: float | None = None) -> di
     }
 
 
-def _pane_inventory(
-    host: Any, workspace: str
-) -> tuple[list[Any], dict[str, str], RuntimeLayout | None]:
+def _pane_inventory(host: Any, workspace: str) -> tuple[list[Any], dict[str, str], RuntimeLayout | None]:
     """One inventory read for the whole answer, with its refusal kept as a channel fact.
 
     Two channels come back, not one, and they fail apart: the session manager can list a
@@ -257,7 +266,12 @@ def _head_row(
     run_payload = record.review_head_run if kind == "review" else record.worker_head_run
     run_id = str((run_payload or {}).get("run_id") or "")
     pane_state, pane_detail = _pane_axis(
-        record, kind=kind, ref=ref, panes=panes, channel=pane_channel, layout=layout,
+        record,
+        kind=kind,
+        ref=ref,
+        panes=panes,
+        channel=pane_channel,
+        layout=layout,
     )
     row: dict[str, Any] = {
         "ref": ref,
@@ -338,9 +352,7 @@ _REPORTED_SOURCES = (
 )
 
 
-def _terminal_status(
-    host: Any, ref: str, record: DispatcherRecord, kind: str
-) -> tuple[dict[str, Any], str]:
+def _terminal_status(host: Any, ref: str, record: DispatcherRecord, kind: str) -> tuple[dict[str, Any], str]:
     """The observation the wait tick makes, falling back to the pid heartbeat alone.
 
     `command_terminal_status` reaches the heartbeat through the pane inventory, so an inventory
@@ -355,7 +367,11 @@ def _terminal_status(
         run = record.review_head_run if kind == "review" else record.worker_head_run
         leaf = record.review_leaf if kind == "review" else record.worker_leaf
         pid_status = head_run_process_status(
-            pid_file_path(kind, ref), run=run, role=kind, task=f"card:{ref}", leaf=leaf,
+            pid_file_path(kind, ref),
+            run=run,
+            role=kind,
+            task=f"card:{ref}",
+            leaf=leaf,
         )
         return {"pid_status": dict(pid_status)}, (
             f"the pane channel could not be read ({str(exc)[:200]}), so this head was observed "
@@ -464,13 +480,9 @@ def _drawn(pane: Any, layout: RuntimeLayout | None) -> tuple[str, str]:
     if not layout.known_workspace:
         return PANE_UNKNOWN, layout.reason
     if pane.leaf and pane.leaf in layout.leaves:
-        return PANE_VISIBLE, (
-            "the renderer tree of this workspace draws a pane with this pty's leaf"
-        )
+        return PANE_VISIBLE, ("the renderer tree of this workspace draws a pane with this pty's leaf")
     if pane.handle and pane.handle in layout.handles:
-        return PANE_VISIBLE, (
-            "the renderer tree of this workspace draws a pane with this pty's handle"
-        )
+        return PANE_VISIBLE, ("the renderer tree of this workspace draws a pane with this pty's handle")
     empty_tree = layout.terminal_nodes == 0
     if pane.leaf and (layout.leaves or empty_tree):
         return PANE_NO_RUNTIME_PANE, (
@@ -509,9 +521,7 @@ def _pane_sentence(row: dict[str, Any]) -> str:
             f"workspace; {_NOT_ABOUT_THE_HEAD}."
         )
     if state == PANE_NO_PANE:
-        return (
-            f"No pane in the workspace inventory answers to this head; {_NOT_ABOUT_THE_HEAD}."
-        )
+        return f"No pane in the workspace inventory answers to this head; {_NOT_ABOUT_THE_HEAD}."
     if state == PANE_UNAVAILABLE:
         return (
             "The pane inventory could not be read, so nothing is known about its pane; "
@@ -541,10 +551,7 @@ def _summary(row: dict[str, Any]) -> str:
         )
         verdict = f"{who} is ALIVE: {proof}."
     elif head == HEAD_ABSENT:
-        verdict = (
-            f"{who} is ABSENT: {row['proved_by']} says the process behind its launch identity "
-            "is gone."
-        )
+        verdict = f"{who} is ABSENT: {row['proved_by']} says the process behind its launch identity is gone."
     else:
         dark = ", ".join(row["unavailable_sources"]) or "none of the sources answered"
         verdict = (

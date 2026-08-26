@@ -255,9 +255,7 @@ def _ensure_commit_actor(actor: str, proposal_actor: str) -> None:
         return
     if _actor_role(actor) in {"secretary", "operator"}:
         return
-    raise MemoryPermissionError(
-        f"actor {actor} cannot commit proposal owned by {proposal_actor}"
-    )
+    raise MemoryPermissionError(f"actor {actor} cannot commit proposal owned by {proposal_actor}")
 
 
 def _actor_role(actor: str) -> str:
@@ -349,9 +347,7 @@ def _prepare_fact_text(
     if not fact_source:
         raise MemoryValidationError("fact source is required")
     if not _source_allowed(actor, fact_source):
-        raise MemoryPermissionError(
-            f"source {fact_source} is not allowed for actor {actor}"
-        )
+        raise MemoryPermissionError(f"source {fact_source} is not allowed for actor {actor}")
     metadata["source"] = fact_source
     if tags:
         metadata["tags"] = tags
@@ -408,9 +404,7 @@ def _read_proposal(proposal_dir: Path) -> dict[str, Any]:
     try:
         payload["fact_text"] = (proposal_dir / "fact.md").read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
-        raise MemoryValidationError(
-            f"could not read proposal fact {proposal_dir.name}: {exc}"
-        ) from None
+        raise MemoryValidationError(f"could not read proposal fact {proposal_dir.name}: {exc}") from None
     return payload
 
 
@@ -420,18 +414,12 @@ def _read_completed_proposal(proposal_dir: Path) -> MemoryWriteResult | None:
     except FileNotFoundError:
         return None
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise MemoryValidationError(
-            f"could not read completed proposal {proposal_dir.name}: {exc}"
-        ) from None
+        raise MemoryValidationError(f"could not read completed proposal {proposal_dir.name}: {exc}") from None
     if not isinstance(payload, dict) or payload.get("version") != 1:
         raise MemoryValidationError(f"invalid completed proposal {proposal_dir.name}")
     changed_facts = payload.get("changed_facts")
-    if not isinstance(changed_facts, list) or not all(
-        isinstance(item, str) for item in changed_facts
-    ):
-        raise MemoryValidationError(
-            f"completed proposal {proposal_dir.name} has invalid changed facts"
-        )
+    if not isinstance(changed_facts, list) or not all(isinstance(item, str) for item in changed_facts):
+        raise MemoryValidationError(f"completed proposal {proposal_dir.name} has invalid changed facts")
     try:
         return MemoryWriteResult(
             op=str(payload["op"]),
@@ -444,9 +432,7 @@ def _read_completed_proposal(proposal_dir: Path) -> MemoryWriteResult | None:
             propose_id=str(payload["propose_id"]) if payload.get("propose_id") else None,
         )
     except KeyError as exc:
-        raise MemoryValidationError(
-            f"completed proposal {proposal_dir.name} missing {exc.args[0]}"
-        ) from None
+        raise MemoryValidationError(f"completed proposal {proposal_dir.name} missing {exc.args[0]}") from None
 
 
 def _write_completed_proposal(proposal_dir: Path, result: MemoryWriteResult) -> None:

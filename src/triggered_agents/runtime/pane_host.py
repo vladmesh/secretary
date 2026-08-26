@@ -172,13 +172,20 @@ class OrcaPaneHost:
         return self.run_json(args)
 
     def wait_idle(self, handle: str, *, timeout_ms: int) -> Any:
-        return self.run_json([
-            "orca", "terminal", "wait",
-            "--terminal", handle,
-            "--for", "tui-idle",
-            "--timeout-ms", str(timeout_ms),
-            "--json",
-        ])
+        return self.run_json(
+            [
+                "orca",
+                "terminal",
+                "wait",
+                "--terminal",
+                handle,
+                "--for",
+                "tui-idle",
+                "--timeout-ms",
+                str(timeout_ms),
+                "--json",
+            ]
+        )
 
 
 def _epoch_seconds(value: Any) -> float:
@@ -305,9 +312,7 @@ def _visual_terminal_nodes(node: Any, out: list[dict[str, Any]], depth: int = 0)
 def _same_workspace(value: Any, workspace: str) -> bool:
     if not isinstance(value, str) or not value:
         return False
-    return os.path.abspath(os.path.expanduser(value)) == os.path.abspath(
-        os.path.expanduser(workspace)
-    )
+    return os.path.abspath(os.path.expanduser(value)) == os.path.abspath(os.path.expanduser(workspace))
 
 
 def _pane_key_leaf(value: Any) -> str:
@@ -323,35 +328,45 @@ class OrcaSessionHost(OrcaPaneHost):
     """Orca's answer to the whole pane lifecycle, as its ``orca terminal`` CLI spells it."""
 
     def open_pane(self, workspace: str, title: str, command: str) -> Pane:
-        result = self.run_json([
-            "orca", "terminal", "create",
-            "--worktree", f"path:{workspace}",
-            "--title", title,
-            "--command", command,
-            "--json",
-        ])
-        terminal = result.get("terminal") if isinstance(result.get("terminal"), dict) else result
-        handle = (
-            terminal.get("handle") or terminal.get("id") if isinstance(terminal, dict) else None
+        result = self.run_json(
+            [
+                "orca",
+                "terminal",
+                "create",
+                "--worktree",
+                f"path:{workspace}",
+                "--title",
+                title,
+                "--command",
+                command,
+                "--json",
+            ]
         )
+        terminal = result.get("terminal") if isinstance(result.get("terminal"), dict) else result
+        handle = terminal.get("handle") or terminal.get("id") if isinstance(terminal, dict) else None
         if not isinstance(handle, str) or not handle:
             raise PaneHostError("orca did not return a terminal handle")
         return Pane(handle=handle, leaf=_pane_key_leaf(terminal.get("paneKey")))
 
     def split_pane(self, handle: str, command: str) -> Pane:
         try:
-            result = self.run_json([
-                "orca", "terminal", "split",
-                "--terminal", handle,
-                "--direction", "vertical",
-                "--command", command,
-                "--json",
-            ])
+            result = self.run_json(
+                [
+                    "orca",
+                    "terminal",
+                    "split",
+                    "--terminal",
+                    handle,
+                    "--direction",
+                    "vertical",
+                    "--command",
+                    command,
+                    "--json",
+                ]
+            )
         except Exception as exc:  # The injected runner owns its error type.
             if "terminal_split_source_not_found" in str(exc):
-                raise PaneSplitSourceMissing(
-                    "orca split source is absent from the renderer graph"
-                ) from None
+                raise PaneSplitSourceMissing("orca split source is absent from the renderer graph") from None
             raise
         split = result.get("split") if isinstance(result.get("split"), dict) else result
         opened = split.get("handle") if isinstance(split, dict) else None
@@ -360,9 +375,18 @@ class OrcaSessionHost(OrcaPaneHost):
         return Pane(handle=opened, leaf=_pane_key_leaf(split.get("paneKey")))
 
     def rename_pane(self, handle: str, title: str) -> None:
-        self.run_json([
-            "orca", "terminal", "rename", "--terminal", handle, "--title", title, "--json",
-        ])
+        self.run_json(
+            [
+                "orca",
+                "terminal",
+                "rename",
+                "--terminal",
+                handle,
+                "--title",
+                title,
+                "--json",
+            ]
+        )
 
     def close_pane(self, handle: str) -> None:
         self.run_json(["orca", "terminal", "close", "--terminal", handle, "--json"])
@@ -380,9 +404,7 @@ class OrcaSessionHost(OrcaPaneHost):
         if isinstance(data, dict) and data.get("ok") is False:
             raise PaneHostError("orca terminal list failed")
         payload = (
-            data.get("result")
-            if isinstance(data, dict) and isinstance(data.get("result"), dict)
-            else data
+            data.get("result") if isinstance(data, dict) and isinstance(data.get("result"), dict) else data
         )
         if not isinstance(payload, dict):
             raise PaneHostError("orca terminal list returned an unsupported shape")
@@ -463,9 +485,7 @@ def pane_host(run_json: RunJson | None = None, *, host: PaneHost | None = None) 
     return OrcaPaneHost(run_json)
 
 
-def session_host(
-    run_json: RunJson | None = None, *, host: SessionHost | None = None
-) -> SessionHost:
+def session_host(run_json: RunJson | None = None, *, host: SessionHost | None = None) -> SessionHost:
     """The same resolution for a caller that opens and closes panes as well as writing into them."""
     if host is not None:
         return host

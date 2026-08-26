@@ -29,9 +29,7 @@ def _schema_sample(spec: dict) -> object:
     if kind == "boolean":
         return True
     if kind == "object":
-        return {
-            name: _schema_sample(child) for name, child in spec.get("properties", {}).items()
-        }
+        return {name: _schema_sample(child) for name, child in spec.get("properties", {}).items()}
     if kind == "array":
         return [_schema_sample(spec["items"])] if "items" in spec else []
     raise AssertionError(f"no sample for schema {spec!r}")
@@ -179,8 +177,10 @@ class OnboardingTests(unittest.TestCase):
 
         self.assertEqual(code, 1)
         self.assertEqual(artifact["draft"]["findings"][-1]["code"], "draft.invalid")
-        self.assertEqual(sorted(load_config(self.draft)["identity"]),
-                         ["adapter", "default_branch", "id", "plane", "policy", "repo"])
+        self.assertEqual(
+            sorted(load_config(self.draft)["identity"]),
+            ["adapter", "default_branch", "id", "plane", "policy", "repo"],
+        )
         stored = load_config(self.binding)
         self.assertEqual(stored["plane"], "project")
         self.assertEqual(stored["policy"], {"code_concurrency": 1})
@@ -312,9 +312,7 @@ class OnboardingTests(unittest.TestCase):
         schema = load_schema("project-binding")
         identity_and_reset = set(IDENTITY_FIELDS) | {"enabled"}
         optional = {
-            name: spec
-            for name, spec in schema["properties"].items()
-            if name not in identity_and_reset
+            name: spec for name, spec in schema["properties"].items() if name not in identity_and_reset
         }
         self.assertTrue(optional)
         binding = load_config(self.binding)
@@ -354,9 +352,7 @@ class OnboardingTests(unittest.TestCase):
     def test_re_onboard_disables_legacy_binding_and_drops_its_adapter(self):
         adapter = self.legacy_enabled_project()
 
-        code, artifact = project_add(
-            str(self.repo), str(self.instance), dry_run=False, re_onboard=True
-        )
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
 
         self.assertEqual(code, 0)
         binding = load_config(self.binding)
@@ -378,9 +374,7 @@ class OnboardingTests(unittest.TestCase):
         binding_bytes = self.binding.read_bytes()
         draft_bytes = self.draft.read_bytes()
 
-        code, _ = project_add(
-            str(self.repo), str(self.instance), dry_run=False, re_onboard=True
-        )
+        code, _ = project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
 
         self.assertEqual(code, 0)
         self.assertEqual(binding_bytes, self.binding.read_bytes())
@@ -394,9 +388,7 @@ class OnboardingTests(unittest.TestCase):
         adapter = self.instance / "adapters" / "sample-project.yaml"
         before = self.binding.read_bytes(), adapter.read_bytes()
 
-        code, artifact = project_add(
-            str(self.repo), str(self.instance), dry_run=False, re_onboard=True
-        )
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
 
         self.assertEqual(code, 1)
         self.assertEqual(artifact["draft"]["findings"][-1]["code"], "draft.invalid")
@@ -412,9 +404,7 @@ class OnboardingTests(unittest.TestCase):
         adapter = self.instance / "adapters" / "sample-project.yaml"
         before = self.binding.read_bytes(), adapter.read_bytes()
 
-        code, artifact = project_add(
-            str(self.repo), str(self.instance), dry_run=False, re_onboard=True
-        )
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
 
         self.assertEqual(code, 1)
         self.assertEqual(artifact["draft"]["findings"][-1]["code"], "draft.invalid")
@@ -427,9 +417,7 @@ class OnboardingTests(unittest.TestCase):
         git(self.repo, "commit", "-m", "Change")
         head = git(self.repo, "rev-parse", "HEAD")
 
-        code, artifact = project_add(
-            str(self.repo), str(self.instance), dry_run=False, re_onboard=True
-        )
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
 
         self.assertEqual(code, 0)
         self.assertEqual(artifact["scanner"]["repo"]["head"], head)
@@ -439,12 +427,8 @@ class OnboardingTests(unittest.TestCase):
         adapter = self.legacy_enabled_project()
         before = self.binding.read_bytes(), adapter.read_bytes()
 
-        with mock.patch(
-            "secretary.onboarding.scan_repo", side_effect=ScannerError("injected")
-        ):
-            code, artifact = project_add(
-                str(self.repo), str(self.instance), dry_run=False, re_onboard=True
-            )
+        with mock.patch("secretary.onboarding.scan_repo", side_effect=ScannerError("injected")):
+            code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
 
         self.assertEqual(code, 1)
         self.assertEqual(artifact["scanner"]["findings"][0]["code"], "scanner.failed")
@@ -465,9 +449,7 @@ class OnboardingTests(unittest.TestCase):
             return real_replace(source, target)
 
         with mock.patch("secretary._fsutil.os.replace", side_effect=fail_second):
-            code, artifact = project_add(
-                str(self.repo), str(self.instance), dry_run=False, re_onboard=True
-            )
+            code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
 
         self.assertEqual(code, 1)
         self.assertEqual(artifact["draft"]["findings"][-1]["code"], "draft.invalid")
@@ -499,9 +481,7 @@ class OnboardingTests(unittest.TestCase):
         self.assertTrue(load_config(self.binding)["enabled"])
         self.assertTrue(adapter.exists())
 
-        code, artifact = project_add(
-            str(self.repo), str(self.instance), dry_run=False, re_onboard=True
-        )
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
 
         self.assertEqual(code, 0)
         self.assertFalse(load_config(self.binding)["enabled"])
@@ -564,9 +544,7 @@ class OnboardingTests(unittest.TestCase):
         code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False)
 
         self.assertEqual(code, 1)
-        self.assertEqual(
-            artifact["draft"]["findings"][-1]["message"], "existing binding is enabled"
-        )
+        self.assertEqual(artifact["draft"]["findings"][-1]["message"], "existing binding is enabled")
         self.assertEqual(before, (self.binding.read_bytes(), adapter.read_bytes()))
 
     def test_scanner_cannot_add_a_target(self):

@@ -4,6 +4,7 @@ The source of host secrets is an instance-owned runtime env file. Launchers must
 inherit it wholesale: each role gets only the names declared here, and sensitive names outside the
 role allowlist are stripped even if the parent process already had them.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -30,8 +31,11 @@ def runtime_env_path() -> Path:
     The file is read on every `runtime_env()`, so the name that points at it is read the same way:
     a process moved onto another installation's file gets it without a module reload.
     """
-    return Path(next((os.environ[name] for name in RUNTIME_ENV_FILE_ENVS if os.environ.get(name)),
-                     RUNTIME_ENV_DEFAULT))
+    return Path(
+        next(
+            (os.environ[name] for name in RUNTIME_ENV_FILE_ENVS if os.environ.get(name)), RUNTIME_ENV_DEFAULT
+        )
+    )
 
 
 # Kept for secretary.session, whose launch error reports the file selected when this module loaded.
@@ -58,6 +62,7 @@ def runtime_pythonpath() -> str:
     configured = os.environ.get(RUNTIME_PYTHONPATH_ENV) or os.environ.get(PRODUCT_ENV)
     root = Path(configured).expanduser() if configured else REPO_ROOT
     return str(root / "src")
+
 
 # SECRETARY_DATA_DIR names the installation's data plane, not a secret. It has to survive the
 # allowlist: the production dispatcher unit imports runtime.env wholesale, so a host that moves its
@@ -124,7 +129,7 @@ def _parse_assignment(line: str) -> tuple[str, str] | None:
     if not line or line.startswith("#"):
         return None
     if line.startswith("export "):
-        line = line[len("export "):].lstrip()
+        line = line[len("export ") :].lstrip()
     if "=" not in line:
         return None
     key, raw_value = line.split("=", 1)
@@ -168,8 +173,9 @@ def _is_sensitive_name(name: str) -> bool:
     return is_sensitive_env_name(name)
 
 
-def runtime_env(role: str, *, base_env: dict[str, str] | None = None,
-                env_file: Path | str | None = None) -> dict[str, str]:
+def runtime_env(
+    role: str, *, base_env: dict[str, str] | None = None, env_file: Path | str | None = None
+) -> dict[str, str]:
     """Return a sanitized env for `role`, with role-allowed values overlaid from the source file."""
     allowed = set(allowlist(role))
     source = load_env_file(env_file)
@@ -226,15 +232,12 @@ def launch_binding() -> list[str]:
     the home default ``~/secretary-instance``. Only names the launcher was actually given are rendered:
     writing out the fallback would state a choice nobody made.
     """
-    return [
-        f"{name}={shlex.quote(value)}"
-        for name in LAUNCH_BOUND_ENV
-        if (value := os.environ.get(name))
-    ]
+    return [f"{name}={shlex.quote(value)}" for name in LAUNCH_BOUND_ENV if (value := os.environ.get(name))]
 
 
-def wrap_shell_command(role: str, command: str, *, pythonpath: str | None = None,
-                       env_file: Path | str | None = None) -> str:
+def wrap_shell_command(
+    role: str, command: str, *, pythonpath: str | None = None, env_file: Path | str | None = None
+) -> str:
     """Shell command that execs `command` under the role env without putting secret values in argv."""
     py_path = pythonpath or runtime_pythonpath()
     parts = [
@@ -269,6 +272,7 @@ def _main_exec(argv: list[str], *, prog: str) -> int:
         env = runtime_env(ns.role, env_file=ns.env_file)
         if ns.role in BOARD_TRANSPORT_ROLES:
             from .board_transport import BoardTransportError, resolve_for_environ
+
             try:
                 resolve_for_environ(env)
             except BoardTransportError as exc:
@@ -283,8 +287,9 @@ def _main_exec(argv: list[str], *, prog: str) -> int:
         return 126
 
 
-def main(argv=None, *, prog: str = "python3 -m triggered_agents.runtime.role_env",
-         description: str | None = None) -> int:
+def main(
+    argv=None, *, prog: str = "python3 -m triggered_agents.runtime.role_env", description: str | None = None
+) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] in {"-h", "--help", "help"}:
         print(description or __doc__)

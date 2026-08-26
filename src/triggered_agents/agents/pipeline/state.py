@@ -1,4 +1,5 @@
 """Canonical state for the pipeline agent."""
+
 from __future__ import annotations
 
 from ...runtime.shared_state import resolve_pipeline_state_dir

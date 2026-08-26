@@ -19,8 +19,15 @@ _EXACT_SHA_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
 _TERMINAL_CONCLUSIONS = frozenset(
     {
-        "SUCCESS", "NEUTRAL", "SKIPPED", "FAILURE", "TIMED_OUT", "CANCELLED",
-        "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE",
+        "SUCCESS",
+        "NEUTRAL",
+        "SKIPPED",
+        "FAILURE",
+        "TIMED_OUT",
+        "CANCELLED",
+        "ACTION_REQUIRED",
+        "STALE",
+        "STARTUP_FAILURE",
     }
 )
 _PASSED_CONCLUSIONS = frozenset({"SUCCESS", "NEUTRAL", "SKIPPED"})
@@ -95,15 +102,17 @@ class GateReceipt:
             f"  - {check.name}: {check.conclusion}" + (f" ({check.url})" if check.url else "")
             for check in self.required_checks
         ]
-        return "\n".join([
-            f"- validated_sha: {self.validated_sha}",
-            f"- base_sha: {self.base_sha}",
-            f"- gate_mode: {self.gate_mode}",
-            "- required terminal checks:",
-            *checks,
-            f"- completed_at: {self.completed_at}",
-            f"- command_or_check_set_digest: {self.command_or_check_set_digest}",
-        ])
+        return "\n".join(
+            [
+                f"- validated_sha: {self.validated_sha}",
+                f"- base_sha: {self.base_sha}",
+                f"- gate_mode: {self.gate_mode}",
+                "- required terminal checks:",
+                *checks,
+                f"- completed_at: {self.completed_at}",
+                f"- command_or_check_set_digest: {self.command_or_check_set_digest}",
+            ]
+        )
 
 
 @dataclass(frozen=True)
@@ -114,9 +123,7 @@ class AcceptedGreenGate:
     policy_valid: bool
 
     @classmethod
-    def accept(
-        cls, payload: object, *, current_sha: str, gate_mode: str, noop: bool
-    ) -> AcceptedGreenGate:
+    def accept(cls, payload: object, *, current_sha: str, gate_mode: str, noop: bool) -> AcceptedGreenGate:
         if gate_mode not in _ALLOWED_MODES:
             return cls(None, False)
         receiptless = payload is None or payload == {}
@@ -136,8 +143,12 @@ class AcceptedGreenGate:
 
 
 def mint_gate_receipt(
-    *, validated_sha: str, base_sha: str, gate_mode: str,
-    required_checks: Iterable[Mapping[str, object]], check_set_identity: str,
+    *,
+    validated_sha: str,
+    base_sha: str,
+    gate_mode: str,
+    required_checks: Iterable[Mapping[str, object]],
+    check_set_identity: str,
 ) -> dict[str, object] | None:
     """Create canonical terminal evidence. Failed checks may be represented, but only a passing
     receipt is accepted for downstream no-rerun decisions."""

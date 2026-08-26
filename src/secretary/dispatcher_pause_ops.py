@@ -104,9 +104,7 @@ def pause(
                 # The records cannot be read, so no head can be identified — and writing the state
                 # back would replace an unreadable file with an empty one. The flag still goes down:
                 # the next tick reads it and advances nothing, which is what a freeze is for.
-                warnings.append(
-                    "production state is unreadable: the flag is set but no head was stopped"
-                )
+                warnings.append("production state is unreadable: the flag is set but no head was stopped")
             else:
                 records = runtime.production_state.records(payload)
                 # The freeze is a stop path like any other, and its stops have to be durable
@@ -200,9 +198,7 @@ def resume_locked(runtime: Any, *, actor: str) -> dict[str, Any]:
     if mode == "freeze":
         payload = runtime.production_state.load()
         if _state_unreadable(payload):
-            warnings.append(
-                "production state is unreadable: the pause is lifted but no head was relaunched"
-            )
+            warnings.append("production state is unreadable: the pause is lifted but no head was relaunched")
         else:
             records = runtime.production_state.records(payload)
             buckets = _resume_heads(runtime, state, records, payload)
@@ -298,10 +294,9 @@ def _excluded_paths(exclude_workspaces: list[str] | None) -> set[str]:
     return {os.path.abspath(os.path.expanduser(path)) for path in (exclude_workspaces or []) if path}
 
 
-def _freeze_state_committing(
-    runtime: Any, payload: dict[str, Any], records: dict[str, DispatcherRecord]
-):
+def _freeze_state_committing(runtime: Any, payload: dict[str, Any], records: dict[str, DispatcherRecord]):
     """Lend the host a flush of the freeze's own records, for the span it holds them."""
+
     def flush() -> None:
         runtime.production_state.put_records(payload, records)
         runtime.production_state.save(payload)
@@ -455,8 +450,10 @@ def _resume_heads(
                 # A pane was already open, or the heartbeat says a head of this relaunch is running
                 # whatever the failure claimed. Its intent stays on disk with what is known of it,
                 # and the next tick adopts or stops that head. Clearing it would hide it from both.
-                aborted = exc if isinstance(exc, HeadLaunchAborted) else HeadLaunchAborted(
-                    str(exc), workspace=record.workspace
+                aborted = (
+                    exc
+                    if isinstance(exc, HeadLaunchAborted)
+                    else HeadLaunchAborted(str(exc), workspace=record.workspace)
                 )
                 mark_launch_aborted(runtime, payload, records, ref, record, aborted)
                 skipped.append(f"{ref}:worker")
@@ -471,8 +468,14 @@ def _resume_heads(
         # The head is up, so its pane and launch snapshot are fixed on disk before the record is
         # told about them: everything left to do here can fail over a worker that already runs.
         confirm_launch_intent(
-            runtime, payload, records, ref, record,
-            handle=launched.handle, leaf=launched.leaf, run=launched.run,
+            runtime,
+            payload,
+            records,
+            ref,
+            record,
+            handle=launched.handle,
+            leaf=launched.leaf,
+            run=launched.run,
             head_run=dict(launched.head_run),
         )
         record.handle = launched.handle

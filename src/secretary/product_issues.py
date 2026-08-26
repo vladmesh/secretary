@@ -1,4 +1,5 @@
 """Durable Product and Issue records on the existing Pipeline board."""
+
 from __future__ import annotations
 
 import fcntl
@@ -180,7 +181,9 @@ class ProductIssueTransaction:
         payload = event.get("payload")
         return event.get("kind") == kind and isinstance(payload, dict) and payload.get("intent") == intent
 
-    def existing(self, request_id: str, *, kind: str, intent: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    def existing(
+        self, request_id: str, *, kind: str, intent: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         with self._lock() as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
@@ -188,7 +191,9 @@ class ProductIssueTransaction:
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
-    def _existing_locked(self, request_id: str, *, kind: str, intent: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    def _existing_locked(
+        self, request_id: str, *, kind: str, intent: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         committed = self.audit.committed_event(request_id)
         if committed is not None:
             if not self._matches(committed, kind=kind, intent=intent):
@@ -214,7 +219,9 @@ class ProductIssueTransaction:
             raise TaskError("validation", "request id belongs to another operation or payload", 2)
         return document, None
 
-    def begin(self, request_id: str, *, kind: str, intent: dict[str, Any], event: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    def begin(
+        self, request_id: str, *, kind: str, intent: dict[str, Any], event: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         path = self._path(request_id)
         with self._lock() as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
@@ -225,10 +232,19 @@ class ProductIssueTransaction:
                 try:
                     document = json.loads(path.read_text(encoding="utf-8"))
                 except FileNotFoundError:
-                    document = {"version": 1, "request_id": request_id, "kind": kind, "intent": intent, "event": event, "progress": {}}
+                    document = {
+                        "version": 1,
+                        "request_id": request_id,
+                        "kind": kind,
+                        "intent": intent,
+                        "event": event,
+                        "progress": {},
+                    }
                     self._atomic(path, document)
                 except (OSError, ValueError):
-                    raise TaskError("audit_pending", "Product/Issue transaction journal is unreadable", 4) from None
+                    raise TaskError(
+                        "audit_pending", "Product/Issue transaction journal is unreadable", 4
+                    ) from None
                 if document.get("kind") != kind or document.get("intent") != intent:
                     raise TaskError("validation", "request id belongs to another operation or payload", 2)
                 return document, None
@@ -245,7 +261,9 @@ class ProductIssueTransaction:
             try:
                 document = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
-                raise TaskError("audit_pending", "Product/Issue transaction journal is unreadable", 4) from None
+                raise TaskError(
+                    "audit_pending", "Product/Issue transaction journal is unreadable", 4
+                ) from None
             event = document.get("event")
             event_reference = event.get("ref") if isinstance(event, dict) else None
             if document.get("request_id") != excluding and event_reference == reference:
@@ -316,7 +334,9 @@ class ProductIssueTransaction:
             except FileNotFoundError:
                 continue
             except (OSError, ValueError):
-                raise TaskError("audit_pending", "Product/Issue transaction journal is unreadable", 4) from None
+                raise TaskError(
+                    "audit_pending", "Product/Issue transaction journal is unreadable", 4
+                ) from None
             if isinstance(document, dict):
                 result.append(document)
         return result
@@ -325,7 +345,9 @@ class ProductIssueTransaction:
         try:
             document = json.loads(self._path(request_id).read_text(encoding="utf-8"))
         except FileNotFoundError:
-            raise TaskError("not_found", "no staged Product/Issue transaction has that request id", 2) from None
+            raise TaskError(
+                "not_found", "no staged Product/Issue transaction has that request id", 2
+            ) from None
         except (OSError, ValueError):
             raise TaskError("audit_pending", "Product/Issue transaction journal is unreadable", 4) from None
         if not isinstance(document, dict):
@@ -442,9 +464,15 @@ class ProductIssueStore:
             raise TaskError("backend_error", "Pipeline board is unavailable", 1)
         columns = self.client.call("getColumns", project_id=board["id"]) or []
         first = columns[0] if columns else None
-        if isinstance(first, dict) and first.get("title") == ISSUES_COLUMN and isinstance(first.get("id"), int):
+        if (
+            isinstance(first, dict)
+            and first.get("title") == ISSUES_COLUMN
+            and isinstance(first.get("id"), int)
+        ):
             return board["id"], first["id"]
-        raise TaskError("legacy_layout", "Pipeline first column is not Issues; run the supported board migration", 2)
+        raise TaskError(
+            "legacy_layout", "Pipeline first column is not Issues; run the supported board migration", 2
+        )
 
     def _cards(self) -> list[dict[str, Any]]:
         board_id, _ = self._board()
@@ -473,8 +501,10 @@ class ProductIssueStore:
     def _view(card: dict[str, Any], metadata: dict[str, str]) -> dict[str, Any]:
         kind = metadata.get(META_RECORD_TYPE)
         view = {
-            "ref": str(card.get("reference") or ""), "title": str(card.get("title") or ""),
-            "description": str(card.get("description") or ""), "closed": int(card.get("is_active", 1) or 0) == 0,
+            "ref": str(card.get("reference") or ""),
+            "title": str(card.get("title") or ""),
+            "description": str(card.get("description") or ""),
+            "closed": int(card.get("is_active", 1) or 0) == 0,
         }
         if kind == PRODUCT_TYPE:
             try:
@@ -483,20 +513,58 @@ class ProductIssueStore:
                 projects = []
             view.update({"id": metadata.get(META_PRODUCT_ID, ""), "projects": projects})
         else:
-            view.update({"product": metadata.get(META_ISSUE_PRODUCT, ""), "kind": metadata.get(META_ISSUE_KIND, ""), "priority": metadata.get(META_ISSUE_PRIORITY, ""), "close_reason": metadata.get(META_ISSUE_CLOSED_REASON) or None})
+            view.update(
+                {
+                    "product": metadata.get(META_ISSUE_PRODUCT, ""),
+                    "kind": metadata.get(META_ISSUE_KIND, ""),
+                    "priority": metadata.get(META_ISSUE_PRIORITY, ""),
+                    "close_reason": metadata.get(META_ISSUE_CLOSED_REASON) or None,
+                }
+            )
         return view
 
-    def _event(self, *, kind: str, role: str, actor: str, reference: str, task_id: int | None, request_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return {"event_id": "evt_" + uuid.uuid4().hex, "schema_version": 1, "occurred_at": _now(), "actor": {"role": role, "id": actor}, "kind": kind, "outcome": "success", "task_id": f"task_kanboard_{task_id}" if task_id is not None else "", "ref": reference, "backend": {"kind": "kanboard", "task_id": task_id, "revision": "product-issue"}, "request_id": request_id, "payload": payload}
+    def _event(
+        self,
+        *,
+        kind: str,
+        role: str,
+        actor: str,
+        reference: str,
+        task_id: int | None,
+        request_id: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "event_id": "evt_" + uuid.uuid4().hex,
+            "schema_version": 1,
+            "occurred_at": _now(),
+            "actor": {"role": role, "id": actor},
+            "kind": kind,
+            "outcome": "success",
+            "task_id": f"task_kanboard_{task_id}" if task_id is not None else "",
+            "ref": reference,
+            "backend": {"kind": "kanboard", "task_id": task_id, "revision": "product-issue"},
+            "request_id": request_id,
+            "payload": payload,
+        }
 
     def list_products(self) -> list[dict[str, Any]]:
-        return sorted((self._view(card, meta) for card in self._cards() if (meta := self._metadata(card)).get(META_RECORD_TYPE) == PRODUCT_TYPE), key=lambda item: str(item["id"]))
+        return sorted(
+            (
+                self._view(card, meta)
+                for card in self._cards()
+                if (meta := self._metadata(card)).get(META_RECORD_TYPE) == PRODUCT_TYPE
+            ),
+            key=lambda item: str(item["id"]),
+        )
 
     def show_product(self, product_id: str) -> dict[str, Any]:
         card, meta = self._find(f"product:{product_id}", PRODUCT_TYPE)
         return self._view(card, meta)
 
-    def list_issues(self, *, product: str | None = None, include_closed: bool = False) -> list[dict[str, Any]]:
+    def list_issues(
+        self, *, product: str | None = None, include_closed: bool = False
+    ) -> list[dict[str, Any]]:
         result = []
         for card in self._cards():
             meta = self._metadata(card)
@@ -524,7 +592,8 @@ class ProductIssueStore:
             if isinstance(comment, dict)
         ]
         audit = [
-            event for event in self.audit.events()
+            event
+            for event in self.audit.events()
             if isinstance(event, dict) and event.get("ref") == reference
         ]
         view = self._view(card, meta)
@@ -537,10 +606,17 @@ class ProductIssueStore:
 
         return reconcile_product_lanes(self, apply=apply)
 
-    def _transaction_event(self, *, kind: str, actor: str, reference: str, request_id: str, intent: dict[str, Any]) -> dict[str, Any]:
+    def _transaction_event(
+        self, *, kind: str, actor: str, reference: str, request_id: str, intent: dict[str, Any]
+    ) -> dict[str, Any]:
         return self._event(
-            kind=kind, role="po", actor=actor, reference=reference, task_id=None,
-            request_id=request_id, payload={"intent": intent},
+            kind=kind,
+            role="po",
+            actor=actor,
+            reference=reference,
+            task_id=None,
+            request_id=request_id,
+            payload={"intent": intent},
         )
 
     def _transaction_card(self, document: dict[str, Any]) -> dict[str, Any]:
@@ -589,7 +665,9 @@ class ProductIssueStore:
         digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()
         return f"[secretary-product-issue-transaction:{digest}]"
 
-    def _ensure_created(self, document: dict[str, Any], *, title: str, description: str, product: str) -> tuple[dict[str, Any], int]:
+    def _ensure_created(
+        self, document: dict[str, Any], *, title: str, description: str, product: str
+    ) -> tuple[dict[str, Any], int]:
         try:
             card = self._transaction_card(document)
         except TaskError:
@@ -605,10 +683,17 @@ class ProductIssueStore:
             swimlane_id = product_swimlane_id(self.client, board_id, product)
             document.setdefault("progress", {})["create_started"] = True
             self.transactions.save(document)
-            task_id = _positive_int(self.client.call(
-                "createTask", project_id=board_id, title=title, description=self._create_marker(document),
-                column_id=column_id, swimlane_id=swimlane_id, reference=reference,
-            ))
+            task_id = _positive_int(
+                self.client.call(
+                    "createTask",
+                    project_id=board_id,
+                    title=title,
+                    description=self._create_marker(document),
+                    column_id=column_id,
+                    swimlane_id=swimlane_id,
+                    reference=reference,
+                )
+            )
             if task_id is None:
                 # Kanboard answers a refused create with `false`, and that refusal is
                 # deterministic: the same call is refused again, so a retry can never finish this
@@ -630,10 +715,16 @@ class ProductIssueStore:
         if str(card.get("reference") or "") != reference or card.get("description") != description:
             document.setdefault("progress", {})["reference_started"] = True
             self.transactions.save(document)
-            if not self.client.call("updateTask", id=int(card["id"]), reference=reference, description=description):
+            if not self.client.call(
+                "updateTask", id=int(card["id"]), reference=reference, description=description
+            ):
                 raise TaskError("backend_error", "Kanboard rejected Product/Issue reference", 1)
             card = self._transaction_card(document)
-            if not isinstance(card, dict) or str(card.get("reference") or "") != reference or card.get("description") != description:
+            if (
+                not isinstance(card, dict)
+                or str(card.get("reference") or "") != reference
+                or card.get("description") != description
+            ):
                 raise TaskError("backend_error", "Product/Issue reference remains incomplete", 1)
         return card, self._remember_card(document, card)
 
@@ -657,7 +748,9 @@ class ProductIssueStore:
             return
         document.setdefault("progress", {})[f"{label}_started"] = True
         self.transactions.save(document)
-        if not _comment_was_saved(self.client.call("createComment", task_id=task_id, user_id=0, content=content)):
+        if not _comment_was_saved(
+            self.client.call("createComment", task_id=task_id, user_id=0, content=content)
+        ):
             raise TaskError("backend_error", f"Kanboard rejected issue {label} comment", 1)
         comments = self.client.call("getAllComments", task_id=task_id) or []
         if not any(isinstance(comment, dict) and comment.get("comment") == content for comment in comments):
@@ -672,18 +765,23 @@ class ProductIssueStore:
         # lane as its first attempt did.
         is_product = intent["record_type"] == PRODUCT_TYPE
         card, task_id = self._ensure_created(
-            document, title=str(intent["title"]), description=str(intent["description"]),
+            document,
+            title=str(intent["title"]),
+            description=str(intent["description"]),
             product=str(intent["product_id"] if is_product else intent["product"]),
         )
         if is_product:
             values = {
-                META_RECORD_TYPE: PRODUCT_TYPE, META_PRODUCT_ID: str(intent["product_id"]),
+                META_RECORD_TYPE: PRODUCT_TYPE,
+                META_PRODUCT_ID: str(intent["product_id"]),
                 META_PRODUCT_PROJECTS: str(intent["product_projects"]),
             }
         else:
             values = {
-                META_RECORD_TYPE: ISSUE_TYPE, META_ISSUE_PRODUCT: str(intent["product"]),
-                META_ISSUE_KIND: str(intent["issue_kind"]), META_ISSUE_PRIORITY: str(intent["priority"]),
+                META_RECORD_TYPE: ISSUE_TYPE,
+                META_ISSUE_PRODUCT: str(intent["product"]),
+                META_ISSUE_KIND: str(intent["issue_kind"]),
+                META_ISSUE_PRIORITY: str(intent["priority"]),
             }
         self._ensure_metadata(document, task_id, values)
         if not isinstance(card, dict):
@@ -698,7 +796,9 @@ class ProductIssueStore:
         payload = document.get("event", {}).get("payload")
         previous = payload.get("from") if isinstance(payload, dict) else None
         if not isinstance(previous, str):
-            raise TaskError("audit_pending", "Product/Issue priority transaction has no staged previous priority", 4)
+            raise TaskError(
+                "audit_pending", "Product/Issue priority transaction has no staged previous priority", 4
+            )
         content = f"[issue:priority]\n{intent['reason']}\n[request-id:{document['request_id']}]"
         self._ensure_comment(document, task_id, content, "priority")
         self._ensure_metadata(document, task_id, {META_ISSUE_PRIORITY: str(intent["priority"])})
@@ -717,7 +817,10 @@ class ProductIssueStore:
             if not self.client.call("closeTask", task_id=task_id):
                 raise TaskError("backend_error", "Kanboard rejected issue closure", 1)
         closed, closed_metadata = self._find(str(intent["reference"]), ISSUE_TYPE)
-        if int(closed.get("is_active", 1) or 0) != 0 or closed_metadata.get(META_ISSUE_CLOSED_REASON) != intent["reason"]:
+        if (
+            int(closed.get("is_active", 1) or 0) != 0
+            or closed_metadata.get(META_ISSUE_CLOSED_REASON) != intent["reason"]
+        ):
             raise TaskError("backend_error", "issue closure remains incomplete", 1)
         document["progress"]["close_done"] = True
         self.transactions.save(document)
@@ -733,9 +836,13 @@ class ProductIssueStore:
                 # for a call that already reported its own failure code.
                 self.transactions.discard(document)
                 raise
-            raise TaskError("audit_pending", "Product/Issue write is pending repair; retry with the same request id", 4) from None
+            raise TaskError(
+                "audit_pending", "Product/Issue write is pending repair; retry with the same request id", 4
+            ) from None
         except (OSError, KeyError, TypeError):
-            raise TaskError("audit_pending", "Product/Issue write is pending repair; retry with the same request id", 4) from None
+            raise TaskError(
+                "audit_pending", "Product/Issue write is pending repair; retry with the same request id", 4
+            ) from None
 
     def _reject_other_pending_reference_operation(self, reference: str, request_id: str) -> None:
         if self.transactions.pending_for_reference(reference, excluding=request_id):
@@ -749,7 +856,8 @@ class ProductIssueStore:
         for event in self.audit.pending_events():
             if (
                 event.get("record_type") == "board.protocol_event"
-                and event.get("request_id") != request_id and event.get("ref") == reference
+                and event.get("request_id") != request_id
+                and event.get("ref") == reference
             ):
                 raise TaskError(
                     "audit_pending",
@@ -806,7 +914,9 @@ class ProductIssueStore:
             raise
         stamp = f"[request-id:{document.get('request_id')}]"
         comments = self.client.call("getAllComments", task_id=int(card["id"])) or []
-        if any(isinstance(comment, dict) and stamp in str(comment.get("comment") or "") for comment in comments):
+        if any(
+            isinstance(comment, dict) and stamp in str(comment.get("comment") or "") for comment in comments
+        ):
             return "the board comment of this request is on the issue"
         return ""
 
@@ -823,10 +933,14 @@ class ProductIssueStore:
                 and isinstance(event.get("kind"), str)
                 and isinstance(subject.get("ref"), str)
             ):
-                typed.append({
-                    "request_id": event["request_id"], "kind": event["kind"],
-                    "ref": subject["ref"], "progress": ["typed_event"],
-                })
+                typed.append(
+                    {
+                        "request_id": event["request_id"],
+                        "kind": event["kind"],
+                        "ref": subject["ref"],
+                        "progress": ["typed_event"],
+                    }
+                )
         return sorted(legacy + typed, key=lambda item: item["request_id"])
 
     def adopt_transaction(self, path: str | Path) -> dict[str, Any]:
@@ -903,14 +1017,20 @@ class ProductIssueStore:
         # Deliberately local: the Kanboard adapter retains the compatibility
         # reader above, while new writer calls enter it through BoardHost.
         from secretary.board.kanboard import KanboardBoardHost
-        return KanboardBoardHost(self.client, data_dir=self.data_dir, instance=self.instance, audit=self.audit)
+
+        return KanboardBoardHost(
+            self.client, data_dir=self.data_dir, instance=self.instance, audit=self.audit
+        )
 
     @staticmethod
     def _host_error(exc: Exception) -> TaskError:
         from secretary.board.events import BoardEventPending
         from secretary.board.transitions import BoardProtocolError
+
         if isinstance(exc, BoardEventPending):
-            return TaskError("audit_pending", "Product/Issue write is pending repair; retry with the same request id", 4)
+            return TaskError(
+                "audit_pending", "Product/Issue write is pending repair; retry with the same request id", 4
+            )
         if isinstance(exc, TaskError):
             return exc
         if isinstance(exc, BoardProtocolError) and (
@@ -919,9 +1039,25 @@ class ProductIssueStore:
             return TaskError("backend_rejected", str(exc), 1)
         return TaskError("validation", str(exc), 2)
 
-    def create_product(self, *, product_id: str, projects: list[str], title: str, description: str, actor: str, request_id: str | None = None) -> dict[str, Any]:
-        if not _ID.fullmatch(product_id) or not title.strip() or not projects or len(set(projects)) != len(projects):
-            raise TaskError("validation", "product needs a valid id, title and non-empty unique project set", 2)
+    def create_product(
+        self,
+        *,
+        product_id: str,
+        projects: list[str],
+        title: str,
+        description: str,
+        actor: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        if (
+            not _ID.fullmatch(product_id)
+            or not title.strip()
+            or not projects
+            or len(set(projects)) != len(projects)
+        ):
+            raise TaskError(
+                "validation", "product needs a valid id, title and non-empty unique project set", 2
+            )
         reference = f"product:{product_id}"
         request_id = request_id or str(uuid.uuid4())
         with self.transactions.reference_lock(reference) as lock:
@@ -937,19 +1073,50 @@ class ProductIssueStore:
                 if not claimed:
                     unknown = sorted(set(projects) - registered_projects(self.instance))
                     if unknown:
-                        raise TaskError("validation", "unknown registered project(s): " + ", ".join(unknown), 2)
+                        raise TaskError(
+                            "validation", "unknown registered project(s): " + ", ".join(unknown), 2
+                        )
                 from secretary.board import Actor, Create, Product
+
                 try:
-                    host.create(Create(Product(reference, title, projects=tuple(sorted(projects)), description=description), Actor("po", actor), "Product created", request_id=request_id))
+                    host.create(
+                        Create(
+                            Product(
+                                reference, title, projects=tuple(sorted(projects)), description=description
+                            ),
+                            Actor("po", actor),
+                            "Product created",
+                            request_id=request_id,
+                        )
+                    )
                 except Exception as exc:
                     raise self._host_error(exc) from None
                 return self.show_product(product_id)
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
-    def create_issue(self, *, product: str, issue_kind: str, priority: str, title: str, description: str, actor: str, request_id: str | None = None) -> dict[str, Any]:
-        if not product.strip() or issue_kind not in ISSUE_KINDS or priority not in ISSUE_PRIORITIES or not title.strip():
-            raise TaskError("validation", "issue requires title, product, kind (bug|feature|question|improvement) and priority (P0-P3)", 2)
+    def create_issue(
+        self,
+        *,
+        product: str,
+        issue_kind: str,
+        priority: str,
+        title: str,
+        description: str,
+        actor: str,
+        request_id: str | None = None,
+    ) -> dict[str, Any]:
+        if (
+            not product.strip()
+            or issue_kind not in ISSUE_KINDS
+            or priority not in ISSUE_PRIORITIES
+            or not title.strip()
+        ):
+            raise TaskError(
+                "validation",
+                "issue requires title, product, kind (bug|feature|question|improvement) and priority (P0-P3)",
+                2,
+            )
         request_id = request_id or str(uuid.uuid4())
         digest = hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:20]
         reference = f"issue:{digest}"
@@ -959,19 +1126,32 @@ class ProductIssueStore:
                 self._reject_other_pending_reference_operation(reference, request_id)
                 self._reject_other_pending_typed_operation(reference, request_id)
                 from secretary.board import Actor, Create, Issue
+
                 try:
-                    self._host().create(Create(
-                        Issue(reference, title, f"product:{product}", priority=priority,
-                              issue_kind=issue_kind, description=description),
-                        Actor("po", actor), "Issue created", request_id=request_id,
-                    ))
+                    self._host().create(
+                        Create(
+                            Issue(
+                                reference,
+                                title,
+                                f"product:{product}",
+                                priority=priority,
+                                issue_kind=issue_kind,
+                                description=description,
+                            ),
+                            Actor("po", actor),
+                            "Issue created",
+                            request_id=request_id,
+                        )
+                    )
                 except Exception as exc:
                     raise self._host_error(exc) from None
                 return self.show_issue(reference)
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
-    def update_priority(self, *, reference: str, priority: str, reason: str, actor: str, request_id: str | None = None) -> dict[str, Any]:
+    def update_priority(
+        self, *, reference: str, priority: str, reason: str, actor: str, request_id: str | None = None
+    ) -> dict[str, Any]:
         if priority not in ISSUE_PRIORITIES or not reason.strip():
             raise TaskError("validation", "priority update requires P0-P3 and a non-empty reason", 2)
         request_id = request_id or str(uuid.uuid4())
@@ -981,6 +1161,7 @@ class ProductIssueStore:
                 self._reject_other_pending_reference_operation(reference, request_id)
                 self._reject_other_pending_typed_operation(reference, request_id)
                 from secretary.board import Actor, EntityKind, Issue, Replace
+
                 host = self._host()
                 try:
                     known = host.canon.event(request_id) if host.canon is not None else None
@@ -1006,7 +1187,16 @@ class ProductIssueStore:
                     raise TaskError("validation", "reference is not an Issue", 2)
                 if current.state.value == "closed":
                     raise TaskError("closed", "cannot reprioritize a closed issue", 3)
-                desired = Issue(current.ref, current.title, current.product_ref, current.state, priority, current.issue_kind, current.description, current.close_reason)
+                desired = Issue(
+                    current.ref,
+                    current.title,
+                    current.product_ref,
+                    current.state,
+                    priority,
+                    current.issue_kind,
+                    current.description,
+                    current.close_reason,
+                )
                 try:
                     host.replace(Replace(desired, Actor("po", actor), reason, request_id=request_id))
                 except Exception as exc:
@@ -1015,9 +1205,13 @@ class ProductIssueStore:
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
-    def close_issue(self, *, reference: str, reason: str, actor: str, request_id: str | None = None) -> dict[str, Any]:
+    def close_issue(
+        self, *, reference: str, reason: str, actor: str, request_id: str | None = None
+    ) -> dict[str, Any]:
         if reason not in ISSUE_CLOSE_REASONS:
-            raise TaskError("validation", "close reason must be one of: resolved, invalid, duplicate, wont_do", 2)
+            raise TaskError(
+                "validation", "close reason must be one of: resolved, invalid, duplicate, wont_do", 2
+            )
         request_id = request_id or str(uuid.uuid4())
         with self.transactions.reference_lock(reference) as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
@@ -1031,16 +1225,28 @@ class ProductIssueStore:
                     IssueState,
                     TransitionRequest,
                 )
+
                 current = self._host().read(EntityKind.ISSUE, reference)
                 if isinstance(current, Issue) and current.state is IssueState.CLOSED:
                     try:
-                        existing = self._host().canon.event(request_id) if self._host().canon is not None else None
+                        existing = (
+                            self._host().canon.event(request_id) if self._host().canon is not None else None
+                        )
                     except ValueError:
                         existing = None
                     if existing is None:
                         raise TaskError("closed", "issue is already closed", 3)
                 try:
-                    self._host().transition(TransitionRequest(EntityKind.ISSUE, reference, IssueState.CLOSED, Actor("po", actor), reason, request_id=request_id))
+                    self._host().transition(
+                        TransitionRequest(
+                            EntityKind.ISSUE,
+                            reference,
+                            IssueState.CLOSED,
+                            Actor("po", actor),
+                            reason,
+                            request_id=request_id,
+                        )
+                    )
                 except Exception as exc:
                     raise self._host_error(exc) from None
                 return self.show_issue(reference)

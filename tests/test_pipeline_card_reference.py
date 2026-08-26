@@ -5,6 +5,7 @@ given, the ids had grown into a range of references handed out under an older nu
 new card's reference resolved to an archived card belonging to someone else. Every later `show`,
 `update`, `move` and `blocked_by` on that reference addressed the old row without saying so.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -18,9 +19,12 @@ from triggered_agents.agents.pipeline import ops
 from triggered_agents.runtime.kanboard import KanboardError
 
 BOARD_COLUMNS = [
-    {"id": 1, "title": "Issues", "position": 1}, {"id": 2, "title": "Ready", "position": 2},
-    {"id": 3, "title": "In progress", "position": 3}, {"id": 4, "title": "Validate", "position": 4},
-    {"id": 5, "title": "Blocked", "position": 5}, {"id": 6, "title": "Done", "position": 6},
+    {"id": 1, "title": "Issues", "position": 1},
+    {"id": 2, "title": "Ready", "position": 2},
+    {"id": 3, "title": "In progress", "position": 3},
+    {"id": 4, "title": "Validate", "position": 4},
+    {"id": 5, "title": "Blocked", "position": 5},
+    {"id": 6, "title": "Done", "position": 6},
 ]
 # The row a fresh createTask is given, far below the references the board has handed out.
 NEW_ROW_ID = 41
@@ -39,12 +43,17 @@ def _board(rows, calls):
             return [dict(row) for row in rows if row["is_active"] == (params["status_id"] == 1)]
         if method == "getTaskByReference":
             return next(
-                (dict(row) for row in rows if row["reference"] == params["reference"]), None,
+                (dict(row) for row in rows if row["reference"] == params["reference"]),
+                None,
             )
         if method == "createTask":
-            rows.append({
-                "id": NEW_ROW_ID, "reference": params.get("reference", ""), "is_active": True,
-            })
+            rows.append(
+                {
+                    "id": NEW_ROW_ID,
+                    "reference": params.get("reference", ""),
+                    "is_active": True,
+                }
+            )
             return NEW_ROW_ID
         if method in ("updateTask", "saveTaskMetadata"):
             return True
@@ -76,10 +85,15 @@ class CardReferenceTests(unittest.TestCase):
 
     def test_a_new_card_is_numbered_above_every_reference_of_its_project(self) -> None:
         calls: list[tuple[str, dict]] = []
-        with mock.patch.object(ops, "call", side_effect=_board(_rows(), calls)), \
-             mock.patch.object(ops, "_sync_head_tags"):
+        with (
+            mock.patch.object(ops, "call", side_effect=_board(_rows(), calls)),
+            mock.patch.object(ops, "_sync_head_tags"),
+        ):
             created = ops.create_card(
-                project="secretary", task_type="code", title="numbered", role="po",
+                project="secretary",
+                task_type="code",
+                title="numbered",
+                role="po",
             )
 
         self.assertEqual(created["reference"], "secretary-1405")
@@ -101,13 +115,17 @@ class CardReferenceTests(unittest.TestCase):
                 # an enumeration that did not see the row holding it.
                 allocated = (
                     mock.patch.object(ops, "next_reference", return_value="secretary-1404")
-                    if reference is None else contextlib.nullcontext()
+                    if reference is None
+                    else contextlib.nullcontext()
                 )
                 with mock.patch.object(ops, "call", side_effect=board), allocated:
                     with self.assertRaisesRegex(KanboardError, "secretary-1404 is already claimed"):
                         ops.create_card(
-                            project="secretary", task_type="code", title="collides",
-                            ref=reference, role="po",
+                            project="secretary",
+                            task_type="code",
+                            title="collides",
+                            ref=reference,
+                            role="po",
                         )
 
                 self.assertFalse(any(method == "createTask" for method, _params in calls))
@@ -151,7 +169,8 @@ class ConcurrentCreateTests(unittest.TestCase):
             if method == "getTaskByReference":
                 with guard:
                     return next(
-                        (dict(row) for row in rows if row["reference"] == params["reference"]), None,
+                        (dict(row) for row in rows if row["reference"] == params["reference"]),
+                        None,
                     )
             if method == "createTask":
                 with guard:
@@ -171,8 +190,7 @@ class ConcurrentCreateTests(unittest.TestCase):
             with guard:
                 created.append(card["reference"])
 
-        with mock.patch.object(ops, "call", side_effect=call), \
-             mock.patch.object(ops, "_sync_head_tags"):
+        with mock.patch.object(ops, "call", side_effect=call), mock.patch.object(ops, "_sync_head_tags"):
             threads = [threading.Thread(target=create, args=(f"card {index}",)) for index in range(2)]
             for thread in threads:
                 thread.start()

@@ -52,9 +52,7 @@ def red_review_count(task: dict[str, Any]) -> int:
     of the card, so the count is durable and idempotent without bookkeeping. A red mechanical gate
     and a red CI rollup leave dispatcher comments with no verdict marker and are not counted.
     """
-    return sum(
-        1 for comment in (task.get("comments") or []) if comment.get("marker") == "review:red"
-    )
+    return sum(1 for comment in (task.get("comments") or []) if comment.get("marker") == "review:red")
 
 
 # The observer decision reaches the worker as prose in its TASK.md, and is recorded once more on a
@@ -192,16 +190,14 @@ def _round_report_ids(workspace: str, attempt_id: str, reference: str, generatio
     """
     recorded_generation, recorded_ids = _task_doc_round_record(workspace)
     from_document = {
-        request_id for request_id in recorded_ids
+        request_id
+        for request_id in recorded_ids
         if recorded_generation == generation
         and request_id.endswith(f"-{request_token(reference)}-{generation}")
     }
     if from_document:
         return from_document
-    return {
-        attempt_request_id(attempt_id, action, reference, str(generation))
-        for action in _REPORT_ACTIONS
-    }
+    return {attempt_request_id(attempt_id, action, reference, str(generation)) for action in _REPORT_ACTIONS}
 
 
 def _round_report_marker(audit: Any, reference: str, round_ids: set[str]) -> str | None:
@@ -219,7 +215,9 @@ def _round_report_marker(audit: Any, reference: str, round_ids: set[str]) -> str
     for event in audit.events(reference, kind="reported"):
         if str(event.get("request_id") or "") not in round_ids:
             continue
-        payload = event.get("data") if event.get("record_type") == "board.protocol_event" else event.get("payload")
+        payload = (
+            event.get("data") if event.get("record_type") == "board.protocol_event" else event.get("payload")
+        )
         candidate = (payload or {}).get("marker") if isinstance(payload, dict) else None
         if candidate in WORKER_REPORT_MARKERS:
             marker = candidate
@@ -229,7 +227,7 @@ def _round_report_marker(audit: Any, reference: str, round_ids: set[str]) -> str
 def _last_marker_body(task: dict[str, Any], marker: str) -> str | None:
     """Text of the most recent comment carrying this marker, with the marker line stripped."""
     body = None
-    for comment in (task.get("comments") or []):
+    for comment in task.get("comments") or []:
         if comment.get("marker") == marker:
             body = comment.get("body")
     if not body:
@@ -295,7 +293,7 @@ def _spent_report_generations(task: dict[str, Any]) -> int:
     """
     return sum(
         1
-        for comment in (task.get("comments") or [])[:_report_adoption_baseline(task)]
+        for comment in (task.get("comments") or [])[: _report_adoption_baseline(task)]
         if comment.get("marker") in WORKER_REPORT_MARKERS
     )
 

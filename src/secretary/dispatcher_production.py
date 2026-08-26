@@ -89,8 +89,7 @@ def degraded_actions(outcomes: Any) -> list[dict[str, Any]]:
     return [
         outcome
         for outcome in (outcomes or [])
-        if isinstance(outcome, dict)
-        and str(outcome.get("status") or "") in DEGRADED_ACTION_STATUSES
+        if isinstance(outcome, dict) and str(outcome.get("status") or "") in DEGRADED_ACTION_STATUSES
     ]
 
 
@@ -146,8 +145,7 @@ def record_tick_telemetry(payload: dict[str, Any], result: dict[str, Any]) -> di
                 # Observer outcomes name their subject `sprint`, card ones `ref`/`pilot_ref`.
                 # All three land in the same field, or a degraded observer action would be
                 # recorded without the one thing an operator needs to find the head.
-                "ref": str(outcome.get("ref") or outcome.get("pilot_ref")
-                           or outcome.get("sprint") or ""),
+                "ref": str(outcome.get("ref") or outcome.get("pilot_ref") or outcome.get("sprint") or ""),
                 "step": str(outcome.get("step") or ""),
                 "status": str(outcome.get("status") or ""),
                 "action": str(outcome.get("action") or ""),
@@ -240,18 +238,23 @@ def _record_failed_tick(runtime: Any, exc: BaseException) -> None:
     """
     try:
         payload = runtime.production_state.load()
-        record_tick_telemetry(payload, {
-            "status": "failed",
-            "step": "production-tick",
-            "reason": f"tick raised {type(exc).__name__}",
-            "errors": [{
-                "ref": "",
-                # TaskError carries the backend's own code (backend_unavailable and friends), which
-                # is the one thing that tells an operator a board outage from a product bug.
-                "code": str(getattr(exc, "code", "") or "") or "unexpected_error",
-                "message": type(exc).__name__,
-            }],
-        })
+        record_tick_telemetry(
+            payload,
+            {
+                "status": "failed",
+                "step": "production-tick",
+                "reason": f"tick raised {type(exc).__name__}",
+                "errors": [
+                    {
+                        "ref": "",
+                        # TaskError carries the backend's own code (backend_unavailable and friends), which
+                        # is the one thing that tells an operator a board outage from a product bug.
+                        "code": str(getattr(exc, "code", "") or "") or "unexpected_error",
+                        "message": type(exc).__name__,
+                    }
+                ],
+            },
+        )
         runtime.production_state.save(payload)
     except Exception:
         return
@@ -352,9 +355,7 @@ def production_tick(runtime: Any) -> dict[str, Any]:
             raise
 
 
-def _committing_records(
-    runtime: Any, payload: dict[str, Any], records: dict[str, DispatcherRecord]
-):
+def _committing_records(runtime: Any, payload: dict[str, Any], records: dict[str, DispatcherRecord]):
     """Lend the host a flush of this tick's records, for the span the tick holds them.
 
     A head lifecycle transition has to be durable *before* the host call it describes, and the host
@@ -383,12 +384,14 @@ def _production_tick_work(
     auto_resume: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """Everything the tick does with the records it has loaded."""
-    payload.update({
-        "version": 1,
-        "mode": "production",
-        "phase": "production",
-        "owner": runtime.owner,
-    })
+    payload.update(
+        {
+            "version": 1,
+            "mode": "production",
+            "phase": "production",
+            "owner": runtime.owner,
+        }
+    )
     payload.setdefault("owner_acquired_at", now_rfc3339())
     payload["last_tick_started_at"] = now_rfc3339()
 
@@ -433,9 +436,7 @@ def _production_tick_work(
     # Reconcile after budget accounting. A hard limit reached by the card work above then
     # stops an already-live observer in this tick and prevents a replacement launch.
     try:
-        outcomes += reconcile_observers(
-            runtime, payload, pause_mode=str(pause.get("mode") or "")
-        )
+        outcomes += reconcile_observers(runtime, payload, pause_mode=str(pause.get("mode") or ""))
     except Exception as exc:
         observer_errors.append(_unexpected_error("", exc))
     errors = observer_errors + errors
@@ -471,7 +472,9 @@ def _production_tick_work(
     if checkpoint_blocked:
         outcomes.append(_checkpoint_degradation(checkpoint))
     result = {
-        "status": "ok" if not errors and not degraded_actions(outcomes) and not checkpoint_blocked else "degraded",
+        "status": "ok"
+        if not errors and not degraded_actions(outcomes) and not checkpoint_blocked
+        else "degraded",
         "step": "production-tick",
         "owner": runtime.owner,
         "actions": outcomes,
@@ -492,9 +495,7 @@ def _production_tick_work(
     return result
 
 
-def _frozen_tick(
-    runtime: Any, pause: dict[str, Any], auto_resume: dict[str, Any] | None
-) -> dict[str, Any]:
+def _frozen_tick(runtime: Any, pause: dict[str, Any], auto_resume: dict[str, Any] | None) -> dict[str, Any]:
     """A frozen tick moves no card, and still writes and pushes the checkpoint.
 
     A freeze stops the pipeline, not durability: returning before the snapshot would turn every
@@ -527,9 +528,7 @@ def _frozen_tick(
         raise
 
 
-def _frozen_tick_body(
-    runtime: Any, payload: dict[str, Any], result: dict[str, Any]
-) -> dict[str, Any]:
+def _frozen_tick_body(runtime: Any, payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     # Reconciliation does not run while frozen, so this is the only place a stop the host refused
     # during the freeze is retried. Nothing else about an observer is touched here.
     try:
@@ -699,8 +698,10 @@ class _ProbeHost:
 
     def __getattr__(self, name: str) -> Any:
         if name in self.EFFECTS:
+
             def effect(*args: Any, **kwargs: Any) -> Any:
                 raise ProbeAbort(name, {})
+
             return effect
         return getattr(self._inner, name)
 
@@ -789,7 +790,9 @@ def production_probe(runtime: Any) -> dict[str, Any]:
             would.append(_probe_ready(probe, dict(records), dict(payload)))
         for entry in would:
             if entry.get("code"):
-                errors.append({"ref": entry["ref"], "code": entry["code"], "message": entry.get("message", "")})
+                errors.append(
+                    {"ref": entry["ref"], "code": entry["code"], "message": entry.get("message", "")}
+                )
 
         return {
             "status": "ok" if not errors else "degraded",
@@ -817,8 +820,18 @@ def _probe_one(
     except TaskError as exc:
         return {"ref": ref, "operation": "error", "code": exc.code, "message": exc.message}
     except Exception as exc:  # noqa: BLE001
-        return {"ref": ref, "operation": "error", "code": "unexpected_error", "message": exc.__class__.__name__}
-    return {"ref": ref, "operation": "none", "status": outcome.get("status", ""), "step": outcome.get("step", "")}
+        return {
+            "ref": ref,
+            "operation": "error",
+            "code": "unexpected_error",
+            "message": exc.__class__.__name__,
+        }
+    return {
+        "ref": ref,
+        "operation": "none",
+        "status": outcome.get("status", ""),
+        "step": outcome.get("step", ""),
+    }
 
 
 def _probe_ready(
@@ -833,10 +846,20 @@ def _probe_ready(
     except TaskError as exc:
         return {"ref": "", "operation": "error", "code": exc.code, "message": exc.message}
     except Exception as exc:  # noqa: BLE001
-        return {"ref": "", "operation": "error", "code": "unexpected_error", "message": exc.__class__.__name__}
+        return {
+            "ref": "",
+            "operation": "error",
+            "code": "unexpected_error",
+            "message": exc.__class__.__name__,
+        }
     if outcome is None:
         return {"ref": "", "operation": "none", "step": "production-claim", "status": "idle"}
-    return {"ref": str(outcome.get("ref") or ""), "operation": "none", "step": "production-claim", "status": outcome.get("status", "")}
+    return {
+        "ref": str(outcome.get("ref") or ""),
+        "operation": "none",
+        "step": "production-claim",
+        "status": outcome.get("status", ""),
+    }
 
 
 def production_run(
@@ -922,9 +945,7 @@ def _advance_active(
     return outcomes, errors, blocked_scopes
 
 
-def _fence_failed_tick(
-    runtime: Any, payload: dict[str, Any], exc: Exception
-) -> dict[str, Any]:
+def _fence_failed_tick(runtime: Any, payload: dict[str, Any], exc: Exception) -> dict[str, Any]:
     """End the tick without touching a card, and leave a durable record of why.
 
     The state is still saved: the fence may have opened or cleared fences and refreshed its snapshot
@@ -1029,23 +1050,29 @@ def _reconcile_production(
         if state == "ready":
             continue
         records.pop(ref)
-        outcomes.append({
-            "status": "ok",
-            "step": "production-reconcile",
-            "ref": ref,
-            "action": "record-removed",
-            "reason": "card left the active dispatcher cycle",
-            "record_state": record.state,
-            "card_state": state,
-            **({"stopped_launch": intent_action} if intent_action else {}),
-        })
+        outcomes.append(
+            {
+                "status": "ok",
+                "step": "production-reconcile",
+                "ref": ref,
+                "action": "record-removed",
+                "reason": "card left the active dispatcher cycle",
+                "record_state": record.state,
+                "card_state": state,
+                **({"stopped_launch": intent_action} if intent_action else {}),
+            }
+        )
 
     divergences = payload.get("controlled_divergences")
-    open_refs = {
-        str(divergence.get("pilot_ref") or "")
-        for divergence in divergences
-        if isinstance(divergence, dict) and divergence_is_open(divergence)
-    } if isinstance(divergences, list) else set()
+    open_refs = (
+        {
+            str(divergence.get("pilot_ref") or "")
+            for divergence in divergences
+            if isinstance(divergence, dict) and divergence_is_open(divergence)
+        }
+        if isinstance(divergences, list)
+        else set()
+    )
     for ref in sorted(open_refs - active_refs):
         if fenced(ref):
             continue
@@ -1054,15 +1081,17 @@ def _reconcile_production(
             continue
         closed_ids = _close_divergences_for_ref(payload, ref, state)
         if closed_ids:
-            outcomes.append({
-                "status": "ok",
-                "step": "production-reconcile",
-                "ref": ref,
-                "action": "divergences-closed",
-                "reason": "card left the active dispatcher cycle",
-                "card_state": state,
-                "divergence_ids": closed_ids,
-            })
+            outcomes.append(
+                {
+                    "status": "ok",
+                    "step": "production-reconcile",
+                    "ref": ref,
+                    "action": "divergences-closed",
+                    "reason": "card left the active dispatcher cycle",
+                    "card_state": state,
+                    "divergence_ids": closed_ids,
+                }
+            )
     return outcomes
 
 
@@ -1192,7 +1221,9 @@ def _production_tick_active(
     mismatch = _production_active_mismatch(runtime, task, record, records, payload)
     if mismatch is not None:
         return mismatch
-    attempt_id = record.attempt_id if record is not None and record.attempt_id else production_adopt_attempt_id(ref)
+    attempt_id = (
+        record.attempt_id if record is not None and record.attempt_id else production_adopt_attempt_id(ref)
+    )
     outcome = runtime._tick_task(task, records, payload, attempt_id)
     return outcome
 
@@ -1209,9 +1240,7 @@ def _production_active_mismatch(
     actual_worker = task.get("claim", {}).get("worker")
     if actual_worker in (None, record.worker):
         return None
-    stopped = _stop_record_heads(
-        runtime, record, task["ref"], str(task.get("state") or "")
-    )
+    stopped = _stop_record_heads(runtime, record, task["ref"], str(task.get("state") or ""))
     if stopped is not None:
         stopped["step"] = "production-recovery"
         stopped["reason"] = (
@@ -1270,26 +1299,32 @@ def _production_claim_ready(
             skipped.append({"ref": task["ref"], "reason": "steward report is not claimable"})
             continue
         if fenced_task(fence, task):
-            skipped.append({
-                "ref": task["ref"],
-                "reason": "the sprint holding this project has no working declared observer",
-            })
+            skipped.append(
+                {
+                    "ref": task["ref"],
+                    "reason": "the sprint holding this project has no working declared observer",
+                }
+            )
             continue
         sprint_ref = str(task.get("sprint") or "")
         project = str(task.get("project") or "")
         # A card that went blocked this cycle closes its own sprint and its own project to new
         # claims, and nothing beyond them: another sprint working on other projects keeps moving.
         if sprint_ref and sprint_ref in blocked_sprints:
-            skipped.append({
-                "ref": task["ref"],
-                "reason": "this sprint has a card blocked in this cycle",
-            })
+            skipped.append(
+                {
+                    "ref": task["ref"],
+                    "reason": "this sprint has a card blocked in this cycle",
+                }
+            )
             continue
         if project and project in blocked_projects:
-            skipped.append({
-                "ref": task["ref"],
-                "reason": "this project has a card blocked in this cycle",
-            })
+            skipped.append(
+                {
+                    "ref": task["ref"],
+                    "reason": "this project has a card blocked in this cycle",
+                }
+            )
             continue
         if sprint_ref:
             sprint = sprint_cache.get(sprint_ref)
@@ -1301,20 +1336,24 @@ def _production_claim_ready(
                 else:
                     sprint_cache[sprint_ref] = sprint
             if sprint_ref in sprint_errors:
-                skipped.append({
-                    "ref": task["ref"],
-                    "reason": "linked sprint cannot be read: " + sprint_errors[sprint_ref],
-                })
+                skipped.append(
+                    {
+                        "ref": task["ref"],
+                        "reason": "linked sprint cannot be read: " + sprint_errors[sprint_ref],
+                    }
+                )
                 continue
             assert sprint is not None
             if sprint.get("status") != "open":
                 skipped.append({"ref": task["ref"], "reason": "linked sprint is stopped or closed"})
                 continue
         if task.get("type") == "code" and task.get("project") in active_code_projects:
-            skipped.append({
-                "ref": task["ref"],
-                "reason": "project has an active code task",
-            })
+            skipped.append(
+                {
+                    "ref": task["ref"],
+                    "reason": "project has an active code task",
+                }
+            )
             continue
         attempt_id = new_attempt_id()
         resume_workspaces = payload.get("resume_workspaces")
@@ -1337,10 +1376,12 @@ def _production_claim_ready(
         # below and ends the pass, which stops cards that had somewhere to go — see
         # CLAIM_SKIP_ACTIONS for the registry a new skip has to join.
         if is_claim_skip(outcome):
-            skipped.append({
-                "ref": task["ref"],
-                "reason": str(outcome.get("reason") or "head resource is not ready"),
-            })
+            skipped.append(
+                {
+                    "ref": task["ref"],
+                    "reason": str(outcome.get("reason") or "head resource is not ready"),
+                }
+            )
             continue
         if skipped:
             outcome["skipped_ready"] = skipped
@@ -1402,14 +1443,23 @@ def _reconcile_sprint_budget(runtime: Any) -> list[dict[str, Any]]:
             _record_unlinked_budget_event(runtime, event, request_id, identity, event_type)
             continue
         result = writer.record_budget(
-            role="dispatcher", actor=runtime.owner, reference=sprint, event_type=event_type,
-            request_id=request_id, source_event_id=identity,
+            role="dispatcher",
+            actor=runtime.owner,
+            reference=sprint,
+            event_type=event_type,
+            request_id=request_id,
+            source_event_id=identity,
         )
-        outcomes.append({
-            "status": "ok", "step": "sprint-budget", "sprint": sprint,
-            "ref": reference, "event_type": event_type,
-            "hard_stopped": result["sprint"]["status"] == "stopped",
-        })
+        outcomes.append(
+            {
+                "status": "ok",
+                "step": "sprint-budget",
+                "sprint": sprint,
+                "ref": reference,
+                "event_type": event_type,
+                "hard_stopped": result["sprint"]["status"] == "stopped",
+            }
+        )
     return outcomes
 
 
@@ -1441,19 +1491,22 @@ def _record_unlinked_budget_event(
     The audit request id is deliberately the same one a charge would use. A card's sprint link is
     assigned at creation and cannot appear later, so this is a terminal result.
     """
-    runtime.audit.append(request_id, {
-        "event_id": "evt_budget_unlinked_" + source_event_id,
-        "schema_version": 1,
-        "occurred_at": now_rfc3339(),
-        "actor": {"role": "dispatcher", "id": runtime.owner},
-        "kind": "budget_unlinked",
-        "outcome": "success",
-        "task_id": str(event.get("task_id") or ""),
-        "ref": str(event.get("ref") or ""),
-        "backend": dict(event.get("backend") or {}),
-        "request_id": request_id,
-        "payload": {"source_event_id": source_event_id, "event_type": event_type},
-    })
+    runtime.audit.append(
+        request_id,
+        {
+            "event_id": "evt_budget_unlinked_" + source_event_id,
+            "schema_version": 1,
+            "occurred_at": now_rfc3339(),
+            "actor": {"role": "dispatcher", "id": runtime.owner},
+            "kind": "budget_unlinked",
+            "outcome": "success",
+            "task_id": str(event.get("task_id") or ""),
+            "ref": str(event.get("ref") or ""),
+            "backend": dict(event.get("backend") or {}),
+            "request_id": request_id,
+            "payload": {"source_event_id": source_event_id, "event_type": event_type},
+        },
+    )
 
 
 def _budget_event_type(event: dict[str, Any]) -> str | None:

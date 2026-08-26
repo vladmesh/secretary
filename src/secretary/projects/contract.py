@@ -210,7 +210,11 @@ class ContractVerdict:
 
 
 def decide(
-    binding: dict[str, Any], *, instance: Path, project_root: Path, workspace: Path | None,
+    binding: dict[str, Any],
+    *,
+    instance: Path,
+    project_root: Path,
+    workspace: Path | None,
 ) -> ContractVerdict:
     """The one decision point about one registered project's broad-check contract.
 
@@ -224,9 +228,7 @@ def decide(
     """
     adapter_name = binding.get("adapter")
     if not isinstance(adapter_name, str) or not adapter_name:
-        return ContractVerdict.as_refused(
-            ADAPTER_UNAVAILABLE, "", "registered project has no adapter"
-        )
+        return ContractVerdict.as_refused(ADAPTER_UNAVAILABLE, "", "registered project has no adapter")
     try:
         adapter = load_config(Path(instance) / "adapters" / f"{adapter_name}.yaml")
     except ConfigError:
@@ -245,16 +247,14 @@ def decide(
 
 def _legacy_default(adapter_name: str, project_root: Path) -> ContractVerdict:
     """The contract an adapter that declares none falls back to, judged against this checkout."""
-    contract = ModuleContract(
-        sys.executable, LEGACY_IMPORT_PACKAGE, LEGACY_REASON_MISSING_BROAD_CHECK
-    )
+    contract = ModuleContract(sys.executable, LEGACY_IMPORT_PACKAGE, LEGACY_REASON_MISSING_BROAD_CHECK)
     # The default names the interpreter running right now, so it is answerable from either side and
     # never leaves an open question.
     if not _executable(contract.interpreter):
         return ContractVerdict.as_refused(
-            INTERPRETER_UNAVAILABLE, adapter_name,
-            f"could not start configured interpreter {contract.interpreter!r}: "
-            "it is not an executable file",
+            INTERPRETER_UNAVAILABLE,
+            adapter_name,
+            f"could not start configured interpreter {contract.interpreter!r}: it is not an executable file",
         )
     if not _attests(project_root, contract.import_package):
         # Only the legacy default is judged against the checkout's own layout. An adapter that
@@ -265,7 +265,8 @@ def _legacy_default(adapter_name: str, project_root: Path) -> ContractVerdict:
         # registered project alike, so for a checkout that does not hold those sources the check it
         # buys attests an installed copy of somebody else's code.
         return ContractVerdict.as_refused(
-            CANNOT_ATTEST_PROJECT, adapter_name,
+            CANNOT_ATTEST_PROJECT,
+            adapter_name,
             f"adapter {adapter_name!r} declares no broad-check contract, so the legacy default "
             f"attests package {contract.import_package!r}, which is not part of this project's "
             f"checkout {project_root}",
@@ -274,26 +275,31 @@ def _legacy_default(adapter_name: str, project_root: Path) -> ContractVerdict:
 
 
 def _declared_contract(
-    configured: Any, adapter_name: str, workspace: Path | None,
+    configured: Any,
+    adapter_name: str,
+    workspace: Path | None,
 ) -> ContractVerdict:
     """The contract an adapter declares for itself: complete, runnable, or an open question."""
     if not isinstance(configured, dict):  # schema validation above normally catches this.
         return ContractVerdict.as_refused(
-            BROAD_CHECK_INCOMPLETE, adapter_name,
+            BROAD_CHECK_INCOMPLETE,
+            adapter_name,
             f"adapter {adapter_name!r} has no broad-check contract",
         )
     interpreter = str(configured.get("interpreter") or "").strip()
     import_package = str(configured.get("import_package") or "").strip()
     if not interpreter or not import_package:
         return ContractVerdict.as_refused(
-            BROAD_CHECK_INCOMPLETE, adapter_name,
+            BROAD_CHECK_INCOMPLETE,
+            adapter_name,
             f"adapter {adapter_name!r} has no broad-check contract",
         )
     interpreter_path = Path(interpreter)
     if not interpreter_path.is_absolute():
         if workspace is None:
             return ContractVerdict.as_undecidable(
-                UNDECIDABLE_RELATIVE_INTERPRETER, adapter_name,
+                UNDECIDABLE_RELATIVE_INTERPRETER,
+                adapter_name,
                 f"adapter {adapter_name!r} names interpreter {interpreter!r}, which the adapter "
                 "schema resolves from the candidate workspace; no candidate workspace exists yet, "
                 "so the tree that will run the check is the only side that can answer this",
@@ -303,9 +309,9 @@ def _declared_contract(
         interpreter = str(Path(workspace).resolve() / interpreter_path)
     if not _executable(interpreter):
         return ContractVerdict.as_refused(
-            INTERPRETER_UNAVAILABLE, adapter_name,
-            f"could not start configured interpreter {interpreter!r}: "
-            "it is not an executable file",
+            INTERPRETER_UNAVAILABLE,
+            adapter_name,
+            f"could not start configured interpreter {interpreter!r}: it is not an executable file",
         )
     return ContractVerdict.as_fit(ModuleContract(interpreter, import_package), adapter_name)
 
@@ -329,18 +335,14 @@ def contract_of(verdict: ContractVerdict) -> ModuleContract:
     raise ContractStateError(f"unreadable contract verdict {verdict.state!r}")
 
 
-def module_contract(
-    binding: dict[str, Any], *, instance: Path, project_root: Path
-) -> ModuleContract:
+def module_contract(binding: dict[str, Any], *, instance: Path, project_root: Path) -> ModuleContract:
     """The worker's own resolution: the contract to run in THIS tree, or ``ContractUnusable``.
 
     `project_root` is the workspace the check will run in, which is what the adapter schema means
     when it resolves a relative interpreter. Having that tree, this side leaves no question open —
     and it does not re-decide anything either: the state it acts on is the one `decide` returned.
     """
-    return contract_of(
-        decide(binding, instance=instance, project_root=project_root, workspace=project_root)
-    )
+    return contract_of(decide(binding, instance=instance, project_root=project_root, workspace=project_root))
 
 
 def _executable(interpreter: str) -> bool:
@@ -368,6 +370,4 @@ def _attests(project_root: Path, import_package: str) -> bool:
                 roots += [child, child / "src"]
     except OSError:
         return False
-    return any(
-        (root / top / "__init__.py").is_file() or (root / f"{top}.py").is_file() for root in roots
-    )
+    return any((root / top / "__init__.py").is_file() or (root / f"{top}.py").is_file() for root in roots)

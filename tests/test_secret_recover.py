@@ -31,9 +31,7 @@ from tests.fakes.installation import PRODUCT_ROOT, _checkpoint, _git
 
 PHRASE = " ".join(RECOVERY_WORDS[:16])
 RUNTIME_ENV = (
-    "EXAMPLE_URL=http://127.0.0.1/jsonrpc.php\n"
-    "EXAMPLE_API_USER=jsonrpc\n"
-    "EXAMPLE_API_TOKEN=live-token\n"
+    "EXAMPLE_URL=http://127.0.0.1/jsonrpc.php\nEXAMPLE_API_USER=jsonrpc\nEXAMPLE_API_TOKEN=live-token\n"
 )
 
 
@@ -105,11 +103,15 @@ class RecoveryCase(unittest.TestCase):
     def recover(self, *extra: str) -> tuple[int, str]:
         argv = [
             "recover",
-            "--instance-remote", str(self.source),
-            "--instance-dir", str(self.target),
-            "--installation-user", getpass.getuser(),
+            "--instance-remote",
+            str(self.source),
+            "--instance-dir",
+            str(self.target),
+            "--installation-user",
+            getpass.getuser(),
             # The recovery materializes this checkout; nothing points at one for it.
-            "--product-root", str(PRODUCT_ROOT),
+            "--product-root",
+            str(PRODUCT_ROOT),
             *extra,
         ]
         output = io.StringIO()
@@ -165,9 +167,14 @@ class LegacyBoardOnlyRecoveryTests(RecoveryCase):
             initialize_store(root, phrase=PHRASE, actor="tester")
         with mock.patch.object(secret_store, "_new_secret_id", secret_store._clean_secret_id):
             secret_store.set_secret(
-                root, secret_id="kanboard_api_token", value=b"historic-token",
-                scope="installation", purpose="historic board transport",
-                environment="KANBOARD_API_TOKEN", materialize={"target": "runtime-env"}, actor="tester",
+                root,
+                secret_id="kanboard_api_token",
+                value=b"historic-token",
+                scope="installation",
+                purpose="historic board transport",
+                environment="KANBOARD_API_TOKEN",
+                materialize={"target": "runtime-env"},
+                actor="tester",
             )
         secret_store.key_path(root).unlink()
 
@@ -249,7 +256,9 @@ class PhraseBranchCase(RecoveryCase):
         self.assertEqual(
             subprocess.run(
                 ["git", "-C", str(self.target), "status", "--porcelain"],
-                capture_output=True, text=True, check=True,
+                capture_output=True,
+                text=True,
+                check=True,
             ).stdout,
             "",
         )
@@ -295,7 +304,9 @@ class NoPhraseBranchCase(RecoveryCase):
         self.target.mkdir(parents=True)
         subprocess.run(
             ["git", "clone", "--quiet", str(self.source), str(self.target)],
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         )
         self.restored.write_text(RUNTIME_ENV, encoding="utf-8")
         self.restored.chmod(0o600)
@@ -340,7 +351,11 @@ class NoStoreCase(unittest.TestCase):
             real_run = installation._run
 
             def run_orca_version(
-                argv: list[str], *, label: str, timeout: int = 120, cwd: Path | None = None,
+                argv: list[str],
+                *,
+                label: str,
+                timeout: int = 120,
+                cwd: Path | None = None,
             ) -> str:
                 if argv[-2:] == ["orca", "--version"]:
                     return ""
@@ -353,12 +368,17 @@ class NoStoreCase(unittest.TestCase):
                 mock.patch("secretary.installation._run", side_effect=run_orca_version),
                 contextlib.redirect_stdout(output),
             ):
-                code = main([
-                    "recover",
-                    "--instance-remote", str(source),
-                    "--instance-dir", str(target),
-                    "--installation-user", getpass.getuser(),
-                ])
+                code = main(
+                    [
+                        "recover",
+                        "--instance-remote",
+                        str(source),
+                        "--instance-dir",
+                        str(target),
+                        "--installation-user",
+                        getpass.getuser(),
+                    ]
+                )
 
             self.assertEqual(code, 1)
             self.assertTrue((target / ".git").is_dir())
@@ -373,11 +393,11 @@ class ReportCase(RecoveryCase):
     def test_recover_secrets_reports_ids_and_targets_only(self) -> None:
         subprocess.run(
             ["git", "clone", "--quiet", str(self.source), str(self.target)],
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         )
-        with mock.patch.dict(
-            os.environ, {"SECRETARY_RUNTIME_ENV_FILE": str(self.restored)}
-        ):
+        with mock.patch.dict(os.environ, {"SECRETARY_RUNTIME_ENV_FILE": str(self.restored)}):
             locked = secret_recover.recover_secrets(self.target)
             opened = secret_recover.recover_secrets(self.target, phrase=PHRASE)
 
@@ -397,7 +417,9 @@ class ReportCase(RecoveryCase):
     def test_a_wrong_phrase_writes_no_key_and_no_env_file(self) -> None:
         subprocess.run(
             ["git", "clone", "--quiet", str(self.source), str(self.target)],
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         )
         with self.assertRaises(RecoveryPhraseError):
             secret_recover.recover_secrets(self.target, phrase=" ".join(RECOVERY_WORDS[16:32]))

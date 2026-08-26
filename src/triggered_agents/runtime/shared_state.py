@@ -1,4 +1,5 @@
 """Shared state locations that must be stable across checkouts."""
+
 from __future__ import annotations
 
 import os

@@ -138,9 +138,7 @@ class PromptDocumentTests(unittest.TestCase):
         worktree = self.root / "ws"
         worktree.mkdir()
 
-        document = write_prompt_document(
-            self.root / "prompts" / "reviewer-0.md", "body", outside=worktree
-        )
+        document = write_prompt_document(self.root / "prompts" / "reviewer-0.md", "body", outside=worktree)
 
         self.assertTrue(document.is_file())
 
@@ -199,7 +197,9 @@ class PromptDocumentTests(unittest.TestCase):
 
         status = subprocess.run(
             ["git", "-C", str(worktree), "status", "--porcelain"],
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         )
         self.assertEqual(status.stdout, "")
 

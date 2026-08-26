@@ -58,7 +58,9 @@ def resolve_data_dir(args: argparse.Namespace) -> str:
         return str(instance_data_dir(instance))
     except DataDirError as exc:
         instance_file = instance / "instance.yaml" if instance.is_dir() else instance
-        raise TaskError("usage", f"cannot resolve data dir from {instance_file}: {exc}; pass --data-dir", 2) from None
+        raise TaskError(
+            "usage", f"cannot resolve data dir from {instance_file}: {exc}; pass --data-dir", 2
+        ) from None
 
 
 def _instance(args: argparse.Namespace) -> str:
@@ -84,7 +86,9 @@ def add_task_subcommands(subparsers) -> None:
     _add_instance_arg(task_show)
     task_show.set_defaults(handler=run_task_show)
     task_create = task_subcommands.add_parser("create")
-    task_create.add_argument("--role", required=True, choices=("po", "worker", "reviewer", "steward", "retro", "observer"))
+    task_create.add_argument(
+        "--role", required=True, choices=("po", "worker", "reviewer", "steward", "retro", "observer")
+    )
     task_create.add_argument("--actor", default=os.environ.get("BOARD_ACTOR"))
     _add_data_dir_args(task_create)
     task_create.add_argument("--request-id")
@@ -100,7 +104,9 @@ def add_task_subcommands(subparsers) -> None:
     task_create.add_argument("--review-head", default="")
     task_create.add_argument("--slug", default="")
     task_create.add_argument("--base-branch", default="")
-    task_create.add_argument("--complexity", choices=("cheap", "standard", "hard", "frontier"), default="standard")
+    task_create.add_argument(
+        "--complexity", choices=("cheap", "standard", "hard", "frontier"), default="standard"
+    )
     task_create.add_argument("--family-preference", choices=("auto", "claude", "codex"), default="auto")
     # No `choices`: `--codex-mode exec` names a launch shape the product removed, and it is
     # answered with that sentence in `_validate_codex_mode_for_create` rather than with argparse's
@@ -108,7 +114,12 @@ def add_task_subcommands(subparsers) -> None:
     task_create.add_argument("--codex-mode", "--codex-launch-mode", dest="codex_mode", default="")
     task_create.add_argument("--sprint", default="", help="link the card to an open sprint reference")
     task_create.add_argument("--priority", default="", help="rejected: tasks do not carry product priority")
-    task_create.add_argument("--budget-event", choices=("recreated_task", "hotfix"), default="", help="charge a sprint recreation or hotfix event")
+    task_create.add_argument(
+        "--budget-event",
+        choices=("recreated_task", "hotfix"),
+        default="",
+        help="charge a sprint recreation or hotfix event",
+    )
     _add_sprint_override_args(task_create)
     task_create.set_defaults(handler=run_task_create)
     for name, handler in (
@@ -143,7 +154,13 @@ def add_task_subcommands(subparsers) -> None:
         if name == "move":
             # `--target` is the spelling the restore commands use for the same idea, and the one
             # operators reach for. Both names write the same dest, so neither is a second contract.
-            command.add_argument("--to", "--target", dest="to", required=True, choices=("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done"))
+            command.add_argument(
+                "--to",
+                "--target",
+                dest="to",
+                required=True,
+                choices=("issues", "ready", "in_progress", "validate", "assessment", "blocked", "done"),
+            )
             command.add_argument("--reason-file")
             # A card leaves Assessment on a decision somebody recorded with `task decide`, and
             # the move has to name it: the writer checks it against the card's audit.
@@ -188,7 +205,9 @@ def add_task_subcommands(subparsers) -> None:
 
 
 def _add_sprint_override_args(parser) -> None:
-    parser.add_argument("--sprint-override", action="store_true", help="PO only: bypass an open sprint's single-writer guard")
+    parser.add_argument(
+        "--sprint-override", action="store_true", help="PO only: bypass an open sprint's single-writer guard"
+    )
     parser.add_argument("--sprint-override-reason-file", help="required PO override reason file")
 
 
@@ -198,7 +217,10 @@ def not_implemented_task(args: argparse.Namespace) -> int:
 
 
 def run_task_list(args: argparse.Namespace) -> int:
-    return _run_task_read(args, lambda reader: reader.list(states=set(args.state or ()), project=args.project, sprint=args.sprint))
+    return _run_task_read(
+        args,
+        lambda reader: reader.list(states=set(args.state or ()), project=args.project, sprint=args.sprint),
+    )
 
 
 def run_task_show(args: argparse.Namespace) -> int:
@@ -206,12 +228,12 @@ def run_task_show(args: argparse.Namespace) -> int:
 
 
 def _run_task_read(args: argparse.Namespace, operation: Callable[[TaskReader], object]) -> int:
-    return run_task_command(
-        lambda: operation(TaskReader(KanboardClient.for_instance(_instance(args))))
-    )
+    return run_task_command(lambda: operation(TaskReader(KanboardClient.for_instance(_instance(args)))))
 
 
-def run_task_command(operation: Callable[[], object], *, exit_code: Callable[[object], int] | None = None) -> int:
+def run_task_command(
+    operation: Callable[[], object], *, exit_code: Callable[[object], int] | None = None
+) -> int:
     try:
         result = operation()
     except TaskError as exc:
@@ -240,7 +262,12 @@ def _run_task_write(args: argparse.Namespace, operation: Callable[[TaskWriter, s
 
 
 def run_task_comment(args: argparse.Namespace) -> int:
-    return _run_task_write(args, lambda writer, body, actor: writer.comment(role=args.role, actor=actor, reference=args.ref, body=body, request_id=args.request_id))
+    return _run_task_write(
+        args,
+        lambda writer, body, actor: writer.comment(
+            role=args.role, actor=actor, reference=args.ref, body=body, request_id=args.request_id
+        ),
+    )
 
 
 def run_task_create(args: argparse.Namespace) -> int:
@@ -297,22 +324,57 @@ def run_task_edit(args: argparse.Namespace) -> int:
 
 
 def run_task_report(args: argparse.Namespace) -> int:
-    return _run_task_write(args, lambda writer, body, actor: writer.report(role=args.role, actor=actor, reference=args.ref, kind=args.kind, body=body, classification=args.classification, request_id=args.request_id))
+    return _run_task_write(
+        args,
+        lambda writer, body, actor: writer.report(
+            role=args.role,
+            actor=actor,
+            reference=args.ref,
+            kind=args.kind,
+            body=body,
+            classification=args.classification,
+            request_id=args.request_id,
+        ),
+    )
 
 
 def run_task_verdict(args: argparse.Namespace) -> int:
-    return _run_task_write(args, lambda writer, body, actor: writer.verdict(role=args.role, actor=actor, reference=args.ref, kind=args.kind, body=body, request_id=args.request_id))
+    return _run_task_write(
+        args,
+        lambda writer, body, actor: writer.verdict(
+            role=args.role,
+            actor=actor,
+            reference=args.ref,
+            kind=args.kind,
+            body=body,
+            request_id=args.request_id,
+        ),
+    )
 
 
 def run_task_decide(args: argparse.Namespace) -> int:
-    return _run_task_write(args, lambda writer, body, actor: writer.decide(role=args.role, actor=actor, reference=args.ref, kind=args.kind, body=body, request_id=args.request_id))
+    return _run_task_write(
+        args,
+        lambda writer, body, actor: writer.decide(
+            role=args.role,
+            actor=actor,
+            reference=args.ref,
+            kind=args.kind,
+            body=body,
+            request_id=args.request_id,
+        ),
+    )
 
 
 def run_task_move(args: argparse.Namespace) -> int:
     return _run_task_write(
         args,
         lambda writer, body, actor: writer.move(
-            role=args.role, actor=actor, reference=args.ref, target=args.to, reason=body,
+            role=args.role,
+            actor=actor,
+            reference=args.ref,
+            target=args.to,
+            reason=body,
             decision=args.decision,
             sprint_override=args.sprint_override,
             sprint_override_reason=_read_body(args.sprint_override_reason_file),
@@ -322,7 +384,12 @@ def run_task_move(args: argparse.Namespace) -> int:
 
 
 def run_task_archive(args: argparse.Namespace) -> int:
-    return _run_task_write(args, lambda writer, body, actor: writer.archive(role=args.role, actor=actor, reference=args.ref, reason=body, request_id=args.request_id))
+    return _run_task_write(
+        args,
+        lambda writer, body, actor: writer.archive(
+            role=args.role, actor=actor, reference=args.ref, reason=body, request_id=args.request_id
+        ),
+    )
 
 
 def run_task_claim(args: argparse.Namespace) -> int:
@@ -346,7 +413,8 @@ def run_task_claim(args: argparse.Namespace) -> int:
 def run_task_reconcile_audit(args: argparse.Namespace) -> int:
     def command() -> object:
         repaired, unresolved = TaskWriter(
-            KanboardClient.for_instance(_instance(args)), data_dir=resolve_data_dir(args),
+            KanboardClient.for_instance(_instance(args)),
+            data_dir=resolve_data_dir(args),
         ).reconcile()
         return {"repaired": repaired, "unresolved": unresolved}
 
@@ -380,7 +448,9 @@ def _validate_codex_mode_for_create(args: argparse.Namespace) -> None:
     profiles = heads.get("profiles", {})
     profile = profiles.get(head) if isinstance(profiles, dict) else None
     if not isinstance(profile, dict):
-        raise TaskError("validation", f"--codex-mode requires a known Codex worker head; {head!r} is not defined", 2)
+        raise TaskError(
+            "validation", f"--codex-mode requires a known Codex worker head; {head!r} is not defined", 2
+        )
     adapter = str(profile.get("adapter") or "")
     if adapter != "codex":
         detail = adapter or "unknown"
@@ -395,5 +465,7 @@ def _load_heads(instance: Path) -> dict:
     except ConfigError as exc:
         raise TaskError("validation", f"cannot validate --codex-mode: {exc}", 2) from None
     if not isinstance(loaded, dict):
-        raise TaskError("validation", "cannot validate --codex-mode: heads config has an unsupported shape", 2)
+        raise TaskError(
+            "validation", "cannot validate --codex-mode: heads config has an unsupported shape", 2
+        )
     return loaded

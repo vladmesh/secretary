@@ -6,6 +6,7 @@ record to the entity lived only on the live board. These pin the whole path: a f
 closed sprint is exported, restored into a separate empty backend, and compared field by
 field against its source.
 """
+
 from __future__ import annotations
 
 import json
@@ -48,17 +49,29 @@ def _root(name: str) -> str:
 
 
 CARD_EXPORT = {
-    "id": 12, "reference": "secretary-12", "title": "Linked card", "description": "card body",
-    "column": "Ready", "swimlane": "", "position": 1, "task_type": "code", "project": "secretary",
+    "id": 12,
+    "reference": "secretary-12",
+    "title": "Linked card",
+    "description": "card body",
+    "column": "Ready",
+    "swimlane": "",
+    "position": 1,
+    "task_type": "code",
+    "project": "secretary",
     "metadata": {
-        "record_type": "task", "complexity": "standard", "family_preference": "auto",
+        "record_type": "task",
+        "complexity": "standard",
+        "family_preference": "auto",
     },
     "comments": [],
 }
 RESUME = {
-    "selected_step": "restore the entity", "selected_why": "the checkpoint carries it",
-    "rejected_alternatives": "recreate it by hand", "current_task": "secretary-12",
-    "dod_state": "tests pending", "next_safe_step": "run the suite",
+    "selected_step": "restore the entity",
+    "selected_why": "the checkpoint carries it",
+    "rejected_alternatives": "recreate it by hand",
+    "current_task": "secretary-12",
+    "dod_state": "tests pending",
+    "next_safe_step": "run the suite",
     "recorded_at": "2026-07-20T00:00:00Z",
 }
 
@@ -79,29 +92,54 @@ class SprintRestoreTests(unittest.TestCase):
 
     def _seed_closed_sprint(self) -> str:
         writer = SprintWriter(  # type: ignore[arg-type]
-            self.source, data_dir=self.source_data, instance=self.instance,
+            self.source,
+            data_dir=self.source_data,
+            instance=self.instance,
         )
         ref = writer.create(
-            role="po", actor="operator", goal="Ship sprint entities into recovery",
-            definition_of_done="restore rebuilds the entity", reference="sprint:entity",
-            repositories=["secretary", "secretary-instance"], product="secretary",
-            issues=["issue:open"], projects=["secretary", "secretary-instance"],
-            observer=head_choice("codex-observer"), request_id="seed-create",
+            role="po",
+            actor="operator",
+            goal="Ship sprint entities into recovery",
+            definition_of_done="restore rebuilds the entity",
+            reference="sprint:entity",
+            repositories=["secretary", "secretary-instance"],
+            product="secretary",
+            issues=["issue:open"],
+            projects=["secretary", "secretary-instance"],
+            observer=head_choice("codex-observer"),
+            request_id="seed-create",
         )["sprint"]["ref"]
         with as_observer(ref):
             card = TaskWriter(self.source, data_dir=self.source_data).create(  # type: ignore[arg-type]
                 # The sprint holds `secretary`, so its own observer is the writer of its cards.
-                role="observer", actor="observer", project="secretary", task_type="code",
-                title="linked", target="ready", sprint=ref, request_id="seed-card",
+                role="observer",
+                actor="observer",
+                project="secretary",
+                task_type="code",
+                title="linked",
+                target="ready",
+                sprint=ref,
+                request_id="seed-card",
             )["task"]
-        writer.comment(role="po", actor="operator", reference=ref, body="first note", request_id="seed-comment")
-        writer.record_budget(role="po", actor="operator", reference=ref, event_type="red_ci", request_id="seed-budget")
+        writer.comment(
+            role="po", actor="operator", reference=ref, body="first note", request_id="seed-comment"
+        )
+        writer.record_budget(
+            role="po", actor="operator", reference=ref, event_type="red_ci", request_id="seed-budget"
+        )
         writer.set_current_task(
-            role="po", actor="operator", reference=ref, task_reference=card["ref"], request_id="seed-current",
+            role="po",
+            actor="operator",
+            reference=ref,
+            task_reference=card["ref"],
+            request_id="seed-current",
         )
         writer.resume(role="po", actor="operator", reference=ref, entry=RESUME, request_id="seed-resume")
         writer.close(
-            role="po", actor="operator", reference=ref, request_id="seed-close",
+            role="po",
+            actor="operator",
+            reference=ref,
+            request_id="seed-close",
             decisions=close_decisions(writer, ref),
         )
         return ref
@@ -113,7 +151,12 @@ class SprintRestoreTests(unittest.TestCase):
         return [sys.executable, str(script)]
 
     def _export(self) -> None:
-        export_board(self.source_data, instance_dir=self.instance, command=self._pipeline_command(), sprint_client=self.source)
+        export_board(
+            self.source_data,
+            instance_dir=self.instance,
+            command=self._pipeline_command(),
+            sprint_client=self.source,
+        )
         # Only the normalized export travels; the target backend starts from nothing else.
         for name in ("cards.json", "sprints.json"):
             shutil.copy(self.source_data / "board" / name, self.target_data / "board" / name)
@@ -125,7 +168,9 @@ class SprintRestoreTests(unittest.TestCase):
     def _restore(self, client: object | None = None) -> tuple[object, int]:
         client = client or _EmptyBoardsKanboard()
         return client, import_normalized_board(
-            self.target_data, client=client, instance=self.instance,  # type: ignore[arg-type]
+            self.target_data,
+            client=client,
+            instance=self.instance,  # type: ignore[arg-type]
         )
 
     def test_export_carries_the_sprint_set_next_to_the_cards(self) -> None:
@@ -137,13 +182,16 @@ class SprintRestoreTests(unittest.TestCase):
         exported = self._exported_sprint()
         self.assertEqual(exported["status"], "closed")
         self.assertEqual(
-            exported["repositories"], [_root("secretary"), _root("secretary-instance")],
+            exported["repositories"],
+            [_root("secretary"), _root("secretary-instance")],
         )
         self.assertEqual(exported["budget"]["by_type"]["red_ci"], 1)
         self.assertEqual(exported["current_task"], "secretary-13")
         self.assertEqual(exported["resume"]["selected_step"], RESUME["selected_step"])
-        self.assertEqual([comment["text"] for comment in exported["comments"]],
-                         ["[po]\nfirst note", "[sprint:resume]\n" + RESUME["selected_step"]])
+        self.assertEqual(
+            [comment["text"] for comment in exported["comments"]],
+            ["[po]\nfirst note", "[sprint:resume]\n" + RESUME["selected_step"]],
+        )
 
     def test_closed_sprint_is_rebuilt_field_by_field_in_an_empty_backend(self) -> None:
         client, cards = self._restore()
@@ -173,8 +221,10 @@ class SprintRestoreTests(unittest.TestCase):
         self.assertEqual(normalize_sprint_entity(live), exported)
         self.assertEqual(restore_state(self.target_data)["sprint_count"], 1)
         self.assertEqual(restore_state(self.target_data)["sprint_parity"], "complete")
-        self.assertEqual(restore_findings(self.target_data), ["memory index has not been rebuilt",
-                                                             "managed reconcile has not been applied"])
+        self.assertEqual(
+            restore_findings(self.target_data),
+            ["memory index has not been rebuilt", "managed reconcile has not been applied"],
+        )
 
     def test_the_observer_declaration_survives_a_round_trip(self) -> None:
         client, _ = self._restore()
@@ -191,9 +241,7 @@ class SprintRestoreTests(unittest.TestCase):
         """
         payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
         payload["sprints"][0]["observer"] = {"kind": "default"}
-        (self.target_data / "board" / "sprints.json").write_text(
-            json.dumps(payload), encoding="utf-8"
-        )
+        (self.target_data / "board" / "sprints.json").write_text(json.dumps(payload), encoding="utf-8")
         client = _EmptyBoardsKanboard()
 
         with self.assertRaisesRegex(RestoreError, "not one of the tagged forms"):
@@ -217,9 +265,7 @@ class SprintRestoreTests(unittest.TestCase):
         """
         payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
         payload["sprints"][0].pop("observer")
-        (self.target_data / "board" / "sprints.json").write_text(
-            json.dumps(payload), encoding="utf-8"
-        )
+        (self.target_data / "board" / "sprints.json").write_text(json.dumps(payload), encoding="utf-8")
         client = _EmptyBoardsKanboard()
 
         with self.assertRaises(RestoreError) as caught:
@@ -236,14 +282,14 @@ class SprintRestoreTests(unittest.TestCase):
         payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
         payload["sprints"][0]["status"] = "open"
         payload["sprints"][0]["observer"] = {"kind": "head", "profile": "retired-observer"}
-        (self.target_data / "board" / "sprints.json").write_text(
-            json.dumps(payload), encoding="utf-8"
-        )
+        (self.target_data / "board" / "sprints.json").write_text(json.dumps(payload), encoding="utf-8")
         client = _EmptyBoardsKanboard()
 
         with self.assertRaisesRegex(RestoreError, "not a profile of this installation"):
             import_normalized_board(  # type: ignore[arg-type]
-                self.target_data, client=client, instance=self.instance,
+                self.target_data,
+                client=client,
+                instance=self.instance,
             )
 
         self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
@@ -251,7 +297,12 @@ class SprintRestoreTests(unittest.TestCase):
     def test_a_second_disaster_keeps_the_declared_observer(self) -> None:
         """The checkpoint of a recovered installation recovers the same declared row again."""
         first, _ = self._restore()
-        export_board(self.target_data, instance_dir=self.instance, command=self._pipeline_command(), sprint_client=first)
+        export_board(
+            self.target_data,
+            instance_dir=self.instance,
+            command=self._pipeline_command(),
+            sprint_client=first,
+        )
         second_data = self.root / "second-recovery"
         shutil.copytree(self.target_data, second_data)
 
@@ -265,11 +316,11 @@ class SprintRestoreTests(unittest.TestCase):
         payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
         payload["sprints"][0]["status"] = "open"
         payload["sprints"][0]["observer"] = {
-            "kind": "historical", "profile": None, "source": "migration_unknown",
+            "kind": "historical",
+            "profile": None,
+            "source": "migration_unknown",
         }
-        (self.target_data / "board" / "sprints.json").write_text(
-            json.dumps(payload), encoding="utf-8"
-        )
+        (self.target_data / "board" / "sprints.json").write_text(json.dumps(payload), encoding="utf-8")
 
         with self.assertRaisesRegex(RestoreError, "may not carry migration provenance"):
             self._restore()
@@ -286,7 +337,8 @@ class SprintRestoreTests(unittest.TestCase):
 
     def _set_open_sprint_limit(self, value: int) -> None:
         (self.instance / "instance.yaml").write_text(
-            f"open_sprint_limit: {value}\n", encoding="utf-8",
+            f"open_sprint_limit: {value}\n",
+            encoding="utf-8",
         )
 
     def test_restore_refuses_an_export_of_open_sprints_admission_would_have_refused(self) -> None:
@@ -301,7 +353,9 @@ class SprintRestoreTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RestoreError, "not admissible"):
             import_normalized_board(
-                self.target_data, client=client, instance=self.instance,  # type: ignore[arg-type]
+                self.target_data,
+                client=client,
+                instance=self.instance,  # type: ignore[arg-type]
             )
 
         self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
@@ -317,8 +371,10 @@ class SprintRestoreTests(unittest.TestCase):
             (
                 "product",
                 {
-                    "product": "secretary", "reservations": ["other"],
-                    "repositories": [_root("other")], "observer": none_choice(),
+                    "product": "secretary",
+                    "reservations": ["other"],
+                    "repositories": [_root("other")],
+                    "observer": none_choice(),
                 },
                 "needs a different product",
             ),
@@ -330,8 +386,10 @@ class SprintRestoreTests(unittest.TestCase):
             (
                 "repository",
                 {
-                    "product": "other", "reservations": ["other"],
-                    "repositories": [_root("secretary/nested")], "observer": none_choice(),
+                    "product": "other",
+                    "reservations": ["other"],
+                    "repositories": [_root("secretary/nested")],
+                    "observer": none_choice(),
                 },
                 "overlaps",
             ),
@@ -344,7 +402,9 @@ class SprintRestoreTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(RestoreError, message):
                     import_normalized_board(
-                        self.target_data, client=client, instance=self.instance,  # type: ignore[arg-type]
+                        self.target_data,
+                        client=client,
+                        instance=self.instance,  # type: ignore[arg-type]
                     )
 
                 self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
@@ -354,7 +414,9 @@ class SprintRestoreTests(unittest.TestCase):
         self.setUp()
         self._set_open_sprint_limit(2)
         self._two_open_rows(
-            product="other", reservations=["other"], repositories=[_root("other")],
+            product="other",
+            reservations=["other"],
+            repositories=[_root("other")],
             observer=head_choice("codex-observer"),
         )
         client, _ = self._restore()
@@ -374,7 +436,9 @@ class SprintRestoreTests(unittest.TestCase):
         """
         self._set_open_sprint_limit(2)
         self._two_open_rows(
-            product="other", reservations=["other"], repositories=["../elsewhere"],
+            product="other",
+            reservations=["other"],
+            repositories=["../elsewhere"],
             observer=none_choice(),
         )
         client = _EmptyBoardsKanboard()
@@ -384,7 +448,9 @@ class SprintRestoreTests(unittest.TestCase):
             "repository root '../elsewhere', which is not an absolute path",
         ):
             import_normalized_board(
-                self.target_data, client=client, instance=self.instance,  # type: ignore[arg-type]
+                self.target_data,
+                client=client,
+                instance=self.instance,  # type: ignore[arg-type]
             )
 
         self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
@@ -405,10 +471,13 @@ class SprintRestoreTests(unittest.TestCase):
         client = _EmptyBoardsKanboard()
 
         with self.assertRaisesRegex(
-            RestoreError, "repository root '.', which is not an absolute path",
+            RestoreError,
+            "repository root '.', which is not an absolute path",
         ):
             import_normalized_board(
-                self.target_data, client=client, instance=self.instance,  # type: ignore[arg-type]
+                self.target_data,
+                client=client,
+                instance=self.instance,  # type: ignore[arg-type]
             )
 
         self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
@@ -424,7 +493,8 @@ class SprintRestoreTests(unittest.TestCase):
         payload["sprints"][0]["status"] = "open"
         payload["sprints"][0]["observer"] = none_choice()
         legacy = dict(payload["sprints"][0]) | {
-            "reference": "sprint:z-legacy", "repositories": ["separate-repository"],
+            "reference": "sprint:z-legacy",
+            "repositories": ["separate-repository"],
         }
         for field in ("product", "issues", "reservations"):
             legacy.pop(field, None)
@@ -445,7 +515,9 @@ class SprintRestoreTests(unittest.TestCase):
 
         with self.assertRaisesRegex(RestoreError, "sprint:z-legacy: this sprint declares no product"):
             import_normalized_board(
-                self.target_data, client=client, instance=self.instance,  # type: ignore[arg-type]
+                self.target_data,
+                client=client,
+                instance=self.instance,  # type: ignore[arg-type]
             )
 
         self.assertEqual(client.tasks, [])  # type: ignore[attr-defined]
@@ -458,7 +530,9 @@ class SprintRestoreTests(unittest.TestCase):
         """
         self._set_open_sprint_limit(2)
         self._two_open_rows(
-            product="other", reservations=["other"], repositories=[_root("other")],
+            product="other",
+            reservations=["other"],
+            repositories=[_root("other")],
             observer=none_choice(),
         )
         blocked: list[str] = []
@@ -491,8 +565,10 @@ class SprintRestoreTests(unittest.TestCase):
             blocked.append("publish:%s" % contender_blocked())
             return publish(*args, **kwargs)  # type: ignore[arg-type]
 
-        with mock.patch.object(restore_module, "_check_restored_admission", checked), \
-                mock.patch.object(restore_module, "_import_sprints", published):
+        with (
+            mock.patch.object(restore_module, "_check_restored_admission", checked),
+            mock.patch.object(restore_module, "_import_sprints", published),
+        ):
             client, _ = self._restore()
 
         self.assertEqual(blocked, ["check:True", "publish:True"])
@@ -510,13 +586,12 @@ class SprintRestoreTests(unittest.TestCase):
         """Status and observer are on the row before the reference makes it readable."""
         payload = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
         payload["sprints"][0]["status"] = "open"
-        (self.target_data / "board" / "sprints.json").write_text(
-            json.dumps(payload), encoding="utf-8"
-        )
+        (self.target_data / "board" / "sprints.json").write_text(json.dumps(payload), encoding="utf-8")
         client, _ = self._restore()
 
         order = [
-            method for method, params in client.calls  # type: ignore[attr-defined]
+            method
+            for method, params in client.calls  # type: ignore[attr-defined]
             if (method == "saveTaskMetadata" and "sprint_observer" in dict(params["values"]))
             or (method == "updateTask" and params.get("reference") == self.ref)
         ]
@@ -553,14 +628,25 @@ class SprintRestoreTests(unittest.TestCase):
         self.assertEqual(
             sorted(key for key in client.metadata[row["id"]] if key.startswith("sprint_")),  # type: ignore[attr-defined]
             [
-                "sprint_budget", "sprint_current_task", "sprint_definition_of_done", "sprint_goal",
-                "sprint_observer", "sprint_repositories", "sprint_resume", "sprint_source_audit",
+                "sprint_budget",
+                "sprint_current_task",
+                "sprint_definition_of_done",
+                "sprint_goal",
+                "sprint_observer",
+                "sprint_repositories",
+                "sprint_resume",
+                "sprint_source_audit",
                 "sprint_status",
             ],
         )
         # Its own export is stable: a second checkpoint of the restored entity still
         # carries no ownership, so the next recovery compares equal again.
-        export_board(self.target_data, instance_dir=self.instance, command=self._pipeline_command(), sprint_client=client)
+        export_board(
+            self.target_data,
+            instance_dir=self.instance,
+            command=self._pipeline_command(),
+            sprint_client=client,
+        )
         again = json.loads((self.target_data / "board" / "sprints.json").read_text(encoding="utf-8"))
         for field in ("product", "issues", "reservations"):
             self.assertNotIn(field, again["sprints"][0])
@@ -585,7 +671,9 @@ class SprintRestoreTests(unittest.TestCase):
         def gains_empty_ownership(method: str, **params: object) -> object:
             if method == "saveTaskMetadata" and "sprint_source_audit" in dict(params["values"]):  # type: ignore[arg-type]
                 values = dict(params["values"]) | {  # type: ignore[arg-type]
-                    "sprint_product": "", "sprint_issues": "[]", "sprint_reservations": "[]",
+                    "sprint_product": "",
+                    "sprint_issues": "[]",
+                    "sprint_reservations": "[]",
                 }
                 return original(method, task_id=params["task_id"], values=values)
             return original(method, **params)
@@ -633,7 +721,12 @@ class SprintRestoreTests(unittest.TestCase):
         """
         first, _ = self._restore()
         # The checkpoint of the recovered instance: its own export, its own audit.
-        export_board(self.target_data, instance_dir=self.instance, command=self._pipeline_command(), sprint_client=first)
+        export_board(
+            self.target_data,
+            instance_dir=self.instance,
+            command=self._pipeline_command(),
+            sprint_client=first,
+        )
         second_data = self.root / "second-data"
         shutil.copytree(self.target_data, second_data)
 
@@ -659,7 +752,8 @@ class SprintRestoreTests(unittest.TestCase):
         self.assertEqual(normalize_sprint_entity(live), exported)
         self.assertEqual(restore_state(second_data)["sprint_parity"], "complete")
         self.assertEqual(
-            [task["reference"] for task in second.tasks if task["reference"] == self.ref], [self.ref]  # type: ignore[attr-defined]
+            [task["reference"] for task in second.tasks if task["reference"] == self.ref],
+            [self.ref],  # type: ignore[attr-defined]
         )
 
     def test_parity_failure_leaves_recovery_incomplete_with_a_named_error(self) -> None:
@@ -704,7 +798,9 @@ class SprintRestoreTests(unittest.TestCase):
         )
         client = _EmptyBoardsKanboard()
         SprintWriter(client, data_dir=self.target_data).restore_create(  # type: ignore[arg-type]
-            goal="someone else's sprint", reference="sprint:foreign", request_id="foreign",
+            goal="someone else's sprint",
+            reference="sprint:foreign",
+            request_id="foreign",
         )
 
         with self.assertRaisesRegex(RestoreError, "sprint board is not empty"):

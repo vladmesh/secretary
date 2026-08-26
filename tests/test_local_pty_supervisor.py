@@ -6,6 +6,7 @@ started it and stay addressable — and a fake supervisor would settle nothing. 
 a real supervisor, which forks a real child onto a real pty, and every test takes back what it
 started, on success and on failure alike.
 """
+
 from __future__ import annotations
 
 import ast
@@ -80,7 +81,7 @@ def _proc_field(pid: int, index: int) -> str:
     """One field of `/proc/<pid>/stat`, counting the way the kernel numbers them (1-based)."""
     stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     close = stat.rfind(")")
-    fields = stat[close + 2:].split()
+    fields = stat[close + 2 :].split()
     return fields[index - 3]
 
 
@@ -195,7 +196,8 @@ class LocalPtySubstrateTests(unittest.TestCase):
         self.assertTrue(_alive(handle.supervisor_pid), "the supervisor died with its launcher")
         self.assertNotIn("Z", _proc_field(handle.supervisor_pid, 3), "the supervisor is a zombie")
         self.assertNotEqual(
-            _proc_field(handle.supervisor_pid, 4), str(launcher.pid),
+            _proc_field(handle.supervisor_pid, 4),
+            str(launcher.pid),
             "the supervisor is still parented to the launcher that exited",
         )
         client = self._client(handle)
@@ -214,12 +216,19 @@ class LocalPtySubstrateTests(unittest.TestCase):
         ).rstrip(os.pathsep)
         launcher = subprocess.Popen(
             [
-                sys.executable, "-P", str(LAUNCHER),
-                "--root", str(self.root),
-                "--run-id", run_id,
-                "--command", CHILD_COMMAND,
-                "--handle-file", str(handle_file),
-                "--linger", str(linger),
+                sys.executable,
+                "-P",
+                str(LAUNCHER),
+                "--root",
+                str(self.root),
+                "--run-id",
+                run_id,
+                "--command",
+                CHILD_COMMAND,
+                "--handle-file",
+                str(handle_file),
+                "--linger",
+                str(linger),
             ],
             env=environment,
             stdin=subprocess.DEVNULL,
@@ -230,9 +239,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
         self.addCleanup(launcher.wait)
         self.addCleanup(launcher.stdout.close)
         self.addCleanup(_kill, launcher.pid, signal.SIGKILL)
-        self._await(
-            handle_file.exists, timeout=30.0, message="the launcher never published a handle"
-        )
+        self._await(handle_file.exists, timeout=30.0, message="the launcher never published a handle")
         record = json.loads(handle_file.read_text(encoding="utf-8"))
         handle = HeadHandle(
             run_dir=Path(record["run_dir"]),
@@ -350,9 +357,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
         self.assertEqual(answer["delivery"]["state"], protocol.DELIVERY_IN_FLIGHT, answer)
         delivered = client.wait_for_delivery(answer["delivery"]["id"], timeout=30.0)
         self.assertEqual(delivered["state"], protocol.DELIVERY_COMPLETE, delivered)
-        self.assertEqual(
-            delivered["written_bytes"], size + 1, "the supervisor wrote less than it took"
-        )
+        self.assertEqual(delivered["written_bytes"], size + 1, "the supervisor wrote less than it took")
         reports: list[bytes] = []
 
         def reported() -> bool:
@@ -360,9 +365,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
             reports = re.findall(rb"BULK (\d+)", client.read_output()["bytes_data"])
             return len(reports) > index
 
-        self._await(
-            reported, timeout=20.0, message=f"the head never reported a {size}-byte delivery"
-        )
+        self._await(reported, timeout=20.0, message=f"the head never reported a {size}-byte delivery")
         # The journal counts what was written, not what was offered.
         accepted = handle.events().of_kind(INPUT_ACCEPTED)
         self.assertEqual(accepted[index]["bytes"], size + 1)
@@ -508,9 +511,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
         self.assertTrue(accepted["ok"], accepted)
 
         for _ in range(10):
-            status = self._prompt(
-                bystander.status, within=2.0, what="a bystander's status during a delivery"
-            )
+            status = self._prompt(bystander.status, within=2.0, what="a bystander's status during a delivery")
             self.assertTrue(status["ok"], status)
             self.assertTrue(status["alive"])
             time.sleep(0.1)
@@ -522,9 +523,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
         self.assertEqual(deliverer.stale_frames, 0)
 
         # And the loop is still doing its own work: a stop, asked for by the bystander mid-delivery.
-        stop = self._prompt(
-            lambda: bystander.stop(initiator="test"), within=2.0, what="stop mid-delivery"
-        )
+        stop = self._prompt(lambda: bystander.stop(initiator="test"), within=2.0, what="stop mid-delivery")
         self.assertTrue(stop["ok"], stop)
         self._await(
             lambda: not _alive(handle.head_pid),
@@ -544,9 +543,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
 
         first = client.send_input(b"z" * protocol.INPUT_MAX_BYTES)
         self.assertTrue(first["ok"], first)
-        second = self._prompt(
-            lambda: client.send_input(b"second\n"), within=2.0, what="a second delivery"
-        )
+        second = self._prompt(lambda: client.send_input(b"second\n"), within=2.0, what="a second delivery")
         self.assertFalse(second["ok"], second)
         self.assertEqual(second["error"], protocol.ERROR_INPUT_IN_FLIGHT)
         self.assertEqual(second["delivery"]["id"], first["delivery"]["id"])
@@ -844,13 +841,15 @@ class LocalPtySubstrateTests(unittest.TestCase):
         started = time.monotonic()
         with self.assertRaises(LocalPtySpawnError) as caught:
             spawn_head(
-                root=self.root, run_id="half-up", role="worker", task="secretary-1463",
-                command=CHILD_COMMAND, timeout=20.0,
+                root=self.root,
+                run_id="half-up",
+                role="worker",
+                task="secretary-1463",
+                command=CHILD_COMMAND,
+                timeout=20.0,
             )
         self.assertEqual(caught.exception.reason, "startup_failed")
-        self.assertLess(
-            time.monotonic() - started, 15.0, "the launcher waited out its timeout instead"
-        )
+        self.assertLess(time.monotonic() - started, 15.0, "the launcher waited out its timeout instead")
         self.assertFalse((run_dir / protocol.SOCKET_NAME).exists(), "an address outlived the run")
 
     def test_a_failure_once_the_run_is_up_is_not_called_a_startup_failure(self) -> None:
@@ -890,9 +889,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
                 timeout=10.0,
             )
         self.assertEqual(caught.exception.reason, "already_running")
-        self.assertEqual(
-            len(handle.events().of_kind(RUN_STARTED)), 1, "a second head came up for one run"
-        )
+        self.assertEqual(len(handle.events().of_kind(RUN_STARTED)), 1, "a second head came up for one run")
         self.assertTrue(_alive(handle.head_pid))
 
     def test_a_supervisor_killed_outright_hangs_its_head_up_and_leaves_only_debris(self) -> None:
@@ -934,8 +931,12 @@ class LocalPtySubstrateTests(unittest.TestCase):
         )
         with self.assertRaises(LocalPtySpawnError) as caught:
             spawn_head(
-                root=self.root, run_id="still-alive", role="worker", task="secretary-1463",
-                command=CHILD_COMMAND, timeout=10.0,
+                root=self.root,
+                run_id="still-alive",
+                role="worker",
+                task="secretary-1463",
+                command=CHILD_COMMAND,
+                timeout=10.0,
             )
         self.assertEqual(caught.exception.reason, "already_running")
         self.assertIn(str(os.getpid()), caught.exception.detail)
@@ -956,13 +957,21 @@ class LocalPtySubstrateTests(unittest.TestCase):
         )
         # Read from a process that is not the supervisor, while the supervisor is still alive.
         reader = subprocess.run(
-            [sys.executable, "-P", "-c",
-             "import sys;sys.path.insert(0, sys.argv[1]);"
-             "from triggered_agents.runtime.head.local_pty.journal import read_events;"
-             "import json;result=read_events(sys.argv[2]);"
-             "print(json.dumps({'kinds': list(result.kinds), 'ordered': result.ordered}))",
-             str(REPO / "src"), str(handle.journal_path)],
-            capture_output=True, text=True, timeout=60, check=True,
+            [
+                sys.executable,
+                "-P",
+                "-c",
+                "import sys;sys.path.insert(0, sys.argv[1]);"
+                "from triggered_agents.runtime.head.local_pty.journal import read_events;"
+                "import json;result=read_events(sys.argv[2]);"
+                "print(json.dumps({'kinds': list(result.kinds), 'ordered': result.ordered}))",
+                str(REPO / "src"),
+                str(handle.journal_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
         )
         outside = json.loads(reader.stdout)
         self.assertTrue(outside["ordered"])
@@ -973,9 +982,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
 
         client.drain("observer")
         client.stop("observer")
-        self._await(
-            lambda: bool(handle.events().of_kind(RUN_EXITED)), message="no run.exited was written"
-        )
+        self._await(lambda: bool(handle.events().of_kind(RUN_EXITED)), message="no run.exited was written")
         result = handle.events()
         self.assertTrue(result.ordered)
         self.assertFalse(result.truncated_tail)
@@ -1051,15 +1058,12 @@ class LocalPtySubstrateTests(unittest.TestCase):
         self.assertNotIn(RUN_STARTED, tail.kinds, "a bounded read is bounded")
         self.assertLess(len(tail.events), len(whole.events))
         self.assertLessEqual(
-            sum(
-                len(json.dumps(event, sort_keys=True, separators=(",", ":"))) + 1
-                for event in tail.events
-            ),
+            sum(len(json.dumps(event, sort_keys=True, separators=(",", ":"))) + 1 for event in tail.events),
             JOURNAL_TAIL_BYTES,
             "the bound is the number it is declared to be",
         )
         self.assertEqual(
-            [event["seq"] for event in whole.events][-len(tail.events):],
+            [event["seq"] for event in whole.events][-len(tail.events) :],
             [event["seq"] for event in tail.events],
             "the window is the end of the same sequence, not a re-numbering of it",
         )
@@ -1155,9 +1159,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
         self.assertEqual(status["state"], HEARTBEAT_LIVE_MATCH, status)
         self.assertEqual(status["pid"], handle.head_pid)
 
-        foreign = head_process_status(
-            str(handle.pid_file), expected={**expected, "run_id": "somebody-else"}
-        )
+        foreign = head_process_status(str(handle.pid_file), expected={**expected, "run_id": "somebody-else"})
         self.assertNotEqual(foreign["state"], HEARTBEAT_LIVE_MATCH)
 
         client = self._client(handle)
@@ -1168,8 +1170,7 @@ class LocalPtySubstrateTests(unittest.TestCase):
         # reader, and the reader — which this card does not touch — calls that inconclusive rather
         # than dead. What is asserted is unchanged; what is removed is a race on the reaper.
         self._await(
-            lambda: head_process_status(str(handle.pid_file), expected=expected)["state"]
-            == HEARTBEAT_DEAD,
+            lambda: head_process_status(str(handle.pid_file), expected=expected)["state"] == HEARTBEAT_DEAD,
             message="the watchdog never classified the stopped head as dead",
         )
         self.assertEqual(
@@ -1185,7 +1186,8 @@ class LocalPtySubstrateTests(unittest.TestCase):
         self.assertTrue(client.send_input("exit 7\n")["ok"])
 
         self._await(
-            lambda: bool(handle.events().of_kind(RUN_EXITED)), timeout=15.0,
+            lambda: bool(handle.events().of_kind(RUN_EXITED)),
+            timeout=15.0,
             message="the supervisor never recorded the head's exit",
         )
         exited = handle.events().of_kind(RUN_EXITED)[-1]
@@ -1195,23 +1197,28 @@ class LocalPtySubstrateTests(unittest.TestCase):
         self.assertEqual(exited["head_pid"], handle.head_pid)
 
         self._await(
-            lambda: not _alive(handle.supervisor_pid), timeout=15.0,
+            lambda: not _alive(handle.supervisor_pid),
+            timeout=15.0,
             message="the supervisor held the socket after its head died",
         )
         self.assertFalse(handle.socket_path.exists(), "a dead head left an address behind")
         self.assertFalse((handle.run_dir / protocol.SUPERVISOR_PID_NAME).exists())
 
     def test_a_stop_is_recorded_as_a_signal_and_the_head_is_not_left_behind(self) -> None:
-        handle = self._start(run_id="stopped", command=f"{sys.executable} -u -c "
-                             "'import signal,time;signal.signal(signal.SIGTERM,signal.SIG_DFL);"
-                             "print(\"UP\",flush=True);time.sleep(600)'")
+        handle = self._start(
+            run_id="stopped",
+            command=f"{sys.executable} -u -c "
+            "'import signal,time;signal.signal(signal.SIGTERM,signal.SIG_DFL);"
+            'print("UP",flush=True);time.sleep(600)\'',
+        )
         client = self._client(handle)
         self._await_output(client, b"UP")
         self.assertTrue(client.drain("observer")["ok"])
         self.assertTrue(client.stop("observer")["ok"])
 
         self._await(
-            lambda: bool(handle.events().of_kind(RUN_EXITED)), timeout=15.0,
+            lambda: bool(handle.events().of_kind(RUN_EXITED)),
+            timeout=15.0,
             message="a stopped head was never reaped",
         )
         exited = handle.events().of_kind(RUN_EXITED)[-1]
@@ -1265,7 +1272,8 @@ class SubstrateIsNotWiredInTests(unittest.TestCase):
             for node in ast.walk(tree):
                 if isinstance(node, ast.ImportFrom):
                     self.assertNotIn(
-                        "runtime", (node.module or "").split("."),
+                        "runtime",
+                        (node.module or "").split("."),
                         f"{path.name} imports the boundary this card does not implement",
                     )
                 if isinstance(node, ast.ClassDef):

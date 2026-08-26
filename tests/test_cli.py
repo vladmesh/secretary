@@ -94,9 +94,7 @@ class CliTests(unittest.TestCase):
         return code, output.getvalue()
 
     def test_doctor_dry_run_validates_example_instance(self):
-        code, output = self.run_cli(
-            ["doctor", "--dry-run", "--instance", str(EXAMPLE_INSTANCE)]
-        )
+        code, output = self.run_cli(["doctor", "--dry-run", "--instance", str(EXAMPLE_INSTANCE)])
 
         self.assertEqual(code, 0, output)
         self.assertIn("Secretary doctor report", output)
@@ -132,9 +130,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("status: ok", output)
 
     def test_doctor_checks_live_host_by_default(self):
-        code, output = self.run_cli(
-            ["doctor", "--instance", str(EXAMPLE_INSTANCE)]
-        )
+        code, output = self.run_cli(["doctor", "--instance", str(EXAMPLE_INSTANCE)])
 
         self.assertIn("host inventory: read-only", output)
         self.assertIn("mode: read-only", output)
@@ -144,9 +140,7 @@ class CliTests(unittest.TestCase):
             instance = Path(tmpdir) / "instance.yaml"
             instance.write_text("version: 1\nname: broken\n", encoding="utf-8")
 
-            code, output = self.run_cli(
-                ["doctor", "--dry-run", "--instance", str(instance)]
-            )
+            code, output = self.run_cli(["doctor", "--dry-run", "--instance", str(instance)])
 
         self.assertEqual(code, 1)
         self.assertIn("config problem", output)
@@ -168,9 +162,7 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            code, output = self.run_cli(
-                ["doctor", "--dry-run", "--instance", str(instance_dir)]
-            )
+            code, output = self.run_cli(["doctor", "--dry-run", "--instance", str(instance_dir)])
             strict_code, strict_output = self.run_cli(
                 ["doctor", "--dry-run", "--strict", "--instance", str(instance_dir)]
             )
@@ -277,17 +269,13 @@ class CliTests(unittest.TestCase):
     def test_doctor_says_nothing_about_probes_without_an_installed_registry(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = self.seed_checkpoint_instance(Path(tmpdir), {"version": 1})
-            code, output = self.run_cli(
-                ["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)]
-            )
+            code, output = self.run_cli(["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)])
 
         self.assertEqual(code, 0, output)
         self.assertNotIn("resource probes", output)
 
     def test_doctor_lists_background_automations_but_offline_leaves_them_uninspected(self):
-        code, output = self.run_cli(
-            ["doctor", "--dry-run", "--offline", "--instance", str(EXAMPLE_INSTANCE)]
-        )
+        code, output = self.run_cli(["doctor", "--dry-run", "--offline", "--instance", str(EXAMPLE_INSTANCE)])
 
         self.assertEqual(code, 0, output)
         self.assertIn("background automations: read-only", output)
@@ -300,9 +288,7 @@ class CliTests(unittest.TestCase):
         from secretary.cli import print_background_automations
 
         # No live automation of any name -> every shipped background role reads as not provisioned.
-        with mock.patch(
-            "secretary.automations.OrcaAutomationClient.list", return_value=[]
-        ):
+        with mock.patch("secretary.automations.OrcaAutomationClient.list", return_value=[]):
             out = io.StringIO()
             with contextlib.redirect_stdout(out):
                 print_background_automations(inspect=True)
@@ -341,9 +327,7 @@ class CliTests(unittest.TestCase):
                     },
                 },
             )
-            code, output = self.run_cli(
-                ["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)]
-            )
+            code, output = self.run_cli(["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)])
 
         self.assertEqual(code, 0, output)
         self.assertIn("checkpoint freshness: read-only", output)
@@ -365,9 +349,7 @@ class CliTests(unittest.TestCase):
                     },
                 },
             )
-            code, output = self.run_cli(
-                ["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)]
-            )
+            code, output = self.run_cli(["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)])
 
         self.assertEqual(code, 1, output)
         self.assertIn("alarm: remote diverged", output)
@@ -381,12 +363,13 @@ class CliTests(unittest.TestCase):
                 Path(tmpdir),
                 {
                     "version": 1,
-                    "checkpoint": {"status": "blocked", "reason": "secret detected in state/board/cards.ndjson"},
+                    "checkpoint": {
+                        "status": "blocked",
+                        "reason": "secret detected in state/board/cards.ndjson",
+                    },
                 },
             )
-            code, output = self.run_cli(
-                ["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)]
-            )
+            code, output = self.run_cli(["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)])
 
         self.assertEqual(code, 1, output)
         self.assertIn("blocked: secret detected in state/board/cards.ndjson", output)
@@ -395,9 +378,7 @@ class CliTests(unittest.TestCase):
     def test_doctor_stays_quiet_about_checkpoints_an_instance_never_wrote(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance_dir = self.seed_checkpoint_instance(Path(tmpdir), {"version": 1})
-            code, output = self.run_cli(
-                ["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)]
-            )
+            code, output = self.run_cli(["doctor", "--dry-run", "--offline", "--instance", str(instance_dir)])
 
         self.assertEqual(code, 0, output)
         self.assertNotIn("checkpoint freshness", output)
@@ -451,9 +432,7 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            init_code, init_output = self.run_cli(
-                ["data", "init", "--instance", str(instance_dir)]
-            )
+            init_code, init_output = self.run_cli(["data", "init", "--instance", str(instance_dir)])
             doctor_code, doctor_output = self.run_cli(
                 ["doctor", "--dry-run", "--instance", str(instance_dir)]
             )
@@ -513,9 +492,7 @@ class CliTests(unittest.TestCase):
             projects.mkdir()
             (projects / "bad.yaml").write_text("unexpected: value\n", encoding="utf-8")
 
-            code, output = self.run_cli(
-                ["data", "export-artifacts", "--instance", str(instance_dir)]
-            )
+            code, output = self.run_cli(["data", "export-artifacts", "--instance", str(instance_dir)])
             untouched = not (instance_dir / "relative-data").exists()
 
         self.assertEqual(code, 1, output)
@@ -607,12 +584,8 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with mock.patch(
-                "secretary.data.tempfile.mkstemp", side_effect=PermissionError("denied")
-            ):
-                code, output = self.run_cli(
-                    ["data", "init", "--instance", str(instance_dir)]
-                )
+            with mock.patch("secretary.data.tempfile.mkstemp", side_effect=PermissionError("denied")):
+                code, output = self.run_cli(["data", "init", "--instance", str(instance_dir)])
 
         self.assertEqual(code, 1)
         self.assertIn("secretary data init: could not write data manifest", output)
@@ -639,9 +612,7 @@ class CliTests(unittest.TestCase):
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
 
             with mock.patch("secretary.data.subprocess.run", side_effect=fake_run) as run:
-                code, output = self.run_cli(
-                    ["data", "raw-kanboard-dump", "--instance", str(instance_dir)]
-                )
+                code, output = self.run_cli(["data", "raw-kanboard-dump", "--instance", str(instance_dir)])
                 docker_command = run.call_args.args[0]
 
         self.assertEqual(code, 0, output)
@@ -663,12 +634,8 @@ class CliTests(unittest.TestCase):
             )
             self.run_cli(["data", "init", "--instance", str(instance_dir)])
 
-            with mock.patch(
-                "secretary.data.tempfile.mkdtemp", side_effect=PermissionError("denied")
-            ):
-                code, output = self.run_cli(
-                    ["data", "raw-kanboard-dump", "--instance", str(instance_dir)]
-                )
+            with mock.patch("secretary.data.tempfile.mkdtemp", side_effect=PermissionError("denied")):
+                code, output = self.run_cli(["data", "raw-kanboard-dump", "--instance", str(instance_dir)])
 
         self.assertEqual(code, 1)
         self.assertIn("secretary data raw-kanboard-dump: could not create raw dump", output)
@@ -762,9 +729,7 @@ class CliTests(unittest.TestCase):
             facts.mkdir(parents=True)
             (facts / "fact.md").write_text("fact\n", encoding="utf-8")
 
-            code, output = self.run_cli(
-                ["data", "export-memory", "--instance", str(instance_dir)]
-            )
+            code, output = self.run_cli(["data", "export-memory", "--instance", str(instance_dir)])
             export_exists = (data_dir / "memory" / "export.ndjson").is_file()
 
         self.assertEqual(code, 0, output)
@@ -791,9 +756,7 @@ class CliTests(unittest.TestCase):
             fact.parent.mkdir(parents=True)
             fact.write_bytes(b"\xff\xfe")
 
-            code, output = self.run_cli(
-                ["data", "export-memory", "--instance", str(instance_dir)]
-            )
+            code, output = self.run_cli(["data", "export-memory", "--instance", str(instance_dir)])
 
         self.assertEqual(code, 1)
         self.assertIn("secretary data export-memory: could not decode memory fact", output)
@@ -919,9 +882,7 @@ class CliTests(unittest.TestCase):
             canon_written = (
                 instance_dir / "state" / "memory" / "facts" / "global" / "butler-cli-fact.md"
             ).exists()
-            staged = (
-                data_dir / "memory" / ".staging" / proposal["propose_id"] / "proposal.json"
-            ).is_file()
+            staged = (data_dir / "memory" / ".staging" / proposal["propose_id"] / "proposal.json").is_file()
 
         self.assertEqual(propose_code, 0, propose_output)
         self.assertTrue(proposal["ok"])
@@ -1068,9 +1029,7 @@ class CliTests(unittest.TestCase):
                 ]
             )
             retried = json.loads(retry_output)
-            log_count = git(
-                instance_dir, "rev-list", "--count", "HEAD", "--", "state/memory"
-            )
+            log_count = git(instance_dir, "rev-list", "--count", "HEAD", "--", "state/memory")
 
         self.assertEqual(propose_code, 0, propose_output)
         self.assertEqual(failed_code, 1, failed_output)
@@ -1183,14 +1142,11 @@ class CliTests(unittest.TestCase):
             shutil.copytree(EXAMPLE_INSTANCE, instance_dir)
             binding = instance_dir / "projects" / "example-project.yaml"
             binding.write_text(
-                "id: Bad_Id\nrepo: /srv/x\nenabled: true\n"
-                "adapter: example-project\ndefault_branch: main\n",
+                "id: Bad_Id\nrepo: /srv/x\nenabled: true\nadapter: example-project\ndefault_branch: main\n",
                 encoding="utf-8",
             )
 
-            code, output = self.run_cli(
-                ["doctor", "--dry-run", "--instance", str(instance_dir)]
-            )
+            code, output = self.run_cli(["doctor", "--dry-run", "--instance", str(instance_dir)])
 
         self.assertEqual(code, 1)
         self.assertIn("example-project.yaml: id:", output)
@@ -1199,9 +1155,7 @@ class CliTests(unittest.TestCase):
     def test_doctor_reports_unreadable_instance_config(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             missing = Path(tmpdir) / "does-not-exist.yaml"
-            code, output = self.run_cli(
-                ["doctor", "--dry-run", "--instance", str(missing)]
-            )
+            code, output = self.run_cli(["doctor", "--dry-run", "--instance", str(missing)])
 
         self.assertEqual(code, 1)
         self.assertIn("config not found", output)
@@ -1214,9 +1168,7 @@ class CliTests(unittest.TestCase):
             # Unterminated quoted scalar: PyYAML's raw message would echo the line.
             instance.write_text(f'name: "{secret}\n', encoding="utf-8")
 
-            code, output = self.run_cli(
-                ["doctor", "--dry-run", "--instance", str(instance)]
-            )
+            code, output = self.run_cli(["doctor", "--dry-run", "--instance", str(instance)])
 
         self.assertEqual(code, 1)
         self.assertIn("cannot parse config", output)
@@ -1231,9 +1183,7 @@ class CliTests(unittest.TestCase):
             # Undefined alias: PyYAML's raw problem text names the alias.
             instance.write_text(f"name: *{secret}\n", encoding="utf-8")
 
-            code, output = self.run_cli(
-                ["doctor", "--dry-run", "--instance", str(instance)]
-            )
+            code, output = self.run_cli(["doctor", "--dry-run", "--instance", str(instance)])
 
         self.assertEqual(code, 1)
         self.assertIn("cannot parse config", output)
@@ -1245,9 +1195,7 @@ class CliTests(unittest.TestCase):
             instance = Path(tmpdir) / "instance.yaml"
             instance.write_bytes(b"\xff")
 
-            code, output = self.run_cli(
-                ["doctor", "--dry-run", "--instance", str(instance)]
-            )
+            code, output = self.run_cli(["doctor", "--dry-run", "--instance", str(instance)])
 
         self.assertEqual(code, 1)
         self.assertIn("cannot decode config as UTF-8", output)
@@ -1274,9 +1222,7 @@ class CliTests(unittest.TestCase):
                 "offsite:\n  instance_remote: git@example.invalid:test/instance.git\n",
                 encoding="utf-8",
             )
-            code, output = self.run_cli(
-                ["bootstrap", "--empty", "--dry-run", "--instance", str(instance)]
-            )
+            code, output = self.run_cli(["bootstrap", "--empty", "--dry-run", "--instance", str(instance)])
 
         self.assertEqual(code, 0, output)
         payload = json.loads(output)
@@ -1297,9 +1243,7 @@ class CliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             archive = root / "missing.tar"
-            code, output = self.run_cli(
-                ["restore", str(archive), "--instance", str(instance), "--dry-run"]
-            )
+            code, output = self.run_cli(["restore", str(archive), "--instance", str(instance), "--dry-run"])
 
         self.assertEqual(code, 2, output)
         payload = json.loads(output)

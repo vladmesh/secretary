@@ -36,13 +36,19 @@ class HermeticKanboardTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             report = _report(root)
-            with mock.patch.dict("os.environ", {
-                "KANBOARD_URL": "https://board.invalid/jsonrpc.php",
-                "KANBOARD_API_USER": "svc",
-                "KANBOARD_API_TOKEN": "secret",
-            }), mock.patch(
-                "secretary.tasks.urllib.request.urlopen",
-                side_effect=AssertionError("unit test reached a real Kanboard network call"),
+            with (
+                mock.patch.dict(
+                    "os.environ",
+                    {
+                        "KANBOARD_URL": "https://board.invalid/jsonrpc.php",
+                        "KANBOARD_API_USER": "svc",
+                        "KANBOARD_API_TOKEN": "secret",
+                    },
+                ),
+                mock.patch(
+                    "secretary.tasks.urllib.request.urlopen",
+                    side_effect=AssertionError("unit test reached a real Kanboard network call"),
+                ),
             ):
                 snapshot = collect_status(report, offline=True)
 

@@ -5,6 +5,7 @@ create a task there explicitly through `create --column ...`. The card is stampe
 so it is an untriaged execution card and never a Product issue, which no agent may create. The
 default create column stays `Ready`.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -39,8 +40,12 @@ def _fake_board(columns, calls):
             return [dict(row) for row in EXISTING_ROWS[params["status_id"]]]
         if method == "getTaskByReference":
             return next(
-                (dict(row) for rows in EXISTING_ROWS.values() for row in rows
-                 if row["reference"] == params["reference"]),
+                (
+                    dict(row)
+                    for rows in EXISTING_ROWS.values()
+                    for row in rows
+                    if row["reference"] == params["reference"]
+                ),
                 None,
             )
         if method == "createTask":
@@ -55,9 +60,12 @@ def _fake_board(columns, calls):
 
 
 BOARD_COLUMNS = [
-    {"id": 1, "title": "Issues", "position": 1}, {"id": 2, "title": "Ready", "position": 2},
-    {"id": 3, "title": "In progress", "position": 3}, {"id": 4, "title": "Validate", "position": 4},
-    {"id": 5, "title": "Blocked", "position": 5}, {"id": 6, "title": "Done", "position": 6},
+    {"id": 1, "title": "Issues", "position": 1},
+    {"id": 2, "title": "Ready", "position": 2},
+    {"id": 3, "title": "In progress", "position": 3},
+    {"id": 4, "title": "Validate", "position": 4},
+    {"id": 5, "title": "Blocked", "position": 5},
+    {"id": 6, "title": "Done", "position": 6},
 ]
 # A board nobody reconciled: the first column is not the one the route writes into.
 UNKNOWN_FIRST_COLUMN = [dict(BOARD_COLUMNS[0], title="Backlog"), *BOARD_COLUMNS[1:]]
@@ -77,11 +85,15 @@ class ProposalRouteTests(unittest.TestCase):
         for file_proposal in (ops.reviewer_idea, ops.retro_idea, ops.steward_idea):
             with self.subTest(route=file_proposal.__name__):
                 calls = []
-                with mock.patch.object(ops, "call", side_effect=_fake_board(BOARD_COLUMNS, calls)), \
-                     mock.patch.object(ops, "_sync_head_tags"):
+                with (
+                    mock.patch.object(ops, "call", side_effect=_fake_board(BOARD_COLUMNS, calls)),
+                    mock.patch.object(ops, "_sync_head_tags"),
+                ):
                     result = file_proposal(
-                        project="secretary", title="retro: looping head",
-                        description="Pattern: looping", ref="secretary-950",
+                        project="secretary",
+                        title="retro: looping head",
+                        description="Pattern: looping",
+                        ref="secretary-950",
                     )
 
                 self.assertEqual(result["action"], "created")
@@ -108,7 +120,10 @@ class ProposalRouteTests(unittest.TestCase):
 
     def test_steward_moves_its_own_proposal_to_blocked_with_a_reason_and_to_ready(self):
         task = {
-            "id": 41, "reference": "secretary-901", "column_id": 1, "swimlane_id": 1,
+            "id": 41,
+            "reference": "secretary-901",
+            "column_id": 1,
+            "swimlane_id": 1,
         }
         metadata = {}
         calls = []
@@ -130,9 +145,7 @@ class ProposalRouteTests(unittest.TestCase):
                 rows.append(task)
                 return 41
             if method == "getTaskByReference":
-                return task if any(
-                    params["reference"] == row["reference"] for row in rows
-                ) else None
+                return task if any(params["reference"] == row["reference"] for row in rows) else None
             if method == "getTaskMetadata":
                 return metadata.copy()
             if method == "saveTaskMetadata":
@@ -147,10 +160,11 @@ class ProposalRouteTests(unittest.TestCase):
                 return 1
             raise AssertionError(f"unexpected call {method} {params}")
 
-        with mock.patch.object(ops, "call", side_effect=fake_call), \
-             mock.patch.object(ops, "_sync_head_tags"):
+        with mock.patch.object(ops, "call", side_effect=fake_call), mock.patch.object(ops, "_sync_head_tags"):
             created = ops.steward_idea(
-                project="secretary", title="unresolved anomaly", description="analysis",
+                project="secretary",
+                title="unresolved anomaly",
+                description="analysis",
                 ref="secretary-901",
             )
             self.assertEqual(created["column"], "Issues")
@@ -161,31 +175,44 @@ class ProposalRouteTests(unittest.TestCase):
             self.assertEqual(task["column_id"], 1)
 
             moved = ops.move_card(
-                "steward", "secretary-901", "Blocked", reason="needs an owner decision",
+                "steward",
+                "secretary-901",
+                "Blocked",
+                reason="needs an owner decision",
             )
 
-        self.assertEqual(moved, {
-            "action": "moved", "reference": "secretary-901", "from": "Issues", "to": "Blocked",
-        })
+        self.assertEqual(
+            moved,
+            {
+                "action": "moved",
+                "reference": "secretary-901",
+                "from": "Issues",
+                "to": "Blocked",
+            },
+        )
         self.assertEqual(task["column_id"], 5)
         comment = next(params for method, params in calls if method == "createComment")
         self.assertIn("needs an owner decision", comment["content"])
 
         # The other half of the steward's two accesses: its own proposal back out to Ready.
         task["column_id"] = 1
-        with mock.patch.object(ops, "call", side_effect=fake_call), \
-             mock.patch.object(ops, "_sync_head_tags"):
+        with mock.patch.object(ops, "call", side_effect=fake_call), mock.patch.object(ops, "_sync_head_tags"):
             promoted = ops.move_card("steward", "secretary-901", "Ready")
         self.assertEqual(promoted["from"], "Issues")
         self.assertEqual(task["column_id"], 2)
 
     def test_po_can_explicitly_create_a_proposal_task_in_the_first_column(self):
         calls = []
-        with mock.patch.object(ops, "call", side_effect=_fake_board(BOARD_COLUMNS, calls)), \
-             mock.patch.object(ops, "_sync_head_tags"):
+        with (
+            mock.patch.object(ops, "call", side_effect=_fake_board(BOARD_COLUMNS, calls)),
+            mock.patch.object(ops, "_sync_head_tags"),
+        ):
             result = ops.create_card(
-                project="secretary", task_type="code", title="agent idea",
-                column="Issues", role="po",
+                project="secretary",
+                task_type="code",
+                title="agent idea",
+                column="Issues",
+                role="po",
             )
 
         self.assertEqual(result["column"], "Issues")
@@ -203,8 +230,11 @@ class ProposalRouteTests(unittest.TestCase):
                 with mock.patch.object(ops, "call", side_effect=_fake_board(BOARD_COLUMNS, calls)):
                     with self.assertRaisesRegex(model.GuardError, "created only in 'Ready'"):
                         ops.create_card(
-                            project="secretary", task_type="code", title="t",
-                            column="Issues", role=role,
+                            project="secretary",
+                            task_type="code",
+                            title="t",
+                            column="Issues",
+                            role=role,
                         )
                 self.assertNotIn("createTask", [method for method, _ in calls])
 
@@ -213,15 +243,21 @@ class ProposalRouteTests(unittest.TestCase):
         with mock.patch.object(ops, "call", side_effect=_fake_board(UNKNOWN_FIRST_COLUMN, calls)):
             with self.assertRaisesRegex(model.GuardError, "first column is 'Backlog'"):
                 ops.create_card(
-                    project="secretary", task_type="code", title="agent idea", column="Issues", role="po",
+                    project="secretary",
+                    task_type="code",
+                    title="agent idea",
+                    column="Issues",
+                    role="po",
                 )
         self.assertNotIn("createTask", [method for method, _ in calls])
         self.assertNotIn("saveTaskMetadata", [method for method, _ in calls])
 
     def test_create_default_remains_ready_and_is_typed(self):
         calls = []
-        with mock.patch.object(ops, "call", side_effect=_fake_board(BOARD_COLUMNS, calls)), \
-             mock.patch.object(ops, "_sync_head_tags"):
+        with (
+            mock.patch.object(ops, "call", side_effect=_fake_board(BOARD_COLUMNS, calls)),
+            mock.patch.object(ops, "_sync_head_tags"),
+        ):
             result = ops.create_card(project="secretary", task_type="code", title="approved", role="po")
         self.assertEqual(result["column"], "Ready")
         created = next(params for method, params in calls if method == "createTask")
@@ -234,53 +270,102 @@ class ProposalRouteTests(unittest.TestCase):
             with self.subTest(column=column):
                 calls = []
                 argv = [
-                    "--role", "po", "create", "--project", "secretary", "--type", "code",
-                    "--title", "agent idea", "--description", "body",
+                    "--role",
+                    "po",
+                    "create",
+                    "--project",
+                    "secretary",
+                    "--type",
+                    "code",
+                    "--title",
+                    "agent idea",
+                    "--description",
+                    "body",
                 ]
                 if column:
                     argv.extend(("--column", column))
                 out, err = io.StringIO(), io.StringIO()
-                with mock.patch.object(ops, "call", side_effect=_fake_board(BOARD_COLUMNS, calls)), \
-                     mock.patch.object(ops, "_sync_head_tags"), \
-                     contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                with (
+                    mock.patch.object(ops, "call", side_effect=_fake_board(BOARD_COLUMNS, calls)),
+                    mock.patch.object(ops, "_sync_head_tags"),
+                    contextlib.redirect_stdout(out),
+                    contextlib.redirect_stderr(err),
+                ):
                     code = cli.main(argv)
                 self.assertEqual(code, 0, err.getvalue())
                 self.assertEqual(json.loads(out.getvalue())["column"], expected)
 
         out, err, calls = io.StringIO(), io.StringIO(), []
-        with mock.patch.object(ops, "call", side_effect=_fake_board(UNKNOWN_FIRST_COLUMN, calls)), \
-             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = cli.main([
-                "--role", "po", "create", "--project", "secretary", "--type", "code",
-                "--title", "agent idea", "--column", "Issues", "--description", "body",
-            ])
+        with (
+            mock.patch.object(ops, "call", side_effect=_fake_board(UNKNOWN_FIRST_COLUMN, calls)),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = cli.main(
+                [
+                    "--role",
+                    "po",
+                    "create",
+                    "--project",
+                    "secretary",
+                    "--type",
+                    "code",
+                    "--title",
+                    "agent idea",
+                    "--column",
+                    "Issues",
+                    "--description",
+                    "body",
+                ]
+            )
         self.assertEqual(code, 3)
         self.assertIn("first column is 'Backlog'", err.getvalue())
         self.assertNotIn("createTask", [method for method, _ in calls])
-
 
     def test_cli_idea_reports_the_first_column_and_a_guard_exit_without_one(self):
         for role in ("reviewer", "retro", "steward"):
             with self.subTest(role=role):
                 argv = [
-                    "--role", role, "idea", "--project", "secretary",
-                    "--title", "proposal", "--description", "body",
+                    "--role",
+                    role,
+                    "idea",
+                    "--project",
+                    "secretary",
+                    "--title",
+                    "proposal",
+                    "--description",
+                    "body",
                 ]
                 out, err = io.StringIO(), io.StringIO()
-                with mock.patch.object(ops, "call", side_effect=_fake_board(BOARD_COLUMNS, [])), \
-                     mock.patch.object(ops, "_sync_head_tags"), \
-                     contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                with (
+                    mock.patch.object(ops, "call", side_effect=_fake_board(BOARD_COLUMNS, [])),
+                    mock.patch.object(ops, "_sync_head_tags"),
+                    contextlib.redirect_stdout(out),
+                    contextlib.redirect_stderr(err),
+                ):
                     code = cli.main(argv)
                 self.assertEqual(code, 0, err.getvalue())
                 self.assertEqual(json.loads(out.getvalue())["column"], "Issues")
 
             out, err = io.StringIO(), io.StringIO()
-            with mock.patch.object(ops, "call", side_effect=_fake_board(UNKNOWN_FIRST_COLUMN, [])), \
-                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                code = cli.main([
-                    "--role", role, "idea", "--project", "secretary",
-                    "--title", "proposal", "--description", "body",
-                ])
+            with (
+                mock.patch.object(ops, "call", side_effect=_fake_board(UNKNOWN_FIRST_COLUMN, [])),
+                contextlib.redirect_stdout(out),
+                contextlib.redirect_stderr(err),
+            ):
+                code = cli.main(
+                    [
+                        "--role",
+                        role,
+                        "idea",
+                        "--project",
+                        "secretary",
+                        "--title",
+                        "proposal",
+                        "--description",
+                        "body",
+                    ]
+                )
             self.assertEqual(code, 3)
             self.assertEqual(out.getvalue(), "")
             self.assertIn("first column is 'Backlog'", err.getvalue())

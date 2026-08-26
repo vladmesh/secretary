@@ -56,9 +56,7 @@ class DataLayoutTests(unittest.TestCase):
             manifest_text = layout.manifest_path.read_text(encoding="utf-8")
             self.assertIn('"data_dir"', manifest_text)
             manifest = json.loads(manifest_text)
-            self.assertEqual(
-                manifest["components"]["memory"]["facts"], "state/memory/facts"
-            )
+            self.assertEqual(manifest["components"]["memory"]["facts"], "state/memory/facts")
 
     def test_init_layout_is_idempotent(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -111,19 +109,16 @@ class DataLayoutTests(unittest.TestCase):
             data_dir = Path(tmpdir) / "secretary-data"
             data_dir.write_text("not a directory", encoding="utf-8")
 
-            with self.assertRaisesRegex(
-                RuntimeError, "cannot prepare secretary-data layout"
-            ):
+            with self.assertRaisesRegex(RuntimeError, "cannot prepare secretary-data layout"):
                 init_layout(data_dir)
 
     def test_init_layout_wraps_manifest_tempfile_failure(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
 
-            with mock.patch(
-                "secretary.data.tempfile.mkstemp", side_effect=PermissionError("denied")
-            ), self.assertRaisesRegex(
-                RuntimeError, "could not write data manifest"
+            with (
+                mock.patch("secretary.data.tempfile.mkstemp", side_effect=PermissionError("denied")),
+                self.assertRaisesRegex(RuntimeError, "could not write data manifest"),
             ):
                 init_layout(data_dir)
 
@@ -201,9 +196,10 @@ class RawKanboardDumpTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
 
-            with mock.patch(
-                "secretary.data.tempfile.mkdtemp", side_effect=PermissionError("denied")
-            ), self.assertRaisesRegex(RuntimeError, "could not create raw dump"):
+            with (
+                mock.patch("secretary.data.tempfile.mkdtemp", side_effect=PermissionError("denied")),
+                self.assertRaisesRegex(RuntimeError, "could not create raw dump"),
+            ):
                 raw_kanboard_dump(data_dir)
 
             self.assertEqual(list((data_dir / "board").iterdir()), [])
@@ -266,9 +262,13 @@ class ExportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
             with mock.patch("secretary.data.subprocess.run", side_effect=fake_run):
-                first = export_board(data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard())
+                first = export_board(
+                    data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard()
+                )
                 first_payload = (data_dir / "board" / "cards.json").read_text(encoding="utf-8")
-                second = export_board(data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard())
+                second = export_board(
+                    data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard()
+                )
                 second_payload = (data_dir / "board" / "cards.json").read_text(encoding="utf-8")
 
         self.assertEqual(first.count, 1)
@@ -280,14 +280,14 @@ class ExportTests(unittest.TestCase):
 
     def test_export_board_writes_an_empty_sprint_set_without_a_sprint_board(self):
         def fake_run(command, **_kwargs):
-            return subprocess_completed(
-                json.dumps([{"id": 1, "reference": "secretary-1", "title": "One"}])
-            )
+            return subprocess_completed(json.dumps([{"id": 1, "reference": "secretary-1", "title": "One"}]))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
             with mock.patch("secretary.data.subprocess.run", side_effect=fake_run):
-                export_board(data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard())
+                export_board(
+                    data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard()
+                )
             board = data_dir / "board"
             sprints = json.loads((board / "sprints.json").read_text(encoding="utf-8"))
             ndjson = (board / "sprints.ndjson").read_text(encoding="utf-8")
@@ -307,16 +307,17 @@ class ExportTests(unittest.TestCase):
                 return super().call(method, **params)
 
         def fake_run(command, **_kwargs):
-            return subprocess_completed(
-                json.dumps([{"id": 1, "reference": "secretary-1", "title": "One"}])
-            )
+            return subprocess_completed(json.dumps([{"id": 1, "reference": "secretary-1", "title": "One"}]))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
             with mock.patch("secretary.data.subprocess.run", side_effect=fake_run):
                 with self.assertRaisesRegex(RuntimeError, "sprint board is unreachable"):
                     export_board(
-                        data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=BrokenSprintKanboard()
+                        data_dir,
+                        instance_dir=Path(tmpdir),
+                        command=["pipeline"],
+                        sprint_client=BrokenSprintKanboard(),
                     )
             published = sorted(path.name for path in (data_dir / "board").iterdir())
 
@@ -348,16 +349,16 @@ class ExportTests(unittest.TestCase):
                     "insert into tasks (project_id, is_active) values (2, 1), (2, 0), (2, 1), (1, 1)"
                 )
             with mock.patch("secretary.data.subprocess.run", side_effect=fake_run):
-                export_board(data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard())
+                export_board(
+                    data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard()
+                )
             summary = json.loads((data_dir / "board" / "export.json").read_text(encoding="utf-8"))
 
         self.assertEqual(summary["raw_active_task_count"], 2)
 
     def test_export_board_skips_raw_count_when_board_project_missing(self):
         def fake_run(command, **_kwargs):
-            return subprocess_completed(
-                json.dumps([{"id": 1, "reference": "secretary-1", "title": "One"}])
-            )
+            return subprocess_completed(json.dumps([{"id": 1, "reference": "secretary-1", "title": "One"}]))
 
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
@@ -369,11 +370,11 @@ class ExportTests(unittest.TestCase):
                     "create table tasks (id integer primary key, project_id integer, is_active integer)"
                 )
                 conn.execute("insert into projects (id, name) values (1, 'Other')")
-                conn.execute(
-                    "insert into tasks (project_id, is_active) values (1, 1), (1, 1), (1, 1)"
-                )
+                conn.execute("insert into tasks (project_id, is_active) values (1, 1), (1, 1), (1, 1)")
             with mock.patch("secretary.data.subprocess.run", side_effect=fake_run):
-                export_board(data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard())
+                export_board(
+                    data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard()
+                )
             summary = json.loads((data_dir / "board" / "export.json").read_text(encoding="utf-8"))
 
         # A dump with no Pipeline board: another board's 3 active tasks must neither enter the
@@ -397,7 +398,9 @@ class ExportTests(unittest.TestCase):
                 conn.execute("insert into projects (id, name) values (1, 'Pipeline')")
                 conn.execute("insert into tasks (project_id, is_active) values (1, 1), (1, 1)")
             with mock.patch("secretary.data.subprocess.run", side_effect=fake_run):
-                export_board(data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard())
+                export_board(
+                    data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard()
+                )
             summary = json.loads((data_dir / "board" / "export.json").read_text(encoding="utf-8"))
 
         self.assertEqual(summary["card_count"], 0)
@@ -427,7 +430,9 @@ class ExportTests(unittest.TestCase):
             raw_marker.write_bytes(b"not sqlite")
 
             with mock.patch("secretary.data.subprocess.run", side_effect=fake_run):
-                export_board(data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard())
+                export_board(
+                    data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard()
+                )
                 old_cards = (board_dir / "cards.json").read_text(encoding="utf-8")
                 old_ndjson = (board_dir / "cards.ndjson").read_text(encoding="utf-8")
                 old_summary = (board_dir / "export.json").read_text(encoding="utf-8")
@@ -444,7 +449,12 @@ class ExportTests(unittest.TestCase):
 
                 with mock.patch("secretary.data.os.replace", side_effect=fail_on_ndjson_publish):
                     with self.assertRaisesRegex(RuntimeError, "could not publish board export"):
-                        export_board(data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard())
+                        export_board(
+                            data_dir,
+                            instance_dir=Path(tmpdir),
+                            command=["pipeline"],
+                            sprint_client=SprintKanboard(),
+                        )
 
             current_cards = (board_dir / "cards.json").read_text(encoding="utf-8")
             current_ndjson = (board_dir / "cards.ndjson").read_text(encoding="utf-8")
@@ -463,12 +473,7 @@ class ExportTests(unittest.TestCase):
             source = memory_facts_dir(instance_dir)
             (source / "secretary").mkdir(parents=True)
             (source / "secretary" / "one.md").write_text(
-                "---\n"
-                "tags: [secretary, memory]\n"
-                "source: test\n"
-                "created: 2026-07-11\n"
-                "---\n"
-                "fact one\n",
+                "---\ntags: [secretary, memory]\nsource: test\ncreated: 2026-07-11\n---\nfact one\n",
                 encoding="utf-8",
             )
             (source / "global").mkdir()
@@ -507,9 +512,7 @@ class ExportTests(unittest.TestCase):
 
             with mock.patch("secretary.memory_journal._copy_tree", side_effect=copy_then_mutate):
                 export_memory(root / "secretary-data", instance_dir)
-            exported = (root / "secretary-data" / "memory" / "export.ndjson").read_text(
-                encoding="utf-8"
-            )
+            exported = (root / "secretary-data" / "memory" / "export.ndjson").read_text(encoding="utf-8")
 
         self.assertIn("fact one", exported)
         self.assertNotIn("changed after snapshot", exported)
@@ -526,9 +529,7 @@ class ExportTests(unittest.TestCase):
             (facts / "secret.md").symlink_to(secret)
 
             result = export_memory(root / "secretary-data", instance_dir)
-            exported = (root / "secretary-data" / "memory" / "export.ndjson").read_text(
-                encoding="utf-8"
-            )
+            exported = (root / "secretary-data" / "memory" / "export.ndjson").read_text(encoding="utf-8")
             mirrored_secret = root / "secretary-data" / "memory" / "facts" / "secretary" / "secret.md"
 
         self.assertEqual(result.count, 1)
@@ -656,10 +657,13 @@ class ExportTests(unittest.TestCase):
                 source="curator:claude/session",
             )
 
-            with mock.patch(
-                "secretary.memory_write._publish_memory_export",
-                side_effect=RuntimeError("disk full"),
-            ), self.assertRaises(MemoryExportPublishError) as raised:
+            with (
+                mock.patch(
+                    "secretary.memory_write._publish_memory_export",
+                    side_effect=RuntimeError("disk full"),
+                ),
+                self.assertRaises(MemoryExportPublishError) as raised,
+            ):
                 commit_memory_proposal(
                     data_dir,
                     instance_dir,
@@ -1227,32 +1231,42 @@ class ExportTests(unittest.TestCase):
             with (
                 mock.patch(
                     "secretary.data.export_board",
-                    side_effect=lambda data_dir_arg, *, instance_dir: calls.append("board")
-                    or data_module.DataExport(data_dir_arg / "board.json", 1, "board"),
+                    side_effect=lambda data_dir_arg, *, instance_dir: (
+                        calls.append("board")
+                        or data_module.DataExport(data_dir_arg / "board.json", 1, "board")
+                    ),
                 ) as board,
                 mock.patch(
                     "secretary.data.export_memory",
-                    side_effect=lambda data_dir_arg, instance_dir_arg: calls.append("memory")
-                    or data_module.DataExport(data_dir_arg / "memory.ndjson", 1, "memory"),
+                    side_effect=lambda data_dir_arg, instance_dir_arg: (
+                        calls.append("memory")
+                        or data_module.DataExport(data_dir_arg / "memory.ndjson", 1, "memory")
+                    ),
                 ) as memory,
                 mock.patch(
                     "secretary.data.export_runs",
-                    side_effect=lambda data_dir_arg: calls.append("runs")
-                    or data_module.DataExport(data_dir_arg / "runs.ndjson", 1, "runs"),
+                    side_effect=lambda data_dir_arg: (
+                        calls.append("runs")
+                        or data_module.DataExport(data_dir_arg / "runs.ndjson", 1, "runs")
+                    ),
                 ),
                 mock.patch(
                     "secretary.data.export_transcripts",
-                    side_effect=lambda data_dir_arg, *, copy: calls.append("transcripts")
-                    or data_module.DataExport(
-                        data_dir_arg / "inventory.json",
-                        1,
-                        "transcripts",
+                    side_effect=lambda data_dir_arg, *, copy: (
+                        calls.append("transcripts")
+                        or data_module.DataExport(
+                            data_dir_arg / "inventory.json",
+                            1,
+                            "transcripts",
+                        )
                     ),
                 ) as transcripts,
                 mock.patch(
                     "secretary.data.export_artifacts",
-                    side_effect=lambda data_dir_arg: calls.append("artifacts")
-                    or data_module.DataExport(data_dir_arg / "artifacts.json", 1, "artifacts"),
+                    side_effect=lambda data_dir_arg: (
+                        calls.append("artifacts")
+                        or data_module.DataExport(data_dir_arg / "artifacts.json", 1, "artifacts")
+                    ),
                 ) as artifacts,
             ):
                 export_all(data_dir, instance_dir, copy_transcripts=True)
@@ -1266,13 +1280,7 @@ class ExportTests(unittest.TestCase):
     def test_default_pipeline_state_uses_secretary_workspace(self):
         self.assertEqual(
             data_module.PIPELINE_STATE_DIR,
-            Path.home()
-            / "orca"
-            / "workspaces"
-            / "secretary"
-            / "pipeline"
-            / "state"
-            / "pipeline",
+            Path.home() / "orca" / "workspaces" / "secretary" / "pipeline" / "state" / "pipeline",
         )
 
 
@@ -1300,8 +1308,7 @@ def memory_facts_dir(instance_dir: Path) -> Path:
 def tracked_facts(instance_dir: Path) -> list[str]:
     prefix = "state/memory/facts/"
     return [
-        line.removeprefix(prefix)
-        for line in git(instance_dir, "ls-files", "--", "state/memory").splitlines()
+        line.removeprefix(prefix) for line in git(instance_dir, "ls-files", "--", "state/memory").splitlines()
     ]
 
 

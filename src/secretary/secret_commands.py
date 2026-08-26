@@ -45,9 +45,7 @@ DEFAULT_ACTOR = "operator"
 
 
 def add_secret_subcommands(subparsers) -> None:
-    secret = subparsers.add_parser(
-        "secret", help="manage the encrypted secret store in the instance repo"
-    )
+    secret = subparsers.add_parser("secret", help="manage the encrypted secret store in the instance repo")
     secret_subcommands = secret.add_subparsers(dest="secret_command")
 
     init = secret_subcommands.add_parser(
@@ -70,19 +68,13 @@ def add_secret_subcommands(subparsers) -> None:
     set_command.add_argument("--instance", required=True)
     set_command.add_argument("--actor", default=DEFAULT_ACTOR)
     set_command.add_argument("--id", required=True, dest="secret_id")
-    set_command.add_argument(
-        "--scope", required=True, help="'installation' or 'project:<id>'"
-    )
+    set_command.add_argument("--scope", required=True, help="'installation' or 'project:<id>'")
     set_command.add_argument("--purpose", required=True)
-    set_command.add_argument(
-        "--environment", help="environment variable this value materializes into"
-    )
+    set_command.add_argument("--environment", help="environment variable this value materializes into")
     _add_target_arguments(set_command, "where this value materializes", default="none")
     source = set_command.add_mutually_exclusive_group(required=True)
     source.add_argument("--file", help="read the value from this file")
-    source.add_argument(
-        "--stdin", action="store_true", help="read the value from standard input"
-    )
+    source.add_argument("--stdin", action="store_true", help="read the value from standard input")
     set_command.set_defaults(handler=run_secret_set)
 
     list_command = secret_subcommands.add_parser(
@@ -132,9 +124,7 @@ def add_secret_subcommands(subparsers) -> None:
     secret.set_defaults(handler=lambda args: _usage(secret))
 
 
-def _add_target_arguments(
-    parser: argparse.ArgumentParser, help_text: str, *, default: str
-) -> None:
+def _add_target_arguments(parser: argparse.ArgumentParser, help_text: str, *, default: str) -> None:
     parser.add_argument(
         "--materialize",
         choices=(*MATERIALIZE_TARGETS, "none"),
@@ -306,15 +296,11 @@ def _materialize_spec(args: argparse.Namespace) -> dict[str, str] | None:
     path = getattr(args, "materialize_path", None)
     if choice == "none":
         if path:
-            raise SecretStoreValidationError(
-                "--materialize-path needs --materialize " + MATERIALIZE_FILE
-            )
+            raise SecretStoreValidationError("--materialize-path needs --materialize " + MATERIALIZE_FILE)
         return None
     if choice == MATERIALIZE_FILE:
         if not path:
-            raise SecretStoreValidationError(
-                f"--materialize {MATERIALIZE_FILE} needs --materialize-path"
-            )
+            raise SecretStoreValidationError(f"--materialize {MATERIALIZE_FILE} needs --materialize-path")
         return {"target": choice, "path": path}
     if path:
         raise SecretStoreValidationError(
@@ -377,8 +363,7 @@ def _acknowledge_written_down() -> bool:
     """
     try:
         answer = _read_line(
-            "Type 'yes' once you have written the phrase down, to clear the "
-            "screen and continue: "
+            "Type 'yes' once you have written the phrase down, to clear the screen and continue: "
         )
     except EOFError:
         return False

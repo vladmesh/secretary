@@ -465,9 +465,7 @@ def load_catalog(instance_dir: Path) -> dict[str, Any]:
             "secret store is not initialized; run `secretary secret init` first"
         ) from None
     except yaml.YAMLError as exc:
-        raise SecretStoreStateError(
-            f"{CATALOG_NAME} is invalid: {_safe_yaml_error(exc)}"
-        ) from None
+        raise SecretStoreStateError(f"{CATALOG_NAME} is invalid: {_safe_yaml_error(exc)}") from None
     except OSError as exc:
         raise SecretStoreStateError(
             f"could not read {CATALOG_NAME}: {exc.strerror or 'unreadable'}"
@@ -575,9 +573,7 @@ def store_findings(instance_dir: Path) -> tuple[str, ...]:
         info = None
     if info is not None and stat.S_ISREG(info.st_mode) and (info.st_mode & 0o077):
         wide_permissions = True
-        findings.append(
-            f"secret store: installation key permissions are too broad; run chmod 0600 {path}"
-        )
+        findings.append(f"secret store: installation key permissions are too broad; run chmod 0600 {path}")
 
     if secrets and not wide_permissions:
         try:
@@ -710,9 +706,7 @@ def set_secret(
 
         catalog_text = _catalog_text(catalog)
         _scan_open_file(f"secrets/{CATALOG_NAME}", catalog_text)
-        envelope_text = json.dumps(
-            seal_value(key, secret_id, bytes(value)), indent=2, sort_keys=True
-        ) + "\n"
+        envelope_text = json.dumps(seal_value(key, secret_id, bytes(value)), indent=2, sort_keys=True) + "\n"
         # No redact scan on the envelope. Its body is ciphertext plus the open
         # parameters needed to decrypt it: a pattern match there would be a
         # coincidence of base64, and a value that redact happened to recognize is
@@ -955,8 +949,7 @@ def materialize_secrets(
     """
     if target is not None and target not in MATERIALIZE_TARGETS:
         raise SecretStoreValidationError(
-            f"unknown materialization target {target!r}; expected one of "
-            + ", ".join(MATERIALIZE_TARGETS)
+            f"unknown materialization target {target!r}; expected one of " + ", ".join(MATERIALIZE_TARGETS)
         )
     instance_dir = state_repo.require_repo(instance_dir)
     with state_repo.state_repo_lock(instance_dir):
@@ -1013,9 +1006,7 @@ def materialize_path(instance_dir: Path, entry: dict[str, Any]) -> Path:
     if target == MATERIALIZE_FILE:
         path = Path(str(instruction.get("path", ""))).expanduser()
         if not str(path):
-            raise SecretStoreStateError(
-                f"secret {entry.get('id')!r} materializes to a file with no path"
-            )
+            raise SecretStoreStateError(f"secret {entry.get('id')!r} materializes to a file with no path")
         return path if path.is_absolute() else instance_dir / path
     raise SecretStoreStateError(
         f"secret {entry.get('id')!r} has an unknown materialization target {target!r}"
@@ -1174,9 +1165,7 @@ def _assert_one_secret_per_variable(path: Path, entries: list[dict[str, Any]]) -
     for entry in entries:
         name = entry["environment"]
         if name in seen:
-            raise SecretStoreStateError(
-                f"{seen[name]} and {entry['id']} both materialize {name} into {path}"
-            )
+            raise SecretStoreStateError(f"{seen[name]} and {entry['id']} both materialize {name} into {path}")
         seen[name] = entry["id"]
 
 
@@ -1190,9 +1179,7 @@ def _assert_one_secret_per_line(path: Path, entries: list[dict[str, Any]]) -> No
                 f"secret {entry['id']} materializes into {path} without a line number"
             )
         if order in seen:
-            raise SecretStoreStateError(
-                f"{seen[order]} and {entry['id']} both claim line {order} of {path}"
-            )
+            raise SecretStoreStateError(f"{seen[order]} and {entry['id']} both claim line {order} of {path}")
         seen[order] = entry["id"]
 
 
@@ -1335,13 +1322,11 @@ def _clean_scope(scope: str) -> str:
     if value == INSTALLATION_SCOPE:
         return value
     if value.startswith(PROJECT_SCOPE_PREFIX):
-        project = value[len(PROJECT_SCOPE_PREFIX):]
+        project = value[len(PROJECT_SCOPE_PREFIX) :]
         if project and project[0] in _ID_ALLOWED - set("._-"):
             if all(char in _ID_ALLOWED for char in project):
                 return value
-    raise SecretStoreValidationError(
-        f"scope must be '{INSTALLATION_SCOPE}' or '{PROJECT_SCOPE_PREFIX}<id>'"
-    )
+    raise SecretStoreValidationError(f"scope must be '{INSTALLATION_SCOPE}' or '{PROJECT_SCOPE_PREFIX}<id>'")
 
 
 def _clean_purpose(purpose: str) -> str:
@@ -1379,8 +1364,7 @@ def _clean_materialize(materialize: dict[str, Any] | None) -> dict[str, Any] | N
     if target == MATERIALIZE_RUNTIME_ENV:
         if materialize.get("path"):
             raise SecretStoreValidationError(
-                f"the {MATERIALIZE_RUNTIME_ENV} target carries no path; "
-                "it is resolved at write time"
+                f"the {MATERIALIZE_RUNTIME_ENV} target carries no path; it is resolved at write time"
             )
     else:
         path = str(materialize.get("path", "")).strip()
@@ -1416,9 +1400,7 @@ def _shift_foreign_lines(
     foreign = [
         name
         for name, entry in entries.items()
-        if name not in keep
-        and entry.get("materialize")
-        and _materialize_slot(entry["materialize"]) == slot
+        if name not in keep and entry.get("materialize") and _materialize_slot(entry["materialize"]) == slot
     ]
     foreign.sort(key=lambda name: (entries[name]["materialize"].get("order", 0), name))
     for offset, name in enumerate(foreign):
@@ -1466,14 +1448,17 @@ def _check_value(value: bytes) -> None:
 
 
 def _commit_message(operation: str, subject: str, actor: str) -> str:
-    return "\n".join(
-        [
-            f"secrets: {operation} {subject}",
-            "",
-            f"Principal: {actor}",
-            f"Operation: {operation}",
-        ]
-    ) + "\n"
+    return (
+        "\n".join(
+            [
+                f"secrets: {operation} {subject}",
+                "",
+                f"Principal: {actor}",
+                f"Operation: {operation}",
+            ]
+        )
+        + "\n"
+    )
 
 
 def _now() -> str:

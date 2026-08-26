@@ -232,7 +232,11 @@ class CheckSpec:
     def argv(self, record: Path | None) -> list[str]:
         if self.shape == _SHAPE_MODULE:
             return [
-                self.interpreter, "-c", _PROVENANCE_BOOTSTRAP, str(record), self.module,
+                self.interpreter,
+                "-c",
+                _PROVENANCE_BOOTSTRAP,
+                str(record),
+                self.module,
                 self.import_package,
                 *self.module_args,
             ]
@@ -241,7 +245,11 @@ class CheckSpec:
     def displayed_argv(self) -> list[str]:
         if self.shape == _SHAPE_MODULE:
             return [
-                self.interpreter, "-c", "<provenance bootstrap>", "<provenance record>", self.module,
+                self.interpreter,
+                "-c",
+                "<provenance bootstrap>",
+                "<provenance record>",
+                self.module,
                 self.import_package,
                 *self.module_args,
             ]
@@ -258,9 +266,7 @@ def receipt_dir(root: Path) -> Path:
 
 def check_set_digest(check_set: Mapping[str, object]) -> str:
     """Digest the canonical check-set, the way the mechanical gate digests its own check set."""
-    canonical = json.dumps(
-        check_set, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    )
+    canonical = json.dumps(check_set, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     return hashlib.sha256(canonical.encode("utf-8", "surrogateescape")).hexdigest()
 
 
@@ -506,9 +512,7 @@ def run_broad_check(
     """
     spec = as_spec(check)
     if len(json.dumps(spec.check_set)) > MAX_COMMAND_CHARS:
-        raise BroadCheckError(
-            "command_too_long", f"command exceeds {MAX_COMMAND_CHARS} characters"
-        )
+        raise BroadCheckError("command_too_long", f"command exceeds {MAX_COMMAND_CHARS} characters")
     root = Path(root)
     if not root.is_dir():
         raise BroadCheckError("missing_root", f"{root} is not a directory")
@@ -522,7 +526,12 @@ def run_broad_check(
         # content the receipt claims to describe.
         record = Path(scratch) / "provenance.json" if spec.attests_provenance else None
         return _run_and_record(
-            spec, root=root, target=target, record=record, environment=environment, sink=sink,
+            spec,
+            root=root,
+            target=target,
+            record=record,
+            environment=environment,
+            sink=sink,
             timeout_seconds=timeout_seconds,
         )
 
@@ -590,10 +599,16 @@ def _run_and_record(
         _write_receipt(
             target,
             _build_payload(
-                spec=spec, root=root, identity=identity,
-                provenance=_read_provenance(record, root), started_at=started_at,
-                duration=time.monotonic() - started, exit_code=exit_code, tail=tail,
-                parsed=scanner.finish(), incomplete_reason=incomplete_reason,
+                spec=spec,
+                root=root,
+                identity=identity,
+                provenance=_read_provenance(record, root),
+                started_at=started_at,
+                duration=time.monotonic() - started,
+                exit_code=exit_code,
+                tail=tail,
+                parsed=scanner.finish(),
+                incomplete_reason=incomplete_reason,
             ),
         )
         raise
@@ -604,9 +619,16 @@ def _run_and_record(
     if exit_code < 0 and not incomplete_reason:
         incomplete_reason = f"killed by signal {-exit_code}"
     payload = _build_payload(
-        spec=spec, root=root, identity=identity, provenance=_read_provenance(record, root),
-        started_at=started_at, duration=time.monotonic() - started, exit_code=exit_code,
-        tail=tail, parsed=scanner.finish(), incomplete_reason=incomplete_reason,
+        spec=spec,
+        root=root,
+        identity=identity,
+        provenance=_read_provenance(record, root),
+        started_at=started_at,
+        duration=time.monotonic() - started,
+        exit_code=exit_code,
+        tail=tail,
+        parsed=scanner.finish(),
+        incomplete_reason=incomplete_reason,
     )
     _write_receipt(target, payload)
     return exit_code, payload
@@ -795,10 +817,23 @@ def load_receipt(path: Path) -> dict[str, object] | None:
     if payload.get("schema_version") != SCHEMA_VERSION:
         return None
     required = (
-        "command", "command_shape", "check_set", "command_or_check_set_digest", "cwd",
+        "command",
+        "command_shape",
+        "check_set",
+        "command_or_check_set_digest",
+        "cwd",
         "project_provenance",
-        "content_identity", "started_at", "ended_at", "duration_seconds", "exit_code", "signal",
-        "status", "incomplete_reason", "verdict", "parsed", "tail",
+        "content_identity",
+        "started_at",
+        "ended_at",
+        "duration_seconds",
+        "exit_code",
+        "signal",
+        "status",
+        "incomplete_reason",
+        "verdict",
+        "parsed",
+        "tail",
     )
     if any(key not in payload for key in required):
         return None
@@ -847,9 +882,7 @@ class ReceiptLookup:
         }
 
 
-def candidate_import_refusal(
-    receipt: Mapping[str, object], root: Path, *, expected_package: str = ""
-) -> str:
+def candidate_import_refusal(receipt: Mapping[str, object], root: Path, *, expected_package: str = "") -> str:
     """The candidate-trust boundary: why this receipt's import may not be trusted, or ``""``.
 
     Observed provenance is necessary and not sufficient: only an import resolved *inside this
@@ -864,8 +897,7 @@ def candidate_import_refusal(
         # A shell shape may change directory or import environment before the interpreter starts,
         # so nothing observed what the check imported.
         return (
-            "import provenance was not observed from the check process, so this receipt attests "
-            "no checkout"
+            "import provenance was not observed from the check process, so this receipt attests no checkout"
         )
     imported_package = str(provenance.get("imported_package") or "")
     if expected_package and imported_package != expected_package:
@@ -891,8 +923,8 @@ def candidate_import_refusal(
         return "the receipt records no interpreter environment provenance"
     try:
         resolved_prefix = Path(environment_prefix).resolve()
-        imported_from_environment = (
-            resolved_prefix != resolved_root and resolved.is_relative_to(resolved_prefix)
+        imported_from_environment = resolved_prefix != resolved_root and resolved.is_relative_to(
+            resolved_prefix
         )
     except (OSError, ValueError):
         imported_from_environment = False

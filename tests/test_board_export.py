@@ -5,6 +5,7 @@ export has to cost one call, not one per card. These pin the batched transport a
 `ops.export_cards`: same per-card surface as `show_card`, two batched RPCs per task, no per-card
 round trip.
 """
+
 from __future__ import annotations
 
 import json
@@ -37,8 +38,10 @@ class CallBatchTests(unittest.TestCase):
             seen.append([request["id"] for request in payload])
             return [{"id": request["id"], "result": request["id"]} for request in payload]
 
-        with mock.patch.object(kanboard, "_BATCH_CHUNK", 2), \
-             mock.patch.object(kanboard, "_post", side_effect=fake_post):
+        with (
+            mock.patch.object(kanboard, "_BATCH_CHUNK", 2),
+            mock.patch.object(kanboard, "_post", side_effect=fake_post),
+        ):
             results = call_batch([("m", {"i": index}) for index in range(5)])
 
         self.assertEqual(results, [0, 1, 2, 3, 4])
@@ -98,6 +101,7 @@ TASKS = [
 
 def _fake_board(calls):
     """Stub the board reads `export_cards` makes; `calls` collects the batched requests."""
+
     def fake_call(method, **params):
         if method == "getAllProjects":
             return [{"id": 2, "name": ops.model.BOARD_NAME}]
@@ -131,8 +135,10 @@ class ExportCardsTests(unittest.TestCase):
     def test_one_batched_request_covers_every_card(self):
         calls = []
         fake_call, fake_batch = _fake_board(calls)
-        with mock.patch.object(ops, "call", side_effect=fake_call) as board_call, \
-            mock.patch.object(ops, "call_batch", side_effect=fake_batch):
+        with (
+            mock.patch.object(ops, "call", side_effect=fake_call) as board_call,
+            mock.patch.object(ops, "call_batch", side_effect=fake_batch),
+        ):
             cards = ops.export_cards()
 
         self.assertEqual(len(calls), 1)
@@ -153,8 +159,10 @@ class ExportCardsTests(unittest.TestCase):
     def test_card_carries_both_the_list_and_the_show_surface(self):
         calls = []
         fake_call, fake_batch = _fake_board(calls)
-        with mock.patch.object(ops, "call", side_effect=fake_call), \
-             mock.patch.object(ops, "call_batch", side_effect=fake_batch):
+        with (
+            mock.patch.object(ops, "call", side_effect=fake_call),
+            mock.patch.object(ops, "call_batch", side_effect=fake_batch),
+        ):
             card = ops.export_cards()[0]
 
         # list view
@@ -171,8 +179,10 @@ class ExportCardsTests(unittest.TestCase):
     def test_metadata_and_comments_stay_paired_with_their_card(self):
         calls = []
         fake_call, fake_batch = _fake_board(calls)
-        with mock.patch.object(ops, "call", side_effect=fake_call), \
-             mock.patch.object(ops, "call_batch", side_effect=fake_batch):
+        with (
+            mock.patch.object(ops, "call", side_effect=fake_call),
+            mock.patch.object(ops, "call_batch", side_effect=fake_batch),
+        ):
             cards = ops.export_cards()
 
         # An off-by-one in the batch unpacking would hand card 8 the metadata of card 7.
@@ -182,8 +192,10 @@ class ExportCardsTests(unittest.TestCase):
     def test_output_is_json_serialisable_for_the_cli(self):
         calls = []
         fake_call, fake_batch = _fake_board(calls)
-        with mock.patch.object(ops, "call", side_effect=fake_call), \
-             mock.patch.object(ops, "call_batch", side_effect=fake_batch):
+        with (
+            mock.patch.object(ops, "call", side_effect=fake_call),
+            mock.patch.object(ops, "call_batch", side_effect=fake_batch),
+        ):
             cards = ops.export_cards()
 
         self.assertEqual(json.loads(json.dumps(cards)), cards)

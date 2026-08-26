@@ -22,9 +22,7 @@ from secretary.memory_write import (
 
 
 def git(repo: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args], text=True, capture_output=True, check=True
-    )
+    result = subprocess.run(["git", "-C", str(repo), *args], text=True, capture_output=True, check=True)
     return result.stdout
 
 
@@ -183,9 +181,7 @@ class MemoryWriteAuthorityTests(unittest.TestCase):
         self.assertIn("actor is not allowed to write memory: worker:codex/1", str(commit_caught.exception))
 
     def test_privileged_commit_ownership_rules_are_unchanged(self):
-        proposal = self._propose(
-            actor="curator:claude/one", source="curator:claude/one", slug="owned-fact"
-        )
+        proposal = self._propose(actor="curator:claude/one", source="curator:claude/one", slug="owned-fact")
 
         with self.assertRaises(MemoryPermissionError) as caught:
             commit_memory_proposal(

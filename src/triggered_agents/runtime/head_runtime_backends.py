@@ -19,6 +19,7 @@ where either comes from. Both are callables so that naming one backend never con
 dependency — an Orca session is not opened to raise a supervised head, and no run root is resolved
 to reach a pane.
 """
+
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -75,9 +76,5 @@ def build_head_runtime(
     if name == ORCA_LEGACY_RUNTIME:
         return OrcaLegacyHeadRuntime(session)
     if name == LOCAL_PTY_RUNTIME:
-        return LocalPtyHeadRuntime(
-            local_pty_root(), head_process_status=head_process_status
-        )
-    raise UnknownHeadRuntimeError(
-        f"unknown head runtime {name!r} (known: {', '.join(HEAD_RUNTIMES)})"
-    )
+        return LocalPtyHeadRuntime(local_pty_root(), head_process_status=head_process_status)
+    raise UnknownHeadRuntimeError(f"unknown head runtime {name!r} (known: {', '.join(HEAD_RUNTIMES)})")

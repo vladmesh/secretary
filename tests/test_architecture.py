@@ -39,9 +39,7 @@ LEGACY_FLAT_MODULES = frozenset(
 
 # This historical telemetry reader is the one known back edge. Holding the exact edge here prevents
 # another one while a later migration removes it.
-LEGACY_TRIGGERED_AGENTS_IMPORTS = frozenset(
-    {("runtime/production_telemetry.py", "secretary.config")}
-)
+LEGACY_TRIGGERED_AGENTS_IMPORTS = frozenset({("runtime/production_telemetry.py", "secretary.config")})
 
 
 class SourceLayoutTests(unittest.TestCase):
@@ -61,8 +59,10 @@ class SourceLayoutTests(unittest.TestCase):
                         for alias in node.names
                         if alias.name == "secretary" or alias.name.startswith("secretary.")
                     )
-                elif isinstance(node, ast.ImportFrom) and node.module and (
-                    node.module == "secretary" or node.module.startswith("secretary.")
+                elif (
+                    isinstance(node, ast.ImportFrom)
+                    and node.module
+                    and (node.module == "secretary" or node.module.startswith("secretary."))
                 ):
                     imports.add((path.relative_to(package).as_posix(), node.module))
         self.assertEqual(imports, LEGACY_TRIGGERED_AGENTS_IMPORTS)

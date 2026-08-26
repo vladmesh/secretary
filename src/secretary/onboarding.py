@@ -55,13 +55,23 @@ def project_add(
     draft_path = instance_dir / "adapter-drafts" / f"{project_id}.yaml"
     if dry_run:
         return _project_add_locked(
-            repo, project_id, instance_dir, binding_path, draft_path,
-            dry_run=True, re_onboard=re_onboard,
+            repo,
+            project_id,
+            instance_dir,
+            binding_path,
+            draft_path,
+            dry_run=True,
+            re_onboard=re_onboard,
         )
     with file_lock(project_lock_path(instance_dir, project_id)):
         return _project_add_locked(
-            repo, project_id, instance_dir, binding_path, draft_path,
-            dry_run=False, re_onboard=re_onboard,
+            repo,
+            project_id,
+            instance_dir,
+            binding_path,
+            draft_path,
+            dry_run=False,
+            re_onboard=re_onboard,
         )
 
 
@@ -78,9 +88,7 @@ def _project_add_locked(
     existing_binding, error = _load_optional_mapping(binding_path)
     if error:
         default_branch = _default_branch(repo) if repo.is_dir() else "main"
-        artifact = _base_artifact(
-            repo, project_id, default_branch, _safe_scan(repo, default_branch)
-        )
+        artifact = _base_artifact(repo, project_id, default_branch, _safe_scan(repo, default_branch))
         return 1, _fail_draft(artifact, "draft.invalid", error)
 
     default_branch = _default_branch(repo) if repo.is_dir() else "main"
@@ -93,13 +101,9 @@ def _project_add_locked(
     # the same bytes instead of wiping a provision run the operator has since applied.
     taking_down = bool(re_onboard) and bool(existing_binding) and existing_binding.get("enabled") is True
     if existing_binding:
-        conflict = _binding_conflict(
-            existing_binding, identity, allow_enabled=dry_run or re_onboard
-        )
+        conflict = _binding_conflict(existing_binding, identity, allow_enabled=dry_run or re_onboard)
         if conflict:
-            artifact = _base_artifact(
-                repo, project_id, default_branch, _safe_scan(repo, default_branch)
-            )
+            artifact = _base_artifact(repo, project_id, default_branch, _safe_scan(repo, default_branch))
             return 1, _fail_draft(artifact, "draft.invalid", conflict)
 
     scanner = _safe_scan(repo, default_branch)
@@ -116,10 +120,7 @@ def _project_add_locked(
         if errors:
             return 1, _fail_draft(artifact, "draft.invalid", str(errors[0]))
         draft_identity = existing_draft.get("identity")
-        if (
-            not isinstance(draft_identity, dict)
-            or _identity_core(draft_identity) != _identity_core(identity)
-        ):
+        if not isinstance(draft_identity, dict) or _identity_core(draft_identity) != _identity_core(identity):
             return 1, _fail_draft(
                 artifact,
                 "draft.invalid",
@@ -305,9 +306,7 @@ def scan_repo(repo: Path, branch: str) -> dict[str, Any]:
         if current != branch:
             raise ScannerError("default branch is not available locally")
         ref = "HEAD"
-    files = sorted(
-        filter(None, _git(repo, "ls-tree", "-r", "--name-only", ref).splitlines())
-    )
+    files = sorted(filter(None, _git(repo, "ls-tree", "-r", "--name-only", ref).splitlines()))
     clean = not bool(
         _git(
             repo,
@@ -347,25 +346,55 @@ def scan_repo(repo: Path, branch: str) -> dict[str, Any]:
 
 def _facts(files: list[str]) -> dict[str, Any]:
     suffix_languages = {
-        ".py": "python", ".js": "javascript", ".jsx": "javascript",
-        ".ts": "typescript", ".tsx": "typescript", ".go": "go",
-        ".rs": "rust", ".rb": "ruby", ".java": "java", ".kt": "kotlin",
-        ".c": "c", ".h": "c", ".cc": "cpp", ".cpp": "cpp",
-        ".sh": "shell", ".php": "php",
+        ".py": "python",
+        ".js": "javascript",
+        ".jsx": "javascript",
+        ".ts": "typescript",
+        ".tsx": "typescript",
+        ".go": "go",
+        ".rs": "rust",
+        ".rb": "ruby",
+        ".java": "java",
+        ".kt": "kotlin",
+        ".c": "c",
+        ".h": "c",
+        ".cc": "cpp",
+        ".cpp": "cpp",
+        ".sh": "shell",
+        ".php": "php",
     }
     package_markers = {
-        "pyproject.toml": "pip", "requirements.txt": "pip", "poetry.lock": "poetry",
-        "package-lock.json": "npm", "package.json": "npm", "pnpm-lock.yaml": "pnpm",
-        "yarn.lock": "yarn", "Cargo.toml": "cargo", "go.mod": "go",
-        "Gemfile": "bundler", "pom.xml": "maven", "build.gradle": "gradle",
+        "pyproject.toml": "pip",
+        "requirements.txt": "pip",
+        "poetry.lock": "poetry",
+        "package-lock.json": "npm",
+        "package.json": "npm",
+        "pnpm-lock.yaml": "pnpm",
+        "yarn.lock": "yarn",
+        "Cargo.toml": "cargo",
+        "go.mod": "go",
+        "Gemfile": "bundler",
+        "pom.xml": "maven",
+        "build.gradle": "gradle",
     }
-    languages = sorted({suffix_languages[PurePosixPath(name).suffix.lower()] for name in files if PurePosixPath(name).suffix.lower() in suffix_languages})
+    languages = sorted(
+        {
+            suffix_languages[PurePosixPath(name).suffix.lower()]
+            for name in files
+            if PurePosixPath(name).suffix.lower() in suffix_languages
+        }
+    )
     basenames = {PurePosixPath(name).name for name in files}
     managers = sorted({manager for marker, manager in package_markers.items() if marker in basenames})
     ci_files = [name for name in files if _is_ci(name)]
     test_files = [name for name in files if _is_test(name)]
     docs_files = [name for name in files if _is_doc(name)]
-    setup_files = [name for name in files if PurePosixPath(name).name in package_markers or PurePosixPath(name).name in {"Makefile", "Dockerfile", "compose.yaml", "docker-compose.yml"}]
+    setup_files = [
+        name
+        for name in files
+        if PurePosixPath(name).name in package_markers
+        or PurePosixPath(name).name in {"Makefile", "Dockerfile", "compose.yaml", "docker-compose.yml"}
+    ]
     local_adapter = any(name in {".secretary/adapter.yaml", "secretary-adapter.yaml"} for name in files)
     return {
         "languages": languages,
@@ -380,18 +409,28 @@ def _facts(files: list[str]) -> dict[str, Any]:
 
 def _is_ci(name: str) -> bool:
     path = PurePosixPath(name)
-    return name.startswith(".github/workflows/") or name in {".gitlab-ci.yml", ".circleci/config.yml", "Jenkinsfile", "azure-pipelines.yml"} or path.name == "buildkite.yml"
+    return (
+        name.startswith(".github/workflows/")
+        or name in {".gitlab-ci.yml", ".circleci/config.yml", "Jenkinsfile", "azure-pipelines.yml"}
+        or path.name == "buildkite.yml"
+    )
 
 
 def _is_test(name: str) -> bool:
     path = PurePosixPath(name)
     lowered = name.lower()
-    return any(part in {"test", "tests", "spec", "specs"} for part in path.parts[:-1]) or bool(re.search(r"(^|[._-])(test|spec)([._-]|$)", path.name.lower())) or lowered.endswith("_test.go")
+    return (
+        any(part in {"test", "tests", "spec", "specs"} for part in path.parts[:-1])
+        or bool(re.search(r"(^|[._-])(test|spec)([._-]|$)", path.name.lower()))
+        or lowered.endswith("_test.go")
+    )
 
 
 def _is_doc(name: str) -> bool:
     path = PurePosixPath(name)
-    return path.name.lower().startswith(("readme", "contributing", "changelog")) or (path.parts and path.parts[0].lower() in {"doc", "docs"})
+    return path.name.lower().startswith(("readme", "contributing", "changelog")) or (
+        path.parts and path.parts[0].lower() in {"doc", "docs"}
+    )
 
 
 def _failed_scanner(code: str) -> dict[str, Any]:
@@ -401,8 +440,13 @@ def _failed_scanner(code: str) -> dict[str, Any]:
         "status": "failed",
         "repo": {"exists": code != "repo.missing"},
         "facts": {
-            "languages": [], "package_managers": [], "ci_files": [], "test_files": [],
-            "docs_files": [], "setup_files": [], "project_local_adapter": False,
+            "languages": [],
+            "package_managers": [],
+            "ci_files": [],
+            "test_files": [],
+            "docs_files": [],
+            "setup_files": [],
+            "project_local_adapter": False,
         },
         "findings": [{"code": code, "severity": "error", "message": "repository scan did not complete"}],
     }
@@ -423,16 +467,41 @@ def _base_artifact(repo: Path, project_id: str, branch: str, scanner: dict[str, 
             "adapter": _unresolved_adapter(),
             "findings": [],
         },
-        "provision": {"owner": "provision-agent", "status": "pending", "binding": {"enabled": False}, "adapter": _unresolved_adapter(), "findings": []},
+        "provision": {
+            "owner": "provision-agent",
+            "status": "pending",
+            "binding": {"enabled": False},
+            "adapter": _unresolved_adapter(),
+            "findings": [],
+        },
         "gate": {
-            "owner": "onboarding-gate", "status": "pending",
-            "checks": {"clean_worktree": "not-run", "setup": "not-run", "smoke": "not-run", "validation": "not-run", "artifact_policy": "not-run"},
-            "binding": {"enabled": False}, "findings": [],
+            "owner": "onboarding-gate",
+            "status": "pending",
+            "checks": {
+                "clean_worktree": "not-run",
+                "setup": "not-run",
+                "smoke": "not-run",
+                "validation": "not-run",
+                "artifact_policy": "not-run",
+            },
+            "binding": {"enabled": False},
+            "findings": [],
         },
         "ownership": {
-            "binding": {"draft_owner": "project-add", "enable_owner": "onboarding-gate", "initial_enabled": False},
-            "adapter": {"draft_owner": "project-add", "provision_owner": "provision-agent", "storage": "secretary-instance/adapter-drafts/<project>.yaml"},
-            "enable_transition": {"only_when": "gate.status == passed", "forbidden_owners": ["deterministic-scanner", "project-add", "provision-agent"]},
+            "binding": {
+                "draft_owner": "project-add",
+                "enable_owner": "onboarding-gate",
+                "initial_enabled": False,
+            },
+            "adapter": {
+                "draft_owner": "project-add",
+                "provision_owner": "provision-agent",
+                "storage": "secretary-instance/adapter-drafts/<project>.yaml",
+            },
+            "enable_transition": {
+                "only_when": "gate.status == passed",
+                "forbidden_owners": ["deterministic-scanner", "project-add", "provision-agent"],
+            },
         },
     }
 
@@ -463,7 +532,5 @@ def _reset_scanner_derived_state(artifact: dict[str, Any]) -> None:
 
 def _fail_draft(artifact: dict[str, Any], code: str, message: str) -> dict[str, Any]:
     failed = json.loads(json.dumps(artifact))
-    failed["draft"].setdefault("findings", []).append(
-        {"code": code, "severity": "error", "message": message}
-    )
+    failed["draft"].setdefault("findings", []).append({"code": code, "severity": "error", "message": message})
     return failed

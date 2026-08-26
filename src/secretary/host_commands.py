@@ -35,7 +35,9 @@ def run_reconcile_plan(args) -> int:
         return 2
     assert report.data_dir is not None
     packaged = resolve_installed_packaged(
-        report.instance, instance_path=report.instance_path.parent, data_dir=report.data_dir,
+        report.instance,
+        instance_path=report.instance_path.parent,
+        data_dir=report.data_dir,
     )
     errors = plan_input_errors(report.instance, report.bindings, packaged=packaged)
     if errors:
@@ -80,7 +82,11 @@ def _merge_adoption(managed, resource):
     if current is not None and current != resource:
         return [], current, "existing managed record has drifted"
     for item in managed:
-        if item.logical_id != resource.logical_id and item.kind == resource.kind and item.name == resource.name:
+        if (
+            item.logical_id != resource.logical_id
+            and item.kind == resource.kind
+            and item.name == resource.name
+        ):
             return [], current, "resource name is already owned by another logical id"
     updated = [item for item in managed if item.logical_id != resource.logical_id] + [resource]
     return updated, current, ""
@@ -93,7 +99,9 @@ def run_reconcile_adopt(args) -> int:
         return 2
     assert report.data_dir is not None
     packaged = resolve_installed_packaged(
-        report.instance, instance_path=report.instance_path.parent, data_dir=report.data_dir,
+        report.instance,
+        instance_path=report.instance_path.parent,
+        data_dir=report.data_dir,
     )
     errors = plan_input_errors(report.instance, report.bindings, packaged=packaged)
     if errors:
@@ -223,7 +231,9 @@ def run_reconcile_apply(args) -> int:
         return 2
     assert report.data_dir is not None
     packaged = resolve_installed_packaged(
-        report.instance, instance_path=report.instance_path.parent, data_dir=report.data_dir,
+        report.instance,
+        instance_path=report.instance_path.parent,
+        data_dir=report.data_dir,
     )
     expected = build_expectations(report.bindings, report.host)
     source = FixtureHostSource(Path(args.host_fixture)) if args.host_fixture else LiveHostSource()
@@ -273,11 +283,13 @@ def add_reconcile_subcommands(subcommands) -> None:
     plan.add_argument("--dry-run", action="store_true", help=argparse.SUPPRESS)
     source = plan.add_mutually_exclusive_group()
     source.add_argument(
-        "--host-fixture", metavar="DIR",
+        "--host-fixture",
+        metavar="DIR",
         help="read a deterministic fixture inventory instead of the live host",
     )
     source.add_argument(
-        "--offline", action="store_true",
+        "--offline",
+        action="store_true",
         help="reject live inventory; use --host-fixture for an offline plan",
     )
     plan.add_argument("--managed-manifest", metavar="FILE")
@@ -291,15 +303,14 @@ def add_reconcile_subcommands(subcommands) -> None:
         "--dry-run", action="store_true", help="show the changes without touching the host"
     )
     apply_command.add_argument(
-        "--host-fixture", metavar="DIR",
+        "--host-fixture",
+        metavar="DIR",
         help="read a deterministic fixture inventory instead of the live host",
     )
     apply_command.add_argument("--managed-manifest", metavar="FILE")
     apply_command.set_defaults(handler=run_reconcile_apply)
 
-    adopt = subcommands.add_parser(
-        "adopt", help="record one verified existing desired resource as managed"
-    )
+    adopt = subcommands.add_parser("adopt", help="record one verified existing desired resource as managed")
     adopt.add_argument("--instance", required=True)
     adopt.add_argument("--logical-id", required=True)
     adopt.add_argument("--managed-manifest", metavar="FILE")

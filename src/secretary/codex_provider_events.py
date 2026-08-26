@@ -77,9 +77,7 @@ class CodexProviderEventIngress:
     def commit_run(self, run: HeadRun) -> None:
         """Persist the handle/leaf rebinding before source binding or prompt delivery."""
         if not self.run.same_run(run):
-            raise CodexProviderSourceError(
-                "Codex provider ingress was handed another HeadRun", run=self.run
-            )
+            raise CodexProviderSourceError("Codex provider ingress was handed another HeadRun", run=self.run)
         self.persist(run)
         self.run = run
 
@@ -146,7 +144,8 @@ class CodexProviderEventIngress:
             return self.run
         path, identity, lines = candidates[0]
         parent_line = next(
-            line for line in lines
+            line
+            for line in lines
             if _is_parent_anchor(
                 line.event,
                 identity["parent_thread_id"],
@@ -227,7 +226,9 @@ class CodexProviderEventIngress:
                 durable_run = self.run
                 run = self._run_at_cursor(source, line)
                 recorder = CodexProviderEventRecorder(
-                    run, self._persist, expected_parent_thread_id=str(source.get("parent_thread_id") or ""),
+                    run,
+                    self._persist,
+                    expected_parent_thread_id=str(source.get("parent_thread_id") or ""),
                 )
                 outcome = enforce_provider_event(
                     recorder,
@@ -291,7 +292,8 @@ class CodexProviderEventIngress:
     def _run_at_cursor(self, source: Mapping[str, Any], line: SourceLine) -> HeadRun:
         policy = dict(self.run.fanout_policy)
         policy["provider_source"] = {
-            **dict(source), "cursor": {"line": line.number, "digest": line.digest},
+            **dict(source),
+            "cursor": {"line": line.number, "digest": line.digest},
         }
         return self.run.with_fanout_policy(policy)
 
@@ -358,7 +360,8 @@ def _read_source(path: Path) -> tuple[dict[str, Any], list[SourceLine]] | None:
 
 def _parent_thread(lines: Iterable[SourceLine], *, session_id: str = "") -> str:
     parents = [
-        str(_event_view(line.event).get("thread_id") or "") for line in lines
+        str(_event_view(line.event).get("thread_id") or "")
+        for line in lines
         if _is_parent_started(_event_view(line.event))
     ]
     parents = [parent for parent in parents if parent]
@@ -402,10 +405,7 @@ def _initial_range_matches(source: Mapping[str, Any], lines: list[SourceLine]) -
     if not isinstance(first, Mapping) or not isinstance(root, Mapping) or not isinstance(last, Mapping):
         return False
     first_line = lines[0]
-    if (
-        first.get("line") != first_line.number
-        or str(first.get("digest") or "") != first_line.digest
-    ):
+    if first.get("line") != first_line.number or str(first.get("digest") or "") != first_line.digest:
         return False
     root_line = root.get("line")
     root_digest = str(root.get("digest") or "")
@@ -443,9 +443,7 @@ def _range_digest(lines: Iterable[SourceLine]) -> str:
     return digest.hexdigest()
 
 
-def _provider_events(
-    event: Any, expected_parent: str, *, raw_event_digest: str
-) -> Iterable[dict[str, Any]]:
+def _provider_events(event: Any, expected_parent: str, *, raw_event_digest: str) -> Iterable[dict[str, Any]]:
     """Map one journal line to policy events without retaining its raw content.
 
     ``raw_event_digest`` is the SHA-256 of the exact JSONL line, rather than a digest of a
@@ -455,14 +453,18 @@ def _provider_events(
     source = {"_secretary_raw_event_digest": raw_event_digest}
     if isinstance(event, dict) and event.get("_secretary_malformed_provider_event"):
         yield {
-            "type": EVENT_UNPARSEABLE_PROVIDER_EVENT, "parent_thread_id": expected_parent,
-            "provider_event": event, **source,
+            "type": EVENT_UNPARSEABLE_PROVIDER_EVENT,
+            "parent_thread_id": expected_parent,
+            "provider_event": event,
+            **source,
         }
         return
     if not isinstance(event, dict):
         yield {
-            "type": EVENT_UNPARSEABLE_PROVIDER_EVENT, "parent_thread_id": expected_parent,
-            "provider_event": event, **source,
+            "type": EVENT_UNPARSEABLE_PROVIDER_EVENT,
+            "parent_thread_id": expected_parent,
+            "provider_event": event,
+            **source,
         }
         return
     view = _event_view(event)
@@ -470,8 +472,10 @@ def _provider_events(
         thread_id = str(view.get("thread_id") or "")
         if thread_id != expected_parent:
             yield {
-                "type": EVENT_UNKNOWN_THREAD_EDGE, "parent_thread_id": thread_id,
-                "provider_event": event, **source,
+                "type": EVENT_UNKNOWN_THREAD_EDGE,
+                "parent_thread_id": thread_id,
+                "provider_event": event,
+                **source,
             }
         return
     item = view.get("item")
@@ -511,14 +515,16 @@ def _provider_events(
                 "parent_thread_id": parent,
                 "child_thread_id": child,
                 "tool": tool,
-                "provider_event": event, **source,
+                "provider_event": event,
+                **source,
             }
         return
     yield {
         "type": EVENT_COLLABORATION_CALL,
         "parent_thread_id": parent,
         "tool": tool,
-        "provider_event": event, **source,
+        "provider_event": event,
+        **source,
     }
 
 

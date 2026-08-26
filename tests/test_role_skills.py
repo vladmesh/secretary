@@ -157,8 +157,7 @@ class CanonicalRegistryTests(unittest.TestCase):
                 self.assertTrue(root.startswith("~/"), root)
 
     def test_a_shipped_target_root_expands_into_the_installing_users_home(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, \
-             mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
             registry = load_registry(self.instance, product_manifest=MANIFEST)
             destinations = {item.dest for item in iter_expected(registry)}
             commands = {command.dest for command in iter_expected_commands(registry)}
@@ -168,11 +167,9 @@ class CanonicalRegistryTests(unittest.TestCase):
 
     def test_a_shipped_skill_source_stays_beside_the_manifest_that_declared_it(self) -> None:
         """Only the target moves with the home: a source is a file in a checkout."""
-        with tempfile.TemporaryDirectory() as tmp, \
-             mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
             sources = {
-                item.source
-                for item in iter_expected(load_registry(self.instance, product_manifest=MANIFEST))
+                item.source for item in iter_expected(load_registry(self.instance, product_manifest=MANIFEST))
             }
 
         self.assertTrue(sources)
@@ -251,9 +248,7 @@ class LayeredRegistryTests(OverlayFixture):
 
         registry = load_registry(self.instance)
 
-        self.assertEqual(
-            [skill for skill, _ in registry.roles["secretary"]], ["shipped", "personal"]
-        )
+        self.assertEqual([skill for skill, _ in registry.roles["secretary"]], ["shipped", "personal"])
 
     def test_each_skill_resolves_beside_the_manifest_that_declared_it(self) -> None:
         self.write_overlay('[roles.secretary]\nskills = ["personal"]\n')
@@ -261,9 +256,7 @@ class LayeredRegistryTests(OverlayFixture):
 
         by_skill = {item.skill: item for item in iter_expected(load_registry(self.instance))}
 
-        self.assertEqual(
-            by_skill["shipped"].source, self.product.parent / "roles" / "secretary" / "shipped"
-        )
+        self.assertEqual(by_skill["shipped"].source, self.product.parent / "roles" / "secretary" / "shipped")
         self.assertEqual(by_skill["shipped"].origin, PRODUCT_ORIGIN)
         self.assertEqual(by_skill["personal"].source, self.personal_skill_dir())
         self.assertEqual(by_skill["personal"].origin, INSTANCE_ORIGIN)
@@ -289,10 +282,7 @@ class LayeredRegistryTests(OverlayFixture):
 
         self.assertFalse(result["ok"])
         self.assertEqual(
-            [
-                (item["skill"], item["origin"], item["manifest"])
-                for item in result["source_missing"]
-            ],
+            [(item["skill"], item["origin"], item["manifest"]) for item in result["source_missing"]],
             [("personal", INSTANCE_ORIGIN, str(overlay))],
         )
 
@@ -329,9 +319,7 @@ class LayeredRegistryTests(OverlayFixture):
     def test_an_overlay_target_replaces_the_product_target_of_the_same_name(self) -> None:
         """A target is one shell root: merging two of them means nothing, so the last one wins."""
         other = self.root / "other-shell"
-        self.write_overlay(
-            f'[targets.t]\nshell = "codex"\nroot = "{other}"\nroles = ["secretary"]\n'
-        )
+        self.write_overlay(f'[targets.t]\nshell = "codex"\nroot = "{other}"\nroles = ["secretary"]\n')
 
         registry = load_registry(self.instance)
 
@@ -499,7 +487,7 @@ class MalformedManifestTests(OverlayFixture):
         self.assertIn("ghost", output)
 
     def test_a_malformed_overlay_makes_sync_write_nothing(self) -> None:
-        overlay = self.write_overlay('[roles.secretary]\nskills = [1]\n')
+        overlay = self.write_overlay("[roles.secretary]\nskills = [1]\n")
 
         code, output = self.run_command("sync")
 
@@ -527,9 +515,7 @@ class MalformedManifestTests(OverlayFixture):
     def test_a_skill_name_that_is_a_path_cannot_leave_the_shell_root(self) -> None:
         """A name is joined onto a shell root, so a name with a separator moves the write."""
         overlay = self.write_overlay('[roles.secretary]\nskills = ["../escaped"]\n')
-        self.write_skill(
-            self.instance / "skills" / "roles" / "secretary" / "escaped", "# escaped\n"
-        )
+        self.write_skill(self.instance / "skills" / "roles" / "secretary" / "escaped", "# escaped\n")
         self.shell_root.mkdir(parents=True)
 
         code, output = self.run_command("sync")
@@ -583,10 +569,7 @@ class CommandEntryPointTests(OverlayFixture):
         self.assertTrue(os.access(self.link, os.X_OK))
         self.assertTrue(bool(self.helper.stat().st_mode & stat.S_IXUSR))
         self.assertEqual(
-            [
-                (item["command"], item["was"], item["origin"], item["manifest"])
-                for item in result["linked"]
-            ],
+            [(item["command"], item["was"], item["origin"], item["manifest"]) for item in result["linked"]],
             [("personal", "missing", INSTANCE_ORIGIN, str(overlay))],
         )
 
@@ -758,9 +741,7 @@ class CommandEntryPointTests(OverlayFixture):
         with contextlib.redirect_stdout(out):
             main(["audit", "--instance", str(self.instance)])
 
-        line = next(
-            line for line in out.getvalue().splitlines() if line.startswith("- personal ")
-        )
+        line = next(line for line in out.getvalue().splitlines() if line.startswith("- personal "))
         self.assertIn(str(overlay), line)
         self.assertIn(INSTANCE_ORIGIN, line)
 

@@ -177,8 +177,12 @@ def review_infrastructure_failure(
     """
     ref = task["ref"]
     failure = classify_bring_up_failure(
-        exc, record, REVIEW_ROLE, stage=STAGE_REVIEW,
-        attempt_id=record.attempt_id or attempt_id, detail=reason,
+        exc,
+        record,
+        REVIEW_ROLE,
+        stage=STAGE_REVIEW,
+        attempt_id=record.attempt_id or attempt_id,
+        detail=reason,
     )
     if failure.infrastructure:
         held = review_infrastructure_retry(
@@ -203,7 +207,10 @@ def review_infrastructure_failure(
     records[ref] = record
     runtime.save_records(payload, records)
     return {
-        "status": "blocked", "step": "review", "pilot_ref": ref, "reason": outcome_reason,
+        "status": "blocked",
+        "step": "review",
+        "pilot_ref": ref,
+        "reason": outcome_reason,
         **failure.outcome_fields(blocked_reason),
     }
 
@@ -288,7 +295,10 @@ def command_terminal_status(
         leaf = record.review_leaf if kind == "review" else record.worker_leaf
         pid_status = _head_run_process_status(
             _pid_file_path(kind, task["ref"]),
-            run=run, role=kind, task=f"card:{task['ref']}", leaf=leaf,
+            run=run,
+            role=kind,
+            task=f"card:{task['ref']}",
+            leaf=leaf,
         )
         # A disconnected pane is otherwise terminal evidence for a relaunch.  Classify the
         # expected HeadRun first: its old heartbeat path can now name a live foreign process,
@@ -306,14 +316,18 @@ def command_terminal_status(
             # or dead process behind a dropped pane within the same tick, instead of
             # reading the disconnect as an unobservable head.
             return {
-                "known": True, "live": False, "reason": "disconnected",
+                "known": True,
+                "live": False,
+                "reason": "disconnected",
                 "pid_status": dict(pid_status),
             }
         if _heartbeat_is_dead(pid_status):
             # The pane is connected and Orca kept its wrapping shell open, but the head process
             # itself is gone (secretary-751): a provider crash or a killed runtime, not silence.
             return {
-                "known": True, "live": False, "reason": "process-exited",
+                "known": True,
+                "live": False,
+                "reason": "process-exited",
                 "pid_status": dict(pid_status),
             }
         # The host already read Orca's milliseconds into epoch seconds, and 0.0 is its answer for a
@@ -347,7 +361,10 @@ def command_terminal_status(
                 activity = max(activity or 0.0, observed_at)
         pid_confirmed = _heartbeat_is_live_match(pid_status)
         status = {
-            "known": True, "live": True, "reason": "live", "last_activity": activity,
+            "known": True,
+            "live": True,
+            "reason": "live",
+            "last_activity": activity,
             # A pid-heartbeat that proves this exact process still runs; only this — not a
             # silent pane — should let a wait watchdog trust liveness past the timing ceilings.
             "pid_confirmed": pid_confirmed,
@@ -384,7 +401,10 @@ def command_terminal_status(
     leaf = record.review_leaf if kind == "review" else record.worker_leaf
     pid_status = _head_run_process_status(
         _pid_file_path(kind, task["ref"]),
-        run=run, role=kind, task=f"card:{task['ref']}", leaf=leaf,
+        run=run,
+        role=kind,
+        task=f"card:{task['ref']}",
+        leaf=leaf,
     )
     if _heartbeat_is_mismatch(pid_status):
         return {
@@ -399,14 +419,19 @@ def command_terminal_status(
         # seen as Suspended, never aged as Unverifiable), and the pid answers the
         # process axis alone: no pane flag exists on this shape.
         return {
-            "known": True, "live": True, "reason": "pid", "pid_confirmed": True,
+            "known": True,
+            "live": True,
+            "reason": "pid",
+            "pid_confirmed": True,
             "pid_status": dict(pid_status),
         }
     if _heartbeat_is_dead(pid_status):
         # The pane vanished AND the heartbeat names a gone process: the reclaim is
         # evidence-backed, so the classification rides along and the reduction sees Dead.
         return {
-            "known": True, "live": False, "reason": "missing-terminal",
+            "known": True,
+            "live": False,
+            "reason": "missing-terminal",
             "pid_status": dict(pid_status),
         }
     if not pid_status.get("known"):
@@ -466,10 +491,7 @@ def _admitted_provider_progress_for_status(value: Any, run: Any) -> dict[str, An
             "state": "unavailable",
             "reason": "persisted HeadRun is unavailable for provider-progress admission",
         }
-    if (
-        result.get("head_run_id") != run_id
-        or result.get("head_run_fingerprint") != fingerprint
-    ):
+    if result.get("head_run_id") != run_id or result.get("head_run_fingerprint") != fingerprint:
         return {
             "state": "identity_mismatch",
             "reason": "provider-progress observation does not name the persisted HeadRun",
@@ -507,9 +529,7 @@ def _pane_work_state(host: Any, handle: str) -> str:
     return "working" if readiness == READINESS_BUSY else ""
 
 
-def end_review_pane(
-    host: Any, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER
-) -> None:
+def end_review_pane(host: Any, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER) -> None:
     """Close the reviewer's pane and forget it. Used wherever the reviewer's lifecycle ends on its own
     — a red verdict, a respawn after a silent reviewer — so the next bring-up cannot mistake a stale
     handle for a live pane, and so the worker's workspace survives untouched.
@@ -544,7 +564,9 @@ def recover_review_launch(
         # Inventory silence cannot prove the reviewer is absent. Preserve launch ambiguity and ask
         # the same liveness question next tick; never launch beside a possibly-live head.
         return {
-            "status": "degraded", "step": "review", "pilot_ref": ref,
+            "status": "degraded",
+            "step": "review",
+            "pilot_ref": ref,
             "attempt_id": record.attempt_id or attempt_id,
             "action": "review-inventory-unavailable",
             "reason": scrub_host_output(str(exc)),
@@ -810,10 +832,7 @@ def _record_review_delivery_failure(record: DispatcherRecord, exc: Exception) ->
     # The reviewer can receive its prompt before a later launch step, such as freezing the
     # retained worker, fails.  That successful receipt still has to survive recovery, but it is
     # not a delivery failure merely because the enclosing reviewer bring-up later aborted.
-    if (
-        not bool(evidence.get("turn_confirmed"))
-        and delivery_readiness_state(evidence) != READINESS_BUSY
-    ):
+    if not bool(evidence.get("turn_confirmed")) and delivery_readiness_state(evidence) != READINESS_BUSY:
         record.review_delivery_failures += 1
 
 
@@ -877,16 +896,28 @@ def start_review(
             raise
         record.state = "review_starting"
         return review_infrastructure_failure(
-            runtime, task, records, record, attempt_id, payload=payload,
-            reason=scrub_host_output(str(exc)), outcome_reason="review resource check failed",
+            runtime,
+            task,
+            records,
+            record,
+            attempt_id,
+            payload=payload,
+            reason=scrub_host_output(str(exc)),
+            outcome_reason="review resource check failed",
             exc=exc,
         )
     if not readiness.launch_allowed:
         record.state = "review_starting"
         if record.gate_state == "green":
             return review_infrastructure_failure(
-                runtime, task, records, record, attempt_id, payload=payload,
-                reason=readiness.reason, outcome_reason="review resource unavailable",
+                runtime,
+                task,
+                records,
+                record,
+                attempt_id,
+                payload=payload,
+                reason=readiness.reason,
+                outcome_reason="review resource unavailable",
             )
         return {
             "status": "skipped",
@@ -906,9 +937,7 @@ def start_review(
     if callable(prompt_document_path):
         # The real host writes the review packet outside the checkout. Its preflight descriptor
         # must carry that same pointer, not the historical in-worktree placeholder.
-        intent_kwargs["document"] = str(
-            prompt_document_path(REVIEW_ROLE, ref, record.review_baseline)
-        )
+        intent_kwargs["document"] = str(prompt_document_path(REVIEW_ROLE, ref, record.review_baseline))
     failure = write_launch_intent(
         runtime,
         payload,
@@ -945,8 +974,14 @@ def start_review(
         record.state = "review_starting"
         if record.gate_state == "green":
             return review_infrastructure_failure(
-                runtime, task, records, record, attempt_id, payload=payload,
-                reason=failure, outcome_reason="review launch intent unavailable",
+                runtime,
+                task,
+                records,
+                record,
+                attempt_id,
+                payload=payload,
+                reason=failure,
+                outcome_reason="review launch intent unavailable",
             )
         return launch_intent_unwritable(
             step="review",
@@ -1006,8 +1041,14 @@ def start_review(
             # `pane-stayed-ready`. Green candidates use only this infrastructure counter; the old
             # pane deferral counter must not create a second ceiling or overwrite this action.
             return review_infrastructure_failure(
-                runtime, task, records, record, attempt_id, payload=payload,
-                reason=scrub_host_output(str(exc)), outcome_reason="host review failed",
+                runtime,
+                task,
+                records,
+                record,
+                attempt_id,
+                payload=payload,
+                reason=scrub_host_output(str(exc)),
+                outcome_reason="host review failed",
                 exc=exc,
             )
         else:
@@ -1031,7 +1072,10 @@ def start_review(
         # the same call the worker path makes, so the card's reason, the class in the transition and
         # this tick's outcome are one statement. Nothing is relaunched from here.
         failure = classify_bring_up_failure(
-            exc, record, REVIEW_ROLE, stage=STAGE_REVIEW,
+            exc,
+            record,
+            REVIEW_ROLE,
+            stage=STAGE_REVIEW,
             attempt_id=record.attempt_id or attempt_id,
         )
         blocked_reason = bring_up_blocked_reason(
@@ -1052,7 +1096,9 @@ def start_review(
         )
         records.pop(ref, None)
         return {
-            "status": "blocked", "step": "review", "pilot_ref": ref,
+            "status": "blocked",
+            "step": "review",
+            "pilot_ref": ref,
             "reason": "host review failed",
             **failure.outcome_fields(blocked_reason),
         }
@@ -1064,8 +1110,14 @@ def start_review(
     # identity, the lifecycle and, once a stop begins, its initiator live there — and it is written
     # by that one call rather than here, so no durable save separates the head from its run.
     confirm_launch_intent(
-        runtime, payload, records, ref, record,
-        handle=launch.handle, leaf=launch.leaf, run=launch.run,
+        runtime,
+        payload,
+        records,
+        ref,
+        record,
+        handle=launch.handle,
+        leaf=launch.leaf,
+        run=launch.run,
         head_run=dict(launch.head_run),
     )
     record.review_handle = launch.handle

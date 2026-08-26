@@ -9,6 +9,7 @@ Guards live here, not in prompts. `move_card` defers to model.check_move; `claim
 only way into "In progress" and runs the entry guards under a host-local lock — Kanboard has no
 compare-and-swap, so a single dispatcher plus the lock is what serializes claims.
 """
+
 from __future__ import annotations
 
 import os
@@ -52,9 +53,7 @@ def _create_card_row(pid: int, project: str, ref: str | None, **params) -> tuple
     with reference_allocation_lock():
         reference = ref or next_reference(_all_cards(pid), f"{project}-")
         if call("getTaskByReference", project_id=pid, reference=reference):
-            raise KanboardError(
-                f"reference {reference} is already claimed on the board; no card was created"
-            )
+            raise KanboardError(f"reference {reference} is already claimed on the board; no card was created")
         return int(call("createTask", project_id=pid, reference=reference, **params)), reference
 
 
@@ -93,7 +92,7 @@ def _column_id(pid: int, title: str) -> int:
     raise KanboardError(
         f"no column {title!r} on board (an empty board is reconciled by `pipeline setup`; a board "
         "that holds cards needs `python3 -P -m secretary board migrate-assessment "
-        "--instance \"$SECRETARY_INSTANCE\"`)"
+        '--instance "$SECRETARY_INSTANCE"`)'
     )
 
 
@@ -118,7 +117,7 @@ def _proposal_column(pid: int) -> str:
         f"this board's first column is {first!r}, not the Product backlog "
         f"{model.PROPOSAL_COLUMN!r}, so an agent proposal has nowhere to go. An empty board is "
         "reconciled by `pipeline setup`; a board that holds cards is repaired by hand or by "
-        "`python3 -P -m secretary board migrate-assessment --instance \"$SECRETARY_INSTANCE\"`. "
+        '`python3 -P -m secretary board migrate-assessment --instance "$SECRETARY_INSTANCE"`. '
         "Report the proposal in the verdict or "
         "the retro output instead."
     )
@@ -158,7 +157,7 @@ def ensure_structure() -> dict:
             f"board has cards but its columns are {', '.join(titles)} "
             f"(expected: {', '.join(model.COLUMNS)}). Reconciling by index here would rename "
             "columns under the cards standing in them. Run `python3 -P -m secretary board "
-            "migrate-assessment --instance \"$SECRETARY_INSTANCE\"` if the board carries the earlier "
+            'migrate-assessment --instance "$SECRETARY_INSTANCE"` if the board carries the earlier '
             "six-column layout; any other "
             "layout is a manual repair."
         )
@@ -168,7 +167,7 @@ def ensure_structure() -> dict:
                 call("updateColumn", column_id=int(current[i]["id"]), title=title)
         else:
             call("addColumn", project_id=pid, title=title)
-    for extra in current[len(model.COLUMNS):]:
+    for extra in current[len(model.COLUMNS) :]:
         call("removeColumn", column_id=int(extra["id"]))
     admin_added = _ensure_admin_member(pid)
     return {"board_id": pid, "columns": model.COLUMNS, "admin_member_added": admin_added}
@@ -195,9 +194,7 @@ def _check_review_head(review_head: str) -> None:
 def _check_no_review_role(role: str | None) -> None:
     """Only PO may deliberately disable layer 3 through board-facing create/update paths."""
     if role not in (None, "po"):
-        raise model.GuardError(
-            f"role {role!r} may not set review_head={model.NO_REVIEW_HEAD!r} (po only)"
-        )
+        raise model.GuardError(f"role {role!r} may not set review_head={model.NO_REVIEW_HEAD!r} (po only)")
 
 
 def _effective_review_head(meta: dict) -> str:
@@ -328,8 +325,9 @@ def _blocked_by_chain(pid: int, ref: str) -> set[str]:
     return seen
 
 
-def _check_worker_continuation(project: str, column: str, blocked_by: str | None,
-                               own_ref: str | None) -> None:
+def _check_worker_continuation(
+    project: str, column: str, blocked_by: str | None, own_ref: str | None
+) -> None:
     """Guard for a worker's own `create` (triggered-agents-261): a card landing straight in Ready
     is only legal as a continuation of the worker's own approved chain — `own_ref` (the card
     reference this worker is running as) itself, or one of its blocked_by predecessors,
@@ -344,8 +342,7 @@ def _check_worker_continuation(project: str, column: str, blocked_by: str | None
         )
     if not own_ref:
         raise model.GuardError(
-            "worker create into Ready needs --own-ref (the card reference this worker is "
-            "running as)"
+            "worker create into Ready needs --own-ref (the card reference this worker is running as)"
         )
     pid = board_id()
     own_task = _get_by_ref(own_ref)
@@ -361,12 +358,21 @@ def _check_worker_continuation(project: str, column: str, blocked_by: str | None
         )
 
 
-def create_card(project: str, task_type: str, title: str, description: str = "",
-                ref: str | None = None, column: str = "Ready",
-                blocked_by: str | None = None, head: str | None = None,
-                slug: str | None = None, base_branch: str | None = None,
-                review_head: str | None = None, role: str | None = None,
-                own_ref: str | None = None) -> dict:
+def create_card(
+    project: str,
+    task_type: str,
+    title: str,
+    description: str = "",
+    ref: str | None = None,
+    column: str = "Ready",
+    blocked_by: str | None = None,
+    head: str | None = None,
+    slug: str | None = None,
+    base_branch: str | None = None,
+    review_head: str | None = None,
+    role: str | None = None,
+    own_ref: str | None = None,
+) -> dict:
     """PO/steward/worker: create a spec card in Ready, keyed by reference, with metadata.
 
     Ready is the only default column; a PO may explicitly create in the board's first column, which
@@ -385,30 +391,68 @@ def create_card(project: str, task_type: str, title: str, description: str = "",
     proposal = role == "po" and column == model.PROPOSAL_COLUMN
     if proposal:
         column = _proposal_column(board_id())
-    return _create_card(project=project, task_type=task_type, title=title, description=description,
-                        ref=ref, column=column, blocked_by=blocked_by, head=head, slug=slug,
-                        base_branch=base_branch, review_head=review_head, role=role,
-                        own_ref=own_ref, proposal=proposal)
+    return _create_card(
+        project=project,
+        task_type=task_type,
+        title=title,
+        description=description,
+        ref=ref,
+        column=column,
+        blocked_by=blocked_by,
+        head=head,
+        slug=slug,
+        base_branch=base_branch,
+        review_head=review_head,
+        role=role,
+        own_ref=own_ref,
+        proposal=proposal,
+    )
 
 
-def _create_proposal_card(project: str, task_type: str, title: str, description: str,
-                          ref: str | None, head: str | None, slug: str | None) -> dict:
+def _create_proposal_card(
+    project: str,
+    task_type: str,
+    title: str,
+    description: str,
+    ref: str | None,
+    head: str | None,
+    slug: str | None,
+) -> dict:
     """The agent-proposal exception to the Ready-only rule, private on purpose.
 
     It takes no column and no proposal flag from its caller, so the only way to write outside Ready
     is through the proposal helpers. The card is stamped record_type=task.
     """
-    return _create_card(project=project, task_type=task_type, title=title,
-                        description=description, ref=ref, column=_proposal_column(board_id()),
-                        head=head, slug=slug, proposal=True)
+    return _create_card(
+        project=project,
+        task_type=task_type,
+        title=title,
+        description=description,
+        ref=ref,
+        column=_proposal_column(board_id()),
+        head=head,
+        slug=slug,
+        proposal=True,
+    )
 
 
-def _create_card(*, project: str, task_type: str, title: str, description: str,
-                 ref: str | None, column: str, blocked_by: str | None = None,
-                 head: str | None = None, slug: str | None = None,
-                 base_branch: str | None = None, review_head: str | None = None,
-                 role: str | None = None, own_ref: str | None = None,
-                 proposal: bool) -> dict:
+def _create_card(
+    *,
+    project: str,
+    task_type: str,
+    title: str,
+    description: str,
+    ref: str | None,
+    column: str,
+    blocked_by: str | None = None,
+    head: str | None = None,
+    slug: str | None = None,
+    base_branch: str | None = None,
+    review_head: str | None = None,
+    role: str | None = None,
+    own_ref: str | None = None,
+    proposal: bool,
+) -> dict:
     """Shared card-create body; see create_card and _create_proposal_card for the two entrypoints."""
     if task_type not in model.TASK_TYPES:
         raise model.GuardError(f"unknown task_type {task_type!r} (types: {', '.join(model.TASK_TYPES)})")
@@ -432,10 +476,12 @@ def _create_card(*, project: str, task_type: str, title: str, description: str,
     pid = board_id()
     col_id = _column_id(pid, column)
     sw_id = _ensure_swimlane(pid, project)
-    task_id, ref = _create_card_row(pid, project, ref, title=title, column_id=col_id,
-                                    swimlane_id=sw_id, description=description)
+    task_id, ref = _create_card_row(
+        pid, project, ref, title=title, column_id=col_id, swimlane_id=sw_id, description=description
+    )
     values = {
-        model.META_TASK_TYPE: task_type, model.META_PROJECT: project,
+        model.META_TASK_TYPE: task_type,
+        model.META_PROJECT: project,
         # Every card this route creates is an execution task, wherever it lands: a card without
         # a record type has no place on the board.
         model.META_RECORD_TYPE: model.RECORD_TASK,
@@ -472,22 +518,33 @@ def create_report_card(project: str, title: str, slug: str, description: str = "
     pid = board_id()
     col_id = _column_id(pid, model.IN_PROGRESS)
     sw_id = _ensure_swimlane(pid, project)
-    task_id, ref = _create_card_row(pid, project, None, title=title, column_id=col_id,
-                                    swimlane_id=sw_id, description=description)
-    call("saveTaskMetadata", task_id=task_id, values={
-        model.META_TASK_TYPE: "research",
-        model.META_RECORD_TYPE: model.RECORD_TASK,
-        model.META_PROJECT: project,
-        model.META_SLUG: slug,
-        model.META_CLAIM: slug,
-        model.META_STEWARD_REPORT: "1",
-    })
+    task_id, ref = _create_card_row(
+        pid, project, None, title=title, column_id=col_id, swimlane_id=sw_id, description=description
+    )
+    call(
+        "saveTaskMetadata",
+        task_id=task_id,
+        values={
+            model.META_TASK_TYPE: "research",
+            model.META_RECORD_TYPE: model.RECORD_TASK,
+            model.META_PROJECT: project,
+            model.META_SLUG: slug,
+            model.META_CLAIM: slug,
+            model.META_STEWARD_REPORT: "1",
+        },
+    )
     return {"action": "created", "id": task_id, "reference": ref, "column": model.IN_PROGRESS}
 
 
-def update_card(role: str, reference: str, slug: str | None = None,
-                head: str | None = None, blocked_by: str | None = None,
-                base_branch: str | None = None, review_head: str | None = None) -> dict:
+def update_card(
+    role: str,
+    reference: str,
+    slug: str | None = None,
+    head: str | None = None,
+    blocked_by: str | None = None,
+    base_branch: str | None = None,
+    review_head: str | None = None,
+) -> dict:
     """PO-only: patch slug/head/review_head/blocked_by/base_branch metadata on an existing card.
     Only the fields passed (not None) change; column and claim are never touched. Same validation
     as create_card (slug SLUG_RE, head/review_head against heads.toml, blocked_by pointing at an
@@ -537,8 +594,14 @@ def update_card(role: str, reference: str, slug: str | None = None,
 def _move_position(pid: int, task_id: int, column_id: int, swimlane_id: int) -> None:
     """moveTaskPosition, raising if Kanboard reports failure. It returns false instead of an
     RPC error, so a bare call() would pass silently (e.g. claim stamped, card still Ready)."""
-    ok = call("moveTaskPosition", project_id=pid, task_id=task_id,
-              column_id=column_id, position=1, swimlane_id=swimlane_id)
+    ok = call(
+        "moveTaskPosition",
+        project_id=pid,
+        task_id=task_id,
+        column_id=column_id,
+        position=1,
+        swimlane_id=swimlane_id,
+    )
     if not ok:
         raise KanboardError(f"moveTaskPosition failed for task {task_id} -> column {column_id}")
 
@@ -569,13 +632,11 @@ def move_card(role: str, reference: str, to_column: str, reason: str = "") -> di
     reason_text = reason.strip()
     if move == model.STEWARD_OVERRIDE and not reason_text:
         raise model.GuardError(
-            "Blocked -> Done requires a non-empty justification comment (--reason), "
-            "supplied in the same call"
+            "Blocked -> Done requires a non-empty justification comment (--reason), supplied in the same call"
         )
     if role == "steward" and move in model.STEWARD_ESCALATIONS and not reason_text:
         raise model.GuardError(
-            f"{cur} -> Blocked requires a non-empty escalation reason (--reason), "
-            "supplied in the same call"
+            f"{cur} -> Blocked requires a non-empty escalation reason (--reason), supplied in the same call"
         )
     if move == model.STEWARD_REPORT_DONE:
         meta = call("getTaskMetadata", task_id=int(task["id"])) or {}
@@ -588,14 +649,16 @@ def move_card(role: str, reference: str, to_column: str, reason: str = "") -> di
     if cur == "Issues" and not meta.get(model.META_RECORD_TYPE):
         meta_updates[model.META_RECORD_TYPE] = "task"
     if to_column == "Ready":
-        meta_updates.update({
-            model.META_CLAIM: "",
-            model.META_RESOLVED_HEAD: "",
-            model.META_RESOLVED_REVIEW_HEAD: "",
-            model.META_RETRY_SAME: "",
-            model.META_RETRY_SWITCH: "",
-            model.META_RETRY_HEADS: "",
-        })
+        meta_updates.update(
+            {
+                model.META_CLAIM: "",
+                model.META_RESOLVED_HEAD: "",
+                model.META_RESOLVED_REVIEW_HEAD: "",
+                model.META_RETRY_SAME: "",
+                model.META_RETRY_SWITCH: "",
+                model.META_RETRY_HEADS: "",
+            }
+        )
     elif cur == "Validate" and to_column != "Validate":
         meta_updates[model.META_RESOLVED_REVIEW_HEAD] = ""
     if meta_updates:
@@ -655,9 +718,7 @@ def claim_card(reference: str, worker: str, cap: int = 3, resolved_head: str | N
         task_type = meta.get(model.META_TASK_TYPE)
         project = meta.get(model.META_PROJECT)
         if not task_type or not project:
-            raise model.GuardError(
-                f"{reference!r} is missing project/task_type metadata"
-            )
+            raise model.GuardError(f"{reference!r} is missing project/task_type metadata")
         actives = call("getAllTasks", project_id=pid, status_id=1) or []
 
         # Validate and Assessment count toward both guards too: a card in either still owns its
@@ -675,8 +736,11 @@ def claim_card(reference: str, worker: str, cap: int = 3, resolved_head: str | N
                 # No bring-up, no workspace, no worker session — doesn't hold a WORKER_CAP
                 # slot and isn't a code card either.
                 continue
-            if task_type == "code" and tmeta.get(model.META_PROJECT) == project \
-                    and tmeta.get(model.META_TASK_TYPE) == "code":
+            if (
+                task_type == "code"
+                and tmeta.get(model.META_PROJECT) == project
+                and tmeta.get(model.META_TASK_TYPE) == "code"
+            ):
                 raise model.GuardError(
                     f"one code task per project: {t.get('reference') or t['id']!r} "
                     f"({project}) is already in {col!r}"
@@ -688,10 +752,14 @@ def claim_card(reference: str, worker: str, cap: int = 3, resolved_head: str | N
                 f"cap reached: {wip} card(s) in In progress/Validate/Assessment (cap {cap})"
             )
 
-        call("saveTaskMetadata", task_id=tid, values={
-            model.META_CLAIM: worker,
-            model.META_RESOLVED_HEAD: selected_head,
-        })
+        call(
+            "saveTaskMetadata",
+            task_id=tid,
+            values={
+                model.META_CLAIM: worker,
+                model.META_RESOLVED_HEAD: selected_head,
+            },
+        )
         meta = call("getTaskMetadata", task_id=tid) or {}
         _sync_head_tags(pid, tid, meta)
         _move_position(pid, tid, _column_id(pid, model.IN_PROGRESS), int(task["swimlane_id"]))
@@ -749,43 +817,76 @@ def verdict(reference: str, kind: str, body: str = "") -> dict:
     return out
 
 
-def reviewer_idea(project: str, title: str, description: str = "", task_type: str = "code",
-                  ref: str | None = None, head: str | None = None,
-                  slug: str | None = None) -> dict:
+def reviewer_idea(
+    project: str,
+    title: str,
+    description: str = "",
+    task_type: str = "code",
+    ref: str | None = None,
+    head: str | None = None,
+    slug: str | None = None,
+) -> dict:
     """Reviewer-only: file an out-of-scope finding as a proposal card (the reviewer's single
     code-creation exception). Title and description are scrubbed for the same reason as a verdict.
     The card goes to the board's first column; _proposal_column resolves it."""
-    return _create_proposal_card(project=project, task_type=task_type,
-                                 title=scrub_secrets(title),
-                                 description=scrub_secrets(description),
-                                 ref=ref, head=head, slug=slug)
+    return _create_proposal_card(
+        project=project,
+        task_type=task_type,
+        title=scrub_secrets(title),
+        description=scrub_secrets(description),
+        ref=ref,
+        head=head,
+        slug=slug,
+    )
 
 
-def retro_idea(project: str, title: str, description: str = "", task_type: str = "code",
-               ref: str | None = None, head: str | None = None,
-               slug: str | None = None) -> dict:
+def retro_idea(
+    project: str,
+    title: str,
+    description: str = "",
+    task_type: str = "code",
+    ref: str | None = None,
+    head: str | None = None,
+    slug: str | None = None,
+) -> dict:
     """Retro-only: file a fail-pattern proposal card, retro's only board write,
     same shape as reviewer_idea (never Ready, title/description scrubbed). Retro quotes redacted
     transcript excerpts; the harvest step already strips secrets, but this scrubs again for the
     same defense-in-depth reason add_comment does for steward."""
-    return _create_proposal_card(project=project, task_type=task_type,
-                                 title=scrub_secrets(title),
-                                 description=scrub_secrets(description),
-                                 ref=ref, head=head, slug=slug)
+    return _create_proposal_card(
+        project=project,
+        task_type=task_type,
+        title=scrub_secrets(title),
+        description=scrub_secrets(description),
+        ref=ref,
+        head=head,
+        slug=slug,
+    )
 
 
-def steward_idea(project: str, title: str, description: str = "", task_type: str = "code",
-                 ref: str | None = None, head: str | None = None,
-                 slug: str | None = None) -> dict:
+def steward_idea(
+    project: str,
+    title: str,
+    description: str = "",
+    task_type: str = "code",
+    ref: str | None = None,
+    head: str | None = None,
+    slug: str | None = None,
+) -> dict:
     """Steward-only: file a discovered anomaly as a proposal card before escalating it.
 
     Steward reads raw system output, so title and description are redacted before the shared proposal
     route creates the task record.
     """
-    return _create_proposal_card(project=project, task_type=task_type,
-                                 title=scrub_secrets(title),
-                                 description=scrub_secrets(description),
-                                 ref=ref, head=head, slug=slug)
+    return _create_proposal_card(
+        project=project,
+        task_type=task_type,
+        title=scrub_secrets(title),
+        description=scrub_secrets(description),
+        ref=ref,
+        head=head,
+        slug=slug,
+    )
 
 
 def feedback(reference: str, body: str) -> dict:
@@ -855,29 +956,31 @@ def export_cards() -> list[dict]:
     lanes = {int(s["id"]): s["name"] for s in call("getActiveSwimlanes", project_id=pid) or []}
     tasks = _all_cards(pid)
     batched = call_batch(
-        [(method, {"task_id": int(t["id"])})
-         for t in tasks
-         for method in ("getTaskMetadata", "getAllComments")]
+        [
+            (method, {"task_id": int(t["id"])})
+            for t in tasks
+            for method in ("getTaskMetadata", "getAllComments")
+        ]
     )
     out = []
     for index, task in enumerate(tasks):
         meta = batched[index * 2] or {}
         comments = batched[index * 2 + 1] or []
-        out.append({
-            **_card_view(pid, task, cols, lanes, meta),
-            "description": task.get("description", "") or "",
-            "closed": int(task.get("is_active", task.get("status", 1)) or 0) == 0,
-            "metadata": meta,
-            "comments": [
-                {"ts": c.get("date_creation", ""), "text": c.get("comment", "")}
-                for c in comments
-            ],
-        })
+        out.append(
+            {
+                **_card_view(pid, task, cols, lanes, meta),
+                "description": task.get("description", "") or "",
+                "closed": int(task.get("is_active", task.get("status", 1)) or 0) == 0,
+                "metadata": meta,
+                "comments": [
+                    {"ts": c.get("date_creation", ""), "text": c.get("comment", "")} for c in comments
+                ],
+            }
+        )
     return out
 
 
-def close_old_done_cards(now: float | None = None,
-                         retention_days: int = DONE_RETENTION_DAYS) -> dict:
+def close_old_done_cards(now: float | None = None, retention_days: int = DONE_RETENTION_DAYS) -> dict:
     """Close active Done cards that have spent more than `retention_days` full days there.
 
     Uses Kanboard's date_moved as the age of the current-column episode. A card without a usable

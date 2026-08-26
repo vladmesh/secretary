@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Compatibility entry point. The implementation lives in secretary.role_skills."""
+
 from __future__ import annotations
 
 import sys

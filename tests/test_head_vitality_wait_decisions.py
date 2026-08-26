@@ -25,15 +25,17 @@ from tests.test_dispatcher import CARD_REF, DispatcherRuntimeFixture  # noqa: E4
 
 #: A live pid whose /proc state says it is parked on a stop signal (state `T`).
 STOPPED_STATUS = {
-    "known": True, "live": True, "reason": "live",
-    "pid_status": {"known": True, "alive": True, "match": True,
-                   "state": "live-match", "stopped": True},
+    "known": True,
+    "live": True,
+    "reason": "live",
+    "pid_status": {"known": True, "alive": True, "match": True, "state": "live-match", "stopped": True},
 }
 #: The same process after it was resumed (SIGCONT territory, not this card's).
 RUNNING_STATUS = {
-    "known": True, "live": True, "reason": "live",
-    "pid_status": {"known": True, "alive": True, "match": True,
-                   "state": "live-match", "stopped": False},
+    "known": True,
+    "live": True,
+    "reason": "live",
+    "pid_status": {"known": True, "alive": True, "match": True, "state": "live-match", "stopped": False},
 }
 
 
@@ -91,7 +93,8 @@ class SuspendedWaitTickDecisionTests(DispatcherRuntimeFixture, unittest.TestCase
         self.tick()
         self.tick()
         self.assertEqual(
-            self._pilot_record()["worker_waiting_since"], before,
+            self._pilot_record()["worker_waiting_since"],
+            before,
             "renewing the wait window would hide the stall behind a fresh clock",
         )
 
@@ -125,7 +128,8 @@ class SuspendedWaitTickDecisionTests(DispatcherRuntimeFixture, unittest.TestCase
         for _ in range(3):
             self.tick()
         self.assertGreaterEqual(
-            len(_suspension_comments(self)), 2,
+            len(_suspension_comments(self)),
+            2,
             "the second freeze span must reach the operator as its own comment",
         )
 
@@ -156,7 +160,8 @@ class SuspendedWaitTickDecisionTests(DispatcherRuntimeFixture, unittest.TestCase
         self.assertEqual(worker_cleared["verdict"], "healthy_quiet")
         self.assertEqual(worker_cleared["recovery_rung"], 0)
         self.assertEqual(
-            worker_cleared["run_id"], worker_suspended["run_id"],
+            worker_cleared["run_id"],
+            worker_suspended["run_id"],
             "the same worker episode is updated in place",
         )
 
@@ -180,11 +185,13 @@ class SuspendedWaitTickDecisionTests(DispatcherRuntimeFixture, unittest.TestCase
         self.assertEqual(review_after["recovery_rung"], 0)
         self.assertEqual(review_after["recovery_span_started_at"], 0.0)
         self.assertEqual(
-            review_after["run_id"], review_suspended["run_id"],
+            review_after["run_id"],
+            review_suspended["run_id"],
             "the same review episode is updated, not replaced by a foreign one",
         )
         self.assertEqual(
-            worker_after, worker_before,
+            worker_after,
+            worker_before,
             "a review recovery must not touch the worker's episode slot",
         )
 
@@ -237,8 +244,11 @@ class WaitTickVerdictTableTests(DispatcherRuntimeFixture, unittest.TestCase):
         run_id, fingerprint = head_run_binding(record["worker_head_run"])
         status = dict(RUNNING_STATUS)
         status["provider_progress"] = {
-            "state": "observed", "admission": "accepted", "source": "fake-bound-session",
-            "source_fingerprint": "f" * 32, "cursor": f"rollout:{time.time()}",
+            "state": "observed",
+            "admission": "accepted",
+            "source": "fake-bound-session",
+            "source_fingerprint": "f" * 32,
+            "cursor": f"rollout:{time.time()}",
             "head_run_id": run_id,
             "head_run_fingerprint": fingerprint,
         }
@@ -263,7 +273,9 @@ class WaitTickVerdictTableTests(DispatcherRuntimeFixture, unittest.TestCase):
 
     def test_unverifiable_waits_instead_of_guessing(self) -> None:
         status = {
-            "known": False, "live": True, "reason": "runtime-unavailable",
+            "known": False,
+            "live": True,
+            "reason": "runtime-unavailable",
         }
         outcome = self._decide_with(status)
         self.assertIn(
@@ -281,7 +293,8 @@ class WaitTickVerdictTableTests(DispatcherRuntimeFixture, unittest.TestCase):
         # cannot reach suspected_stall is a broken test, not an inapplicable one.
         episode = self._pilot_record()["worker_vitality_episode"]
         self.assertEqual(
-            episode["verdict"], "suspected_stall",
+            episode["verdict"],
+            "suspected_stall",
             f"the fixture aged quiet to {episode['verdict']} instead of suspected_stall",
         )
         self.assertEqual(first["action"], "worker-stall-suspected")
@@ -290,7 +303,8 @@ class WaitTickVerdictTableTests(DispatcherRuntimeFixture, unittest.TestCase):
         again = self.tick()
         self.assertEqual(again["action"], "worker-stall-suspected")
         self.assertEqual(
-            self.host.calls.count("prompt_worker_report"), prompts,
+            self.host.calls.count("prompt_worker_report"),
+            prompts,
             "a suspicion spends at most one nudge per round generation",
         )
         self.assertEqual(self._pilot_record()["worker_respawns"], 0)
@@ -352,11 +366,11 @@ class UnobservableWaitEscalationTests(DispatcherRuntimeFixture, unittest.TestCas
         comments = [
             str(comment.get("body") or "")
             for comment in self.reader.show(CARD_REF)["comments"]
-            if isinstance(comment, dict)
-            and "NOT stopped or replaced" in str(comment.get("body") or "")
+            if isinstance(comment, dict) and "NOT stopped or replaced" in str(comment.get("body") or "")
         ]
         self.assertEqual(
-            len(comments), 1,
+            len(comments),
+            1,
             "exactly one escalation per unobserved wait cycle",
         )
         self.assertNotIn("restart_worker", self.host.calls)
@@ -367,10 +381,12 @@ class UnobservableWaitEscalationTests(DispatcherRuntimeFixture, unittest.TestCas
         first = self.tick()
         second = self.tick()
         for outcome in (first, second):
-            self.assertEqual(outcome["action"], "worker-runtime-unavailable") \
-                if outcome.get("reason") else None
+            self.assertEqual(outcome["action"], "worker-runtime-unavailable") if outcome.get(
+                "reason"
+            ) else None
             self.assertNotEqual(
-                outcome.get("action"), "worker-unobserved-wait-escalated",
+                outcome.get("action"),
+                "worker-unobserved-wait-escalated",
                 "escalation must not fire before the ceiling",
             )
 
@@ -386,7 +402,8 @@ class UnobservableWaitEscalationTests(DispatcherRuntimeFixture, unittest.TestCas
         self.runtime.production_state.save(payload)
 
         with mock.patch.object(
-            type(self.runtime), "_escalate_unobservable_wait",
+            type(self.runtime),
+            "_escalate_unobservable_wait",
             side_effect=AssertionError("the escalation arm was disabled"),
         ):
             with self.assertRaises(AssertionError):
@@ -405,7 +422,7 @@ class UnobservableWaitEscalationTests(DispatcherRuntimeFixture, unittest.TestCas
 
         calls_before = list(self.host.calls)
         self.tick()
-        new_calls = [call for call in self.host.calls[len(calls_before):]]
+        new_calls = [call for call in self.host.calls[len(calls_before) :]]
         self.assertEqual(
             [call for call in new_calls if "restart" in call or "stop" in call],
             [],
@@ -444,9 +461,13 @@ class VitalityVerdictCommentIdempotencyTests(DispatcherRuntimeFixture, unittest.
         run_id, fingerprint = head_run_binding(record["worker_head_run"])
         status = dict(RUNNING_STATUS)
         status["provider_progress"] = {
-            "state": "observed", "admission": "accepted", "source": "fake-bound-session",
-            "source_fingerprint": "f" * 32, "cursor": cursor,
-            "head_run_id": run_id, "head_run_fingerprint": fingerprint,
+            "state": "observed",
+            "admission": "accepted",
+            "source": "fake-bound-session",
+            "source_fingerprint": "f" * 32,
+            "cursor": cursor,
+            "head_run_id": run_id,
+            "head_run_fingerprint": fingerprint,
         }
         return status
 
@@ -473,7 +494,9 @@ class VitalityVerdictCommentIdempotencyTests(DispatcherRuntimeFixture, unittest.
         production.
         """
         with mock.patch.object(
-            self.writer, "comment", wraps=self.writer.comment,
+            self.writer,
+            "comment",
+            wraps=self.writer.comment,
         ) as spy:
             self.host.worker_status_result = self._cursor_status("rollout:1")
             self.tick()  # first observation: the cursor is stored, nothing advanced yet
@@ -490,7 +513,8 @@ class VitalityVerdictCommentIdempotencyTests(DispatcherRuntimeFixture, unittest.
             self.tick()
         calls = list(spy.call_args_list)
         repeated = [
-            call for call in calls
+            call
+            for call in calls
             if str(call.kwargs.get("request_id") or "").endswith(
                 "worker-vitality-verdict-" + CARD_REF + "-healthy_active--healthy_quiet"
             )
@@ -502,7 +526,8 @@ class VitalityVerdictCommentIdempotencyTests(DispatcherRuntimeFixture, unittest.
         _, repeated = self._flap_twice_through_one_pair()
 
         self.assertEqual(
-            len(repeated), 2,
+            len(repeated),
+            2,
             "the flap must visit healthy_active -> healthy_quiet twice for this to prove anything",
         )
         first, second = (str(call.kwargs["body"]) for call in repeated)
@@ -541,7 +566,8 @@ class VitalityVerdictCommentIdempotencyTests(DispatcherRuntimeFixture, unittest.
         for request_id, seen in by_request.items():
             self.assertEqual(len(seen), 1, f"{request_id} was written with two payloads: {seen}")
         self.assertEqual(
-            len(by_request), 3,
+            len(by_request),
+            3,
             "five ticks may only ever name the pairs they actually visited",
         )
 

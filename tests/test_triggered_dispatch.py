@@ -31,9 +31,15 @@ class FakeSessionHost:
     somebody has to re-parse.
     """
 
-    def __init__(self, *, panes: tuple[Pane, ...] = (), screens: tuple[str, ...] = (),
-                 idle: bool = True, wait_error: BaseException | None = None,
-                 list_error: BaseException | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        panes: tuple[Pane, ...] = (),
+        screens: tuple[str, ...] = (),
+        idle: bool = True,
+        wait_error: BaseException | None = None,
+        list_error: BaseException | None = None,
+    ) -> None:
         self._panes = list(panes)
         self._screens = list(screens)
         self._idle = idle
@@ -55,8 +61,9 @@ class FakeSessionHost:
 
     def read(self, handle: str, *, limit: int | None = None) -> dict:
         self.reads.append((handle, limit))
-        screen = self._screens.pop(0) if len(self._screens) > 1 else (
-            self._screens[0] if self._screens else "")
+        screen = (
+            self._screens.pop(0) if len(self._screens) > 1 else (self._screens[0] if self._screens else "")
+        )
         return {"terminal": {"tail": screen.splitlines()}}
 
     def wait_idle(self, handle: str, *, timeout_ms: int) -> dict:
@@ -106,8 +113,9 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
         self.state_root_patch.start()
         self.addCleanup(self.state_root_patch.stop)
         self.command = dispatch.DispatchCommand("/retro", "claude '/retro'", None)
-        self.term = Pane(handle="term-live", leaf="leaf-live", title="triggered-agent:retro",
-                         last_output_at=1.0)
+        self.term = Pane(
+            handle="term-live", leaf="leaf-live", title="triggered-agent:retro", last_output_at=1.0
+        )
 
     def _common_run_patches(self):
         """Everything a warm-reuse tick decides that is not about terminals.
@@ -138,18 +146,19 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
 
     def test_unreadable_pause_state_blocks_dispatch_and_is_reported(self) -> None:
         output = io.StringIO()
-        with mock.patch(
-            "triggered_agents.agents.pipeline.pause.is_paused",
-            side_effect=OSError("pause.json: input/output error"),
-        ), contextlib.redirect_stderr(output):
+        with (
+            mock.patch(
+                "triggered_agents.agents.pipeline.pause.is_paused",
+                side_effect=OSError("pause.json: input/output error"),
+            ),
+            contextlib.redirect_stderr(output),
+        ):
             self.assertTrue(dispatch._pipeline_paused())
 
         self.assertIn("pipeline pause state is unreadable; refusing dispatch", output.getvalue())
 
     def test_unreadable_automation_spec_disables_warm_reuse(self) -> None:
-        with mock.patch.object(
-            dispatch, "_load_spec", side_effect=ValueError("malformed automation.toml")
-        ):
+        with mock.patch.object(dispatch, "_load_spec", side_effect=ValueError("malformed automation.toml")):
             self.assertTrue(dispatch._is_ephemeral("curator"))
 
     def test_live_agent_repl_is_reused_after_delivery_is_confirmed(self) -> None:
@@ -197,9 +206,7 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
         self.assertEqual(host.stopped, [])
         self.assertEqual([handle for handle, _ in host.waits], ["term-new"])
         self.assertEqual(self._actions(), ["reused"])
-        self.assertEqual(
-            runtime_state.AgentState("retro").load_terminal_handle(), "term-new"
-        )
+        self.assertEqual(runtime_state.AgentState("retro").load_terminal_handle(), "term-new")
 
     def test_the_idle_probe_keeps_its_condition_its_budget_and_its_two_readings(self) -> None:
         """`tui-idle` within `IDLE_PROBE_MS`; a refused or timed-out probe is busy, never idle."""
@@ -247,6 +254,7 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
     def test_a_stop_the_host_refuses_is_still_judged_by_the_inventory(self) -> None:
         """`terminal stop`'s refusal was dropped before the seam and is dropped behind it: what
         decides is whether the workspace is empty afterwards."""
+
         class RefusingStop(FakeSessionHost):
             def stop_workspace(self, workspace: str) -> None:
                 super().stop_workspace(workspace)
@@ -300,9 +308,7 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
 
     def test_shell_output_above_the_repl_prompt_does_not_restart_a_live_agent(self) -> None:
         screen = "\n".join(["Claude Code", "dev@host:~/workspace$ from Bash output", "❯"])
-        self.assertTrue(
-            dispatch._agent_repl_visible("term-live", host=FakeSessionHost(screens=(screen,)))
-        )
+        self.assertTrue(dispatch._agent_repl_visible("term-live", host=FakeSessionHost(screens=(screen,))))
 
     def test_claude_user_turn_after_reads_the_workspace_session_log(self) -> None:
         projects = Path(self.tmp.name) / "claude-projects"
@@ -314,10 +320,13 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
         session.parent.mkdir(parents=True)
         since = time.time()
         session.write_text(
-            json.dumps({
-                "type": "user",
-                "timestamp": datetime.fromtimestamp(since + 1, UTC).isoformat(),
-            }) + "\n",
+            json.dumps(
+                {
+                    "type": "user",
+                    "timestamp": datetime.fromtimestamp(since + 1, UTC).isoformat(),
+                }
+            )
+            + "\n",
             encoding="utf-8",
         )
         # The reader skips a log whose mtime is not past `since`, and a filesystem whose timestamp
@@ -335,7 +344,10 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
             mock.patch.object(dispatch, "_fresh_steward_report_in_progress", return_value=None),
             mock.patch.object(dispatch, "_dispatch_command", return_value=command),
             mock.patch.object(dispatch, "REUSE_DELIVERY_TIMEOUT_S", 0),
-            mock.patch("triggered_agents.agents.pipeline.ops.move_card", side_effect=lambda *args, **kwargs: moved.append((args, kwargs))),
+            mock.patch(
+                "triggered_agents.agents.pipeline.ops.move_card",
+                side_effect=lambda *args, **kwargs: moved.append((args, kwargs)),
+            ),
         ]
         with self._running(patches):
             with self.assertRaises(dispatch.ReuseDeliveryError):
@@ -366,6 +378,7 @@ class TriggeredCodexHeadTests(unittest.TestCase):
         self.workspace = str(Path(self.tmp.name) / "workspace")
         Path(self.workspace).mkdir()
         from triggered_agents.agents.pipeline import heads as pipeline_heads
+
         self.registry = pipeline_heads.Registry(
             self.REGISTRY["resources"], self.REGISTRY["profiles"], self.REGISTRY["role_defaults"]
         )
@@ -374,11 +387,13 @@ class TriggeredCodexHeadTests(unittest.TestCase):
         from triggered_agents.agents.pipeline import heads as pipeline_heads
         from triggered_agents.agents.pipeline import health as pipeline_health
 
-        with mock.patch.object(dispatch, "_load_spec", return_value={"skill": "/retro"}), \
-             mock.patch.object(dispatch, "_workspace", return_value=self.workspace), \
-             mock.patch.object(pipeline_heads, "load_registry", return_value=self.registry), \
-             mock.patch.object(pipeline_health, "refresh", return_value={}), \
-             mock.patch.object(pipeline_health, "resolve_head", return_value="codex"):
+        with (
+            mock.patch.object(dispatch, "_load_spec", return_value={"skill": "/retro"}),
+            mock.patch.object(dispatch, "_workspace", return_value=self.workspace),
+            mock.patch.object(pipeline_heads, "load_registry", return_value=self.registry),
+            mock.patch.object(pipeline_health, "refresh", return_value={}),
+            mock.patch.object(pipeline_health, "resolve_head", return_value="codex"),
+        ):
             skill, launch, profile, after_start, profile_data = dispatch._launch_cmd("retro")
 
         self.assertEqual((skill, profile), ("/retro", "codex"))
@@ -395,17 +410,16 @@ class TriggeredCodexHeadTests(unittest.TestCase):
         host = FakeSessionHost()
         state = mock.Mock()
 
-        with mock.patch.object(dispatch, "_dispatch_command", return_value=command), \
-             mock.patch.object(dispatch, "_ensure_claude_ready"), \
-             mock.patch.object(dispatch, "_create_terminal", return_value="term-codex"), \
-             mock.patch.object(dispatch, "_codex_turn_after", return_value=True), \
-             mock.patch("triggered_agents.runtime.tui_delivery.time.sleep"):
-            dispatch._spawn_fresh_terminal("retro", None, self.workspace, state, "dispatch",
-                                           host=host)
+        with (
+            mock.patch.object(dispatch, "_dispatch_command", return_value=command),
+            mock.patch.object(dispatch, "_ensure_claude_ready"),
+            mock.patch.object(dispatch, "_create_terminal", return_value="term-codex"),
+            mock.patch.object(dispatch, "_codex_turn_after", return_value=True),
+            mock.patch("triggered_agents.runtime.tui_delivery.time.sleep"),
+        ):
+            dispatch._spawn_fresh_terminal("retro", None, self.workspace, state, "dispatch", host=host)
 
-        self.assertEqual(
-            host.sends, [f"{BRACKETED_PASTE_START}/retro{BRACKETED_PASTE_END}", ""]
-        )
+        self.assertEqual(host.sends, [f"{BRACKETED_PASTE_START}/retro{BRACKETED_PASTE_END}", ""])
         self.assertEqual(host.enters, [False, True])
         self.assertIn(("term-codex", tui_delivery.TUI_IDLE_TIMEOUT_MS), host.waits)
         # The skill itself is never typed the warm-reuse way into a head being brought up.
@@ -416,17 +430,17 @@ class TriggeredCodexHeadTests(unittest.TestCase):
         command = dispatch.DispatchCommand("/retro", "codex", "codex", None, prompt_after_start=True)
         host = FakeSessionHost()
 
-        with mock.patch.object(dispatch, "_dispatch_command", return_value=command), \
-             mock.patch.object(dispatch, "_codex_turn_after", return_value=True), \
-             mock.patch.object(dispatch, "_claude_user_turn_after", return_value=False), \
-             mock.patch("triggered_agents.runtime.tui_delivery.time.sleep"):
+        with (
+            mock.patch.object(dispatch, "_dispatch_command", return_value=command),
+            mock.patch.object(dispatch, "_codex_turn_after", return_value=True),
+            mock.patch.object(dispatch, "_claude_user_turn_after", return_value=False),
+            mock.patch("triggered_agents.runtime.tui_delivery.time.sleep"),
+        ):
             dispatch._send_reuse_dispatch(
                 "retro", None, "term-codex", self.workspace, mock.Mock(), "dispatch", host=host
             )
 
-        self.assertEqual(
-            host.sends, [f"{BRACKETED_PASTE_START}/retro{BRACKETED_PASTE_END}", ""]
-        )
+        self.assertEqual(host.sends, [f"{BRACKETED_PASTE_START}/retro{BRACKETED_PASTE_END}", ""])
         self.assertEqual(host.enters, [False, True])
         self.assertNotIn("/retro", host.sends)
 
@@ -434,27 +448,31 @@ class TriggeredCodexHeadTests(unittest.TestCase):
         """A pane that takes the prompt but never records a turn is the shared path's failure."""
         command = dispatch.DispatchCommand("/retro", "codex", "codex", None, prompt_after_start=True)
 
-        with mock.patch.object(dispatch, "_dispatch_command", return_value=command), \
-             mock.patch.object(dispatch, "_ensure_claude_ready"), \
-             mock.patch.object(dispatch, "_create_terminal", return_value="term-codex"), \
-             mock.patch.object(dispatch, "_codex_turn_after", return_value=False), \
-             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.05), \
-             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01), \
-             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0):
+        with (
+            mock.patch.object(dispatch, "_dispatch_command", return_value=command),
+            mock.patch.object(dispatch, "_ensure_claude_ready"),
+            mock.patch.object(dispatch, "_create_terminal", return_value="term-codex"),
+            mock.patch.object(dispatch, "_codex_turn_after", return_value=False),
+            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.05),
+            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
+            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
+        ):
             with self.assertRaises(tui_delivery.TuiDeliveryError):
-                dispatch._spawn_fresh_terminal("retro", None, self.workspace, mock.Mock(),
-                                               "dispatch", host=FakeSessionHost())
+                dispatch._spawn_fresh_terminal(
+                    "retro", None, self.workspace, mock.Mock(), "dispatch", host=FakeSessionHost()
+                )
 
     def test_a_claude_service_head_is_not_typed_at_after_its_launch(self) -> None:
         """Its command already seeds the skill; sending it again would run the agent twice."""
         command = dispatch.DispatchCommand("/retro", "claude '/retro'", "claude-opus", None)
         host = FakeSessionHost()
 
-        with mock.patch.object(dispatch, "_dispatch_command", return_value=command), \
-             mock.patch.object(dispatch, "_ensure_claude_ready"), \
-             mock.patch.object(dispatch, "_create_terminal", return_value="term-claude"):
-            dispatch._spawn_fresh_terminal("retro", None, self.workspace, mock.Mock(), "dispatch",
-                                           host=host)
+        with (
+            mock.patch.object(dispatch, "_dispatch_command", return_value=command),
+            mock.patch.object(dispatch, "_ensure_claude_ready"),
+            mock.patch.object(dispatch, "_create_terminal", return_value="term-claude"),
+        ):
+            dispatch._spawn_fresh_terminal("retro", None, self.workspace, mock.Mock(), "dispatch", host=host)
 
         self.assertEqual(host.sends, [])
 
@@ -468,17 +486,16 @@ class TriggeredCodexHeadTests(unittest.TestCase):
             def send(self, handle: str, text: str, *, enter: bool) -> dict:
                 raise AssertionError("a pane that never came up must not be sent a prompt")
 
-        host = NeverReady(
-            wait_error=RuntimeError('orca wait failed: {"error": {"code": "timeout"}}')
-        )
+        host = NeverReady(wait_error=RuntimeError('orca wait failed: {"error": {"code": "timeout"}}'))
 
-        with mock.patch.object(dispatch, "_dispatch_command", return_value=command), \
-             mock.patch.object(dispatch, "_ensure_claude_ready"), \
-             mock.patch.object(dispatch, "_create_terminal", return_value="term-codex"), \
-             mock.patch.object(dispatch, "_stop_and_confirm") as stop:
+        with (
+            mock.patch.object(dispatch, "_dispatch_command", return_value=command),
+            mock.patch.object(dispatch, "_ensure_claude_ready"),
+            mock.patch.object(dispatch, "_create_terminal", return_value="term-codex"),
+            mock.patch.object(dispatch, "_stop_and_confirm") as stop,
+        ):
             with self.assertRaises(RuntimeError):
-                dispatch._spawn_fresh_terminal("retro", None, self.workspace, state, "dispatch",
-                                               host=host)
+                dispatch._spawn_fresh_terminal("retro", None, self.workspace, state, "dispatch", host=host)
 
         self.assertEqual(host.sends, [])
         stop.assert_not_called()
@@ -487,9 +504,8 @@ class TriggeredCodexHeadTests(unittest.TestCase):
     def test_an_agent_pinned_to_an_old_codex_id_still_resolves(self) -> None:
         """The spec's last-resort head is a product-side id; the installation republished its own."""
         from triggered_agents.agents.pipeline import heads as pipeline_heads
-        registry = pipeline_heads.Registry(
-            self.REGISTRY["resources"], self.REGISTRY["profiles"], {}
-        )
+
+        registry = pipeline_heads.Registry(self.REGISTRY["resources"], self.REGISTRY["profiles"], {})
 
         with mock.patch.object(pipeline_heads, "load_registry", return_value=registry):
             self.assertEqual(dispatch._preferred_head("retro", {"head": "codex-terra"}), "codex")
@@ -503,20 +519,33 @@ class TriggeredCodexHeadTests(unittest.TestCase):
         rather than quietly rendered as some other family's launch command.
         """
         from triggered_agents.agents.pipeline import heads as pipeline_heads
+
         resources = self.REGISTRY["resources"]
-        with_codex = pipeline_heads.Registry(resources, {
-            "codex-terra": {"resource": "openai-sub", "adapter": "claude", "fallback": []},
-            "codex": {"resource": "openai-sub", "adapter": "codex", "fallback": []},
-        }, {})
-        claude_only = pipeline_heads.Registry(resources, {
-            "codex-terra": {"resource": "openai-sub", "adapter": "claude", "fallback": []},
-        }, {})
+        with_codex = pipeline_heads.Registry(
+            resources,
+            {
+                "codex-terra": {"resource": "openai-sub", "adapter": "claude", "fallback": []},
+                "codex": {"resource": "openai-sub", "adapter": "codex", "fallback": []},
+            },
+            {},
+        )
+        claude_only = pipeline_heads.Registry(
+            resources,
+            {
+                "codex-terra": {"resource": "openai-sub", "adapter": "claude", "fallback": []},
+            },
+            {},
+        )
 
         with mock.patch.object(pipeline_heads, "load_registry", return_value=with_codex):
             self.assertEqual(dispatch._preferred_head("retro", {"head": "codex-terra"}), "codex")
-        with mock.patch.object(pipeline_heads, "load_registry", return_value=claude_only), \
-             mock.patch.object(dispatch, "_load_spec", return_value={"skill": "/retro", "head": "codex-terra"}), \
-             mock.patch.object(dispatch, "_workspace", return_value=self.workspace):
+        with (
+            mock.patch.object(pipeline_heads, "load_registry", return_value=claude_only),
+            mock.patch.object(
+                dispatch, "_load_spec", return_value={"skill": "/retro", "head": "codex-terra"}
+            ),
+            mock.patch.object(dispatch, "_workspace", return_value=self.workspace),
+        ):
             with self.assertRaises(pipeline_heads.HeadRegistryError):
                 dispatch._preferred_head("retro", {"head": "codex-terra"})
             with self.assertRaises(pipeline_heads.HeadRegistryError):
@@ -539,33 +568,41 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
         self.workspace = str(self.root / "workspace")
         Path(self.workspace).mkdir()
         self.codex_home = self.root / "codex-home"
-        self.profile = {"resource": "openai-sub", "adapter": "codex", "model": "gpt-5.6-terra",
-                        "codex_home": str(self.codex_home), "fallback": []}
+        self.profile = {
+            "resource": "openai-sub",
+            "adapter": "codex",
+            "model": "gpt-5.6-terra",
+            "codex_home": str(self.codex_home),
+            "fallback": [],
+        }
         self.command = dispatch.DispatchCommand(
             "/retro", "codex", "codex", None, prompt_after_start=True, head_profile=self.profile
         )
 
     def _trusted(self) -> dict:
         import tomllib
+
         return tomllib.loads((self.codex_home / "config.toml").read_text(encoding="utf-8"))
 
     @staticmethod
     def _allowed_attestation(_profile, run, **_kwargs):
         """An independently accepted provider-schema result for shared-boundary tests."""
-        return run.with_fanout_policy({
-            "version": 1,
-            "state": "allowed",
-            "terminal_state": "clean",
-            "run_id": run.run_id,
-            "role": run.role,
-            "model": run.spec.model or "",
-            "binary_path": "/test/codex",
-            "binary_digest": "0" * 64,
-            "cli_version": "test-codex",
-            "tool_schema_digest": "0" * 64,
-            "provider_schema_verdict": "no_callable_child_spawn_surface",
-            "events": [],
-        })
+        return run.with_fanout_policy(
+            {
+                "version": 1,
+                "state": "allowed",
+                "terminal_state": "clean",
+                "run_id": run.run_id,
+                "role": run.role,
+                "model": run.spec.model or "",
+                "binary_path": "/test/codex",
+                "binary_digest": "0" * 64,
+                "cli_version": "test-codex",
+                "tool_schema_digest": "0" * 64,
+                "provider_schema_verdict": "no_callable_child_spawn_surface",
+                "events": [],
+            }
+        )
 
     def test_a_fresh_codex_service_workspace_is_trusted_before_its_pane_exists(self) -> None:
         order: list[str] = []
@@ -583,30 +620,35 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
             order.append("preflight")
             return shared_preflight(*args, **kwargs)
 
-        with mock.patch.object(dispatch, "_dispatch_command", return_value=self.command), \
-             mock.patch.object(dispatch, "_create_terminal", side_effect=create), \
-             mock.patch.object(codex_preflight, "attest_codex_fanout", side_effect=self._allowed_attestation), \
-             mock.patch.object(dispatch, "preflight_codex_launch", side_effect=recording_preflight), \
-             mock.patch.object(dispatch, "_deliver_interactive_skill",
-                               side_effect=lambda *a, **kw: order.append("deliver")):
-            dispatch._spawn_fresh_terminal("retro", None, self.workspace, mock.Mock(), "dispatch",
-                                           host=FakeSessionHost())
+        with (
+            mock.patch.object(dispatch, "_dispatch_command", return_value=self.command),
+            mock.patch.object(dispatch, "_create_terminal", side_effect=create),
+            mock.patch.object(codex_preflight, "attest_codex_fanout", side_effect=self._allowed_attestation),
+            mock.patch.object(dispatch, "preflight_codex_launch", side_effect=recording_preflight),
+            mock.patch.object(
+                dispatch, "_deliver_interactive_skill", side_effect=lambda *a, **kw: order.append("deliver")
+            ),
+        ):
+            dispatch._spawn_fresh_terminal(
+                "retro", None, self.workspace, mock.Mock(), "dispatch", host=FakeSessionHost()
+            )
 
         self.assertEqual(order, ["preflight", "create", "trusted", "deliver"])
         trusted = self._trusted()
-        self.assertEqual(
-            trusted["projects"][str(Path(self.workspace).resolve())]["trust_level"], "trusted"
-        )
+        self.assertEqual(trusted["projects"][str(Path(self.workspace).resolve())]["trust_level"], "trusted")
 
     def test_a_claude_service_head_keeps_its_own_best_effort_preparation(self) -> None:
         """Claude's first-run prep is unchanged, and no codex config is written for it."""
         command = dispatch.DispatchCommand("/retro", "claude '/retro'", "claude-opus", None)
 
-        with mock.patch.object(dispatch, "_dispatch_command", return_value=command), \
-             mock.patch.object(dispatch, "_ensure_claude_ready") as claude_ready, \
-             mock.patch.object(dispatch, "_create_terminal", return_value="term-claude"):
-            dispatch._spawn_fresh_terminal("retro", None, self.workspace, mock.Mock(), "dispatch",
-                                           host=FakeSessionHost())
+        with (
+            mock.patch.object(dispatch, "_dispatch_command", return_value=command),
+            mock.patch.object(dispatch, "_ensure_claude_ready") as claude_ready,
+            mock.patch.object(dispatch, "_create_terminal", return_value="term-claude"),
+        ):
+            dispatch._spawn_fresh_terminal(
+                "retro", None, self.workspace, mock.Mock(), "dispatch", host=FakeSessionHost()
+            )
 
         claude_ready.assert_called_once_with(self.workspace)
         self.assertFalse(self.codex_home.exists())
@@ -615,11 +657,14 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
         """Schema evidence is advisory; the shared trust preflight still precedes the pane."""
         state = mock.Mock()
 
-        with mock.patch.object(dispatch, "_dispatch_command", return_value=self.command), \
-             mock.patch.object(dispatch, "_create_terminal", return_value="term-codex") as create, \
-             mock.patch.object(dispatch, "_deliver_interactive_skill") as deliver:
-            dispatch._spawn_fresh_terminal("retro", None, self.workspace, state, "dispatch",
-                                           host=FakeSessionHost())
+        with (
+            mock.patch.object(dispatch, "_dispatch_command", return_value=self.command),
+            mock.patch.object(dispatch, "_create_terminal", return_value="term-codex") as create,
+            mock.patch.object(dispatch, "_deliver_interactive_skill") as deliver,
+        ):
+            dispatch._spawn_fresh_terminal(
+                "retro", None, self.workspace, state, "dispatch", host=FakeSessionHost()
+            )
 
         create.assert_called_once()
         deliver.assert_called_once_with("term-codex", self.workspace, "/retro", host=mock.ANY)
@@ -633,19 +678,21 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
         self.codex_home.mkdir()
         config = self.codex_home / "config.toml"
         config.write_text(
-            f'[projects.{json.dumps(str(Path(self.workspace).resolve()))}]\n'
-            'trust_level = "untrusted"\n',
+            f'[projects.{json.dumps(str(Path(self.workspace).resolve()))}]\ntrust_level = "untrusted"\n',
             encoding="utf-8",
         )
         state = mock.Mock()
 
-        with mock.patch.object(dispatch, "_dispatch_command", return_value=self.command), \
-             mock.patch.object(codex_preflight, "attest_codex_fanout", side_effect=self._allowed_attestation), \
-             mock.patch.object(dispatch, "_create_terminal") as create, \
-             mock.patch.object(dispatch, "_deliver_interactive_skill") as deliver:
+        with (
+            mock.patch.object(dispatch, "_dispatch_command", return_value=self.command),
+            mock.patch.object(codex_preflight, "attest_codex_fanout", side_effect=self._allowed_attestation),
+            mock.patch.object(dispatch, "_create_terminal") as create,
+            mock.patch.object(dispatch, "_deliver_interactive_skill") as deliver,
+        ):
             with self.assertRaises(dispatch.CodexPreflightError):
-                dispatch._spawn_fresh_terminal("retro", None, self.workspace, state, "dispatch",
-                                               host=FakeSessionHost())
+                dispatch._spawn_fresh_terminal(
+                    "retro", None, self.workspace, state, "dispatch", host=FakeSessionHost()
+                )
 
         create.assert_not_called()
         deliver.assert_not_called()
@@ -660,24 +707,32 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
         """
         self.codex_home.mkdir()
         (self.codex_home / "config.toml").write_text(
-            f'[projects.{json.dumps(str(Path(self.workspace).resolve()))}]\n'
-            'trust_level = "untrusted"\n',
+            f'[projects.{json.dumps(str(Path(self.workspace).resolve()))}]\ntrust_level = "untrusted"\n',
             encoding="utf-8",
         )
         command = dispatch.DispatchCommand(
-            "/steward --card secretary-817", "codex", "codex", "secretary-817",
-            prompt_after_start=True, head_profile=self.profile,
+            "/steward --card secretary-817",
+            "codex",
+            "codex",
+            "secretary-817",
+            prompt_after_start=True,
+            head_profile=self.profile,
         )
         moved: list[tuple] = []
         state = mock.Mock()
 
-        with mock.patch.object(dispatch, "_dispatch_command", return_value=command), \
-             mock.patch.object(dispatch, "_create_terminal") as create, \
-             mock.patch("triggered_agents.agents.pipeline.ops.move_card",
-                        side_effect=lambda *args, **kwargs: moved.append((args, kwargs))):
+        with (
+            mock.patch.object(dispatch, "_dispatch_command", return_value=command),
+            mock.patch.object(dispatch, "_create_terminal") as create,
+            mock.patch(
+                "triggered_agents.agents.pipeline.ops.move_card",
+                side_effect=lambda *args, **kwargs: moved.append((args, kwargs)),
+            ),
+        ):
             with self.assertRaises(dispatch.CodexPreflightError):
-                dispatch._spawn_fresh_terminal("steward", None, self.workspace, state, "dispatch",
-                                               host=FakeSessionHost())
+                dispatch._spawn_fresh_terminal(
+                    "steward", None, self.workspace, state, "dispatch", host=FakeSessionHost()
+                )
 
         create.assert_not_called()
         self.assertEqual(moved[0][0], ("steward", "secretary-817", "Blocked"))
@@ -696,7 +751,7 @@ class TriggeredCodexPreflightTests(unittest.TestCase):
         """Not two implementations that agree today: the same function object."""
         from secretary import dispatcher_launcher
 
-        self.assertIs(dispatch.preflight_codex_launch,
-                      codex_preflight.preflight_codex_launch)
-        self.assertIs(dispatcher_launcher._preflight_codex_workspace,
-                      codex_preflight.ensure_codex_workspace_trusted)
+        self.assertIs(dispatch.preflight_codex_launch, codex_preflight.preflight_codex_launch)
+        self.assertIs(
+            dispatcher_launcher._preflight_codex_workspace, codex_preflight.ensure_codex_workspace_trusted
+        )

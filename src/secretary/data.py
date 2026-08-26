@@ -130,9 +130,7 @@ def raw_kanboard_dump(
     staging_dir: Path | None = None
 
     try:
-        staging_dir = Path(
-            tempfile.mkdtemp(prefix=".kanboard-raw-", suffix=".tmp", dir=board_dir)
-        )
+        staging_dir = Path(tempfile.mkdtemp(prefix=".kanboard-raw-", suffix=".tmp", dir=board_dir))
         destination = staging_dir / "data"
         subprocess.run(
             ["docker", "cp", f"{container}:{source_path}", str(destination)],
@@ -186,6 +184,7 @@ def export_board(
     # reconstructed from an untyped partial backend row, so no checkpoint may
     # export the board while one remains.
     from secretary.product_issues import ProductIssueTransaction
+
     product_issue = ProductIssueTransaction(data_dir, TaskAudit(data_dir)).status()
     if not product_issue["ok"]:
         raise RuntimeError(
@@ -269,14 +268,10 @@ def normalize_board_card(list_card: dict[str, Any], shown_card: dict[str, Any]) 
             "project": str(shown_card.get("project") or list_card.get("project") or ""),
             "blocked_by": str(shown_card.get("blocked_by") or list_card.get("blocked_by") or ""),
             "head": str(shown_card.get("head") or list_card.get("head") or ""),
-            "effective_head": str(
-                shown_card.get("effective_head") or list_card.get("effective_head") or ""
-            ),
+            "effective_head": str(shown_card.get("effective_head") or list_card.get("effective_head") or ""),
             "review_head": str(shown_card.get("review_head") or list_card.get("review_head") or ""),
             "effective_review_head": str(
-                shown_card.get("effective_review_head")
-                or list_card.get("effective_review_head")
-                or ""
+                shown_card.get("effective_review_head") or list_card.get("effective_review_head") or ""
             ),
             "claim": str(shown_card.get("claim") or list_card.get("claim") or ""),
             "slug": str(shown_card.get("slug") or list_card.get("slug") or ""),
@@ -323,10 +318,15 @@ def normalize_sprint_entity(sprint: dict[str, Any]) -> dict[str, Any]:
     # The uncharged counts are carried only where a sprint has any, so a record of a sprint that
     # never had one stays byte-identical to the record this export always wrote.
     uncharged = budget.get("uncharged")
-    uncharged = {
-        str(key): _int_or_none(value) or 0
-        for key, value in sorted(uncharged.items()) if _int_or_none(value)
-    } if isinstance(uncharged, dict) else {}
+    uncharged = (
+        {
+            str(key): _int_or_none(value) or 0
+            for key, value in sorted(uncharged.items())
+            if _int_or_none(value)
+        }
+        if isinstance(uncharged, dict)
+        else {}
+    )
     resume = sprint.get("resume")
     comments = sprint.get("comments")
     return {
@@ -340,7 +340,8 @@ def normalize_sprint_entity(sprint: dict[str, Any]) -> dict[str, Any]:
         **({"issues": [str(issue) for issue in sprint["issues"] or []]} if "issues" in sprint else {}),
         **(
             {"reservations": [str(project) for project in sprint["reservations"] or []]}
-            if "reservations" in sprint else {}
+            if "reservations" in sprint
+            else {}
         ),
         # A key present and `None` is a value that is not one of the four tagged forms: restore
         # refuses the whole set on it rather than guessing a repair.
@@ -353,7 +354,8 @@ def normalize_sprint_entity(sprint: dict[str, Any]) -> dict[str, Any]:
         "current_task": str(sprint.get("current_task") or ""),
         "resume": (
             {str(key): str(value) for key, value in sorted(resume.items())}
-            if isinstance(resume, dict) else None
+            if isinstance(resume, dict)
+            else None
         ),
         "audit": _sprint_audit(audit),
         "comments": [
@@ -545,7 +547,9 @@ def export_transcripts(
     except RuntimeError:
         _cleanup_staging_dir(staging)
         raise
-    return DataExport(path=transcripts_dir / "inventory.json", count=len(entries), source=", ".join(str(p) for p in roots))
+    return DataExport(
+        path=transcripts_dir / "inventory.json", count=len(entries), source=", ".join(str(p) for p in roots)
+    )
 
 
 def export_artifacts(
@@ -575,9 +579,7 @@ def export_artifacts(
     entries.extend(task_docs)
 
     try:
-        staging = Path(
-            tempfile.mkdtemp(prefix=".artifacts-export-", suffix=".tmp", dir=artifacts_dir)
-        )
+        staging = Path(tempfile.mkdtemp(prefix=".artifacts-export-", suffix=".tmp", dir=artifacts_dir))
     except OSError as exc:
         raise RuntimeError(f"could not create artifacts export staging: {exc}") from None
     try:
@@ -600,9 +602,7 @@ def export_artifacts(
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, destination, follow_symlinks=False)
             except OSError as exc:
-                raise RuntimeError(
-                    f"could not copy task artifact {entry['relative_path']}: {exc}"
-                ) from None
+                raise RuntimeError(f"could not copy task artifact {entry['relative_path']}: {exc}") from None
         _publish_component_entries(
             staging,
             artifacts_dir,
@@ -706,14 +706,8 @@ def _latest_raw_active_task_count(board_dir: Path, *, board_name: str) -> int | 
             continue
         try:
             with sqlite3.connect(f"file:{database}?mode=ro", uri=True) as conn:
-                columns = {
-                    row[1]
-                    for row in conn.execute("pragma table_info(tasks)").fetchall()
-                }
-                project_columns = {
-                    row[1]
-                    for row in conn.execute("pragma table_info(projects)").fetchall()
-                }
+                columns = {row[1] for row in conn.execute("pragma table_info(tasks)").fetchall()}
+                project_columns = {row[1] for row in conn.execute("pragma table_info(projects)").fetchall()}
                 project = None
                 if {"id", "name"}.issubset(project_columns):
                     project = conn.execute(

@@ -9,6 +9,7 @@ Self-exclusion: the curator must not harvest its own runs, sessions or memory. S
 and memory files whose cwd resolves under a TA_CURATOR_EXCLUDE path (the curator's own
 workspace) are skipped.
 """
+
 from __future__ import annotations
 
 import json
@@ -34,24 +35,26 @@ HERMES_MEMORY_DIR = HERMES_HOME / "memories"
 
 # Orca-managed Codex home shared by interactive Orca heads and pipeline Codex heads.
 # Overridable in tests for the same reason as CLAUDE_PROJECTS/HERMES_HOME.
-CODEX_SESSIONS = Path(os.environ.get(
-    "TA_CODEX_SESSIONS_DIR",
-    str(Path.home() / ".config" / "orca" / "codex-runtime-home" / "home" / "sessions"),
-))
+CODEX_SESSIONS = Path(
+    os.environ.get(
+        "TA_CODEX_SESSIONS_DIR",
+        str(Path.home() / ".config" / "orca" / "codex-runtime-home" / "home" / "sessions"),
+    )
+)
 
 # cwd prefixes whose sessions we never harvest — the runtime's own runs, so no
 # triggered-agent (curator included) harvests itself or its siblings:
 #   ~/curator                          legacy pre-rename base checkout
 #   ~/secretary                        current base checkout (dev/provision cwd)
 #   ~/orca/workspaces/secretary        per-agent Orca worktrees (curator/, pipeline/, …)
-_DEFAULT_EXCLUDE = ":".join([
-    str(Path.home() / "curator"),
-    str(Path.home() / "secretary"),
-    str(Path.home() / "orca" / "workspaces" / "secretary"),
-])
-EXCLUDE_CWDS = [
-    p for p in os.environ.get("TA_CURATOR_EXCLUDE", _DEFAULT_EXCLUDE).split(":") if p
-]
+_DEFAULT_EXCLUDE = ":".join(
+    [
+        str(Path.home() / "curator"),
+        str(Path.home() / "secretary"),
+        str(Path.home() / "orca" / "workspaces" / "secretary"),
+    ]
+)
+EXCLUDE_CWDS = [p for p in os.environ.get("TA_CURATOR_EXCLUDE", _DEFAULT_EXCLUDE).split(":") if p]
 
 
 def _cwd_from_claude_dir(dirname: str) -> str:

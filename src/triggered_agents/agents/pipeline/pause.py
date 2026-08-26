@@ -11,6 +11,7 @@ module (state.py primitives only, no ops import) so runtime/dispatch.py can read
 pulling in the board machinery — the same reason it lazy-imports agents.pipeline.health rather
 than importing more of this package.
 """
+
 from __future__ import annotations
 
 import json

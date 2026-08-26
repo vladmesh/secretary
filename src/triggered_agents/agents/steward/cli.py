@@ -23,6 +23,7 @@ whole-system audit that runs with no precheck gate at all (the second
 secretary-steward-deep-sweep timer). Kept independent on purpose: the signal gate must not swallow an
 anomaly the daily sweep hasn't looked at yet, and vice versa.
 """
+
 from __future__ import annotations
 
 import json
@@ -71,8 +72,11 @@ def cmd_advance() -> int:
         # Blocked — without this it would look "new" again on the very next hour's scan, one
         # wasted wake-up for a card this same run just put there (2026-07-04 review,
         # triggered-agents-244 note Z2).
-        current_blocked = {c["reference"] for c in signals.pipeline_ops.list_cards(column="Blocked")
-                           if c.get("steward_report") != "1"}
+        current_blocked = {
+            c["reference"]
+            for c in signals.pipeline_ops.list_cards(column="Blocked")
+            if c.get("steward_report") != "1"
+        }
         pending["notified_blocked"] = sorted(set(pending["notified_blocked"]) | current_blocked)
         STATE.save_watermark(pending)
         STATE.pending_file.unlink()
@@ -106,8 +110,7 @@ def cmd_precheck() -> int:
     # and re-taken on every later failure, suppressing it (see signals.ensure_pipeline_baseline).
     signals.ensure_pipeline_baseline(batch)
     if signals.has_signal(batch):
-        counts = {k: (len(v) if isinstance(v, (list, dict)) else v)
-                 for k, v in batch["signals"].items()}
+        counts = {k: (len(v) if isinstance(v, (list, dict)) else v) for k, v in batch["signals"].items()}
         STATE.log_run("precheck", result="change", **counts)
         return 0
     STATE.log_run("precheck", result="no-change")
@@ -168,7 +171,9 @@ def cmd_role_skills(as_json: bool) -> int:
         if proc.returncode not in (0, 1):
             result = {
                 "ok": False,
-                "error": proc.stderr.strip() or proc.stdout.strip() or f"role_skills exited {proc.returncode}",
+                "error": proc.stderr.strip()
+                or proc.stdout.strip()
+                or f"role_skills exited {proc.returncode}",
             }
         else:
             result = json.loads(proc.stdout)

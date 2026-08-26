@@ -5,6 +5,7 @@ vocabulary. This surface still writes board comments, so without a guard it woul
 `[report:blocked]` comment with no classification at all — a record the protocol owner refuses,
 written by the second engine. It refuses instead, and names the writer that owns the protocol.
 """
+
 from __future__ import annotations
 
 import inspect

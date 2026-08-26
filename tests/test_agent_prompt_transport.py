@@ -24,7 +24,13 @@ class AgentPromptTransportTests(unittest.TestCase):
 
         def run_json(args: list[str]) -> dict:
             calls.append(args)
-            return {"send": {"accepted": True, "bytesWritten": len(args[args.index("--text") + 1].encode()) + (1 if "--enter" in args else 0)}}
+            return {
+                "send": {
+                    "accepted": True,
+                    "bytesWritten": len(args[args.index("--text") + 1].encode())
+                    + (1 if "--enter" in args else 0),
+                }
+            }
 
         prepared = prepare_agent_prompt(text, adapter=adapter)
         with mock.patch("triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0):
@@ -32,16 +38,17 @@ class AgentPromptTransportTests(unittest.TestCase):
         return calls, receipt
 
     def test_codex_size_matrix_is_one_framed_body_and_one_submit(self) -> None:
-        maximum = AGENT_PROMPT_MAX_BYTES - len(
-            (BRACKETED_PASTE_START + BRACKETED_PASTE_END).encode()
-        )
+        maximum = AGENT_PROMPT_MAX_BYTES - len((BRACKETED_PASTE_START + BRACKETED_PASTE_END).encode())
         for size in (1023, 1024, 1025, 4095, 4096, 4097, 6679, maximum):
             with self.subTest(size=size):
                 calls, receipt = self.send("codex", "x" * size)
                 self.assertEqual(len(calls), 2)
                 body, submit = calls
                 self.assertNotIn("--enter", body)
-                self.assertEqual(body[body.index("--text") + 1], f"{BRACKETED_PASTE_START}{'x' * size}{BRACKETED_PASTE_END}")
+                self.assertEqual(
+                    body[body.index("--text") + 1],
+                    f"{BRACKETED_PASTE_START}{'x' * size}{BRACKETED_PASTE_END}",
+                )
                 self.assertEqual(submit[submit.index("--text") + 1], "")
                 self.assertIn("--enter", submit)
                 self.assertTrue(receipt.body_write_accepted)
@@ -49,9 +56,7 @@ class AgentPromptTransportTests(unittest.TestCase):
                 self.assertEqual((receipt.body_write_count, receipt.submit_count), (1, 1))
 
     def test_codex_rejects_a_body_larger_than_the_public_send_limit(self) -> None:
-        maximum = AGENT_PROMPT_MAX_BYTES - len(
-            (BRACKETED_PASTE_START + BRACKETED_PASTE_END).encode()
-        )
+        maximum = AGENT_PROMPT_MAX_BYTES - len((BRACKETED_PASTE_START + BRACKETED_PASTE_END).encode())
         with self.assertRaisesRegex(AgentPromptTransportError, "prompt-body-too-large"):
             prepare_agent_prompt("x" * (maximum + 1), adapter="codex")
 
@@ -104,8 +109,10 @@ class AgentPromptTransportTests(unittest.TestCase):
             accepted = "--enter" not in args
             return {"send": {"accepted": accepted, "bytesWritten": 5 if accepted else 0}}
 
-        with mock.patch("triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0), \
-             self.assertRaises(AgentPromptTransportError) as raised:
+        with (
+            mock.patch("triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0),
+            self.assertRaises(AgentPromptTransportError) as raised,
+        ):
             send_agent_prompt("term-1", prepared, run_json=run_json)
         receipt = raised.exception.receipt
         self.assertEqual(len(calls), 2)

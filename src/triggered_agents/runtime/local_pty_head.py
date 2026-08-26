@@ -159,6 +159,7 @@ constructor argument rather than an import so that every builder of this runtime
 reader, and because inventing a second pid-file reader here is the failure this argument exists to
 prevent.
 """
+
 from __future__ import annotations
 
 import os
@@ -711,9 +712,16 @@ class LocalPtyHeadRuntime:
                     evidence={"reason": exc.reason, "detail": exc.detail},
                     epoch=self.activity.epoch(identity),
                 )
-            live = (run or HeadRun(
-                run_id=identity, spec=spec, workspace=workspace, task_ref=task_ref, role=role,
-            )).rebound(str(handle.socket_path), leaf=identity)
+            live = (
+                run
+                or HeadRun(
+                    run_id=identity,
+                    spec=spec,
+                    workspace=workspace,
+                    task_ref=task_ref,
+                    role=role,
+                )
+            ).rebound(str(handle.socket_path), leaf=identity)
             live = _with_pid_file(live, str(handle.pid_file))
             # A new supervisor over a new pty is a new incarnation, so whatever this runtime had
             # concluded about the one that ended under this id — an admission closed because it
@@ -901,7 +909,12 @@ class LocalPtyHeadRuntime:
             status = probe.status
             if status is None:
                 return _unobservable(
-                    run, OBSERVE_STATUS_UNREADABLE, epoch, lease, rotatable, evidence=probe.answer,
+                    run,
+                    OBSERVE_STATUS_UNREADABLE,
+                    epoch,
+                    lease,
+                    rotatable,
+                    evidence=probe.answer,
                 )
             if not status.get("alive"):
                 # The supervisor reaped the head and says so. A dead head runs no turn, and the
@@ -1035,9 +1048,7 @@ class LocalPtyHeadRuntime:
                         f"this head was asked to stop and its process was still there "
                         f"{self._stop_timeout:g}s later"
                     ),
-                    failure=HeadStopFailed(
-                        "the head's process outlived the stop it was sent", run=finishing
-                    ),
+                    failure=HeadStopFailed("the head's process outlived the stop it was sent", run=finishing),
                     evidence=asked,
                     epoch=self.activity.epoch(run.run_id),
                     lease=self.activity.lease(run.run_id),
@@ -1051,9 +1062,7 @@ class LocalPtyHeadRuntime:
             self.activity.forget(run.run_id)
             self._fatal.pop(run.run_id, None)
             self._admission_notes.pop(run.run_id, None)
-            return StopReceipt(
-                status=HEAD_OK, run=finishing.exited(), evidence=asked, epoch=epoch
-            )
+            return StopReceipt(status=HEAD_OK, run=finishing.exited(), evidence=asked, epoch=epoch)
 
     def attach(self, run: HeadRun) -> AttachReceipt:
         """Join a caller to this head's live stream, through the substrate's own bounded attach.
@@ -1372,9 +1381,7 @@ class LocalPtyHeadRuntime:
         address = self._address(run)
         if address is None:
             return self.activity.epoch(run.run_id)
-        return self.activity.advance_to(
-            run.run_id, self._durable_state(address, run.run_id, probe).seq
-        )
+        return self.activity.advance_to(run.run_id, self._durable_state(address, run.run_id, probe).seq)
 
     def _section_probe(self, run: HeadRun) -> tuple[_Address | None, _Probe | None]:
         """The successful-path status request, taken once at the top of a critical section.
@@ -1408,9 +1415,7 @@ class LocalPtyHeadRuntime:
             return _Probe(status=answer)
         return _Probe(answer=answer)
 
-    def _durable_state(
-        self, address: _Address, run_id: str, probe: _Probe | None = None
-    ) -> _DurableHead:
+    def _durable_state(self, address: _Address, run_id: str, probe: _Probe | None = None) -> _DurableHead:
         """What the head itself still says about its turn, its admission and its epoch.
 
         The supervisor first and the journal second, in that order and never the other way round:
@@ -1492,8 +1497,14 @@ class LocalPtyHeadRuntime:
         exists.
         """
         subject = _with_pid_file(
-            run if run is not None else HeadRun(
-                run_id=claimed, spec=spec, workspace=workspace, task_ref=task_ref, role=role,
+            run
+            if run is not None
+            else HeadRun(
+                run_id=claimed,
+                spec=spec,
+                workspace=workspace,
+                task_ref=task_ref,
+                role=role,
             ),
             "",
         )
@@ -1538,9 +1549,7 @@ class LocalPtyHeadRuntime:
         )
 
     def _connect(self, address: _Address) -> local_pty.SupervisorClient:
-        return local_pty.SupervisorClient.connect(
-            address.socket_path, timeout=self._connect_timeout
-        )
+        return local_pty.SupervisorClient.connect(address.socket_path, timeout=self._connect_timeout)
 
     def _process_alive(self, address: _Address, run: HeadRun) -> bool:
         """Whether the head's own process is alive, by the launch identity and nothing else.
@@ -1716,9 +1725,7 @@ class LocalPtyHeadRuntime:
         # payload was offered. It is carried out on the report so that the epoch this delivery
         # moves is the head's own sequence rather than a count kept only in this process.
         seq = floor
-        deadline = time.monotonic() + self.delivery_wait_for(
-            _declared_bound(admitted)
-        )
+        deadline = time.monotonic() + self.delivery_wait_for(_declared_bound(admitted))
         while True:
             try:
                 status = client.status()
@@ -1743,17 +1750,20 @@ class LocalPtyHeadRuntime:
                 # supervisor that said nothing had landed. It ends this watch the same way a
                 # silent socket does, and for the same reason: the journal is the witness left.
                 return self._report_of(
-                    address, last, offered, floor,
-                    established=False, detail=_refusal_detail(status), seq=seq,
+                    address,
+                    last,
+                    offered,
+                    floor,
+                    established=False,
+                    detail=_refusal_detail(status),
+                    seq=seq,
                 )
             seq = max(seq, int(status.get("journal_seq") or 0))
             delivery = status.get("delivery")
             if isinstance(delivery, dict) and int(delivery.get("id") or 0) == delivery_id:
                 last = delivery
                 if delivery.get("state") != protocol.DELIVERY_IN_FLIGHT:
-                    return self._report_of(
-                        address, last, offered, floor, established=True, seq=seq
-                    )
+                    return self._report_of(address, last, offered, floor, established=True, seq=seq)
             if time.monotonic() >= deadline:
                 # Past the substrate's own bound, plus the grace, and the delivery it declared
                 # that bound for has still not ended. That is not a delivery going well and it is
@@ -1763,7 +1773,10 @@ class LocalPtyHeadRuntime:
                 # fate is unknown and closes the head, because bytes may be sitting on its
                 # terminal.
                 return self._report_of(
-                    address, last, offered, floor,
+                    address,
+                    last,
+                    offered,
+                    floor,
                     established=False,
                     seq=seq,
                     detail=(
@@ -1834,9 +1847,7 @@ class LocalPtyHeadRuntime:
             return ()
         return tuple(event for event in events if int(event.get("seq") or 0) > floor)
 
-    def _unreachable_refusal(
-        self, address: _Address, run: HeadRun, exc: Exception
-    ) -> _Refusal:
+    def _unreachable_refusal(self, address: _Address, run: HeadRun, exc: Exception) -> _Refusal:
         """A payload that was never admitted, because the supervisor could not be spoken to."""
         return _Refusal(
             status=HEAD_ALIVE if self._process_alive(address, run) else HEAD_GONE,
@@ -2026,9 +2037,7 @@ class LocalPtyHeadRuntime:
         except _UNREACHABLE as exc:
             return False, str(exc), 0, None
 
-    def _ask_to_stop(
-        self, address: _Address, initiator: StopInitiator, signal_name: str
-    ) -> Any:
+    def _ask_to_stop(self, address: _Address, initiator: StopInitiator, signal_name: str) -> Any:
         """Ask the supervisor to end its head. A supervisor that is gone is not a failure here.
 
         A head whose supervisor has died is exactly the case where the confirmation below matters:
@@ -2413,9 +2422,7 @@ def _payload_of(pointer: NudgePointer) -> bytes:
     return (pointer.text + "\n").encode("utf-8")
 
 
-def _outcome_of(
-    run: HeadRun, pointer: NudgePointer, report: DeliveryReport, subject: str
-) -> DeliveryOutcome:
+def _outcome_of(run: HeadRun, pointer: NudgePointer, report: DeliveryReport, subject: str) -> DeliveryOutcome:
     """The delivery evidence for a payload that provably reached the head's terminal.
 
     `confirmed` rather than `accepted`, and it is the stronger word on purpose: on this backend the
@@ -2456,9 +2463,7 @@ def _spawn_status(exc: local_pty.LocalPtySpawnError) -> str:
     return HEAD_GONE
 
 
-def _spawn_failure(
-    exc: local_pty.LocalPtySpawnError, run: HeadRun | None
-) -> HeadOperationError:
+def _spawn_failure(exc: local_pty.LocalPtySpawnError, run: HeadRun | None) -> HeadOperationError:
     if _spawn_status(exc) == HEAD_ALIVE and run is not None:
         return HeadSpawnAborted(str(exc), run=run)
     return HeadSpawnFailed(str(exc))
@@ -2479,10 +2484,7 @@ def _task_of(run: HeadRun) -> str:
 
 def _in_flight(status: Mapping[str, Any]) -> bool:
     delivery = status.get("delivery")
-    return (
-        isinstance(delivery, dict)
-        and delivery.get("state") == protocol.DELIVERY_IN_FLIGHT
-    )
+    return isinstance(delivery, dict) and delivery.get("state") == protocol.DELIVERY_IN_FLIGHT
 
 
 def _has_exited(address: _Address) -> bool:

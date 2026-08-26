@@ -25,6 +25,7 @@ Tests that belong to one backend — Orca having no stream to attach to, the loc
 partial delivery — stay in that backend's own file. What is here is what neither of them may
 weaken.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -156,9 +157,7 @@ class HeadRuntimeContract:
         seen = set()
         for receipt in receipts:
             flags = {
-                name
-                for name in ("ok", "deferred", "left_alive", "unsupported")
-                if getattr(receipt, name)
+                name for name in ("ok", "deferred", "left_alive", "unsupported") if getattr(receipt, name)
             }
             self.assertEqual(flags, expected[receipt.status], f"{receipt.status}: {receipt.reason}")
             seen.add(receipt.status)

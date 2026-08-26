@@ -145,9 +145,7 @@ class RunAndCaptureTests(BroadCheckTestCase):
         self.assertLess(receipt_path(self.root, command).stat().st_size, 32768)
 
     def test_one_unbroken_line_cannot_grow_the_receipt(self) -> None:
-        command = self._script(
-            "onebigline.py", "import sys\nsys.stdout.write('x' * 500000)\n"
-        )
+        command = self._script("onebigline.py", "import sys\nsys.stdout.write('x' * 500000)\n")
         _, receipt = self._run(command)
 
         self.assertEqual(receipt["output_bytes"], 500000)
@@ -220,14 +218,10 @@ class RunAndCaptureTests(BroadCheckTestCase):
         _, receipt = self._run("echo timed")
 
         self.assertEqual(receipt["cwd"], str(self.root.resolve()))
-        self.assertEqual(
-            receipt["command_or_check_set_digest"], CheckSpec.for_shell("echo timed").digest
-        )
+        self.assertEqual(receipt["command_or_check_set_digest"], CheckSpec.for_shell("echo timed").digest)
         self.assertLessEqual(receipt["started_at"], receipt["ended_at"])
         self.assertGreaterEqual(receipt["duration_seconds"], 0.0)
-        self.assertEqual(
-            receipt["content_identity"]["tree_sha"], content_identity(self.root).tree_sha
-        )
+        self.assertEqual(receipt["content_identity"]["tree_sha"], content_identity(self.root).tree_sha)
 
 
 class ParsedVerdictTests(unittest.TestCase):
@@ -241,8 +235,7 @@ class ParsedVerdictTests(unittest.TestCase):
 
     def test_a_red_unittest_summary_yields_failure_and_error_counts(self) -> None:
         parsed = parse_unittest_summary(
-            "Ran 12 tests in 1.5s\n\nFAILED (failures=2, errors=1, skipped=4, "
-            "expected failures=1)\n"
+            "Ran 12 tests in 1.5s\n\nFAILED (failures=2, errors=1, skipped=4, expected failures=1)\n"
         )
 
         self.assertEqual(parsed["summary"], "FAILED")
@@ -341,9 +334,7 @@ class DocumentedCommandTests(unittest.TestCase):
             self.assertIn("check broad", text, name)
 
     def test_the_operator_reference_documents_reading_a_receipt_back(self) -> None:
-        text = (Path(__file__).resolve().parents[1] / "docs" / "OPERATIONS.md").read_text(
-            encoding="utf-8"
-        )
+        text = (Path(__file__).resolve().parents[1] / "docs" / "OPERATIONS.md").read_text(encoding="utf-8")
 
         self.assertIn("python3 -m secretary check show --module", text)
         self.assertIn("state/checks/", text)
@@ -493,18 +484,28 @@ class ResultInvariantTests(BroadCheckTestCase):
     def test_the_boundary_refuses_every_result_no_run_could_have_written(self) -> None:
         cases = {
             "a complete run that died on a signal": {
-                "exit_code": -9, "signal": 9, "verdict": "failed", "status": "complete",
+                "exit_code": -9,
+                "signal": 9,
+                "verdict": "failed",
+                "status": "complete",
             },
             "an exit code and signal that disagree": {
-                "exit_code": -9, "signal": 2, "status": "incomplete", "verdict": "unknown",
+                "exit_code": -9,
+                "signal": 2,
+                "status": "incomplete",
+                "verdict": "unknown",
                 "incomplete_reason": "killed by signal 9",
             },
             "a signal on an ordinary exit": {"exit_code": 1, "signal": 9, "verdict": "failed"},
             "an incomplete run with no reason": {
-                "status": "incomplete", "verdict": "unknown", "incomplete_reason": "",
+                "status": "incomplete",
+                "verdict": "unknown",
+                "incomplete_reason": "",
             },
             "an incomplete run that claims a verdict": {
-                "status": "incomplete", "verdict": "passed", "incomplete_reason": "timed out",
+                "status": "incomplete",
+                "verdict": "passed",
+                "incomplete_reason": "timed out",
             },
             "a complete run carrying an incomplete reason": {"incomplete_reason": "timed out"},
             "a green exit reported as failed": {"exit_code": 0, "verdict": "failed"},
@@ -515,12 +516,17 @@ class ResultInvariantTests(BroadCheckTestCase):
             "a boolean masquerading as an exit code": {"exit_code": True, "verdict": "failed"},
             "a normal status outside the POSIX range": {"exit_code": 256, "verdict": "failed"},
             "a signal this platform does not define": {
-                "exit_code": -NSIG, "signal": NSIG, "status": "incomplete", "verdict": "unknown",
+                "exit_code": -NSIG,
+                "signal": NSIG,
+                "status": "incomplete",
+                "verdict": "unknown",
                 "incomplete_reason": f"killed by signal {NSIG}",
             },
             "a complete run whose reason is only whitespace": {"incomplete_reason": " "},
             "an incomplete reason that is not canonical": {
-                "status": "incomplete", "verdict": "unknown", "incomplete_reason": "timed out  ",
+                "status": "incomplete",
+                "verdict": "unknown",
+                "incomplete_reason": "timed out  ",
             },
         }
         for name, changes in cases.items():
@@ -535,11 +541,17 @@ class ResultInvariantTests(BroadCheckTestCase):
             "a green complete run": {},
             "a red complete run": {"exit_code": 2, "verdict": "failed"},
             "a killed run": {
-                "exit_code": -15, "signal": 15, "status": "incomplete", "verdict": "unknown",
+                "exit_code": -15,
+                "signal": 15,
+                "status": "incomplete",
+                "verdict": "unknown",
                 "incomplete_reason": "killed by signal 15",
             },
             "a timeout that still exited normally": {
-                "exit_code": 0, "signal": 0, "status": "incomplete", "verdict": "unknown",
+                "exit_code": 0,
+                "signal": 0,
+                "status": "incomplete",
+                "verdict": "unknown",
                 "incomplete_reason": "timed out after 0.5s",
             },
         }
@@ -563,9 +575,7 @@ class ResultInvariantTests(BroadCheckTestCase):
 
     def test_no_reader_reaches_a_receipt_except_through_the_boundary(self) -> None:
         """The CLI has no way to a receipt that goes around `load_receipt`."""
-        source = Path(broad_check.__file__).with_name("check_commands.py").read_text(
-            encoding="utf-8"
-        )
+        source = Path(broad_check.__file__).with_name("check_commands.py").read_text(encoding="utf-8")
 
         for bypass in ("json.load", "read_text", "read_bytes", "open("):
             self.assertNotIn(bypass, source, "check_commands must not read a receipt itself")
@@ -576,9 +586,7 @@ class ResultInvariantTests(BroadCheckTestCase):
             self.assertNotIn(raw, source, "check_commands must not read raw result fields")
         self.assertIn("shell_status", source)
         # And the only producer of a lookup is the function that starts by loading.
-        self.assertIn("receipt = load_receipt(path)", Path(broad_check.__file__).read_text(
-            encoding="utf-8"
-        ))
+        self.assertIn("receipt = load_receipt(path)", Path(broad_check.__file__).read_text(encoding="utf-8"))
 
 
 class UnchangedContentReuseTests(BroadCheckTestCase):
@@ -718,9 +726,7 @@ class UnchangedContentReuseTests(BroadCheckTestCase):
         self.assertFalse(usable_receipt(self.root, self.suite).usable)
 
     def test_a_check_that_writes_into_the_checkout_invalidates_its_own_receipt(self) -> None:
-        writer = self._suite(
-            "writersuite", "open('artefact.txt', 'w', encoding='utf-8').write('made\\n')\n"
-        )
+        writer = self._suite("writersuite", "open('artefact.txt', 'w', encoding='utf-8').write('made\\n')\n")
         self._run(writer)
 
         # Not a defect: the content the receipt described is not the content now on disk, and
@@ -771,8 +777,7 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
     def test_a_shell_check_that_changes_directory_cannot_claim_the_candidate_checkout(self) -> None:
         outside = self._outside_project()
         command = (
-            f"cd {outside}; {sys.executable} -c "
-            "\"import secretary, sys; sys.stdout.write(secretary.__file__)\""
+            f'cd {outside}; {sys.executable} -c "import secretary, sys; sys.stdout.write(secretary.__file__)"'
         )
 
         exit_code, receipt = self._run(command)
@@ -805,9 +810,7 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
         """The end-to-end case the second review reproduced: a real subprocess, a real safe-path
         import environment, and an alternate checkout ordered before the candidate."""
         outside = self._outside_project()
-        suite = self._suite(
-            "outsidesuite", "import secretary\nprint(secretary.__file__)\n"
-        )
+        suite = self._suite("outsidesuite", "import secretary\nprint(secretary.__file__)\n")
         env = dict(
             os.environ,
             PYTHONSAFEPATH="1",
@@ -917,8 +920,9 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
             "inside": (self._suite("insidesuite", "print('in')\n"), None),
             "outside": (
                 self._suite("outsidecase", "print('out')\n"),
-                dict(os.environ, PYTHONSAFEPATH="1",
-                     PYTHONPATH=os.pathsep.join([str(outside), str(self.root)])),
+                dict(
+                    os.environ, PYTHONSAFEPATH="1", PYTHONPATH=os.pathsep.join([str(outside), str(self.root)])
+                ),
             ),
             "shell": (CheckSpec.for_shell("echo shell"), None),
         }
@@ -927,18 +931,13 @@ class ProvenanceHonestyTests(BroadCheckTestCase):
                 self._run(spec, **({"env": env} if env else {}))
                 lookup = usable_receipt(self.root, spec)
                 argv = ["check", "broad", "--root", str(self.root), "--reuse"]
-                argv += (
-                    ["--module", spec.module] if spec.shape == "module"
-                    else ["--command", spec.command]
-                )
+                argv += ["--module", spec.module] if spec.shape == "module" else ["--command", spec.command]
                 stdout = StringIO()
                 with mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", StringIO()):
                     main(argv)
                 reused = json.loads(stdout.getvalue())["reused"]
 
-                self.assertEqual(
-                    reused, lookup.usable, f"{name}: --reuse and the predicate disagree"
-                )
+                self.assertEqual(reused, lookup.usable, f"{name}: --reuse and the predicate disagree")
                 self.assertEqual(lookup.usable, lookup.authorized() is not None)
 
 
@@ -950,10 +949,7 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
         (instance / "projects").mkdir(parents=True)
         (instance / "adapters").mkdir()
         (instance / "projects" / "example.yaml").write_text(
-            "id: example\n"
-            f"repo: {self.root}\n"
-            "adapter: example\n"
-            "enabled: true\n",
+            f"id: example\nrepo: {self.root}\nadapter: example\nenabled: true\n",
             encoding="utf-8",
         )
         (instance / "adapters" / "example.yaml").write_text(
@@ -984,12 +980,17 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
         interpreter = self.root / ".venv" / "bin" / "python"
         interpreter.parent.mkdir(parents=True)
         interpreter.symlink_to(sys.executable)
-        instance = self._register(
-            interpreter=".venv/bin/python", import_package="codegen_orchestrator"
-        )
+        instance = self._register(interpreter=".venv/bin/python", import_package="codegen_orchestrator")
         argv = [
-            "check", "broad", "--root", str(self.root), "--instance", str(instance),
-            "--reuse", "--module", "project_suite",
+            "check",
+            "broad",
+            "--root",
+            str(self.root),
+            "--instance",
+            str(instance),
+            "--reuse",
+            "--module",
+            "project_suite",
         ]
 
         first = _run_main(argv)
@@ -1002,22 +1003,40 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
         self.assertTrue(provenance["imported_project"].startswith(str(self.root.resolve())))
         self.assertTrue(provenance["inside_workspace"])
 
-        self.assertEqual(_status([
-            "check", "show", "--root", str(self.root), "--instance", str(instance),
-            "--module", "project_suite",
-        ]), 0)
+        self.assertEqual(
+            _status(
+                [
+                    "check",
+                    "show",
+                    "--root",
+                    str(self.root),
+                    "--instance",
+                    str(instance),
+                    "--module",
+                    "project_suite",
+                ]
+            ),
+            0,
+        )
         second = _run_main(argv)
         self.assertTrue(second["reused"])
 
     def test_missing_configured_interpreter_is_a_structured_cli_error(self) -> None:
-        instance = self._register(
-            interpreter=".venv/bin/python", import_package="codegen_orchestrator"
-        )
+        instance = self._register(interpreter=".venv/bin/python", import_package="codegen_orchestrator")
         source_root = Path(__file__).resolve().parents[1]
         completed = subprocess.run(
             [
-                sys.executable, "-m", "secretary", "check", "broad", "--root", str(self.root),
-                "--instance", str(instance), "--module", "project_suite",
+                sys.executable,
+                "-m",
+                "secretary",
+                "check",
+                "broad",
+                "--root",
+                str(self.root),
+                "--instance",
+                str(instance),
+                "--module",
+                "project_suite",
             ],
             cwd=source_root,
             env={**os.environ, "PYTHONPATH": str(source_root / "src")},
@@ -1040,17 +1059,26 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
         self.assertFalse(receipt_path(self.root, spec).exists())
 
     def test_other_interpreter_os_errors_follow_the_same_cli_contract(self) -> None:
-        instance = self._register(
-            interpreter=".venv/bin/python", import_package="codegen_orchestrator"
-        )
+        instance = self._register(interpreter=".venv/bin/python", import_package="codegen_orchestrator")
         argv = [
-            "check", "broad", "--root", str(self.root), "--instance", str(instance),
-            "--module", "project_suite",
+            "check",
+            "broad",
+            "--root",
+            str(self.root),
+            "--instance",
+            str(instance),
+            "--module",
+            "project_suite",
         ]
         stdout = StringIO()
         stderr = StringIO()
-        with mock.patch("secretary.broad_check.subprocess.Popen", side_effect=OSError(ENOEXEC, "Exec format error")), \
-             mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
+        with (
+            mock.patch(
+                "secretary.broad_check.subprocess.Popen", side_effect=OSError(ENOEXEC, "Exec format error")
+            ),
+            mock.patch("sys.stdout", stdout),
+            mock.patch("sys.stderr", stderr),
+        ):
             status = main(argv)
 
         self.assertEqual(status, 2)
@@ -1061,15 +1089,14 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
         (self.root / "legacysuite.py").write_text("print('legacy')\n", encoding="utf-8")
         disabled = self._register(interpreter=".venv/bin/python", import_package="codegen_orchestrator")
         binding = disabled / "projects" / "example.yaml"
-        binding.write_text(binding.read_text(encoding="utf-8").replace("enabled: true", "enabled: false"), encoding="utf-8")
+        binding.write_text(
+            binding.read_text(encoding="utf-8").replace("enabled: true", "enabled: false"), encoding="utf-8"
+        )
         no_contract = Path(self.tmpdir.name) / "no-contract"
         (no_contract / "projects").mkdir(parents=True)
         (no_contract / "adapters").mkdir()
         (no_contract / "projects" / "example.yaml").write_text(
-            "id: example\n"
-            f"repo: {self.root}\n"
-            "adapter: example\n"
-            "enabled: true\n",
+            f"id: example\nrepo: {self.root}\nadapter: example\nenabled: true\n",
             encoding="utf-8",
         )
         (no_contract / "adapters" / "example.yaml").write_text(
@@ -1086,13 +1113,25 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
         }
         for reason, instance in cases.items():
             with self.subTest(reason=reason):
-                payload = _run_main([
-                    "check", "broad", "--root", str(self.root), "--instance", str(instance),
-                    "--module", "legacysuite",
-                ])
-                self.assertEqual(payload["module_contract"], {
-                    "source": "legacy_default", "reason": reason,
-                })
+                payload = _run_main(
+                    [
+                        "check",
+                        "broad",
+                        "--root",
+                        str(self.root),
+                        "--instance",
+                        str(instance),
+                        "--module",
+                        "legacysuite",
+                    ]
+                )
+                self.assertEqual(
+                    payload["module_contract"],
+                    {
+                        "source": "legacy_default",
+                        "reason": reason,
+                    },
+                )
 
     def test_a_legacy_default_that_cannot_attest_this_project_is_refused_before_any_run(self) -> None:
         """secretary-1458: the worker asks the same rules the dispatcher's preflight asked.
@@ -1122,8 +1161,14 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
             encoding="utf-8",
         )
         argv = [
-            "check", "broad", "--root", str(self.root), "--instance", str(no_contract),
-            "--module", "project_suite",
+            "check",
+            "broad",
+            "--root",
+            str(self.root),
+            "--instance",
+            str(no_contract),
+            "--module",
+            "project_suite",
         ]
         stdout, stderr = StringIO(), StringIO()
 
@@ -1148,10 +1193,12 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
         venv = self.root / ".venv"
         subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(venv)], check=True)
         interpreter = venv / "bin" / "python"
-        site_packages = Path(subprocess.check_output(
-            [str(interpreter), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
-            text=True,
-        ).strip())
+        site_packages = Path(
+            subprocess.check_output(
+                [str(interpreter), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
+                text=True,
+            ).strip()
+        )
         package = site_packages / "codegen_orchestrator"
         package.mkdir(parents=True)
         (package / "__init__.py").write_text("NAME = 'installed'\n", encoding="utf-8")
@@ -1190,8 +1237,7 @@ class CheckSetIdentityTests(BroadCheckTestCase):
         """A suite that logs its own argv — outside the checkout, so running it is not an edit."""
         log = self.scripts / "argv.log"
         (self.root / "argsuite.py").write_text(
-            "import sys\n"
-            f"open({str(log)!r}, 'a', encoding='utf-8').write(repr(sys.argv[1:]) + '\\n')\n",
+            f"import sys\nopen({str(log)!r}, 'a', encoding='utf-8').write(repr(sys.argv[1:]) + '\\n')\n",
             encoding="utf-8",
         )
         return log
@@ -1227,9 +1273,7 @@ class CheckSetIdentityTests(BroadCheckTestCase):
         self.assertFalse(first["reused"])
         self.assertFalse(second["reused"], "a different argument vector must run, not reuse")
         self.assertTrue(third["reused"])
-        self.assertEqual(
-            log.read_text(encoding="utf-8").splitlines(), ["['one two']", "['one', 'two']"]
-        )
+        self.assertEqual(log.read_text(encoding="utf-8").splitlines(), ["['one two']", "['one', 'two']"])
 
     def test_a_receipt_whose_stored_check_set_was_edited_is_refused(self) -> None:
         self._record()
@@ -1326,14 +1370,10 @@ class StreamingSummaryTests(BroadCheckTestCase):
         scanner.feed(b"\nRan 2 tests in 0.5s\nOK\n")
 
         self.assertEqual(len(scanner._carry), 0)
-        self.assertEqual(
-            scanner.finish(), {"tests": 2, "runner_duration_seconds": 0.5, "summary": "OK"}
-        )
+        self.assertEqual(scanner.finish(), {"tests": 2, "runner_duration_seconds": 0.5, "summary": "OK"})
 
     def test_the_last_summary_wins_when_a_runner_prints_several(self) -> None:
-        parsed = parse_unittest_summary(
-            "Ran 1 test in 0.1s\nOK\nRan 4 tests in 0.4s\nFAILED (errors=2)\n"
-        )
+        parsed = parse_unittest_summary("Ran 1 test in 0.1s\nOK\nRan 4 tests in 0.4s\nFAILED (errors=2)\n")
 
         self.assertEqual(
             parsed,
@@ -1349,9 +1389,7 @@ class CheckCommandTests(BroadCheckTestCase):
         return code, json.loads(stdout.getvalue())
 
     def test_the_command_exit_status_survives_the_wrapper(self) -> None:
-        code, payload = self._main(
-            ["check", "broad", "--root", str(self.root), "--command", "exit 7"]
-        )
+        code, payload = self._main(["check", "broad", "--root", str(self.root), "--command", "exit 7"])
 
         self.assertEqual(code, 7)
         self.assertEqual(payload["receipt"]["exit_code"], 7)
@@ -1359,9 +1397,7 @@ class CheckCommandTests(BroadCheckTestCase):
         self.assertIn("exit_code: 7", payload["summary"])
 
     def test_a_signal_death_is_reported_as_a_shell_status_not_flattened_to_one(self) -> None:
-        code, payload = self._main(
-            ["check", "broad", "--root", str(self.root), "--command", "kill -9 $$"]
-        )
+        code, payload = self._main(["check", "broad", "--root", str(self.root), "--command", "kill -9 $$"])
 
         self.assertEqual(code, 137)
         self.assertEqual(payload["receipt"]["status"], "incomplete")
@@ -1377,9 +1413,7 @@ class CheckCommandTests(BroadCheckTestCase):
         self._main(["check", "broad", "--root", str(self.root), "--module", "marksuite"])
         self.assertEqual(marker.read_text(encoding="utf-8").count("ran"), 1)
 
-        code, payload = self._main(
-            ["check", "show", "--root", str(self.root), "--module", "marksuite"]
-        )
+        code, payload = self._main(["check", "show", "--root", str(self.root), "--module", "marksuite"])
 
         self.assertEqual(code, 0)
         self.assertTrue(payload["usable"])
@@ -1390,9 +1424,7 @@ class CheckCommandTests(BroadCheckTestCase):
     def test_show_refuses_a_shell_receipt_because_it_attests_no_import(self) -> None:
         self._main(["check", "broad", "--root", str(self.root), "--command", "echo suite"])
 
-        code, payload = self._main(
-            ["check", "show", "--root", str(self.root), "--command", "echo suite"]
-        )
+        code, payload = self._main(["check", "show", "--root", str(self.root), "--command", "echo suite"])
 
         self.assertEqual(code, 1)
         self.assertFalse(payload["usable"])
@@ -1405,9 +1437,7 @@ class CheckCommandTests(BroadCheckTestCase):
         self._main(["check", "broad", "--root", str(self.root), "--module", "showsuite"])
         (self.root / "app.py").write_text("VALUE = 9\n", encoding="utf-8")
 
-        code, payload = self._main(
-            ["check", "show", "--root", str(self.root), "--module", "showsuite"]
-        )
+        code, payload = self._main(["check", "show", "--root", str(self.root), "--module", "showsuite"])
 
         self.assertEqual(code, 1)
         self.assertFalse(payload["usable"])
@@ -1502,10 +1532,18 @@ class CheckCommandTests(BroadCheckTestCase):
         stdout, stderr = StringIO(), StringIO()
         with mock.patch("sys.stdout", stdout), mock.patch("sys.stderr", stderr):
             neither = main(["check", "broad", "--root", str(self.root)])
-            both = main([
-                "check", "broad", "--root", str(self.root), "--module", "unittest",
-                "--command", "true",
-            ])
+            both = main(
+                [
+                    "check",
+                    "broad",
+                    "--root",
+                    str(self.root),
+                    "--module",
+                    "unittest",
+                    "--command",
+                    "true",
+                ]
+            )
 
         self.assertEqual(neither, 2)
         self.assertEqual(both, 2)

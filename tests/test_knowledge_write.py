@@ -17,9 +17,7 @@ from secretary.state_repo import StateRepoError
 
 
 def git(repo: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args], text=True, capture_output=True, check=True
-    )
+    result = subprocess.run(["git", "-C", str(repo), *args], text=True, capture_output=True, check=True)
     return result.stdout
 
 
@@ -72,12 +70,8 @@ class KnowledgeRepoCase(unittest.TestCase):
         runs = self.data_dir / "runs"
         body = "".join(json.dumps(record, sort_keys=True) + "\n" for record in records)
         (runs / "runs.ndjson").write_text(body, encoding="utf-8")
-        (runs / "watermarks.json").write_text(
-            json.dumps({"version": 1, "files": []}), encoding="utf-8"
-        )
-        (runs / "claims.json").write_text(
-            json.dumps({"version": 1, "claims": {}}), encoding="utf-8"
-        )
+        (runs / "watermarks.json").write_text(json.dumps({"version": 1, "files": []}), encoding="utf-8")
+        (runs / "claims.json").write_text(json.dumps({"version": 1, "claims": {}}), encoding="utf-8")
         (runs / "export.json").write_text(
             json.dumps(
                 {
@@ -106,9 +100,7 @@ class KnowledgeRepoCase(unittest.TestCase):
                 return CheckpointWriter(self.data_dir, self.instance_dir).write()
 
     def write(self, *, document: str = DOCUMENT, text: str = BODY, actor: str = "po"):
-        return write_knowledge_document(
-            self.instance_dir, document=document, actor=actor, text=text
-        )
+        return write_knowledge_document(self.instance_dir, document=document, actor=actor, text=text)
 
     def head_files(self) -> list[str]:
         return git(self.instance_dir, "ls-tree", "-r", "--name-only", "HEAD").split()
@@ -252,9 +244,7 @@ class KnowledgeCheckpointRaceTests(KnowledgeRepoCase):
         self.assertIn("state/board/cards.ndjson", files)
         self.assertIn("state/runs/runs.ndjson", files)
         self.assertEqual(git(self.instance_dir, "status", "--porcelain").strip(), "")
-        self.assertEqual(
-            len(git(self.instance_dir, "log", "--format=%H").split()), 3
-        )
+        self.assertEqual(len(git(self.instance_dir, "log", "--format=%H").split()), 3)
 
     def test_repeated_interleavings_never_drop_a_side(self):
         for round_index in range(5):
@@ -290,9 +280,7 @@ class KnowledgeCheckpointRaceTests(KnowledgeRepoCase):
                 self.assertEqual(errors, [])
                 self.assertIn(f"state/knowledge/{document}", self.head_files())
                 self.assertEqual(git(self.instance_dir, "status", "--porcelain").strip(), "")
-                board = (
-                    self.instance_dir / "state" / "board" / "cards.ndjson"
-                ).read_text(encoding="utf-8")
+                board = (self.instance_dir / "state" / "board" / "cards.ndjson").read_text(encoding="utf-8")
                 self.assertIn(f"round {round_index}", board)
 
 

@@ -33,7 +33,11 @@ STATUS_SCHEMA_VERSION = 1
 
 
 def collect_status(
-    report, *, host_fixture: str | None = None, offline: bool = False, sprint_client: KanboardClient | None = None,
+    report,
+    *,
+    host_fixture: str | None = None,
+    offline: bool = False,
+    sprint_client: KanboardClient | None = None,
 ) -> dict[str, Any]:
     """Return a stable, non-mutating snapshot for one validated instance."""
     assert report.data_dir is not None
@@ -41,9 +45,12 @@ def collect_status(
     instance_dir = report.instance_path.parent
     production = _read_object(data_dir / "dispatcher" / "production-state.json")
     expected = build_doctor_expectations(
-        report.instance, report.bindings,
+        report.instance,
+        report.bindings,
         packaged=resolve_installed_packaged(
-            report.instance, instance_path=instance_dir, data_dir=data_dir,
+            report.instance,
+            instance_path=instance_dir,
+            data_dir=data_dir,
         ),
         data_dir=data_dir,
     )
@@ -60,8 +67,13 @@ def collect_status(
             "projects": report.projects,
             "heads": _heads(report.instance),
             "head_registry": _head_registry(report.instance_path.parent),
-            "cards": {"total": _card_count(data_dir), "active_attempts": len(_attempts(production, probe_panels=False))},
-            "sprints": _sprints(data_dir, report.instance_path.parent, report.instance, production, client=sprint_client),
+            "cards": {
+                "total": _card_count(data_dir),
+                "active_attempts": len(_attempts(production, probe_panels=False)),
+            },
+            "sprints": _sprints(
+                data_dir, report.instance_path.parent, report.instance, production, client=sprint_client
+            ),
         },
         "host": {
             "units": _units(expected, collected, offline=offline),
@@ -96,6 +108,7 @@ def expected_to_empty_inventory():
     status represents each expected resource with null presence instead.
     """
     from secretary.host import HostInventory
+
     return HostInventory()
 
 
@@ -146,8 +159,12 @@ def _head_registry(instance_dir: Path) -> dict[str, Any]:
 
 
 def _sprints(
-    data_dir: Path, instance_dir: Path, instance: dict[str, Any], production: dict[str, Any],
-    *, client: KanboardClient | None = None,
+    data_dir: Path,
+    instance_dir: Path,
+    instance: dict[str, Any],
+    production: dict[str, Any],
+    *,
+    client: KanboardClient | None = None,
 ) -> dict[str, Any]:
     """Read the sprint entity and live board without consulting observer context."""
     try:
@@ -161,17 +178,22 @@ def _sprints(
     except TaskError as exc:
         return {"items": [], "error": {"code": exc.code, "message": exc.message}}
 
+
 def _units(expected, collected: CollectResult, *, offline: bool) -> list[dict[str, Any]]:
     rows = []
     for name in sorted(expected.units):
         enabled, active = collected.inventory.unit_states.get(name, (None, None))
-        rows.append({
-            "name": name,
-            "kind": "timer" if name.endswith(".timer") else "service",
-            "present": None if offline or "units" in collected.errors else name in collected.inventory.units,
-            "enabled": enabled,
-            "active": active,
-        })
+        rows.append(
+            {
+                "name": name,
+                "kind": "timer" if name.endswith(".timer") else "service",
+                "present": None
+                if offline or "units" in collected.errors
+                else name in collected.inventory.units,
+                "enabled": enabled,
+                "active": active,
+            }
+        )
     return rows
 
 
@@ -202,20 +224,22 @@ def _attempts(production: dict[str, Any], *, probe_panels: bool) -> list[dict[st
             continue
         worker = _watchdog(record, reference, "worker", probe_panels)
         reviewer = _watchdog(record, reference, "review", probe_panels)
-        attempts.append({
-            "reference": reference,
-            "attempt_id": _text(record.get("attempt_id")) or None,
-            "state": _text(record.get("state")) or None,
-            "worker": _text(record.get("worker")) or None,
-            "head": _text(record.get("head")) or None,
-            "review_head": _text(record.get("review_head")) or None,
-            "workspace": _text(record.get("workspace")) or None,
-            "watchdogs": {"worker": worker, "reviewer": reviewer},
-            "paused": {
-                "worker": _float(record.get("paused_worker_at")) > 0,
-                "reviewer": _float(record.get("paused_reviewer_at")) > 0,
-            },
-        })
+        attempts.append(
+            {
+                "reference": reference,
+                "attempt_id": _text(record.get("attempt_id")) or None,
+                "state": _text(record.get("state")) or None,
+                "worker": _text(record.get("worker")) or None,
+                "head": _text(record.get("head")) or None,
+                "review_head": _text(record.get("review_head")) or None,
+                "workspace": _text(record.get("workspace")) or None,
+                "watchdogs": {"worker": worker, "reviewer": reviewer},
+                "paused": {
+                    "worker": _float(record.get("paused_worker_at")) > 0,
+                    "reviewer": _float(record.get("paused_reviewer_at")) > 0,
+                },
+            }
+        )
     return attempts
 
 
@@ -301,9 +325,7 @@ def _observers(production: dict[str, Any]) -> list[dict[str, Any]]:
 def _delivery_failures(delivery: Any) -> int:
     if not isinstance(delivery, dict):
         return 0
-    return int(delivery.get("wake_failures") or 0) + int(
-        delivery.get("launch_delivery_failures") or 0
-    )
+    return int(delivery.get("wake_failures") or 0) + int(delivery.get("launch_delivery_failures") or 0)
 
 
 def _delivery_last_failure(delivery: Any) -> str | None:
@@ -370,8 +392,10 @@ def _pause_status(data_dir: Path, production: dict[str, Any]) -> dict[str, Any]:
         if isinstance(ref, str) and isinstance(record, dict)
     }
     return {
-        "paused": bool(pause.get("paused")), "mode": _text(pause.get("mode")) or None,
-        "since": _text(pause.get("since")) or None, "actor": _text(pause.get("actor")) or None,
+        "paused": bool(pause.get("paused")),
+        "mode": _text(pause.get("mode")) or None,
+        "since": _text(pause.get("since")) or None,
+        "actor": _text(pause.get("actor")) or None,
         "reason": _text(pause.get("reason")) or None,
         "auto_resume": pause.get("auto_resume") if isinstance(pause.get("auto_resume"), dict) else None,
         "cards": paused,
@@ -403,7 +427,11 @@ def _host_resources(data_dir: Path) -> dict[str, Any]:
         disk_free = usage.free
     except OSError:
         disk_free = None
-    return {"disk_free_bytes": disk_free, "memory_available_bytes": _memory_available(), "load_average": _load_average()}
+    return {
+        "disk_free_bytes": disk_free,
+        "memory_available_bytes": _memory_available(),
+        "load_average": _load_average(),
+    }
 
 
 def _memory_available() -> int | None:
@@ -440,7 +468,12 @@ def _export_fact_count(path: Path) -> int | None:
 
 def _mtime(path: Path) -> str | None:
     try:
-        return datetime.fromtimestamp(path.stat().st_mtime, UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        return (
+            datetime.fromtimestamp(path.stat().st_mtime, UTC)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
     except OSError:
         return None
 

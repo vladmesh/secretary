@@ -132,7 +132,10 @@ def observer_fence(runtime: Any, payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _blind_fence(
-    runtime: Any, payload: dict[str, Any], snapshot: dict[str, list[str]], reason: str,
+    runtime: Any,
+    payload: dict[str, Any],
+    snapshot: dict[str, list[str]],
+    reason: str,
 ) -> dict[str, Any]:
     """Fence every open sprint the last successful pass saw, plus every sprint-linked card.
 
@@ -154,17 +157,19 @@ def _blind_fence(
         # Not a fence the durable log carries a reason for: it is one tick's read failure, it
         # clears by itself as soon as the board answers, and writing an event per tick of a
         # Kanboard outage would bury the fences that are about an actual observer.
-        "outcomes": [{
-            "status": "critical",
-            "step": "observer-fence",
-            "action": REASON_BOARD_UNAVAILABLE,
-            "reason": (
-                "the sprint board could not be read, so no declared observer could be checked; "
-                f"every sprint-held project is fenced this tick: {reason}"
-            ),
-            "sprints": sorted(fenced_sprints),
-            "projects": sorted(projects),
-        }],
+        "outcomes": [
+            {
+                "status": "critical",
+                "step": "observer-fence",
+                "action": REASON_BOARD_UNAVAILABLE,
+                "reason": (
+                    "the sprint board could not be read, so no declared observer could be checked; "
+                    f"every sprint-held project is fenced this tick: {reason}"
+                ),
+                "sprints": sorted(fenced_sprints),
+                "projects": sorted(projects),
+            }
+        ],
     }
 
 
@@ -194,9 +199,7 @@ def _snapshot(payload: dict[str, Any]) -> dict[str, list[str]]:
 
 
 def _put_snapshot(payload: dict[str, Any], open_sprints: dict[str, dict[str, Any]]) -> None:
-    snapshot = {
-        ref: sorted(_sprint_projects(sprint)) for ref, sprint in sorted(open_sprints.items())
-    }
+    snapshot = {ref: sorted(_sprint_projects(sprint)) for ref, sprint in sorted(open_sprints.items())}
     if snapshot:
         payload[FENCE_SNAPSHOT] = snapshot
     else:
@@ -204,7 +207,9 @@ def _put_snapshot(payload: dict[str, Any], open_sprints: dict[str, dict[str, Any
 
 
 def _sprint_verdict(
-    runtime: Any, sprint: dict[str, Any], record: ObserverRecord | None,
+    runtime: Any,
+    sprint: dict[str, Any],
+    record: ObserverRecord | None,
 ) -> dict[str, Any] | None:
     """Why this sprint is fenced, or None when it is free to run."""
     try:
@@ -227,8 +232,7 @@ def _sprint_verdict(
         return {
             "reason": REASON_MISMATCH,
             "message": (
-                f"declared observer {head} is not the running head "
-                f"{record.head or '(none recorded)'}"
+                f"declared observer {head} is not the running head {record.head or '(none recorded)'}"
             ),
             "head": head,
         }
@@ -241,9 +245,7 @@ def _sprint_verdict(
     if record.state in {"deferred", "pending", "launching"}:
         return {
             "reason": REASON_DEFERRED,
-            "message": (
-                f"declared observer {head} is not up: {record.deferred_reason or record.state}"
-            ),
+            "message": (f"declared observer {head} is not up: {record.deferred_reason or record.state}"),
             "head": head,
         }
     liveness = observer_alive(record)
@@ -271,7 +273,10 @@ def _sprint_verdict(
 
 
 def _raise(
-    runtime: Any, payload: dict[str, Any], state: dict[str, Any], sprint: dict[str, Any],
+    runtime: Any,
+    payload: dict[str, Any],
+    state: dict[str, Any],
+    sprint: dict[str, Any],
     verdict: dict[str, Any],
 ) -> dict[str, Any]:
     """Open or keep the fence on one sprint, writing the critical fact once per reason."""
@@ -295,7 +300,10 @@ def _raise(
     # Durable before the cards are held back, in the order every other dispatcher effect uses: the
     # log carries why a sprint stopped even if this tick does not live to save its state.
     event = stage_event(
-        runtime, EVENT_FENCED, ref, request_id,
+        runtime,
+        EVENT_FENCED,
+        ref,
+        request_id,
         {
             "observer_reason": verdict["reason"],
             "head": verdict.get("head") or "",
@@ -306,8 +314,11 @@ def _raise(
     )
     audited = commit_event(runtime, event)
     state[ref] = {
-        "reason": verdict["reason"], "since": since, "episode": episode,
-        "head": verdict.get("head") or "", "request_id": request_id,
+        "reason": verdict["reason"],
+        "since": since,
+        "episode": episode,
+        "head": verdict.get("head") or "",
+        "request_id": request_id,
     }
     outcome = {
         "status": "critical",
@@ -330,11 +341,15 @@ def _clear(runtime: Any, state: dict[str, Any], ref: str) -> list[dict[str, Any]
     if not isinstance(previous, dict):
         return []
     request_id = _fence_request_id(
-        ref, "cleared",
+        ref,
+        "cleared",
         _episode_stamp(str(previous.get("since") or ""), previous.get("episode")),
     )
     event = stage_event(
-        runtime, EVENT_CLEARED, ref, request_id,
+        runtime,
+        EVENT_CLEARED,
+        ref,
+        request_id,
         {"observer_reason": previous.get("reason"), "since": previous.get("since")},
     )
     audited = commit_event(runtime, event)

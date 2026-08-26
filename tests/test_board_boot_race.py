@@ -10,6 +10,7 @@ bounded window and then raises the distinct KanboardUnreachable; the board-depen
 that one error into exit code 101; the gate waits and re-runs a precheck that answers 101, a
 bounded number of times, and dispatches nothing while the board is out of reach.
 """
+
 from __future__ import annotations
 
 import json
@@ -54,8 +55,13 @@ class ClientRetryTests(unittest.TestCase):
     """`_post` rides out a refused connection, and only a refused connection."""
 
     def setUp(self) -> None:
-        patch = mock.patch.object(kanboard, "_creds", return_value=mock.Mock(
-            url="http://board.invalid/jsonrpc.php", authorization_header=lambda: "Basic x"))
+        patch = mock.patch.object(
+            kanboard,
+            "_creds",
+            return_value=mock.Mock(
+                url="http://board.invalid/jsonrpc.php", authorization_header=lambda: "Basic x"
+            ),
+        )
         patch.start()
         self.addCleanup(patch.stop)
         for name, value in (("_CONNECT_RETRY_WINDOW_S", 9.0), ("_CONNECT_RETRY_SLEEP_S", 3.0)):
@@ -71,8 +77,7 @@ class ClientRetryTests(unittest.TestCase):
             self.slept.append(seconds)
             self.now += seconds
 
-        clock = mock.patch.object(kanboard, "time",
-                                  mock.Mock(monotonic=lambda: self.now, sleep=sleep))
+        clock = mock.patch.object(kanboard, "time", mock.Mock(monotonic=lambda: self.now, sleep=sleep))
         clock.start()
         self.addCleanup(clock.stop)
 
@@ -113,16 +118,20 @@ class ClientRetryTests(unittest.TestCase):
         self.assertEqual(calls, ["http"])
         self.assertEqual(self.slept, [])
 
-        with mock.patch.object(kanboard.urllib.request, "urlopen",
-                               lambda *a, **k: Response(b'{"error": {"code": -32601}}')):
+        with mock.patch.object(
+            kanboard.urllib.request, "urlopen", lambda *a, **k: Response(b'{"error": {"code": -32601}}')
+        ):
             with self.assertRaises(kanboard.KanboardError) as rpc:
                 kanboard.call("nope")
         self.assertNotIsInstance(rpc.exception, kanboard.KanboardUnreachable)
 
     def test_a_timeout_is_not_treated_as_a_refused_connection(self):
         """A timeout may mean the request was already delivered; retrying it is not free."""
-        with mock.patch.object(kanboard.urllib.request, "urlopen",
-                               mock.Mock(side_effect=urllib.error.URLError(TimeoutError("timed out")))):
+        with mock.patch.object(
+            kanboard.urllib.request,
+            "urlopen",
+            mock.Mock(side_effect=urllib.error.URLError(TimeoutError("timed out"))),
+        ):
             with self.assertRaises(kanboard.KanboardError) as caught:
                 kanboard.call("getAllProjects")
         self.assertNotIsInstance(caught.exception, kanboard.KanboardUnreachable)
@@ -153,20 +162,26 @@ class PrecheckDeferralTests(unittest.TestCase):
 
     def test_retro_defers_the_daily_run_instead_of_crashing_on_it(self):
         unreachable = kanboard.KanboardUnreachable("getAllProjects: board unreachable after 90s")
-        with mock.patch.object(retro_cli, "STATE", self.state), \
-             mock.patch.object(retro_cli.pipeline_ops, "close_old_done_cards", side_effect=unreachable):
+        with (
+            mock.patch.object(retro_cli, "STATE", self.state),
+            mock.patch.object(retro_cli.pipeline_ops, "close_old_done_cards", side_effect=unreachable),
+        ):
             self.assert_deferred(retro_cli.cmd_precheck())
 
     def test_steward_defers_its_tick_instead_of_failing_the_unit(self):
         unreachable = kanboard.KanboardUnreachable("getAllTasks: board unreachable after 90s")
-        with mock.patch.object(steward_cli, "STATE", self.state), \
-             mock.patch.object(steward_cli.signals, "scan", side_effect=unreachable):
+        with (
+            mock.patch.object(steward_cli, "STATE", self.state),
+            mock.patch.object(steward_cli.signals, "scan", side_effect=unreachable),
+        ):
             self.assert_deferred(steward_cli.cmd_precheck())
 
     def test_a_precheck_that_really_broke_still_fails_the_unit(self):
         """The deferral branch is for the board being absent, not for the agent being broken."""
-        with mock.patch.object(steward_cli, "STATE", self.state), \
-             mock.patch.object(steward_cli.signals, "scan", side_effect=kanboard.KanboardError("rpc error")):
+        with (
+            mock.patch.object(steward_cli, "STATE", self.state),
+            mock.patch.object(steward_cli.signals, "scan", side_effect=kanboard.KanboardError("rpc error")),
+        ):
             self.assertEqual(steward_cli.cmd_precheck(), 2)
         self.assertEqual([r["result"] for r in self.runs() if r["event"] == "precheck"], ["error"])
 
@@ -176,8 +191,10 @@ class HealthTests(unittest.TestCase):
 
     def runs_status(self, results: list[str]) -> tuple[list[str], str]:
         now = datetime.now(UTC)
-        records = [{"ts": (now - timedelta(minutes=len(results) - i)).isoformat(),
-                    "event": "precheck", "result": r} for i, r in enumerate(results)]
+        records = [
+            {"ts": (now - timedelta(minutes=len(results) - i)).isoformat(), "event": "precheck", "result": r}
+            for i, r in enumerate(results)
+        ]
         with mock.patch.object(health, "_runs", return_value=records):
             return health._runs_status("retro")
 
@@ -211,25 +228,32 @@ class GateTests(unittest.TestCase):
             # code, and records anything else the gate decided to run.
             shim.write_text(
                 "#!/usr/bin/env bash\n"
-                "args=(\"$@\")\n"
-                "for i in \"${!args[@]}\"; do\n"
-                "  if [ \"${args[$i]}\" = \"--\" ]; then args=(\"${args[@]:$((i+1))}\"); break; fi\n"
+                'args=("$@")\n'
+                'for i in "${!args[@]}"; do\n'
+                '  if [ "${args[$i]}" = "--" ]; then args=("${args[@]:$((i+1))}"); break; fi\n'
                 "done\n"
-                "if [ \"${args[-1]}\" = precheck ]; then\n"
-                "  code=$(head -n1 \"$STUB_CODES\")\n"
-                "  tail -n +2 \"$STUB_CODES\" > \"$STUB_CODES.rest\"\n"
-                "  mv \"$STUB_CODES.rest\" \"$STUB_CODES\"\n"
-                "  echo precheck >> \"$STUB_CODES.log\"\n"
-                "  exit \"${code:-0}\"\n"
+                'if [ "${args[-1]}" = precheck ]; then\n'
+                '  code=$(head -n1 "$STUB_CODES")\n'
+                '  tail -n +2 "$STUB_CODES" > "$STUB_CODES.rest"\n'
+                '  mv "$STUB_CODES.rest" "$STUB_CODES"\n'
+                '  echo precheck >> "$STUB_CODES.log"\n'
+                '  exit "${code:-0}"\n'
                 "fi\n"
-                "echo \"ran: ${args[*]}\"\n",
-                encoding="utf-8")
+                'echo "ran: ${args[*]}"\n',
+                encoding="utf-8",
+            )
             shim.chmod(0o755)
-            env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", HOME=tmp,
-                       STUB_CODES=str(codes_file),
-                       TA_GATE_BOARD_ATTEMPTS=str(attempts), TA_GATE_BOARD_WAIT="0")
-            result = subprocess.run([str(GATE), "retro"], capture_output=True, text=True,
-                                    env=env, timeout=120)
+            env = dict(
+                os.environ,
+                PATH=f"{bin_dir}:{os.environ['PATH']}",
+                HOME=tmp,
+                STUB_CODES=str(codes_file),
+                TA_GATE_BOARD_ATTEMPTS=str(attempts),
+                TA_GATE_BOARD_WAIT="0",
+            )
+            result = subprocess.run(
+                [str(GATE), "retro"], capture_output=True, text=True, env=env, timeout=120
+            )
             log = Path(str(codes_file) + ".log")
             result.attempts = len(log.read_text(encoding="utf-8").splitlines()) if log.is_file() else 0
             return result

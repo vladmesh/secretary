@@ -7,6 +7,7 @@ Workspaces already live under the project's own directory in the session manager
 just echo something the path already says. `card_id` strips the reference (`<project>-<id>`, the board-CLI identity, left untouched)
 down to the numeric tail a workspace or tab name is keyed off.
 """
+
 from __future__ import annotations
 
 import re

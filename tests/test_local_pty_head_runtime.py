@@ -22,6 +22,7 @@ legacy one. What is in this file beside it is what only this backend can be aske
   * a supervisor that died being classified by the head's launch identity and not by the socket;
   * `stop_if_quiescent` in the order secretary-1462 fixed, with liveness outranking the terminal.
 """
+
 from __future__ import annotations
 
 import ast
@@ -128,7 +129,7 @@ def _alive(pid: int) -> bool:
     except OSError:
         return False
     close = stat.rfind(")")
-    fields = stat[close + 2:].split()
+    fields = stat[close + 2 :].split()
     return bool(fields) and fields[0] != "Z"
 
 
@@ -208,8 +209,7 @@ class LocalPtyRuntimeTestCase(unittest.TestCase):
 
     # -- the runtime ---------------------------------------------------------------------------
 
-    def bring_up(self, *, pointer: NudgePointer | None = None, command: str = CHILD_COMMAND,
-                 **options):
+    def bring_up(self, *, pointer: NudgePointer | None = None, command: str = CHILD_COMMAND, **options):
         receipt = self.runtime.start(
             CODEX,
             str(self.workspace),
@@ -348,9 +348,7 @@ class LocalPtyStartTests(LocalPtyRuntimeTestCase):
         self.assertEqual(run.pid_file, str(self.root / run.run_id / protocol.PID_FILE_NAME))
         identity = json.loads(Path(run.pid_file).read_text(encoding="utf-8"))
         self.assertEqual(identity["run_id"], run.run_id)
-        self.assertEqual(
-            head_process_status(run.pid_file)["state"], "live-match", "the head is not running"
-        )
+        self.assertEqual(head_process_status(run.pid_file)["state"], "live-match", "the head is not running")
 
     def test_a_bring_up_over_a_run_whose_head_is_up_is_refused_on_its_launch_identity(self) -> None:
         """secretary-1468: the refusal that used to be the supervisor's is made before the spawn.
@@ -558,9 +556,7 @@ class LocalPtyRestartTests(LocalPtyRuntimeTestCase):
         record = json.loads(Path(run.pid_file).read_text(encoding="utf-8"))
         record["boot_id"] = "00000000-0000-0000-0000-000000000000"
         Path(run.pid_file).write_text(json.dumps(record), encoding="utf-8")
-        self.assertTrue(
-            self.root.joinpath(run.run_id).is_dir(), "the run directory is meant to survive"
-        )
+        self.assertTrue(self.root.joinpath(run.run_id).is_dir(), "the run directory is meant to survive")
 
         receipt = self._next_tick().start(
             CODEX,
@@ -689,9 +685,7 @@ class LocalPtyDurableTurnTests(LocalPtyRuntimeTestCase):
         self.assertNotEqual(second.lease.lease_id, lease.lease_id, "the lease is adopted, not re-granted")
         self.assertEqual(second.lease.subject, ADOPTED_TURN_SUBJECT)
         self.assertTrue(_alive(head), "the turn that was running was interrupted")
-        self._await(
-            lambda: b"DONE" in self.output_of(run), message="the turn never finished on its own"
-        )
+        self._await(lambda: b"DONE" in self.output_of(run), message="the turn never finished on its own")
 
     # -- criterion 3: the rotation happens where the lease closes -------------------------------
 
@@ -763,9 +757,7 @@ class LocalPtyDurableTurnTests(LocalPtyRuntimeTestCase):
             looking.epoch,
             "the tick that has to compare this number reads the head, and reads it unchanged",
         )
-        self.assertGreater(
-            self.runtime.activity.ticks, 0, "`ticks` is still the diagnostic it always was"
-        )
+        self.assertGreater(self.runtime.activity.ticks, 0, "`ticks` is still the diagnostic it always was")
 
     def test_a_turn_opened_after_a_judgement_was_formed_survives_that_judgement_s_stop(self) -> None:
         """The snapshot a conditional stop compares is this critical section's, never an older one.
@@ -795,9 +787,7 @@ class LocalPtyDurableTurnTests(LocalPtyRuntimeTestCase):
         self.assertNotEqual(receipt.status, HEAD_OK, "a running turn was ended by a stale epoch")
         self.assertIn(receipt.reason, (STOP_ACTIVITY_SINCE, STOP_TURN_IN_FLIGHT), receipt.reason)
         self.assertTrue(_alive(head), "the head another tick was working was killed")
-        self._await(
-            lambda: b"DONE" in self.output_of(run), message="the turn never finished on its own"
-        )
+        self._await(lambda: b"DONE" in self.output_of(run), message="the turn never finished on its own")
 
     def test_an_epoch_from_a_tick_the_head_has_worked_since_refuses_the_stop(self) -> None:
         run = self.live_run()
@@ -958,6 +948,7 @@ class LocalPtyDurableTurnTests(LocalPtyRuntimeTestCase):
         running. The replay is what tells them apart: everything before the last `run.started` is
         about a head that no longer exists.
         """
+
         def write(journal, path) -> None:
             journal.append(RUN_STARTED, head_pid=1)
             journal.append(DRAIN_REQUESTED, initiator="an incarnation that is over")
@@ -997,6 +988,7 @@ class LocalPtyDurableTurnTests(LocalPtyRuntimeTestCase):
         drain" is not "there was none", and a reader that spells those the same way admits work to
         a head somebody took out of service.
         """
+
         def write(journal, path) -> None:
             journal.append(RUN_STARTED, head_pid=1)
             while path.stat().st_size <= JOURNAL_TAIL_BYTES:
@@ -1035,6 +1027,7 @@ class LocalPtyDurableTurnTests(LocalPtyRuntimeTestCase):
         the window `read_tail` is allowed to read. A replay of what is left says "no drain here",
         which is exactly the sentence that must not become an open admission.
         """
+
         def write(journal, path) -> None:
             journal.append(RUN_STARTED, head_pid=1)
             journal.append(DRAIN_REQUESTED, initiator="the tick that took this head out")
@@ -1109,9 +1102,7 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
         head itself — the one bound both layers follow.
         """
         options.setdefault("delivery_grace", TEST_GRACE_SECONDS)
-        self.runtime = LocalPtyHeadRuntime(
-            self.root, head_process_status=head_process_status, **options
-        )
+        self.runtime = LocalPtyHeadRuntime(self.root, head_process_status=head_process_status, **options)
 
     def _fill_the_terminal(self, run: HeadRun) -> int:
         """Stall one payload against this head's pty from outside the runtime, and say how much landed.
@@ -1279,9 +1270,7 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
             command=f"{sys.executable} -u {LINE_READER} --chunk 4096 --pause {pause:g}",
             delivery_seconds=delivery_seconds,
         )
-        self._await(
-            lambda: b"UP" in self.output_of(run), message="the head never said it was up"
-        )
+        self._await(lambda: b"UP" in self.output_of(run), message="the head never said it was up")
         return run
 
     def _terminal_records(self, run: HeadRun) -> list[bytes]:
@@ -1391,9 +1380,7 @@ class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
         self.assertEqual(self.payloads_delivered(), 0, "the terminal was touched after all")
         self.assertTrue(_alive(head), "the head died of a connection limit")
         held.pop().close()
-        self.assertFalse(
-            self._admitted_status(address.socket_path)["draining"], "the substrate was drained"
-        )
+        self.assertFalse(self._admitted_status(address.socket_path)["draining"], "the substrate was drained")
 
         def delivered() -> bool:
             return self.deliver_line(run, "and now this").status == HEAD_OK
@@ -1531,9 +1518,7 @@ class LocalPtyDrainTests(LocalPtyRuntimeTestCase):
         self.assertEqual(receipt.status, HEAD_ALIVE)
         self.assertTrue(receipt.draining, "this runtime's own gate is still real")
         self.assertFalse(receipt.head_signalled)
-        self.assertEqual(
-            self.deliver_line(run, "more work").status, HEAD_DRAINING, "the local gate holds"
-        )
+        self.assertEqual(self.deliver_line(run, "more work").status, HEAD_DRAINING, "the local gate holds")
         _kill(head, group=True)
 
     def test_a_drain_does_not_interrupt_the_turn_the_head_is_running(self) -> None:
@@ -1665,7 +1650,6 @@ class LocalPtyAttachTests(LocalPtyRuntimeTestCase):
         self._await(rejoined, message="the freed connection was never reusable")
 
 
-
 class LocalPtyObserveTests(LocalPtyRuntimeTestCase):
     """Criterion 7: built on the journal and the substrate's state, never on a guess."""
 
@@ -1714,9 +1698,7 @@ class LocalPtyObserveTests(LocalPtyRuntimeTestCase):
     def test_the_epoch_moves_on_new_output_and_not_on_the_fact_of_looking(self) -> None:
         run = self.live_run()
         self.deliver_line(run, "hello")
-        self._await(
-            lambda: b"ECHO hello" in self.output_of(run), message="the head never echoed"
-        )
+        self._await(lambda: b"ECHO hello" in self.output_of(run), message="the head never echoed")
         self.end_turn(run)
         printed = self.runtime.observe(run).epoch
 
@@ -1726,7 +1708,6 @@ class LocalPtyObserveTests(LocalPtyRuntimeTestCase):
         self.assertEqual(self.deliver_line(run, "again").status, HEAD_OK)
         self._await(lambda: b"ECHO again" in self.output_of(run), message="the head never echoed")
         self.assertGreater(self.runtime.observe(run).epoch, printed)
-
 
 
 class LocalPtyStopTests(LocalPtyRuntimeTestCase):
@@ -1834,18 +1815,14 @@ class TheWaitIsDerivedFromTheSubstrateTests(LocalPtyRuntimeTestCase):
 
         self.assertNotIn("delivery_timeout", parameters, "the independent second knob is back")
         with self.assertRaises(TypeError):
-            LocalPtyHeadRuntime(
-                self.root, head_process_status=head_process_status, delivery_timeout=0.5
-            )
+            LocalPtyHeadRuntime(self.root, head_process_status=head_process_status, delivery_timeout=0.5)
 
     def test_the_wait_is_the_substrate_s_bound_and_can_only_be_longer_than_it(self) -> None:
         """Whatever the head was raised with, the wait over it is strictly longer. No exceptions."""
         for bound in (0.5, 1.0, protocol.INPUT_DELIVERY_SECONDS, 60.0, 3600.0):
             with self.subTest(bound=bound):
                 self.assertGreater(self.runtime.delivery_wait_for(bound), bound)
-        raised = LocalPtyHeadRuntime(
-            self.root, head_process_status=head_process_status, delivery_grace=0.0
-        )
+        raised = LocalPtyHeadRuntime(self.root, head_process_status=head_process_status, delivery_grace=0.0)
         self.assertGreaterEqual(raised.delivery_wait_for(90.0), 90.0, "a raised bound is followed")
         self.assertGreater(
             raised.delivery_wait_for(90.0),
@@ -1855,16 +1832,13 @@ class TheWaitIsDerivedFromTheSubstrateTests(LocalPtyRuntimeTestCase):
 
     def test_the_grace_cannot_be_spelled_as_a_shorter_wait(self) -> None:
         with self.assertRaises(LocalPtyRuntimeError):
-            LocalPtyHeadRuntime(
-                self.root, head_process_status=head_process_status, delivery_grace=-1.0
-            )
+            LocalPtyHeadRuntime(self.root, head_process_status=head_process_status, delivery_grace=-1.0)
 
     def test_the_bound_is_read_off_the_delivery_the_substrate_admitted(self) -> None:
         """Per delivery, from the answer that admitted it — not from anything remembered here."""
         self.assertEqual(_declared_bound({"timeout_seconds": 7.5}), 7.5)
         self.assertEqual(_declared_bound({}), UNDECLARED_DELIVERY_BOUND)
-        self.assertEqual(_declared_bound({"timeout_seconds": "not a number"}),
-                         UNDECLARED_DELIVERY_BOUND)
+        self.assertEqual(_declared_bound({"timeout_seconds": "not a number"}), UNDECLARED_DELIVERY_BOUND)
         # And what the substrate really puts there is the head's own bound, so a head raised with
         # one number is a head every delivery to it is waited out at.
         run = self.live_run(delivery_seconds=17.0)
@@ -1883,14 +1857,12 @@ class TheWaitIsDerivedFromTheSubstrateTests(LocalPtyRuntimeTestCase):
         A name that comes back is a decision somebody has to make again, and this fails when it is
         made silently.
         """
-        source = (
-            REPO / "src" / "triggered_agents" / "runtime" / "local_pty_head.py"
-        ).read_text(encoding="utf-8")
+        source = (REPO / "src" / "triggered_agents" / "runtime" / "local_pty_head.py").read_text(
+            encoding="utf-8"
+        )
         tree = ast.parse(source)
         defined = {
-            node.name
-            for node in ast.walk(tree)
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            node.name for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
         assigned = {
             target.id
@@ -1904,9 +1876,7 @@ class TheWaitIsDerivedFromTheSubstrateTests(LocalPtyRuntimeTestCase):
         self.assertNotIn("_resolve", defined)
         self.assertNotIn("_remember", defined)
         self.assertNotIn("DELIVERY_STILL_GOING", assigned, "the fifth outcome is back")
-        self.assertNotIn(
-            "_unfinished", source, "the register of deliveries nobody accounted for is back"
-        )
+        self.assertNotIn("_unfinished", source, "the register of deliveries nobody accounted for is back")
         self.assertNotIn("still_going", source)
         # And the one place that does ask is still there, asking once.
         self.assertIn("_follow", defined)
@@ -2244,9 +2214,7 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
                         sites.setdefault(holder.name, set()).add(node.func.id)
 
         self.assertEqual(sorted(sites), ["build_head_runtime"], "a second place builds a backend")
-        self.assertEqual(
-            sites["build_head_runtime"], {"OrcaLegacyHeadRuntime", "LocalPtyHeadRuntime"}
-        )
+        self.assertEqual(sites["build_head_runtime"], {"OrcaLegacyHeadRuntime", "LocalPtyHeadRuntime"})
 
     def test_no_profile_and_no_registry_names_this_backend(self) -> None:
         offenders = []

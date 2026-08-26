@@ -47,7 +47,8 @@ class RolloutSummaryTests(unittest.TestCase):
         self.assertEqual(result["spawn_schema_availability"], "unknown")
         self.assertEqual(result["model_spawn_compliance"], "model_did_not_issue_spawn_tool_call")
         self.assertEqual(
-            result["policy_result"], "collaboration_call_observed_without_child_edge: reject_as_native_boundary"
+            result["policy_result"],
+            "collaboration_call_observed_without_child_edge: reject_as_native_boundary",
         )
 
     def test_child_edge_is_a_typed_policy_violation(self) -> None:
@@ -72,7 +73,14 @@ class RolloutSummaryTests(unittest.TestCase):
         self.assertEqual(result["all_observed_thread_or_session_ids"], ["child", "parent"])
         self.assertEqual(
             result["child_thread_edges"],
-            [{"sequence": 0, "tool": "spawn_agent", "parent_thread_id": "parent", "child_thread_ids": ["child"]}],
+            [
+                {
+                    "sequence": 0,
+                    "tool": "spawn_agent",
+                    "parent_thread_id": "parent",
+                    "child_thread_ids": ["child"],
+                }
+            ],
         )
         self.assertEqual(result["policy_result"], "child_edge_observed: reject_as_native_boundary")
 
@@ -109,15 +117,14 @@ class RolloutSummaryTests(unittest.TestCase):
             strict_config_flags=("-c", "agents.default.wait_agent_enabled=false"),
         )
 
-        self.assertEqual(
-            result["configuration_evidence"]["agent_role_status"], "ignored_role_definition"
-        )
+        self.assertEqual(result["configuration_evidence"]["agent_role_status"], "ignored_role_definition")
         self.assertEqual(
             result["configuration_evidence"]["ignored_role_definitions"],
             ["agent role default must define a description"],
         )
         self.assertEqual(
-            result["policy_result"], "role_configuration_not_applied: native_boundary_not_evaluated")
+            result["policy_result"], "role_configuration_not_applied: native_boundary_not_evaluated"
+        )
 
 
 class CandidateInventoryTests(unittest.TestCase):
@@ -127,9 +134,7 @@ class CandidateInventoryTests(unittest.TestCase):
             b"multi_agent_v2                       stable             false\n"
         )
 
-        self.assertEqual(
-            features["multi_agent_v2"], {"status": "stable", "default_enabled": False}
-        )
+        self.assertEqual(features["multi_agent_v2"], {"status": "stable", "default_enabled": False})
 
     def test_v2_global_wait_candidate_and_valid_role_tables_are_required(self) -> None:
         variants = dict(probe.VARIANTS)
@@ -156,9 +161,7 @@ class CandidateInventoryTests(unittest.TestCase):
             self.assertEqual(config["strict_config_status"], "no_rejection_observed")
             self.assertEqual(config["strict_config_rejections"], [])
             if name.startswith("v2_role_"):
-                self.assertEqual(
-                    config["agent_role_status"], "description_supplied_no_ignored_role_warning"
-                )
+                self.assertEqual(config["agent_role_status"], "description_supplied_no_ignored_role_warning")
             else:
                 self.assertEqual(config["agent_role_status"], "not_requested")
             self.assertEqual(config["ignored_role_definitions"], [])
@@ -169,9 +172,7 @@ class CandidateInventoryTests(unittest.TestCase):
         )
 
     def test_committed_feature_inventory_pins_v2_status_and_report_uses_it(self) -> None:
-        inventory = Path(
-            "docs/evidence/codex-feature-inventory-2026-08-13.json"
-        )
+        inventory = Path("docs/evidence/codex-feature-inventory-2026-08-13.json")
         payload = json.loads(inventory.read_text(encoding="utf-8"))
 
         self.assertTrue(payload["disposable_codex_home"])

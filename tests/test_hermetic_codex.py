@@ -90,7 +90,10 @@ class HermeticCodexHomeTests(unittest.TestCase):
                 for role in ("worker", "reviewer"):
                     with self.subTest(role=role):
                         catalog.head_launch(
-                            "codex-hermetic", "TASK.md", workspace=str(workspace), role=role,
+                            "codex-hermetic",
+                            "TASK.md",
+                            workspace=str(workspace),
+                            role=role,
                         ).command
 
             # Not vacuous: these bring-ups really did answer the trust question.
@@ -101,9 +104,7 @@ class HermeticCodexHomeTests(unittest.TestCase):
                         config.is_relative_to(_SUITE_CODEX_HOME) or config.is_relative_to(owned),
                         f"codex bring-up wrote {config}, outside the directories this run owns",
                     )
-            trusted = (_SUITE_CODEX_HOME / codex_preflight.CODEX_CONFIG_FILE).read_text(
-                encoding="utf-8"
-            )
+            trusted = (_SUITE_CODEX_HOME / codex_preflight.CODEX_CONFIG_FILE).read_text(encoding="utf-8")
             self.assertIn(str(workspace.resolve()), trusted)
             self.assertIn('trust_level = "trusted"', trusted)
 

@@ -40,9 +40,7 @@ from secretary.secret_words import RECOVERY_WORDS
 
 
 def git(repo: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args], text=True, capture_output=True, check=True
-    )
+    result = subprocess.run(["git", "-C", str(repo), *args], text=True, capture_output=True, check=True)
     return result.stdout
 
 
@@ -78,9 +76,7 @@ class SecretStoreCase(unittest.TestCase):
         (self.instance_dir / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
         git(self.instance_dir, "add", "instance.yaml")
         git(self.instance_dir, "commit", "--quiet", "-m", "config")
-        self.kdf_patch = mock.patch.object(
-            secret_store, "_new_key_params", side_effect=fast_key_params
-        )
+        self.kdf_patch = mock.patch.object(secret_store, "_new_key_params", side_effect=fast_key_params)
         self.kdf_patch.start()
         self.addCleanup(self.kdf_patch.stop)
         self.addCleanup(self.tmpdir.cleanup)
@@ -92,9 +88,7 @@ class SecretStoreCase(unittest.TestCase):
         return git(self.instance_dir, "ls-files").split()
 
     def catalog(self) -> dict:
-        return yaml.safe_load(
-            (self.instance_dir / "secrets" / CATALOG_NAME).read_text(encoding="utf-8")
-        )
+        return yaml.safe_load((self.instance_dir / "secrets" / CATALOG_NAME).read_text(encoding="utf-8"))
 
 
 class InitCase(SecretStoreCase):
@@ -105,9 +99,7 @@ class InitCase(SecretStoreCase):
         self.assertNotEqual(before, head)
         self.assertEqual(result.commit, head)
         self.assertEqual(result.catalog_path, self.instance_dir / "secrets" / CATALOG_NAME)
-        self.assertEqual(
-            self.catalog(), {"version": secret_store.CATALOG_VERSION, "secrets": []}
-        )
+        self.assertEqual(self.catalog(), {"version": secret_store.CATALOG_VERSION, "secrets": []})
         tracked = self.tracked()
         self.assertIn("secrets/catalog.yaml", tracked)
         self.assertIn("secrets/installation-key.json", tracked)
@@ -127,9 +119,7 @@ class InitCase(SecretStoreCase):
 
     def test_key_params_are_open_and_hold_no_key_material(self) -> None:
         self.initialize()
-        params = json.loads(
-            (self.instance_dir / "secrets" / "installation-key.json").read_text("utf-8")
-        )
+        params = json.loads((self.instance_dir / "secrets" / "installation-key.json").read_text("utf-8"))
         self.assertEqual(params["format"], secret_store.KEY_PARAMS_FORMAT)
         self.assertEqual(params["version"], secret_store.KEY_PARAMS_VERSION)
         self.assertEqual(params["kdf"]["id"], "scrypt")
@@ -198,9 +188,7 @@ class RecoveryPhraseCase(SecretStoreCase):
     def test_wrong_phrase_never_yields_a_usable_key(self) -> None:
         self.initialize()
         good = load_installation_key(self.instance_dir)
-        params = json.loads(
-            (self.instance_dir / "secrets" / "installation-key.json").read_text("utf-8")
-        )
+        params = json.loads((self.instance_dir / "secrets" / "installation-key.json").read_text("utf-8"))
         wrong = secret_store._derive_key(" ".join(RECOVERY_WORDS[32:48]), params)
         self.assertNotEqual(wrong, good)
 
@@ -237,9 +225,7 @@ class RoundTripCase(SecretStoreCase):
         self.assertEqual(read_secret(self.instance_dir, "openrouter.api-token"), b"sk-live-value")
 
     def test_multiline_and_binary_values_survive_unchanged(self) -> None:
-        multiline = (
-            b"-----BEGIN CERTIFICATE-----\nline one\r\nline two\n\n  trailing spaces   \n"
-        )
+        multiline = b"-----BEGIN CERTIFICATE-----\nline one\r\nline two\n\n  trailing spaces   \n"
         binary = bytes(range(256)) * 4
         set_secret(
             self.instance_dir,
@@ -271,9 +257,9 @@ class RoundTripCase(SecretStoreCase):
         )
         catalog_text = (self.instance_dir / "secrets" / CATALOG_NAME).read_text("utf-8")
         self.assertNotIn("plaintext-needle", catalog_text)
-        envelope_text = (
-            self.instance_dir / "secrets" / "values" / "kanboard.api-token.enc.json"
-        ).read_text("utf-8")
+        envelope_text = (self.instance_dir / "secrets" / "values" / "kanboard.api-token.enc.json").read_text(
+            "utf-8"
+        )
         self.assertNotIn("plaintext-needle", envelope_text)
         self.assertNotIn(
             "plaintext-needle",
@@ -290,9 +276,7 @@ class RoundTripCase(SecretStoreCase):
             actor="tester",
         )
         envelope = json.loads(
-            (self.instance_dir / "secrets" / "values" / "kanboard.api-token.enc.json").read_text(
-                "utf-8"
-            )
+            (self.instance_dir / "secrets" / "values" / "kanboard.api-token.enc.json").read_text("utf-8")
         )
         self.assertEqual(envelope["format"], secret_store.ENVELOPE_FORMAT)
         self.assertEqual(envelope["version"], secret_store.ENVELOPE_VERSION)
@@ -454,9 +438,7 @@ class InterruptedWriteCase(SecretStoreCase):
                 )
         self.assertEqual(state_repo.head(self.instance_dir), head)
         self.assert_consistent()
-        self.assertEqual(
-            [entry["id"] for entry in list_secrets(self.instance_dir)], ["first.secret"]
-        )
+        self.assertEqual([entry["id"] for entry in list_secrets(self.instance_dir)], ["first.secret"])
 
     def test_interrupt_before_the_commit_leaves_a_consistent_pair_to_commit(self) -> None:
         with mock.patch.object(
@@ -491,9 +473,7 @@ class InterruptedWriteCase(SecretStoreCase):
 
     def test_divergence_is_reported_when_a_value_file_disappears(self) -> None:
         (self.instance_dir / "secrets" / "values" / "first.secret.enc.json").unlink()
-        self.assertEqual(
-            store_divergence(self.instance_dir), ("first.secret: catalogued with no value",)
-        )
+        self.assertEqual(store_divergence(self.instance_dir), ("first.secret: catalogued with no value",))
 
 
 class LegacyBoardSecretTests(SecretStoreCase):
@@ -523,8 +503,12 @@ class LegacyBoardSecretTests(SecretStoreCase):
     def test_legacy_entries_cannot_be_created_or_read_but_can_be_removed(self) -> None:
         with self.assertRaisesRegex(SecretStoreValidationError, "board transport"):
             set_secret(
-                self.instance_dir, secret_id="kanboard_api_token", value=b"new",
-                scope="installation", purpose="no", actor="tester",
+                self.instance_dir,
+                secret_id="kanboard_api_token",
+                value=b"new",
+                scope="installation",
+                purpose="no",
+                actor="tester",
             )
         self._historical_entry()
         with self.assertRaisesRegex(SecretStoreValidationError, "board transport"):
@@ -557,9 +541,13 @@ class LegacyBoardSecretTests(SecretStoreCase):
                 ("kanboard_api_user", "KANBOARD_API_USER", b"jsonrpc"),
             ):
                 set_secret(
-                    self.instance_dir, secret_id=secret_id, value=value,
-                    scope="installation", purpose="historic board configuration",
-                    environment=environment, actor="tester",
+                    self.instance_dir,
+                    secret_id=secret_id,
+                    value=value,
+                    scope="installation",
+                    purpose="historic board configuration",
+                    environment=environment,
+                    actor="tester",
                 )
         values = secret_store.redaction_values(self.instance_dir)
         self.assertNotIn("http://127.0.0.1:8080/jsonrpc.php", values)
@@ -602,9 +590,7 @@ class EnvStoreCase(SecretStoreCase):
         self.source.write_text(LIVE_RUNTIME_ENV, encoding="utf-8")
         os.chmod(self.source, 0o600)
         self.target = Path(self.tmpdir.name) / "materialized" / "runtime.env"
-        override = mock.patch.dict(
-            os.environ, {"SECRETARY_RUNTIME_ENV_FILE": str(self.target)}
-        )
+        override = mock.patch.dict(os.environ, {"SECRETARY_RUNTIME_ENV_FILE": str(self.target)})
         override.start()
         self.addCleanup(override.stop)
 
@@ -623,9 +609,7 @@ class EnvStoreCase(SecretStoreCase):
 class ImportCase(EnvStoreCase):
     def test_import_makes_one_secret_per_variable(self) -> None:
         result = self.do_import()
-        self.assertEqual(
-            result.created, ("example_url", "example_api_user", "example_api_token")
-        )
+        self.assertEqual(result.created, ("example_url", "example_api_user", "example_api_token"))
         entries = list_secrets(self.instance_dir)
         self.assertEqual(
             [(entry["id"], entry["environment"]) for entry in entries],
@@ -672,18 +656,14 @@ class ImportCase(EnvStoreCase):
         result = self.do_import()
         self.assertEqual(result.created, ())
         self.assertEqual(result.updated, ())
-        self.assertEqual(
-            result.unchanged, ("example_url", "example_api_user", "example_api_token")
-        )
+        self.assertEqual(result.unchanged, ("example_url", "example_api_user", "example_api_token"))
         self.assertEqual(state_repo.head(self.instance_dir), head)
         self.assertEqual(envelope.read_bytes(), sealed)
         self.assertEqual(len(list_secrets(self.instance_dir)), 3)
 
     def test_reimport_names_the_variable_that_moved(self) -> None:
         self.do_import()
-        self.source.write_text(
-            LIVE_RUNTIME_ENV.replace("=secretary\n", "=secretary-two\n"), encoding="utf-8"
-        )
+        self.source.write_text(LIVE_RUNTIME_ENV.replace("=secretary\n", "=secretary-two\n"), encoding="utf-8")
         result = self.do_import()
         self.assertEqual(result.updated, ("example_api_user",))
         self.assertEqual(result.created, ())
@@ -697,9 +677,7 @@ class ImportCase(EnvStoreCase):
     def test_import_keeps_created_at_across_a_rotation(self) -> None:
         self.do_import()
         created_at = list_secrets(self.instance_dir)[0]["created_at"]
-        self.source.write_text(
-            LIVE_RUNTIME_ENV.replace("=1f2e3d4c5b6a\n", "=rotated\n"), encoding="utf-8"
-        )
+        self.source.write_text(LIVE_RUNTIME_ENV.replace("=1f2e3d4c5b6a\n", "=rotated\n"), encoding="utf-8")
         self.do_import()
         self.assertEqual(list_secrets(self.instance_dir)[0]["created_at"], created_at)
 
@@ -759,9 +737,7 @@ class ImportCase(EnvStoreCase):
             actor="tester",
         )
         self.do_import()
-        orders = {
-            entry["id"]: entry["materialize"]["order"] for entry in list_secrets(self.instance_dir)
-        }
+        orders = {entry["id"]: entry["materialize"]["order"] for entry in list_secrets(self.instance_dir)}
         self.assertEqual(
             orders,
             {
@@ -772,9 +748,7 @@ class ImportCase(EnvStoreCase):
             },
         )
         materialize_secrets(self.instance_dir)
-        self.assertEqual(
-            self.target.read_text(encoding="utf-8"), LIVE_RUNTIME_ENV + "EXTRA_FLAG=on\n"
-        )
+        self.assertEqual(self.target.read_text(encoding="utf-8"), LIVE_RUNTIME_ENV + "EXTRA_FLAG=on\n")
 
     def test_import_refuses_names_that_differ_only_in_case(self) -> None:
         # One id per variable, so two names sharing an id are refused whole:
@@ -994,9 +968,7 @@ class MaterializeCase(EnvStoreCase):
         self.assertIn("not gitignored", str(caught.exception))
         self.assertFalse(inside.exists())
 
-        (self.instance_dir / ".gitignore").write_text(
-            f"{GITIGNORE_ENTRY}\ntracked.env\n", encoding="utf-8"
-        )
+        (self.instance_dir / ".gitignore").write_text(f"{GITIGNORE_ENTRY}\ntracked.env\n", encoding="utf-8")
         materialize_secrets(self.instance_dir, target="file")
         self.assertEqual(inside.read_text(encoding="utf-8"), "APP_TOKEN=app-value\n")
 
@@ -1081,9 +1053,7 @@ class ObservabilityCase(SecretStoreCase):
         self.assertEqual(health["secret_count"], 1)
         self.assertIsNotNone(health["last_modified_at"])
         self.assertEqual(health["installation_key"], {"present": True, "usable": True})
-        self.assertEqual(
-            health["materialize"], [{"target": "runtime-env", "path": None, "count": 1}]
-        )
+        self.assertEqual(health["materialize"], [{"target": "runtime-env", "path": None, "count": 1}])
         self.assertEqual(secret_store.store_findings(self.instance_dir), ())
 
     def test_health_never_carries_a_value_or_the_recovery_phrase(self) -> None:
@@ -1228,9 +1198,7 @@ class ObservabilityCase(SecretStoreCase):
 
     def test_malformed_catalog_is_a_finding_not_a_crash(self) -> None:
         self.initialize()
-        (self.instance_dir / "secrets" / CATALOG_NAME).write_text(
-            "bad: catalog\n", encoding="utf-8"
-        )
+        (self.instance_dir / "secrets" / CATALOG_NAME).write_text("bad: catalog\n", encoding="utf-8")
         findings = secret_store.store_findings(self.instance_dir)
         self.assertEqual(len(findings), 1)
         self.assertIn("secret store:", findings[0])
@@ -1273,9 +1241,7 @@ class CatalogSchemaCase(unittest.TestCase):
             {"target": "file", "path": "/etc/secretary/app.env", "order": 7},
         ):
             with self.subTest(instruction=instruction):
-                catalog = self.catalog(
-                    {"environment": "EXAMPLE_URL", "materialize": instruction}
-                )
+                catalog = self.catalog({"environment": "EXAMPLE_URL", "materialize": instruction})
                 self.assertEqual(validate(catalog, "secret-catalog", "catalog.yaml"), [])
 
     def test_a_record_nothing_could_act_on_is_rejected(self) -> None:
@@ -1284,9 +1250,7 @@ class CatalogSchemaCase(unittest.TestCase):
             {"environment": "EXAMPLE_URL", "materialize": {"target": "file", "order": 0}},
             {
                 "environment": "EXAMPLE_URL",
-                "materialize": {
-                    "target": "runtime-env", "path": "/etc/runtime.env", "order": 0
-                },
+                "materialize": {"target": "runtime-env", "path": "/etc/runtime.env", "order": 0},
             },
             # Without a variable name there is nothing to write on the left of '='.
             {"materialize": {"target": "runtime-env", "order": 0}},
@@ -1304,9 +1268,7 @@ class CatalogSchemaCase(unittest.TestCase):
         ]
         for entry in cases:
             with self.subTest(entry=entry):
-                self.assertNotEqual(
-                    validate(self.catalog(entry), "secret-catalog", "catalog.yaml"), []
-                )
+                self.assertNotEqual(validate(self.catalog(entry), "secret-catalog", "catalog.yaml"), [])
 
 
 class SecretCliCase(SecretStoreCase):
@@ -1326,15 +1288,11 @@ class SecretCliCase(SecretStoreCase):
             stack.enter_context(mock.patch("sys.stdin", stream))
             if interactive:
                 stack.enter_context(
-                    mock.patch.object(
-                        secret_commands, "_stdin_and_stderr_are_interactive", return_value=True
-                    )
+                    mock.patch.object(secret_commands, "_stdin_and_stderr_are_interactive", return_value=True)
                 )
             if clear_ok:
                 stack.enter_context(
-                    mock.patch.object(
-                        secret_commands, "_clear_screen_and_scrollback", return_value=True
-                    )
+                    mock.patch.object(secret_commands, "_clear_screen_and_scrollback", return_value=True)
                 )
             code = main(argv)
         return code, out.getvalue(), err.getvalue()
@@ -1352,9 +1310,7 @@ class SecretCliCase(SecretStoreCase):
 
         with mock.patch.object(secret_commands, "generate_recovery_phrase", return_value=phrase):
             with mock.patch.object(secret_commands, "_read_line", side_effect=fake_read_line):
-                code, out, err = self.run_cli(
-                    ["secret", "init", "--instance", str(self.instance_dir)]
-                )
+                code, out, err = self.run_cli(["secret", "init", "--instance", str(self.instance_dir)])
         self.assertEqual(code, 0)
         # One "written it down" acknowledgement plus one question per confirmed word.
         self.assertEqual(len(answers), secret_store.CONFIRM_WORDS + 1)
@@ -1370,9 +1326,7 @@ class SecretCliCase(SecretStoreCase):
             "list_secrets",
             return_value=({"id": "board.token", "scope": "installation"},),
         ):
-            code, output, errors = self.run_cli(
-                ["secret", "list", "--instance", str(self.instance_dir)]
-            )
+            code, output, errors = self.run_cli(["secret", "list", "--instance", str(self.instance_dir)])
 
         self.assertEqual(code, 0)
         self.assertEqual(errors, "")
@@ -1380,7 +1334,7 @@ class SecretCliCase(SecretStoreCase):
             output,
             '{\n  "ok": true,\n  "op": "list",\n  "secrets": [\n    {\n'
             '      "id": "board.token",\n      "scope": "installation"\n    }\n'
-            '  ]\n}\n',
+            "  ]\n}\n",
         )
 
     def test_list_keeps_secret_error_kinds_and_exit_codes(self) -> None:
@@ -1442,9 +1396,7 @@ class SecretCliCase(SecretStoreCase):
             return "yes"
 
         with mock.patch.object(secret_commands, "_read_line", side_effect=fake_read_line):
-            with mock.patch.object(
-                secret_commands, "_clear_screen_and_scrollback", return_value=False
-            ):
+            with mock.patch.object(secret_commands, "_clear_screen_and_scrollback", return_value=False):
                 code, out, _ = self.run_cli(
                     ["secret", "init", "--instance", str(self.instance_dir)], clear_ok=False
                 )
@@ -1472,12 +1424,11 @@ class SecretCliCase(SecretStoreCase):
             order.append("confirm")
             return True
 
-        with mock.patch.object(secret_commands, "_show_phrase", side_effect=show), mock.patch.object(
-            secret_commands, "_acknowledge_written_down", side_effect=acknowledge
-        ), mock.patch.object(
-            secret_commands, "_clear_screen_and_scrollback", side_effect=clear
-        ), mock.patch.object(
-            secret_commands, "_confirm_phrase", side_effect=confirm
+        with (
+            mock.patch.object(secret_commands, "_show_phrase", side_effect=show),
+            mock.patch.object(secret_commands, "_acknowledge_written_down", side_effect=acknowledge),
+            mock.patch.object(secret_commands, "_clear_screen_and_scrollback", side_effect=clear),
+            mock.patch.object(secret_commands, "_confirm_phrase", side_effect=confirm),
         ):
             code, _out, _err = self.run_cli(
                 ["secret", "init", "--instance", str(self.instance_dir)], clear_ok=False
@@ -1531,9 +1482,7 @@ class SecretCliCase(SecretStoreCase):
         self.assertEqual([entry["id"] for entry in listed], ["kanboard.api-token"])
         self.assertNotIn("multi", out)
         self.assertNotIn("value", out.replace("kanboard.api-token", ""))
-        self.assertEqual(
-            read_secret(self.instance_dir, "kanboard.api-token"), b"multi\nline\nvalue\n"
-        )
+        self.assertEqual(read_secret(self.instance_dir, "kanboard.api-token"), b"multi\nline\nvalue\n")
 
     def test_set_reads_a_binary_file_without_touching_argv(self) -> None:
         self.initialize()
@@ -1611,9 +1560,7 @@ class SecretCliCase(SecretStoreCase):
         self.assertNotIn("secretary-instance/secrets/values", out)
 
         with mock.patch.dict(os.environ, {"SECRETARY_RUNTIME_ENV_FILE": str(target)}):
-            code, out, _ = self.run_cli(
-                ["secret", "materialize", "--instance", str(self.instance_dir)]
-            )
+            code, out, _ = self.run_cli(["secret", "materialize", "--instance", str(self.instance_dir)])
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["targets"][0]["path"], str(target))
         self.assertNotIn("1f2e3d4c5b6a", out)
@@ -1623,8 +1570,10 @@ class SecretCliCase(SecretStoreCase):
             ["secret", "remove", "--instance", str(self.instance_dir), "--id", "example_url"]
         )
         self.assertEqual(code, 0)
-        self.assertEqual([entry["id"] for entry in list_secrets(self.instance_dir)],
-                         ["example_api_token", "example_api_user"])
+        self.assertEqual(
+            [entry["id"] for entry in list_secrets(self.instance_dir)],
+            ["example_api_token", "example_api_user"],
+        )
 
         code, out, _ = self.run_cli(
             ["secret", "remove", "--instance", str(self.instance_dir), "--id", "example_url"]

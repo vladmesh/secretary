@@ -1,4 +1,5 @@
 """Canonical local board transport primitives shared by product and runtime layers."""
+
 from __future__ import annotations
 
 import base64

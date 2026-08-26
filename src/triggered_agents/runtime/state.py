@@ -10,6 +10,7 @@ a backstop against a manual run overlapping a scheduled one.
 State root is `TA_STATE` or `~/secretary-data/automation-state`, then `/<agent>`.
 a watermark file.
 """
+
 from __future__ import annotations
 
 import json
@@ -18,9 +19,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
-STATE_ROOT = Path(
-    os.environ.get("TA_STATE", str(Path.home() / "secretary-data" / "automation-state"))
-)
+STATE_ROOT = Path(os.environ.get("TA_STATE", str(Path.home() / "secretary-data" / "automation-state")))
 
 # Precheck exit-code protocol, shared by every agent's `precheck` command and the systemd gate
 # (deploy/ta-gate.sh): 0 = there is work (dispatch the head), PRECHECK_SKIP = a deliberate skip
@@ -119,7 +118,9 @@ class AgentState:
         cur = 0
         if self.terminal_generation_file.is_file():
             try:
-                cur = int(json.loads(self.terminal_generation_file.read_text(encoding="utf-8")).get("counter", 0))
+                cur = int(
+                    json.loads(self.terminal_generation_file.read_text(encoding="utf-8")).get("counter", 0)
+                )
             except (json.JSONDecodeError, ValueError, TypeError):
                 cur = 0
         nxt = cur + 1
@@ -156,8 +157,9 @@ class AgentState:
         except json.JSONDecodeError:
             return None
 
-    def save_terminal_handle(self, handle: str | None, created_at: float | None = None,
-                             generation: int | None = None) -> None:
+    def save_terminal_handle(
+        self, handle: str | None, created_at: float | None = None, generation: int | None = None
+    ) -> None:
         """Record the terminal handle from the latest fresh spawn.
 
         Codex can rename its tab away from the explicit `triggered-agent:<name>` title after
@@ -244,8 +246,10 @@ class AgentState:
             self.clear_active_report(reference)
             return
         tmp = self.active_report_file.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"reference": reference, "terminal_handle": terminal_handle},
-                                  ensure_ascii=False), encoding="utf-8")
+        tmp.write_text(
+            json.dumps({"reference": reference, "terminal_handle": terminal_handle}, ensure_ascii=False),
+            encoding="utf-8",
+        )
         tmp.replace(self.active_report_file)
 
     def clear_active_report(self, reference: str | None = None) -> None:
@@ -276,8 +280,14 @@ class AgentState:
         try:
             fd = os.open(self.lockfile, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
-            holder = self.lockfile.read_text(encoding="utf-8", errors="replace").strip() if self.lockfile.is_file() else "?"
-            raise SystemExit(f"triggered_agents[{self.agent}]: another run holds the lock ({self.lockfile}, pid {holder})")
+            holder = (
+                self.lockfile.read_text(encoding="utf-8", errors="replace").strip()
+                if self.lockfile.is_file()
+                else "?"
+            )
+            raise SystemExit(
+                f"triggered_agents[{self.agent}]: another run holds the lock ({self.lockfile}, pid {holder})"
+            )
         try:
             os.write(fd, str(os.getpid()).encode())
             os.close(fd)

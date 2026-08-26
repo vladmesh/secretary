@@ -11,6 +11,7 @@ The rules the adapter, effort, codex launch mode and backend runtime are checked
 registry is what only a whole registry can answer: that the resource a profile names exists, and
 that its fallback chain points at profiles that do.
 """
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -85,9 +86,7 @@ class HeadSpec:
         profile must not be told its head is unlaunchable over a table it never had.
         """
         if not isinstance(profile, Mapping):
-            raise HeadSpecError(
-                f"head {profile_id!r} is not a profile table, got {type(profile).__name__}"
-            )
+            raise HeadSpecError(f"head {profile_id!r} is not a profile table, got {type(profile).__name__}")
         try:
             validate_launch_shape(profile_id, profile)
         except HeadCommandError as exc:
@@ -102,9 +101,7 @@ class HeadSpec:
             model=str(model) if isinstance(model, str) and model else None,
             effort=str(profile.get("effort", DEFAULT_EFFORT)),
             resource=resource if isinstance(resource, str) and resource else None,
-            codex_mode=(
-                str(profile.get("codex_mode", CODEX_TUI_MODE)) if adapter == "codex" else None
-            ),
+            codex_mode=(str(profile.get("codex_mode", CODEX_TUI_MODE)) if adapter == "codex" else None),
             fallback=tuple(str(fb) for fb in fallback) if isinstance(fallback, list) else (),
             runtime=str(profile.get("runtime", DEFAULT_HEAD_RUNTIME)),
         )

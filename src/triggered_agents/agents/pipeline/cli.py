@@ -29,6 +29,7 @@ health.refresh, never touching the board at all.
 Exit codes: 0 ok, 1 KanboardError, 2 usage/bad-args/role, 3 GuardError. Kanboard-touching
 commands emit JSON on stdout; errors go to stderr prefixed `pipeline: `.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -96,21 +97,31 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("setup")
 
-    p_pause = sub.add_parser("pause")     # po/steward: drain (claims off) or freeze (heads stopped)
+    p_pause = sub.add_parser("pause")  # po/steward: drain (claims off) or freeze (heads stopped)
     p_pause.add_argument(
-        "mode", nargs="?", choices=(*pause_flag.PUBLIC_MODES, *pause_flag.MODES),
-        help="drain stops new claims; freeze also stops live heads; soft/hard are legacy internal aliases")
+        "mode",
+        nargs="?",
+        choices=(*pause_flag.PUBLIC_MODES, *pause_flag.MODES),
+        help="drain stops new claims; freeze also stops live heads; soft/hard are legacy internal aliases",
+    )
     p_pause.add_argument(
-        "--mode", dest="mode_flag", choices=(*pause_flag.PUBLIC_MODES, *pause_flag.MODES),
-        help="legacy form; use positional drain/freeze for user-facing calls")
+        "--mode",
+        dest="mode_flag",
+        choices=(*pause_flag.PUBLIC_MODES, *pause_flag.MODES),
+        help="legacy form; use positional drain/freeze for user-facing calls",
+    )
     p_pause.add_argument("--reason")
     p_pause.add_argument("--reason-file")
     p_pause.add_argument("--actor", help="who requested the pause; defaults to the acting role")
-    p_pause.add_argument("--exclude-workspace", action="append", default=[],
-                         help="hard pause: leave this worker workspace running")
-    sub.add_parser("resume")              # po/steward: undo pause, idempotent if not paused
+    p_pause.add_argument(
+        "--exclude-workspace",
+        action="append",
+        default=[],
+        help="hard pause: leave this worker workspace running",
+    )
+    sub.add_parser("resume")  # po/steward: undo pause, idempotent if not paused
 
-    p_probe = sub.add_parser("probe")   # heads.toml's own probe command for a resource
+    p_probe = sub.add_parser("probe")  # heads.toml's own probe command for a resource
     p_probe.add_argument("--resource", required=True)
 
     p_create = sub.add_parser("create")
@@ -122,21 +133,25 @@ def _build_parser() -> argparse.ArgumentParser:
     p_create.add_argument("--blocked-by", dest="blocked_by")
     p_create.add_argument("--head", dest="head")
     p_create.add_argument(
-        "--review-head", dest="review_head",
-        help="reviewer profile for Validate layer 3; reserved value 'none' skips only layer 3")
+        "--review-head",
+        dest="review_head",
+        help="reviewer profile for Validate layer 3; reserved value 'none' skips only layer 3",
+    )
     p_create.add_argument("--slug")
     p_create.add_argument("--base-branch", dest="base_branch")
     p_create.add_argument("--description")
     p_create.add_argument("--description-file")
-    p_create.add_argument("--own-ref", dest="own_ref")   # worker-only: its own card reference
+    p_create.add_argument("--own-ref", dest="own_ref")  # worker-only: its own card reference
 
     p_update = sub.add_parser("update")
     p_update.add_argument("--ref", required=True)
     p_update.add_argument("--blocked-by", dest="blocked_by")
     p_update.add_argument("--head", dest="head")
     p_update.add_argument(
-        "--review-head", dest="review_head",
-        help="reviewer profile, 'none' to skip layer 3, or empty string to restore the default")
+        "--review-head",
+        dest="review_head",
+        help="reviewer profile, 'none' to skip layer 3, or empty string to restore the default",
+    )
     p_update.add_argument("--slug")
     p_update.add_argument("--base-branch", dest="base_branch")
 
@@ -146,7 +161,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_move = sub.add_parser("move")
     p_move.add_argument("--ref", required=True)
     p_move.add_argument("--to", required=True, dest="to_column")
-    p_move.add_argument("--reason")           # comment body; required for steward break-glass moves
+    p_move.add_argument("--reason")  # comment body; required for steward break-glass moves
     p_move.add_argument("--reason-file")
 
     p_claim = sub.add_parser("claim")
@@ -170,13 +185,13 @@ def _build_parser() -> argparse.ArgumentParser:
     p_feedback.add_argument("--body")
     p_feedback.add_argument("--body-file")
 
-    p_verdict = sub.add_parser("verdict")     # reviewer: the layer-3 green/red verdict
+    p_verdict = sub.add_parser("verdict")  # reviewer: the layer-3 green/red verdict
     p_verdict.add_argument("--ref", required=True)
     p_verdict.add_argument("--kind", required=True, choices=("green", "red"))
     p_verdict.add_argument("--body")
     p_verdict.add_argument("--body-file")
 
-    p_idea = sub.add_parser("idea")           # reviewer/retro/steward: file a proposal card
+    p_idea = sub.add_parser("idea")  # reviewer/retro/steward: file a proposal card
     p_idea.add_argument("--project", required=True)
     p_idea.add_argument("--title", required=True)
     p_idea.add_argument("--type", default="code", dest="task_type")
@@ -193,7 +208,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_show = sub.add_parser("show")
     p_show.add_argument("--ref", required=True)
 
-    sub.add_parser("export")   # whole board with descriptions/metadata/comments, one call
+    sub.add_parser("export")  # whole board with descriptions/metadata/comments, one call
 
     return parser
 
@@ -219,11 +234,14 @@ def main(argv=None) -> int:
             return _moved_pause_command(args.cmd)
         if args.cmd == "probe":
             from . import health
+
             try:
                 result = health.run_builtin_probe_result(args.resource)
             except KeyError:
-                _err(f"no builtin probe for resource {args.resource!r} "
-                    f"(known: {', '.join(sorted(health.BUILTIN_PROBES))})")
+                _err(
+                    f"no builtin probe for resource {args.resource!r} "
+                    f"(known: {', '.join(sorted(health.BUILTIN_PROBES))})"
+                )
                 return 2
             if not result.ok:
                 _err(health.format_probe_failure(args.resource, result))
@@ -239,18 +257,37 @@ def main(argv=None) -> int:
             if not _need_role(role, ("po", "steward", "worker")):
                 return 2
             desc = _text_arg(args.description, args.description_file)
-            return _emit(ops.create_card(
-                project=args.project, task_type=args.task_type, title=args.title,
-                description=desc, ref=args.ref, column=args.column,
-                blocked_by=args.blocked_by, head=args.head, review_head=args.review_head,
-                slug=args.slug, base_branch=args.base_branch, role=role, own_ref=args.own_ref))
+            return _emit(
+                ops.create_card(
+                    project=args.project,
+                    task_type=args.task_type,
+                    title=args.title,
+                    description=desc,
+                    ref=args.ref,
+                    column=args.column,
+                    blocked_by=args.blocked_by,
+                    head=args.head,
+                    review_head=args.review_head,
+                    slug=args.slug,
+                    base_branch=args.base_branch,
+                    role=role,
+                    own_ref=args.own_ref,
+                )
+            )
         if args.cmd == "update":
             if not _need_role(role, ROLES):
                 return 2
-            return _emit(ops.update_card(
-                role, args.ref, slug=args.slug,
-                head=args.head, blocked_by=args.blocked_by,
-                base_branch=args.base_branch, review_head=args.review_head))
+            return _emit(
+                ops.update_card(
+                    role,
+                    args.ref,
+                    slug=args.slug,
+                    head=args.head,
+                    blocked_by=args.blocked_by,
+                    base_branch=args.base_branch,
+                    review_head=args.review_head,
+                )
+            )
         if args.cmd == "ready":
             if not _need_role(role, ROLES):
                 return 2
@@ -287,9 +324,17 @@ def main(argv=None) -> int:
                 "retro": ops.retro_idea,
                 "steward": ops.steward_idea,
             }[role]
-            return _emit(fn(
-                project=args.project, task_type=args.task_type, title=args.title,
-                description=desc, ref=args.ref, head=args.head, slug=args.slug))
+            return _emit(
+                fn(
+                    project=args.project,
+                    task_type=args.task_type,
+                    title=args.title,
+                    description=desc,
+                    ref=args.ref,
+                    head=args.head,
+                    slug=args.slug,
+                )
+            )
         if args.cmd == "comment":
             if not _need_role(role, ROLES):
                 return 2

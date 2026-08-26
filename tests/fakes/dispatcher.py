@@ -67,26 +67,29 @@ def _legacy_unbound_v1_run(run_json: dict[str, Any], *, root: Path) -> dict[str,
         "root": str(root.resolve(strict=False)),
         "baseline": [],
     }
-    return run.with_fanout_policy({
-        "version": 1,
-        "state": "allowed",
-        "terminal_state": "clean",
-        "run_id": run.run_id,
-        "role": run.role,
-        "model": run.spec.model or "",
-        "binary_path": "/test/codex",
-        "binary_digest": "0" * 64,
-        "cli_version": "test-codex",
-        "tool_schema_digest": "0" * 64,
-        "provider_schema_verdict": "no_callable_child_spawn_surface",
-        "events": [],
-        "provider_source_required": True,
-        "provider_source": source,
-    }).to_json()
+    return run.with_fanout_policy(
+        {
+            "version": 1,
+            "state": "allowed",
+            "terminal_state": "clean",
+            "run_id": run.run_id,
+            "role": run.role,
+            "model": run.spec.model or "",
+            "binary_path": "/test/codex",
+            "binary_digest": "0" * 64,
+            "cli_version": "test-codex",
+            "tool_schema_digest": "0" * 64,
+            "provider_schema_verdict": "no_callable_child_spawn_surface",
+            "events": [],
+            "provider_source_required": True,
+            "provider_source": source,
+        }
+    ).to_json()
 
 
 def _configure_production_shaped_codex_relaunch(host: Any, *, root: Path) -> None:
     """Make the fake's next Codex rework retain the real preflight/launch HeadRun handoff."""
+
     def preflight(
         head: str,
         *,
@@ -99,16 +102,21 @@ def _configure_production_shaped_codex_relaunch(host: Any, *, root: Path) -> Non
         run = head_ops.HeadRun(
             run_id=run_id,
             spec=head_ops.HeadSpec(
-                profile_id=head, adapter="codex", model="gpt-5.6-terra",
+                profile_id=head,
+                adapter="codex",
+                model="gpt-5.6-terra",
             ),
             workspace=workspace,
             task_ref=task_ref,
             role=role,
             pid_file=pid_file,
         )
-        return head_ops.HeadRun.from_json(_legacy_unbound_v1_run(
-            run.to_json(), root=root / run_id,
-        ))
+        return head_ops.HeadRun.from_json(
+            _legacy_unbound_v1_run(
+                run.to_json(),
+                root=root / run_id,
+            )
+        )
 
     real_restart = host.restart_worker
 
@@ -121,6 +129,7 @@ def _configure_production_shaped_codex_relaunch(host: Any, *, root: Path) -> Non
 
     host.preflight_codex_run = preflight
     host.restart_worker = restart
+
 
 class FakeKanboard(BatchedCalls):
     def __init__(self) -> None:
@@ -194,21 +203,29 @@ class FakeKanboard(BatchedCalls):
         return sprint
 
     def add_record(
-        self, task_id: int, reference: str, title: str, metadata: dict, *, closed: bool = False,
+        self,
+        task_id: int,
+        reference: str,
+        title: str,
+        metadata: dict,
+        *,
+        closed: bool = False,
     ) -> None:
         """A Product or Issue row in the Pipeline's Issues column, as the real board carries it."""
-        self.tasks.append({
-            "id": task_id,
-            "reference": reference,
-            "title": title,
-            "description": "",
-            "column_id": 1,
-            "position": task_id,
-            "swimlane_id": 4,
-            "is_active": 0 if closed else 1,
-            "date_creation": 1720000000,
-            "date_modification": 1720000000,
-        })
+        self.tasks.append(
+            {
+                "id": task_id,
+                "reference": reference,
+                "title": title,
+                "description": "",
+                "column_id": 1,
+                "position": task_id,
+                "swimlane_id": 4,
+                "is_active": 0 if closed else 1,
+                "date_creation": 1720000000,
+                "date_modification": 1720000000,
+            }
+        )
         self.metadata[task_id] = dict(metadata)
         self.comments[task_id] = []
 
@@ -229,7 +246,8 @@ class FakeKanboard(BatchedCalls):
                 return []
             pool = self.sprints if int(params.get("project_id") or 0) == 8 else self.tasks
             return [
-                task for task in pool
+                task
+                for task in pool
                 if (int(task.get("is_active", task.get("status", 1)) or 0) != 0) == (status == 1)
             ]
         if method == "getTaskByReference":
@@ -258,20 +276,20 @@ class FakeKanboard(BatchedCalls):
             # Sprint rows are written this way by `SprintWriter.create`: a row first, its
             # reference last, which is the order the create's recovery depends on.
             pool = self._pool(params.get("project_id"))
-            task_id = max(
-                [int(task["id"]) for task in self.tasks + self.sprints] + [11]
-            ) + 1
-            pool.append({
-                "id": task_id,
-                "reference": "",
-                "title": params.get("title", ""),
-                "description": params.get("description", ""),
-                "column_id": params.get("column_id", 1),
-                "position": len(pool) + 1,
-                "swimlane_id": params.get("swimlane_id", 0),
-                "date_creation": self.now,
-                "date_modification": self.now,
-            })
+            task_id = max([int(task["id"]) for task in self.tasks + self.sprints] + [11]) + 1
+            pool.append(
+                {
+                    "id": task_id,
+                    "reference": "",
+                    "title": params.get("title", ""),
+                    "description": params.get("description", ""),
+                    "column_id": params.get("column_id", 1),
+                    "position": len(pool) + 1,
+                    "swimlane_id": params.get("swimlane_id", 0),
+                    "date_creation": self.now,
+                    "date_modification": self.now,
+                }
+            )
             self.metadata[task_id] = {}
             self.comments[task_id] = []
             return task_id
@@ -279,18 +297,14 @@ class FakeKanboard(BatchedCalls):
             # A sprint close archives the cards its dispositions take off the contract, so
             # this fake answers the archival write the same way the board does.
             task = next(
-                task for task in self.tasks + self.sprints
-                if int(task["id"]) == int(params["task_id"])
+                task for task in self.tasks + self.sprints if int(task["id"]) == int(params["task_id"])
             )
             task["is_active"] = 0
             self.now += 1
             task["date_modification"] = self.now
             return True
         if method == "updateTask":
-            task = next(
-                task for task in self.tasks + self.sprints
-                if int(task["id"]) == int(params["id"])
-            )
+            task = next(task for task in self.tasks + self.sprints if int(task["id"]) == int(params["id"]))
             for field in ("reference", "title", "description"):
                 if field in params:
                     task[field] = params[field]
@@ -303,25 +317,27 @@ class FakeKanboard(BatchedCalls):
 # The head snapshot the sprint entity resolves a declared observer against. It is the
 # installation's own registry, not the dispatcher's catalog, and a sprint may not be opened on a
 # profile that is missing from it.
-SPRINT_HEAD_SNAPSHOT = "\n".join([
-    "resources:",
-    "  openai-sub:",
-    "    account: openai-subscription",
-    "  claude-sub:",
-    "    account: claude-subscription",
-    "profiles:",
-    "  codex-observer:",
-    "    adapter: codex",
-    "    resource: openai-sub",
-    "  claude-observer:",
-    "    adapter: claude",
-    "    resource: claude-sub",
-    "role_defaults:",
-    "  new_card: codex-observer",
-    "  reviewer: codex-observer",
-    "  observer: codex-observer",
-    "",
-])
+SPRINT_HEAD_SNAPSHOT = "\n".join(
+    [
+        "resources:",
+        "  openai-sub:",
+        "    account: openai-subscription",
+        "  claude-sub:",
+        "    account: claude-subscription",
+        "profiles:",
+        "  codex-observer:",
+        "    adapter: codex",
+        "    resource: openai-sub",
+        "  claude-observer:",
+        "    adapter: claude",
+        "    resource: claude-sub",
+        "role_defaults:",
+        "  new_card: codex-observer",
+        "  reviewer: codex-observer",
+        "  observer: codex-observer",
+        "",
+    ]
+)
 
 
 class TwoOpenSprintAdmission:
@@ -360,29 +376,56 @@ class TwoOpenSprintAdmission:
         (instance / "projects").mkdir(parents=True, exist_ok=True)
         for project in ("secretary", "other", "third", "fourth"):
             (instance / "projects" / f"{project}.yaml").write_text(
-                f"id: {project}\n", encoding="utf-8",
+                f"id: {project}\n",
+                encoding="utf-8",
             )
         write_installed_pair(instance, SPRINT_HEAD_SNAPSHOT)
         # The setting is in force before either create runs: it is what the second one is
         # admitted by, and admission reads it live.
         (instance / "instance.yaml").write_text("open_sprint_limit: 2\n", encoding="utf-8")
         self.assertEqual(instance_open_sprint_limit(instance), 2)
-        self.board.add_record(20, "product:secretary", "Secretary", {
-            "record_type": "product", "product_id": "secretary",
-            "product_projects": json.dumps(["secretary", "fourth"]),
-        })
-        self.board.add_record(21, "product:other", "Other", {
-            "record_type": "product", "product_id": "other",
-            "product_projects": json.dumps(["other", "third"]),
-        })
-        self.board.add_record(22, "issue:secretary", "Secretary issue", {
-            "record_type": "issue", "issue_product": "secretary", "issue_kind": "feature",
-            "issue_priority": "P1",
-        })
-        self.board.add_record(23, "issue:other", "Other issue", {
-            "record_type": "issue", "issue_product": "other", "issue_kind": "feature",
-            "issue_priority": "P1",
-        })
+        self.board.add_record(
+            20,
+            "product:secretary",
+            "Secretary",
+            {
+                "record_type": "product",
+                "product_id": "secretary",
+                "product_projects": json.dumps(["secretary", "fourth"]),
+            },
+        )
+        self.board.add_record(
+            21,
+            "product:other",
+            "Other",
+            {
+                "record_type": "product",
+                "product_id": "other",
+                "product_projects": json.dumps(["other", "third"]),
+            },
+        )
+        self.board.add_record(
+            22,
+            "issue:secretary",
+            "Secretary issue",
+            {
+                "record_type": "issue",
+                "issue_product": "secretary",
+                "issue_kind": "feature",
+                "issue_priority": "P1",
+            },
+        )
+        self.board.add_record(
+            23,
+            "issue:other",
+            "Other issue",
+            {
+                "record_type": "issue",
+                "issue_product": "other",
+                "issue_kind": "feature",
+                "issue_priority": "P1",
+            },
+        )
         writer = SprintWriter(self.board, data_dir=self.data_dir, instance=instance)
         roots = self.data_dir / "repos"
         for reference, product, issue, request in (
@@ -390,20 +433,23 @@ class TwoOpenSprintAdmission:
             (self.SECOND, "other", "issue:other", "admit-second-sprint"),
         ):
             writer.create(
-                role="po", actor="operator", goal=f"goal of {reference}",
+                role="po",
+                actor="operator",
+                goal=f"goal of {reference}",
                 definition_of_done="done when the pair is proven",
-                reference=reference, product=product, issues=[issue],
+                reference=reference,
+                product=product,
+                issues=[issue],
                 projects=self.RESERVATIONS[reference],
                 repositories=[str(roots / product)],
-                observer=observer if reference == self.FIRST else (
-                    second_observer if second_observer is not None else none_choice()
-                ),
+                observer=observer
+                if reference == self.FIRST
+                else (second_observer if second_observer is not None else none_choice()),
                 request_id=request,
             )
         self.assertEqual(
             sorted(
-                sprint["ref"]
-                for sprint in SprintReader(self.board).list(statuses={"open"}, create=False)
+                sprint["ref"] for sprint in SprintReader(self.board).list(statuses={"open"}, create=False)
             ),
             [self.FIRST, self.SECOND],
         )
@@ -427,13 +473,24 @@ class TwoOpenSprintAdmission:
         self.add_pair_card(15, "third-1", project="third", sprint=self.SECOND)
 
     def add_pair_card(self, task_id: int, reference: str, *, project: str, sprint: str) -> None:
-        self.board.tasks.append({
-            "id": task_id, "reference": reference, "title": reference, "description": "spec",
-            "column_id": 2, "position": task_id, "swimlane_id": 4,
-            "date_creation": 1720000000, "date_modification": 1720000000,
-        })
+        self.board.tasks.append(
+            {
+                "id": task_id,
+                "reference": reference,
+                "title": reference,
+                "description": "spec",
+                "column_id": 2,
+                "position": task_id,
+                "swimlane_id": 4,
+                "date_creation": 1720000000,
+                "date_modification": 1720000000,
+            }
+        )
         self.board.metadata[task_id] = {
-            "project": project, "task_type": "code", "slug": reference, "sprint_ref": sprint,
+            "project": project,
+            "task_type": "code",
+            "slug": reference,
+            "sprint_ref": sprint,
         }
         self.board.comments[task_id] = []
 
@@ -454,9 +511,17 @@ class FakeCatalog:
         # A trimmed stand-in for heads.yaml: enough profiles to tell two families apart in the
         # routing journal, including one that pins no model at all.
         self.profiles = {
-            "codex": {"adapter": "codex", "model": "gpt-5.6-terra", "effort": "default", "resource": "openai-sub"},
+            "codex": {
+                "adapter": "codex",
+                "model": "gpt-5.6-terra",
+                "effort": "default",
+                "resource": "openai-sub",
+            },
             "codex-reviewer": {
-                "adapter": "codex", "model": "gpt-5.6-terra", "effort": "extra", "resource": "openai-sub",
+                "adapter": "codex",
+                "model": "gpt-5.6-terra",
+                "effort": "extra",
+                "resource": "openai-sub",
             },
             "claude-opus": {"adapter": "claude", "model": "opus", "resource": "claude-sub"},
             "claude-default": {"adapter": "claude", "resource": "claude-sub"},
@@ -466,13 +531,18 @@ class FakeCatalog:
             "claude-sub": {"account": "claude-subscription"},
         }
         self.profiles["codex-observer"] = {
-            "adapter": "codex", "model": "gpt-5.6-terra", "effort": "extra",
-            "resource": "openai-sub", "codex_mode": "tui",
+            "adapter": "codex",
+            "model": "gpt-5.6-terra",
+            "effort": "extra",
+            "resource": "openai-sub",
+            "codex_mode": "tui",
         }
         # Mutable, like the role_defaults block of heads.yaml: an operator can re-point a role
         # while cards are in flight.
         self.role_defaults = {
-            "new_card": "codex", "reviewer": "codex-reviewer", "observer": "codex-observer",
+            "new_card": "codex",
+            "reviewer": "codex-reviewer",
+            "observer": "codex-observer",
         }
         # None until a test needs one of the other two contract states (secretary-1458), or needs
         # to watch the moment the preflight asks.
@@ -500,9 +570,7 @@ class FakeCatalog:
         if self.broad_check_state is not None:
             return self.broad_check_state
         return ContractVerdict.as_fit(
-            ModuleContract(
-                sys.executable, LEGACY_IMPORT_PACKAGE, LEGACY_REASON_MISSING_BROAD_CHECK
-            ),
+            ModuleContract(sys.executable, LEGACY_IMPORT_PACKAGE, LEGACY_REASON_MISSING_BROAD_CHECK),
             "secretary",
         )
 
@@ -516,9 +584,7 @@ class FakeCatalog:
         return str(task.get("routing", {}).get("head_override") or self.role_defaults["new_card"])
 
     def review_head(self, task: dict) -> str:
-        return str(
-            task.get("routing", {}).get("review_head_override") or self.role_defaults["reviewer"]
-        )
+        return str(task.get("routing", {}).get("review_head_override") or self.role_defaults["reviewer"])
 
     def head_profile(self, head: str) -> dict:
         # The registry entry behind a head, as InstanceCatalog answers it: prompt delivery resolves
@@ -555,7 +621,12 @@ class FakeCatalog:
         return head
 
     def head_run(
-        self, task: dict, *, role: str, head: str = "", workspace: str = "",
+        self,
+        task: dict,
+        *,
+        role: str,
+        head: str = "",
+        workspace: str = "",
         failover: bool = False,
     ) -> HeadRun:
         """Mirror InstanceCatalog.head_run over a four-profile registry: `codex` for the worker,
@@ -584,9 +655,7 @@ class FakeCatalog:
         if str(profile.get("adapter") or "") == "claude":
             # Same as InstanceCatalog: a claude profile that pins no model leaves the choice to the
             # CLI, and the snapshot names the model that CLI resolves at this bring-up.
-            model, model_source = claude_launch_model(
-                profile, workspace=workspace, env=role_launch_env(role)
-            )
+            model, model_source = claude_launch_model(profile, workspace=workspace, env=role_launch_env(role))
         return head_run_from_profile(
             role=role,
             head=launched,
@@ -802,23 +871,28 @@ class FakeHost:
             path.unlink(missing_ok=True)
             return
         identity = run_heartbeat_identity(
-            head_run or {"run_id": run_id}, role=kind, task=f"card:{reference}", leaf=leaf,
+            head_run or {"run_id": run_id},
+            role=kind,
+            task=f"card:{reference}",
+            leaf=leaf,
         )
         if self.head_pid > 0 and Path(f"/proc/{self.head_pid}/stat").exists():
             stat = Path(f"/proc/{self.head_pid}/stat").read_text(encoding="utf-8")
-            starttime = stat[stat.rfind(")") + 2:].split()[19]
+            starttime = stat[stat.rfind(")") + 2 :].split()[19]
             boot_id = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
         else:
             # Death is checked before the kernel identity, so a valid-shaped record can model an
             # exited head without depending on a recycled or still-present /proc directory.
             starttime = "0"
             boot_id = "dead-process"
-        identity.update({
-            "version": 1,
-            "pid": self.head_pid,
-            "boot_id": boot_id,
-            "proc_starttime_ticks": starttime,
-        })
+        identity.update(
+            {
+                "version": 1,
+                "pid": self.head_pid,
+                "boot_id": boot_id,
+                "proc_starttime_ticks": starttime,
+            }
+        )
         path.write_text(json.dumps(identity), encoding="utf-8")
 
     def prepare_worker(
@@ -890,9 +964,13 @@ class FakeHost:
         if not run_id:
             return {"state": "unavailable", "reason": "fake has no persisted HeadRun"}
         return {
-            "state": "observed", "admission": "accepted", "source": "fake-bound-session",
-            "source_fingerprint": "f" * 32, "cursor": self.provider_cursor,
-            "head_run_id": run_id, "head_run_fingerprint": fingerprint,
+            "state": "observed",
+            "admission": "accepted",
+            "source": "fake-bound-session",
+            "source_fingerprint": "f" * 32,
+            "cursor": self.provider_cursor,
+            "head_run_id": run_id,
+            "head_run_fingerprint": fingerprint,
         }
 
     def _synthetic_status(self, task: dict, record, kind: str) -> dict | None:
@@ -918,13 +996,20 @@ class FakeHost:
         leaf = record.worker_leaf if kind == "worker" else record.review_leaf
         if "pid_status" not in result:
             if pid_file:
-                result["pid_status"] = dict(_head_run_process_status(
-                    pid_file, run=run, role=kind,
-                    task=f"card:{task['ref']}", leaf=leaf,
-                ))
+                result["pid_status"] = dict(
+                    _head_run_process_status(
+                        pid_file,
+                        run=run,
+                        role=kind,
+                        task=f"card:{task['ref']}",
+                        leaf=leaf,
+                    )
+                )
             else:
                 result["pid_status"] = {
-                    "known": False, "alive": False, "match": False,
+                    "known": False,
+                    "alive": False,
+                    "match": False,
                     "state": "not-yet-written",
                 }
         if "provider_progress" not in result:
@@ -941,16 +1026,25 @@ class FakeHost:
         if not run_id:
             return {"state": "unavailable", "reason": "fake has no persisted observer HeadRun"}
         return {
-            "state": "observed", "admission": "accepted", "source": "fake-bound-session",
-            "source_fingerprint": "f" * 32, "cursor": "fake:unchanged",
-            "head_run_id": run_id, "head_run_fingerprint": fingerprint,
+            "state": "observed",
+            "admission": "accepted",
+            "source": "fake-bound-session",
+            "source_fingerprint": "f" * 32,
+            "cursor": "fake:unchanged",
+            "head_run_id": run_id,
+            "head_run_fingerprint": fingerprint,
         }
 
     def observer_pid_file(self, reference: str) -> str:
         return str(self.root / "observers" / f"{reference.replace(':', '-')}.pid")
 
     def prepare_observer(
-        self, sprint: dict, head: str, *, prompt: str, identity: dict[str, str] | None = None,
+        self,
+        sprint: dict,
+        head: str,
+        *,
+        prompt: str,
+        identity: dict[str, str] | None = None,
         heartbeat_run_id: str = "",
     ) -> dict:
         self.calls.append("prepare_observer")
@@ -970,9 +1064,7 @@ class FakeHost:
         leaf = f"leaf:{handle}"
         head_run = head_ops.HeadRun(
             run_id=heartbeat_run_id or "fake-observer-run",
-            spec=head_ops.HeadSpec(
-                profile_id=head, adapter="codex", model="gpt-5.6-terra"
-            ),
+            spec=head_ops.HeadSpec(profile_id=head, adapter="codex", model="gpt-5.6-terra"),
             workspace=str(workspace),
             task_ref=head_ops.TaskRef.sprint(reference),
             role="observer",
@@ -981,14 +1073,19 @@ class FakeHost:
             pid_file=str(pid_file),
         ).to_json()
         observer_identity = run_heartbeat_identity(
-            head_run, role="observer", task=f"sprint:{reference}", leaf=leaf,
+            head_run,
+            role="observer",
+            task=f"sprint:{reference}",
+            leaf=leaf,
         )
         if self.observer_pid > 0 and Path(f"/proc/{self.observer_pid}/stat").exists():
             stat = Path(f"/proc/{self.observer_pid}/stat").read_text(encoding="utf-8")
-            observer_identity.update({
-                "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip(),
-                "proc_starttime_ticks": stat[stat.rfind(")") + 2:].split()[19],
-            })
+            observer_identity.update(
+                {
+                    "boot_id": Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip(),
+                    "proc_starttime_ticks": stat[stat.rfind(")") + 2 :].split()[19],
+                }
+            )
         else:
             observer_identity.update({"boot_id": "dead-process", "proc_starttime_ticks": "0"})
         observer_identity.update({"version": 1, "pid": self.observer_pid})
@@ -1077,7 +1174,11 @@ class FakeHost:
         # pinning the commit the reviewer judges.
         self.split_from.append(record.handle)
         launched = self._launched(
-            f"review:{task['ref']}", record.review_head, task, "reviewer", record.workspace,
+            f"review:{task['ref']}",
+            record.review_head,
+            task,
+            "reviewer",
+            record.workspace,
             failover=bool(record.preferred_review_head),
             delivery_evidence=dict(self.review_launch_delivery_evidence),
             run_id=str((record.launch_intent or {}).get("run_id") or ""),
@@ -1131,7 +1232,8 @@ class FakeHost:
             "handle": str(intent.get("handle") or run.handle),
             "leaf": str(intent.get("leaf") or run.leaf),
             "head_run": run.to_json(),
-            "delivery_evidence": self.review_delivery_retry_evidence or {
+            "delivery_evidence": self.review_delivery_retry_evidence
+            or {
                 "subject": "reviewer-launch",
                 "handle": str(intent.get("handle") or run.handle),
                 "stage": "acknowledged",
@@ -1155,12 +1257,18 @@ class FakeHost:
         if self.fail_restart_reason:
             raise HostError(self.fail_restart_reason)
         self._write_task_doc(
-            task, Path(record.workspace), record.attempt_id, record.report_generation,
+            task,
+            Path(record.workspace),
+            record.attempt_id,
+            record.report_generation,
             record.report_decision,
         )
         self.prepared.append(task["ref"])
         launched = self._launched(
-            f"rework:{task['ref']}", record.head, task, "worker",
+            f"rework:{task['ref']}",
+            record.head,
+            task,
+            "worker",
             failover=bool(record.preferred_head),
             run_id=heartbeat_run_id,
         )
@@ -1168,8 +1276,15 @@ class FakeHost:
         return launched
 
     def _launched(
-        self, handle: str, head: str, task: dict, role: str, workspace: str = "",
-        failover: bool = False, delivery_evidence: dict[str, object] | None = None, run_id: str = "",
+        self,
+        handle: str,
+        head: str,
+        task: dict,
+        role: str,
+        workspace: str = "",
+        failover: bool = False,
+        delivery_evidence: dict[str, object] | None = None,
+        run_id: str = "",
     ) -> LaunchedHead:
         leaf = f"leaf:{handle}"
         return LaunchedHead(
@@ -1215,21 +1330,29 @@ class FakeHost:
         run = record.worker_head_run
         leaf = record.worker_leaf
         pid_status = (
-            dict(_head_run_process_status(
-                pid_file, run=run, role="worker",
-                task=f"card:{task['ref']}", leaf=leaf,
-            ))
-            if pid_file else {
-                "known": False, "alive": False, "match": False,
+            dict(
+                _head_run_process_status(
+                    pid_file,
+                    run=run,
+                    role="worker",
+                    task=f"card:{task['ref']}",
+                    leaf=leaf,
+                )
+            )
+            if pid_file
+            else {
+                "known": False,
+                "alive": False,
+                "match": False,
                 "state": "not-yet-written",
             }
         )
         return {
             "known": True,
             "live": bool(pid_status.get("alive")) if pid_status.get("known") else True,
-            "reason": "live" if pid_status.get("alive") else (
-                "process-exited" if pid_status.get("state") == "dead" else "live"
-            ),
+            "reason": "live"
+            if pid_status.get("alive")
+            else ("process-exited" if pid_status.get("state") == "dead" else "live"),
             "pid_confirmed": bool(pid_status.get("match") and pid_status.get("alive")),
             "last_activity": time.time(),
             "pid_status": pid_status,
@@ -1250,12 +1373,20 @@ class FakeHost:
         run = record.review_head_run
         leaf = record.review_leaf
         pid_status = (
-            dict(_head_run_process_status(
-                pid_file, run=run, role="review",
-                task=f"card:{task['ref']}", leaf=leaf,
-            ))
-            if pid_file else {
-                "known": False, "alive": False, "match": False,
+            dict(
+                _head_run_process_status(
+                    pid_file,
+                    run=run,
+                    role="review",
+                    task=f"card:{task['ref']}",
+                    leaf=leaf,
+                )
+            )
+            if pid_file
+            else {
+                "known": False,
+                "alive": False,
+                "match": False,
                 "state": "not-yet-written",
             }
         )
@@ -1401,9 +1532,7 @@ class FakeHost:
             raise HostError("worker session exited")
         # Unlike a continuation, this writes no document and clears no body file: the round the
         # head is being pointed back at is the one it already has.
-        self.report_prompts.append(
-            _report_nudge_prompt(record.report_generation, task["ref"])
-        )
+        self.report_prompts.append(_report_nudge_prompt(record.report_generation, task["ref"]))
 
     def resume_worker(self, task: dict, record) -> None:
         self.calls.append("resume_worker")
@@ -1414,7 +1543,10 @@ class FakeHost:
         # Same order as the real host: the round's document is on disk before the suspended
         # conversation is woken, and the prompt that wakes it names that same round.
         self._write_task_doc(
-            task, Path(record.workspace), record.attempt_id, record.report_generation,
+            task,
+            Path(record.workspace),
+            record.attempt_id,
+            record.report_generation,
             record.report_decision,
         )
         self.resumed_continuations.append(
@@ -1453,7 +1585,9 @@ class FakeHost:
         self.calls.append("head_commit")
         return self.commit
 
-    def is_instance_publish_recovery(self, task: dict, record, reviewed_commit: str, current_commit: str) -> bool:
+    def is_instance_publish_recovery(
+        self, task: dict, record, reviewed_commit: str, current_commit: str
+    ) -> bool:
         self.calls.append("is_instance_publish_recovery")
         return (reviewed_commit, current_commit) in self.instance_publish_recoveries
 
@@ -1507,8 +1641,14 @@ class FakeSprints:
         return self.rows[reference]
 
 
-
 __all__ = [
-    "FakeCatalog", "FakeCheckpoint", "FakeHost", "FakeKanboard", "FakePusher", "FakeSprints",
-    "TwoOpenSprintAdmission", "_configure_production_shaped_codex_relaunch", "_legacy_unbound_v1_run",
+    "FakeCatalog",
+    "FakeCheckpoint",
+    "FakeHost",
+    "FakeKanboard",
+    "FakePusher",
+    "FakeSprints",
+    "TwoOpenSprintAdmission",
+    "_configure_production_shaped_codex_relaunch",
+    "_legacy_unbound_v1_run",
 ]

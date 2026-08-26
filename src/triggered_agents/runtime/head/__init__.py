@@ -25,6 +25,7 @@ The neighbours are the other two halves of the same boundary: `prompt_document` 
 given, `pane_host` owns the pane it runs in — including, since these operations landed, the verbs
 that open and close one. This package owns which head that is, what it runs, and what happens to it.
 """
+
 from __future__ import annotations
 
 from .command import (

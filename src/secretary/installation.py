@@ -127,7 +127,11 @@ class PipelineStateMaterialization:
 
 
 def _run(
-    argv: list[str], *, label: str, timeout: int = 120, cwd: Path | None = None,
+    argv: list[str],
+    *,
+    label: str,
+    timeout: int = 120,
+    cwd: Path | None = None,
 ) -> str:
     # Installation clones before there is an instance checkout to cross into, so it
     # takes the environment half of the instance-repository boundary on its own.
@@ -190,7 +194,9 @@ def _clone_or_reuse(remote: str, target: Path, *, recovery: bool, dry_run: bool)
     # loads repository configuration before every command, including executable fsmonitor hooks.
     # state_repo crosses to the owner before Git starts.
     try:
-        origin = state_repo.git(target, ["remote", "get-url", "origin"], label="inspect instance remote").strip()
+        origin = state_repo.git(
+            target, ["remote", "get-url", "origin"], label="inspect instance remote"
+        ).strip()
     except state_repo.StateRepoError as exc:
         raise InstallError(str(exc)) from None
     if origin != remote:
@@ -283,21 +289,15 @@ def _add_secret_steps(result: InstallResult, recovery: SecretRecovery) -> None:
     for status, entries in (("locked", recovery.locked), ("missing", recovery.missing)):
         for entry in entries:
             where = entry.get("path") or entry.get("target") or "not materialized"
-            result.add(
-                f"secret:{entry['id']}", status, f"{entry.get('environment', '-')} -> {where}"
-            )
+            result.add(f"secret:{entry['id']}", status, f"{entry.get('environment', '-')} -> {where}")
     for path in recovery.withheld:
         result.add(f"secret-file:{path}", "withheld", "a secret this file needs is not readable")
 
 
-def _blocked_by_secrets(
-    cause: InstallError, recovery: SecretRecovery, runtime_env: Path
-) -> InstallError:
+def _blocked_by_secrets(cause: InstallError, recovery: SecretRecovery, runtime_env: Path) -> InstallError:
     """Say what is still closed instead of asking for a hand-written file."""
     reason = (
-        str(cause)
-        if runtime_env.exists()
-        else f"{runtime_env} is not there, and the store is what writes it"
+        str(cause) if runtime_env.exists() else f"{runtime_env} is not there, and the store is what writes it"
     )
     lines = [f"recovery is incomplete: {recovery.summary()}", f"  cause: {reason}"]
     lines.extend(recovery.render())
@@ -319,7 +319,9 @@ def _runtime_environment(values: dict[str, str]) -> Iterator[None]:
 
 
 def check_prerequisites(
-    transport: BoardTransport, instance_dir: Path, installation_user: str | None = None,
+    transport: BoardTransport,
+    instance_dir: Path,
+    installation_user: str | None = None,
 ) -> None:
     if shutil.which("orca") is None:
         raise InstallError(
@@ -351,7 +353,10 @@ def _read_optional(path: Path) -> str:
 
 
 def materialize_checkpoint(
-    instance_dir: Path, data_dir: Path, *, dry_run: bool = False,
+    instance_dir: Path,
+    data_dir: Path,
+    *,
+    dry_run: bool = False,
 ) -> tuple[int, int]:
     """Validate the checkpoint and optionally publish it into the local layout."""
     bootstrap_evidence = False
@@ -390,9 +395,7 @@ def materialize_checkpoint(
         # sprints.ndjson; its export.json declares no sprint count either, and the
         # next tick writes both.
         sprint_lines = [
-            line
-            for line in _read_optional(board_source / "sprints.ndjson").splitlines()
-            if line.strip()
+            line for line in _read_optional(board_source / "sprints.ndjson").splitlines() if line.strip()
         ]
         cards = [json.loads(line) for line in card_lines]
         sprints = [json.loads(line) for line in sprint_lines]
@@ -540,7 +543,10 @@ def _live_run_journals(state_dir: Path) -> dict[Path, list[str]]:
 
 
 def materialize_pipeline_state(
-    instance_dir: Path, state_dir: Path, *, dry_run: bool = False,
+    instance_dir: Path,
+    state_dir: Path,
+    *,
+    dry_run: bool = False,
 ) -> PipelineStateMaterialization:
     """Put canonical run journals back where the dispatcher checkpoint reads them.
 
@@ -558,7 +564,7 @@ def materialize_pipeline_state(
     for relative, canonical in journals.items():
         live = existing.get(relative, [])
         canonical_records = [record for _, record in canonical]
-        if live and live[:len(canonical_records)] != canonical_records:
+        if live and live[: len(canonical_records)] != canonical_records:
             raise InstallError(
                 f"live pipeline state at {state_dir} does not extend the checkpoint; refusing to overwrite it"
             )
@@ -636,7 +642,8 @@ def materialize_host(
 
 
 def provision_project_checkouts(
-    bindings: list[dict[str, object]], installation_user: str | None,
+    bindings: list[dict[str, object]],
+    installation_user: str | None,
 ) -> int:
     """Clone missing registered checkouts without touching an existing path."""
     cloned = 0
@@ -651,21 +658,23 @@ def provision_project_checkouts(
             continue
         remote = binding.get("remote")
         if not isinstance(remote, str) or not remote:
-            raise InstallError(
-                f"project {binding.get('id')!s} is missing its recovery remote"
-            )
+            raise InstallError(f"project {binding.get('id')!s} is missing its recovery remote")
         branch = binding.get("default_branch")
         if not isinstance(branch, str) or not branch:
             raise InstallError("project registry entry has no default branch")
         target.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(
-            prefix=f".{target.name}.clone-", dir=target.parent
-        ) as temporary:
+        with tempfile.TemporaryDirectory(prefix=f".{target.name}.clone-", dir=target.parent) as temporary:
             staging = Path(temporary) / "checkout"
             _run(
                 [
-                    "git", "clone", "--branch", branch, "--single-branch", "--",
-                    remote, str(staging),
+                    "git",
+                    "clone",
+                    "--branch",
+                    branch,
+                    "--single-branch",
+                    "--",
+                    remote,
+                    str(staging),
                 ],
                 label=f"clone project {binding.get('id')!s}",
                 timeout=600,
@@ -733,9 +742,7 @@ def _product_root(args: argparse.Namespace) -> Path:
     return root
 
 
-def _restore_without_credentials(
-    args: argparse.Namespace, target: Path, result: InstallResult
-) -> None:
+def _restore_without_credentials(args: argparse.Namespace, target: Path, result: InstallResult) -> None:
     """Recover everything that does not go through Kanboard.
 
     A locked store costs the operator their credentials, not their installation. What is left undone
@@ -757,9 +764,7 @@ def _restore_without_credentials(
     result.add("checkpoint", "changed", f"{cards} board card(s), {runs} run record(s)")
     host = report.host if isinstance(report.host, dict) else {}
     threads = host.get("memory_threads", 1)
-    count = rebuild_memory_index(
-        data_dir, target, threads=threads if isinstance(threads, int) else None
-    )
+    count = rebuild_memory_index(data_dir, target, threads=threads if isinstance(threads, int) else None)
     result.add("memory", "changed", f"rebuilt index for {count} fact(s)")
     cloned = provision_project_checkouts(report.bindings, args.installation_user)
     seeded = provision_codex_home(_product_root(args), args.installation_user)
@@ -791,17 +796,15 @@ def install(args: argparse.Namespace) -> InstallResult:
         )
         result.add(
             "installation-user",
-            "unchanged" if recovery or bootstrap_checkout else (
-                "would-change" if args.dry_run else "changed"
-            ),
+            "unchanged"
+            if recovery or bootstrap_checkout
+            else ("would-change" if args.dry_run else "changed"),
             args.installation_user,
         )
         detail = _clone_or_reuse(args.instance_remote, target, recovery=recovery, dry_run=args.dry_run)
         result.add(
             "instance-checkout",
-            "unchanged" if detail.startswith("reused") else (
-                "would-change" if args.dry_run else "changed"
-            ),
+            "unchanged" if detail.startswith("reused") else ("would-change" if args.dry_run else "changed"),
             detail,
         )
         if detail.startswith("cloned"):
@@ -830,8 +833,7 @@ def install(args: argparse.Namespace) -> InstallResult:
             # must not force a recovery phrase merely to recreate transport.
             runtime_loaded = False
             runtime_required = any(
-                entry.get("target") == "runtime-env"
-                for entry in (*secrets.locked, *secrets.missing)
+                entry.get("target") == "runtime-env" for entry in (*secrets.locked, *secrets.missing)
             )
             if not runtime_required:
                 values = {}
@@ -863,15 +865,17 @@ def install(args: argparse.Namespace) -> InstallResult:
         transport = transport_outcome.transport
         result.add(
             "board-transport",
-            "would-change" if args.dry_run and transport_outcome.changed else (
-                "changed" if transport_outcome.changed else "unchanged"
-            ),
+            "would-change"
+            if args.dry_run and transport_outcome.changed
+            else ("changed" if transport_outcome.changed else "unchanged"),
             transport_outcome.render(dry_run=args.dry_run),
         )
         result.add(
             "runtime-env",
             "unchanged" if runtime_loaded else "skipped",
-            "host-only runtime configuration loaded" if runtime_loaded else "not required by this installation",
+            "host-only runtime configuration loaded"
+            if runtime_loaded
+            else "not required by this installation",
         )
         with _runtime_environment({**values, "SECRETARY_INSTANCE": str(target)}):
             check_prerequisites(transport, target, args.installation_user)
@@ -896,6 +900,7 @@ def install(args: argparse.Namespace) -> InstallResult:
             # The checkpoint only contains cards. The board itself is derived host
             # state and must exist before restore can prove card parity.
             from secretary.bootstrap import ensure_pipeline_board
+
             ensure_pipeline_board(target)
             restored = import_normalized_board(data_dir, instance=target)
             result.add("board", "changed", f"{restored} card(s) at parity")
@@ -920,7 +925,9 @@ def install(args: argparse.Namespace) -> InstallResult:
                 nonlocal restored_runs, pipeline_state_changed
                 state_path = pipeline_state_path(context.runtime_home or Path.home())
                 restored = materialize_pipeline_state(
-                    target, state_path, dry_run=False,
+                    target,
+                    state_path,
+                    dry_run=False,
                 )
                 restored_runs = restored.records
                 pipeline_state_changed = restored.changed
@@ -967,10 +974,16 @@ def install(args: argparse.Namespace) -> InstallResult:
 def run_install(args: argparse.Namespace) -> int:
     result = install(args)
     if args.json:
-        print(json.dumps({
-            "status": "ok" if result.ok else "failed",
-            "steps": [step.__dict__ for step in result.steps],
-        }, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "status": "ok" if result.ok else "failed",
+                    "steps": [step.__dict__ for step in result.steps],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
     else:
         print(result.render())
     return 0 if result.ok else 1
@@ -996,8 +1009,12 @@ def add_install_commands(subparsers) -> None:
             help="read the recovery phrase from standard input",
         )
         parser.add_argument("--product-root", help="installed product checkout")
-        parser.add_argument("--recover", action="store_true", default=recovery_default,
-                            help="resume or recover the same installation without overwriting local changes")
+        parser.add_argument(
+            "--recover",
+            action="store_true",
+            default=recovery_default,
+            help="resume or recover the same installation without overwriting local changes",
+        )
         parser.add_argument(
             "--adopt",
             action="store_true",

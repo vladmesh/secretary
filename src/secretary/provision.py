@@ -77,7 +77,9 @@ def _apply_provision_result_locked(
             return 1, loaded
         draft = loaded["draft"]
         run_id = _run_id(draft)
-    result_path = Path(result_value) if result_value else _run_dir(instance, project_id, run_id) / "result.yaml"
+    result_path = (
+        Path(result_value) if result_value else _run_dir(instance, project_id, run_id) / "result.yaml"
+    )
     try:
         result = load_config(result_path)
     except ConfigError as exc:
@@ -112,7 +114,11 @@ def _apply_provision_result_locked(
     adapter = result["adapter"]
     project_local = result.get("project_local_adapter", {})
     if project_local.get("proposed") and loaded["binding"].get("plane") != "project":
-        return 1, _status("result_invalid", run_id=run_id, errors=["project-local adapter proposal is only available for project plane"])
+        return 1, _status(
+            "result_invalid",
+            run_id=run_id,
+            errors=["project-local adapter proposal is only available for project plane"],
+        )
     if project_local.get("proposed") and not project_local.get("requires_opt_in"):
         return 1, _status("result_invalid", run_id=run_id, errors=["project-local adapter requires opt-in"])
     if adapter.get("artifact_policy", {}).get("write_project_files"):
@@ -308,16 +314,21 @@ def _record_provision_failure(
         "owner": "provision-agent",
         "status": "failed",
         "binding": {"enabled": False},
-        "adapter": {"status": "unresolved", "required_decisions": [
-            "setup.commands",
-            "smoke.command",
-            "validation.ci",
-            "artifact_policy.write_project_files",
-        ]},
+        "adapter": {
+            "status": "unresolved",
+            "required_decisions": [
+                "setup.commands",
+                "smoke.command",
+                "validation.ci",
+                "artifact_policy.write_project_files",
+            ],
+        },
         "findings": [{"code": code, "severity": "error", "message": message}],
     }
     if validate(updated, "onboarding-contract", "failure"):
-        return _status("canonical_invalid", run_id=_run_id(draft), errors=["environment failure draft is invalid"])
+        return _status(
+            "canonical_invalid", run_id=_run_id(draft), errors=["environment failure draft is invalid"]
+        )
     path = instance / "adapter-drafts" / f"{project_id}.yaml"
     try:
         publish_state_atomic([(path, yaml.safe_dump(updated, sort_keys=False))])

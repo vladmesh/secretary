@@ -96,18 +96,14 @@ _SUITE_PIPELINE_STATE_DIR = Path(tempfile.mkdtemp(prefix="secretary-tests-pipeli
 os.environ["TA_PIPELINE_STATE_DIR"] = str(_SUITE_PIPELINE_STATE_DIR)
 atexit.register(shutil.rmtree, _SUITE_PIPELINE_STATE_DIR, ignore_errors=True)
 
-_find_orca_patcher = mock.patch(
-    "secretary.host_apply.find_orca_executable", return_value=_FIXTURE_ORCA
-)
+_find_orca_patcher = mock.patch("secretary.host_apply.find_orca_executable", return_value=_FIXTURE_ORCA)
 _find_orca_patcher.start()
 
 # pinned_orca_executable() reads /usr/local/bin/orca straight off the host,
 # outside the find_orca_executable seam above. Default it to "no pinned
 # runtime" so secretary.bootstrap's install-vs-skip branch is deterministic
 # regardless of whether this machine happens to have Orca installed there.
-_pinned_orca_patcher = mock.patch(
-    "secretary.host_apply.pinned_orca_executable", return_value=None
-)
+_pinned_orca_patcher = mock.patch("secretary.host_apply.pinned_orca_executable", return_value=None)
 _pinned_orca_patcher.start()
 
 # `git fetch` ends with `git maintenance run --auto`, and gc detaches by default,

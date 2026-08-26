@@ -49,10 +49,7 @@ SOURCE_REQUIRED_FIELDS = ("canonical", "canonical_owner", "product_root", "revis
 
 def snapshot_header(canonical: Path) -> str:
     """Name the file this snapshot came from, so a reader is never left guessing which canon won."""
-    return (
-        f"# Generated from {canonical} by `secretary upgrade`.\n"
-        "# Do not edit this snapshot by hand.\n"
-    )
+    return f"# Generated from {canonical} by `secretary upgrade`.\n# Do not edit this snapshot by hand.\n"
 
 
 class HeadRegistryConfigError(RuntimeError):
@@ -113,20 +110,14 @@ def canonical_path(product_root: Path, instance_path: Path | None = None) -> tup
     except FileNotFoundError:
         return product_root / HEADS_RELATIVE, PRODUCT_ORIGIN
     except OSError as exc:
-        raise HeadRegistryConfigError(
-            f"cannot inspect instance head registry {owned}: {exc}"
-        ) from None
+        raise HeadRegistryConfigError(f"cannot inspect instance head registry {owned}: {exc}") from None
     if stat.S_ISLNK(mode):
         try:
             mode = owned.stat().st_mode
         except FileNotFoundError:
-            raise HeadRegistryConfigError(
-                f"instance head registry {owned} is a dangling symlink"
-            ) from None
+            raise HeadRegistryConfigError(f"instance head registry {owned} is a dangling symlink") from None
         except OSError as exc:
-            raise HeadRegistryConfigError(
-                f"cannot inspect instance head registry {owned}: {exc}"
-            ) from None
+            raise HeadRegistryConfigError(f"cannot inspect instance head registry {owned}: {exc}") from None
     if stat.S_ISREG(mode):
         return owned, INSTANCE_ORIGIN
     if stat.S_ISDIR(mode):
@@ -218,7 +209,9 @@ def _validated_source_pair(instance_path: Path, snapshot: str) -> dict[str, Any]
             f"installation head registry source pin {path} is missing; run `secretary upgrade --instance "
             f"{_instance_dir(instance_path)}` to regenerate the recovery pair"
         )
-    missing = [key for key in SOURCE_REQUIRED_FIELDS if not isinstance(source.get(key), str) or not source[key]]
+    missing = [
+        key for key in SOURCE_REQUIRED_FIELDS if not isinstance(source.get(key), str) or not source[key]
+    ]
     if missing:
         raise HeadRegistryConfigError(
             f"head registry source pin {path} is incomplete ({', '.join(missing)}); run `secretary upgrade --instance "
@@ -262,8 +255,7 @@ def pinned_product_root(instance_path: Path) -> Path:
 
 
 def record_source(instance_path: Path, product_root: Path, *, dry_run: bool = False) -> bool:
-    """Write which canon, checkout and revision the snapshot came from. Returns whether it moved.
-    """
+    """Write which canon, checkout and revision the snapshot came from. Returns whether it moved."""
     target = source_path(instance_path)
     canonical, origin = canonical_path(product_root, instance_path)
     canonical = canonical.expanduser().resolve(strict=False)

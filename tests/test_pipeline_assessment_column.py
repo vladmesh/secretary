@@ -4,6 +4,7 @@
 writes the same board, so two things have to hold: it must not reshape a populated board by
 positional rename, and it must not answer a release decision the task protocol owns.
 """
+
 from __future__ import annotations
 
 import unittest
@@ -12,14 +13,11 @@ from unittest import mock
 from triggered_agents.agents.pipeline import model, ops
 
 CURRENT_COLUMNS = [
-    {"id": index, "title": title, "position": index}
-    for index, title in enumerate(model.COLUMNS, 1)
+    {"id": index, "title": title, "position": index} for index, title in enumerate(model.COLUMNS, 1)
 ]
 LEGACY_COLUMNS = [
     {"id": index, "title": title, "position": index}
-    for index, title in enumerate(
-        ("Issues", "Ready", "In progress", "Validate", "Blocked", "Done"), 1
-    )
+    for index, title in enumerate(("Issues", "Ready", "In progress", "Validate", "Blocked", "Done"), 1)
 ]
 KANBOARD_DEFAULTS = [
     {"id": index, "title": title, "position": index}
@@ -45,9 +43,7 @@ def _board(columns, *, open_cards=(), closed_cards=()):
                     column["title"] = params["title"]
             return True
         if method == "addColumn":
-            columns.append(
-                {"id": len(columns) + 1, "title": params["title"], "position": len(columns) + 1}
-            )
+            columns.append({"id": len(columns) + 1, "title": params["title"], "position": len(columns) + 1})
             return len(columns)
         if method == "removeColumn":
             columns[:] = [c for c in columns if c["id"] != params["column_id"]]
@@ -105,9 +101,7 @@ class EnsureStructureTests(unittest.TestCase):
         self.assertIn("Backlog", str(raised.exception))
 
     def test_a_populated_board_on_the_current_layout_is_verified_not_rewritten(self):
-        result, calls, columns = self._run(
-            CURRENT_COLUMNS, open_cards=[{"id": 7, "column_id": 5}]
-        )
+        result, calls, columns = self._run(CURRENT_COLUMNS, open_cards=[{"id": 7, "column_id": 5}])
 
         self.assertEqual(result["board_id"], 2)
         self.assertEqual([c["title"] for c in columns], list(model.COLUMNS))

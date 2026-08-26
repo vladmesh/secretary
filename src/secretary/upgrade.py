@@ -298,7 +298,9 @@ def step_role_skills(context: UpgradeContext) -> StepResult:
         return StepResult("role-skills", "unchanged", f"{len(before['targets'])} targets in sync")
     pending = len(before["missing"]) + len(before["drift"]) + len(before["entry_points"])
     if before["config_errors"] or before["source_missing"]:
-        return StepResult("role-skills", "failed", "manifest is not usable: overlapping roots or a missing source skill")
+        return StepResult(
+            "role-skills", "failed", "manifest is not usable: overlapping roots or a missing source skill"
+        )
     if context.dry_run:
         return StepResult("role-skills", "changed", f"would sync {pending} skill copies")
     try:
@@ -371,8 +373,7 @@ def step_publish_head_registry(context: UpgradeContext) -> StepResult:
             missing = [path for path in state_repo.HEADS_PATHSPEC if path not in tracked]
             if missing:
                 raise state_repo.StateRepoError(
-                    "head registry recovery pair is not tracked by the instance repo: "
-                    + ", ".join(missing)
+                    "head registry recovery pair is not tracked by the instance repo: " + ", ".join(missing)
                 )
     except state_repo.StateRepoError as exc:
         return StepResult("head-registry-checkpoint", "failed", str(exc))
@@ -686,8 +687,10 @@ def step_board_transport(context: UpgradeContext) -> StepResult:
         except RuntimeEnvMissing:
             values = {}
         outcome = ensure_from_runtime_values(
-            context.instance_path, legacy_values=values,
-            runtime_env=context.instance_path / "runtime.env", dry_run=context.dry_run,
+            context.instance_path,
+            legacy_values=values,
+            runtime_env=context.instance_path / "runtime.env",
+            dry_run=context.dry_run,
         )
     except (BoardTransportError, RuntimeEnvError) as exc:
         return StepResult("board-transport", "failed", str(exc))
@@ -769,9 +772,7 @@ def run_upgrade(args) -> int:
     # home-relative path an upgrade materializes agree with the units it renders.
     instance_path = report.instance_path.parent
     try:
-        runtime_user, runtime_home = resolve_runtime_owner(
-            instance_path, getattr(args, "runtime_user", None)
-        )
+        runtime_user, runtime_home = resolve_runtime_owner(instance_path, getattr(args, "runtime_user", None))
     except ValueError as exc:
         print(f"secretary upgrade: {exc}")
         return 2
@@ -796,18 +797,20 @@ def run_upgrade(args) -> int:
     )
     result = run_steps(context)
     if args.json:
-        print(json.dumps(
-            {
-                "status": "ok" if result.ok else "failed",
-                "dry_run": context.dry_run,
-                "steps": [
-                    {"name": step.name, "status": step.status, "detail": step.detail}
-                    for step in result.steps
-                ],
-            },
-            sort_keys=True,
-            indent=2,
-        ))
+        print(
+            json.dumps(
+                {
+                    "status": "ok" if result.ok else "failed",
+                    "dry_run": context.dry_run,
+                    "steps": [
+                        {"name": step.name, "status": step.status, "detail": step.detail}
+                        for step in result.steps
+                    ],
+                },
+                sort_keys=True,
+                indent=2,
+            )
+        )
     else:
         print(result.render())
     return 0 if result.ok else 1

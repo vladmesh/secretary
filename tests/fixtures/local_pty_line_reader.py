@@ -20,6 +20,7 @@ Each record carries its length, the distinct printable bytes in it, and its firs
 bytes, because that is what tells a fragment of one payload from a fragment of one payload with
 another payload welded onto its end.
 """
+
 from __future__ import annotations
 
 import argparse

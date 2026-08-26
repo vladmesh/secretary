@@ -237,15 +237,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_instance(export_runs_command, data_dir=True)
     export_runs_command.add_argument(
         "--state-dir",
-        default=str(
-            Path.home()
-            / "orca"
-            / "workspaces"
-            / "secretary"
-            / "pipeline"
-            / "state"
-            / "pipeline"
-        ),
+        default=str(Path.home() / "orca" / "workspaces" / "secretary" / "pipeline" / "state" / "pipeline"),
     )
     export_runs_command.set_defaults(handler=run_export_runs)
 
@@ -425,9 +417,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_instance(knowledge_write)
     knowledge_write.add_argument("--actor", required=True)
-    knowledge_write.add_argument(
-        "--path", required=True, help="document path relative to state/knowledge"
-    )
+    knowledge_write.add_argument("--path", required=True, help="document path relative to state/knowledge")
     knowledge_write.add_argument("--file", required=True, help="source markdown file")
     knowledge_write.add_argument("--message", help="commit subject; defaults to the document path")
     knowledge_write.set_defaults(handler=run_knowledge_write)
@@ -558,7 +548,11 @@ def _is_temporary_directory(path: Path) -> bool:
 def run_status(args: argparse.Namespace) -> int:
     report = validate_instance(Path(args.instance))
     if not report.ok:
-        payload = {"schema_version": 1, "error": "invalid_instance", "findings": [str(error) for error in report.errors]}
+        payload = {
+            "schema_version": 1,
+            "error": "invalid_instance",
+            "findings": [str(error) for error in report.errors],
+        }
         if args.json:
             print(json.dumps(payload, sort_keys=True))
         else:
@@ -575,8 +569,10 @@ def run_status(args: argparse.Namespace) -> int:
         print(f"head registry: {canon['error']}")
     else:
         owner = canon["canonical_owner"] or "unknown"
-        print(f"head registry: {canon['canonical']} ({owner}-owned), "
-              f"built from {canon['product_root']} @ {canon['revision']}")
+        print(
+            f"head registry: {canon['canonical']} ({owner}-owned), "
+            f"built from {canon['product_root']} @ {canon['revision']}"
+        )
     observers = snapshot["dispatcher"]["observers"]
     live = sum(1 for observer in observers if observer["alive"])
     print(f"sprint observers: {live} live of {len(observers)}")
@@ -587,7 +583,9 @@ def run_status(args: argparse.Namespace) -> int:
         stopped = sum(sprint["status"] == "stopped" for sprint in sprint_status["items"])
         stale = sum(not sprint["resume_freshness"]["fresh"] for sprint in sprint_status["items"])
         print(f"sprints: {len(sprint_status['items'])}, {stopped} stopped, {stale} resume errors")
-    print(f"memory facts: {snapshot['memory']['fact_count'] if snapshot['memory']['fact_count'] is not None else 'unknown'}")
+    print(
+        f"memory facts: {snapshot['memory']['fact_count'] if snapshot['memory']['fact_count'] is not None else 'unknown'}"
+    )
     print(f"checkpoint lag: {snapshot['checkpoint']['lag_minutes']} min")
     return 0
 
@@ -595,15 +593,27 @@ def run_status(args: argparse.Namespace) -> int:
 def run_doctor_json(args: argparse.Namespace, report) -> int:
     """Structured counterpart to doctor without changing its default transcript."""
     if not report.ok:
-        print(json.dumps({
-            "schema_version": 1,
-            "ok": False,
-            "findings": [{"code": "config_invalid", "message": str(error)} for error in report.errors],
-        }, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "ok": False,
+                    "findings": [
+                        {"code": "config_invalid", "message": str(error)} for error in report.errors
+                    ],
+                },
+                sort_keys=True,
+            )
+        )
         return 1 if args.dry_run else 2
     snapshot = collect_status(report, host_fixture=args.host_fixture, offline=args.offline)
     inspection = collect_doctor_inspection(report, args)
-    payload = {"schema_version": 1, "ok": not inspection.findings, "findings": inspection.findings, "status": snapshot}
+    payload = {
+        "schema_version": 1,
+        "ok": not inspection.findings,
+        "findings": inspection.findings,
+        "status": snapshot,
+    }
     print(json.dumps(payload, sort_keys=True))
     if inspection.unavailable:
         return 2
@@ -628,9 +638,16 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
         for kind, diff in diffs.items():
             if kind in collected.errors:
                 continue
-            findings.extend({"code": "missing_on_host", "kind": kind, "name": name} for name in diff.missing_on_host)
-            findings.extend({"code": "unmanaged_on_host", "kind": kind, "name": name} for name in diff.unmanaged_on_host)
-        findings.extend({"code": "unit_runtime", "message": finding} for finding in _unit_runtime_findings(expected, collected))
+            findings.extend(
+                {"code": "missing_on_host", "kind": kind, "name": name} for name in diff.missing_on_host
+            )
+            findings.extend(
+                {"code": "unmanaged_on_host", "kind": kind, "name": name} for name in diff.unmanaged_on_host
+            )
+        findings.extend(
+            {"code": "unit_runtime", "message": finding}
+            for finding in _unit_runtime_findings(expected, collected)
+        )
     dispatcher = dispatcher_findings(report, collected, inspect_live=not args.offline)
     checkpoint = checkpoint_findings(report)
     secret_store = secret_store_findings(report)
@@ -648,8 +665,17 @@ def collect_doctor_inspection(report, args: argparse.Namespace) -> DoctorInspect
     if args.strict:
         findings.extend({"code": "config_warning", "message": str(warning)} for warning in report.warnings)
     return DoctorInspection(
-        findings, unavailable, restore, dispatcher, checkpoint, secret_store, board_transport,
-        resource_probes, expected, collected, diffs,
+        findings,
+        unavailable,
+        restore,
+        dispatcher,
+        checkpoint,
+        secret_store,
+        board_transport,
+        resource_probes,
+        expected,
+        collected,
+        diffs,
     )
 
 
@@ -719,7 +745,11 @@ def print_dispatcher_status(
 
     owner_state = "production-owner" if production_owner else "unowned"
 
-    findings = dispatcher_findings(report, collected_host, inspect_live=inspect_live) if findings is None else findings
+    findings = (
+        dispatcher_findings(report, collected_host, inspect_live=inspect_live)
+        if findings is None
+        else findings
+    )
     print()
     print("dispatcher ownership: read-only")
     print(f"  state: {owner_state}")
@@ -727,7 +757,9 @@ def print_dispatcher_status(
     print(f"  production owner: {production_owner or '(none)'}")
     pause = ProductionPause(data_dir).summary()
     if pause.get("paused"):
-        print(f"  pause: {pause['mode']} since {pause.get('since') or '(unknown)'} by {pause.get('actor') or '(unknown)'}")
+        print(
+            f"  pause: {pause['mode']} since {pause.get('since') or '(unknown)'} by {pause.get('actor') or '(unknown)'}"
+        )
     else:
         print("  pause: none")
 
@@ -898,7 +930,11 @@ def checkpoint_findings(report) -> list[str]:
     production = _load_dispatcher_state(report.data_dir / "dispatcher" / "production-state.json")
     if "checkpoint" not in production and "checkpoint_push" not in production:
         return []
-    snapshot = checkpoint_snapshot(report.instance_path.parent, write_state=production.get("checkpoint"), push_state=production.get("checkpoint_push"))
+    snapshot = checkpoint_snapshot(
+        report.instance_path.parent,
+        write_state=production.get("checkpoint"),
+        push_state=production.get("checkpoint_push"),
+    )
     findings: list[str] = []
     if snapshot["remote_diverged"]:
         findings.append(f"remote diverged: {snapshot['push_reason'] or 'push stopped, resolve by hand'}")
@@ -940,7 +976,9 @@ def _production_host_findings(report, data_dir: Path, collected_host: CollectRes
     prefix = prefix if isinstance(prefix, str) else ""
     assert report.data_dir is not None
     packaged = resolve_installed_packaged(
-        report.instance, instance_path=report.instance_path.parent, data_dir=report.data_dir,
+        report.instance,
+        instance_path=report.instance_path.parent,
+        data_dir=report.data_dir,
     )
     desired = build_plan(report.instance, report.bindings, packaged=packaged)
     managed = load_managed_manifest(data_dir / "host-managed.json")
@@ -951,9 +989,7 @@ def _production_host_findings(report, data_dir: Path, collected_host: CollectRes
             continue
         if change.action == "unchanged":
             continue
-        findings.append(
-            f"production dispatcher managed unit mismatch: {change.action} {change.name}"
-        )
+        findings.append(f"production dispatcher managed unit mismatch: {change.action} {change.name}")
     return findings
 
 
@@ -1010,9 +1046,7 @@ def run_data_export(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        exports = export_all(
-            data_dir, _instance_dir(args.instance), copy_transcripts=args.copy_transcripts
-        )
+        exports = export_all(data_dir, _instance_dir(args.instance), copy_transcripts=args.copy_transcripts)
     except RuntimeError as exc:
         print(f"secretary data export: {exc}")
         return 1
@@ -1162,9 +1196,7 @@ def run_knowledge_write(args: argparse.Namespace) -> int:
             message=args.message,
         )
     except KnowledgeValidationError as exc:
-        _print_json(
-            {"ok": False, "op": "write", "error": "validation", "message": str(exc)}
-        )
+        _print_json({"ok": False, "op": "write", "error": "validation", "message": str(exc)})
         return MEMORY_EXIT_VALIDATION
     except (KnowledgeError, StateRepoError) as exc:
         _print_json({"ok": False, "op": "write", "error": "runtime", "message": str(exc)})
@@ -1385,10 +1417,15 @@ def collect_host_inventory(report, args: argparse.Namespace):
     source = FixtureHostSource(Path(args.host_fixture)) if args.host_fixture else LiveHostSource()
     assert report.data_dir is not None
     packaged = resolve_installed_packaged(
-        report.instance, instance_path=report.instance_path.parent, data_dir=report.data_dir,
+        report.instance,
+        instance_path=report.instance_path.parent,
+        data_dir=report.data_dir,
     )
     expected = build_doctor_expectations(
-        report.instance, report.bindings, packaged=packaged, data_dir=report.data_dir,
+        report.instance,
+        report.bindings,
+        packaged=packaged,
+        data_dir=report.data_dir,
     )
     collected = source.collect(expected)
     return expected, collected, inventory(expected, collected.inventory)

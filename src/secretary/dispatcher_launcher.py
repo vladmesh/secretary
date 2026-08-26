@@ -35,8 +35,7 @@ CLAUDE_MODEL_ENV = "ANTHROPIC_MODEL"
 
 
 class HeadLaunchError(RuntimeError):
-    """A head that cannot be brought up in this workspace: its CLI's first-run state is unwritable.
-    """
+    """A head that cannot be brought up in this workspace: its CLI's first-run state is unwritable."""
 
 
 def ensure_claude_workspace_ready(
@@ -97,7 +96,10 @@ def claude_launch_model(
     if from_env:
         return from_env, f"env:{CLAUDE_MODEL_ENV}"
     if workspace:
-        for name, source in (("settings.local.json", "project_settings_local"), ("settings.json", "project_settings")):
+        for name, source in (
+            ("settings.local.json", "project_settings_local"),
+            ("settings.json", "project_settings"),
+        ):
             model = _settings_model(Path(workspace) / ".claude" / name)
             if model:
                 return model, source

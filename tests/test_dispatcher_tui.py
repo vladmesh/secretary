@@ -51,10 +51,15 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             workspace.mkdir()
             claude_root = Path(tmp) / "claude-projects"
             with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(claude_root)}):
-                claude_run = prepare_claude_provider_progress_source(HeadRun(
-                    run_id="claude-bound", spec=HeadSpec(profile_id="claude", adapter="claude"),
-                    workspace=str(workspace), task_ref=TaskRef.card("secretary-1429"), role="worker",
-                ))
+                claude_run = prepare_claude_provider_progress_source(
+                    HeadRun(
+                        run_id="claude-bound",
+                        spec=HeadSpec(profile_id="claude", adapter="claude"),
+                        workspace=str(workspace),
+                        task_ref=TaskRef.card("secretary-1429"),
+                        role="worker",
+                    )
+                )
                 transcript = claude_root / claude_project_dir_name(str(workspace)) / "session.jsonl"
                 foreign = claude_root / claude_project_dir_name(str(workspace)) / "foreign.jsonl"
                 transcript.parent.mkdir(parents=True)
@@ -78,36 +83,58 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             )
             from secretary.codex_provider_events import _range_digest, _read_source
             from secretary.dispatcher_worker_lifecycle import head_run_binding
+
             parsed = _read_source(codex_path)
             self.assertIsNotNone(parsed)
             _meta, lines = parsed
-            _, run_fingerprint = head_run_binding(HeadRun(
-                run_id="codex-bound", spec=HeadSpec(profile_id="codex", adapter="codex"),
-                workspace=str(workspace), task_ref=TaskRef.card("secretary-1429"), role="worker",
-            ).to_json())
+            _, run_fingerprint = head_run_binding(
+                HeadRun(
+                    run_id="codex-bound",
+                    spec=HeadSpec(profile_id="codex", adapter="codex"),
+                    workspace=str(workspace),
+                    task_ref=TaskRef.card("secretary-1429"),
+                    role="worker",
+                ).to_json()
+            )
             codex_run = HeadRun(
-                run_id="codex-bound", spec=HeadSpec(profile_id="codex", adapter="codex"),
-                workspace=str(workspace), task_ref=TaskRef.card("secretary-1429"), role="worker",
+                run_id="codex-bound",
+                spec=HeadSpec(profile_id="codex", adapter="codex"),
+                workspace=str(workspace),
+                task_ref=TaskRef.card("secretary-1429"),
+                role="worker",
             )
             source = {
-                "version": 1, "kind": "codex_session_event_jsonl", "state": "bound",
-                "run_id": codex_run.run_id, "head_run_fingerprint": run_fingerprint,
-                "workspace": str(workspace.resolve()), "role": "worker",
-                "task_ref": codex_run.task_ref.to_json(), "root": str(codex_root.resolve()),
-                "path": str(codex_path.resolve()), "session_id": "own", "parent_thread_id": "parent",
+                "version": 1,
+                "kind": "codex_session_event_jsonl",
+                "state": "bound",
+                "run_id": codex_run.run_id,
+                "head_run_fingerprint": run_fingerprint,
+                "workspace": str(workspace.resolve()),
+                "role": "worker",
+                "task_ref": codex_run.task_ref.to_json(),
+                "root": str(codex_root.resolve()),
+                "path": str(codex_path.resolve()),
+                "session_id": "own",
+                "parent_thread_id": "parent",
                 "initial_range": {
                     "first": {"line": 1, "digest": lines[0].digest},
                     "root": {"line": 2, "digest": lines[1].digest},
                     "last": {"line": 2, "digest": lines[1].digest},
                     "digest": _range_digest(lines),
                 },
-                "cursor": {"line": 2, "digest": lines[1].digest}, "bound_at": "2026-08-13T00:00:00Z",
+                "cursor": {"line": 2, "digest": lines[1].digest},
+                "bound_at": "2026-08-13T00:00:00Z",
             }
-            codex_run = codex_run.with_fanout_policy({
-                **codex_run.fanout_policy, "provider_source": source,
-            })
+            codex_run = codex_run.with_fanout_policy(
+                {
+                    **codex_run.fanout_policy,
+                    "provider_source": source,
+                }
+            )
             foreign_codex = codex_root / "foreign.jsonl"
-            foreign_codex.write_text('{"type":"session_meta","payload":{"session_id":"foreign"}}\n', encoding="utf-8")
+            foreign_codex.write_text(
+                '{"type":"session_meta","payload":{"session_id":"foreign"}}\n', encoding="utf-8"
+            )
             codex = provider_progress_for_run(codex_run)
             self.assertEqual(codex["state"], "observed")
             self.assertEqual(codex["source"], "codex-session")
@@ -115,11 +142,15 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
 
     def test_provider_progress_keeps_an_unavailable_source_distinct_from_busy(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            unavailable = provider_progress_for_run(HeadRun(
-                run_id="claude-unbound", spec=HeadSpec(profile_id="claude", adapter="claude"),
-                workspace=str(Path(tmp) / "workspace"), task_ref=TaskRef.card("secretary-1429"),
-                role="worker",
-            ))
+            unavailable = provider_progress_for_run(
+                HeadRun(
+                    run_id="claude-unbound",
+                    spec=HeadSpec(profile_id="claude", adapter="claude"),
+                    workspace=str(Path(tmp) / "workspace"),
+                    task_ref=TaskRef.card("secretary-1429"),
+                    role="worker",
+                )
+            )
         self.assertEqual(unavailable["state"], "unavailable")
         self.assertNotEqual(unavailable["state"], READINESS_BUSY)
 
@@ -160,32 +191,60 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             }
 
             legacy = provider_progress_for_run(run.with_fanout_policy(policy))
-            foreign = provider_progress_for_run(run.with_fanout_policy({
-                **policy,
-                "provider_source": {**source, "workspace": "/foreign"},
-            }))
-            malformed = provider_progress_for_run(run.with_fanout_policy({
-                **policy,
-                "provider_source": {**source, "baseline": [1]},
-            }))
-            relative_root = provider_progress_for_run(run.with_fanout_policy({
-                **policy,
-                "provider_source": {**source, "root": "relative-session-root"},
-            }))
-            relative_baseline = provider_progress_for_run(run.with_fanout_policy({
-                **policy,
-                "provider_source": {**source, "baseline": ["relative-old-session.jsonl"]},
-            }))
-            noncanonical_root = provider_progress_for_run(run.with_fanout_policy({
-                **policy,
-                "provider_source": {**source, "root": str(Path(tmp) / "sessions" / ".." / "sessions")},
-            }))
-            outside_baseline = provider_progress_for_run(run.with_fanout_policy({
-                **policy,
-                "provider_source": {
-                    **source, "baseline": [str((Path(tmp) / "outside.jsonl").resolve())],
-                },
-            }))
+            foreign = provider_progress_for_run(
+                run.with_fanout_policy(
+                    {
+                        **policy,
+                        "provider_source": {**source, "workspace": "/foreign"},
+                    }
+                )
+            )
+            malformed = provider_progress_for_run(
+                run.with_fanout_policy(
+                    {
+                        **policy,
+                        "provider_source": {**source, "baseline": [1]},
+                    }
+                )
+            )
+            relative_root = provider_progress_for_run(
+                run.with_fanout_policy(
+                    {
+                        **policy,
+                        "provider_source": {**source, "root": "relative-session-root"},
+                    }
+                )
+            )
+            relative_baseline = provider_progress_for_run(
+                run.with_fanout_policy(
+                    {
+                        **policy,
+                        "provider_source": {**source, "baseline": ["relative-old-session.jsonl"]},
+                    }
+                )
+            )
+            noncanonical_root = provider_progress_for_run(
+                run.with_fanout_policy(
+                    {
+                        **policy,
+                        "provider_source": {
+                            **source,
+                            "root": str(Path(tmp) / "sessions" / ".." / "sessions"),
+                        },
+                    }
+                )
+            )
+            outside_baseline = provider_progress_for_run(
+                run.with_fanout_policy(
+                    {
+                        **policy,
+                        "provider_source": {
+                            **source,
+                            "baseline": [str((Path(tmp) / "outside.jsonl").resolve())],
+                        },
+                    }
+                )
+            )
 
         self.assertEqual(legacy["state"], "unavailable")
         self.assertEqual(
@@ -229,8 +288,11 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             return True
 
         outcome = deliver_interactive_prompt(
-            "term-observer", "wake", run_json=run_json,
-            confirm=confirm, ack_out_of_band=True,
+            "term-observer",
+            "wake",
+            run_json=run_json,
+            confirm=confirm,
+            ack_out_of_band=True,
         )
 
         self.assertTrue(outcome.evidence.turn_confirmed)
@@ -238,22 +300,31 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
 
     def test_claude_turn_detection_accepts_real_status_lines(self) -> None:
         def run_json(command: list[str]) -> dict:
-            return {"terminal": {"tail": [
-                "The completed response says it was thinking while working.",
-                "✻ Forming... (4s · ↑ 13.2k tokens)",
-            ]}}
+            return {
+                "terminal": {
+                    "tail": [
+                        "The completed response says it was thinking while working.",
+                        "✻ Forming... (4s · ↑ 13.2k tokens)",
+                    ]
+                }
+            }
 
         self.assertTrue(terminal_turn_started("term-claude", adapter="claude", run_json=run_json))
 
         def completed_run_json(command: list[str]) -> dict:
-            return {"terminal": {"tail": [
-                "The completed response says it was thinking while working.",
-            ]}}
+            return {
+                "terminal": {
+                    "tail": [
+                        "The completed response says it was thinking while working.",
+                    ]
+                }
+            }
 
         self.assertFalse(terminal_turn_started("term-claude", adapter="claude", run_json=completed_run_json))
 
     def test_readiness_tells_a_busy_pane_from_one_that_cannot_be_probed(self) -> None:
         """A refused probe is its own answer: it is neither a ready pane nor a working one."""
+
         def answer(payload: dict | Exception):
             def run_json(_command: list[str]) -> dict:
                 if isinstance(payload, Exception):
@@ -297,9 +368,7 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             HostError(STALE_HANDLE_WAIT_FAILURE),
             HostError("orca terminal wait failed: [Errno 2] No such file or directory: 'orca'"),
         ):
-            self.assertEqual(
-                terminal_readiness("term", run_json=answer(failure)), READINESS_UNKNOWN
-            )
+            self.assertEqual(terminal_readiness("term", run_json=answer(failure)), READINESS_UNKNOWN)
 
     def test_claude_delivery_accepts_its_durable_user_turn(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -389,7 +458,9 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
     def test_tui_launch_delivers_short_pointer_not_task_body(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
-            (workspace / "TASK.md").write_text("full spec body that must not be delivered\n", encoding="utf-8")
+            (workspace / "TASK.md").write_text(
+                "full spec body that must not be delivered\n", encoding="utf-8"
+            )
             host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["\x1b[1mWorking\x1b[0m"]}}])
 
             host._launch(
@@ -439,8 +510,10 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
                 ],
             )
 
-            with mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0), \
-                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01):
+            with (
+                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
+                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
+            ):
                 host._launch(
                     str(workspace),
                     "title",
@@ -467,11 +540,13 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             (workspace / "TASK.md").write_text("Read TASK.md\n", encoding="utf-8")
             host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["\u203a Read TASK.md"]}}])
 
-            with mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.03), \
-                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01), \
-                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0), \
-                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 1), \
-                 self.assertRaises(HostError):
+            with (
+                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.03),
+                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
+                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
+                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 1),
+                self.assertRaises(HostError),
+            ):
                 host._launch(
                     str(workspace),
                     "title",
@@ -509,20 +584,26 @@ class DispatcherTuiLaunchTests(unittest.TestCase):
             sessions = Path(tmp) / "sessions" / "2099" / "01" / "02"
             sessions.mkdir(parents=True)
             (sessions / "session.jsonl").write_text(
-                "\n".join([
-                    json.dumps({"type": "session_meta", "payload": {"cwd": str(workspace.resolve())}}),
-                    json.dumps({
-                        "type": "event_msg",
-                        "timestamp": "2099-01-02T03:04:05Z",
-                        "payload": {"type": "user_message"},
-                    }),
-                ]),
+                "\n".join(
+                    [
+                        json.dumps({"type": "session_meta", "payload": {"cwd": str(workspace.resolve())}}),
+                        json.dumps(
+                            {
+                                "type": "event_msg",
+                                "timestamp": "2099-01-02T03:04:05Z",
+                                "payload": {"type": "user_message"},
+                            }
+                        ),
+                    ]
+                ),
                 encoding="utf-8",
             )
             host = RecordingTuiHost(workspace, [{"terminal": {"tail": ["idle"]}}])
 
-            with mock.patch.dict(os.environ, {"SECRETARY_CODEX_SESSIONS": str(Path(tmp) / "sessions")}), \
-                 mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01):
+            with (
+                mock.patch.dict(os.environ, {"SECRETARY_CODEX_SESSIONS": str(Path(tmp) / "sessions")}),
+                mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
+            ):
                 handle = host._launch(
                     str(workspace),
                     "title",
@@ -557,10 +638,14 @@ class CodexUserTurnRecordTests(unittest.TestCase):
         self.sessions.mkdir()
 
     def write_session(self, *records: dict, name: str = "rollout.jsonl") -> None:
-        lines = [json.dumps({
-            "type": "session_meta",
-            "payload": {"cwd": str(self.workspace.resolve()), "originator": "codex-tui"},
-        })]
+        lines = [
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {"cwd": str(self.workspace.resolve()), "originator": "codex-tui"},
+                }
+            )
+        ]
         lines += [json.dumps(record) for record in records]
         (self.sessions / name).write_text("\n".join(lines), encoding="utf-8")
 
@@ -583,10 +668,12 @@ class CodexUserTurnRecordTests(unittest.TestCase):
     def test_what_the_provider_writes_without_a_prompt_is_not_a_turn(self) -> None:
         """Everything a session holds that is not somebody submitting something."""
         self.write_session(
-            self.record("response_item", {"type": "message", "role": "developer",
-                                          "content": [{"text": "skills"}]}),
-            self.record("response_item", {"type": "message", "role": "assistant",
-                                          "content": [{"text": "done"}]}),
+            self.record(
+                "response_item", {"type": "message", "role": "developer", "content": [{"text": "skills"}]}
+            ),
+            self.record(
+                "response_item", {"type": "message", "role": "assistant", "content": [{"text": "done"}]}
+            ),
             self.record("response_item", {"type": "reasoning"}),
             self.record("event_msg", {"type": "task_started"}),
             self.record("event_msg", {"type": "token_count"}),
@@ -596,9 +683,12 @@ class CodexUserTurnRecordTests(unittest.TestCase):
 
     def test_a_turn_before_the_send_is_not_a_turn_after_it(self) -> None:
         """The window is what makes this a delivery proof rather than a session history."""
-        self.write_session(self.record(
-            "response_item", {"type": "message", "role": "user", "content": [{"text": "earlier"}]},
-        ))
+        self.write_session(
+            self.record(
+                "response_item",
+                {"type": "message", "role": "user", "content": [{"text": "earlier"}]},
+            )
+        )
         recorded = self.turn_after(0.0)
 
         self.assertIsNotNone(recorded)
@@ -610,24 +700,22 @@ class CodexUserTurnRecordTests(unittest.TestCase):
         The difference decides who gets to answer: only the absent journal leaves a caller with
         the screen, and the screen says yes for every pane that has ever worked.
         """
-        self.write_session(self.record(
-            "response_item", {"type": "message", "role": "user", "content": [{"text": "wake"}]},
-        ))
-        recorded = latest_user_turn_for(
-            str(self.workspace), 0.0, session_root=self.sessions
+        self.write_session(
+            self.record(
+                "response_item",
+                {"type": "message", "role": "user", "content": [{"text": "wake"}]},
+            )
         )
+        recorded = latest_user_turn_for(str(self.workspace), 0.0, session_root=self.sessions)
 
         def answer(workspace: Path, since: float) -> bool | None:
-            return provider_turn_started(
-                str(workspace), since, adapter="codex", session_root=self.sessions
-            )
+            return provider_turn_started(str(workspace), since, adapter="codex", session_root=self.sessions)
 
         self.assertIs(answer(self.workspace, recorded - 1), True)
         self.assertIs(answer(self.workspace, recorded + 1), False)
         self.assertIsNone(answer(self.root / "elsewhere", 1.0))
         self.assertIsNone(
-            provider_turn_started(str(self.workspace), 1.0, adapter="shell",
-                                  session_root=self.sessions)
+            provider_turn_started(str(self.workspace), 1.0, adapter="shell", session_root=self.sessions)
         )
 
     def test_a_journal_that_can_answer_is_not_second_guessed_by_the_screen(self) -> None:
@@ -648,13 +736,19 @@ class CodexUserTurnRecordTests(unittest.TestCase):
                 return {"terminal": {"tail": ["Working (12s · esc to interrupt)", "›"]}}
             raise AssertionError(args)
 
-        self.write_session(self.record(
-            "response_item", {"type": "message", "role": "user", "content": [{"text": "wake"}]},
-        ))
+        self.write_session(
+            self.record(
+                "response_item",
+                {"type": "message", "role": "user", "content": [{"text": "wake"}]},
+            )
+        )
         recorded = latest_user_turn_for(str(self.workspace), 0.0, session_root=self.sessions)
         confirm = turn_started_confirm(
-            "term-observer", str(self.workspace), "codex",
-            run_json=run_json, session_root=self.sessions,
+            "term-observer",
+            str(self.workspace),
+            "codex",
+            run_json=run_json,
+            session_root=self.sessions,
         )
 
         self.assertTrue(confirm(recorded - 1))
@@ -663,8 +757,11 @@ class CodexUserTurnRecordTests(unittest.TestCase):
 
         # And with no journal to read, the screen is all there is, so it is asked.
         blind = turn_started_confirm(
-            "term-observer", str(self.root / "elsewhere"), "codex",
-            run_json=run_json, session_root=self.sessions,
+            "term-observer",
+            str(self.root / "elsewhere"),
+            "codex",
+            run_json=run_json,
+            session_root=self.sessions,
         )
         self.assertTrue(blind(recorded + 1))
         self.assertEqual(screen_reads, 1)
@@ -705,9 +802,7 @@ class ClaudeTranscriptPathTests(unittest.TestCase):
         if not underscored:
             self.skipTest("no workspace with an underscore in the catalogue on this host")
 
-        self.assertEqual(
-            [(name, cwd) for name, cwd in pairs if claude_project_dir_name(cwd) != name], []
-        )
+        self.assertEqual([(name, cwd) for name, cwd in pairs if claude_project_dir_name(cwd) != name], [])
         # And the rule that was there before really does miss those workspaces, which is why six
         # healthy heads were closed on a product whose workspaces carry one.
         self.assertEqual(
@@ -734,21 +829,23 @@ class ClaudeTranscriptPathTests(unittest.TestCase):
             self.assertIn("-codegen-orchestrator-codegen-orchestrator-1166", str(folder))
             folder.mkdir(parents=True)
             (folder / "session.jsonl").write_text(
-                json.dumps({
-                    "type": "user",
-                    "timestamp": "2099-01-02T03:04:05Z",
-                    "cwd": str(workspace),
-                }) + "\n",
+                json.dumps(
+                    {
+                        "type": "user",
+                        "timestamp": "2099-01-02T03:04:05Z",
+                        "cwd": str(workspace),
+                    }
+                )
+                + "\n",
                 encoding="utf-8",
             )
+
             # A pane with nothing on it: no spinner, no status line, no glyph of any generation.
             def run_json(command: list[str]) -> dict:
                 return {"terminal": {"tail": ["", "❯"]}}
 
             with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(projects)}):
-                confirm = turn_started_confirm(
-                    "term-claude", str(workspace), "claude", run_json=run_json
-                )
+                confirm = turn_started_confirm("term-claude", str(workspace), "claude", run_json=run_json)
                 self.assertTrue(confirm(1.0))
                 # Everything the criterion says is about the boundary: a turn older than the send
                 # is not this delivery's, and no screen glyph can make it one.
@@ -966,7 +1063,7 @@ class ScriptedPane:
             if "--limit" in args:
                 # Orca answers a limited read from the bottom of the retained output, which is the
                 # only reason a prompt marker in it means anything.
-                screen = screen[-int(args[args.index("--limit") + 1]):]
+                screen = screen[-int(args[args.index("--limit") + 1]) :]
             terminal: dict = {"tail": screen}
             cursor = self._at(self.cursors)
             if cursor is not None:
@@ -992,13 +1089,15 @@ class TuiDeliveryStageTests(unittest.TestCase):
         def advance_clock(seconds: float) -> None:
             clock[0] += seconds
 
-        with mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3), \
-             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01), \
-             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0), \
-             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2), \
-             mock.patch("triggered_agents.runtime.tui_delivery.time.monotonic", side_effect=lambda: clock[0]), \
-             mock.patch("triggered_agents.runtime.tui_delivery.time.sleep", side_effect=advance_clock), \
-             mock.patch("triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0):
+        with (
+            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 0.3),
+            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
+            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RESEND_GRACE_S", 0),
+            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_RETRIES", 2),
+            mock.patch("triggered_agents.runtime.tui_delivery.time.monotonic", side_effect=lambda: clock[0]),
+            mock.patch("triggered_agents.runtime.tui_delivery.time.sleep", side_effect=advance_clock),
+            mock.patch("triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0),
+        ):
             return deliver_interactive_prompt(
                 "term-observer", "wake the observer", run_json=pane.run_json, **kwargs
             )
@@ -1096,10 +1195,7 @@ class TuiDeliveryStageTests(unittest.TestCase):
         wake — the payload itself, quoted back. Read that way, every wake is a payload stuck in a
         composer forever. The delivery reads a bounded window from the bottom instead.
         """
-        history = (
-            ["› wake the observer and let it work"]
-            + [f"· step {index}" for index in range(40)]
-        )
+        history = ["› wake the observer and let it work"] + [f"· step {index}" for index in range(40)]
         live_screen = history + ["› Improve documentation in @filename gpt-5.6-terra"]
         pane = ScriptedPane({0: live_screen, 1: live_screen + ["· recorded resume"]})
 
@@ -1113,9 +1209,7 @@ class TuiDeliveryStageTests(unittest.TestCase):
             self.assertIn("--limit", read)
         # And the same screen read whole is exactly the trap: the payload does follow the last
         # marker of the unbounded window, which is why the bound is the fix and not a tidy-up.
-        self.assertTrue(
-            composer_holds_payload("\n".join(live_screen[:1] + history[1:]), "wake the observer")
-        )
+        self.assertTrue(composer_holds_payload("\n".join(live_screen[:1] + history[1:]), "wake the observer"))
 
     def test_a_composer_showing_the_payload_is_still_a_delivery_that_did_not_land(self) -> None:
         """The failure this boundary exists for, without a paste placeholder over it.
@@ -1316,8 +1410,11 @@ class TuiDeliveryStageTests(unittest.TestCase):
         with mock.patch("triggered_agents.runtime.agent_prompt_transport.AGENT_PROMPT_SUBMIT_DELAY_S", 0):
             with self.assertRaises(TuiDeliveryError) as raised:
                 deliver_interactive_prompt(
-                    "term-codex", "deliver exactly once", run_json=run_json,
-                    adapter="codex", ack_out_of_band=True,
+                    "term-codex",
+                    "deliver exactly once",
+                    run_json=run_json,
+                    adapter="codex",
+                    ack_out_of_band=True,
                 )
 
         evidence = raised.exception.evidence
@@ -1351,18 +1448,22 @@ class TuiDeliveryStageTests(unittest.TestCase):
             (HostError(TIMEOUT_WAIT_FAILURE), READINESS_BUSY, "readiness-busy"),
             (
                 HostError(
-                    'orca terminal wait --for tui-idle failed: '
+                    "orca terminal wait --for tui-idle failed: "
                     '{"result":{"wait":{"satisfied":false,"status":"running"}}}'
                 ),
                 READINESS_BUSY,
                 "readiness-busy",
             ),
-            (HostError("orca terminal wait --for tui-idle failed: connection refused"),
-             READINESS_UNAVAILABLE, "readiness-unavailable"),
+            (
+                HostError("orca terminal wait --for tui-idle failed: connection refused"),
+                READINESS_UNAVAILABLE,
+                "readiness-unavailable",
+            ),
             (HostError(STALE_HANDLE_WAIT_FAILURE), READINESS_STALE_HANDLE, "readiness-stale_handle"),
         )
         for refusal, state, reason in cases:
             with self.subTest(state=state, refusal=str(refusal)):
+
                 def run_json(_command: list[str]) -> dict:
                     raise refusal
 

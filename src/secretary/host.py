@@ -106,7 +106,9 @@ def default_systemd_layout() -> SystemdLayout:
     """The layout of a host nobody named anything for: the configured product, the running home."""
     root = configured_product_root()
     home = Path.home()
-    return SystemdLayout(root, home / "secretary-instance", home / "secretary-data", os.environ.get("USER", "dev"), home)
+    return SystemdLayout(
+        root, home / "secretary-instance", home / "secretary-data", os.environ.get("USER", "dev"), home
+    )
 
 
 def render_systemd_unit(template: bytes, layout: SystemdLayout) -> bytes:
@@ -271,7 +273,9 @@ def _production_dispatcher_units(prefix: str, digests: dict[str, str]) -> list[P
     ]
 
 
-def _packaged_component_units(host: dict[str, Any], packaged: Iterable[PackagedUnit]) -> list[PlannedResource]:
+def _packaged_component_units(
+    host: dict[str, Any], packaged: Iterable[PackagedUnit]
+) -> list[PlannedResource]:
     """Every shipped unit of an enabled component, keyed by its own name."""
     result: list[PlannedResource] = []
     for unit in packaged:
@@ -311,7 +315,11 @@ def plan_input_errors(
         return ["host.unit_prefix is required when heads are configured"]
     errors: list[str] = []
     for binding in bindings:
-        if isinstance(binding, dict) and binding.get("enabled") and not isinstance(binding.get("orca_binding"), str):
+        if (
+            isinstance(binding, dict)
+            and binding.get("enabled")
+            and not isinstance(binding.get("orca_binding"), str)
+        ):
             errors.append("enabled binding requires explicit orca_binding")
     desired = build_plan(instance, bindings, packaged=packaged)
     logical_ids: set[str] = set()
@@ -341,7 +349,11 @@ def load_managed_manifest(path: Path) -> list[PlannedResource]:
         fields = (value.get("logical_id"), value.get("kind"), value.get("name"), value.get("fingerprint"))
         if all(isinstance(field, str) and field for field in fields):
             spec = value.get("spec", "")
-            resources.append(PlannedResource(fields[0], fields[1], fields[2], spec if isinstance(spec, str) else "", fields[3]))
+            resources.append(
+                PlannedResource(
+                    fields[0], fields[1], fields[2], spec if isinstance(spec, str) else "", fields[3]
+                )
+            )
     return resources
 
 
@@ -363,7 +375,11 @@ def strict_manifest(path: Path) -> tuple[list[PlannedResource], str]:
         return [], "managed manifest is unreadable"
     except ValueError:
         return [], "managed manifest is not valid JSON"
-    if not isinstance(payload, dict) or payload.get("version") != 1 or not isinstance(payload.get("resources"), list):
+    if (
+        not isinstance(payload, dict)
+        or payload.get("version") != 1
+        or not isinstance(payload.get("resources"), list)
+    ):
         return [], "managed manifest has an unsupported shape"
     resources = load_managed_manifest(path)
     if len(resources) != len(payload["resources"]):
@@ -438,7 +454,9 @@ def plan_changes(
         changes.append(PlanChange(resource.logical_id, resource.kind, resource.name, action))
     for logical_id, resource in managed_by_id.items():
         desired_resource = desired_by_id.get(logical_id)
-        renamed = desired_resource and (resource.kind != desired_resource.kind or resource.name != desired_resource.name)
+        renamed = desired_resource and (
+            resource.kind != desired_resource.kind or resource.name != desired_resource.name
+        )
         if (desired_resource is None or renamed) and resource.name in actual_names.get(resource.kind, set()):
             changes.append(PlanChange(logical_id, resource.kind, resource.name, "delete"))
     known_units = {resource.name for resource in desired_by_id.values() if resource.kind == "unit"}
@@ -561,7 +579,9 @@ def build_doctor_expectations(
             # checkout is absent. Leave this kind unavailable for doctor.
             project_error = "expected project checkout path could not be normalized"
     prefix = host.get("unit_prefix", "") if isinstance(host.get("unit_prefix"), str) else ""
-    packaged = list(packaged) if packaged is not None else load_packaged_units(default_packaging_root(), prefix)
+    packaged = (
+        list(packaged) if packaged is not None else load_packaged_units(default_packaging_root(), prefix)
+    )
     desired = build_plan(instance, bindings, packaged=packaged)
     units = {resource.name for resource in desired if resource.kind == "unit"}
     packaged_by_name = {unit.name: unit for unit in packaged}
@@ -652,8 +672,7 @@ class HostSource(ABC):
     """Something that can enumerate host resources without changing them."""
 
     @abstractmethod
-    def collect(self, expected: Expectations) -> CollectResult:
-        ...
+    def collect(self, expected: Expectations) -> CollectResult: ...
 
 
 def _names_from_dir(directory: Path) -> set[str]:
@@ -682,7 +701,8 @@ class FixtureHostSource(HostSource):
             if not path.is_file():
                 return set(), ""
             names = {
-                token for line in path.read_text(encoding="utf-8").splitlines()
+                token
+                for line in path.read_text(encoding="utf-8").splitlines()
                 if (token := line.strip()) and not token.startswith("#")
             }
             return names, ""
@@ -702,7 +722,9 @@ class FixtureHostSource(HostSource):
             # Legacy fixtures model checkouts beneath their own root. Their
             # directory names are observed host facts, not aliases for an
             # expected binding with the same basename.
-            return {_normalized_repo_path(str(projects_dir / name)) for name in _names_from_dir(projects_dir)}, ""
+            return {
+                _normalized_repo_path(str(projects_dir / name)) for name in _names_from_dir(projects_dir)
+            }, ""
         except OSError:
             return set(), "fixture projects directory is unreadable"
 
@@ -721,9 +743,13 @@ class FixtureHostSource(HostSource):
         states, state_error = self._unit_states()
         repos, repo_error = self._lines("orca-repos.txt")
         errors = {
-            kind: reason for kind, reason in (
-                ("projects", project_error), ("units", unit_error or state_error), ("orca repos", repo_error)
-            ) if reason
+            kind: reason
+            for kind, reason in (
+                ("projects", project_error),
+                ("units", unit_error or state_error),
+                ("orca repos", repo_error),
+            )
+            if reason
         }
         return CollectResult(HostInventory(projects, units, repos, states), errors)
 
@@ -785,19 +811,29 @@ class LiveHostSource(HostSource):
         if reason:
             errors["projects"] = reason
         else:
-            inventory = HostInventory(projects, inventory.units, inventory.orca_repos, inventory.unit_states, inventory.orca_repo_paths)
+            inventory = HostInventory(
+                projects,
+                inventory.units,
+                inventory.orca_repos,
+                inventory.unit_states,
+                inventory.orca_repo_paths,
+            )
 
         units, unit_states, reason = self._units(expected)
         if reason:
             errors["units"] = reason
         else:
-            inventory = HostInventory(inventory.projects, units, inventory.orca_repos, unit_states, inventory.orca_repo_paths)
+            inventory = HostInventory(
+                inventory.projects, units, inventory.orca_repos, unit_states, inventory.orca_repo_paths
+            )
 
         repos, repo_paths, reason = self._orca_repos()
         if reason:
             errors["orca repos"] = reason
         else:
-            inventory = HostInventory(inventory.projects, inventory.units, repos, inventory.unit_states, repo_paths)
+            inventory = HostInventory(
+                inventory.projects, inventory.units, repos, inventory.unit_states, repo_paths
+            )
 
         return CollectResult(inventory=inventory, errors=errors)
 

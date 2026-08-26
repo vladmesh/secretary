@@ -117,19 +117,30 @@ class PackagedUnitTests(unittest.TestCase):
 
     def test_render_is_stable_and_uses_the_installation_layout(self):
         layout = SystemdLayout(
-            Path("/opt/secretary"), Path("/srv/secretary-instance"), Path("/srv/secretary-data"),
-            "operator", Path("/home/operator"),
+            Path("/opt/secretary"),
+            Path("/srv/secretary-instance"),
+            Path("/srv/secretary-data"),
+            "operator",
+            Path("/home/operator"),
         )
-        first = load_packaged_units(upgrade.running_product_root() / "packaging" / "systemd", UNIT_PREFIX, layout)
-        second = load_packaged_units(upgrade.running_product_root() / "packaging" / "systemd", UNIT_PREFIX, layout)
+        first = load_packaged_units(
+            upgrade.running_product_root() / "packaging" / "systemd", UNIT_PREFIX, layout
+        )
+        second = load_packaged_units(
+            upgrade.running_product_root() / "packaging" / "systemd", UNIT_PREFIX, layout
+        )
 
-        self.assertEqual([(unit.name, unit.content, unit.digest) for unit in first], [(unit.name, unit.content, unit.digest) for unit in second])
+        self.assertEqual(
+            [(unit.name, unit.content, unit.digest) for unit in first],
+            [(unit.name, unit.content, unit.digest) for unit in second],
+        )
         rendered = b"\n".join(unit.content for unit in first)
         self.assertIn(b"User=operator", rendered)
         self.assertIn(b"/opt/secretary", rendered)
         self.assertIn(b"/srv/secretary-instance", rendered)
         self.assertIn(b"/srv/secretary-data", rendered)
         self.assertNotIn(b"/home/dev", rendered)
+
     def test_catalogue_reads_component_digest_and_installability(self):
         with tempfile.TemporaryDirectory() as tmp:
             packaging = write_packaging(Path(tmp))
@@ -189,9 +200,7 @@ class PackagedUnitTests(unittest.TestCase):
         self.assertEqual(changes["secretary-example.service"], "unchanged")
 
     def test_dispatcher_units_carry_the_shipped_file_digest(self):
-        packaged = load_packaged_units(
-            upgrade.running_product_root() / "packaging" / "systemd", UNIT_PREFIX
-        )
+        packaged = load_packaged_units(upgrade.running_product_root() / "packaging" / "systemd", UNIT_PREFIX)
         by_id = {r.logical_id: r for r in build_plan(instance_config(Path("/tmp")), [], packaged=packaged)}
         spec = json.loads(by_id["systemd:dispatcher:production.service"].spec)
         self.assertIn("digest", spec)
@@ -473,7 +482,9 @@ class UpgradeStepTests(unittest.TestCase):
             instance = Path(tmp)
             subprocess.run(["git", "-C", str(instance), "init", "--quiet"], check=True)
             subprocess.run(["git", "-C", str(instance), "config", "user.name", "Test"], check=True)
-            subprocess.run(["git", "-C", str(instance), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(
+                ["git", "-C", str(instance), "config", "user.email", "test@example.invalid"], check=True
+            )
             runtime = instance / "runtime.env"
             runtime.write_text(
                 "KANBOARD_URL=http://legacy/jsonrpc.php\nKANBOARD_API_USER=jsonrpc\n"
@@ -524,7 +535,9 @@ class UpgradeStepTests(unittest.TestCase):
             body = "KANBOARD_URL=http://legacy/jsonrpc.php\nKANBOARD_API_USER=jsonrpc\nKANBOARD_API_TOKEN=legacy-token\n"
             runtime.write_text(body, encoding="utf-8")
             runtime.chmod(0o600)
-            preview = upgrade.step_board_transport(self.context(FakeUnitInstaller(), instance_path=instance, dry_run=True))
+            preview = upgrade.step_board_transport(
+                self.context(FakeUnitInstaller(), instance_path=instance, dry_run=True)
+            )
             self.assertEqual(preview.status, "would-change")
             self.assertIn("would import legacy transport", preview.detail)
             self.assertIn("would retire legacy runtime values", preview.detail)
@@ -559,7 +572,8 @@ class UpgradeStepTests(unittest.TestCase):
             transport = instance / "board-transport.env"
             transport.write_text(
                 "KANBOARD_URL=http://127.0.0.1:8080/jsonrpc.php\n"
-                "KANBOARD_API_USER=jsonrpc\nKANBOARD_API_TOKEN=local-token\n", encoding="utf-8",
+                "KANBOARD_API_USER=jsonrpc\nKANBOARD_API_TOKEN=local-token\n",
+                encoding="utf-8",
             )
             transport.chmod(0o600)
             runtime = instance / "runtime.env"
@@ -726,9 +740,7 @@ class UpgradeStepTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance = Path(tmpdir)
             (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
-            context = self.context(
-                FakeUnitInstaller(), instance_path=instance, runtime_user="operator"
-            )
+            context = self.context(FakeUnitInstaller(), instance_path=instance, runtime_user="operator")
             account = SimpleNamespace(pw_uid=123, pw_gid=456)
 
             with (
@@ -770,7 +782,8 @@ class UpgradeStepTests(unittest.TestCase):
             data_dir.mkdir()
             config = instance / "instance.yaml"
             config.write_text(
-                "version: 1\nname: upgrade\ndata_dir: " + str(data_dir)
+                "version: 1\nname: upgrade\ndata_dir: "
+                + str(data_dir)
                 + "\noffsite:\n  instance_remote: git@example.invalid:x/y\nhost:\n  unit_prefix: secretary-\n",
                 encoding="utf-8",
             )
@@ -789,24 +802,29 @@ class UpgradeStepTests(unittest.TestCase):
                 rendered.append({unit.name: unit.content for unit in packaged})
                 return upgrade.UpgradeResult()
 
-            with mock.patch.object(upgrade, "run_steps", side_effect=capture), mock.patch(
-                "secretary.host_apply.pwd.getpwnam", return_value=account
-            ), mock.patch("secretary.host_apply.find_orca_executable", return_value=Path("/usr/local/bin/orca")), mock.patch(
-                "secretary.host_apply._is_executable", return_value=True
+            with (
+                mock.patch.object(upgrade, "run_steps", side_effect=capture),
+                mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account),
+                mock.patch(
+                    "secretary.host_apply.find_orca_executable", return_value=Path("/usr/local/bin/orca")
+                ),
+                mock.patch("secretary.host_apply._is_executable", return_value=True),
             ):
                 for value in (instance, config):
-                    code = upgrade.run_upgrade(SimpleNamespace(
-                        instance=str(value),
-                        # The question here is the instance spelling, so the checkout is named
-                        # rather than defaulted: the default is a configured path or a home, and
-                        # neither has to be a checkout with unit templates in it.
-                        product_root=str(upgrade.running_product_root()),
-                        base_branch="main",
-                        dry_run=True,
-                        no_pull=True,
-                        host_fixture=None,
-                        json=False,
-                    ))
+                    code = upgrade.run_upgrade(
+                        SimpleNamespace(
+                            instance=str(value),
+                            # The question here is the instance spelling, so the checkout is named
+                            # rather than defaulted: the default is a configured path or a home, and
+                            # neither has to be a checkout with unit templates in it.
+                            product_root=str(upgrade.running_product_root()),
+                            base_branch="main",
+                            dry_run=True,
+                            no_pull=True,
+                            host_fixture=None,
+                            json=False,
+                        )
+                    )
                     self.assertEqual(code, 0)
 
             self.assertEqual(rendered[0], rendered[1])
@@ -846,7 +864,8 @@ class UpgradeStepTests(unittest.TestCase):
                     resolved = health.resolve_head(preferred, statuses, registry)
                     self.assertIsNotNone(resolved, f"{role} has no head with {red} red")
                     self.assertNotEqual(
-                        registry.profile(resolved)["resource"], red,
+                        registry.profile(resolved)["resource"],
+                        red,
                         f"{role} resolved onto the red resource",
                     )
 
@@ -874,15 +893,21 @@ class UpgradeStepTests(unittest.TestCase):
         canon = canonical_heads(upgrade.running_product_root())
 
         self.assertEqual(
-            [name for name, resource in canon["resources"].items()
-             if resource.get("account") not in {"claude-subscription", "openai-subscription"}],
+            [
+                name
+                for name, resource in canon["resources"].items()
+                if resource.get("account") not in {"claude-subscription", "openai-subscription"}
+            ],
             [],
         )
         # A pinned model version is a spend decision that ages out of the product; the shipped
         # profiles name a family or nothing at all.
         self.assertEqual(
-            [name for name, profile in canon["profiles"].items()
-             if any(char.isdigit() for char in str(profile.get("model", "")))],
+            [
+                name
+                for name, profile in canon["profiles"].items()
+                if any(char.isdigit() for char in str(profile.get("model", "")))
+            ],
             [],
         )
 
@@ -901,8 +926,9 @@ class UpgradeStepTests(unittest.TestCase):
                 check=True,
             )
             subprocess.run(["git", "-C", str(product), "add", "."], check=True)
-            subprocess.run(["git", "-C", str(product), "commit", "-m", "product"], check=True,
-                           capture_output=True)
+            subprocess.run(
+                ["git", "-C", str(product), "commit", "-m", "product"], check=True, capture_output=True
+            )
             subprocess.run(["git", "-C", str(product), "remote", "add", "origin", str(product)], check=True)
 
             with mock.patch.dict(os.environ, {"TA_WORKSPACES_ROOT": str(root / "workspaces")}):
@@ -924,14 +950,20 @@ class UpgradeStepTests(unittest.TestCase):
             (agent / "automation.toml").write_text("name = 'curator'\n", encoding="utf-8")
             subprocess.run(["git", "init", "-b", "main", str(product)], check=True, capture_output=True)
             subprocess.run(["git", "-C", str(product), "config", "user.name", "Test"], check=True)
-            subprocess.run(["git", "-C", str(product), "config", "user.email", "test@example.invalid"], check=True)
+            subprocess.run(
+                ["git", "-C", str(product), "config", "user.email", "test@example.invalid"], check=True
+            )
             subprocess.run(["git", "-C", str(product), "add", "."], check=True)
-            subprocess.run(["git", "-C", str(product), "commit", "-m", "product"], check=True, capture_output=True)
+            subprocess.run(
+                ["git", "-C", str(product), "commit", "-m", "product"], check=True, capture_output=True
+            )
             subprocess.run(["git", "-C", str(product), "remote", "add", "origin", str(product)], check=True)
             account = SimpleNamespace(pw_uid=123, pw_gid=456)
 
             with (
-                mock.patch.dict(os.environ, {"TA_WORKSPACES_ROOT": str(root / "home" / "orca" / "workspaces")}),
+                mock.patch.dict(
+                    os.environ, {"TA_WORKSPACES_ROOT": str(root / "home" / "orca" / "workspaces")}
+                ),
                 mock.patch("secretary.upgrade.os.geteuid", return_value=0),
                 mock.patch("secretary.upgrade.pwd.getpwnam", return_value=account),
                 mock.patch("secretary.upgrade.os.chown") as chown,
@@ -1018,8 +1050,11 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
     def test_changed_pair_is_scoped_committed_published_and_cleanly_restored(self):
         # These are deliberately all outside the registry writer's pathspec.
         for relative in (
-            "state/board/foreign.ndjson", "state/memory/facts/foreign.md",
-            "state/knowledge/foreign.md", "secrets/foreign.age", "operator-note.txt",
+            "state/board/foreign.ndjson",
+            "state/memory/facts/foreign.md",
+            "state/knowledge/foreign.md",
+            "secrets/foreign.age",
+            "operator-note.txt",
         ):
             path = self.instance / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -1100,7 +1135,10 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
     def test_commit_or_push_failure_refuses_success_and_keeps_an_actionable_checkpoint(self):
         generated = upgrade.step_head_registry(self.context)
         self.assertEqual(generated.status, "changed")
-        with mock.patch("secretary.upgrade.state_repo.commit", side_effect=upgrade.state_repo.StateRepoError("index locked")):
+        with mock.patch(
+            "secretary.upgrade.state_repo.commit",
+            side_effect=upgrade.state_repo.StateRepoError("index locked"),
+        ):
             failed_commit = upgrade.step_publish_head_registry(self.context)
         self.assertEqual(failed_commit.status, "failed")
         self.assertIn("index locked", failed_commit.detail)
@@ -1109,9 +1147,9 @@ class HeadRegistryCheckpointTests(unittest.TestCase):
         self.assertEqual(failed_push.status, "changed", failed_push.detail)
         self._git(self.instance, "remote", "set-url", "origin", str(self.root / "missing.git"))
         (self.instance / "heads" / "heads.toml").write_text(
-            (self.context.product_root / "src" / "triggered_agents" / "agents" / "pipeline" / "heads.toml").read_text(
-                encoding="utf-8"
-            ),
+            (
+                self.context.product_root / "src" / "triggered_agents" / "agents" / "pipeline" / "heads.toml"
+            ).read_text(encoding="utf-8"),
             encoding="utf-8",
         )
         upgrade.step_head_registry(self.context)
@@ -1159,9 +1197,7 @@ class CommandSurfaceTests(unittest.TestCase):
         # A host runs a checkout, and these fixtures run this one. Reconcile and the role-skill
         # audit read the configured product, so an installation that names none has no units and
         # no manifest to compare against.
-        env = mock.patch.dict(
-            os.environ, {"TA_SECRETARY_REPO": str(upgrade.running_product_root())}
-        )
+        env = mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(upgrade.running_product_root())})
         env.start()
         self.addCleanup(env.stop)
 
@@ -1183,10 +1219,17 @@ class CommandSurfaceTests(unittest.TestCase):
         (self.fixture / "units.txt").write_text("", encoding="utf-8")
         manifest = self.root / "data" / "host-managed.json"
 
-        code, output = self.run_cli([
-            "reconcile", "apply", "--instance", str(self.instance),
-            "--host-fixture", str(self.fixture), "--dry-run",
-        ])
+        code, output = self.run_cli(
+            [
+                "reconcile",
+                "apply",
+                "--instance",
+                str(self.instance),
+                "--host-fixture",
+                str(self.fixture),
+                "--dry-run",
+            ]
+        )
 
         self.assertEqual(code, 0, output)
         self.assertIn("create systemd:unit:secretary-curator.timer", output)
@@ -1195,10 +1238,17 @@ class CommandSurfaceTests(unittest.TestCase):
     def test_apply_refuses_an_unowned_name_and_names_the_way_out(self):
         (self.fixture / "units.txt").write_text("secretary-curator.timer\n", encoding="utf-8")
 
-        code, output = self.run_cli([
-            "reconcile", "apply", "--instance", str(self.instance),
-            "--host-fixture", str(self.fixture), "--dry-run",
-        ])
+        code, output = self.run_cli(
+            [
+                "reconcile",
+                "apply",
+                "--instance",
+                str(self.instance),
+                "--host-fixture",
+                str(self.fixture),
+                "--dry-run",
+            ]
+        )
 
         self.assertEqual(code, 1, output)
         self.assertIn("secretary reconcile adopt", output)
@@ -1207,10 +1257,17 @@ class CommandSurfaceTests(unittest.TestCase):
     def test_a_declared_foreign_unit_does_not_block_apply(self):
         (self.fixture / "units.txt").write_text("secretary-supervisor.timer\n", encoding="utf-8")
 
-        code, output = self.run_cli([
-            "reconcile", "apply", "--instance", str(self.instance),
-            "--host-fixture", str(self.fixture), "--dry-run",
-        ])
+        code, output = self.run_cli(
+            [
+                "reconcile",
+                "apply",
+                "--instance",
+                str(self.instance),
+                "--host-fixture",
+                str(self.fixture),
+                "--dry-run",
+            ]
+        )
 
         self.assertEqual(code, 0, output)
 
@@ -1220,9 +1277,14 @@ class CommandSurfaceTests(unittest.TestCase):
         shipped = upgrade.running_product_root() / "packaging" / "systemd" / "secretary-curator.timer"
         (unit_dir / "secretary-curator.timer").write_bytes(shipped.read_bytes())
         argv = [
-            "reconcile", "adopt", "--instance", str(self.instance),
-            "--logical-id", "systemd:unit:secretary-curator.timer",
-            "--unit-dir", str(unit_dir),
+            "reconcile",
+            "adopt",
+            "--instance",
+            str(self.instance),
+            "--logical-id",
+            "systemd:unit:secretary-curator.timer",
+            "--unit-dir",
+            str(unit_dir),
         ]
 
         code, output = self.run_cli(argv)
@@ -1251,13 +1313,16 @@ class RunUpgradeClientOwnerTests(unittest.TestCase):
         self.instance.mkdir()
 
     def build_context(self, *, euid: int):
-        report = SimpleNamespace(
-            ok=True, errors=[], instance_path=self.instance / "instance.yaml"
-        )
+        report = SimpleNamespace(ok=True, errors=[], instance_path=self.instance / "instance.yaml")
         args = SimpleNamespace(
-            instance=str(self.instance), product_root=str(self.root / "product"),
-            base_branch="main", dry_run=True, host_fixture=None, no_pull=True,
-            json=False, runtime_user="operator",
+            instance=str(self.instance),
+            product_root=str(self.root / "product"),
+            base_branch="main",
+            dry_run=True,
+            host_fixture=None,
+            no_pull=True,
+            json=False,
+            runtime_user="operator",
         )
         captured = {}
 
@@ -1265,6 +1330,7 @@ class RunUpgradeClientOwnerTests(unittest.TestCase):
             def build(user=None):
                 captured[name] = user
                 return mock.Mock()
+
             return build
 
         with (
@@ -1276,9 +1342,7 @@ class RunUpgradeClientOwnerTests(unittest.TestCase):
             mock.patch.object(upgrade, "LiveOrcaRegistrar", remember("orca")),
             mock.patch.object(upgrade, "OrcaAutomationClient", remember("automations")),
             mock.patch.object(upgrade, "SystemdUnitInstaller", mock.Mock()),
-            mock.patch.object(
-                upgrade, "run_steps", return_value=upgrade.UpgradeResult()
-            ),
+            mock.patch.object(upgrade, "run_steps", return_value=upgrade.UpgradeResult()),
             contextlib.redirect_stdout(io.StringIO()),
         ):
             upgrade.run_upgrade(args)
@@ -1286,9 +1350,7 @@ class RunUpgradeClientOwnerTests(unittest.TestCase):
 
     def test_root_run_reaches_orca_through_the_runtime_user(self):
         """Root has no Orca runtime of its own; the automations step must not call the CLI as root."""
-        self.assertEqual(
-            self.build_context(euid=0), {"orca": "operator", "automations": "operator"}
-        )
+        self.assertEqual(self.build_context(euid=0), {"orca": "operator", "automations": "operator"})
 
     def test_unprivileged_run_calls_orca_directly(self):
         """`runuser` is root's tool: an owner running the upgrade is already the right account."""
@@ -1327,12 +1389,12 @@ class InstanceHeadCanonTests(unittest.TestCase):
     """
 
     CANON = (
-        "[resources.local-sub]\naccount = \"local\"\nprobe = \"true\"\n"
-        "[profiles.local-head]\nresource = \"local-sub\"\nadapter = \"claude\"\nfallback = []\n"
-        "[profiles.local-reviewer]\nresource = \"local-sub\"\nadapter = \"claude\"\nfallback = []\n"
-        "[role_defaults]\nnew_card = \"local-head\"\nreviewer = \"local-reviewer\"\n"
-        "curator = \"local-head\"\nretro = \"local-head\"\nsteward = \"local-head\"\n"
-        "observer = \"local-reviewer\"\n"
+        '[resources.local-sub]\naccount = "local"\nprobe = "true"\n'
+        '[profiles.local-head]\nresource = "local-sub"\nadapter = "claude"\nfallback = []\n'
+        '[profiles.local-reviewer]\nresource = "local-sub"\nadapter = "claude"\nfallback = []\n'
+        '[role_defaults]\nnew_card = "local-head"\nreviewer = "local-reviewer"\n'
+        'curator = "local-head"\nretro = "local-head"\nsteward = "local-head"\n'
+        'observer = "local-reviewer"\n'
     )
 
     def instance(self, root: Path, canon: str | None = None) -> Path:
@@ -1372,13 +1434,19 @@ class InstanceHeadCanonTests(unittest.TestCase):
     def test_a_present_but_unusable_canon_fails_by_name_instead_of_falling_back(self):
         product = upgrade.running_product_root()
         for name, build in (
-            ("malformed", lambda root: (root / "heads" / "heads.toml").write_text("nope = [", encoding="utf-8")),
+            (
+                "malformed",
+                lambda root: (root / "heads" / "heads.toml").write_text("nope = [", encoding="utf-8"),
+            ),
             ("directory", lambda root: (root / "heads" / "heads.toml").mkdir()),
             ("dangling", lambda root: (root / "heads" / "heads.toml").symlink_to(root / "gone.toml")),
-            ("unreadable", lambda root: (
-                (root / "heads" / "heads.toml").write_text(self.CANON, encoding="utf-8"),
-                (root / "heads" / "heads.toml").chmod(0o000),
-            )),
+            (
+                "unreadable",
+                lambda root: (
+                    (root / "heads" / "heads.toml").write_text(self.CANON, encoding="utf-8"),
+                    (root / "heads" / "heads.toml").chmod(0o000),
+                ),
+            ),
         ):
             with self.subTest(name), tempfile.TemporaryDirectory() as tmpdir:
                 instance = self.instance(Path(tmpdir))
@@ -1421,21 +1489,20 @@ class InstanceHeadCanonTests(unittest.TestCase):
         TypeError would escape the step instead of failing it.
         """
         broken = {
-            "list profile": "[resources.local-sub]\naccount = \"local\"\n"
-                            "profiles = { local-head = [] }\n",
+            "list profile": '[resources.local-sub]\naccount = "local"\nprofiles = { local-head = [] }\n',
             "list resource": "resources = { local-sub = [] }\n"
-                             "[profiles.local-head]\nresource = \"local-sub\"\nadapter = \"claude\"\n"
-                             "[role_defaults]\nnew_card = \"local-head\"\n",
-            "list role default": "[resources.local-sub]\naccount = \"local\"\n"
-                                 "[profiles.local-head]\nresource = \"local-sub\"\nadapter = \"claude\"\n"
-                                 "[role_defaults]\nnew_card = []\n",
-            "list fallback entry": "[resources.local-sub]\naccount = \"local\"\n"
-                                   "[profiles.local-head]\nresource = \"local-sub\"\n"
-                                   "adapter = \"claude\"\nfallback = [[]]\n"
-                                   "[role_defaults]\nnew_card = \"local-head\"\n",
-            "list adapter": "[resources.local-sub]\naccount = \"local\"\n"
-                            "[profiles.local-head]\nresource = \"local-sub\"\nadapter = []\n"
-                            "[role_defaults]\nnew_card = \"local-head\"\n",
+            '[profiles.local-head]\nresource = "local-sub"\nadapter = "claude"\n'
+            '[role_defaults]\nnew_card = "local-head"\n',
+            "list role default": '[resources.local-sub]\naccount = "local"\n'
+            '[profiles.local-head]\nresource = "local-sub"\nadapter = "claude"\n'
+            "[role_defaults]\nnew_card = []\n",
+            "list fallback entry": '[resources.local-sub]\naccount = "local"\n'
+            '[profiles.local-head]\nresource = "local-sub"\n'
+            'adapter = "claude"\nfallback = [[]]\n'
+            '[role_defaults]\nnew_card = "local-head"\n',
+            "list adapter": '[resources.local-sub]\naccount = "local"\n'
+            '[profiles.local-head]\nresource = "local-sub"\nadapter = []\n'
+            '[role_defaults]\nnew_card = "local-head"\n',
         }
         for name, canon in broken.items():
             with self.subTest(name), tempfile.TemporaryDirectory() as tmpdir:
@@ -1471,8 +1538,10 @@ class InstanceHeadCanonTests(unittest.TestCase):
             self.assertIn(snapshot, record["error"])
 
     def test_the_snapshot_and_pin_name_the_canon_that_actually_won(self):
-        for name, canon, origin in (("instance", self.CANON, INSTANCE_ORIGIN),
-                                    ("product", None, PRODUCT_ORIGIN)):
+        for name, canon, origin in (
+            ("instance", self.CANON, INSTANCE_ORIGIN),
+            ("product", None, PRODUCT_ORIGIN),
+        ):
             with self.subTest(name), tempfile.TemporaryDirectory() as tmpdir:
                 instance = self.instance(Path(tmpdir), canon)
                 context = self.context(instance)

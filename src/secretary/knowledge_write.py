@@ -98,9 +98,7 @@ def list_knowledge_documents(instance_dir: Path) -> tuple[str, ...]:
     root = state_repo.knowledge_dir(instance_dir)
     if not root.is_dir():
         return ()
-    return tuple(
-        sorted(str(path.relative_to(root)) for path in root.rglob("*.md") if path.is_file())
-    )
+    return tuple(sorted(str(path.relative_to(root)) for path in root.rglob("*.md") if path.is_file()))
 
 
 def _clean_actor(actor: str) -> str:
@@ -146,11 +144,14 @@ def _document_text(*, text: str | None, source_file: Path | None) -> str:
 
 
 def _commit_message(document: str, actor: str) -> str:
-    return "\n".join(
-        [
-            f"knowledge: {document}",
-            "",
-            f"Principal: {actor}",
-            f"Document: {document}",
-        ]
-    ) + "\n"
+    return (
+        "\n".join(
+            [
+                f"knowledge: {document}",
+                "",
+                f"Principal: {actor}",
+                f"Document: {document}",
+            ]
+        )
+        + "\n"
+    )

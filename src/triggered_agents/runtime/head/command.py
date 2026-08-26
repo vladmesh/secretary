@@ -17,6 +17,7 @@ line for the adapters that can carry one; `prompt=None` renders the interactive 
 caller delivers the prompt into the live pane afterwards and `prompt_after_start` says so. A
 Codex head has only the interactive shape, so it ignores a prompt either way.
 """
+
 from __future__ import annotations
 
 import json
@@ -28,6 +29,7 @@ from typing import Any
 
 from .. import role_env
 from ..codex_preflight import codex_home, codex_trust_paths
+
 # The two backend names a profile may choose between. They live beside the backends themselves
 # rather than here, because this package names no session manager and one of them is an Orca
 # backend's name; what this module owns is the *rule* that a profile names one of them.
@@ -108,8 +110,7 @@ def validate_launch_shape(profile_id: str, profile: Mapping[str, Any]) -> None:
     adapter = _named(profile.get("adapter"), f"profile {profile_id!r} adapter")
     if adapter not in _ADAPTERS:
         raise HeadCommandError(
-            f"profile {profile_id!r} has unknown adapter {adapter!r} "
-            f"(known: {', '.join(sorted(_ADAPTERS))})"
+            f"profile {profile_id!r} has unknown adapter {adapter!r} (known: {', '.join(sorted(_ADAPTERS))})"
         )
     if adapter == "codex":
         effort = _named(profile.get("effort", "default"), f"profile {profile_id!r} effort")
@@ -118,9 +119,7 @@ def validate_launch_shape(profile_id: str, profile: Mapping[str, Any]) -> None:
             raise HeadCommandError(
                 f"profile {profile_id!r} has unknown codex effort {effort!r} (known: {known})"
             )
-        mode = _named(
-            profile.get("codex_mode", CODEX_TUI_MODE), f"profile {profile_id!r} codex launch mode"
-        )
+        mode = _named(profile.get("codex_mode", CODEX_TUI_MODE), f"profile {profile_id!r} codex launch mode")
         if mode not in CODEX_LAUNCH_MODES:
             known = ", ".join(sorted(CODEX_LAUNCH_MODES))
             raise HeadCommandError(
@@ -137,14 +136,10 @@ def validate_launch_shape(profile_id: str, profile: Mapping[str, Any]) -> None:
     # inside one of the branches above: which backend holds a head is independent of which CLI the
     # head runs, so there is no combination of the two this rule may accept for one adapter and
     # refuse for another.
-    runtime = _named(
-        profile.get("runtime", DEFAULT_HEAD_RUNTIME), f"profile {profile_id!r} runtime"
-    )
+    runtime = _named(profile.get("runtime", DEFAULT_HEAD_RUNTIME), f"profile {profile_id!r} runtime")
     if runtime not in HEAD_RUNTIMES:
         known = ", ".join(HEAD_RUNTIMES)
-        raise HeadCommandError(
-            f"profile {profile_id!r} has unknown runtime {runtime!r} (known: {known})"
-        )
+        raise HeadCommandError(f"profile {profile_id!r} has unknown runtime {runtime!r} (known: {known})")
 
 
 def _named(value: object, what: str) -> str:
@@ -229,9 +224,7 @@ def wrap_role_command(
     )
 
 
-def with_pid_heartbeat(
-    command: str, pid_file: str, *, identity: Mapping[str, str] | None = None
-) -> str:
+def with_pid_heartbeat(command: str, pid_file: str, *, identity: Mapping[str, str] | None = None) -> str:
     """Prefix a head command with an atomic versioned launch-identity heartbeat.
 
     `$$` inside a shell always names that shell's own pid, and the trailing `exec` replaces the
@@ -296,14 +289,12 @@ if record.get('leaf') != before:
     publish(record)"""
     encoded_identity = json.dumps(dict(identity or {}), sort_keys=True, separators=(",", ":"))
     return (
-        f"python3 -P -c {shlex.quote(writer)} {shlex.quote(pid_file)} \"$$\" "
+        f'python3 -P -c {shlex.quote(writer)} {shlex.quote(pid_file)} "$$" '
         f"{shlex.quote(encoded_identity)}; exec env {command}"
     )
 
 
-def _render_claude(
-    profile: Mapping[str, Any], *, prompt: str | None, workspace: str
-) -> str:
+def _render_claude(profile: Mapping[str, Any], *, prompt: str | None, workspace: str) -> str:
     del workspace
     args = ["claude", "--dangerously-skip-permissions"]
     model = profile.get("model")
@@ -319,9 +310,7 @@ def _render_claude(
     return command if prompt is None else f"{command} {prompt!r}"
 
 
-def _render_hermes(
-    profile: Mapping[str, Any], *, prompt: str | None, workspace: str
-) -> str:
+def _render_hermes(profile: Mapping[str, Any], *, prompt: str | None, workspace: str) -> str:
     """Hermes' one-shot-seeded-session equivalent of `claude --dangerously-skip-permissions
     <prompt>`: `-z` seeds an autonomous session with the initial message (not `-q`/`chat`'s
     single-turn query mode), `--yolo` is Hermes' skip-permissions, `--cli` forces the plain REPL
@@ -340,9 +329,7 @@ def _render_hermes(
     return " ".join(parts)
 
 
-def _render_codex_tui(
-    profile: Mapping[str, Any], *, prompt: str | None, workspace: str
-) -> str:
+def _render_codex_tui(profile: Mapping[str, Any], *, prompt: str | None, workspace: str) -> str:
     """The command that brings one Codex head up. There is one shape and it is interactive.
 
     Nothing selects it: no profile field, no card, no caller argument. `prompt` is accepted and never
@@ -365,9 +352,12 @@ def _render_codex_tui(
     # companion journal monitor records collaboration events without stopping the run; prompts
     # independently tell every role not to delegate.
     args = [
-        "codex", "--dangerously-bypass-approvals-and-sandbox",
-        "--enable", "multi_agent_v2",
-        "-c", "features.multi_agent_v2.wait_agent_enabled=false",
+        "codex",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--enable",
+        "multi_agent_v2",
+        "-c",
+        "features.multi_agent_v2.wait_agent_enabled=false",
     ]
     model = profile.get("model")
     if model:
@@ -375,9 +365,7 @@ def _render_codex_tui(
     effort_name = str(profile.get("effort") or "default")
     if effort_name not in CODEX_EFFORTS:
         known = ", ".join(sorted(CODEX_EFFORTS))
-        raise HeadCommandError(
-            f"codex profile has unknown effort {effort_name!r} (known: {known})"
-        )
+        raise HeadCommandError(f"codex profile has unknown effort {effort_name!r} (known: {known})")
     effort = CODEX_EFFORTS[effort_name]
     if effort:
         args += ["-c", f'model_reasoning_effort="{effort}"']

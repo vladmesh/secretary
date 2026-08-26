@@ -12,6 +12,7 @@ anything is written. Two layers:
 `scrub_secrets` adds a third, wider layer on top of those two for text that goes onto a board
 card: secret-looking KEY=value assignments and long token-shaped blobs.
 """
+
 from __future__ import annotations
 
 import re
@@ -41,11 +42,17 @@ PATTERNS = [
     (re.compile(r"gh[pousr]_[A-Za-z0-9]{36,}"), "github-token"),
     (re.compile(r"github_pat_[A-Za-z0-9_]{20,}"), "github-pat"),
     (re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"), "slack-token"),
-    (re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+"), "slack-webhook"),
+    (
+        re.compile(r"https://hooks\.slack\.com/services/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+"),
+        "slack-webhook",
+    ),
     (re.compile(r"AKIA[0-9A-Z]{16}"), "aws-access-key-id"),
     (re.compile(r"AIza[0-9A-Za-z_-]{35}"), "google-api-key"),
     (re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{20,}"), "bearer-token"),
-    (re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL), "private-key-block"),
+    (
+        re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.DOTALL),
+        "private-key-block",
+    ),
 ]
 
 # `runtime.env` is an environment *configuration* file, not a list of secret
@@ -96,7 +103,9 @@ def redact(text: str, env_files=None, secret_values=None) -> str:
         return text
     files = [*DEFAULT_ENV_FILES, *(env_files or ())]
     values = [*(_load_env_values(files)), *(secret_values or ())]
-    for val in sorted({str(value) for value in values if len(str(value)) >= MIN_ENV_VALUE_LEN}, key=len, reverse=True):
+    for val in sorted(
+        {str(value) for value in values if len(str(value)) >= MIN_ENV_VALUE_LEN}, key=len, reverse=True
+    ):
         if val in text:
             text = text.replace(val, f"{REDACTED}:env-value")
     for pat, label in PATTERNS:

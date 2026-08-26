@@ -53,8 +53,10 @@ def __getattr__(name: str):
     """Keep legacy adapters out of imports of board's protocol leaves."""
     if name == "KanboardBoardHost":
         from secretary.board.kanboard import KanboardBoardHost
+
         return KanboardBoardHost
     raise AttributeError(name)
+
 
 __all__ = [
     "CARD_TRANSITIONS",

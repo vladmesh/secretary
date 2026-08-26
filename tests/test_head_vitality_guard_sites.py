@@ -134,13 +134,15 @@ class WatchdogPathsAreGuardedTests(DispatcherRuntimeFixture, unittest.TestCase):
 
         proc = subprocess.Popen(["true"])
         proc.wait()
-        record = self.runtime.production_state.records(
-            self.runtime.production_state.load()
-        )["secretary-510-pilot"]
+        record = self.runtime.production_state.records(self.runtime.production_state.load())[
+            "secretary-510-pilot"
+        ]
         self.host.head_pid = proc.pid
         self.host._write_head_pid(
-            "worker", "secretary-510-pilot",
-            head_run=record.worker_head_run, leaf=record.worker_leaf,
+            "worker",
+            "secretary-510-pilot",
+            head_run=record.worker_head_run,
+            leaf=record.worker_leaf,
         )
 
     def test_the_unobservable_ceiling_escalates_without_touching_the_head(self) -> None:
@@ -155,7 +157,8 @@ class WatchdogPathsAreGuardedTests(DispatcherRuntimeFixture, unittest.TestCase):
         self._rewind_idle()
 
         with mock.patch.object(
-            type(self.runtime), "_reduce_and_store_vitality_episode",
+            type(self.runtime),
+            "_reduce_and_store_vitality_episode",
             lambda *args, **kwargs: None,
         ):
             self.tick()  # stamps the fresh waiting window
@@ -190,7 +193,8 @@ class TheGuardReallyFiresTests(DispatcherRuntimeFixture, unittest.TestCase):
         self._rewind_idle()
 
         with mock.patch.object(
-            dispatcher_module, "_assert_destructive_allowed",
+            dispatcher_module,
+            "_assert_destructive_allowed",
             wraps=dispatcher_module._assert_destructive_allowed,
         ) as guard:
             outcome = self.tick()
@@ -213,7 +217,8 @@ class LegitimateStopsWithoutAnEpisodeTests(DispatcherRuntimeFixture, unittest.Te
         # The operator's explicit command path: the host's stop_head with no vitality
         # history on file. It must not be fenced by the guard.
         with mock.patch.object(
-            dispatcher_module, "_assert_destructive_allowed",
+            dispatcher_module,
+            "_assert_destructive_allowed",
             side_effect=AssertionError("the guard must not be consulted"),
         ):
             self.runtime.host.stop_head(record, "worker", "operator asked")
@@ -228,7 +233,8 @@ class LegitimateStopsWithoutAnEpisodeTests(DispatcherRuntimeFixture, unittest.Te
         # The lifecycle stop goes through its own confirmed-stop path, which the guard
         # never sees; the assertion is that it completes without one.
         with mock.patch.object(
-            dispatcher_module, "_assert_destructive_allowed",
+            dispatcher_module,
+            "_assert_destructive_allowed",
             side_effect=AssertionError("the guard must not be consulted"),
         ):
             self.runtime.host.stop_head(record, "worker", "card blocked")

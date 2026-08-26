@@ -1,4 +1,5 @@
 """The one validated reader for host ``runtime.env`` configuration."""
+
 from __future__ import annotations
 
 import stat
@@ -21,7 +22,10 @@ def instance_runtime_env_path(instance_dir: Path, override: str | None = None) -
 
 
 def read_runtime_env(
-    instance_dir: Path, override: str | None = None, *, require_ignored: bool = True,
+    instance_dir: Path,
+    override: str | None = None,
+    *,
+    require_ignored: bool = True,
 ) -> dict[str, str]:
     """Read the supported ``KEY=VALUE`` dialect, after private-file checks.
 

@@ -84,9 +84,7 @@ def _verify_plain_tar(path: Path) -> VerifyResult:
             "copies",
         )
     ]
-    findings.extend(
-        f"unexpected transcript payload copy: {name}" for name in transcript_copy_names
-    )
+    findings.extend(f"unexpected transcript payload copy: {name}" for name in transcript_copy_names)
     return VerifyResult(
         1 if findings else 0,
         findings,
@@ -154,9 +152,7 @@ def _read_member_json(archive: tarfile.TarFile, name: str) -> Any:
     return json.loads(member.read().decode("utf-8"))
 
 
-def verify_restore_payload(
-    plain_archive: Path, manifest: dict[str, Any], policy: BackupPolicy
-) -> list[str]:
+def verify_restore_payload(plain_archive: Path, manifest: dict[str, Any], policy: BackupPolicy) -> list[str]:
     """Verify the checksum and extraction contract required by restore."""
     checksums = manifest.get("checksums")
     if not isinstance(checksums, dict) or not checksums:
@@ -180,12 +176,9 @@ def verify_restore_payload(
                 if member.name.startswith(data_prefix):
                     data_relative = relative.removeprefix("secretary-data/")
                     path = Path(data_relative)
-                    if (
-                        should_skip_data_entry(path, policy=policy)
-                        and (
-                            not is_memory_journal_git_runtime_entry(path)
-                            or path.parts[3:5] == ("objects", "info")
-                        )
+                    if should_skip_data_entry(path, policy=policy) and (
+                        not is_memory_journal_git_runtime_entry(path)
+                        or path.parts[3:5] == ("objects", "info")
                     ):
                         return [f"unexpected data component: {data_relative}"]
                 if member.isdir():
@@ -236,9 +229,7 @@ def _is_forbidden_archive_entry(name: str) -> bool:
 
 
 def _archive_has_path(names: set[str], archive_name: str) -> bool:
-    return archive_name in names or any(
-        member_name.startswith(f"{archive_name}/") for member_name in names
-    )
+    return archive_name in names or any(member_name.startswith(f"{archive_name}/") for member_name in names)
 
 
 def _verify_raw_board_component(

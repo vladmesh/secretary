@@ -45,11 +45,15 @@ def add_sprint_subcommands(subparsers) -> None:
     created.add_argument("--repository", action="append", default=[])
     created.add_argument("--product", required=True, help="product id the sprint belongs to")
     created.add_argument(
-        "--issue", action="append", required=True,
+        "--issue",
+        action="append",
+        required=True,
         help="open issue of that product the sprint serves; repeat for more",
     )
     created.add_argument(
-        "--project", action="append", required=True,
+        "--project",
+        action="append",
+        required=True,
         help="registered project the sprint reserves; repeat for more",
     )
     created.add_argument("--ref", default="")
@@ -85,7 +89,7 @@ def add_sprint_subcommands(subparsers) -> None:
             command.add_argument(
                 "--decisions-file",
                 help="YAML file stating the verdict on every declared issue and the disposition "
-                     "of every card that is not done",
+                "of every card that is not done",
             )
         command.set_defaults(handler=handler)
     sprint.set_defaults(handler=not_implemented)
@@ -98,7 +102,8 @@ def _add_observer_argument(command: argparse.ArgumentParser) -> None:
     two answers, and neither is more of a default than the other.
     """
     command.add_argument(
-        "--observer", required=True,
+        "--observer",
+        required=True,
         help="head profile that observes this sprint, or 'none' to run without one",
     )
 
@@ -109,11 +114,16 @@ def not_implemented(args: argparse.Namespace) -> int:
 
 
 def _read(
-    args: argparse.Namespace, operation: Callable[[SprintReader], object], *, data_dir: str | None = None,
+    args: argparse.Namespace,
+    operation: Callable[[SprintReader], object],
+    *,
+    data_dir: str | None = None,
     thresholds: dict | None = None,
 ) -> int:
     try:
-        result = operation(SprintReader(KanboardClient.for_instance(args.instance), data_dir=data_dir, thresholds=thresholds))
+        result = operation(
+            SprintReader(KanboardClient.for_instance(args.instance), data_dir=data_dir, thresholds=thresholds)
+        )
     except TaskError as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
         return exc.exit_code
@@ -123,10 +133,14 @@ def _read(
 
 def _write(args: argparse.Namespace, operation: Callable[[SprintWriter], object]) -> int:
     try:
-        result = operation(SprintWriter(
-            KanboardClient.for_instance(args.instance), data_dir=resolve_data_dir(args), thresholds=_thresholds(args),
-            instance=getattr(args, "instance", None) or None,
-        ))
+        result = operation(
+            SprintWriter(
+                KanboardClient.for_instance(args.instance),
+                data_dir=resolve_data_dir(args),
+                thresholds=_thresholds(args),
+                instance=getattr(args, "instance", None) or None,
+            )
+        )
     except TaskError as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
         return exc.exit_code
@@ -139,20 +153,28 @@ def run_list(args: argparse.Namespace) -> int:
 
 
 def run_show(args: argparse.Namespace) -> int:
-    return _read(args,
-        lambda reader: reader.show(args.ref), data_dir=resolve_data_dir(args), thresholds=_thresholds(args),
+    return _read(
+        args,
+        lambda reader: reader.show(args.ref),
+        data_dir=resolve_data_dir(args),
+        thresholds=_thresholds(args),
     )
 
 
 def run_status(args: argparse.Namespace) -> int:
     data_dir = resolve_data_dir(args)
     try:
-        raw = json.loads((Path(data_dir) / "dispatcher" / "production-state.json").read_text(encoding="utf-8"))
+        raw = json.loads(
+            (Path(data_dir) / "dispatcher" / "production-state.json").read_text(encoding="utf-8")
+        )
     except (OSError, ValueError, UnicodeError):
         raw = {}
     observer = next((row for row in observer_snapshot(raw) if row.get("sprint") == args.ref), None)
-    return _read(args,
-        lambda reader: reader.status(args.ref, observer=observer), data_dir=data_dir, thresholds=_thresholds(args),
+    return _read(
+        args,
+        lambda reader: reader.status(args.ref, observer=observer),
+        data_dir=data_dir,
+        thresholds=_thresholds(args),
     )
 
 
@@ -175,32 +197,71 @@ def run_create(args: argparse.Namespace) -> int:
     except TaskError as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
         return exc.exit_code
-    return _write(args, lambda writer: writer.create(
-        role=args.role, actor=args.actor or args.role, goal=args.goal,
-        definition_of_done=definition_of_done, repositories=args.repository,
-        product=args.product, issues=args.issue, projects=args.project,
-        reference=args.ref, request_id=args.request_id,
-        observer=observer_choice(args.observer),
-    ))
+    return _write(
+        args,
+        lambda writer: writer.create(
+            role=args.role,
+            actor=args.actor or args.role,
+            goal=args.goal,
+            definition_of_done=definition_of_done,
+            repositories=args.repository,
+            product=args.product,
+            issues=args.issue,
+            projects=args.project,
+            reference=args.ref,
+            request_id=args.request_id,
+            observer=observer_choice(args.observer),
+        ),
+    )
 
 
 def run_comment(args: argparse.Namespace) -> int:
-    return _write(args, lambda writer: writer.comment(role=args.role, actor=args.actor or args.role, reference=args.ref, body=_read_body(args.body_file), request_id=args.request_id))
+    return _write(
+        args,
+        lambda writer: writer.comment(
+            role=args.role,
+            actor=args.actor or args.role,
+            reference=args.ref,
+            body=_read_body(args.body_file),
+            request_id=args.request_id,
+        ),
+    )
 
 
 def run_current_task(args: argparse.Namespace) -> int:
-    return _write(args, lambda writer: writer.set_current_task(role=args.role, actor=args.actor or args.role, reference=args.ref, task_reference=args.task, request_id=args.request_id))
+    return _write(
+        args,
+        lambda writer: writer.set_current_task(
+            role=args.role,
+            actor=args.actor or args.role,
+            reference=args.ref,
+            task_reference=args.task,
+            request_id=args.request_id,
+        ),
+    )
 
 
 def run_budget(args: argparse.Namespace) -> int:
-    return _write(args, lambda writer: writer.record_budget(role=args.role, actor=args.actor or args.role, reference=args.ref, event_type=args.type, request_id=args.request_id))
+    return _write(
+        args,
+        lambda writer: writer.record_budget(
+            role=args.role,
+            actor=args.actor or args.role,
+            reference=args.ref,
+            event_type=args.type,
+            request_id=args.request_id,
+        ),
+    )
 
 
 def run_resume(args: argparse.Namespace) -> int:
     try:
         entry = json.loads(_read_body(args.body_file))
     except (TaskError, ValueError):
-        print(json.dumps({"error": {"code": "validation", "message": "resume file must contain JSON"}}), file=os.sys.stderr)
+        print(
+            json.dumps({"error": {"code": "validation", "message": "resume file must contain JSON"}}),
+            file=os.sys.stderr,
+        )
         return 2
     return _write(
         args,
@@ -217,10 +278,16 @@ def run_resume(args: argparse.Namespace) -> int:
 
 
 def run_reopen(args: argparse.Namespace) -> int:
-    return _write(args, lambda writer: writer.reopen(
-        role=args.role, actor=args.actor or args.role, reference=args.ref,
-        request_id=args.request_id, observer=observer_choice(args.observer),
-    ))
+    return _write(
+        args,
+        lambda writer: writer.reopen(
+            role=args.role,
+            actor=args.actor or args.role,
+            reference=args.ref,
+            request_id=args.request_id,
+            observer=observer_choice(args.observer),
+        ),
+    )
 
 
 def run_close(args: argparse.Namespace) -> int:
@@ -231,7 +298,13 @@ def run_close(args: argparse.Namespace) -> int:
     except TaskError as exc:
         print(json.dumps({"error": {"code": exc.code, "message": exc.message}}), file=os.sys.stderr)
         return exc.exit_code
-    return _write(args, lambda writer: writer.close(
-        role=args.role, actor=args.actor or args.role, reference=args.ref,
-        decisions=decisions, request_id=args.request_id,
-    ))
+    return _write(
+        args,
+        lambda writer: writer.close(
+            role=args.role,
+            actor=args.actor or args.role,
+            reference=args.ref,
+            decisions=decisions,
+            request_id=args.request_id,
+        ),
+    )

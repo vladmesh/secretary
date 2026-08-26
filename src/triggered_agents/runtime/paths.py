@@ -10,6 +10,7 @@ which checkout they are talking to.
 Only the fallback lives here. Every caller reads its own override first, so an operator who
 configured a path keeps it.
 """
+
 from __future__ import annotations
 
 import os

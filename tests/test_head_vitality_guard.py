@@ -61,7 +61,8 @@ class AllowedCasesTests(unittest.TestCase):
     def test_a_witnessed_confirmed_stall_is_allowed(self) -> None:
         decision = assert_destructive_allowed(
             episode(evidence={"provider_cursor": "fake:unchanged"}),
-            "worker-respawn", NOW,
+            "worker-respawn",
+            NOW,
         )
         self.assertTrue(decision.allowed)
         self.assertIsNone(decision.refusal)
@@ -75,7 +76,10 @@ class AllowedCasesTests(unittest.TestCase):
     def test_a_pid_only_confirmation_past_the_outer_ceiling_is_allowed(self) -> None:
         # No evidence cursor and no progress stamp: the pid-only arm earned this one.
         decision = assert_destructive_allowed(
-            episode(), "worker-respawn", NOW, pid_only_outer_ceiling_seconds=5_400.0,
+            episode(),
+            "worker-respawn",
+            NOW,
+            pid_only_outer_ceiling_seconds=5_400.0,
         )
         self.assertTrue(decision.allowed, decision.reason)
 
@@ -97,7 +101,10 @@ class RefusalClassesTests(unittest.TestCase):
 
     def test_an_episode_of_another_run_is_refused(self) -> None:
         decision = assert_destructive_allowed(
-            episode(), "worker-respawn", NOW, current_run_id=OTHER_RUN_ID,
+            episode(),
+            "worker-respawn",
+            NOW,
+            current_run_id=OTHER_RUN_ID,
         )
         self.assertIs(decision.refusal, GuardRefusal.FOREIGN_RUN)
         self.assertIn(RUN_ID, decision.reason)
@@ -105,32 +112,42 @@ class RefusalClassesTests(unittest.TestCase):
 
     def test_healthy_active_is_refused(self) -> None:
         decision = assert_destructive_allowed(
-            episode(VitalityVerdict.HEALTHY_ACTIVE), "worker-respawn", NOW,
+            episode(VitalityVerdict.HEALTHY_ACTIVE),
+            "worker-respawn",
+            NOW,
         )
         self.assertIs(decision.refusal, GuardRefusal.HEALTHY_ACTIVE)
 
     def test_healthy_quiet_is_refused(self) -> None:
         decision = assert_destructive_allowed(
-            episode(VitalityVerdict.HEALTHY_QUIET), "worker-respawn", NOW,
+            episode(VitalityVerdict.HEALTHY_QUIET),
+            "worker-respawn",
+            NOW,
         )
         self.assertIs(decision.refusal, GuardRefusal.HEALTHY_QUIET)
 
     def test_unverifiable_is_refused(self) -> None:
         decision = assert_destructive_allowed(
-            episode(VitalityVerdict.UNVERIFIABLE), "worker-respawn", NOW,
+            episode(VitalityVerdict.UNVERIFIABLE),
+            "worker-respawn",
+            NOW,
         )
         self.assertIs(decision.refusal, GuardRefusal.UNVERIFIABLE)
 
     def test_suspended_is_refused(self) -> None:
         decision = assert_destructive_allowed(
-            episode(VitalityVerdict.SUSPENDED), "worker-respawn", NOW,
+            episode(VitalityVerdict.SUSPENDED),
+            "worker-respawn",
+            NOW,
         )
         self.assertIs(decision.refusal, GuardRefusal.SUSPENDED)
         self.assertIn("SIGCONT", decision.reason)
 
     def test_a_suspected_stall_never_reaches_destruction(self) -> None:
         decision = assert_destructive_allowed(
-            episode(VitalityVerdict.SUSPECTED_STALL), "worker-respawn", NOW,
+            episode(VitalityVerdict.SUSPECTED_STALL),
+            "worker-respawn",
+            NOW,
         )
         self.assertIs(decision.refusal, GuardRefusal.SUSPECTED_STALL)
 
@@ -147,24 +164,34 @@ class RefusalClassesTests(unittest.TestCase):
         # not elapsed, so the guard holds the line the old clock would have crossed.
         young = episode(started_at=NOW - 5_400.0)
         decision = assert_destructive_allowed(
-            young, "worker-respawn", NOW, pid_only_outer_ceiling_seconds=9_000.0,
+            young,
+            "worker-respawn",
+            NOW,
+            pid_only_outer_ceiling_seconds=9_000.0,
         )
         self.assertIs(decision.refusal, GuardRefusal.PID_ONLY_CEILING_UNELAPSED)
 
     def test_a_witnessed_confirmation_is_not_held_by_the_pid_only_rule(self) -> None:
         # The provider answered and then went silent: two-channel evidence, no ceiling hold.
         witnessed = episode(
-            started_at=NOW - 5_400.0, evidence={"provider_cursor": "fake:unchanged"},
+            started_at=NOW - 5_400.0,
+            evidence={"provider_cursor": "fake:unchanged"},
         )
         decision = assert_destructive_allowed(
-            witnessed, "worker-respawn", NOW, pid_only_outer_ceiling_seconds=9_000.0,
+            witnessed,
+            "worker-respawn",
+            NOW,
+            pid_only_outer_ceiling_seconds=9_000.0,
         )
         self.assertTrue(decision.allowed, decision.reason)
 
     def test_a_progress_stamp_counts_as_witnessing_even_without_a_cursor(self) -> None:
         stamped = episode(started_at=NOW - 5_400.0, last_progress_at=NOW - 9_000.0)
         decision = assert_destructive_allowed(
-            stamped, "worker-respawn", NOW, pid_only_outer_ceiling_seconds=9_000.0,
+            stamped,
+            "worker-respawn",
+            NOW,
+            pid_only_outer_ceiling_seconds=9_000.0,
         )
         self.assertTrue(decision.allowed, decision.reason)
 
@@ -192,21 +219,26 @@ class MutationResistanceTests(unittest.TestCase):
 
         destructive = {VitalityVerdict.CONFIRMED_STALL, VitalityVerdict.DEAD}
         self.assertEqual(
-            set(_REFUSED_VERDICTS), set(VitalityVerdict) - destructive,
+            set(_REFUSED_VERDICTS),
+            set(VitalityVerdict) - destructive,
             "every non-destructive verdict must be named in the refusal map explicitly",
         )
 
     def test_the_decision_travels_as_bounded_telemetry(self) -> None:
         decision = assert_destructive_allowed(
-            episode(VitalityVerdict.HEALTHY_QUIET), "worker-respawn", NOW,
+            episode(VitalityVerdict.HEALTHY_QUIET),
+            "worker-respawn",
+            NOW,
         )
         payload = decision.to_json()
         self.assertEqual(
             payload,
             {
-                "action": "worker-respawn", "allowed": False,
+                "action": "worker-respawn",
+                "allowed": False,
                 "refusal": "healthy-quiet",
-                "reason": decision.reason, "verdict": "healthy_quiet",
+                "reason": decision.reason,
+                "verdict": "healthy_quiet",
                 "episode_run_id": RUN_ID,
             },
         )

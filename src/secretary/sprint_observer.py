@@ -105,8 +105,10 @@ def parse_observer(raw: Any) -> dict[str, Any] | None:
         event_id = source.get("event_id")
         if (
             source.get("source") == SOURCE_LIFECYCLE_AUDIT
-            and isinstance(profile, str) and profile.strip()
-            and isinstance(event_id, str) and event_id.strip()
+            and isinstance(profile, str)
+            and profile.strip()
+            and isinstance(event_id, str)
+            and event_id.strip()
         ):
             return historical_recovered(profile.strip(), event_id.strip())
         return None
@@ -188,9 +190,7 @@ def installed_observer_profiles(instance: str | Path | None) -> set[str]:
             REASON_UNKNOWN_PROFILE, f"the head registry could not be read: {exc}"
         ) from None
     if not isinstance(profiles, dict):
-        raise ObserverMetadataError(
-            REASON_UNKNOWN_PROFILE, "the head registry has no profiles table"
-        )
+        raise ObserverMetadataError(REASON_UNKNOWN_PROFILE, "the head registry has no profiles table")
     return {str(name) for name in profiles}
 
 

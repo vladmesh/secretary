@@ -21,9 +21,7 @@ from secretary.tasks import TaskAudit
 
 
 def git(repo: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args], text=True, capture_output=True, check=True
-    )
+    result = subprocess.run(["git", "-C", str(repo), *args], text=True, capture_output=True, check=True)
     return result.stdout
 
 
@@ -106,13 +104,9 @@ class NestedJournalTests(unittest.TestCase):
         facts = self.facts_dir()
         self.assertFalse((facts / "global" / "two.md").exists())
         self.assertFalse((facts / "global" / "one.md").exists())
+        self.assertEqual(git(self.instance_dir, "status", "--porcelain", "--", "state/memory"), "")
         self.assertEqual(
-            git(self.instance_dir, "status", "--porcelain", "--", "state/memory"), ""
-        )
-        self.assertEqual(
-            sorted(
-                path.relative_to(legacy).as_posix() for path in legacy.rglob("*") if path.is_file()
-            ),
+            sorted(path.relative_to(legacy).as_posix() for path in legacy.rglob("*") if path.is_file()),
             legacy_before,
         )
 
@@ -147,9 +141,7 @@ class NestedJournalTests(unittest.TestCase):
         for call in init.call_args_list:
             self.assertEqual(call.kwargs, {})
             self.assertEqual(len(call.args), 1)
-        self.assertEqual(
-            [name for name in dir(memory_journal) if name.startswith("migrate")], []
-        )
+        self.assertEqual([name for name in dir(memory_journal) if name.startswith("migrate")], [])
 
         facts = self.facts_dir()
         self.assertIn("a brand new fact", (facts / "global" / "two.md").read_text(encoding="utf-8"))
@@ -188,9 +180,7 @@ class MemorySecretGateTests(unittest.TestCase):
 
     def test_a_fact_carrying_a_secret_never_reaches_the_repo(self):
         fact_file = Path(self.tmpdir.name) / "leaky.md"
-        fact_file.write_text(
-            "token ghp_0123456789abcdefghijklmnopqrstuvwxyzAB\n", encoding="utf-8"
-        )
+        fact_file.write_text("token ghp_0123456789abcdefghijklmnopqrstuvwxyzAB\n", encoding="utf-8")
         proposal = propose_memory_fact(
             self.data_dir,
             actor="curator:claude/session",
@@ -266,18 +256,14 @@ class TwoWriterTests(unittest.TestCase):
 
     def test_tick_checkpoint_leaves_memory_facts_alone(self):
         self.write_fact("one")
-        memory_head = git(
-            self.instance_dir, "log", "-1", "--format=%H", "--", "state/memory"
-        ).strip()
+        memory_head = git(self.instance_dir, "log", "-1", "--format=%H", "--", "state/memory").strip()
 
         with mock.patch.object(TaskAudit, "status", return_value={"ok": True, "pending": 0}):
             result = self.writer().write()
 
         self.assertEqual(result.status, "committed")
         # The tick commit touched board and runs only; memory's tip did not move.
-        touched = git(
-            self.instance_dir, "show", "--name-only", "--format=", "HEAD"
-        ).split()
+        touched = git(self.instance_dir, "show", "--name-only", "--format=", "HEAD").split()
         self.assertTrue(touched)
         self.assertFalse([path for path in touched if path.startswith("state/memory")], touched)
         self.assertEqual(
@@ -306,9 +292,7 @@ class TwoWriterTests(unittest.TestCase):
         def tick() -> None:
             try:
                 start.wait(timeout=10)
-                with mock.patch.object(
-                    TaskAudit, "status", return_value={"ok": True, "pending": 0}
-                ):
+                with mock.patch.object(TaskAudit, "status", return_value={"ok": True, "pending": 0}):
                     self.writer().write()
             except BaseException as exc:  # noqa: BLE001 - reported to the main thread
                 errors.append(exc)

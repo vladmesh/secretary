@@ -8,6 +8,7 @@ lock, precheck, redaction. The per-agent judgment lives in that agent's Orca ski
 
 Agents are modules under `triggered_agents.agents.<name>` exposing `cli.main(argv)`.
 """
+
 from __future__ import annotations
 
 import sys
@@ -24,6 +25,7 @@ def main(argv=None) -> int:
         return 0
     if argv[0] == "health":  # cross-agent, not a per-agent cmd
         from .runtime import health
+
         return health.check(AGENTS)
     agent, rest = argv[0], argv[1:]
     if agent not in AGENTS:
@@ -37,8 +39,11 @@ def main(argv=None) -> int:
             # `pipeline` is a board CLI, not a head: its automation.toml ships no skill, so there
             # is nothing to dispatch. Refuse instead of falling through into the terminal driver,
             # which would fail on the missing skill.
-            print("triggered_agents: pipeline has no dispatch — it is the board CLI only "
-                  "(task dispatch lives in secretary/dispatcher_production.py)", file=sys.stderr)
+            print(
+                "triggered_agents: pipeline has no dispatch — it is the board CLI only "
+                "(task dispatch lives in secretary/dispatcher_production.py)",
+                file=sys.stderr,
+            )
             return 2
         dispatch_args = rest[1:]
         cleanup_only = "--cleanup-only" in dispatch_args
@@ -53,6 +58,7 @@ def main(argv=None) -> int:
                 except ValueError:
                     generation = None
         from .runtime import dispatch
+
         if spawn_finalizer:
             return dispatch.spawn_finalizer(agent, generation=generation)
         if finalize:

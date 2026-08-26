@@ -33,10 +33,12 @@ if TYPE_CHECKING:
 # skip that is missing from it does not degrade, it stops the tick's whole Ready pass.
 CLAIM_SKIP_RESOURCE_NOT_READY = "resource-not-ready"
 CLAIM_SKIP_FAILOVER_COLLAPSE = "failover-collapses-roles"
-CLAIM_SKIP_ACTIONS = frozenset({
-    CLAIM_SKIP_RESOURCE_NOT_READY,
-    CLAIM_SKIP_FAILOVER_COLLAPSE,
-})
+CLAIM_SKIP_ACTIONS = frozenset(
+    {
+        CLAIM_SKIP_RESOURCE_NOT_READY,
+        CLAIM_SKIP_FAILOVER_COLLAPSE,
+    }
+)
 
 
 def is_claim_skip(outcome: dict[str, Any]) -> bool:
@@ -339,12 +341,10 @@ class DispatcherRecord:
             "worker_continuation": self.worker_continuation.to_json(),
             "worker_continuation_liveness": self.worker_continuation_liveness.to_json(),
             "worker_vitality_episode": (
-                self.worker_vitality_episode.to_json()
-                if self.worker_vitality_episode is not None else None
+                self.worker_vitality_episode.to_json() if self.worker_vitality_episode is not None else None
             ),
             "review_vitality_episode": (
-                self.review_vitality_episode.to_json()
-                if self.review_vitality_episode is not None else None
+                self.review_vitality_episode.to_json() if self.review_vitality_episode is not None else None
             ),
             "worker_respawns": self.worker_respawns,
             "worker_started_at": self.worker_started_at,
@@ -413,9 +413,7 @@ class DispatcherRecord:
             # `review_baseline`, which is the number the worker in that checkout was handed. Taking
             # it over is what keeps the first generation this dispatcher opens above every id the
             # previous one issued for the round still running.
-            report_generation=int(
-                payload.get("report_generation") or payload.get("review_baseline") or 0
-            ),
+            report_generation=int(payload.get("report_generation") or payload.get("review_baseline") or 0),
             report_decision=str(payload.get("report_decision") or ""),
             state=str(payload.get("state") or "claimed"),
             claimed_at=float(payload.get("claimed_at") or time.time()),
@@ -469,9 +467,7 @@ class DispatcherRecord:
             # Absent on every record written before the prompt existed, which is exactly a round
             # that has not spent one: the empty value opens the same single prompt for it.
             worker_report_nudge=WorkerReportNudge.from_json(payload.get("worker_report_nudge")),
-            worker_continuation=WorkerContinuation.from_json(
-                payload.get("worker_continuation")
-            ),
+            worker_continuation=WorkerContinuation.from_json(payload.get("worker_continuation")),
             worker_continuation_liveness=WorkerContinuationLiveness.from_json(
                 payload.get("worker_continuation_liveness")
             ),
@@ -481,11 +477,13 @@ class DispatcherRecord:
             # than be silently dropped, or the record would look observed when it was not.
             worker_vitality_episode=(
                 _vitality_episode_from_json(payload["worker_vitality_episode"])
-                if payload.get("worker_vitality_episode") is not None else None
+                if payload.get("worker_vitality_episode") is not None
+                else None
             ),
             review_vitality_episode=(
                 _vitality_episode_from_json(payload["review_vitality_episode"])
-                if payload.get("review_vitality_episode") is not None else None
+                if payload.get("review_vitality_episode") is not None
+                else None
             ),
             review_waiting_since=float(payload.get("review_waiting_since") or 0.0),
             review_respawns=int(payload.get("review_respawns") or 0),
@@ -536,13 +534,15 @@ def record_attempt(
         payload["attempts"] = attempts
     if any(isinstance(attempt, dict) and attempt.get("attempt_id") == attempt_id for attempt in attempts):
         return
-    attempts.append({
-        "attempt_id": attempt_id,
-        "pilot_ref": reference,
-        "owner": owner,
-        "started_at": now_rfc3339(),
-        "started_by": actor,
-    })
+    attempts.append(
+        {
+            "attempt_id": attempt_id,
+            "pilot_ref": reference,
+            "owner": owner,
+            "started_at": now_rfc3339(),
+            "started_by": actor,
+        }
+    )
 
 
 def attempt_request_id(attempt_id: str, action: str, reference: str, suffix: str = "") -> str:

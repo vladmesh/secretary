@@ -117,10 +117,24 @@ _STATE_BY_COLUMN = {
     "Done": "done",
 }
 _KNOWN_METADATA = {
-    "task_type", "project", "blocked_by", "claim", "slug", "base_branch",
-    "head", "resolved_head", "review_head", "resolved_review_head", "retry_same",
-    "retry_switch", "retry_heads", "complexity", "family_preference", "routing_reason",
-    "quota_snapshot_at", "codex_launch_mode",
+    "task_type",
+    "project",
+    "blocked_by",
+    "claim",
+    "slug",
+    "base_branch",
+    "head",
+    "resolved_head",
+    "review_head",
+    "resolved_review_head",
+    "retry_same",
+    "retry_switch",
+    "retry_heads",
+    "complexity",
+    "family_preference",
+    "routing_reason",
+    "quota_snapshot_at",
+    "codex_launch_mode",
     "sprint_ref",
 }
 _TASK_TYPES = {"code", "research"}
@@ -235,9 +249,7 @@ def assessment_resolution(events: Iterable[dict[str, Any]]) -> tuple[str, dict[s
     for index, event in enumerate(ordered):
         payload = _event_payload(event)
         lifecycle = event.get("transition") if isinstance(event.get("transition"), dict) else {}
-        if (
-            event.get("kind") == "moved" and str(payload.get("to") or "") == "assessment"
-        ) or (
+        if (event.get("kind") == "moved" and str(payload.get("to") or "") == "assessment") or (
             event.get("record_type") == TaskAudit._PROTOCOL_EVENT_RECORD_TYPE
             and str(lifecycle.get("target") or "") == "assessment"
         ):
@@ -245,7 +257,7 @@ def assessment_resolution(events: Iterable[dict[str, Any]]) -> tuple[str, dict[s
     if latest_park < 0:
         return "", None
     visit = str(ordered[latest_park].get("event_id") or ordered[latest_park].get("request_id") or "")
-    for event in ordered[latest_park + 1:]:
+    for event in ordered[latest_park + 1 :]:
         payload = _event_payload(event)
         if _event_action(event) != "decided" or not str(payload.get("decision") or ""):
             continue
@@ -297,14 +309,15 @@ def is_significant_card_event(event: dict[str, Any], *, linked_refs: set[str]) -
     # `steward` has no such transition today, but keeping both human control-plane roles here
     # makes a future permitted equivalent retain the same semantic contract.
     return (
-        str(actor.get("role") or "") in {"po", "steward"}
-        and source in ACTIVE_STATES
-        and target == "issues"
+        str(actor.get("role") or "") in {"po", "steward"} and source in ACTIVE_STATES and target == "issues"
     )
 
 
 def is_significant_observer_event(
-    event: dict[str, Any], *, linked_refs: set[str], sprint_ref: str,
+    event: dict[str, Any],
+    *,
+    linked_refs: set[str],
+    sprint_ref: str,
 ) -> bool:
     """Whether an audit event is a semantic wake for one sprint observer."""
     if is_significant_card_event(event, linked_refs=linked_refs):
@@ -349,7 +362,9 @@ class KanboardClient:
             root = normalize_instance_dir(instance).resolve()
             return cls(resolve(root), root)
         except BoardTransportError:
-            raise TaskError("backend_unavailable", "Kanboard runtime configuration is unavailable", 1) from None
+            raise TaskError(
+                "backend_unavailable", "Kanboard runtime configuration is unavailable", 1
+            ) from None
 
     def call(self, method: str, **params: Any) -> Any:
         document = self._post(_rpc_request(1, method, params))
@@ -367,11 +382,13 @@ class KanboardClient:
         calls = list(calls)
         results: list[Any] = [None] * len(calls)
         for start in range(0, len(calls), _BATCH_CHUNK):
-            chunk = calls[start:start + _BATCH_CHUNK]
-            document = self._post([
-                _rpc_request(start + offset, method, params)
-                for offset, (method, params) in enumerate(chunk)
-            ])
+            chunk = calls[start : start + _BATCH_CHUNK]
+            document = self._post(
+                [
+                    _rpc_request(start + offset, method, params)
+                    for offset, (method, params) in enumerate(chunk)
+                ]
+            )
             if not isinstance(document, list):
                 raise TaskError("backend_error", "Kanboard rejected the read request", 1)
             answers: dict[Any, Any] = {}
@@ -433,9 +450,7 @@ def project_card_by_reference(
     return card
 
 
-def project_card_by_id(
-    client: KanboardClient, project_id: int, task_id: int
-) -> dict[str, Any] | None:
+def project_card_by_id(client: KanboardClient, project_id: int, task_id: int) -> dict[str, Any] | None:
     """Return the exact board row named by a recorded Kanboard task id."""
     for card in all_project_cards(client, project_id):
         if _positive_int(card.get("id")) == task_id:
@@ -480,7 +495,9 @@ class TaskReader:
         metadata = self._metadata_of(rows)
         result = []
         for card in rows:
-            normalized = self._normalize(card, columns, swimlanes, metadata[_task_number(card)], comments=None)
+            normalized = self._normalize(
+                card, columns, swimlanes, metadata[_task_number(card)], comments=None
+            )
             if states and normalized["state"] not in states:
                 continue
             if project is not None and normalized["project"] != project:
@@ -513,13 +530,11 @@ class TaskReader:
         if task_id is None:
             raise TaskError("backend_error", "Kanboard returned an invalid task", 1)
         raw_comments = self.client.call("getAllComments", task_id=task_id) or []
-        comments = [
-            _normalize_comment(comment)
-            for comment in raw_comments
-            if isinstance(comment, dict)
-        ]
+        comments = [_normalize_comment(comment) for comment in raw_comments if isinstance(comment, dict)]
         return self._normalize(
-            card, columns, swimlanes,
+            card,
+            columns,
+            swimlanes,
             _task_metadata(self.client.call("getTaskMetadata", task_id=task_id)),
             comments=comments,
         )
@@ -527,13 +542,8 @@ class TaskReader:
     def _metadata_of(self, cards: list[dict[str, Any]]) -> dict[int, dict[str, str]]:
         """The task metadata of every given row, keyed by Kanboard task id, in one batched read."""
         task_ids = [_task_number(card) for card in cards]
-        answers = self.client.call_batch(
-            ("getTaskMetadata", {"task_id": task_id}) for task_id in task_ids
-        )
-        return {
-            task_id: _task_metadata(answer)
-            for task_id, answer in zip(task_ids, answers, strict=True)
-        }
+        answers = self.client.call_batch(("getTaskMetadata", {"task_id": task_id}) for task_id in task_ids)
+        return {task_id: _task_metadata(answer) for task_id, answer in zip(task_ids, answers, strict=True)}
 
     def _board(self) -> tuple[int, dict[int, str], dict[int, str]]:
         board = self.client.call("getProjectByName", name=self.board_name)
@@ -566,30 +576,48 @@ class TaskReader:
             raise TaskError("backend_error", "Kanboard board schema is invalid", 1)
         ref = _text(card.get("reference"))
         result: dict[str, Any] = {
-            "id": f"task_kanboard_{task_id}", "ref": ref, "title": _text(card.get("title")),
-            "description": _text(card.get("description")), "state": _STATE_BY_COLUMN[column],
+            "id": f"task_kanboard_{task_id}",
+            "ref": ref,
+            "title": _text(card.get("title")),
+            "description": _text(card.get("description")),
+            "state": _STATE_BY_COLUMN[column],
             "closed": _nonnegative_int(card.get("is_active", card.get("status", 1))) == 0,
-            "position": _nonnegative_int(card.get("position")), "project": _text(meta.get("project")),
-            "type": _text(meta.get("task_type")), "blocked_by": _null_if_empty(meta.get("blocked_by")),
+            "position": _nonnegative_int(card.get("position")),
+            "project": _text(meta.get("project")),
+            "type": _text(meta.get("task_type")),
+            "blocked_by": _null_if_empty(meta.get("blocked_by")),
             "claim": {"worker": _null_if_empty(meta.get("claim")), "claimed_at": None},
             "routing": {
-                "complexity": _enum_or_default(
-                    meta.get("complexity"), _COMPLEXITIES, "standard"
-                ),
+                "complexity": _enum_or_default(meta.get("complexity"), _COMPLEXITIES, "standard"),
                 "family_preference": _enum_or_default(
                     meta.get("family_preference"), _FAMILY_PREFERENCES, "auto"
                 ),
-                "head_override": _null_if_empty(meta.get("head")), "review_head_override": _null_if_empty(meta.get("review_head")),
-                "resolved_worker_family": None, "resolved_worker_head": _null_if_empty(meta.get("resolved_head")),
-                "resolved_review_family": None, "resolved_review_head": _null_if_empty(meta.get("resolved_review_head")),
-                "routing_reason": _null_if_empty(meta.get("routing_reason")), "quota_snapshot_at": _null_if_empty(meta.get("quota_snapshot_at")),
+                "head_override": _null_if_empty(meta.get("head")),
+                "review_head_override": _null_if_empty(meta.get("review_head")),
+                "resolved_worker_family": None,
+                "resolved_worker_head": _null_if_empty(meta.get("resolved_head")),
+                "resolved_review_family": None,
+                "resolved_review_head": _null_if_empty(meta.get("resolved_review_head")),
+                "routing_reason": _null_if_empty(meta.get("routing_reason")),
+                "quota_snapshot_at": _null_if_empty(meta.get("quota_snapshot_at")),
                 "codex_launch_mode": _enum_or_none(meta.get("codex_launch_mode"), _CODEX_LAUNCH_MODES),
             },
-            "workspace": {"slug": _null_if_empty(meta.get("slug")), "base_branch": _null_if_empty(meta.get("base_branch"))},
-            "retry": {"same": _nonnegative_int(meta.get("retry_same")), "switched": _nonnegative_int(meta.get("retry_switch")), "heads": _split_heads(meta.get("retry_heads"))},
+            "workspace": {
+                "slug": _null_if_empty(meta.get("slug")),
+                "base_branch": _null_if_empty(meta.get("base_branch")),
+            },
+            "retry": {
+                "same": _nonnegative_int(meta.get("retry_same")),
+                "switched": _nonnegative_int(meta.get("retry_switch")),
+                "heads": _split_heads(meta.get("retry_heads")),
+            },
             "sprint": _null_if_empty(meta.get("sprint_ref")),
             "record_type": _null_if_empty(meta.get("record_type")),
-            "audit": {"created_at": _rfc3339(card.get("date_creation")), "updated_at": _rfc3339(card.get("date_modification")), "backend": {"kind": "kanboard", "kanboard_task_id": task_id, "board": self.board_name}},
+            "audit": {
+                "created_at": _rfc3339(card.get("date_creation")),
+                "updated_at": _rfc3339(card.get("date_modification")),
+                "backend": {"kind": "kanboard", "kanboard_task_id": task_id, "board": self.board_name},
+            },
         }
         extensions = {key: value for key, value in meta.items() if key not in _KNOWN_METADATA}
         lane = swimlanes.get(_positive_int(card.get("swimlane_id")) or -1)
@@ -640,7 +668,11 @@ class TaskAudit:
         """Do not guess how a released generic transient record maps to v2."""
         if not os.path.isdir(self.pending_dir):
             return
-        legacy = [name for name in os.listdir(self.pending_dir) if name.endswith(".json") and not name.startswith("v2-")]
+        legacy = [
+            name
+            for name in os.listdir(self.pending_dir)
+            if name.endswith(".json") and not name.startswith("v2-")
+        ]
         if legacy:
             raise TaskError(
                 "upgrade_required",
@@ -690,7 +722,9 @@ class TaskAudit:
             finally:
                 del held[reference]
 
-    def pending_marker_owner(self, reference: str, content: str, *, request_id: str | None = None) -> str | None:
+    def pending_marker_owner(
+        self, reference: str, content: str, *, request_id: str | None = None
+    ) -> str | None:
         """Return a different pending owner of an indistinguishable marker.
 
         Runs under the audit lock while callers hold the per-Card marker lock, so no writer can put a
@@ -778,7 +812,9 @@ class TaskAudit:
     def stage(self, request_id: str, event: dict[str, Any]) -> None:
         with self._locked_audit(create_pending=True):
             committed, _pending, replace = self._pending_owner(
-                request_id, event, operation="stage",
+                request_id,
+                event,
+                operation="stage",
             )
             if committed is not None:
                 return
@@ -800,7 +836,9 @@ class TaskAudit:
         """Resolve request-id ownership and stage the record in one critical section."""
         with self._locked_audit(create_pending=True):
             committed, pending, _replace = self._pending_owner(
-                request_id, event, operation="claim",
+                request_id,
+                event,
+                operation="claim",
             )
             if committed is not None:
                 return committed
@@ -864,7 +902,9 @@ class TaskAudit:
         """Discard a generic pending retry, or the supplied exact protocol event."""
         with self._locked_audit():
             committed, pending, _replace = self._pending_owner(
-                request_id, event, operation="discard",
+                request_id,
+                event,
+                operation="discard",
             )
             if committed is not None or pending is None:
                 return
@@ -1007,7 +1047,11 @@ class TaskAudit:
             if isinstance(request_id, str) and request_id not in self._committed_offsets:
                 self._committed_offsets[request_id] = offset
             event_id = candidate.get("event_id")
-            if isinstance(event_id, str) and isinstance(request_id, str) and event_id not in self._committed_event_ids:
+            if (
+                isinstance(event_id, str)
+                and isinstance(request_id, str)
+                and event_id not in self._committed_event_ids
+            ):
                 self._committed_event_ids[event_id] = request_id
         self._committed_read += consumed
 
@@ -1116,7 +1160,9 @@ class TaskWriter:
         from secretary.board.kanboard import KanboardBoardHost
 
         self.board_host = KanboardBoardHost(
-            client, data_dir=os.fspath(data_dir), audit=self.audit,
+            client,
+            data_dir=os.fspath(data_dir),
+            audit=self.audit,
         )
         self.workspace = Path(workspace) if workspace is not None else None
         self._redaction_cache: tuple[tuple[tuple[str, int, int, int], ...], tuple[str, ...]] | None = None
@@ -1145,7 +1191,9 @@ class TaskWriter:
         try:
             values = redaction_values(self.instance_dir)
         except SecretStoreError as exc:
-            raise TaskError("backend_unavailable", f"board redaction configuration is unavailable: {exc}", 1) from None
+            raise TaskError(
+                "backend_unavailable", f"board redaction configuration is unavailable: {exc}", 1
+            ) from None
         self._redaction_cache = (key, values)
         return values
 
@@ -1218,7 +1266,11 @@ class TaskWriter:
         sprint = sprint.strip()
         priority = priority.strip()
         budget_event = budget_event.strip()
-        sprint_override_reason = sprint_override_reason.strip() if restoring else self._redact_for_board(sprint_override_reason.strip())
+        sprint_override_reason = (
+            sprint_override_reason.strip()
+            if restoring
+            else self._redact_for_board(sprint_override_reason.strip())
+        )
         if not project:
             raise TaskError("validation", "create requires a non-empty project", 2)
         if task_type not in _TASK_TYPES:
@@ -1236,7 +1288,9 @@ class TaskWriter:
         if complexity not in _COMPLEXITIES:
             raise TaskError("validation", "complexity must be one of: " + ", ".join(sorted(_COMPLEXITIES)), 2)
         if family_preference not in _FAMILY_PREFERENCES:
-            raise TaskError("validation", "family preference must be one of: " + ", ".join(sorted(_FAMILY_PREFERENCES)), 2)
+            raise TaskError(
+                "validation", "family preference must be one of: " + ", ".join(sorted(_FAMILY_PREFERENCES)), 2
+            )
         if codex_launch_mode and codex_launch_mode not in _CODEX_LAUNCH_MODES:
             # Refused here, before any board call: a card must not be able to carry a launch mode
             # the product cannot launch. `exec` is the one this rejects in practice, and it is
@@ -1268,9 +1322,14 @@ class TaskWriter:
 
         request_id = request_id or str(uuid.uuid4())
         override_payload = self._guard_sprint_write(
-            role=role, actor=actor, project=project, card_sprint=sprint,
-            linked_sprint=linked_sprint, sprint_override=sprint_override,
-            sprint_override_reason=sprint_override_reason, request_id=request_id,
+            role=role,
+            actor=actor,
+            project=project,
+            card_sprint=sprint,
+            linked_sprint=linked_sprint,
+            sprint_override=sprint_override,
+            sprint_override_reason=sprint_override_reason,
+            request_id=request_id,
             reference=reference,
         )
         # After the ownership guard: a project another sprint holds is refused by that sprint,
@@ -1307,8 +1366,15 @@ class TaskWriter:
             try:
                 event_id = self.audit.append(request_id, committed)
             except OSError:
-                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-            return {"action": "created", "task": self.reader.show(str(committed["ref"])), "event_id": event_id, "replayed": True}
+                raise TaskError(
+                    "audit_pending", "backend write committed; audit repair is required", 4
+                ) from None
+            return {
+                "action": "created",
+                "task": self.reader.show(str(committed["ref"])),
+                "event_id": event_id,
+                "replayed": True,
+            }
         pending = self.audit.pending_event(request_id)
         if pending is not None:
             self.audit.require_claim(pending, kind="created", reference=None, identity=payload)
@@ -1320,7 +1386,9 @@ class TaskWriter:
                 self.audit.stage(request_id, pending)
                 event_id = self.audit.append(request_id, pending)
             except (TaskError, OSError, KeyError, TypeError):
-                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
+                raise TaskError(
+                    "audit_pending", "backend write committed; audit repair is required", 4
+                ) from None
             return {"action": "created", "task": task, "event_id": event_id, "replayed": True}
 
         event = {
@@ -1333,7 +1401,9 @@ class TaskWriter:
             "task_id": "",
             "ref": reference,
             "backend": {
-                "kind": "kanboard", "task_id": None, "revision": "pending",
+                "kind": "kanboard",
+                "task_id": None,
+                "revision": "pending",
                 "reference_assignment": "atomic",
             },
             "request_id": request_id,
@@ -1419,15 +1489,17 @@ class TaskWriter:
             # after createTask still leaves a recoverable, already-reserved reference.
             event["ref"] = created_ref
             self.audit.stage(request_id, event)
-            task_id = _positive_int(self.client.call(
-                "createTask",
-                project_id=board_id,
-                title=title,
-                description=description,
-                column_id=column_id,
-                swimlane_id=swimlane_id or 0,
-                reference=created_ref,
-            ))
+            task_id = _positive_int(
+                self.client.call(
+                    "createTask",
+                    project_id=board_id,
+                    title=title,
+                    description=description,
+                    column_id=column_id,
+                    swimlane_id=swimlane_id or 0,
+                    reference=created_ref,
+                )
+            )
             if task_id is None:
                 raise TaskError("backend_error", "Kanboard rejected the write", 1)
             event["task_id"] = f"task_kanboard_{task_id}"
@@ -1469,11 +1541,24 @@ class TaskWriter:
                 raise _CommittedWriteError() from exc
             return created_ref
 
-    def comment(self, *, role: str, actor: str, reference: str, body: str, request_id: str | None = None) -> dict[str, Any]:
+    def comment(
+        self, *, role: str, actor: str, reference: str, body: str, request_id: str | None = None
+    ) -> dict[str, Any]:
         self._role(role, _COMMENT_ROLES)
         body = self._redact_for_board(body)
         payload = {"marker": role, "body_sha256": _digest(body)}
-        return self._write("commented", role, actor, reference, request_id, payload, lambda task: self.client.call("createComment", task_id=_task_number(task), user_id=0, content=f"[{role}]\n{body}"), identity=payload)
+        return self._write(
+            "commented",
+            role,
+            actor,
+            reference,
+            request_id,
+            payload,
+            lambda task: self.client.call(
+                "createComment", task_id=_task_number(task), user_id=0, content=f"[{role}]\n{body}"
+            ),
+            identity=payload,
+        )
 
     def _require_committed_workspace(self) -> None:
         """Refuse a done report from a dirty checkout.
@@ -1495,11 +1580,20 @@ class TaskWriter:
         files = ", ".join(shown)
         if len(dirt) > len(shown):
             files += f", +{len(dirt) - len(shown)} more"
-        raise TaskError("uncommitted", f"workspace has uncommitted changes: {files}; commit them and retry", 3)
+        raise TaskError(
+            "uncommitted", f"workspace has uncommitted changes: {files}; commit them and retry", 3
+        )
 
     def report(
-        self, *, role: str, actor: str, reference: str, kind: str, body: str,
-        classification: str = "", request_id: str | None = None,
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        kind: str,
+        body: str,
+        classification: str = "",
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         """A worker's report, and for a blocked one the kind of blocker it hit.
 
@@ -1516,35 +1610,51 @@ class TaskWriter:
         if kind == "blocked" and classification not in _BLOCK_CLASSIFICATIONS:
             raise TaskError(
                 "validation",
-                "blocked reports require --classification, one of "
-                + ", ".join(_BLOCK_CLASSIFICATIONS),
+                "blocked reports require --classification, one of " + ", ".join(_BLOCK_CLASSIFICATIONS),
                 2,
             )
         if kind == "done":
             if classification:
                 raise TaskError("validation", "a done report carries no classification", 2)
         return self._marker_write(
-            action="reported", event_kind=EventKind.CARD_REPORTED, role=role, actor=actor,
-            reference=reference, reason=body, request_id=request_id,
+            action="reported",
+            event_kind=EventKind.CARD_REPORTED,
+            role=role,
+            actor=actor,
+            reference=reference,
+            reason=body,
+            request_id=request_id,
             data={
-                "marker": f"report:{kind}", "status": kind, "body": body,
-                "body_sha256": _digest(body), "classification": classification or None,
+                "marker": f"report:{kind}",
+                "status": kind,
+                "body": body,
+                "body_sha256": _digest(body),
+                "classification": classification or None,
             },
             fresh_admission=self._require_committed_workspace if kind == "done" else None,
         )
 
-    def verdict(self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None) -> dict[str, Any]:
+    def verdict(
+        self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None
+    ) -> dict[str, Any]:
         self._role(role, {"reviewer"})
         body = self._redact_for_board(body)
         if kind not in {"green", "red"} or not body.strip():
             raise TaskError("validation", "verdicts require a non-empty body", 2)
         return self._marker_write(
-            action="verdict", event_kind=EventKind.CARD_VERDICTED, role=role, actor=actor,
-            reference=reference, reason=body, request_id=request_id,
+            action="verdict",
+            event_kind=EventKind.CARD_VERDICTED,
+            role=role,
+            actor=actor,
+            reference=reference,
+            reason=body,
+            request_id=request_id,
             data={"marker": f"review:{kind}", "status": kind, "body": body, "body_sha256": _digest(body)},
         )
 
-    def decide(self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None) -> dict[str, Any]:
+    def decide(
+        self, *, role: str, actor: str, reference: str, kind: str, body: str, request_id: str | None = None
+    ) -> dict[str, Any]:
         """Record what to do with a parked card, apart from the move that does it.
 
         The decision and its effect are two facts. Recording the decision first is what makes it
@@ -1578,10 +1688,17 @@ class TaskWriter:
                 raise TaskError("validation", message, 2) from None
             if owned is not None:
                 return self._marker_write(
-                    action="decided", event_kind=EventKind.CARD_DECIDED, role=role, actor=actor,
-                    reference=reference, reason=body, request_id=request_id,
+                    action="decided",
+                    event_kind=EventKind.CARD_DECIDED,
+                    role=role,
+                    actor=actor,
+                    reference=reference,
+                    reason=body,
+                    request_id=request_id,
                     data={
-                        "marker": f"decision:{kind}", "decision": kind, "body": body,
+                        "marker": f"decision:{kind}",
+                        "decision": kind,
+                        "body": body,
                         "body_sha256": _digest(body),
                     },
                 )
@@ -1589,25 +1706,36 @@ class TaskWriter:
             # Authorization before anything about the card: which sprint holds the project is the
             # question of whether this observer may write here at all.
             self._guard_sprint_write(
-                role=role, actor=actor, project=current["project"],
-                card_sprint=str(current.get("sprint") or ""), linked_sprint=None,
-                sprint_override=False, sprint_override_reason="", request_id=request_id,
+                role=role,
+                actor=actor,
+                project=current["project"],
+                card_sprint=str(current.get("sprint") or ""),
+                linked_sprint=None,
+                sprint_override=False,
+                sprint_override_reason="",
+                request_id=request_id,
                 reference=reference,
             )
             if not self._sprint_holds_project(current["project"]):
                 raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
             committed_events = self.audit.events(reference)
             pending_decisions = [
-                event for event in self.audit.pending_events()
+                event
+                for event in self.audit.pending_events()
                 if str(event.get("ref") or "") == reference and _event_action(event) == "decided"
             ]
             visit, existing = assessment_resolution([*committed_events, *pending_decisions])
             marker_data = {
-                "marker": f"decision:{kind}", "decision": kind, "body": body,
-                "body_sha256": _digest(body), "assessment_visit": visit or None,
+                "marker": f"decision:{kind}",
+                "decision": kind,
+                "body": body,
+                "body_sha256": _digest(body),
+                "assessment_visit": visit or None,
             }
             if current["state"] != "assessment":
-                raise TaskError("transition_forbidden", "a decision is only recorded on a card in Assessment", 3)
+                raise TaskError(
+                    "transition_forbidden", "a decision is only recorded on a card in Assessment", 3
+                )
             if existing is not None:
                 existing_payload = _event_payload(existing)
                 existing_kind = str(existing_payload.get("decision") or "")
@@ -1619,11 +1747,25 @@ class TaskWriter:
                         4,
                     )
                 if existing_kind != kind:
-                    raise TaskError("decision_already_recorded", f"Assessment visit {visit} already has a {existing_kind} decision", 3)
-                return {"action": "decided", "task": current, "event_id": str(existing.get("event_id") or existing.get("request_id") or ""), "replayed": True}
+                    raise TaskError(
+                        "decision_already_recorded",
+                        f"Assessment visit {visit} already has a {existing_kind} decision",
+                        3,
+                    )
+                return {
+                    "action": "decided",
+                    "task": current,
+                    "event_id": str(existing.get("event_id") or existing.get("request_id") or ""),
+                    "replayed": True,
+                }
             return self._marker_write(
-                action="decided", event_kind=EventKind.CARD_DECIDED, role=role, actor=actor,
-                reference=reference, reason=body, request_id=request_id,
+                action="decided",
+                event_kind=EventKind.CARD_DECIDED,
+                role=role,
+                actor=actor,
+                reference=reference,
+                reason=body,
+                request_id=request_id,
                 data=marker_data,
                 require_assessment=True,
             )
@@ -1652,7 +1794,13 @@ class TaskWriter:
         if not isinstance(heads, list) or not heads:
             raise TaskError("validation", "routing requires at least one head record", 2)
         return self._write(
-            "routing", role, actor, reference, request_id, dict(payload), lambda task: None,
+            "routing",
+            role,
+            actor,
+            reference,
+            request_id,
+            dict(payload),
+            lambda task: None,
             identity=dict(payload),
         )
 
@@ -1693,7 +1841,13 @@ class TaskWriter:
                 "cap": cap,
             }
             return self._write(
-                "claimed", role, actor, reference, request_id, payload, lambda task: None,
+                "claimed",
+                role,
+                actor,
+                reference,
+                request_id,
+                payload,
+                lambda task: None,
                 identity=payload,
             )
         existing = self._typed_event(request_id)
@@ -1719,8 +1873,14 @@ class TaskWriter:
             for active in self.reader.list(states=set(ACTIVE_STATES)):
                 if active["id"] == task["id"] or _is_steward_report(active):
                     continue
-                if active["type"] == "code" and task["type"] == "code" and active["project"] == task["project"]:
-                    raise TaskError("capacity_reached", "one active code task per project is already claimed", 3)
+                if (
+                    active["type"] == "code"
+                    and task["type"] == "code"
+                    and active["project"] == task["project"]
+                ):
+                    raise TaskError(
+                        "capacity_reached", "one active code task per project is already claimed", 3
+                    )
             active_count = sum(
                 1
                 for active in self.reader.list(states=set(ACTIVE_STATES))
@@ -1743,20 +1903,36 @@ class TaskWriter:
         # A refused or failed move therefore leaves no claimed-but-Ready card behind, and a
         # metadata write that does not land keeps the pending event instead of a clean journal.
         result = self._transition_card(
-            reference=reference, target=CardState.IN_PROGRESS, role=role, actor=actor,
-            reason=f"claimed by {worker}", request_id=request_id,
+            reference=reference,
+            target=CardState.IN_PROGRESS,
+            role=role,
+            actor=actor,
+            reason=f"claimed by {worker}",
+            request_id=request_id,
             finish=lambda _card: self.client.call(
-                "saveTaskMetadata", task_id=_task_number(task), values=values,
+                "saveTaskMetadata",
+                task_id=_task_number(task),
+                values=values,
             ),
         )
         return {
-            "action": "claimed", "task": self.reader.show(reference),
-            "event_id": result.event.event_id, "replayed": existing is not None,
+            "action": "claimed",
+            "task": self.reader.show(reference),
+            "event_id": result.event.event_id,
+            "replayed": existing is not None,
         }
 
     def move(
-        self, *, role: str, actor: str, reference: str, target: str, reason: str,
-        decision: str = "", sprint_override: bool = False, sprint_override_reason: str = "",
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        target: str,
+        reason: str,
+        decision: str = "",
+        sprint_override: bool = False,
+        sprint_override_reason: str = "",
         request_id: str | None = None,
     ) -> dict[str, Any]:
         self._role(role, _ROLES)
@@ -1769,9 +1945,16 @@ class TaskWriter:
             # it stays one: its retry replays that record and its pending form is finished by the
             # released cleanup, exactly as they were on the version that wrote it.
             return self._legacy_move(
-                role=role, actor=actor, reference=reference, target=target, reason=reason,
-                decision=decision, sprint_override=sprint_override,
-                sprint_override_reason=sprint_override_reason, request_id=request_id, task=task,
+                role=role,
+                actor=actor,
+                reference=reference,
+                target=target,
+                reason=reason,
+                decision=decision,
+                sprint_override=sprint_override,
+                sprint_override_reason=sprint_override_reason,
+                request_id=request_id,
+                task=task,
             )
         existing = self._typed_event(request_id)
         # The replay is answered before the sprint guard, not after it: this request id already
@@ -1782,28 +1965,45 @@ class TaskWriter:
                 target_state = CardState(target)
             except ValueError:
                 raise TaskError(
-                    "transition_forbidden", _forbidden_move_message(role, task["state"], target), 3,
+                    "transition_forbidden",
+                    _forbidden_move_message(role, task["state"], target),
+                    3,
                 ) from None
             # A replay repeats no admission check and no backend move, but it does finish the
             # idempotent board cleanup the first attempt may have lost. The comment is the one
             # follow-up it never repeats: it is not idempotent, and the released reconciliation
             # never recreated one either.
             result = self._transition_card(
-                reference=reference, target=target_state, role=role, actor=actor,
-                reason=_transition_reason(reason, target), request_id=request_id,
+                reference=reference,
+                target=target_state,
+                role=role,
+                actor=actor,
+                reason=_transition_reason(reason, target),
+                request_id=request_id,
                 finish=self._transition_cleanup(
-                    task, source=str(existing.source_state or ""), target=target, reason="",
+                    task,
+                    source=str(existing.source_state or ""),
+                    target=target,
+                    reason="",
                     role=role,
                 ),
             )
             return {
-                "action": "moved", "task": self.reader.show(reference),
-                "event_id": result.event.event_id, "replayed": True,
+                "action": "moved",
+                "task": self.reader.show(reference),
+                "event_id": result.event.event_id,
+                "replayed": True,
             }
         override_payload = self._guard_sprint_write(
-            role=role, actor=actor, project=task["project"], card_sprint=str(task.get("sprint") or ""),
-            linked_sprint=None, sprint_override=sprint_override,
-            sprint_override_reason=sprint_override_reason.strip(), request_id=request_id, reference=reference,
+            role=role,
+            actor=actor,
+            project=task["project"],
+            card_sprint=str(task.get("sprint") or ""),
+            linked_sprint=None,
+            sprint_override=sprint_override,
+            sprint_override_reason=sprint_override_reason.strip(),
+            request_id=request_id,
+            reference=reference,
         )
         source = task["state"]
         _check_execution_record(task)
@@ -1813,8 +2013,14 @@ class TaskWriter:
             target_state = CardState(target)
             card_transition(role, source, target_state)
         except (ValueError, CardTransitionForbidden):
-            raise TaskError("transition_forbidden", _forbidden_move_message(role, source, target), 3) from None
-        if role == "steward" and (target == "blocked" or (source, target) == ("blocked", "done")) and not reason.strip():
+            raise TaskError(
+                "transition_forbidden", _forbidden_move_message(role, source, target), 3
+            ) from None
+        if (
+            role == "steward"
+            and (target == "blocked" or (source, target) == ("blocked", "done"))
+            and not reason.strip()
+        ):
             raise TaskError("validation", "this steward transition requires a non-empty reason", 2)
         # The observer's disposition of a Blocked card is the other half of the worker's
         # classification: the card says why it stopped, and the move out says what was done
@@ -1824,32 +2030,62 @@ class TaskWriter:
             raise TaskError("validation", "moving a card out of Blocked requires a non-empty reason", 2)
         self._check_decision(task, source, target, decision, role)
         result = self._transition_card(
-            reference=reference, target=target_state, role=role, actor=actor,
-            reason=_transition_reason(reason, target), request_id=request_id,
+            reference=reference,
+            target=target_state,
+            role=role,
+            actor=actor,
+            reason=_transition_reason(reason, target),
+            request_id=request_id,
             finish=self._transition_cleanup(
-                task, source=source, target=target, reason=reason, role=role,
+                task,
+                source=source,
+                target=target,
+                reason=reason,
+                role=role,
             ),
         )
         return {
-            "action": "moved", "task": self.reader.show(reference),
-            "event_id": result.event.event_id, "replayed": False,
+            "action": "moved",
+            "task": self.reader.show(reference),
+            "event_id": result.event.event_id,
+            "replayed": False,
         }
 
     def _legacy_move(
-        self, *, role: str, actor: str, reference: str, target: str, reason: str, decision: str,
-        sprint_override: bool, sprint_override_reason: str, request_id: str, task: dict[str, Any],
+        self,
+        *,
+        role: str,
+        actor: str,
+        reference: str,
+        target: str,
+        reason: str,
+        decision: str,
+        sprint_override: bool,
+        sprint_override_reason: str,
+        request_id: str,
+        task: dict[str, Any],
     ) -> dict[str, Any]:
         """Replay a move this request id already recorded as a released generic operation."""
         override_payload = self._guard_sprint_write(
-            role=role, actor=actor, project=task["project"], card_sprint=str(task.get("sprint") or ""),
-            linked_sprint=None, sprint_override=sprint_override,
-            sprint_override_reason=sprint_override_reason.strip(), request_id=request_id,
+            role=role,
+            actor=actor,
+            project=task["project"],
+            card_sprint=str(task.get("sprint") or ""),
+            linked_sprint=None,
+            sprint_override=sprint_override,
+            sprint_override_reason=sprint_override_reason.strip(),
+            request_id=request_id,
             reference=reference,
         )
         return self._write(
-            "moved", role, actor, reference, request_id,
+            "moved",
+            role,
+            actor,
+            reference,
+            request_id,
             lambda task: {
-                "from": task["state"], "to": target,
+                "from": task["state"],
+                "to": target,
                 "reason_sha256": _digest(reason) if reason else None,
                 **({"decision": decision} if decision else {}),
                 **override_payload,
@@ -1877,7 +2113,13 @@ class TaskWriter:
         return record
 
     def _transition_cleanup(
-        self, task: dict[str, Any], *, source: str, target: str, reason: str, role: str,
+        self,
+        task: dict[str, Any],
+        *,
+        source: str,
+        target: str,
+        reason: str,
+        role: str,
     ) -> Callable[[Any], None]:
         """The board work a migrated Card state edge still owes once its column effect lands.
 
@@ -1885,11 +2127,14 @@ class TaskWriter:
         event commits, and an incomplete one leaves the exact pending typed record that both a retry and
         :meth:`reconcile` know how to finish.
         """
+
         def finish(_entity: Any) -> None:
             self._reset_transition_metadata(task, source=source, target=target)
             if reason.strip():
                 self.client.call(
-                    "createComment", task_id=_task_number(task), user_id=0,
+                    "createComment",
+                    task_id=_task_number(task),
+                    user_id=0,
                     content=f"[{role}]\n{reason}",
                 )
 
@@ -1904,7 +2149,9 @@ class TaskWriter:
         if target in {"ready", "done"}:
             self.client.call("saveTaskMetadata", task_id=_task_number(task), values=_READY_RESET_METADATA)
         elif source == "validate":
-            self.client.call("saveTaskMetadata", task_id=_task_number(task), values={"resolved_review_head": ""})
+            self.client.call(
+                "saveTaskMetadata", task_id=_task_number(task), values={"resolved_review_head": ""}
+            )
 
     def _transition_card(
         self,
@@ -1925,14 +2172,21 @@ class TaskWriter:
         try:
             return self.board_host.transition(
                 TransitionRequest(
-                    EntityKind.CARD, reference, target, Actor(role, actor), reason,
-                    RelatedRefs(()), request_id,
+                    EntityKind.CARD,
+                    reference,
+                    target,
+                    Actor(role, actor),
+                    reason,
+                    RelatedRefs(()),
+                    request_id,
                 ),
                 finish=finish,
             )
         except BoardEventPending:
             raise TaskError(
-                "audit_pending", "backend write committed; audit repair is required", 4,
+                "audit_pending",
+                "backend write committed; audit repair is required",
+                4,
             ) from None
         except ValueError as exc:
             raise TaskError("validation", str(exc), 2) from None
@@ -1950,7 +2204,12 @@ class TaskWriter:
             raise TaskError("validation", str(exc), 2) from None
 
     def _check_decision(
-        self, task: dict[str, Any], source: str, target: str, decision: str, role: str,
+        self,
+        task: dict[str, Any],
+        source: str,
+        target: str,
+        decision: str,
+        role: str,
     ) -> None:
         """A card leaves Assessment on a decision somebody recorded, or it does not leave.
 
@@ -1974,8 +2233,10 @@ class TaskWriter:
                 3,
             )
         if (
-            source == "assessment" and target in _DECIDED_TARGETS
-            and not decision and role in _DECISION_BOUND_ROLES
+            source == "assessment"
+            and target in _DECIDED_TARGETS
+            and not decision
+            and role in _DECISION_BOUND_ROLES
         ):
             raise TaskError(
                 "decision_required",
@@ -2031,11 +2292,21 @@ class TaskWriter:
             raise TaskError("validation", "edit requires a new title, description, head or review head", 2)
         current = self.reader.show(reference)
         override_payload = self._guard_sprint_write(
-            role=role, actor=actor, project=current["project"], card_sprint=str(current.get("sprint") or ""),
-            linked_sprint=None, sprint_override=sprint_override,
-            sprint_override_reason=sprint_override_reason.strip(), request_id=request_id, reference=reference,
+            role=role,
+            actor=actor,
+            project=current["project"],
+            card_sprint=str(current.get("sprint") or ""),
+            linked_sprint=None,
+            sprint_override=sprint_override,
+            sprint_override_reason=sprint_override_reason.strip(),
+            request_id=request_id,
+            reference=reference,
         )
-        if role in {"observer", "dispatcher"} and not override_payload and not self._sprint_holds_project(current["project"]):
+        if (
+            role in {"observer", "dispatcher"}
+            and not override_payload
+            and not self._sprint_holds_project(current["project"])
+        ):
             raise TaskError("role_forbidden", "role is not permitted for this operation", 3)
         payload = {
             "title_sha256": _digest(title.strip()) if title is not None else None,
@@ -2045,7 +2316,9 @@ class TaskWriter:
             "head": head.strip() or None if head is not None else None,
             "head_was": current["routing"]["head_override"] if head is not None else None,
             "review_head": review_head.strip() or None if review_head is not None else None,
-            "review_head_was": current["routing"]["review_head_override"] if review_head is not None else None,
+            "review_head_was": current["routing"]["review_head_override"]
+            if review_head is not None
+            else None,
             **override_payload,
         }
 
@@ -2111,8 +2384,12 @@ class TaskWriter:
         the observer of, and an unprovable caller is refused rather than admitted.
         """
         self._guard_observer_identity(
-            role=role, actor=actor, project=project, card_sprint=card_sprint,
-            request_id=request_id, reference=reference,
+            role=role,
+            actor=actor,
+            project=project,
+            card_sprint=card_sprint,
+            request_id=request_id,
+            reference=reference,
         )
         from secretary.sprints import (
             SprintReader,
@@ -2129,7 +2406,12 @@ class TaskWriter:
                 self._deny_sprint_write(
                     code="sprint_guard_unavailable",
                     message=f"cannot verify open sprints for project {project}; write it through the sprint entity",
-                    role=role, actor=actor, project=project, sprint="", request_id=request_id, reference=reference,
+                    role=role,
+                    actor=actor,
+                    project=project,
+                    sprint="",
+                    request_id=request_id,
+                    reference=reference,
                 )
                 raise AssertionError("unreachable") from exc
 
@@ -2139,12 +2421,21 @@ class TaskWriter:
         held: list[str] = []
         for sprint_ref in sorted(refs):
             try:
-                sprint = linked_sprint if linked_sprint and sprint_ref == linked_sprint.get("ref") else SprintReader(self.client).show(sprint_ref, include_cards=False)
+                sprint = (
+                    linked_sprint
+                    if linked_sprint and sprint_ref == linked_sprint.get("ref")
+                    else SprintReader(self.client).show(sprint_ref, include_cards=False)
+                )
             except TaskError as exc:
                 self._deny_sprint_write(
                     code="sprint_guard_unavailable",
                     message=f"cannot verify sprint {sprint_ref} reserving project {project}; write it through the sprint entity",
-                    role=role, actor=actor, project=project, sprint=sprint_ref, request_id=request_id, reference=reference,
+                    role=role,
+                    actor=actor,
+                    project=project,
+                    sprint=sprint_ref,
+                    request_id=request_id,
+                    reference=reference,
                 )
                 raise AssertionError("unreachable") from exc
             update_active_sprint_projects(self.data_dir, sprint)
@@ -2156,13 +2447,24 @@ class TaskWriter:
         if role == "po" and sprint_override:
             if not sprint_override_reason:
                 self._deny_sprint_write(
-                    code="validation", message="sprint override requires a non-empty reason",
-                    role=role, actor=actor, project=project, sprint=sprint_ref,
-                    request_id=request_id, reference=reference, exit_code=2,
+                    code="validation",
+                    message="sprint override requires a non-empty reason",
+                    role=role,
+                    actor=actor,
+                    project=project,
+                    sprint=sprint_ref,
+                    request_id=request_id,
+                    reference=reference,
+                    exit_code=2,
                 )
             self._grant_sprint_override(
-                role=role, actor=actor, project=project, sprint=sprint_ref,
-                reason=sprint_override_reason, request_id=request_id, reference=reference,
+                role=role,
+                actor=actor,
+                project=project,
+                sprint=sprint_ref,
+                reason=sprint_override_reason,
+                request_id=request_id,
+                reference=reference,
             )
             return {"sprint_override_reason": sprint_override_reason}
         # The caller was already proven to be this card's sprint's observer above; what is left is
@@ -2174,13 +2476,24 @@ class TaskWriter:
         self._deny_sprint_write(
             code="sprint_write_forbidden",
             message=f"project {project} is reserved by open sprint {sprint_ref}; write it through the sprint entity {sprint_ref}",
-            role=role, actor=actor, project=project, sprint=sprint_ref, request_id=request_id, reference=reference,
+            role=role,
+            actor=actor,
+            project=project,
+            sprint=sprint_ref,
+            request_id=request_id,
+            reference=reference,
         )
         raise AssertionError("unreachable")
 
     def _guard_observer_identity(
-        self, *, role: str, actor: str, project: str, card_sprint: str,
-        request_id: str, reference: str,
+        self,
+        *,
+        role: str,
+        actor: str,
+        project: str,
+        card_sprint: str,
+        request_id: str,
+        reference: str,
     ) -> None:
         """Refuse a write of role `observer` that is not about the caller's own sprint.
 
@@ -2200,22 +2513,37 @@ class TaskWriter:
             self._deny_sprint_write(
                 code="observer_identity_unbound",
                 message="this observer names no sprint, so its writes cannot be authenticated; "
-                        "it has to be launched by the dispatcher for one sprint",
-                role=role, actor=actor, project=project, sprint="", request_id=request_id,
+                "it has to be launched by the dispatcher for one sprint",
+                role=role,
+                actor=actor,
+                project=project,
+                sprint="",
+                request_id=request_id,
                 reference=reference,
             )
         if card_sprint and card_sprint != declared:
             self._deny_sprint_write(
                 code="observer_sprint_mismatch",
                 message=f"this observer belongs to sprint {declared} and the card is linked to "
-                        f"{card_sprint}; write it as that sprint's observer",
-                role=role, actor=actor, project=project, sprint=declared,
-                request_id=request_id, reference=reference,
+                f"{card_sprint}; write it as that sprint's observer",
+                role=role,
+                actor=actor,
+                project=project,
+                sprint=declared,
+                request_id=request_id,
+                reference=reference,
             )
 
     def _grant_sprint_override(
-        self, *, role: str, actor: str, project: str, sprint: str, reason: str,
-        request_id: str, reference: str,
+        self,
+        *,
+        role: str,
+        actor: str,
+        project: str,
+        sprint: str,
+        reason: str,
+        request_id: str,
+        reference: str,
     ) -> None:
         """Record the granted single-writer override before the operation it authorizes runs.
 
@@ -2228,13 +2556,20 @@ class TaskWriter:
         if self.audit.committed_event(override_request_id) is not None:
             return
         event = {
-            "event_id": "evt_" + uuid.uuid4().hex, "schema_version": 1, "occurred_at": _now(),
-            "actor": {"role": role, "id": actor}, "kind": "sprint_guard_override",
-            "outcome": "granted", "task_id": "", "ref": reference,
+            "event_id": "evt_" + uuid.uuid4().hex,
+            "schema_version": 1,
+            "occurred_at": _now(),
+            "actor": {"role": role, "id": actor},
+            "kind": "sprint_guard_override",
+            "outcome": "granted",
+            "task_id": "",
+            "ref": reference,
             "backend": {"kind": "kanboard", "task_id": None, "revision": "not_written"},
             "request_id": override_request_id,
             "payload": {
-                "project": project, "sprint": sprint, "sprint_override_reason": reason,
+                "project": project,
+                "sprint": sprint,
+                "sprint_override_reason": reason,
                 "operation_request_id": request_id,
             },
         }
@@ -2243,23 +2578,43 @@ class TaskWriter:
             self.audit.append(override_request_id, event)
         except OSError:
             raise TaskError(
-                "audit_pending", "sprint override was granted but audit repair is required", 4,
+                "audit_pending",
+                "sprint override was granted but audit repair is required",
+                4,
             ) from None
 
     def _deny_sprint_write(
-        self, *, code: str, message: str, role: str, actor: str, project: str,
-        sprint: str, request_id: str, reference: str, exit_code: int = 3,
+        self,
+        *,
+        code: str,
+        message: str,
+        role: str,
+        actor: str,
+        project: str,
+        sprint: str,
+        request_id: str,
+        reference: str,
+        exit_code: int = 3,
     ) -> None:
         denial_request_id = _sprint_guard_denial_request_id(request_id)
         event = self.audit.committed_event(denial_request_id)
         if event is None:
             event = {
-                "event_id": "evt_" + uuid.uuid4().hex, "schema_version": 1, "occurred_at": _now(),
-                "actor": {"role": role, "id": actor}, "kind": "sprint_guard_denied", "outcome": "denied",
-                "task_id": "", "ref": reference, "backend": {"kind": "kanboard", "task_id": None, "revision": "not_written"},
+                "event_id": "evt_" + uuid.uuid4().hex,
+                "schema_version": 1,
+                "occurred_at": _now(),
+                "actor": {"role": role, "id": actor},
+                "kind": "sprint_guard_denied",
+                "outcome": "denied",
+                "task_id": "",
+                "ref": reference,
+                "backend": {"kind": "kanboard", "task_id": None, "revision": "not_written"},
                 "request_id": denial_request_id,
                 "payload": {
-                    "code": code, "message": message, "project": project, "sprint": sprint,
+                    "code": code,
+                    "message": message,
+                    "project": project,
+                    "sprint": sprint,
                     "operation_request_id": request_id,
                 },
             }
@@ -2267,7 +2622,9 @@ class TaskWriter:
             try:
                 self.audit.append(denial_request_id, event)
             except OSError:
-                raise TaskError("audit_pending", "sprint write was denied but audit repair is required", 4) from None
+                raise TaskError(
+                    "audit_pending", "sprint write was denied but audit repair is required", 4
+                ) from None
         payload = event.get("payload") if isinstance(event, dict) else {}
         raise TaskError(str(payload.get("code") or code), str(payload.get("message") or message), exit_code)
 
@@ -2333,9 +2690,7 @@ class TaskWriter:
 
         return restore_comment(self, reference, body, occurrence, request_id)
 
-    def _move_raw(
-        self, task: dict[str, Any], target: str, *, position: int = 1, swimlane_id: int
-    ) -> None:
+    def _move_raw(self, task: dict[str, Any], target: str, *, position: int = 1, swimlane_id: int) -> None:
         board_id, columns, _ = self.reader._board()
         column_id = _target_column_id(columns, target)
         if column_id is None:
@@ -2382,15 +2737,26 @@ class TaskWriter:
         if require_assessment:
             current = self.reader.show(reference)
             if current["state"] != "assessment":
-                raise TaskError("transition_forbidden", "a decision is only recorded on a card in Assessment", 3)
+                raise TaskError(
+                    "transition_forbidden", "a decision is only recorded on a card in Assessment", 3
+                )
         try:
-            result = self.board_host.marker_comment(MarkerComment(
-                reference, event_kind, Actor(role, actor), reason, data,
-                request_id=request_id, fresh_admission=fresh_admission,
-            ))
+            result = self.board_host.marker_comment(
+                MarkerComment(
+                    reference,
+                    event_kind,
+                    Actor(role, actor),
+                    reason,
+                    data,
+                    request_id=request_id,
+                    fresh_admission=fresh_admission,
+                )
+            )
         except BoardEventPending:
             raise TaskError(
-                "audit_pending", "backend write committed; audit repair is required", 4,
+                "audit_pending",
+                "backend write committed; audit repair is required",
+                4,
             ) from None
         except ValueError as exc:
             message = str(exc)
@@ -2428,8 +2794,15 @@ class TaskWriter:
             try:
                 event_id = self.audit.append(request_id, committed)
             except OSError:
-                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-            return {"action": kind, "task": self.reader.show(reference), "event_id": event_id, "replayed": True}
+                raise TaskError(
+                    "audit_pending", "backend write committed; audit repair is required", 4
+                ) from None
+            return {
+                "action": kind,
+                "task": self.reader.show(reference),
+                "event_id": event_id,
+                "replayed": True,
+            }
         pending = self.audit.pending_event(request_id)
         if pending is not None:
             self.audit.require_claim(pending, kind=kind, reference=reference, identity=identity)
@@ -2441,11 +2814,30 @@ class TaskWriter:
                 self.audit.stage(request_id, pending)
                 event_id = self.audit.append(request_id, pending)
             except (TaskError, OSError, KeyError, TypeError):
-                raise TaskError("audit_pending", "backend write committed; audit repair is required", 4) from None
-            return {"action": kind, "task": self.reader.show(reference), "event_id": event_id, "replayed": True}
+                raise TaskError(
+                    "audit_pending", "backend write committed; audit repair is required", 4
+                ) from None
+            return {
+                "action": kind,
+                "task": self.reader.show(reference),
+                "event_id": event_id,
+                "replayed": True,
+            }
         task = self.reader.show(reference)
         event_payload = payload(task) if callable(payload) else payload
-        event = {"event_id": "evt_" + uuid.uuid4().hex, "schema_version": 1, "occurred_at": _now(), "actor": {"role": role, "id": actor}, "kind": kind, "outcome": "success", "task_id": task["id"], "ref": reference, "backend": {"kind": "kanboard", "task_id": _task_number(task), "revision": _revision(task)}, "request_id": request_id, "payload": event_payload}
+        event = {
+            "event_id": "evt_" + uuid.uuid4().hex,
+            "schema_version": 1,
+            "occurred_at": _now(),
+            "actor": {"role": role, "id": actor},
+            "kind": kind,
+            "outcome": "success",
+            "task_id": task["id"],
+            "ref": reference,
+            "backend": {"kind": "kanboard", "task_id": _task_number(task), "revision": _revision(task)},
+            "request_id": request_id,
+            "payload": event_payload,
+        }
         self.audit.stage(request_id, event)
         try:
             mutation(task)
@@ -2511,7 +2903,8 @@ class TaskWriter:
                         SprintWriter(self.client, data_dir=self.data_dir).record_budget(
                             role=str(event.get("actor", {}).get("role") or ""),
                             actor=str(event.get("actor", {}).get("id") or ""),
-                            reference=str(event["ref"]), event_type=str(payload.get("event_type") or ""),
+                            reference=str(event["ref"]),
+                            event_type=str(payload.get("event_type") or ""),
                             request_id=str(event["request_id"]),
                             source_event_id=str(payload.get("source_event_id") or ""),
                         )
@@ -2523,7 +2916,11 @@ class TaskWriter:
                     repaired += 1
                     continue
                 self._finish_pending_cleanup(event, None)
-                task = self._pending_create_task(event) if event.get("kind") == "created" else self.reader.show(str(event["ref"]))
+                task = (
+                    self._pending_create_task(event)
+                    if event.get("kind") == "created"
+                    else self.reader.show(str(event["ref"]))
+                )
                 event["task_id"] = task["id"]
                 event["backend"]["revision"] = _revision(task)
                 self.audit.stage(str(event["request_id"]), event)
@@ -2547,7 +2944,9 @@ class TaskWriter:
         card = self.reader.show(ref)
         if card["state"] == target:
             self._reset_transition_metadata(
-                card, source=str(transition.get("source") or ""), target=target,
+                card,
+                source=str(transition.get("source") or ""),
+                target=target,
             )
             if target in {"ready", "done"}:
                 normalized = self.reader.show(ref)
@@ -2623,7 +3022,9 @@ class TaskWriter:
             raise TaskError("backend_error", "pending claim no longer matches task claim", 1)
         if not _matches_optional(payload.get("resolved_head"), task["routing"]["resolved_worker_head"]):
             raise TaskError("backend_error", "pending claim worker head remains incomplete", 1)
-        if not _matches_optional(payload.get("resolved_review_head"), task["routing"]["resolved_review_head"]):
+        if not _matches_optional(
+            payload.get("resolved_review_head"), task["routing"]["resolved_review_head"]
+        ):
             raise TaskError("backend_error", "pending claim review head remains incomplete", 1)
         if task["state"] == "ready":
             self._move_raw(task, "in_progress", swimlane_id=self._current_swimlane_id(task))
@@ -2634,7 +3035,10 @@ class TaskWriter:
             raise TaskError("backend_error", "pending claim cleanup remains incomplete", 1)
 
     def _finish_pending_decided(
-        self, event: dict[str, Any], payload: dict[str, Any], retry_payload: dict[str, Any] | None,
+        self,
+        event: dict[str, Any],
+        payload: dict[str, Any],
+        retry_payload: dict[str, Any] | None,
     ) -> None:
         """Commit a decision only after its canonical marker and exact body exist on the card."""
         ref = str(event.get("ref") or "")
@@ -2663,7 +3067,10 @@ class TaskWriter:
         if task.get("state") != "assessment":
             raise TaskError("backend_error", "pending decision no longer matches Assessment", 1)
         self.client.call(
-            "createComment", task_id=_task_number(task), user_id=0, content=f"[{marker}]\n{body}",
+            "createComment",
+            task_id=_task_number(task),
+            user_id=0,
+            content=f"[{marker}]\n{body}",
         )
         verified = self.reader.show(ref)
         if not any(matches(comment) for comment in verified.get("comments", [])):
@@ -2722,11 +3129,7 @@ class TaskWriter:
             if task_id is None:
                 raise TaskError("backend_error", "Kanboard returned an invalid task", 1)
             raw_comments = self.client.call("getAllComments", task_id=task_id) or []
-            comments = [
-                _normalize_comment(comment)
-                for comment in raw_comments
-                if isinstance(comment, dict)
-            ]
+            comments = [_normalize_comment(comment) for comment in raw_comments if isinstance(comment, dict)]
             if not _has_archive_reason({"comments": comments}, expected_digest):
                 raise TaskError("backend_error", "pending archive reason comment is missing", 1)
         raw = project_card_by_reference(self.client, board_id, ref)
@@ -2827,7 +3230,9 @@ def _text(value: Any) -> str:
 
 
 def _target_column_id(columns: dict[int, str], target: str) -> int | None:
-    return next((identifier for identifier, name in columns.items() if _STATE_BY_COLUMN.get(name) == target), None)
+    return next(
+        (identifier for identifier, name in columns.items() if _STATE_BY_COLUMN.get(name) == target), None
+    )
 
 
 def _has_archive_reason(task: dict[str, Any], reason_sha256: str) -> bool:
@@ -2849,10 +3254,7 @@ def _has_archive_reason(task: dict[str, Any], reason_sha256: str) -> bool:
 
 
 def _dispatcher_record_has_live_work(record: dict[str, Any]) -> bool:
-    return any(
-        _text(record.get(key))
-        for key in ("workspace", "handle", "review_handle", "review_leaf")
-    )
+    return any(_text(record.get(key)) for key in ("workspace", "handle", "review_handle", "review_leaf"))
 
 
 def _task_number(task: dict[str, Any]) -> int:

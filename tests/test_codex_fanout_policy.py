@@ -101,9 +101,7 @@ class CodexFanoutPolicyTests(unittest.TestCase):
         run = self._run()
         profile_claim = {"codex_provider_schema_attestation": self._schema(run)}
 
-        attested = codex_preflight.attest_codex_fanout(
-            profile_claim, run, binary_path=str(self.binary)
-        )
+        attested = codex_preflight.attest_codex_fanout(profile_claim, run, binary_path=str(self.binary))
 
         self.assertEqual(attested.fanout_policy["state"], codex_preflight.FANOUT_SCHEMA_ABSENT)
         self.assertFalse(attested.fanout_clean)
@@ -117,7 +115,7 @@ class CodexFanoutPolicyTests(unittest.TestCase):
 
         self.assertEqual(prepared.fanout_policy["state"], codex_preflight.FANOUT_SCHEMA_ABSENT)
         self.assertEqual(prepared.fanout_policy["provider_source"]["state"], "unbound")
-        self.assertIn("trust_level = \"trusted\"", config.read_text(encoding="utf-8"))
+        self.assertIn('trust_level = "trusted"', config.read_text(encoding="utf-8"))
 
     def test_schema_attestation_enriches_telemetry_without_changing_trust_preflight(self) -> None:
         run = self._run()
@@ -136,7 +134,7 @@ class CodexFanoutPolicyTests(unittest.TestCase):
         self.assertEqual(allowed.fanout_policy["provider_source"]["state"], "unbound")
         self.assertEqual(allowed.fanout_policy["provider_source"]["kind"], "codex_session_event_jsonl")
         trusted = config.read_text(encoding="utf-8")
-        self.assertIn("trust_level = \"trusted\"", trusted)
+        self.assertIn('trust_level = "trusted"', trusted)
 
     def test_a_non_spawning_model_response_is_not_schema_evidence(self) -> None:
         written: list[HeadRun] = []
@@ -156,16 +154,22 @@ class CodexFanoutPolicyTests(unittest.TestCase):
     def test_every_declared_provider_event_type_is_durable_before_its_result(self) -> None:
         cases = {
             codex_preflight.EVENT_COLLABORATION_CALL: {
-                "type": "collaboration_call", "parent_thread_id": "parent", "tool": "spawn_agent"
+                "type": "collaboration_call",
+                "parent_thread_id": "parent",
+                "tool": "spawn_agent",
             },
             codex_preflight.EVENT_CHILD_THREAD_EDGE: {
-                "type": "child_thread_edge", "parent_thread_id": "parent", "child_thread_id": "child"
+                "type": "child_thread_edge",
+                "parent_thread_id": "parent",
+                "child_thread_id": "child",
             },
             codex_preflight.EVENT_UNKNOWN_THREAD_EDGE: {
-                "type": "unknown_thread_edge", "parent_thread_id": "parent"
+                "type": "unknown_thread_edge",
+                "parent_thread_id": "parent",
             },
             codex_preflight.EVENT_UNPARSEABLE_PROVIDER_EVENT: {
-                "type": "unparseable_provider_event", "parent_thread_id": "parent"
+                "type": "unparseable_provider_event",
+                "parent_thread_id": "parent",
             },
         }
         for expected, raw in cases.items():
@@ -183,13 +187,15 @@ class CodexFanoutPolicyTests(unittest.TestCase):
         )
         spawned = recorder.record(
             {"type": "child_thread_edge", "parent_thread_id": "parent", "child_thread_id": "child"},
-            source_sequence=3, source_location="stream:3",
+            source_sequence=3,
+            source_location="stream:3",
         )
         unknown = codex_preflight.CodexProviderEventRecorder(
             self._allowed_run(), lambda _run: None, expected_parent_thread_id="parent"
         ).record(
             {"type": "child_thread_edge", "parent_thread_id": "wrong", "child_thread_id": "child"},
-            source_sequence=4, source_location="stream:4",
+            source_sequence=4,
+            source_location="stream:4",
         )
         self.assertEqual(spawned.terminal_state, codex_preflight.FANOUT_TERMINAL_VIOLATION)
         self.assertEqual(unknown.terminal_state, codex_preflight.FANOUT_TERMINAL_UNKNOWN)
@@ -218,9 +224,9 @@ class CodexFanoutPolicyTests(unittest.TestCase):
     def test_head_run_round_trip_and_historical_record_remain_non_clean(self) -> None:
         allowed = self._allowed_run()
         restored = HeadRun.from_json(allowed.to_json())
-        historical = HeadRun.from_json({
-            key: value for key, value in allowed.to_json().items() if key != "fanout_policy"
-        })
+        historical = HeadRun.from_json(
+            {key: value for key, value in allowed.to_json().items() if key != "fanout_policy"}
+        )
         malformed = HeadRun.from_json({**allowed.to_json(), "fanout_policy": {"version": 1}})
 
         self.assertTrue(restored.fanout_clean)
@@ -230,13 +236,15 @@ class CodexFanoutPolicyTests(unittest.TestCase):
 
     def test_malformed_provider_source_remains_unknown_on_recovery(self) -> None:
         allowed = self._allowed_run()
-        malformed = HeadRun.from_json({
-            **allowed.to_json(),
-            "fanout_policy": {
-                **allowed.fanout_policy,
-                "provider_source": {"version": 1, "state": "bound"},
-            },
-        })
+        malformed = HeadRun.from_json(
+            {
+                **allowed.to_json(),
+                "fanout_policy": {
+                    **allowed.fanout_policy,
+                    "provider_source": {"version": 1, "state": "bound"},
+                },
+            }
+        )
 
         self.assertFalse(malformed.fanout_clean)
         self.assertEqual(malformed.fanout_policy_state, "unknown")
@@ -245,24 +253,26 @@ class CodexFanoutPolicyTests(unittest.TestCase):
 
     def test_bound_source_without_a_full_range_anchor_remains_unknown_on_recovery(self) -> None:
         allowed = self._allowed_run()
-        incomplete = HeadRun.from_json({
-            **allowed.to_json(),
-            "fanout_policy": {
-                **allowed.fanout_policy,
-                "provider_source_required": True,
-                "provider_source": {
-                    "version": 1,
-                    "kind": "codex_session_event_jsonl",
-                    "state": "bound",
-                    "root": "/sessions",
-                    "path": "/sessions/run.jsonl",
-                    "session_id": "session-1",
-                    "parent_thread_id": "parent-1",
-                    "cursor": {"line": 2, "digest": "0" * 64},
-                    "bound_at": "2026-08-13T00:00:00Z",
+        incomplete = HeadRun.from_json(
+            {
+                **allowed.to_json(),
+                "fanout_policy": {
+                    **allowed.fanout_policy,
+                    "provider_source_required": True,
+                    "provider_source": {
+                        "version": 1,
+                        "kind": "codex_session_event_jsonl",
+                        "state": "bound",
+                        "root": "/sessions",
+                        "path": "/sessions/run.jsonl",
+                        "session_id": "session-1",
+                        "parent_thread_id": "parent-1",
+                        "cursor": {"line": 2, "digest": "0" * 64},
+                        "bound_at": "2026-08-13T00:00:00Z",
+                    },
                 },
-            },
-        })
+            }
+        )
 
         self.assertFalse(incomplete.fanout_clean)
         self.assertEqual(incomplete.fanout_policy_state, "unknown")
@@ -271,10 +281,12 @@ class CodexFanoutPolicyTests(unittest.TestCase):
 
     def test_missing_required_provider_source_remains_an_ingress_fenced_unknown(self) -> None:
         allowed = self._allowed_run()
-        missing = HeadRun.from_json({
-            **allowed.to_json(),
-            "fanout_policy": {**allowed.fanout_policy, "provider_source_required": True},
-        })
+        missing = HeadRun.from_json(
+            {
+                **allowed.to_json(),
+                "fanout_policy": {**allowed.fanout_policy, "provider_source_required": True},
+            }
+        )
 
         self.assertFalse(missing.fanout_clean)
         self.assertEqual(missing.fanout_policy_state, "unknown")
@@ -295,19 +307,22 @@ class CodexFanoutPolicyTests(unittest.TestCase):
                     run=run,
                     role=role,
                     preflight=lambda candidate: codex_preflight.preflight_codex_launch(
-                        {}, candidate.workspace, candidate, binary_path=str(self.binary),
+                        {},
+                        candidate.workspace,
+                        candidate,
+                        binary_path=str(self.binary),
                         config=self.root / f"{role}.toml",
                     ),
                 )
                 self.assertEqual(host.opened, 1)
-                self.assertEqual(
-                    launched.run.fanout_policy["state"], codex_preflight.FANOUT_SCHEMA_ABSENT
-                )
+                self.assertEqual(launched.run.fanout_policy["state"], codex_preflight.FANOUT_SCHEMA_ABSENT)
 
     def test_dispatcher_worker_reviewer_and_observer_allow_without_schema(self) -> None:
         class Catalog:
             profile = {
-                "adapter": "codex", "model": "gpt-5.6-terra", "codex_mode": "tui",
+                "adapter": "codex",
+                "model": "gpt-5.6-terra",
+                "codex_mode": "tui",
                 "codex_home": str(self.root / "codex-home"),
             }
 
@@ -326,8 +341,13 @@ class CodexFanoutPolicyTests(unittest.TestCase):
         for role in ("worker", "reviewer"):
             with self.subTest(role=role):
                 launched = runtime._launch(
-                    str(self.workspace), f"{role} title", "codex-extra", "TASK.md",
-                    role=role, env_name="SECRETARY_UNSET_COMMAND", task=task,
+                    str(self.workspace),
+                    f"{role} title",
+                    "codex-extra",
+                    "TASK.md",
+                    role=role,
+                    env_name="SECRETARY_UNSET_COMMAND",
+                    task=task,
                 )
                 self.assertEqual(launched.head_run["fanout_policy"]["state"], "schema_absent")
         observer = runtime.prepare_observer({"ref": "sprint:1428"}, "codex-extra", prompt="# Sprint")

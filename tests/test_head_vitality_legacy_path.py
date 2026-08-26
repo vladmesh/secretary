@@ -45,16 +45,12 @@ class LegacyPathTests(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmpdir.cleanup)
         self.data_dir = Path(self.tmpdir.name) / "data"
-        env = mock.patch.dict(
-            os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies")}
-        )
+        env = mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir / "bodies")})
         env.start()
         self.addCleanup(env.stop)
         self.board = FakeKanboard()
         self.reader = TaskReader(self.board)
-        self.writer = TaskWriter(
-            self.board, data_dir=self.data_dir, workspace=self.data_dir
-        )
+        self.writer = TaskWriter(self.board, data_dir=self.data_dir, workspace=self.data_dir)
         self.catalog = FakeCatalog(instance_dir=self.data_dir)
         self.host = FakeHost(self.data_dir / "workspaces", self.catalog)
         self.sprints = FakeSprints()
@@ -76,45 +72,48 @@ class LegacyPathTests(unittest.TestCase):
         self.board.metadata[12]["sprint_ref"] = "sprint:1031"
         bind_observer(self, "sprint:1031")
         self.sprints.rows["sprint:1031"] = {
-            "ref": "sprint:1031", "status": "open",
+            "ref": "sprint:1031",
+            "status": "open",
             "observer": {"kind": "head", "profile": "claude-observer"},
         }
-        row = next(
-            (r for r in self.board.sprints if r["reference"] == "sprint:1031"), None
-        )
+        row = next((r for r in self.board.sprints if r["reference"] == "sprint:1031"), None)
         if row is None:
             self.board.add_sprint(
-                "sprint:1031", status="open", sprint_reservations='["secretary"]',
+                "sprint:1031",
+                status="open",
+                sprint_reservations='["secretary"]',
             )
         else:
             self.board.metadata[int(row["id"])]["sprint_status"] = "open"
 
     def start_dispatcher(self) -> None:
         self.observed_sprint()
-        self.runtime.production_state.save({
-            "version": 1, "mode": "production", "phase": "production",
-            "owner": self.runtime.owner, "records": {},
-        })
+        self.runtime.production_state.save(
+            {
+                "version": 1,
+                "mode": "production",
+                "phase": "production",
+                "owner": self.runtime.owner,
+                "records": {},
+            }
+        )
 
     def tick(self) -> dict:
         from secretary._fsutil import file_lock
+
         runtime = self.runtime
         with file_lock(runtime.production_state.tick_lock):
             payload = runtime.production_state.load()
             records = runtime.production_state.records(payload)
             attempt_id = ensure_attempt(payload, CARD_REF, runtime.owner, runtime.owner)
-            outcome = runtime._tick_task(
-                self.reader.show(CARD_REF), records, payload, attempt_id
-            )
+            outcome = runtime._tick_task(self.reader.show(CARD_REF), records, payload, attempt_id)
             runtime.production_state.put_records(payload, records)
             payload["last_tick_at"] = now_rfc3339()
             runtime.production_state.save(payload)
         return outcome
 
     def record_of(self) -> DispatcherRecord:
-        return self.runtime.production_state.records(
-            self.runtime.production_state.load()
-        )[CARD_REF]
+        return self.runtime.production_state.records(self.runtime.production_state.load())[CARD_REF]
 
     def report_done(self) -> None:
         record = self.runtime.production_state.load()["records"][CARD_REF]
@@ -122,8 +121,12 @@ class LegacyPathTests(unittest.TestCase):
         line = next(l for l in document.splitlines() if "--kind done" in l)
         request_id = line.split("--request-id ", 1)[1].split()[0]
         self.writer.report(
-            role="worker", actor="worker", reference=CARD_REF,
-            kind="done", body="done", request_id=request_id,
+            role="worker",
+            actor="worker",
+            reference=CARD_REF,
+            kind="done",
+            body="done",
+            request_id=request_id,
         )
 
     def run_worker_to_validate_and_review(self) -> None:
@@ -161,14 +164,22 @@ class IssueB5195041LegacyIdlePathTests(LegacyPathTests):
         self.assertEqual(self.tick()["to"], "validate")
         self.assertEqual(self.tick()["action"], "review-started")
         self.writer.verdict(
-            role="reviewer", actor="reviewer", reference=CARD_REF, kind="red",
-            body="fix it", request_id="review-red",
+            role="reviewer",
+            actor="reviewer",
+            reference=CARD_REF,
+            kind="red",
+            body="fix it",
+            request_id="review-red",
         )
         parked = self.tick()
         self.assertEqual(parked["to"], "assessment")
         self.writer.decide(
-            role="observer", actor="observer", reference=CARD_REF, kind="rework",
-            body="decided", request_id="decision-rework",
+            role="observer",
+            actor="observer",
+            reference=CARD_REF,
+            kind="rework",
+            body="decided",
+            request_id="decision-rework",
         )
         resumed = self.tick()
         self.assertEqual(resumed["action"], "review-red-reused-worker")
@@ -193,8 +204,11 @@ class IssueB5195041LegacyIdlePathTests(LegacyPathTests):
             return self.tick()
 
         status = {
-            "known": True, "live": True, "reason": "live",
-            "last_activity": time.time(), "pid_confirmed": True,
+            "known": True,
+            "live": True,
+            "reason": "live",
+            "last_activity": time.time(),
+            "pid_confirmed": True,
             "idle": True,
         }
         self.host.worker_status_result = dict(status)
@@ -214,7 +228,8 @@ class IssueB5195041LegacyIdlePathTests(LegacyPathTests):
         record = self.record_of()
         self.assertIsNotNone(record.worker_vitality_episode)
         self.assertIn(
-            "advancing@provider_cursor", " ".join(record.worker_vitality_episode.basis),
+            "advancing@provider_cursor",
+            " ".join(record.worker_vitality_episode.basis),
             "the working head's own evidence says its transcript advances",
         )
 
@@ -242,7 +257,8 @@ class Issue3e7abdf9LegacyBusyReadinessTests(LegacyPathTests):
         self.host.fail_prepare_error = HeadPaneNotReady(
             "the head pane was busy and never took its launch prompt: "
             "orca terminal wait --for tui-idle timeout",
-            readiness="busy", pane="term-head",
+            readiness="busy",
+            pane="term-head",
         )
 
         deferred = self.tick()
@@ -309,10 +325,19 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
 
         # Meanwhile the worker's process is discovered suspended (its /proc state is `T`).
         stopped_status = {
-            "known": True, "live": True, "reason": "live",
-            "last_activity": time.time(), "pid_confirmed": True, "idle": False,
-            "pid_status": {"known": True, "alive": True, "match": True,
-                           "state": "live-match", "stopped": True},
+            "known": True,
+            "live": True,
+            "reason": "live",
+            "last_activity": time.time(),
+            "pid_confirmed": True,
+            "idle": False,
+            "pid_status": {
+                "known": True,
+                "alive": True,
+                "match": True,
+                "state": "live-match",
+                "stopped": True,
+            },
         }
         self.host.worker_status_result = dict(stopped_status)
 
@@ -359,10 +384,19 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
         self.tick()  # first pending stamp
 
         stopped_status = {
-            "known": True, "live": True, "reason": "live",
-            "last_activity": time.time(), "pid_confirmed": True, "idle": False,
-            "pid_status": {"known": True, "alive": True, "match": True,
-                           "state": "live-match", "stopped": True},
+            "known": True,
+            "live": True,
+            "reason": "live",
+            "last_activity": time.time(),
+            "pid_confirmed": True,
+            "idle": False,
+            "pid_status": {
+                "known": True,
+                "alive": True,
+                "match": True,
+                "state": "live-match",
+                "stopped": True,
+            },
         }
         self.host.worker_status_result = dict(stopped_status)
 
@@ -385,7 +419,8 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
         self.assertEqual(record.worker_respawns, 0)
         # The six-hour gate ceiling was nowhere near elapsed; only the policy spoke.
         self.assertLess(
-            time.time() - record.gate_pending_since, 600,
+            time.time() - record.gate_pending_since,
+            600,
             "the escalation must come from the response window, not the gate clock",
         )
         self.assertNotIn("restart_worker", self.host.calls)
@@ -411,10 +446,12 @@ class IssueFe04011bLegacyGatePendingTests(LegacyPathTests):
         self.tick()  # first pending stamp (no scripted worker status yet: plain wait)
 
         refusal_status = {
-            "known": True, "live": True, "reason": "live",
-            "last_activity": time.time(), "pid_confirmed": False,
-            "provider_progress": {"state": "unavailable",
-                                  "reason": "terminal_split_source_not_found"},
+            "known": True,
+            "live": True,
+            "reason": "live",
+            "last_activity": time.time(),
+            "pid_confirmed": False,
+            "provider_progress": {"state": "unavailable", "reason": "terminal_split_source_not_found"},
         }
         self.host.worker_status_result = dict(refusal_status)
         for _ in range(DEFAULT_DETERMINISTIC_REFUSAL_LIMIT):

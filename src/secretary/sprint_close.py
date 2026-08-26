@@ -73,7 +73,9 @@ def parse_close_decisions(text: str) -> dict[str, list[dict[str, str]]]:
     unknown = sorted(key for key in document if key not in _SECTIONS)
     if unknown:
         raise TaskError(
-            "validation", "sprint close decisions file has unknown section(s): " + ", ".join(map(str, unknown)), 2,
+            "validation",
+            "sprint close decisions file has unknown section(s): " + ", ".join(map(str, unknown)),
+            2,
         )
     return {
         "issues": _entries(document.get("issues"), "issue", ISSUE_VERDICTS),
@@ -111,7 +113,9 @@ def _entries(raw: Any, kind: str, verdicts: tuple[str, ...]) -> list[dict[str, s
         extra = sorted(key for key in entry if key not in _ENTRY_FIELDS)
         if extra:
             raise TaskError(
-                "validation", f"{kind} decision has unknown field(s): " + ", ".join(map(str, extra)), 2,
+                "validation",
+                f"{kind} decision has unknown field(s): " + ", ".join(map(str, extra)),
+                2,
             )
         reference = entry.get("ref")
         if not isinstance(reference, str) or not reference.strip():
@@ -130,7 +134,9 @@ def _entries(raw: Any, kind: str, verdicts: tuple[str, ...]) -> list[dict[str, s
         reason = entry.get("reason")
         if not isinstance(reason, str) or not reason.strip():
             raise TaskError(
-                "validation", f"{kind} decision for {reference} requires a non-empty reason", 2,
+                "validation",
+                f"{kind} decision for {reference} requires a non-empty reason",
+                2,
             )
         confirmation, facts = CONFIRMATIONS[kind]
         actual = entry.get("actual")
@@ -190,7 +196,9 @@ def plan_close_decisions(
             + ", ".join(unknown_issues),
             2,
         )
-    missing_issues = [reference for reference in declared if reference not in {entry["ref"] for entry in issues}]
+    missing_issues = [
+        reference for reference in declared if reference not in {entry["ref"] for entry in issues}
+    ]
     if missing_issues:
         raise TaskError(
             "validation",
@@ -223,7 +231,8 @@ def plan_close_decisions(
 
 
 def _check_issue_decisions_match_reality(
-    issues: list[dict[str, str]], issue_states: dict[str, dict[str, Any]],
+    issues: list[dict[str, str]],
+    issue_states: dict[str, dict[str, Any]],
 ) -> None:
     """Refuse a decision the issue itself contradicts, before the transaction is opened."""
     conflicting: list[str] = []
@@ -244,8 +253,7 @@ def _check_issue_decisions_match_reality(
             if entry["actual"] != carried:
                 raise TaskError(
                     "validation",
-                    f"issue {entry['ref']} is closed as {carried or 'unknown'}, not as "
-                    f"{entry['actual']}",
+                    f"issue {entry['ref']} is closed as {carried or 'unknown'}, not as {entry['actual']}",
                     2,
                 )
         elif closed:
@@ -260,7 +268,8 @@ def _check_issue_decisions_match_reality(
 
 
 def _check_card_confirmations_match_reality(
-    cards: list[dict[str, str]], states: dict[str, str],
+    cards: list[dict[str, str]],
+    states: dict[str, str],
 ) -> None:
     """A card confirmation names the state the card actually carries, or it is refused."""
     for entry in cards:

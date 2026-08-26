@@ -17,6 +17,7 @@ three operations hand each other. Four things about it are decisions rather than
   * **it is JSON, so it survives the dispatcher.** The process that spawned a head is not
     necessarily the process that stops it.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -124,13 +125,10 @@ class HeadRun:
             raise HeadRunError("a head run has an identity of its own")
         if self.lifecycle not in LIFECYCLE:
             raise HeadRunError(
-                f"a head run's lifecycle is one of {', '.join(LIFECYCLE)}, "
-                f"not {self.lifecycle!r}"
+                f"a head run's lifecycle is one of {', '.join(LIFECYCLE)}, not {self.lifecycle!r}"
             )
         if self.lifecycle in (FINISHING, EXITED) and self.stopped_by is None:
-            raise HeadRunError(
-                f"a head run in {self.lifecycle} carries the initiator that ended it"
-            )
+            raise HeadRunError(f"a head run in {self.lifecycle} carries the initiator that ended it")
         # Frozen records still need a canonical value on their first serialisation.  Without this
         # a fresh historical-shaped run and the same run read back from JSON compare differently,
         # inviting callers to treat the latter normalisation as a lifecycle change.
@@ -218,9 +216,7 @@ class HeadRun:
     def exited(self) -> HeadRun:
         """The stop was confirmed. Only reachable from `finishing`, which carries the initiator."""
         if self.lifecycle != FINISHING:
-            raise HeadRunError(
-                f"a head exits from {FINISHING}, and this run is in {self.lifecycle}"
-            )
+            raise HeadRunError(f"a head exits from {FINISHING}, and this run is in {self.lifecycle}")
         return replace(self, lifecycle=EXITED)
 
     def to_json(self) -> dict[str, Any]:
@@ -252,9 +248,7 @@ class HeadRun:
             raise HeadRunError("a head run is read from an object, and this is not one")
         return cls(
             run_id=str(payload.get("run_id") or ""),
-            spec=_spec_from_json(
-                payload.get("spec"), str(payload.get("head_runtime") or "")
-            ),
+            spec=_spec_from_json(payload.get("spec"), str(payload.get("head_runtime") or "")),
             workspace=str(payload.get("workspace") or ""),
             task_ref=TaskRef.from_json(payload.get("task_ref")),
             role=str(payload.get("role") or ""),
@@ -347,8 +341,11 @@ def _fanout_policy_json(payload: Any) -> dict[str, Any]:
     result["events"] = [dict(event) for event in events]
     for event in result["events"]:
         if (
-            str(event.get("type") or "") not in {
-                "collaboration_call", "child_thread_edge", "unknown_thread_edge",
+            str(event.get("type") or "")
+            not in {
+                "collaboration_call",
+                "child_thread_edge",
+                "unknown_thread_edge",
                 "unparseable_provider_event",
             }
             or not str(event.get("raw_event_digest") or "")
@@ -438,9 +435,7 @@ def _digest(value: Any) -> bool:
     return len(text) == 64 and all(character in "0123456789abcdef" for character in text)
 
 
-def _unknown_fanout_policy(
-    reason: str, *, provider_source_required: bool = False
-) -> dict[str, Any]:
+def _unknown_fanout_policy(reason: str, *, provider_source_required: bool = False) -> dict[str, Any]:
     result = {
         "version": FANOUT_POLICY_VERSION,
         "state": FANOUT_UNKNOWN,

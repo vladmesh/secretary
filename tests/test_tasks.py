@@ -88,17 +88,28 @@ class FakeKanboard(BatchedCalls):
         self.calls: list[tuple[str, dict]] = []
         self.tasks = [
             {
-                "id": "12", "reference": "secretary-468", "title": "Readonly task protocol",
-                "description": "", "column_id": "2", "position": "3", "swimlane_id": "4",
-                "date_creation": "1720000000", "date_modification": "1720000010",
+                "id": "12",
+                "reference": "secretary-468",
+                "title": "Readonly task protocol",
+                "description": "",
+                "column_id": "2",
+                "position": "3",
+                "swimlane_id": "4",
+                "date_creation": "1720000000",
+                "date_modification": "1720000010",
             },
             {"id": 13, "reference": "old-1", "title": "Old", "column_id": 1, "position": "bad"},
         ]
         self.metadata = {
             12: {
-                "project": "secretary", "task_type": "code", "claim": "codex-terra",
-                "head": "codex-terra", "retry_same": "2", "retry_switch": "bad",
-                "retry_heads": "codex-terra,claude-opus", "steward_report": "1",
+                "project": "secretary",
+                "task_type": "code",
+                "claim": "codex-terra",
+                "head": "codex-terra",
+                "retry_same": "2",
+                "retry_switch": "bad",
+                "retry_heads": "codex-terra,claude-opus",
+                "steward_report": "1",
                 "codex_launch_mode": "tui",
             },
             13: {},
@@ -117,7 +128,8 @@ class FakeKanboard(BatchedCalls):
             if status not in {0, 1}:
                 return []
             return [
-                task for task in self.tasks
+                task
+                for task in self.tasks
                 if (int(task.get("is_active", task.get("status", 1)) or 0) != 0) == (status == 1)
             ]
         if method == "getTaskByReference":
@@ -165,12 +177,22 @@ class TaskReaderTests(unittest.TestCase):
 
     def test_show_prefers_live_duplicate_reference(self) -> None:
         archived = {
-            "id": 14, "reference": "secretary-784", "title": "Archived", "column_id": 6,
-            "position": 1, "swimlane_id": 4, "is_active": 0,
+            "id": 14,
+            "reference": "secretary-784",
+            "title": "Archived",
+            "column_id": 6,
+            "position": 1,
+            "swimlane_id": 4,
+            "is_active": 0,
         }
         live = {
-            "id": 15, "reference": "secretary-784", "title": "Live", "column_id": 2,
-            "position": 1, "swimlane_id": 4, "is_active": 1,
+            "id": 15,
+            "reference": "secretary-784",
+            "title": "Live",
+            "column_id": 2,
+            "position": 1,
+            "swimlane_id": 4,
+            "is_active": 1,
         }
         self.client.tasks.extend([archived, live])
         self.client.metadata.update({14: {}, 15: {"project": "secretary"}})
@@ -201,7 +223,20 @@ class TaskReaderTests(unittest.TestCase):
 class TaskCliTests(unittest.TestCase):
     def test_backend_error_never_echoes_credentials(self) -> None:
         output, errors = io.StringIO(), io.StringIO()
-        with mock.patch.dict("os.environ", {"KANBOARD_URL": "https://board.invalid/token", "KANBOARD_API_USER": "user", "KANBOARD_API_TOKEN": "super-secret"}, clear=False), mock.patch("secretary.tasks.urllib.request.urlopen", side_effect=OSError("super-secret")), contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+        with (
+            mock.patch.dict(
+                "os.environ",
+                {
+                    "KANBOARD_URL": "https://board.invalid/token",
+                    "KANBOARD_API_USER": "user",
+                    "KANBOARD_API_TOKEN": "super-secret",
+                },
+                clear=False,
+            ),
+            mock.patch("secretary.tasks.urllib.request.urlopen", side_effect=OSError("super-secret")),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
             code = main(["task", "list"])
 
         self.assertEqual(code, 1)
@@ -216,7 +251,11 @@ class TaskCliTests(unittest.TestCase):
         # installation and reads the production board.
         output, errors = io.StringIO(), io.StringIO()
         with tempfile.TemporaryDirectory() as tmp:
-            with mock.patch.dict("os.environ", {}, clear=True), contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            with (
+                mock.patch.dict("os.environ", {}, clear=True),
+                contextlib.redirect_stdout(output),
+                contextlib.redirect_stderr(errors),
+            ):
                 code = main(["task", "show", "--ref", "secretary-468", "--instance", tmp])
 
         self.assertEqual(code, 1)
@@ -256,29 +295,47 @@ class TaskCliTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "heads").mkdir()
-            (root / "instance.yaml").write_text("version: 1\nname: test\ndata_dir: /tmp/data\n", encoding="utf-8")
+            (root / "instance.yaml").write_text(
+                "version: 1\nname: test\ndata_dir: /tmp/data\n", encoding="utf-8"
+            )
             (root / "heads" / "heads.yaml").write_text(
-                "\n".join([
-                    "profiles:",
-                    "  claude-opus:",
-                    "    adapter: claude",
-                    "role_defaults:",
-                    "  new_card: claude-opus",
-                ]),
+                "\n".join(
+                    [
+                        "profiles:",
+                        "  claude-opus:",
+                        "    adapter: claude",
+                        "role_defaults:",
+                        "  new_card: claude-opus",
+                    ]
+                ),
                 encoding="utf-8",
             )
             output, errors = io.StringIO(), io.StringIO()
-            with mock.patch.dict("os.environ", {}, clear=True), contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
-                code = main([
-                    "task", "create",
-                    "--role", "po",
-                    "--instance", str(root),
-                    "--project", "secretary",
-                    "--type", "code",
-                    "--title", "T",
-                    "--head", "claude-opus",
-                    "--codex-mode", "tui",
-                ])
+            with (
+                mock.patch.dict("os.environ", {}, clear=True),
+                contextlib.redirect_stdout(output),
+                contextlib.redirect_stderr(errors),
+            ):
+                code = main(
+                    [
+                        "task",
+                        "create",
+                        "--role",
+                        "po",
+                        "--instance",
+                        str(root),
+                        "--project",
+                        "secretary",
+                        "--type",
+                        "code",
+                        "--title",
+                        "T",
+                        "--head",
+                        "claude-opus",
+                        "--codex-mode",
+                        "tui",
+                    ]
+                )
 
         self.assertEqual(code, 2)
         self.assertEqual(output.getvalue(), "")
@@ -295,17 +352,29 @@ class TaskCliTests(unittest.TestCase):
         all would fail with a different error.
         """
         output, errors = io.StringIO(), io.StringIO()
-        with mock.patch.dict("os.environ", {}, clear=True), \
-             contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
-            code = main([
-                "task", "create",
-                "--role", "po",
-                "--instance", "/nonexistent-instance",
-                "--project", "secretary",
-                "--type", "code",
-                "--title", "T",
-                "--codex-mode", "exec",
-            ])
+        with (
+            mock.patch.dict("os.environ", {}, clear=True),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = main(
+                [
+                    "task",
+                    "create",
+                    "--role",
+                    "po",
+                    "--instance",
+                    "/nonexistent-instance",
+                    "--project",
+                    "secretary",
+                    "--type",
+                    "code",
+                    "--title",
+                    "T",
+                    "--codex-mode",
+                    "exec",
+                ]
+            )
 
         self.assertEqual(code, 2)
         self.assertEqual(output.getvalue(), "")
@@ -322,16 +391,27 @@ class TaskCliTests(unittest.TestCase):
             client = WriteKanboard()
             client.metadata[12]["claim"] = ""
             output, errors = io.StringIO(), io.StringIO()
-            with mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=client), \
-                 contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
-                code = main([
-                    "task", "archive",
-                    "--role", "po",
-                    "--ref", "secretary-468",
-                    "--data-dir", str(data_dir),
-                    "--reason-file", str(reason),
-                    "--request-id", "archive-cli",
-                ])
+            with (
+                mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=client),
+                contextlib.redirect_stdout(output),
+                contextlib.redirect_stderr(errors),
+            ):
+                code = main(
+                    [
+                        "task",
+                        "archive",
+                        "--role",
+                        "po",
+                        "--ref",
+                        "secretary-468",
+                        "--data-dir",
+                        str(data_dir),
+                        "--reason-file",
+                        str(reason),
+                        "--request-id",
+                        "archive-cli",
+                    ]
+                )
 
         self.assertEqual(code, 0)
         self.assertEqual(errors.getvalue(), "")
@@ -346,7 +426,8 @@ class KanboardClientTests(unittest.TestCase):
         response.__enter__.return_value = response
         with mock.patch("secretary.tasks.urllib.request.urlopen", return_value=response):
             client = KanboardClient(
-                BoardTransport("https://board.invalid", "user", "super-secret"), Path.cwd(),
+                BoardTransport("https://board.invalid", "user", "super-secret"),
+                Path.cwd(),
             )
             with self.assertRaises(TaskError) as raised:
                 client.call("getAllTasks", project_id=1)
@@ -369,9 +450,7 @@ class WriteKanboard(FakeKanboard):
 
     def __init__(self) -> None:
         super().__init__()
-        self.comments: dict[int, list[dict[str, object]]] = {
-            int(task["id"]): [] for task in self.tasks
-        }
+        self.comments: dict[int, list[dict[str, object]]] = {int(task["id"]): [] for task in self.tasks}
         # Свимлейны борда, а не константа ответа: их создают по требованию, как живой Kanboard.
         self.swimlanes: list[dict[str, object]] = [{"id": 4, "name": "Secretary", "position": 1}]
         self._unavailable_next_call = False
@@ -395,10 +474,13 @@ class WriteKanboard(FakeKanboard):
             return identifier
         if method == "getColumns":
             return [
-                {"id": 1, "title": "Issues"}, {"id": 2, "title": "Ready"},
-                {"id": 3, "title": "In progress"}, {"id": 4, "title": "Validate"},
+                {"id": 1, "title": "Issues"},
+                {"id": 2, "title": "Ready"},
+                {"id": 3, "title": "In progress"},
+                {"id": 4, "title": "Validate"},
                 {"id": 7, "title": "Assessment"},
-                {"id": 5, "title": "Blocked"}, {"id": 6, "title": "Done"},
+                {"id": 5, "title": "Blocked"},
+                {"id": 6, "title": "Done"},
             ]
         if method == "createComment":
             self.calls.append((method, params))
@@ -415,17 +497,19 @@ class WriteKanboard(FakeKanboard):
         if method == "createTask":
             self.calls.append((method, params))
             task_id = max(int(task["id"]) for task in self.tasks) + 1
-            self.tasks.append({
-                "id": task_id,
-                "reference": params.get("reference", ""),
-                "title": params["title"],
-                "description": params.get("description", ""),
-                "column_id": params["column_id"],
-                "position": len(self.tasks) + 1,
-                "swimlane_id": params.get("swimlane_id") or 0,
-                "date_creation": "1720000200",
-                "date_modification": "1720000200",
-            })
+            self.tasks.append(
+                {
+                    "id": task_id,
+                    "reference": params.get("reference", ""),
+                    "title": params["title"],
+                    "description": params.get("description", ""),
+                    "column_id": params["column_id"],
+                    "position": len(self.tasks) + 1,
+                    "swimlane_id": params.get("swimlane_id") or 0,
+                    "date_creation": "1720000200",
+                    "date_modification": "1720000200",
+                }
+            )
             self.metadata[task_id] = {}
             self.comments[task_id] = []
             return task_id
@@ -450,7 +534,8 @@ class WriteKanboard(FakeKanboard):
             self.tasks.remove(task)
             siblings = sorted(
                 (
-                    candidate for candidate in self.tasks
+                    candidate
+                    for candidate in self.tasks
                     if candidate["column_id"] == column_id and candidate["swimlane_id"] == swimlane_id
                 ),
                 key=lambda candidate: int(candidate.get("position") or 0),
@@ -519,10 +604,17 @@ class TaskWriterTests(unittest.TestCase):
         self.client.tasks[1]["swimlane_id"] = 0
         for index, declaration in enumerate(TRANSITIONS[EntityKind.CARD].values()):
             self.client.tasks[0]["column_id"] = columns[declaration.source.value]
-            result = host.transition(TransitionRequest(
-                EntityKind.CARD, "secretary-468", declaration.target, Actor("po", "operator"),
-                "registry contract", RelatedRefs(("sprint:1031",)), f"host-edge-{index}",
-            ))
+            result = host.transition(
+                TransitionRequest(
+                    EntityKind.CARD,
+                    "secretary-468",
+                    declaration.target,
+                    Actor("po", "operator"),
+                    "registry contract",
+                    RelatedRefs(("sprint:1031",)),
+                    f"host-edge-{index}",
+                )
+            )
             self.assertEqual(result.entity.state, declaration.target)
             self.assertEqual(result.event.kind, declaration.event_kind)
             self.assertEqual(
@@ -536,7 +628,10 @@ class TaskWriterTests(unittest.TestCase):
         with mock.patch.object(self.writer.audit, "append", side_effect=OSError("disk full")):
             with self.assertRaisesRegex(TaskError, "audit repair") as raised:
                 self.writer.claim(
-                    role="dispatcher", actor="d", reference="secretary-468", worker="worker-a",
+                    role="dispatcher",
+                    actor="d",
+                    reference="secretary-468",
+                    worker="worker-a",
                     request_id="typed-pending-claim",
                 )
         self.assertEqual(raised.exception.code, "audit_pending")
@@ -564,8 +659,12 @@ class TaskWriterTests(unittest.TestCase):
 
         with mock.patch.object(self.client, "call", call):
             self.writer.move(
-                role="dispatcher", actor="d", reference="secretary-468", target="validate",
-                reason="submit", request_id="staged-once",
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                target="validate",
+                reason="submit",
+                request_id="staged-once",
             )
 
         self.assertEqual(len(staged), 1)
@@ -573,7 +672,8 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(staged[0]["transition"], {"source": "in_progress", "target": "validate"})
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
         self.assertEqual(
-            self.writer.audit.committed_event("staged-once")["event_id"], staged[0]["event_id"],
+            self.writer.audit.committed_event("staged-once")["event_id"],
+            staged[0]["event_id"],
         )
 
     def _pending_typed_move(self, request_id: str, target: str = "ready") -> int:
@@ -582,8 +682,12 @@ class TaskWriterTests(unittest.TestCase):
         with mock.patch.object(self.writer.audit, "append", side_effect=OSError("disk full")):
             with self.assertRaisesRegex(TaskError, "audit repair"):
                 self.writer.move(
-                    role="dispatcher", actor="d", reference="secretary-468", target=target,
-                    reason="", request_id=request_id,
+                    role="dispatcher",
+                    actor="d",
+                    reference="secretary-468",
+                    target=target,
+                    reason="",
+                    request_id=request_id,
                 )
         self.assertEqual(self.writer.reader.show("secretary-468")["state"], target)
         # The cleanup this edge owes the board runs inside the transition, so it is already
@@ -641,8 +745,12 @@ class TaskWriterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TaskError, "audit repair") as raised:
             self.writer.move(
-                role="dispatcher", actor="d", reference="secretary-468", target="validate",
-                reason="submit", request_id="lost-read-back",
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                target="validate",
+                reason="submit",
+                request_id="lost-read-back",
             )
 
         self.assertEqual(raised.exception.code, "audit_pending")
@@ -661,7 +769,8 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(self.writer.audit.status(), {"ok": True, "pending": 0})
         self.assertEqual(moves, len([call for call in self.client.calls if call[0] == "moveTaskPosition"]))
         self.assertEqual(
-            self.writer.audit.committed_event("lost-read-back")["event_id"], pending["event_id"],
+            self.writer.audit.committed_event("lost-read-back")["event_id"],
+            pending["event_id"],
         )
 
     def test_a_state_race_after_the_move_keeps_the_typed_pending_record(self) -> None:
@@ -675,8 +784,12 @@ class TaskWriterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TaskError, "audit repair") as raised:
             self.writer.move(
-                role="dispatcher", actor="d", reference="secretary-468", target="validate",
-                reason="submit", request_id="raced-read-back",
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                target="validate",
+                reason="submit",
+                request_id="raced-read-back",
             )
 
         self.assertEqual(raised.exception.code, "audit_pending")
@@ -698,7 +811,11 @@ class TaskWriterTests(unittest.TestCase):
     def test_a_refused_card_edge_stages_no_typed_event(self) -> None:
         with self.assertRaisesRegex(TaskError, "may not move") as raised:
             self.writer.move(
-                role="po", actor="p", reference="secretary-468", target="ready", reason="",
+                role="po",
+                actor="p",
+                reference="secretary-468",
+                target="ready",
+                reason="",
                 request_id="refused-edge",
             )
 
@@ -711,12 +828,17 @@ class TaskWriterTests(unittest.TestCase):
     def _released_move_record(self, request_id: str, **payload: object) -> dict[str, object]:
         """One generic `moved` record shaped exactly as the released writer wrote it."""
         return {
-            "event_id": f"evt_{request_id}", "schema_version": 1,
+            "event_id": f"evt_{request_id}",
+            "schema_version": 1,
             "occurred_at": "2026-08-01T00:00:00+00:00",
-            "actor": {"role": "dispatcher", "id": "d"}, "kind": "moved", "outcome": "success",
-            "task_id": self.writer.reader.show("secretary-468")["id"], "ref": "secretary-468",
+            "actor": {"role": "dispatcher", "id": "d"},
+            "kind": "moved",
+            "outcome": "success",
+            "task_id": self.writer.reader.show("secretary-468")["id"],
+            "ref": "secretary-468",
             "backend": {"kind": "kanboard", "task_id": 12, "revision": "r1"},
-            "request_id": request_id, "payload": dict(payload),
+            "request_id": request_id,
+            "payload": dict(payload),
         }
 
     def test_generic_pending_contender_cannot_be_published_as_a_typed_transition(self) -> None:
@@ -728,8 +850,12 @@ class TaskWriterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TaskError, "another operation or payload") as raised:
             self.writer.move(
-                role="dispatcher", actor="d", reference="secretary-468", target="validate",
-                reason="submit", request_id="contended-transition",
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                target="validate",
+                reason="submit",
+                request_id="contended-transition",
             )
 
         self.assertEqual(raised.exception.code, "validation")
@@ -746,15 +872,23 @@ class TaskWriterTests(unittest.TestCase):
         """
         self.client.tasks[0]["column_id"] = 4
         released = self._released_move_record(
-            "released-move", **{"from": "in_progress", "to": "validate",
-                                "reason_sha256": hashlib.sha256(b"submit").hexdigest()},
+            "released-move",
+            **{
+                "from": "in_progress",
+                "to": "validate",
+                "reason_sha256": hashlib.sha256(b"submit").hexdigest(),
+            },
         )
         self.writer.audit.stage("released-move", released)
         self.writer.audit.append("released-move", released)
 
         replayed = self.writer.move(
-            role="dispatcher", actor="d", reference="secretary-468", target="validate",
-            reason="submit", request_id="released-move",
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            target="validate",
+            reason="submit",
+            request_id="released-move",
         )
 
         self.assertEqual(replayed["action"], "moved")
@@ -769,12 +903,17 @@ class TaskWriterTests(unittest.TestCase):
         """The other released half: a pending generic move still completes its Ready reset."""
         self.client.tasks[0]["column_id"] = 2
         released = self._released_move_record(
-            "released-pending-move", **{"from": "in_progress", "to": "ready", "reason_sha256": None},
+            "released-pending-move",
+            **{"from": "in_progress", "to": "ready", "reason_sha256": None},
         )
         self.writer.audit.stage("released-pending-move", released)
 
         replayed = self.writer.move(
-            role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="",
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            target="ready",
+            reason="",
             request_id="released-pending-move",
         )
 
@@ -787,8 +926,12 @@ class TaskWriterTests(unittest.TestCase):
             self.assertNotIn("record_type", json.loads(events.readline()))
 
     def test_retry_does_not_repeat_backend_write_or_event(self) -> None:
-        result = self.writer.comment(role="worker", actor="w", reference="secretary-468", body="safe", request_id="same")
-        second = self.writer.comment(role="worker", actor="w", reference="secretary-468", body="safe", request_id="same")
+        result = self.writer.comment(
+            role="worker", actor="w", reference="secretary-468", body="safe", request_id="same"
+        )
+        second = self.writer.comment(
+            role="worker", actor="w", reference="secretary-468", body="safe", request_id="same"
+        )
         self.assertEqual(result["event_id"], second["event_id"])
         self.assertEqual(len([call for call in self.client.calls if call[0] == "createComment"]), 1)
         audit = TaskAudit(self.tmpdir.name)
@@ -800,9 +943,7 @@ class TaskWriterTests(unittest.TestCase):
         secret = "opaque-token-value"
         url = "https://board.example.invalid/jsonrpc.php"
         runtime.parent.mkdir()
-        runtime.write_text(
-            f"KANBOARD_URL={url}\nKANBOARD_API_TOKEN={secret}\n", encoding="utf-8"
-        )
+        runtime.write_text(f"KANBOARD_URL={url}\nKANBOARD_API_TOKEN={secret}\n", encoding="utf-8")
         with mock.patch.dict(os.environ, {"SECRETARY_RUNTIME_ENV_FILE": str(runtime)}):
             self.writer.comment(
                 role="worker",
@@ -824,16 +965,28 @@ class TaskWriterTests(unittest.TestCase):
         ordinary = "build-attestation-" + "a" * 64
 
         self.writer.comment(
-            role="worker", actor="w", reference="secretary-468", body=ordinary,
+            role="worker",
+            actor="w",
+            reference="secretary-468",
+            body=ordinary,
             request_id="ordinary-long-comment",
         )
         self.writer.report(
-            role="worker", actor="w", reference="secretary-468", kind="blocked",
-            classification="external_fact", body=ordinary, request_id="ordinary-long-report",
+            role="worker",
+            actor="w",
+            reference="secretary-468",
+            kind="blocked",
+            classification="external_fact",
+            body=ordinary,
+            request_id="ordinary-long-report",
         )
         self.writer.verdict(
-            role="reviewer", actor="r", reference="secretary-468", kind="red",
-            body=ordinary, request_id="ordinary-long-verdict",
+            role="reviewer",
+            actor="r",
+            reference="secretary-468",
+            kind="red",
+            body=ordinary,
+            request_id="ordinary-long-verdict",
         )
 
         comments = [str(call[1]["content"]) for call in self.client.calls if call[0] == "createComment"]
@@ -843,7 +996,10 @@ class TaskWriterTests(unittest.TestCase):
         secret = "custom-catalogued-credential"
         with mock.patch("secretary.secret_store.redaction_values", return_value=(secret,)):
             self.writer.comment(
-                role="worker", actor="w", reference="secretary-468", body=secret,
+                role="worker",
+                actor="w",
+                reference="secretary-468",
+                body=secret,
                 request_id="custom-catalog-scrub",
             )
 
@@ -855,9 +1011,16 @@ class TaskWriterTests(unittest.TestCase):
         ordinary = "restore-proof-" + "a" * 64
 
         result = self.writer.create(
-            role="po", actor="operator", project="secretary", task_type="code",
-            title=ordinary, description=ordinary, target="ready", reference="secretary-restore-long",
-            request_id="restore-long", restoring=True,
+            role="po",
+            actor="operator",
+            project="secretary",
+            task_type="code",
+            title=ordinary,
+            description=ordinary,
+            target="ready",
+            reference="secretary-restore-long",
+            request_id="restore-long",
+            restoring=True,
         )
 
         self.assertEqual(result["task"]["title"], ordinary)
@@ -912,46 +1075,44 @@ class TaskWriterTests(unittest.TestCase):
         self.assertEqual(event["kind"], "edited")
         payload = event["payload"]
         self.assertEqual(payload["description_sha256"], hashlib.sha256(b"revised spec").hexdigest())
-        self.assertEqual(payload["description_sha256_was"], hashlib.sha256(old_description.encode()).hexdigest())
+        self.assertEqual(
+            payload["description_sha256_was"], hashlib.sha256(old_description.encode()).hexdigest()
+        )
         self.assertIsNone(payload["title_sha256"])
         self.assertEqual(payload["head"], "codex-terra")
         self.assertEqual(payload["review_head"], "claude-opus")
 
     def test_edit_retry_does_not_repeat_backend_write(self) -> None:
-        first = self.writer.edit(role="po", actor="operator", reference="secretary-468", description="v2", request_id="same-edit")
-        second = self.writer.edit(role="po", actor="operator", reference="secretary-468", description="v2", request_id="same-edit")
+        first = self.writer.edit(
+            role="po", actor="operator", reference="secretary-468", description="v2", request_id="same-edit"
+        )
+        second = self.writer.edit(
+            role="po", actor="operator", reference="secretary-468", description="v2", request_id="same-edit"
+        )
         self.assertEqual(first["event_id"], second["event_id"])
         self.assertEqual(len([call for call in self.client.calls if call[0] == "updateTask"]), 1)
 
     def test_archive_is_po_only_and_requires_reason(self) -> None:
         with self.assertRaisesRegex(TaskError, "not permitted") as raised:
-            self.writer.archive(
-                role="worker", actor="w", reference="secretary-468", reason="cleanup"
-            )
+            self.writer.archive(role="worker", actor="w", reference="secretary-468", reason="cleanup")
         self.assertEqual(raised.exception.code, "role_forbidden")
         self.assertFalse(any(call[0] == "closeTask" for call in self.client.calls))
 
         with self.assertRaisesRegex(TaskError, "non-empty reason") as raised:
-            self.writer.archive(
-                role="po", actor="operator", reference="secretary-468", reason=" "
-            )
+            self.writer.archive(role="po", actor="operator", reference="secretary-468", reason=" ")
         self.assertEqual(raised.exception.code, "validation")
         self.assertFalse(any(call[0] == "closeTask" for call in self.client.calls))
 
     def test_archive_refuses_live_work_or_active_claim(self) -> None:
         with self.assertRaisesRegex(TaskError, "active claim") as raised:
-            self.writer.archive(
-                role="po", actor="operator", reference="secretary-468", reason="cleanup"
-            )
+            self.writer.archive(role="po", actor="operator", reference="secretary-468", reason="cleanup")
         self.assertEqual(raised.exception.code, "live_work")
         self.assertFalse(any(call[0] == "closeTask" for call in self.client.calls))
 
         self.client.metadata[12]["claim"] = ""
         self.client.tasks[0]["column_id"] = 4
         with self.assertRaisesRegex(TaskError, "live worker or reviewer") as raised:
-            self.writer.archive(
-                role="po", actor="operator", reference="secretary-468", reason="cleanup"
-            )
+            self.writer.archive(role="po", actor="operator", reference="secretary-468", reason="cleanup")
         self.assertEqual(raised.exception.code, "live_work")
         self.assertFalse(any(call[0] == "closeTask" for call in self.client.calls))
 
@@ -1090,18 +1251,20 @@ class TaskWriterTests(unittest.TestCase):
         state_dir = Path(self.tmpdir.name) / "dispatcher"
         state_dir.mkdir()
         (state_dir / "production-state.json").write_text(
-            json.dumps({
-                "version": 1,
-                "phase": "production",
-                "records": {
-                    "secretary-468": {
-                        "worker": "worker-secretary-468",
-                        "workspace": "/home/dev/orca/workspaces/secretary/468-archive",
-                        "handle": "terminal-1",
-                        "review_handle": "review-1",
-                    }
-                },
-            }),
+            json.dumps(
+                {
+                    "version": 1,
+                    "phase": "production",
+                    "records": {
+                        "secretary-468": {
+                            "worker": "worker-secretary-468",
+                            "workspace": "/home/dev/orca/workspaces/secretary/468-archive",
+                            "handle": "terminal-1",
+                            "review_handle": "review-1",
+                        }
+                    },
+                }
+            ),
             encoding="utf-8",
         )
 
@@ -1131,7 +1294,9 @@ class TaskWriterTests(unittest.TestCase):
         self.client.lose_comment_reply = True
         with self.assertRaisesRegex(TaskError, "audit repair") as raised:
             self.writer.restore_comment(
-                reference="secretary-468", body="[report:done]\\nrestored", occurrence=0,
+                reference="secretary-468",
+                body="[report:done]\\nrestored",
+                occurrence=0,
                 request_id="restore-comment-lost-reply",
             )
         self.assertEqual(raised.exception.code, "audit_pending")
@@ -1140,7 +1305,9 @@ class TaskWriterTests(unittest.TestCase):
 
         self.client.lose_comment_reply = False
         self.writer.restore_comment(
-            reference="secretary-468", body="[report:done]\\nrestored", occurrence=0,
+            reference="secretary-468",
+            body="[report:done]\\nrestored",
+            occurrence=0,
             request_id="restore-comment-lost-reply",
         )
 
@@ -1154,12 +1321,16 @@ class TaskWriterTests(unittest.TestCase):
         self.client.lose_comment_reply = True
         with self.assertRaisesRegex(TaskError, "audit repair"):
             self.writer.restore_comment(
-                reference="secretary-468", body="second", occurrence=0,
+                reference="secretary-468",
+                body="second",
+                occurrence=0,
                 request_id="restore-second-lost-reply",
             )
         self.client.lose_comment_reply = False
         self.writer.restore_comment(
-            reference="secretary-468", body="second", occurrence=0,
+            reference="secretary-468",
+            body="second",
+            occurrence=0,
             request_id="restore-second-lost-reply",
         )
         self.assertEqual([comment["comment"] for comment in self.client.comments[12]], ["first", "second"])
@@ -1167,12 +1338,16 @@ class TaskWriterTests(unittest.TestCase):
         self.client.lose_comment_reply = True
         with self.assertRaisesRegex(TaskError, "audit repair"):
             self.writer.restore_comment(
-                reference="secretary-468", body="second", occurrence=1,
+                reference="secretary-468",
+                body="second",
+                occurrence=1,
                 request_id="restore-duplicate-lost-reply",
             )
         self.client.lose_comment_reply = False
         self.writer.restore_comment(
-            reference="secretary-468", body="second", occurrence=1,
+            reference="secretary-468",
+            body="second",
+            occurrence=1,
             request_id="restore-duplicate-lost-reply",
         )
         self.assertEqual(
@@ -1190,7 +1365,9 @@ class TaskWriterTests(unittest.TestCase):
         self.client.tasks[0]["column_id"] = 3
         self.client.fail_comments = True
         with self.assertRaisesRegex(TaskError, "audit repair") as raised:
-            self.writer.move(role="dispatcher", actor="d", reference="secretary-468", target="validate", reason="why")
+            self.writer.move(
+                role="dispatcher", actor="d", reference="secretary-468", target="validate", reason="why"
+            )
         self.assertEqual(raised.exception.code, "audit_pending")
         self.assertEqual(self.client.tasks[0]["column_id"], 4)
         self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
@@ -1226,9 +1403,16 @@ class TaskWriterTests(unittest.TestCase):
         archived = self.client.tasks[0]
         archived.update({"column_id": 3, "position": 1, "is_active": 0})
         live = {
-            "id": 15, "reference": "secretary-468", "title": "Live", "description": "",
-            "column_id": 3, "position": 2, "swimlane_id": 4, "is_active": 1,
-            "date_creation": "1720000000", "date_modification": "1720000000",
+            "id": 15,
+            "reference": "secretary-468",
+            "title": "Live",
+            "description": "",
+            "column_id": 3,
+            "position": 2,
+            "swimlane_id": 4,
+            "is_active": 1,
+            "date_creation": "1720000000",
+            "date_modification": "1720000000",
         }
         self.client.tasks.append(live)
         self.client.metadata[15] = {"project": "secretary", "task_type": "code"}
@@ -1246,8 +1430,13 @@ class TaskWriterTests(unittest.TestCase):
         with open_sprint() as sprint:
             with self.assertRaisesRegex(TaskError, "audit repair"):
                 self.writer.create(
-                    role="observer", actor="observer", project="secretary", task_type="code",
-                    title="Restore", reference="secretary-restore", request_id="restore-create",
+                    role="observer",
+                    actor="observer",
+                    project="secretary",
+                    task_type="code",
+                    title="Restore",
+                    reference="secretary-restore",
+                    request_id="restore-create",
                     sprint=sprint,
                 )
             # A staged event left by the pre-atomic create path has the id but not the ref.
@@ -1260,8 +1449,13 @@ class TaskWriterTests(unittest.TestCase):
             self.client.fail_metadata = False
 
             result = self.writer.create(
-                role="observer", actor="observer", project="secretary", task_type="code",
-                title="Restore", reference="secretary-restore", request_id="restore-create",
+                role="observer",
+                actor="observer",
+                project="secretary",
+                task_type="code",
+                title="Restore",
+                reference="secretary-restore",
+                request_id="restore-create",
                 sprint=sprint,
             )
         self.assertEqual(result["task"]["ref"], "secretary-restore")
@@ -1272,7 +1466,9 @@ class TaskWriterTests(unittest.TestCase):
         self.client.tasks[0]["column_id"] = 3
         self.client.fail_metadata = True
         with self.assertRaisesRegex(TaskError, "audit repair") as raised:
-            self.writer.move(role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="")
+            self.writer.move(
+                role="dispatcher", actor="d", reference="secretary-468", target="ready", reason=""
+            )
         self.assertEqual(raised.exception.code, "audit_pending")
         self.assertEqual(self.client.tasks[0]["column_id"], 2)
         self.assertEqual(self.client.metadata[12]["claim"], "codex-terra")
@@ -1296,7 +1492,11 @@ class TaskWriterTests(unittest.TestCase):
         self.client.fail_metadata = True
         with self.assertRaisesRegex(TaskError, "audit repair"):
             self.writer.move(
-                role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="",
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                target="ready",
+                reason="",
                 request_id="ready-replay",
             )
 
@@ -1305,7 +1505,11 @@ class TaskWriterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TaskError, "audit repair"):
             self.writer.move(
-                role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="",
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                target="ready",
+                reason="",
                 request_id="ready-replay",
             )
         self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
@@ -1313,7 +1517,11 @@ class TaskWriterTests(unittest.TestCase):
 
         self.client.fail_metadata = False
         replayed = self.writer.move(
-            role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="",
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            target="ready",
+            reason="",
             request_id="ready-replay",
         )
         self.assertIs(replayed["replayed"], True)
@@ -1387,21 +1595,50 @@ class TaskWriterTests(unittest.TestCase):
         self.client.tasks[0]["reference"] = "secretary-14"
         self.client.tasks.append(
             {
-                "id": 10, "reference": "secretary-1158", "title": "Archived", "column_id": 6,
-                "position": 1, "swimlane_id": 4, "is_active": 0,
+                "id": 10,
+                "reference": "secretary-1158",
+                "title": "Archived",
+                "column_id": 6,
+                "position": 1,
+                "swimlane_id": 4,
+                "is_active": 0,
             }
         )
-        self.client.tasks.extend([
-            {"id": 9, "reference": "secretary-nope", "title": "Malformed", "column_id": 2, "position": 2, "swimlane_id": 4},
-            {"id": 8, "reference": "other-999", "title": "Other project", "column_id": 2, "position": 3, "swimlane_id": 4},
-        ])
+        self.client.tasks.extend(
+            [
+                {
+                    "id": 9,
+                    "reference": "secretary-nope",
+                    "title": "Malformed",
+                    "column_id": 2,
+                    "position": 2,
+                    "swimlane_id": 4,
+                },
+                {
+                    "id": 8,
+                    "reference": "other-999",
+                    "title": "Other project",
+                    "column_id": 2,
+                    "position": 3,
+                    "swimlane_id": 4,
+                },
+            ]
+        )
         self.client.metadata.update({8: {}, 9: {}, 10: {}})
         self.client.comments.update({8: [], 9: [], 10: []})
 
-        with mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True), open_sprint() as sprint:
+        with (
+            mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True),
+            open_sprint() as sprint,
+        ):
             result = self.writer.create(
-                role="observer", actor="observer", project="secretary", task_type="code",
-                title="Auto reference", request_id="auto-reference", sprint=sprint,
+                role="observer",
+                actor="observer",
+                project="secretary",
+                task_type="code",
+                title="Auto reference",
+                request_id="auto-reference",
+                sprint=sprint,
             )
 
         self.assertEqual(result["task"]["ref"], "secretary-1159")
@@ -1433,17 +1670,28 @@ class TaskWriterTests(unittest.TestCase):
 
         def create(writer: TaskWriter, request_id: str, sprint: str) -> None:
             try:
-                results.append(writer.create(
-                    role="po", actor="operator", project="secretary", task_type="code",
-                    title=request_id, target="ready", request_id=request_id, sprint=sprint,
-                    sprint_override=True, sprint_override_reason="concurrent allocation test",
-                ))
+                results.append(
+                    writer.create(
+                        role="po",
+                        actor="operator",
+                        project="secretary",
+                        task_type="code",
+                        title=request_id,
+                        target="ready",
+                        request_id=request_id,
+                        sprint=sprint,
+                        sprint_override=True,
+                        sprint_override_reason="concurrent allocation test",
+                    )
+                )
             except BaseException as exc:  # Preserve thread failures for the assertion below.
                 failures.append(exc)
 
-        with mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True), \
-             open_sprint() as sprint, \
-             mock.patch.object(self.client, "call", side_effect=paused_first_create):
+        with (
+            mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True),
+            open_sprint() as sprint,
+            mock.patch.object(self.client, "call", side_effect=paused_first_create),
+        ):
             first = threading.Thread(target=create, args=(self.writer, "first-auto-reference", sprint))
             first.start()
             self.assertTrue(first_create_started.wait(2))
@@ -1460,7 +1708,9 @@ class TaskWriterTests(unittest.TestCase):
         self.assertFalse(first.is_alive())
         self.assertFalse(second.is_alive())
         self.assertEqual(failures, [])
-        self.assertEqual(sorted(result["task"]["ref"] for result in results), ["secretary-469", "secretary-470"])
+        self.assertEqual(
+            sorted(result["task"]["ref"] for result in results), ["secretary-469", "secretary-470"]
+        )
 
     def test_auto_reference_enumeration_failure_writes_no_card(self) -> None:
         original_call = self.client.call
@@ -1470,13 +1720,20 @@ class TaskWriterTests(unittest.TestCase):
                 return {"unexpected": "shape"}
             return original_call(method, **params)
 
-        with mock.patch.object(self.client, "call", side_effect=invalid_task_list), \
-             mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True), \
-             open_sprint() as sprint:
+        with (
+            mock.patch.object(self.client, "call", side_effect=invalid_task_list),
+            mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True),
+            open_sprint() as sprint,
+        ):
             with self.assertRaisesRegex(TaskError, "invalid task list") as raised:
                 self.writer.create(
-                    role="observer", actor="observer", project="secretary", task_type="code",
-                    title="No fallback", request_id="auto-reference-failure", sprint=sprint,
+                    role="observer",
+                    actor="observer",
+                    project="secretary",
+                    task_type="code",
+                    title="No fallback",
+                    request_id="auto-reference-failure",
+                    sprint=sprint,
                 )
 
         self.assertEqual(raised.exception.code, "backend_error")
@@ -1486,28 +1743,45 @@ class TaskWriterTests(unittest.TestCase):
         original_call = self.client.call
 
         for reply in (None, False):
-            with self.subTest(reply=reply), \
-                 mock.patch.object(
-                     self.client,
-                     "call",
-                     side_effect=lambda method, **params: reply if method == "getAllTasks" else original_call(method, **params),
-                 ), \
-                 mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True), \
-                 open_sprint() as sprint:
+            with (
+                self.subTest(reply=reply),
+                mock.patch.object(
+                    self.client,
+                    "call",
+                    side_effect=lambda method, **params: (
+                        reply if method == "getAllTasks" else original_call(method, **params)
+                    ),
+                ),
+                mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True),
+                open_sprint() as sprint,
+            ):
                 with self.assertRaisesRegex(TaskError, "invalid task list") as raised:
                     self.writer.create(
-                        role="observer", actor="observer", project="secretary", task_type="code",
-                        title="No fallback", request_id=f"null-reference-{reply}", sprint=sprint,
+                        role="observer",
+                        actor="observer",
+                        project="secretary",
+                        task_type="code",
+                        title="No fallback",
+                        request_id=f"null-reference-{reply}",
+                        sprint=sprint,
                     )
 
             self.assertEqual(raised.exception.code, "backend_error")
             self.assertFalse(any(method == "createTask" for method, _params in self.client.calls))
 
     def test_create_passes_reference_to_atomic_backend_write(self) -> None:
-        with mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True), open_sprint() as sprint:
+        with (
+            mock.patch("secretary.sprints.sprint_guard_index_initialized", return_value=True),
+            open_sprint() as sprint,
+        ):
             result = self.writer.create(
-                role="observer", actor="observer", project="secretary", task_type="code",
-                title="Atomic reference", request_id="atomic-reference", sprint=sprint,
+                role="observer",
+                actor="observer",
+                project="secretary",
+                task_type="code",
+                title="Atomic reference",
+                request_id="atomic-reference",
+                sprint=sprint,
             )
 
         created = [params for method, params in self.client.calls if method == "createTask"]
@@ -1525,11 +1799,19 @@ class TaskWriterTests(unittest.TestCase):
                 raise OSError("lost after create")
             original_stage(request_id, event)  # type: ignore[arg-type]
 
-        with mock.patch.object(self.writer.audit, "stage", side_effect=lose_backend_id_stage), open_sprint() as sprint:
+        with (
+            mock.patch.object(self.writer.audit, "stage", side_effect=lose_backend_id_stage),
+            open_sprint() as sprint,
+        ):
             with self.assertRaisesRegex(TaskError, "audit repair"):
                 self.writer.create(
-                    role="observer", actor="observer", project="secretary", task_type="code",
-                    title="Crash safe", request_id="atomic-create-crash", sprint=sprint,
+                    role="observer",
+                    actor="observer",
+                    project="secretary",
+                    task_type="code",
+                    title="Crash safe",
+                    request_id="atomic-create-crash",
+                    sprint=sprint,
                 )
 
         self.assertEqual(self.client.tasks[-1]["reference"], "secretary-469")
@@ -1537,8 +1819,13 @@ class TaskWriterTests(unittest.TestCase):
         with open_sprint() as sprint:
             with self.assertRaisesRegex(TaskError, "audit repair"):
                 self.writer.create(
-                    role="observer", actor="observer", project="secretary", task_type="code",
-                    title="Crash safe", request_id="atomic-create-crash", sprint=sprint,
+                    role="observer",
+                    actor="observer",
+                    project="secretary",
+                    task_type="code",
+                    title="Crash safe",
+                    request_id="atomic-create-crash",
+                    sprint=sprint,
                 )
 
         self.assertEqual(len([call for call in self.client.calls if call[0] == "createTask"]), 1)
@@ -1557,17 +1844,29 @@ class TaskWriterTests(unittest.TestCase):
         with mock.patch.object(self.client, "call", side_effect=interrupt_create), open_sprint() as sprint:
             with self.assertRaises(KeyboardInterrupt):
                 self.writer.create(
-                    role="observer", actor="observer", project="secretary", task_type="code",
-                    title="Interrupted before create", description="never reached board",
-                    request_id="sigint-before-create", sprint=sprint,
+                    role="observer",
+                    actor="observer",
+                    project="secretary",
+                    task_type="code",
+                    title="Interrupted before create",
+                    description="never reached board",
+                    request_id="sigint-before-create",
+                    sprint=sprint,
                 )
 
         self.assertEqual(self.writer.audit.status(), {"ok": False, "pending": 1})
-        self.client.tasks.append({
-            "id": 99, "reference": "secretary-469", "title": "Interrupted before create",
-            "description": "never reached board",
-            "column_id": 2, "position": 1, "swimlane_id": 4, "is_active": 1,
-        })
+        self.client.tasks.append(
+            {
+                "id": 99,
+                "reference": "secretary-469",
+                "title": "Interrupted before create",
+                "description": "never reached board",
+                "column_id": 2,
+                "position": 1,
+                "swimlane_id": 4,
+                "is_active": 1,
+            }
+        )
         self.client.metadata[99] = {}
         self.client.comments[99] = []
 
@@ -1586,8 +1885,13 @@ class TaskWriterTests(unittest.TestCase):
         with mock.patch.object(self.client, "call", side_effect=ignore_reference), open_sprint() as sprint:
             with self.assertRaisesRegex(TaskError, "audit repair"):
                 self.writer.create(
-                    role="observer", actor="observer", project="secretary", task_type="code",
-                    title="Reference must persist", request_id="ignored-atomic-reference", sprint=sprint,
+                    role="observer",
+                    actor="observer",
+                    project="secretary",
+                    task_type="code",
+                    title="Reference must persist",
+                    request_id="ignored-atomic-reference",
+                    sprint=sprint,
                 )
 
         self.assertEqual(self.client.tasks[-1]["reference"], "")
@@ -1600,16 +1904,28 @@ class TaskWriterTests(unittest.TestCase):
         with open_sprint() as sprint:
             with self.assertRaisesRegex(TaskError, "audit repair"):
                 self.writer.create(
-                    role="observer", actor="observer", project="secretary", task_type="code",
-                    title="Interrupted", reference="secretary-interrupted", request_id="interrupted-create",
+                    role="observer",
+                    actor="observer",
+                    project="secretary",
+                    task_type="code",
+                    title="Interrupted",
+                    reference="secretary-interrupted",
+                    request_id="interrupted-create",
                     sprint=sprint,
                 )
         intended = self.client.tasks[-1]
         intended["reference"] = ""
-        self.client.tasks.append({
-            "id": 99, "reference": "secretary-interrupted", "title": "Different", "column_id": 2,
-            "position": 1, "swimlane_id": 4, "is_active": 1,
-        })
+        self.client.tasks.append(
+            {
+                "id": 99,
+                "reference": "secretary-interrupted",
+                "title": "Different",
+                "column_id": 2,
+                "position": 1,
+                "swimlane_id": 4,
+                "is_active": 1,
+            }
+        )
         self.client.metadata[99] = {}
         self.client.comments[99] = []
         self.client.fail_metadata = False
@@ -1621,17 +1937,30 @@ class TaskWriterTests(unittest.TestCase):
 
     def test_an_allocated_reference_clears_the_archived_rows_too(self) -> None:
         """An archived card keeps its reference for good, so the counter has to see it."""
-        self.client.tasks.append({
-            "id": 900, "reference": "secretary-1404", "title": "Archived", "description": "",
-            "column_id": 6, "position": 1, "swimlane_id": 4, "is_active": 0,
-        })
+        self.client.tasks.append(
+            {
+                "id": 900,
+                "reference": "secretary-1404",
+                "title": "Archived",
+                "description": "",
+                "column_id": 6,
+                "position": 1,
+                "swimlane_id": 4,
+                "is_active": 0,
+            }
+        )
         self.client.metadata[900] = {"project": "secretary"}
         self.client.comments[900] = []
 
         with open_sprint() as sprint:
             created = self.writer.create(
-                role="observer", actor="observer", project="secretary", task_type="code",
-                title="Next in line", request_id="allocate-above-archived", sprint=sprint,
+                role="observer",
+                actor="observer",
+                project="secretary",
+                task_type="code",
+                title="Next in line",
+                request_id="allocate-above-archived",
+                sprint=sprint,
             )
 
         self.assertEqual(created["task"]["ref"], "secretary-1405")
@@ -1646,8 +1975,13 @@ class TaskWriterTests(unittest.TestCase):
             with open_sprint() as sprint:
                 with self.assertRaisesRegex(TaskError, "secretary-468 is already claimed") as raised:
                     self.writer.create(
-                        role="observer", actor="observer", project="secretary", task_type="code",
-                        title="Collides", request_id="allocated-collision", sprint=sprint,
+                        role="observer",
+                        actor="observer",
+                        project="secretary",
+                        task_type="code",
+                        title="Collides",
+                        request_id="allocated-collision",
+                        sprint=sprint,
                     )
 
         self.assertEqual(raised.exception.code, "validation")
@@ -1657,8 +1991,13 @@ class TaskWriterTests(unittest.TestCase):
         with open_sprint() as sprint:
             with self.assertRaisesRegex(TaskError, "secretary-468 is already claimed") as raised:
                 self.writer.create(
-                    role="observer", actor="observer", project="secretary", task_type="code",
-                    title="Duplicate", reference="secretary-468", request_id="explicit-collision",
+                    role="observer",
+                    actor="observer",
+                    project="secretary",
+                    task_type="code",
+                    title="Duplicate",
+                    reference="secretary-468",
+                    request_id="explicit-collision",
                     sprint=sprint,
                 )
 
@@ -1775,8 +2114,12 @@ class TaskWriterTests(unittest.TestCase):
         try:
             with self.assertRaisesRegex(TaskError, "rejected the move") as raised:
                 self.writer.claim(
-                    role="dispatcher", actor="d", reference="secretary-468", worker=worker,
-                    resolved_head="codex", request_id=request_id,
+                    role="dispatcher",
+                    actor="d",
+                    reference="secretary-468",
+                    worker=worker,
+                    resolved_head="codex",
+                    request_id=request_id,
                 )
         finally:
             self.client.fail_move = False
@@ -1801,8 +2144,12 @@ class TaskWriterTests(unittest.TestCase):
         self.assertIsNone(task["routing"]["resolved_worker_head"])
 
         replayed = self.writer.claim(
-            role="dispatcher", actor="d", reference="secretary-468",
-            worker="secretary-468-runtime", resolved_head="codex", request_id="claim-replay",
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            worker="secretary-468-runtime",
+            resolved_head="codex",
+            request_id="claim-replay",
         )
 
         self.assertEqual(replayed["task"]["state"], "in_progress")
@@ -1829,20 +2176,31 @@ class TaskWriterTests(unittest.TestCase):
         self.client.metadata[12]["claim"] = ""
         self._failed_claim("claim-attempt-1")
         # Another code card of the same project is claimed before the retry.
-        self.client.tasks.append({
-            "id": 14, "reference": "secretary-999", "title": "Other code", "column_id": 3,
-            "position": 1, "swimlane_id": 4,
-        })
+        self.client.tasks.append(
+            {
+                "id": 14,
+                "reference": "secretary-999",
+                "title": "Other code",
+                "column_id": 3,
+                "position": 1,
+                "swimlane_id": 4,
+            }
+        )
         self.client.metadata[14] = {
-            "project": "secretary", "task_type": "code", "claim": "other-worker",
+            "project": "secretary",
+            "task_type": "code",
+            "claim": "other-worker",
         }
         self.client.comments[14] = []
         moves = len([call for call in self.client.calls if call[0] == "moveTaskPosition"])
 
         with self.assertRaisesRegex(TaskError, "one active code task") as raised:
             self.writer.claim(
-                role="dispatcher", actor="d", reference="secretary-468",
-                worker="secretary-468-runtime", resolved_head="codex-b",
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                worker="secretary-468-runtime",
+                resolved_head="codex-b",
                 request_id="claim-attempt-2",
             )
 
@@ -1863,22 +2221,30 @@ class TaskWriterTests(unittest.TestCase):
         self.client.fail_move = True
         with self.assertRaisesRegex(TaskError, "rejected the move"):
             self.writer.claim(
-                role="dispatcher", actor="d", reference="secretary-468",
-                worker="secretary-468-runtime", resolved_head="codex-a",
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                worker="secretary-468-runtime",
+                resolved_head="codex-a",
                 request_id="claim-head-1",
             )
         self.client.fail_move = False
 
         claimed = self.writer.claim(
-            role="dispatcher", actor="d", reference="secretary-468",
-            worker="secretary-468-runtime", resolved_head="codex-b", request_id="claim-head-2",
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            worker="secretary-468-runtime",
+            resolved_head="codex-b",
+            request_id="claim-head-2",
         )
 
         self.assertIs(claimed["replayed"], False)
         self.assertEqual(claimed["task"]["state"], "in_progress")
         self.assertEqual(claimed["task"]["routing"]["resolved_worker_head"], "codex-b")
         self.assertNotIn(
-            "resolved_head", claim_mismatch(claimed["task"], "secretary-468-runtime", "codex-b", ""),
+            "resolved_head",
+            claim_mismatch(claimed["task"], "secretary-468-runtime", "codex-b", ""),
         )
 
     def test_a_claim_on_a_held_card_is_refused_even_when_it_names_the_same_worker(self) -> None:
@@ -1887,8 +2253,12 @@ class TaskWriterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TaskError, "already claimed") as raised:
             self.writer.claim(
-                role="dispatcher", actor="d", reference="secretary-468", worker=held,
-                resolved_head="codex-b", request_id="claim-contender",
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                worker=held,
+                resolved_head="codex-b",
+                request_id="claim-contender",
             )
 
         self.assertEqual(raised.exception.code, "claim_conflict")
@@ -1899,22 +2269,35 @@ class TaskWriterTests(unittest.TestCase):
     def _released_claim_record(self, request_id: str, **payload: object) -> dict[str, object]:
         """One generic `claimed` record shaped exactly as the released writer wrote it."""
         return {
-            "event_id": f"evt_{request_id}", "schema_version": 1,
+            "event_id": f"evt_{request_id}",
+            "schema_version": 1,
             "occurred_at": "2026-08-01T00:00:00+00:00",
-            "actor": {"role": "dispatcher", "id": "d"}, "kind": "claimed", "outcome": "success",
-            "task_id": self.writer.reader.show("secretary-468")["id"], "ref": "secretary-468",
+            "actor": {"role": "dispatcher", "id": "d"},
+            "kind": "claimed",
+            "outcome": "success",
+            "task_id": self.writer.reader.show("secretary-468")["id"],
+            "ref": "secretary-468",
             "backend": {"kind": "kanboard", "task_id": 12, "revision": "r1"},
-            "request_id": request_id, "payload": dict(payload),
+            "request_id": request_id,
+            "payload": dict(payload),
         }
 
     def _released_pending_claim(self, request_id: str) -> None:
         """The released half-claim: metadata written, column move still owed."""
         self.client.metadata[12]["claim"] = "secretary-468-runtime"
         self.client.metadata[12]["resolved_head"] = "codex"
-        self.writer.audit.stage(request_id, self._released_claim_record(
-            request_id, worker="secretary-468-runtime", resolved_head="codex",
-            resolved_review_head=None, slug=None, base_branch=None, cap=3,
-        ))
+        self.writer.audit.stage(
+            request_id,
+            self._released_claim_record(
+                request_id,
+                worker="secretary-468-runtime",
+                resolved_head="codex",
+                resolved_review_head=None,
+                slug=None,
+                base_branch=None,
+                cap=3,
+            ),
+        )
 
     def test_a_released_pending_claim_is_still_finished_by_reconcile(self) -> None:
         """The released recovery survives the migration for the records that need it.
@@ -1941,8 +2324,11 @@ class TaskWriterTests(unittest.TestCase):
         self._released_pending_claim("released-claim-replay")
 
         replayed = self.writer.claim(
-            role="dispatcher", actor="d", reference="secretary-468",
-            worker="secretary-468-runtime", resolved_head="codex",
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            worker="secretary-468-runtime",
+            resolved_head="codex",
             request_id="released-claim-replay",
         )
 
@@ -1964,8 +2350,12 @@ class TaskWriterTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TaskError, "audit repair") as raised:
             self.writer.claim(
-                role="dispatcher", actor="d", reference="secretary-468",
-                worker="secretary-468-runtime", resolved_head="codex", request_id="claim-cleanup",
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                worker="secretary-468-runtime",
+                resolved_head="codex",
+                request_id="claim-cleanup",
             )
 
         self.assertEqual(raised.exception.code, "audit_pending")
@@ -1976,8 +2366,12 @@ class TaskWriterTests(unittest.TestCase):
 
         self.client.fail_metadata = False
         replayed = self.writer.claim(
-            role="dispatcher", actor="d", reference="secretary-468",
-            worker="secretary-468-runtime", resolved_head="codex", request_id="claim-cleanup",
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            worker="secretary-468-runtime",
+            resolved_head="codex",
+            request_id="claim-cleanup",
         )
 
         self.assertIs(replayed["replayed"], True)
@@ -2001,8 +2395,12 @@ class TaskWriterTests(unittest.TestCase):
         self.client.fail_metadata = True
         with self.assertRaisesRegex(TaskError, "audit repair"):
             self.writer.claim(
-                role="dispatcher", actor="d", reference="secretary-468",
-                worker="secretary-468-runtime", resolved_head="codex", request_id="claim-orphan",
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                worker="secretary-468-runtime",
+                resolved_head="codex",
+                request_id="claim-orphan",
             )
         moves = len([call for call in self.client.calls if call[0] == "moveTaskPosition"])
 
@@ -2084,9 +2482,7 @@ class TaskWriterTests(unittest.TestCase):
         self.client.tasks[0]["column_id"] = 7
 
         with self.assertRaisesRegex(TaskError, "live worker or reviewer") as raised:
-            self.writer.archive(
-                role="po", actor="operator", reference="secretary-468", reason="cleanup"
-            )
+            self.writer.archive(role="po", actor="operator", reference="secretary-468", reason="cleanup")
 
         self.assertEqual(raised.exception.code, "live_work")
         self.assertFalse(any(call[0] == "closeTask" for call in self.client.calls))
@@ -2123,7 +2519,14 @@ class TaskWriterTests(unittest.TestCase):
 
     def test_completed_ready_replay_does_not_reset_metadata_again(self) -> None:
         self.client.tasks[0]["column_id"] = 3
-        self.writer.move(role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="", request_id="ready-done")
+        self.writer.move(
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            target="ready",
+            reason="",
+            request_id="ready-done",
+        )
         metadata_writes = len([call for call in self.client.calls if call[0] == "saveTaskMetadata"])
 
         self.client.tasks[0]["column_id"] = 4
@@ -2131,10 +2534,19 @@ class TaskWriterTests(unittest.TestCase):
         self.client.metadata[12]["resolved_head"] = "codex-terra"
         self.client.metadata[12]["resolved_review_head"] = "codex-reviewer"
         self.client.metadata[12]["retry_same"] = "1"
-        second = self.writer.move(role="dispatcher", actor="d", reference="secretary-468", target="ready", reason="", request_id="ready-done")
+        second = self.writer.move(
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            target="ready",
+            reason="",
+            request_id="ready-done",
+        )
 
         self.assertEqual(second["task"]["state"], "validate")
-        self.assertEqual(metadata_writes, len([call for call in self.client.calls if call[0] == "saveTaskMetadata"]))
+        self.assertEqual(
+            metadata_writes, len([call for call in self.client.calls if call[0] == "saveTaskMetadata"])
+        )
         self.assertEqual(self.client.metadata[12]["claim"], "codex-terra")
         with open(self.writer.audit.events_path, encoding="utf-8") as events:
             self.assertEqual(len(events.readlines()), 1)
@@ -2160,7 +2572,11 @@ class AssessmentStateTests(unittest.TestCase):
         self.writer = TaskWriter(self.client, data_dir=self.tmpdir.name)
 
     def reserve_project(
-        self, *, card_sprint: str = SPRINT, project: str = "secretary", data_dir: str = "",
+        self,
+        *,
+        card_sprint: str = SPRINT,
+        project: str = "secretary",
+        data_dir: str = "",
     ) -> None:
         """Put the card in an open sprint that reserves its project.
 
@@ -2192,11 +2608,16 @@ class AssessmentStateTests(unittest.TestCase):
             CARD_TRANSITIONS["dispatcher"],
             {
                 (CardState.READY, CardState.IN_PROGRESS),
-                (CardState.IN_PROGRESS, CardState.VALIDATE), (CardState.IN_PROGRESS, CardState.BLOCKED),
-                (CardState.IN_PROGRESS, CardState.READY), (CardState.VALIDATE, CardState.IN_PROGRESS),
-                (CardState.VALIDATE, CardState.BLOCKED), (CardState.VALIDATE, CardState.DONE),
-                (CardState.VALIDATE, CardState.ASSESSMENT), (CardState.ASSESSMENT, CardState.IN_PROGRESS),
-                (CardState.ASSESSMENT, CardState.DONE), (CardState.ASSESSMENT, CardState.BLOCKED),
+                (CardState.IN_PROGRESS, CardState.VALIDATE),
+                (CardState.IN_PROGRESS, CardState.BLOCKED),
+                (CardState.IN_PROGRESS, CardState.READY),
+                (CardState.VALIDATE, CardState.IN_PROGRESS),
+                (CardState.VALIDATE, CardState.BLOCKED),
+                (CardState.VALIDATE, CardState.DONE),
+                (CardState.VALIDATE, CardState.ASSESSMENT),
+                (CardState.ASSESSMENT, CardState.IN_PROGRESS),
+                (CardState.ASSESSMENT, CardState.DONE),
+                (CardState.ASSESSMENT, CardState.BLOCKED),
             },
         )
 
@@ -2223,15 +2644,24 @@ class AssessmentStateTests(unittest.TestCase):
         """Exercise the public writer instead of proving a copied table equals the registry."""
         dispatcher = {
             ("ready", "in_progress"),
-            ("in_progress", "validate"), ("in_progress", "blocked"),
-            ("in_progress", "ready"), ("validate", "in_progress"),
-            ("validate", "blocked"), ("validate", "done"),
-            ("validate", "assessment"), ("assessment", "in_progress"),
-            ("assessment", "done"), ("assessment", "blocked"),
+            ("in_progress", "validate"),
+            ("in_progress", "blocked"),
+            ("in_progress", "ready"),
+            ("validate", "in_progress"),
+            ("validate", "blocked"),
+            ("validate", "done"),
+            ("validate", "assessment"),
+            ("assessment", "in_progress"),
+            ("assessment", "done"),
+            ("assessment", "blocked"),
         }
         steward = {
-            ("blocked", "ready"), ("blocked", "done"), ("in_progress", "done"),
-            ("ready", "blocked"), ("in_progress", "blocked"), ("validate", "blocked"),
+            ("blocked", "ready"),
+            ("blocked", "done"),
+            ("in_progress", "done"),
+            ("ready", "blocked"),
+            ("in_progress", "blocked"),
+            ("validate", "blocked"),
             ("assessment", "blocked"),
         }
         column_by_state = {
@@ -2258,11 +2688,16 @@ class AssessmentStateTests(unittest.TestCase):
             for role in ("po", "dispatcher", "observer", "steward", "worker", "reviewer", "retro"):
                 for source in CARD_STATES:
                     for target in CARD_STATES:
-                        card = next(task for task in self.client.tasks if task["reference"] == "secretary-468")
+                        card = next(
+                            task for task in self.client.tasks if task["reference"] == "secretary-468"
+                        )
                         card["column_id"] = column_by_state[source]
                         try:
                             self.writer.move(
-                                role=role, actor=role, reference="secretary-468", target=target,
+                                role=role,
+                                actor=role,
+                                reference="secretary-468",
+                                target=target,
                                 reason="authorization contract",
                                 request_id=f"transition-contract-{role}-{source}-{target}",
                             )
@@ -2270,13 +2705,19 @@ class AssessmentStateTests(unittest.TestCase):
                             admitted = exc.code != "transition_forbidden"
                         else:
                             admitted = True
-                        self.assertEqual(admitted, legacy_authorized(role, source, target), (role, source, target))
+                        self.assertEqual(
+                            admitted, legacy_authorized(role, source, target), (role, source, target)
+                        )
 
     def _park(self, request_id: str = "into-assessment") -> None:
         self.client.tasks[0]["column_id"] = 4  # Validate
         entered = self.writer.move(
-            role="dispatcher", actor="d", reference="secretary-468",
-            target="assessment", reason="", request_id=request_id,
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            target="assessment",
+            reason="",
+            request_id=request_id,
         )
         self.assertEqual(entered["task"]["state"], "assessment")
         self.assertEqual(self.client.tasks[0]["column_id"], 7)
@@ -2285,8 +2726,12 @@ class AssessmentStateTests(unittest.TestCase):
         if not self.client.metadata[12].get("sprint_ref"):
             self.reserve_project()
         return self.writer.decide(
-            role="observer", actor="observer", reference="secretary-468", kind=kind,
-            body="the round converged", request_id=request_id or f"decision-{kind}",
+            role="observer",
+            actor="observer",
+            reference="secretary-468",
+            kind=kind,
+            body="the round converged",
+            request_id=request_id or f"decision-{kind}",
         )
 
     def test_dispatcher_moves_a_card_into_and_out_of_assessment(self) -> None:
@@ -2294,8 +2739,13 @@ class AssessmentStateTests(unittest.TestCase):
         self._decide("rework")
 
         left = self.writer.move(
-            role="dispatcher", actor="d", reference="secretary-468",
-            target="in_progress", reason="", decision="rework", request_id="out-of-assessment",
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            target="in_progress",
+            reason="",
+            decision="rework",
+            request_id="out-of-assessment",
         )
         self.assertEqual(left["task"]["state"], "in_progress")
         self.assertEqual(self.client.tasks[0]["column_id"], 3)
@@ -2306,8 +2756,12 @@ class AssessmentStateTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TaskError, "recorded decision") as raised:
             self.writer.move(
-                role="dispatcher", actor="d", reference="secretary-468", target="done",
-                reason="", request_id="undecided-release",
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                target="done",
+                reason="",
+                request_id="undecided-release",
             )
 
         self.assertEqual(raised.exception.code, "decision_required")
@@ -2323,8 +2777,13 @@ class AssessmentStateTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TaskError, "no release decision is recorded"):
             self.writer.move(
-                role="dispatcher", actor="d", reference="secretary-468", target="done",
-                reason="", decision="release", request_id="claimed-release",
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                target="done",
+                reason="",
+                decision="release",
+                request_id="claimed-release",
             )
 
         self.assertEqual(self.client.tasks[0]["column_id"], 7)
@@ -2334,23 +2793,38 @@ class AssessmentStateTests(unittest.TestCase):
         self._park()
         self._decide("release")
         self.writer.move(
-            role="dispatcher", actor="d", reference="secretary-468", target="done",
-            reason="", decision="release", request_id="first-release",
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            target="done",
+            reason="",
+            decision="release",
+            request_id="first-release",
         )
         self._park(request_id="parked-again")
 
         with self.assertRaisesRegex(TaskError, "no release decision is recorded"):
             self.writer.move(
-                role="dispatcher", actor="d", reference="secretary-468", target="done",
-                reason="", decision="release", request_id="replayed-release",
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                target="done",
+                reason="",
+                decision="release",
+                request_id="replayed-release",
             )
 
     def test_exact_decision_replay_survives_dispatcher_leaving_assessment(self) -> None:
         self._park()
         first = self._decide("release", request_id="replay-after-release")
         self.writer.move(
-            role="dispatcher", actor="d", reference="secretary-468", target="done",
-            reason="", decision="release", request_id="apply-release",
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            target="done",
+            reason="",
+            decision="release",
+            request_id="apply-release",
         )
 
         replay = self._decide("release", request_id="replay-after-release")
@@ -2358,17 +2832,28 @@ class AssessmentStateTests(unittest.TestCase):
         self.assertTrue(replay["replayed"])
         self.assertEqual(replay["event_id"], first["event_id"])
         self.assertEqual(replay["task"]["state"], "done")
-        self.assertEqual(len([
-            comment for comment in self.client.comments[12]
-            if comment["comment"] == "[decision:release]\nthe round converged"
-        ]), 1)
+        self.assertEqual(
+            len(
+                [
+                    comment
+                    for comment in self.client.comments[12]
+                    if comment["comment"] == "[decision:release]\nthe round converged"
+                ]
+            ),
+            1,
+        )
 
     def test_exact_decision_replay_uses_its_original_assessment_visit(self) -> None:
         self._park()
         first = self._decide("release", request_id="replay-after-later-visit")
         self.writer.move(
-            role="dispatcher", actor="d", reference="secretary-468", target="done",
-            reason="", decision="release", request_id="apply-first-visit",
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            target="done",
+            reason="",
+            decision="release",
+            request_id="apply-first-visit",
         )
         # A PO may return the Card to Validate before the dispatcher parks a
         # second Assessment visit.  The replay must still describe visit one.
@@ -2379,17 +2864,28 @@ class AssessmentStateTests(unittest.TestCase):
 
         self.assertTrue(replay["replayed"])
         self.assertEqual(replay["event_id"], first["event_id"])
-        self.assertEqual(len([
-            comment for comment in self.client.comments[12]
-            if comment["comment"] == "[decision:release]\nthe round converged"
-        ]), 1)
+        self.assertEqual(
+            len(
+                [
+                    comment
+                    for comment in self.client.comments[12]
+                    if comment["comment"] == "[decision:release]\nthe round converged"
+                ]
+            ),
+            1,
+        )
 
     def test_unowned_decision_remains_refused_after_leaving_assessment(self) -> None:
         self._park()
         self._decide("release", request_id="first-release")
         self.writer.move(
-            role="dispatcher", actor="d", reference="secretary-468", target="done",
-            reason="", decision="release", request_id="apply-first-release",
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            target="done",
+            reason="",
+            decision="release",
+            request_id="apply-first-release",
         )
 
         with self.assertRaisesRegex(TaskError, "only recorded on a card in Assessment") as raised:
@@ -2401,8 +2897,13 @@ class AssessmentStateTests(unittest.TestCase):
         self._park()
         self._decide("release", request_id="mismatched-after-release")
         self.writer.move(
-            role="dispatcher", actor="d", reference="secretary-468", target="done",
-            reason="", decision="release", request_id="apply-mismatched-release",
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            target="done",
+            reason="",
+            decision="release",
+            request_id="apply-mismatched-release",
         )
 
         with self.assertRaisesRegex(TaskError, "belongs to another operation") as raised:
@@ -2451,10 +2952,19 @@ class AssessmentStateTests(unittest.TestCase):
             gate.wait()
             try:
                 with as_observer(SPRINT):
-                    outcomes.append((kind, self.writer.decide(
-                        role="observer", actor="observer", reference="secretary-468", kind=kind,
-                        body=kind, request_id="race-" + kind,
-                    )))
+                    outcomes.append(
+                        (
+                            kind,
+                            self.writer.decide(
+                                role="observer",
+                                actor="observer",
+                                reference="secretary-468",
+                                kind=kind,
+                                body=kind,
+                                request_id="race-" + kind,
+                            ),
+                        )
+                    )
             except TaskError as exc:
                 outcomes.append((kind, exc))
 
@@ -2478,10 +2988,16 @@ class AssessmentStateTests(unittest.TestCase):
         def decide(body: str) -> None:
             gate.wait()
             try:
-                outcomes.append(self.writer.decide(
-                    role="observer", actor="observer", reference="secretary-468", kind="release",
-                    body=body, request_id="same-id-different-body",
-                ))
+                outcomes.append(
+                    self.writer.decide(
+                        role="observer",
+                        actor="observer",
+                        reference="secretary-468",
+                        kind="release",
+                        body=body,
+                        request_id="same-id-different-body",
+                    )
+                )
             except TaskError as exc:
                 outcomes.append(exc)
 
@@ -2515,7 +3031,8 @@ class AssessmentStateTests(unittest.TestCase):
             self._decide("rework", request_id="conflicting-after-crash")
         self.assertEqual(blocked.exception.code, "decision_pending")
         comments = [
-            comment for comment in self.writer.reader.show("secretary-468")["comments"]
+            comment
+            for comment in self.writer.reader.show("secretary-468")["comments"]
             if comment.get("marker") == "decision:release"
         ]
         self.assertEqual(len(comments), 1)
@@ -2544,17 +3061,23 @@ class AssessmentStateTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 self._decide("release", request_id="staged-before-comment")
 
-        self.assertFalse(any(
-            comment.get("marker") == "decision:release"
-            for comment in self.writer.reader.show("secretary-468")["comments"]
-        ))
+        self.assertFalse(
+            any(
+                comment.get("marker") == "decision:release"
+                for comment in self.writer.reader.show("secretary-468")["comments"]
+            )
+        )
         repaired, unresolved = self.writer.reconcile()
         self.assertEqual((repaired, unresolved), (0, 1))
         self.assertEqual(self.writer.audit.events("secretary-468", kind="decided"), [])
         with self.assertRaisesRegex(TaskError, "recorded decision"):
             self.writer.move(
-                role="dispatcher", actor="d", reference="secretary-468", target="done",
-                reason="", request_id="must-not-act-on-commentless-decision",
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                target="done",
+                reason="",
+                request_id="must-not-act-on-commentless-decision",
             )
 
         # A staged occurrence is ambiguous evidence.  Retrying it must not
@@ -2569,8 +3092,11 @@ class AssessmentStateTests(unittest.TestCase):
 
         def event(kind: str, *, actor: str, ref: str = "secretary-468", payload: dict | None = None) -> dict:
             return {
-                "ref": ref, "kind": kind, "outcome": "success",
-                "actor": {"role": actor}, "payload": payload or {},
+                "ref": ref,
+                "kind": kind,
+                "outcome": "success",
+                "actor": {"role": actor},
+                "payload": payload or {},
             }
 
         for routine in (
@@ -2583,9 +3109,13 @@ class AssessmentStateTests(unittest.TestCase):
             event("routing", actor="dispatcher"),
             event("decided", actor="observer", payload={"decision": "release"}),
         ):
-            self.assertFalse(is_significant_observer_event(
-                routine, linked_refs=refs, sprint_ref=SPRINT,
-            ))
+            self.assertFalse(
+                is_significant_observer_event(
+                    routine,
+                    linked_refs=refs,
+                    sprint_ref=SPRINT,
+                )
+            )
         for semantic in (
             event("moved", actor="dispatcher", payload={"to": "assessment"}),
             event("moved", actor="dispatcher", payload={"to": "blocked"}),
@@ -2597,9 +3127,13 @@ class AssessmentStateTests(unittest.TestCase):
             event("budget_recorded", actor="dispatcher", ref=SPRINT),
             event("commented", actor="po", ref=SPRINT),
         ):
-            self.assertTrue(is_significant_observer_event(
-                semantic, linked_refs=refs, sprint_ref=SPRINT,
-            ))
+            self.assertTrue(
+                is_significant_observer_event(
+                    semantic,
+                    linked_refs=refs,
+                    sprint_ref=SPRINT,
+                )
+            )
 
     def test_observer_wake_predicate_reads_typed_transitions_by_their_own_shape(self) -> None:
         """The migrated representation carries the same semantics, in its own fields.
@@ -2612,10 +3146,15 @@ class AssessmentStateTests(unittest.TestCase):
         def typed(source: CardState, target: CardState, *, actor: str = "dispatcher") -> dict:
             declaration = transition_for(EntityKind.CARD, source, target)
             return Event(
-                f"board-event-{actor}-{source.value}-{target.value}", declaration.event_kind,
-                EntityKind.CARD, "secretary-468", Actor(actor, actor), "why",
+                f"board-event-{actor}-{source.value}-{target.value}",
+                declaration.event_kind,
+                EntityKind.CARD,
+                "secretary-468",
+                Actor(actor, actor),
+                "why",
                 datetime(2026, 8, 11, tzinfo=UTC),
-                source_state=source.value, target_state=target.value,
+                source_state=source.value,
+                target_state=target.value,
             ).to_record(f"request-{actor}-{source.value}-{target.value}")
 
         for routine in (
@@ -2627,7 +3166,8 @@ class AssessmentStateTests(unittest.TestCase):
             typed(CardState.VALIDATE, CardState.BLOCKED, actor="observer"),
         ):
             self.assertFalse(
-                is_significant_observer_event(routine, linked_refs=refs, sprint_ref=SPRINT), routine,
+                is_significant_observer_event(routine, linked_refs=refs, sprint_ref=SPRINT),
+                routine,
             )
         for semantic in (
             typed(CardState.VALIDATE, CardState.ASSESSMENT),
@@ -2636,25 +3176,38 @@ class AssessmentStateTests(unittest.TestCase):
             typed(CardState.IN_PROGRESS, CardState.ISSUES, actor="po"),
         ):
             self.assertTrue(
-                is_significant_observer_event(semantic, linked_refs=refs, sprint_ref=SPRINT), semantic,
+                is_significant_observer_event(semantic, linked_refs=refs, sprint_ref=SPRINT),
+                semantic,
             )
 
     def test_a_decision_needs_a_parked_card_a_reason_and_a_permitted_role(self) -> None:
         self._park()
         with self.assertRaisesRegex(TaskError, "non-empty reason"):
             self.writer.decide(
-                role="observer", actor="observer", reference="secretary-468",
-                kind="release", body="  ", request_id="empty-reason",
+                role="observer",
+                actor="observer",
+                reference="secretary-468",
+                kind="release",
+                body="  ",
+                request_id="empty-reason",
             )
         with self.assertRaisesRegex(TaskError, "decision must be one of"):
             self.writer.decide(
-                role="observer", actor="observer", reference="secretary-468",
-                kind="merge", body="ship it", request_id="unknown-kind",
+                role="observer",
+                actor="observer",
+                reference="secretary-468",
+                kind="merge",
+                body="ship it",
+                request_id="unknown-kind",
             )
         with self.assertRaisesRegex(TaskError, "role is not permitted"):
             self.writer.decide(
-                role="worker", actor="w", reference="secretary-468",
-                kind="release", body="ship it", request_id="worker-decision",
+                role="worker",
+                actor="w",
+                reference="secretary-468",
+                kind="release",
+                body="ship it",
+                request_id="worker-decision",
             )
         # The card leaves the column. Its project stays reserved by the observer's own sprint, so
         # what refuses this is the state and not the reservation.
@@ -2662,8 +3215,12 @@ class AssessmentStateTests(unittest.TestCase):
         self.client.tasks[0]["column_id"] = 4
         with self.assertRaisesRegex(TaskError, "only recorded on a card in Assessment"):
             self.writer.decide(
-                role="observer", actor="observer", reference="secretary-468",
-                kind="release", body="ship it", request_id="unparked-decision",
+                role="observer",
+                actor="observer",
+                reference="secretary-468",
+                kind="release",
+                body="ship it",
+                request_id="unparked-decision",
             )
 
     def test_a_blocked_escalation_out_of_assessment_needs_no_decision(self) -> None:
@@ -2671,8 +3228,12 @@ class AssessmentStateTests(unittest.TestCase):
         self._park()
 
         escalated = self.writer.move(
-            role="dispatcher", actor="d", reference="secretary-468", target="blocked",
-            reason="the release could not land", request_id="parked-card-blocked",
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            target="blocked",
+            reason="the release could not land",
+            request_id="parked-card-blocked",
         )
 
         self.assertEqual(escalated["task"]["state"], "blocked")
@@ -2683,8 +3244,12 @@ class AssessmentStateTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TaskError, "role is not permitted"):
             self.writer.decide(
-                role="po", actor="operator", reference="secretary-468",
-                kind="release", body="ship it", request_id="po-decision",
+                role="po",
+                actor="operator",
+                reference="secretary-468",
+                kind="release",
+                body="ship it",
+                request_id="po-decision",
             )
 
     def test_a_decision_moves_the_card_where_that_decision_goes(self) -> None:
@@ -2694,8 +3259,13 @@ class AssessmentStateTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TaskError, "release decision moves the card to done") as raised:
             self.writer.move(
-                role="dispatcher", actor="d", reference="secretary-468", target="in_progress",
-                reason="", decision="release", request_id="release-to-in-progress",
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                target="in_progress",
+                reason="",
+                decision="release",
+                request_id="release-to-in-progress",
             )
 
         self.assertEqual(raised.exception.code, "decision_mismatch")
@@ -2709,8 +3279,12 @@ class AssessmentStateTests(unittest.TestCase):
         for target in ("ready", "validate", "issues"):
             with self.assertRaises(TaskError) as raised:
                 self.writer.move(
-                    role="dispatcher", actor="d", reference="secretary-468", target=target,
-                    reason="", request_id=f"dispatcher-bypass-{target}",
+                    role="dispatcher",
+                    actor="d",
+                    reference="secretary-468",
+                    target=target,
+                    reason="",
+                    request_id=f"dispatcher-bypass-{target}",
                 )
             self.assertIn(raised.exception.code, {"decision_required", "transition_forbidden"})
         self.assertEqual(self.client.tasks[0]["column_id"], 7)
@@ -2728,8 +3302,13 @@ class AssessmentStateTests(unittest.TestCase):
         self._decide("release", request_id="decision-performed-by-observer")
         with self.assertRaises(TaskError) as raised:
             self.writer.move(
-                role="observer", actor="observer", reference="secretary-468", target="done",
-                reason="", decision="release", request_id="observer-performs-release",
+                role="observer",
+                actor="observer",
+                reference="secretary-468",
+                target="done",
+                reason="",
+                decision="release",
+                request_id="observer-performs-release",
             )
         self.assertEqual(raised.exception.code, "transition_forbidden")
         self.assertIn("task decide", str(raised.exception))
@@ -2737,8 +3316,13 @@ class AssessmentStateTests(unittest.TestCase):
 
         # And the dispatcher performs the one canonical decision that is standing.
         performed = self.writer.move(
-            role="dispatcher", actor="d", reference="secretary-468", target="done",
-            reason="", decision="release", request_id="dispatcher-performs-release",
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            target="done",
+            reason="",
+            decision="release",
+            request_id="dispatcher-performs-release",
         )
         self.assertEqual(performed["task"]["state"], "done")
 
@@ -2753,8 +3337,12 @@ class AssessmentStateTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TaskError, "role is not permitted") as unheld:
             self.writer.decide(
-                role="observer", actor="observer", reference="secretary-468",
-                kind="release", body="ship it", request_id="decision-without-a-sprint",
+                role="observer",
+                actor="observer",
+                reference="secretary-468",
+                kind="release",
+                body="ship it",
+                request_id="decision-without-a-sprint",
             )
         self.assertEqual(unheld.exception.code, "role_forbidden")
 
@@ -2763,8 +3351,12 @@ class AssessmentStateTests(unittest.TestCase):
         self.reserve_project(card_sprint="sprint:1030")
         with self.assertRaises(TaskError) as other:
             self.writer.decide(
-                role="observer", actor="observer", reference="secretary-468",
-                kind="release", body="ship it", request_id="decision-from-another-sprint",
+                role="observer",
+                actor="observer",
+                reference="secretary-468",
+                kind="release",
+                body="ship it",
+                request_id="decision-from-another-sprint",
             )
         self.assertEqual(other.exception.code, "sprint_write_forbidden")
         self.assertEqual(standing_decision(TaskAudit(Path(self.tmpdir.name)).events("secretary-468")), "")
@@ -2780,8 +3372,12 @@ class AssessmentStateTests(unittest.TestCase):
         self.reserve_project()
 
         decided = self.writer.decide(
-            role="observer", actor="observer", reference="secretary-468", kind="release",
-            body="deciding from this card's own head", request_id="decision-from-its-own-head",
+            role="observer",
+            actor="observer",
+            reference="secretary-468",
+            kind="release",
+            body="deciding from this card's own head",
+            request_id="decision-from-its-own-head",
         )
 
         self.assertEqual(decided["action"], "decided")
@@ -2792,8 +3388,11 @@ class AssessmentStateTests(unittest.TestCase):
         with as_observer("sprint:2000"):
             with self.assertRaises(TaskError) as stranger:
                 self.writer.decide(
-                    role="observer", actor="observer", reference="secretary-468",
-                    kind="release", body="deciding about a sprint I do not observe",
+                    role="observer",
+                    actor="observer",
+                    reference="secretary-468",
+                    kind="release",
+                    body="deciding about a sprint I do not observe",
                     request_id="decision-from-another-head",
                 )
         self.assertEqual(stranger.exception.code, "observer_sprint_mismatch")
@@ -2803,8 +3402,11 @@ class AssessmentStateTests(unittest.TestCase):
 
         with self.assertRaises(TaskError) as unbound, unbound_observer():
             self.writer.decide(
-                role="observer", actor="observer", reference="secretary-468",
-                kind="release", body="deciding from a head nobody bound",
+                role="observer",
+                actor="observer",
+                reference="secretary-468",
+                kind="release",
+                body="deciding from a head nobody bound",
                 request_id="decision-from-an-unbound-head",
             )
         self.assertEqual(unbound.exception.code, "observer_identity_unbound")
@@ -2814,8 +3416,12 @@ class AssessmentStateTests(unittest.TestCase):
         self._park()
 
         requeued = self.writer.move(
-            role="po", actor="operator", reference="secretary-468", target="ready",
-            reason="taking this one back by hand", request_id="po-requeue",
+            role="po",
+            actor="operator",
+            reference="secretary-468",
+            target="ready",
+            reason="taking this one back by hand",
+            request_id="po-requeue",
         )
 
         self.assertEqual(requeued["task"]["state"], "ready")
@@ -2832,8 +3438,12 @@ class AssessmentStateTests(unittest.TestCase):
             self._park(request_id=f"{request_id}-park")
 
             moved = self.writer.move(
-                role="po", actor="operator", reference="secretary-468", target=target,
-                reason="finishing this one by hand", sprint_override=True,
+                role="po",
+                actor="operator",
+                reference="secretary-468",
+                target=target,
+                reason="finishing this one by hand",
+                sprint_override=True,
                 sprint_override_reason="no observer is coming back for it",
                 request_id=request_id,
             )
@@ -2847,14 +3457,24 @@ class AssessmentStateTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TaskError, "no release decision is recorded"):
             self.writer.move(
-                role="po", actor="operator", reference="secretary-468", target="done",
-                reason="", decision="release", request_id="po-claimed-release",
+                role="po",
+                actor="operator",
+                reference="secretary-468",
+                target="done",
+                reason="",
+                decision="release",
+                request_id="po-claimed-release",
             )
         self._decide("release")
         with self.assertRaises(TaskError) as mismatched:
             self.writer.move(
-                role="po", actor="operator", reference="secretary-468", target="in_progress",
-                reason="", decision="release", sprint_override=True,
+                role="po",
+                actor="operator",
+                reference="secretary-468",
+                target="in_progress",
+                reason="",
+                decision="release",
+                sprint_override=True,
                 sprint_override_reason="stepping in on a reserved project",
                 request_id="po-mismatched-release",
             )
@@ -2866,7 +3486,11 @@ class AssessmentStateTests(unittest.TestCase):
         self.client.tasks[0]["column_id"] = 7
         with self.assertRaisesRegex(TaskError, "may not move") as raised:
             self.writer.move(
-                role="worker", actor="w", reference="secretary-468", target="done", reason="",
+                role="worker",
+                actor="w",
+                reference="secretary-468",
+                target="done",
+                reason="",
             )
         self.assertEqual(raised.exception.code, "transition_forbidden")
         self.assertFalse(any(call[0] == "moveTaskPosition" for call in self.client.calls))
@@ -2875,30 +3499,53 @@ class AssessmentStateTests(unittest.TestCase):
         self.client.tasks[0]["column_id"] = 7
         with self.assertRaisesRegex(TaskError, "non-empty reason"):
             self.writer.move(
-                role="steward", actor="s", reference="secretary-468", target="blocked", reason="",
+                role="steward",
+                actor="s",
+                reference="secretary-468",
+                target="blocked",
+                reason="",
             )
         escalated = self.writer.move(
-            role="steward", actor="s", reference="secretary-468", target="blocked",
-            reason="the observer never came back", request_id="assessment-escalation",
+            role="steward",
+            actor="s",
+            reference="secretary-468",
+            target="blocked",
+            reason="the observer never came back",
+            request_id="assessment-escalation",
         )
         self.assertEqual(escalated["task"]["state"], "blocked")
         self.assertEqual(self.writer.reader.show("secretary-468")["state"], "blocked")
 
     def _move_cli(self, *arguments: str) -> tuple[int, str, str]:
         output, errors = io.StringIO(), io.StringIO()
-        with mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client), \
-             contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
-            code = main([
-                "task", "move", "--ref", "secretary-468",
-                "--data-dir", str(Path(self.tmpdir.name) / "data"), *arguments,
-            ])
+        with (
+            mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = main(
+                [
+                    "task",
+                    "move",
+                    "--ref",
+                    "secretary-468",
+                    "--data-dir",
+                    str(Path(self.tmpdir.name) / "data"),
+                    *arguments,
+                ]
+            )
         return code, output.getvalue(), errors.getvalue()
 
     def test_cli_move_target_assessment_moves_the_card(self) -> None:
         """Criterion 3 spells this `--target`; `--to` is the same argument under another name."""
         self.client.tasks[0]["column_id"] = 4  # Validate
         code, output, errors = self._move_cli(
-            "--role", "dispatcher", "--target", "assessment", "--request-id", "cli-target",
+            "--role",
+            "dispatcher",
+            "--target",
+            "assessment",
+            "--request-id",
+            "cli-target",
         )
 
         self.assertEqual((code, errors), (0, ""))
@@ -2908,7 +3555,12 @@ class AssessmentStateTests(unittest.TestCase):
         # The way back out is the decision path, through the CLI as well: the writer checks
         # `--decision` against the audit, so the recorded decision has to come first.
         code, output, errors = self._move_cli(
-            "--role", "dispatcher", "--to", "done", "--request-id", "cli-to-undecided",
+            "--role",
+            "dispatcher",
+            "--to",
+            "done",
+            "--request-id",
+            "cli-to-undecided",
         )
         self.assertEqual(code, 3)
         self.assertEqual(json.loads(errors)["error"]["code"], "decision_required")
@@ -2919,18 +3571,40 @@ class AssessmentStateTests(unittest.TestCase):
         reason = Path(self.tmpdir.name) / "reason.md"
         reason.write_text("ship it", encoding="utf-8")
         output, errors = io.StringIO(), io.StringIO()
-        with mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client), \
-             contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
-            decided = main([
-                "task", "decide", "--ref", "secretary-468", "--role", "observer",
-                "--kind", "release", "--reason-file", str(reason),
-                "--data-dir", str(Path(self.tmpdir.name) / "data"), "--request-id", "cli-decision",
-            ])
+        with (
+            mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            decided = main(
+                [
+                    "task",
+                    "decide",
+                    "--ref",
+                    "secretary-468",
+                    "--role",
+                    "observer",
+                    "--kind",
+                    "release",
+                    "--reason-file",
+                    str(reason),
+                    "--data-dir",
+                    str(Path(self.tmpdir.name) / "data"),
+                    "--request-id",
+                    "cli-decision",
+                ]
+            )
         self.assertEqual((decided, errors.getvalue()), (0, ""))
         self.assertEqual(json.loads(output.getvalue())["action"], "decided")
         code, output, errors = self._move_cli(
-            "--role", "dispatcher", "--to", "done", "--decision", "release",
-            "--request-id", "cli-to",
+            "--role",
+            "dispatcher",
+            "--to",
+            "done",
+            "--decision",
+            "release",
+            "--request-id",
+            "cli-to",
         )
         self.assertEqual((code, errors), (0, ""))
         self.assertEqual(self.client.tasks[0]["column_id"], 6)
@@ -2938,7 +3612,12 @@ class AssessmentStateTests(unittest.TestCase):
     def test_cli_move_target_assessment_is_refused_for_a_forbidden_role(self) -> None:
         self.client.tasks[0]["column_id"] = 4
         code, output, errors = self._move_cli(
-            "--role", "worker", "--target", "assessment", "--request-id", "cli-forbidden",
+            "--role",
+            "worker",
+            "--target",
+            "assessment",
+            "--request-id",
+            "cli-forbidden",
         )
 
         self.assertEqual((code, output), (3, ""))
@@ -2963,9 +3642,7 @@ def _move_target_option_strings() -> list[str]:
     add_task_subcommands(parser.add_subparsers(dest="command"))
     task = parser._subparsers._group_actions[0].choices["task"]  # type: ignore[union-attr]
     move = task._subparsers._group_actions[0].choices["move"]  # type: ignore[union-attr]
-    return [
-        option for action in move._actions if action.dest == "to" for option in action.option_strings
-    ]
+    return [option for action in move._actions if action.dest == "to" for option in action.option_strings]
 
 
 def _task_state_choices() -> dict[tuple[str, str], tuple[str, ...]]:
@@ -2984,8 +3661,12 @@ def _task_state_choices() -> dict[tuple[str, str], tuple[str, ...]]:
 
 
 _READ_METHODS = {
-    "getProjectByName", "getActiveSwimlanes", "getTaskByReference", "getTaskMetadata",
-    "getAllComments", "getTask",
+    "getProjectByName",
+    "getActiveSwimlanes",
+    "getTaskByReference",
+    "getTaskMetadata",
+    "getAllComments",
+    "getTask",
 }
 
 
@@ -3006,7 +3687,12 @@ class RoutingJournalTests(unittest.TestCase):
             role=role,
             head=head,
             head_source="role_default",
-            profile={"adapter": "codex", "model": "gpt-5.6-terra", "effort": "extra", "resource": "openai-sub"},
+            profile={
+                "adapter": "codex",
+                "model": "gpt-5.6-terra",
+                "effort": "extra",
+                "resource": "openai-sub",
+            },
             resources={"openai-sub": {"account": "openai-subscription"}},
         )
 
@@ -3021,23 +3707,30 @@ class RoutingJournalTests(unittest.TestCase):
 
     def test_routing_writes_the_journal_without_touching_the_board(self) -> None:
         self.writer.routing(
-            role="dispatcher", actor="pilot", reference="secretary-468",
-            payload=self._payload(1, "worker", ("worker", "codex")), request_id="routing-1",
+            role="dispatcher",
+            actor="pilot",
+            reference="secretary-468",
+            payload=self._payload(1, "worker", ("worker", "codex")),
+            request_id="routing-1",
         )
 
         events = self.audit.events("secretary-468", kind="routing")
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["payload"]["heads"][0]["head"], "codex")
         self.assertEqual(
-            [call for call in self.client.calls if call[0] not in _READ_METHODS], [],
+            [call for call in self.client.calls if call[0] not in _READ_METHODS],
+            [],
             "a routing record is telemetry; it must not mutate the card",
         )
 
     def test_repeated_routing_record_commits_once(self) -> None:
         for _ in range(2):
             self.writer.routing(
-                role="dispatcher", actor="pilot", reference="secretary-468",
-                payload=self._payload(1, "worker", ("worker", "codex")), request_id="routing-1",
+                role="dispatcher",
+                actor="pilot",
+                reference="secretary-468",
+                payload=self._payload(1, "worker", ("worker", "codex")),
+                request_id="routing-1",
             )
 
         self.assertEqual(len(self.audit.events("secretary-468", kind="routing")), 1)
@@ -3045,38 +3738,53 @@ class RoutingJournalTests(unittest.TestCase):
     def test_only_the_dispatcher_may_write_routing(self) -> None:
         with self.assertRaisesRegex(TaskError, "not permitted"):
             self.writer.routing(
-                role="worker", actor="w", reference="secretary-468",
+                role="worker",
+                actor="w",
+                reference="secretary-468",
                 payload=self._payload(1, "worker", ("worker", "codex")),
             )
 
     def test_routing_rejects_an_unknown_phase_and_an_empty_head_list(self) -> None:
         with self.assertRaisesRegex(TaskError, "unknown routing phase"):
             self.writer.routing(
-                role="dispatcher", actor="pilot", reference="secretary-468",
+                role="dispatcher",
+                actor="pilot",
+                reference="secretary-468",
                 payload={"attempt": 1, "phase": "guess", "heads": [{"role": "worker"}]},
             )
         with self.assertRaisesRegex(TaskError, "at least one head"):
             self.writer.routing(
-                role="dispatcher", actor="pilot", reference="secretary-468",
+                role="dispatcher",
+                actor="pilot",
+                reference="secretary-468",
                 payload={"attempt": 1, "phase": "worker", "heads": []},
             )
 
     def test_attempts_rebuild_the_pairs_and_their_outcomes(self) -> None:
         for attempt, outcome in ((1, "red"), (2, "green")):
             self.writer.routing(
-                role="dispatcher", actor="pilot", reference="secretary-468",
+                role="dispatcher",
+                actor="pilot",
+                reference="secretary-468",
                 payload=self._payload(attempt, "worker", ("worker", "codex")),
                 request_id=f"routing-worker-{attempt}",
             )
             self.writer.routing(
-                role="dispatcher", actor="pilot", reference="secretary-468",
+                role="dispatcher",
+                actor="pilot",
+                reference="secretary-468",
                 payload=self._payload(attempt, "review", ("reviewer", "codex-reviewer")),
                 request_id=f"routing-review-{attempt}",
             )
             self.writer.routing(
-                role="dispatcher", actor="pilot", reference="secretary-468",
+                role="dispatcher",
+                actor="pilot",
+                reference="secretary-468",
                 payload=self._payload(
-                    attempt, "verdict", ("worker", "codex"), ("reviewer", "codex-reviewer"),
+                    attempt,
+                    "verdict",
+                    ("worker", "codex"),
+                    ("reviewer", "codex-reviewer"),
                     outcome=outcome,
                 ),
                 request_id=f"routing-verdict-{attempt}",
@@ -3116,25 +3824,38 @@ class RoutingJournalTests(unittest.TestCase):
             head="codex",
             head_source="card",
             profile={
-                "adapter": "codex", "model": "gpt-5.6-terra", "effort": "high",
-                "resource": "openai-sub", "codex_mode": "exec",
+                "adapter": "codex",
+                "model": "gpt-5.6-terra",
+                "effort": "high",
+                "resource": "openai-sub",
+                "codex_mode": "exec",
             },
             resources={"openai-sub": {"account": "openai-subscription"}},
         )
 
         self.assertEqual(run.codex_mode, "tui")
         self.assertNotIn(
-            "codex_mode", inspect.signature(head_run_from_profile).parameters,
+            "codex_mode",
+            inspect.signature(head_run_from_profile).parameters,
             "no caller may hand the journal a launch mode of its own",
         )
 
     def test_an_old_journal_record_is_read_back_as_it_was_written(self) -> None:
         """History is read, not rewritten: an attempt that really ran one-shot still says so."""
-        legacy = HeadRun.from_json({
-            "role": "worker", "head": "codex", "head_source": "card", "adapter": "codex",
-            "model": "gpt-5.6-terra", "model_source": "profile", "effort": "default",
-            "codex_mode": "exec", "resource": "openai-sub", "account": "openai-subscription",
-        })
+        legacy = HeadRun.from_json(
+            {
+                "role": "worker",
+                "head": "codex",
+                "head_source": "card",
+                "adapter": "codex",
+                "model": "gpt-5.6-terra",
+                "model_source": "profile",
+                "effort": "default",
+                "codex_mode": "exec",
+                "resource": "openai-sub",
+                "account": "openai-subscription",
+            }
+        )
 
         self.assertEqual(legacy.codex_mode, "exec")
 
@@ -3144,7 +3865,9 @@ class RoutingJournalTests(unittest.TestCase):
             head="claude-opus-medium",
             head_source="card",
             profile={
-                "adapter": "claude", "model": "opus", "effort": "medium",
+                "adapter": "claude",
+                "model": "opus",
+                "effort": "medium",
                 "resource": "claude-sub",
             },
             resources={"claude-sub": {"account": "claude-subscription"}},
@@ -3185,7 +3908,11 @@ class ReportDurabilityGateTests(unittest.TestCase):
     def _report(self, kind: str, body: str = "ready") -> dict:
         classification = "external_fact" if kind == "blocked" else ""
         return self.writer.report(
-            role="worker", actor="w", reference="secretary-468", kind=kind, body=body,
+            role="worker",
+            actor="w",
+            reference="secretary-468",
+            kind=kind,
+            body=body,
             classification=classification,
         )
 
@@ -3205,13 +3932,21 @@ class ReportDurabilityGateTests(unittest.TestCase):
 
     def test_exact_done_report_replays_after_the_workspace_becomes_dirty(self) -> None:
         first = self.writer.report(
-            role="worker", actor="w", reference="secretary-468", kind="done", body="ready",
+            role="worker",
+            actor="w",
+            reference="secretary-468",
+            kind="done",
+            body="ready",
             request_id="replay-after-dirt",
         )
         (self.workspace / "code.py").write_text("print(2)\n", encoding="utf-8")
 
         replay = self.writer.report(
-            role="worker", actor="w", reference="secretary-468", kind="done", body="ready",
+            role="worker",
+            actor="w",
+            reference="secretary-468",
+            kind="done",
+            body="ready",
             request_id="replay-after-dirt",
         )
 
@@ -3272,7 +4007,9 @@ class BlockedContractTests(unittest.TestCase):
         workspace = Path(self.tmpdir.name) / "workspace"
         workspace.mkdir()
         self.writer = TaskWriter(  # type: ignore[arg-type]
-            self.client, data_dir=self.tmpdir.name, workspace=str(workspace),
+            self.client,
+            data_dir=self.tmpdir.name,
+            workspace=str(workspace),
         )
 
     def _events(self, kind: str) -> list[dict]:
@@ -3292,8 +4029,12 @@ class BlockedContractTests(unittest.TestCase):
     def test_a_blocked_report_without_a_classification_is_refused(self) -> None:
         with self.assertRaisesRegex(TaskError, "require --classification") as raised:
             self.writer.report(
-                role="worker", actor="w", reference="secretary-468", kind="blocked",
-                body="the upstream API is down", request_id="blocked-unclassified",
+                role="worker",
+                actor="w",
+                reference="secretary-468",
+                kind="blocked",
+                body="the upstream API is down",
+                request_id="blocked-unclassified",
             )
         self.assertEqual(raised.exception.code, "validation")
         self.assertEqual(raised.exception.exit_code, 2)
@@ -3302,8 +4043,13 @@ class BlockedContractTests(unittest.TestCase):
     def test_an_unknown_classification_is_refused(self) -> None:
         with self.assertRaisesRegex(TaskError, "require --classification"):
             self.writer.report(
-                role="worker", actor="w", reference="secretary-468", kind="blocked",
-                body="stuck", classification="something_else", request_id="blocked-unknown",
+                role="worker",
+                actor="w",
+                reference="secretary-468",
+                kind="blocked",
+                body="stuck",
+                classification="something_else",
+                request_id="blocked-unknown",
             )
         self.assertEqual(self.client.calls, [])
 
@@ -3311,8 +4057,12 @@ class BlockedContractTests(unittest.TestCase):
         for index, classification in enumerate(("external_fact", "wrong_task_definition")):
             with self.subTest(classification=classification):
                 result = self.writer.report(
-                    role="worker", actor="w", reference="secretary-468", kind="blocked",
-                    body="stuck on the adapter", classification=classification,
+                    role="worker",
+                    actor="w",
+                    reference="secretary-468",
+                    kind="blocked",
+                    body="stuck on the adapter",
+                    classification=classification,
                     request_id=f"blocked-{classification}",
                 )
                 self.assertEqual(result["action"], "reported")
@@ -3334,15 +4084,28 @@ class BlockedContractTests(unittest.TestCase):
     def test_a_blocked_report_is_a_single_backend_write(self) -> None:
         """Two writes could disagree; the comment and the audit event cannot."""
         self.writer.report(
-            role="worker", actor="w", reference="secretary-468", kind="blocked",
-            body="stuck", classification="external_fact", request_id="blocked-one-write",
+            role="worker",
+            actor="w",
+            reference="secretary-468",
+            kind="blocked",
+            body="stuck",
+            classification="external_fact",
+            request_id="blocked-one-write",
         )
-        written = [method for method, _ in self.client.calls if method.startswith(("create", "save", "move", "update"))]
+        written = [
+            method
+            for method, _ in self.client.calls
+            if method.startswith(("create", "save", "move", "update"))
+        ]
         self.assertEqual(written, ["createComment"])
 
     def test_a_done_report_carries_no_classification(self) -> None:
         result = self.writer.report(
-            role="worker", actor="w", reference="secretary-468", kind="done", body="ready",
+            role="worker",
+            actor="w",
+            reference="secretary-468",
+            kind="done",
+            body="ready",
             request_id="done-no-classification",
         )
         self.assertEqual(result["action"], "reported")
@@ -3350,8 +4113,13 @@ class BlockedContractTests(unittest.TestCase):
         self.assertNotIn("classification:", self.client.comments[12][-1]["comment"])
         with self.assertRaisesRegex(TaskError, "no classification") as raised:
             self.writer.report(
-                role="worker", actor="w", reference="secretary-468", kind="done", body="ready",
-                classification="external_fact", request_id="done-with-classification",
+                role="worker",
+                actor="w",
+                reference="secretary-468",
+                kind="done",
+                body="ready",
+                classification="external_fact",
+                request_id="done-with-classification",
             )
         self.assertEqual(raised.exception.code, "validation")
 
@@ -3359,13 +4127,29 @@ class BlockedContractTests(unittest.TestCase):
         body = Path(self.tmpdir.name) / "report.md"
         body.write_text("the upstream API is down\n", encoding="utf-8")
         output, errors = io.StringIO(), io.StringIO()
-        with mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client), \
-             contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
-            code = main([
-                "task", "report", "--role", "worker", "--ref", "secretary-468",
-                "--kind", "blocked", "--data-dir", str(Path(self.tmpdir.name) / "cli"),
-                "--body-file", str(body), "--request-id", "cli-blocked-unclassified",
-            ])
+        with (
+            mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = main(
+                [
+                    "task",
+                    "report",
+                    "--role",
+                    "worker",
+                    "--ref",
+                    "secretary-468",
+                    "--kind",
+                    "blocked",
+                    "--data-dir",
+                    str(Path(self.tmpdir.name) / "cli"),
+                    "--body-file",
+                    str(body),
+                    "--request-id",
+                    "cli-blocked-unclassified",
+                ]
+            )
 
         self.assertEqual(code, 2)
         self.assertEqual(output.getvalue(), "")
@@ -3375,14 +4159,31 @@ class BlockedContractTests(unittest.TestCase):
         body = Path(self.tmpdir.name) / "report.md"
         body.write_text("the card contradicts itself\n", encoding="utf-8")
         output, errors = io.StringIO(), io.StringIO()
-        with mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client), \
-             contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
-            code = main([
-                "task", "report", "--role", "worker", "--ref", "secretary-468",
-                "--kind", "blocked", "--classification", "wrong_task_definition",
-                "--data-dir", str(Path(self.tmpdir.name) / "cli"),
-                "--body-file", str(body), "--request-id", "cli-blocked-classified",
-            ])
+        with (
+            mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            code = main(
+                [
+                    "task",
+                    "report",
+                    "--role",
+                    "worker",
+                    "--ref",
+                    "secretary-468",
+                    "--kind",
+                    "blocked",
+                    "--classification",
+                    "wrong_task_definition",
+                    "--data-dir",
+                    str(Path(self.tmpdir.name) / "cli"),
+                    "--body-file",
+                    str(body),
+                    "--request-id",
+                    "cli-blocked-classified",
+                ]
+            )
 
         self.assertEqual(code, 0)
         self.assertEqual(errors.getvalue(), "")
@@ -3396,8 +4197,12 @@ class BlockedContractTests(unittest.TestCase):
 
         with self.assertRaisesRegex(TaskError, "out of Blocked requires a non-empty reason") as raised:
             self.writer.move(
-                role="observer", actor="observer", reference="secretary-468", target="ready",
-                reason="   ", request_id="observer-silent-disposition",
+                role="observer",
+                actor="observer",
+                reference="secretary-468",
+                target="ready",
+                reason="   ",
+                request_id="observer-silent-disposition",
             )
         self.assertEqual(raised.exception.code, "validation")
         self.assertEqual(raised.exception.exit_code, 2)
@@ -3405,8 +4210,12 @@ class BlockedContractTests(unittest.TestCase):
 
         reason = "the upstream fix landed, the card is workable again"
         moved = self.writer.move(
-            role="observer", actor="observer", reference="secretary-468", target="ready",
-            reason=reason, request_id="observer-disposition",
+            role="observer",
+            actor="observer",
+            reference="secretary-468",
+            target="ready",
+            reason=reason,
+            request_id="observer-disposition",
         )
         self.assertEqual(moved["task"]["state"], "ready")
         event = self._events("card.unblocked")[-1]
@@ -3422,8 +4231,12 @@ class BlockedContractTests(unittest.TestCase):
         self.client.tasks[0]["column_id"] = 5
         with self.assertRaisesRegex(TaskError, "out of Blocked requires a non-empty reason"):
             self.writer.move(
-                role="observer", actor="observer", reference="secretary-468",
-                target="in_progress", reason="", request_id="observer-silent-resume",
+                role="observer",
+                actor="observer",
+                reference="secretary-468",
+                target="in_progress",
+                reason="",
+                request_id="observer-silent-resume",
             )
 
     def test_the_observer_may_still_move_a_card_into_blocked_without_a_reason(self) -> None:
@@ -3431,8 +4244,12 @@ class BlockedContractTests(unittest.TestCase):
         self._reserve()
         self.client.tasks[0]["column_id"] = 3  # In progress
         moved = self.writer.move(
-            role="observer", actor="observer", reference="secretary-468", target="blocked",
-            reason="", request_id="observer-into-blocked",
+            role="observer",
+            actor="observer",
+            reference="secretary-468",
+            target="blocked",
+            reason="",
+            request_id="observer-into-blocked",
         )
         self.assertEqual(moved["task"]["state"], "blocked")
 
@@ -3440,14 +4257,22 @@ class BlockedContractTests(unittest.TestCase):
         """The classification is history, not card state: nothing on the card to go stale."""
         self._reserve()
         self.writer.report(
-            role="worker", actor="w", reference="secretary-468", kind="blocked",
-            body="the upstream API is down", classification="external_fact",
+            role="worker",
+            actor="w",
+            reference="secretary-468",
+            kind="blocked",
+            body="the upstream API is down",
+            classification="external_fact",
             request_id="blocked-before-requeue",
         )
         self.client.tasks[0]["column_id"] = 5  # Blocked
         requeued = self.writer.move(
-            role="observer", actor="observer", reference="secretary-468", target="ready",
-            reason="the upstream fix landed", request_id="observer-requeue",
+            role="observer",
+            actor="observer",
+            reference="secretary-468",
+            target="ready",
+            reason="the upstream fix landed",
+            request_id="observer-requeue",
         )
         self.assertEqual(requeued["task"]["state"], "ready")
         self.assertNotIn("blocked_classification", requeued["task"])
@@ -3458,17 +4283,29 @@ class BlockedContractTests(unittest.TestCase):
         self.client.tasks[0]["column_id"] = 3  # In progress
         with self.assertRaisesRegex(TaskError, "this steward transition requires a non-empty reason"):
             self.writer.move(
-                role="steward", actor="s", reference="secretary-468", target="blocked", reason="",
+                role="steward",
+                actor="s",
+                reference="secretary-468",
+                target="blocked",
+                reason="",
             )
         escalated = self.writer.move(
-            role="steward", actor="s", reference="secretary-468", target="blocked",
-            reason="the head went silent", request_id="steward-escalation",
+            role="steward",
+            actor="s",
+            reference="secretary-468",
+            target="blocked",
+            reason="the head went silent",
+            request_id="steward-escalation",
         )
         self.assertEqual(escalated["task"]["state"], "blocked")
         # And its own exit out of Blocked keeps the shape it had: Ready needs nothing, Done does.
         self.assertEqual(
             self.writer.move(
-                role="steward", actor="s", reference="secretary-468", target="ready", reason="",
+                role="steward",
+                actor="s",
+                reference="secretary-468",
+                target="ready",
+                reason="",
                 request_id="steward-requeue",
             )["task"]["state"],
             "ready",
@@ -3492,7 +4329,9 @@ class RequestIdOwnershipTests(unittest.TestCase):
         workspace = Path(self.tmpdir.name) / "workspace"
         workspace.mkdir()
         self.writer = TaskWriter(  # type: ignore[arg-type]
-            self.client, data_dir=self.tmpdir.name, workspace=str(workspace),
+            self.client,
+            data_dir=self.tmpdir.name,
+            workspace=str(workspace),
         )
 
     def _events(self, request_id: str = "") -> list[dict]:
@@ -3510,8 +4349,12 @@ class RequestIdOwnershipTests(unittest.TestCase):
 
     def _report(self, **overrides: object) -> dict:
         call = {
-            "role": "worker", "actor": "w", "reference": "secretary-468", "kind": "done",
-            "body": "first round", "request_id": "round-1",
+            "role": "worker",
+            "actor": "w",
+            "reference": "secretary-468",
+            "kind": "done",
+            "body": "first round",
+            "request_id": "round-1",
         }
         call.update(overrides)
         return self.writer.report(**call)  # type: ignore[arg-type]
@@ -3560,9 +4403,7 @@ class RequestIdOwnershipTests(unittest.TestCase):
         with self.assertRaisesRegex(TaskError, "belongs to another operation"):
             self._report(kind="blocked", body="stuck", classification="wrong_task_definition")
 
-        self.assertEqual(
-            self._events("round-1")[0]["data"]["classification"], "external_fact"
-        )
+        self.assertEqual(self._events("round-1")[0]["data"]["classification"], "external_fact")
         self.assertEqual(len(self._comments()), 1)
 
     def test_a_reused_report_id_on_another_card_is_refused(self) -> None:
@@ -3578,7 +4419,10 @@ class RequestIdOwnershipTests(unittest.TestCase):
     def test_a_reused_id_from_another_write_is_refused(self) -> None:
         """The claim is over the operation, not only over the report vocabulary."""
         self.writer.comment(
-            role="worker", actor="w", reference="secretary-468", body="a note",
+            role="worker",
+            actor="w",
+            reference="secretary-468",
+            body="a note",
             request_id="round-1",
         )
 
@@ -3591,9 +4435,14 @@ class RequestIdOwnershipTests(unittest.TestCase):
     def _stage_pending_report(self, body: str) -> dict:
         """A report staged by a crashed attempt: written, never appended."""
         event = {
-            "event_id": "evt_staged", "schema_version": 1, "occurred_at": "2026-08-03T00:00:00Z",
-            "actor": {"role": "worker", "id": "w"}, "kind": "reported", "outcome": "success",
-            "task_id": "task_kanboard_12", "ref": "secretary-468",
+            "event_id": "evt_staged",
+            "schema_version": 1,
+            "occurred_at": "2026-08-03T00:00:00Z",
+            "actor": {"role": "worker", "id": "w"},
+            "kind": "reported",
+            "outcome": "success",
+            "task_id": "task_kanboard_12",
+            "ref": "secretary-468",
             "backend": {"kind": "kanboard", "task_id": 12, "revision": "pending"},
             "request_id": "round-1",
             "payload": {"marker": "report:done", "body_sha256": hashlib.sha256(body.encode()).hexdigest()},
@@ -3625,14 +4474,22 @@ class RequestIdOwnershipTests(unittest.TestCase):
 
     def test_a_reused_verdict_id_with_another_verdict_is_refused(self) -> None:
         self.writer.verdict(
-            role="reviewer", actor="r", reference="secretary-468", kind="green", body="ok",
+            role="reviewer",
+            actor="r",
+            reference="secretary-468",
+            kind="green",
+            body="ok",
             request_id="round-1",
         )
 
         with self.assertRaisesRegex(TaskError, "belongs to another operation"):
             self.writer.verdict(
-                role="reviewer", actor="r", reference="secretary-468", kind="red",
-                body="the gate is red", request_id="round-1",
+                role="reviewer",
+                actor="r",
+                reference="secretary-468",
+                kind="red",
+                body="the gate is red",
+                request_id="round-1",
             )
 
         self.assertEqual(self._events("round-1")[0]["data"]["marker"], "review:green")
@@ -3643,13 +4500,28 @@ class RequestIdOwnershipTests(unittest.TestCase):
         body = Path(self.tmpdir.name) / "report.md"
         body.write_text("first round\n", encoding="utf-8")
         argv = [
-            "task", "report", "--role", "worker", "--ref", "secretary-468", "--kind", "done",
-            "--data-dir", data_dir, "--body-file", str(body), "--request-id", "cli-round-1",
+            "task",
+            "report",
+            "--role",
+            "worker",
+            "--ref",
+            "secretary-468",
+            "--kind",
+            "done",
+            "--data-dir",
+            data_dir,
+            "--body-file",
+            str(body),
+            "--request-id",
+            "cli-round-1",
         ]
         output, errors = io.StringIO(), io.StringIO()
-        with mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client), \
-             mock.patch("secretary.tasks.workspace_dirt", return_value=[]), \
-             contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+        with (
+            mock.patch("secretary.task_commands.KanboardClient.for_instance", return_value=self.client),
+            mock.patch("secretary.tasks.workspace_dirt", return_value=[]),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
             self.assertEqual(main(argv), 0)
             body.write_text("third round, a different report entirely\n", encoding="utf-8")
             code = main(argv)
@@ -3671,18 +4543,30 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
     def _write(self, family: str, request_id: str, body: str = "complete typed reason") -> dict:
         if family == "report":
             return self.writer.report(
-                role="worker", actor="worker", reference="secretary-468", kind="done",
-                body=body, request_id=request_id,
+                role="worker",
+                actor="worker",
+                reference="secretary-468",
+                kind="done",
+                body=body,
+                request_id=request_id,
             )
         if family == "verdict":
             return self.writer.verdict(
-                role="reviewer", actor="reviewer", reference="secretary-468", kind="green",
-                body=body, request_id=request_id,
+                role="reviewer",
+                actor="reviewer",
+                reference="secretary-468",
+                kind="green",
+                body=body,
+                request_id=request_id,
             )
         self.client.tasks[0]["column_id"] = 7  # Assessment for observer decisions.
         return self.writer.decide(
-            role="observer", actor="observer", reference="secretary-468", kind="release",
-            body=body, request_id=request_id,
+            role="observer",
+            actor="observer",
+            reference="secretary-468",
+            kind="release",
+            body=body,
+            request_id=request_id,
         )
 
     def test_each_marker_is_rendered_from_a_complete_typed_event(self) -> None:
@@ -3704,7 +4588,10 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
                 self.assertEqual(event["data"]["marker"], marker)
                 self.assertEqual(event["data"]["body"], "complete typed reason")
                 self.assertEqual(event["data"]["marker_occurrence"], 1)
-                self.assertEqual(self.client.comments[12][-1]["comment"], KanboardBoardHost.render_marker(Event.from_record(event)))
+                self.assertEqual(
+                    self.client.comments[12][-1]["comment"],
+                    KanboardBoardHost.render_marker(Event.from_record(event)),
+                )
                 self.assertEqual(result["event_id"], event["event_id"])
 
     def test_post_effect_append_failure_recovers_without_a_second_comment_for_each_marker(self) -> None:
@@ -3823,7 +4710,9 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
                 # proves that exact staged rendering before the later request is
                 # admitted to write its own second occurrence.
                 original_call(
-                    "createComment", task_id=12, user_id=0,
+                    "createComment",
+                    task_id=12,
+                    user_id=0,
                     content=KanboardBoardHost.render_marker(Event.from_record(pending)),
                 )
                 self.assertEqual(self.writer.reconcile(), (1, 0))
@@ -3850,9 +4739,13 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
                 assert pending is not None
                 content = KanboardBoardHost.render_marker(Event.from_record(pending))
                 writes = len(self.client.comments[12])
-                with self.assertRaisesRegex(TaskError, "identical Card marker occurrence is pending") as blocked:
+                with self.assertRaisesRegex(
+                    TaskError, "identical Card marker occurrence is pending"
+                ) as blocked:
                     self.writer.restore_comment(
-                        reference="secretary-468", body=content, occurrence=0,
+                        reference="secretary-468",
+                        body=content,
+                        occurrence=0,
                         request_id=f"{family}-restore-collision",
                     )
                 self.assertEqual(blocked.exception.code, "audit_pending")
@@ -3864,7 +4757,9 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
                 original_call("createComment", task_id=12, user_id=0, content=content)
                 self.assertEqual(self.writer.reconcile(), (1, 0))
                 self.writer.restore_comment(
-                    reference="secretary-468", body=content, occurrence=1,
+                    reference="secretary-468",
+                    body=content,
+                    occurrence=1,
                     request_id=f"{family}-restore-after-typed-owner",
                 )
                 self.assertEqual(len(self.client.comments[12]), writes + 2)
@@ -3893,7 +4788,9 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
                 with mock.patch.object(self.client, "call", side_effect=unavailable_before_delivery):
                     with self.assertRaisesRegex(TaskError, "audit repair"):
                         self.writer.restore_comment(
-                            reference="secretary-468", body=content, occurrence=0,
+                            reference="secretary-468",
+                            body=content,
+                            occurrence=0,
                             request_id=request_id,
                         )
 
@@ -3933,7 +4830,9 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
                 self._write("report", "pending-nonmatching-restore", "typed marker body")
 
         self.writer.restore_comment(
-            reference="secretary-468", body="[historical]\nnonmatching restore body", occurrence=0,
+            reference="secretary-468",
+            body="[historical]\nnonmatching restore body",
+            occurrence=0,
             request_id="nonmatching-restore",
         )
         self.assertEqual(
@@ -3981,13 +4880,17 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
         def report(request_id: str) -> None:
             try:
                 outcomes[request_id] = self._write(
-                    "report", request_id, body="same concurrent marker",
+                    "report",
+                    request_id,
+                    body="same concurrent marker",
                 )
             except TaskError as exc:
                 outcomes[request_id] = exc
 
-        with mock.patch.object(self.writer.board_host, "_marker_occurrences", side_effect=count_occurrences), \
-             mock.patch.object(self.client, "call", side_effect=create_then_lose_second_reply):
+        with (
+            mock.patch.object(self.writer.board_host, "_marker_occurrences", side_effect=count_occurrences),
+            mock.patch.object(self.client, "call", side_effect=create_then_lose_second_reply),
+        ):
             first = threading.Thread(target=report, args=("concurrent-first",))
             second = threading.Thread(target=report, args=("concurrent-second",))
             first.start()
@@ -4011,7 +4914,12 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
         for family in ("report", "verdict", "decision"):
             with self.subTest(family=family):
                 request_id = f"generic-{family}"
-                generic = {"event_id": request_id, "request_id": request_id, "kind": "commented", "payload": {}}
+                generic = {
+                    "event_id": request_id,
+                    "request_id": request_id,
+                    "kind": "commented",
+                    "payload": {},
+                }
                 self.writer.audit.stage(request_id, generic)
                 with self.assertRaisesRegex(TaskError, "belongs to another operation"):
                     self._write(family, request_id)
@@ -4029,7 +4937,9 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
             phase="worker",
             heads=[
                 head_run_from_profile(
-                    role="worker", head=head, head_source="role_default",
+                    role="worker",
+                    head=head,
+                    head_source="role_default",
                     profile={"adapter": "codex", "model": "gpt-5.6-terra", "effort": "extra"},
                     resources={},
                 )
@@ -4038,8 +4948,11 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
 
     def _routing(self, attempt: int, **overrides: object) -> dict:
         call = {
-            "role": "dispatcher", "actor": "pilot", "reference": "secretary-468",
-            "payload": self._routing_payload(attempt), "request_id": "round-1",
+            "role": "dispatcher",
+            "actor": "pilot",
+            "reference": "secretary-468",
+            "payload": self._routing_payload(attempt),
+            "request_id": "round-1",
         }
         call.update(overrides)
         return self.writer.routing(**call)  # type: ignore[arg-type]
@@ -4059,12 +4972,17 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
 
     def test_a_staged_routing_record_is_owned_by_its_id_too(self) -> None:
         staged = {
-            "event_id": "evt_staged_routing", "schema_version": 1,
-            "occurred_at": "2026-08-03T00:00:00Z", "actor": {"role": "dispatcher", "id": "pilot"},
-            "kind": "routing", "outcome": "success", "task_id": "task_kanboard_12",
+            "event_id": "evt_staged_routing",
+            "schema_version": 1,
+            "occurred_at": "2026-08-03T00:00:00Z",
+            "actor": {"role": "dispatcher", "id": "pilot"},
+            "kind": "routing",
+            "outcome": "success",
+            "task_id": "task_kanboard_12",
             "ref": "secretary-468",
             "backend": {"kind": "kanboard", "task_id": 12, "revision": "pending"},
-            "request_id": "round-1", "payload": self._routing_payload(1),
+            "request_id": "round-1",
+            "payload": self._routing_payload(1),
         }
         self.writer.audit.stage("round-1", staged)
 
@@ -4080,13 +4998,19 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
 
     def test_a_reused_edit_id_with_another_spec_is_refused(self) -> None:
         self.writer.edit(
-            role="po", actor="operator", reference="secretary-468", description="first spec",
+            role="po",
+            actor="operator",
+            reference="secretary-468",
+            description="first spec",
             request_id="round-1",
         )
 
         with self.assertRaisesRegex(TaskError, "belongs to another operation"):
             self.writer.edit(
-                role="po", actor="operator", reference="secretary-468", description="second spec",
+                role="po",
+                actor="operator",
+                reference="secretary-468",
+                description="second spec",
                 request_id="round-1",
             )
 
@@ -4096,12 +5020,20 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
     def test_an_edit_retried_after_it_landed_stays_idempotent(self) -> None:
         """The `_was` digests are of text the edit replaced, so a retry must not compare them."""
         first = self.writer.edit(
-            role="po", actor="operator", reference="secretary-468", description="one spec",
-            head="codex-terra", request_id="round-1",
+            role="po",
+            actor="operator",
+            reference="secretary-468",
+            description="one spec",
+            head="codex-terra",
+            request_id="round-1",
         )
         second = self.writer.edit(
-            role="po", actor="operator", reference="secretary-468", description="one spec",
-            head="codex-terra", request_id="round-1",
+            role="po",
+            actor="operator",
+            reference="secretary-468",
+            description="one spec",
+            head="codex-terra",
+            request_id="round-1",
         )
 
         self.assertEqual(first["event_id"], second["event_id"])
@@ -4111,13 +5043,19 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
     def test_a_reused_claim_id_with_another_worker_is_refused(self) -> None:
         self.client.metadata[12]["claim"] = ""
         self.writer.claim(
-            role="dispatcher", actor="d", reference="secretary-468", worker="worker-a",
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            worker="worker-a",
             request_id="round-1",
         )
 
         with self.assertRaisesRegex(TaskError, "belongs to another operation"):
             self.writer.claim(
-                role="dispatcher", actor="d", reference="secretary-468", worker="worker-b",
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                worker="worker-b",
                 request_id="round-1",
             )
 
@@ -4127,19 +5065,31 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
     def test_a_reused_move_id_with_another_destination_is_refused(self) -> None:
         self.client.tasks[0]["column_id"] = 3  # In progress
         self.writer.move(
-            role="dispatcher", actor="d", reference="secretary-468", target="ready",
-            reason="requeue", request_id="round-1",
+            role="dispatcher",
+            actor="d",
+            reference="secretary-468",
+            target="ready",
+            reason="requeue",
+            request_id="round-1",
         )
 
         with self.assertRaisesRegex(TaskError, "belongs to another operation"):
             self.writer.move(
-                role="dispatcher", actor="d", reference="secretary-468", target="blocked",
-                reason="requeue", request_id="round-1",
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                target="blocked",
+                reason="requeue",
+                request_id="round-1",
             )
         with self.assertRaisesRegex(TaskError, "belongs to another operation"):
             self.writer.move(
-                role="dispatcher", actor="d", reference="secretary-468", target="ready",
-                reason="a different reason entirely", request_id="round-1",
+                role="dispatcher",
+                actor="d",
+                reference="secretary-468",
+                target="ready",
+                reason="a different reason entirely",
+                request_id="round-1",
             )
 
         self.assertEqual(len(self._events("round-1")), 1)
@@ -4149,8 +5099,12 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
         """`from` is the column the move left, so a retry must not compare it."""
         self.client.tasks[0]["column_id"] = 3  # In progress
         call = {
-            "role": "dispatcher", "actor": "d", "reference": "secretary-468", "target": "ready",
-            "reason": "requeue", "request_id": "round-1",
+            "role": "dispatcher",
+            "actor": "d",
+            "reference": "secretary-468",
+            "target": "ready",
+            "reason": "requeue",
+            "request_id": "round-1",
         }
         first = self.writer.move(**call)  # type: ignore[arg-type]
         second = self.writer.move(**call)  # type: ignore[arg-type]
@@ -4161,13 +5115,17 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
 
     def test_a_reused_restore_id_with_another_placement_is_refused(self) -> None:
         self.writer.restore_card(
-            reference="secretary-468", metadata={"project": "secretary"}, target="ready",
+            reference="secretary-468",
+            metadata={"project": "secretary"},
+            target="ready",
             request_id="round-1",
         )
 
         with self.assertRaisesRegex(TaskError, "belongs to another operation"):
             self.writer.restore_card(
-                reference="secretary-468", metadata={"project": "secretary"}, target="blocked",
+                reference="secretary-468",
+                metadata={"project": "secretary"},
+                target="blocked",
                 request_id="round-1",
             )
 
@@ -4176,13 +5134,17 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
 
     def test_a_reused_restore_comment_id_with_another_body_is_refused(self) -> None:
         self.writer.restore_comment(
-            reference="secretary-468", body="the original comment", occurrence=0,
+            reference="secretary-468",
+            body="the original comment",
+            occurrence=0,
             request_id="round-1",
         )
 
         with self.assertRaisesRegex(TaskError, "belongs to another operation"):
             self.writer.restore_comment(
-                reference="secretary-468", body="another comment entirely", occurrence=0,
+                reference="secretary-468",
+                body="another comment entirely",
+                occurrence=0,
                 request_id="round-1",
             )
 
@@ -4191,8 +5153,13 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
 
     def _create(self, **overrides: object) -> dict:
         call = {
-            "role": "observer", "actor": "observer", "project": "secretary", "task_type": "code",
-            "title": "First card", "target": "ready", "request_id": "create-1",
+            "role": "observer",
+            "actor": "observer",
+            "project": "secretary",
+            "task_type": "code",
+            "title": "First card",
+            "target": "ready",
+            "request_id": "create-1",
         }
         call.update(overrides)
         with open_sprint() as sprint:

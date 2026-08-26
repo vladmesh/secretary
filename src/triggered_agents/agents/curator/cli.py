@@ -14,6 +14,7 @@ Two-phase so a crash before the memory commit re-harvests instead of dropping tu
 `status` shows the watermark; `precheck` exits PRECHECK_SKIP (100) when there is nothing new, so
 the systemd gate can skip the run without spinning up a head.
 """
+
 from __future__ import annotations
 
 import json
@@ -121,12 +122,26 @@ def cmd_memory_write(argv: list[str]) -> int:
     try:
         result = write_fact(STATE, request)
     except MemoryProtocolError as exc:
-        STATE.log_run("memory_write", result="error", actor=ns.actor, scope=ns.scope, slug=ns.slug,
-                      error=exc.payload.get("error"), commit=exc.payload.get("commit"))
+        STATE.log_run(
+            "memory_write",
+            result="error",
+            actor=ns.actor,
+            scope=ns.scope,
+            slug=ns.slug,
+            error=exc.payload.get("error"),
+            commit=exc.payload.get("commit"),
+        )
         print(json.dumps(exc.payload, ensure_ascii=False, sort_keys=True), file=sys.stderr)
         return 1
-    STATE.log_run("memory_write", result="ok", actor=ns.actor, scope=ns.scope, slug=ns.slug,
-                  commit=result.get("commit"), fact=result.get("fact"))
+    STATE.log_run(
+        "memory_write",
+        result="ok",
+        actor=ns.actor,
+        scope=ns.scope,
+        slug=ns.slug,
+        commit=result.get("commit"),
+        fact=result.get("fact"),
+    )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
 

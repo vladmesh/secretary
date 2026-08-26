@@ -19,9 +19,7 @@ class RuntimeEnvPathTests(unittest.TestCase):
             os.environ, {"SECRETARY_RUNTIME_ENV_FILE": "/tmp/secretary-runtime.env"}, clear=True
         ):
             self.assertEqual(role_env.runtime_env_path(), Path("/tmp/secretary-runtime.env"))
-        with mock.patch.dict(
-            os.environ, {"TA_RUNTIME_ENV_FILE": "/tmp/ta-runtime.env"}, clear=True
-        ):
+        with mock.patch.dict(os.environ, {"TA_RUNTIME_ENV_FILE": "/tmp/ta-runtime.env"}, clear=True):
             self.assertEqual(role_env.runtime_env_path(), Path("/tmp/ta-runtime.env"))
         with mock.patch.dict(
             os.environ,
@@ -81,7 +79,8 @@ class RuntimeEnvRoleTests(unittest.TestCase):
             instance = Path(tmp)
             with mock.patch("triggered_agents.runtime.board_transport.resolve", side_effect=AssertionError):
                 env = role_env.runtime_env(
-                    "worker", base_env={"PATH": "/usr/bin", "SECRETARY_INSTANCE": str(instance)},
+                    "worker",
+                    base_env={"PATH": "/usr/bin", "SECRETARY_INSTANCE": str(instance)},
                     env_file=instance / "runtime.env",
                 )
         self.assertEqual(env["SECRETARY_INSTANCE"], str(instance))

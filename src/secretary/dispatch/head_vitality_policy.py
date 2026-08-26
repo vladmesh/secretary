@@ -191,8 +191,12 @@ class RecoveryThresholds:
 
     def __post_init__(self) -> None:
         value = self.response_window_seconds
-        if isinstance(value, bool) or not isinstance(value, (int, float)) \
-                or not math.isfinite(float(value)) or float(value) <= 0:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) <= 0
+        ):
             raise ValueError("recovery threshold response_window_seconds is positive and finite")
         limit = self.deterministic_refusal_limit
         if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
@@ -240,9 +244,7 @@ class RecoveryDecision:
         }
 
 
-def apply_rung_state(
-    episode: VitalityEpisode, decision: RecoveryDecision
-) -> VitalityEpisode:
+def apply_rung_state(episode: VitalityEpisode, decision: RecoveryDecision) -> VitalityEpisode:
     """Write a decision's rung state back onto the episode, purely.
 
     Rung, span key and refusal count ride the episode's own serialisation (S1-2 reserved
@@ -294,15 +296,10 @@ def decide_recovery(
     """
     if not isinstance(episode, VitalityEpisode):
         return _previous_or_observe(previous_rung_state, "no persisted episode to decide from")
-    if isinstance(now, bool) or not isinstance(now, (int, float)) \
-            or not math.isfinite(float(now)):
-        return _previous_or_observe(
-            previous_rung_state, "the policy was handed a clock it cannot read"
-        )
+    if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(float(now)):
+        return _previous_or_observe(previous_rung_state, "the policy was handed a clock it cannot read")
     if not isinstance(thresholds, RecoveryThresholds):
-        return _previous_or_observe(
-            previous_rung_state, "the policy was handed thresholds it cannot read"
-        )
+        return _previous_or_observe(previous_rung_state, "the policy was handed thresholds it cannot read")
     now = float(now)
 
     cls = deterministic_reason_class(episode.reason)
@@ -314,7 +311,8 @@ def decide_recovery(
         # that this suspicion was consumed, completing the rung table. Idempotency per
         # round generation remains the nudge machinery's contract, unchanged from S1-4.
         return RecoveryDecision(
-            intent=RecoveryIntent.NUDGE, rung=RUNG_SUSPICION_NOTED,
+            intent=RecoveryIntent.NUDGE,
+            rung=RUNG_SUSPICION_NOTED,
             refusals=episode.deterministic_refusals,
             reason=episode.reason or "strong quiet past the suspect threshold",
             detail={"suspected_since": episode.suspected_since},
@@ -329,7 +327,9 @@ def decide_recovery(
     # does not survive into health -- the operator comment already written stands, but the
     # next suspension must earn its own rungs from scratch.
     return RecoveryDecision(
-        intent=RecoveryIntent.OBSERVE, rung=RUNG_NONE, refusals=0,
+        intent=RecoveryIntent.OBSERVE,
+        rung=RUNG_NONE,
+        refusals=0,
         reason="",
         detail={"verdict": episode.verdict.value},
     )
@@ -409,15 +409,14 @@ def _decide_suspended(
     """The SIGCONT rungs for one suspension span, keyed on the reducer's freeze stamp."""
     span = float(episode.stall_frozen_since or 0.0)
     previous_rung = (
-        int(previous_rung_state.recovery_rung or 0)
-        if isinstance(previous_rung_state, VitalityEpisode) else 0
+        int(previous_rung_state.recovery_rung or 0) if isinstance(previous_rung_state, VitalityEpisode) else 0
     )
     previous_span = (
         float(previous_rung_state.recovery_span_started_at or 0.0)
-        if isinstance(previous_rung_state, VitalityEpisode) else 0.0
+        if isinstance(previous_rung_state, VitalityEpisode)
+        else 0.0
     )
-    same_span = previous_rung >= RUNG_SIGCONT_SENT and previous_span > 0.0 \
-        and previous_span == span
+    same_span = previous_rung >= RUNG_SIGCONT_SENT and previous_span > 0.0 and previous_span == span
     detail: dict[str, Any] = {"span_started_at": span}
     if not same_span:
         # Fresh span (or the first policy sighting of it): one identity-fenced SIGCONT.
@@ -425,7 +424,8 @@ def _decide_suspended(
         # the caller's perspective; SIGCONT_SENT exists as vocabulary for a caller that had
         # to persist "sent" before its window bookkeeping could start.
         return RecoveryDecision(
-            intent=RecoveryIntent.SIGCONT, rung=RUNG_RESPONSE_WINDOW,
+            intent=RecoveryIntent.SIGCONT,
+            rung=RUNG_RESPONSE_WINDOW,
             refusals=episode.deterministic_refusals,
             reason=(
                 "process parked on a stop signal: send one identity-fenced SIGCONT, "
@@ -441,7 +441,8 @@ def _decide_suspended(
         # Already escalated for this span: stay observable but do not re-fire. The comment
         # was written once; repeating it per tick would flood the card.
         return RecoveryDecision(
-            intent=RecoveryIntent.OBSERVE, rung=RUNG_ESCALATED,
+            intent=RecoveryIntent.OBSERVE,
+            rung=RUNG_ESCALATED,
             refusals=episode.deterministic_refusals,
             reason=(
                 "still suspended past the response window; the operator has been "
@@ -452,7 +453,8 @@ def _decide_suspended(
     suspended_for = max(0.0, now - span)
     if suspended_for <= thresholds.response_window_seconds:
         return RecoveryDecision(
-            intent=RecoveryIntent.OBSERVE, rung=RUNG_RESPONSE_WINDOW,
+            intent=RecoveryIntent.OBSERVE,
+            rung=RUNG_RESPONSE_WINDOW,
             refusals=episode.deterministic_refusals,
             reason=(
                 "SIGCONT sent this span; inside the response window "
@@ -465,7 +467,8 @@ def _decide_suspended(
             },
         )
     return RecoveryDecision(
-        intent=RecoveryIntent.ESCALATE_OPERATOR, rung=RUNG_ESCALATED,
+        intent=RecoveryIntent.ESCALATE_OPERATOR,
+        rung=RUNG_ESCALATED,
         refusals=episode.deterministic_refusals,
         reason=(
             f"suspended for {int(suspended_for)}s -- past the "

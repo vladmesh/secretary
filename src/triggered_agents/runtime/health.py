@@ -21,6 +21,7 @@ Both sources here are the live data plane, not a checkout (secretary-833):
     A recorded tick that ended unhealthy is red on its own: it must never be answered with the
     last healthy one that came before it.
 """
+
 from __future__ import annotations
 
 import datetime
@@ -165,9 +166,7 @@ def check(agents: tuple[str, ...]) -> int:
     for agent in agents:
         # No automation.toml means the agent is CLI-only (no timer, no runs); it has nothing to
         # be red about, so report it neutrally and move on.
-        if not (
-            _REPO_ROOT / "src" / "triggered_agents" / "agents" / agent / "automation.toml"
-        ).is_file():
+        if not (_REPO_ROOT / "src" / "triggered_agents" / "agents" / agent / "automation.toml").is_file():
             print(f"SKIP {agent}: no automation (CLI-only)")
             continue
         problems = []

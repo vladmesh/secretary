@@ -45,12 +45,36 @@ from secretary.dispatcher_watchdog import pid_file_path
 # The measured inventory, in the shape the live CLI returns it: a bare shell, a dropped shell, and
 # the worker's own pty -- all listed, and none of them carrying a word about what is drawn.
 MEASURED_TERMINALS = [
-    {"handle": "term-105", "ptyId": "105", "leafId": "leaf-105", "tabId": "tab-1",
-     "title": "bash", "connected": True, "writable": True, "orphaned": False},
-    {"handle": "term-107", "ptyId": "107", "leafId": "leaf-107", "tabId": "tab-1",
-     "title": "bash", "connected": False, "writable": False, "orphaned": False},
-    {"handle": "term-106", "ptyId": "106", "leafId": "leaf-106", "tabId": "tab-2",
-     "title": "codex", "connected": True, "writable": True, "orphaned": False},
+    {
+        "handle": "term-105",
+        "ptyId": "105",
+        "leafId": "leaf-105",
+        "tabId": "tab-1",
+        "title": "bash",
+        "connected": True,
+        "writable": True,
+        "orphaned": False,
+    },
+    {
+        "handle": "term-107",
+        "ptyId": "107",
+        "leafId": "leaf-107",
+        "tabId": "tab-1",
+        "title": "bash",
+        "connected": False,
+        "writable": False,
+        "orphaned": False,
+    },
+    {
+        "handle": "term-106",
+        "ptyId": "106",
+        "leafId": "leaf-106",
+        "tabId": "tab-2",
+        "title": "codex",
+        "connected": True,
+        "writable": True,
+        "orphaned": False,
+    },
 ]
 
 
@@ -146,7 +170,10 @@ class HeadStatusTests(unittest.TestCase):
                 # An Orca old enough not to know the option refuses the whole call, exactly as its
                 # argument parser would.
                 return subprocess.CompletedProcess(
-                    list(argv), 2, stdout="", stderr="unknown option --include-visual-layouts",
+                    list(argv),
+                    2,
+                    stdout="",
+                    stderr="unknown option --include-visual-layouts",
                 )
             result: dict = {
                 "terminals": self.terminals,
@@ -156,12 +183,16 @@ class HeadStatusTests(unittest.TestCase):
             if wants_layouts and self.layouts is not None:
                 result["visualLayouts"] = self.layouts
             return subprocess.CompletedProcess(
-                list(argv), 0, stdout=json.dumps({"ok": True, "result": result}),
+                list(argv),
+                0,
+                stdout=json.dumps({"ok": True, "result": result}),
             )
         if operation == "wait":
             # The head is mid-turn, which is what the measured pane read as.
             return subprocess.CompletedProcess(
-                list(argv), 0, stdout=json.dumps({"result": {"wait": {"satisfied": False}}}),
+                list(argv),
+                0,
+                stdout=json.dumps({"result": {"wait": {"satisfied": False}}}),
             )
         return subprocess.CompletedProcess(list(argv), 0, stdout="{}")
 
@@ -196,15 +227,15 @@ class HeadStatusTests(unittest.TestCase):
 
     def _write_heartbeat(self, record: DispatcherRecord, pid: int, *, alive: bool) -> None:
         identity = run_heartbeat_identity(
-            record.worker_head_run, role="worker", task=f"card:{self.ref}",
+            record.worker_head_run,
+            role="worker",
+            task=f"card:{self.ref}",
             leaf=record.worker_leaf,
         )
         if alive:
             stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-            identity["proc_starttime_ticks"] = stat[stat.rfind(")") + 2:].split()[19]
-            identity["boot_id"] = Path("/proc/sys/kernel/random/boot_id").read_text(
-                encoding="utf-8"
-            ).strip()
+            identity["proc_starttime_ticks"] = stat[stat.rfind(")") + 2 :].split()[19]
+            identity["boot_id"] = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
         else:
             # Death is classified before the kernel identity, so this models an exited head
             # without depending on a recycled /proc directory.
@@ -379,7 +410,8 @@ class HeadStatusTests(unittest.TestCase):
         record = self._record()
         self._write_heartbeat(record, self._live_pid(), alive=True)
         record.worker_vitality_episode = VitalityEpisode(
-            run_id="some-older-run", verdict=VitalityVerdict.CONFIRMED_STALL,
+            run_id="some-older-run",
+            verdict=VitalityVerdict.CONFIRMED_STALL,
         )
 
         head = self._answer(record)["heads"][0]
@@ -392,7 +424,9 @@ class HeadStatusTests(unittest.TestCase):
         record = self._record()
         self._write_heartbeat(record, self._live_pid(), alive=True)
         record.worker_vitality_episode = VitalityEpisode(
-            run_id="run-1450", verdict=VitalityVerdict.HEALTHY_QUIET, basis=("pid_heartbeat",),
+            run_id="run-1450",
+            verdict=VitalityVerdict.HEALTHY_QUIET,
+            basis=("pid_heartbeat",),
         )
 
         head = self._answer(record)["heads"][0]
@@ -418,10 +452,17 @@ class HeadStatusTests(unittest.TestCase):
         here = self._record()
         self._write_heartbeat(here, self._live_pid(), alive=True)
         elsewhere = DispatcherRecord(
-            worker="worker-2", workspace=str(self.root / "other"), handle="term-999",
-            head="codex-high", review_head="codex-high", attempt_id="attempt-2",
-            comment_baseline=0, review_baseline=0, claimed_at=0.0,
-            worker_head_run={"run_id": "run-other"}, state="in_progress",
+            worker="worker-2",
+            workspace=str(self.root / "other"),
+            handle="term-999",
+            head="codex-high",
+            review_head="codex-high",
+            attempt_id="attempt-2",
+            comment_baseline=0,
+            review_baseline=0,
+            claimed_at=0.0,
+            worker_head_run={"run_id": "run-other"},
+            state="in_progress",
         )
         runtime = _FakeRuntime({self.ref: here, "secretary-1": elsewhere})
 
@@ -477,21 +518,29 @@ class RuntimePaneInventoryTransportTests(unittest.TestCase):
         return OrcaSessionHost(run_json), calls
 
     def test_the_inventory_asks_for_the_visual_layouts_and_reads_the_tree(self) -> None:
-        host, calls = self._host(lambda _args: {
-            "terminals": MEASURED_TERMINALS,
-            "visualLayouts": measured_layouts(self.workspace),
-            "totalCount": 3,
-        })
+        host, calls = self._host(
+            lambda _args: {
+                "terminals": MEASURED_TERMINALS,
+                "visualLayouts": measured_layouts(self.workspace),
+                "totalCount": 3,
+            }
+        )
 
         inventory = host.workspace_inventory(self.workspace)
 
         self.assertEqual(
             calls[0],
-            ["orca", "terminal", "list", "--worktree", f"path:{self.workspace}",
-             "--include-visual-layouts", "--json"],
+            [
+                "orca",
+                "terminal",
+                "list",
+                "--worktree",
+                f"path:{self.workspace}",
+                "--include-visual-layouts",
+                "--json",
+            ],
         )
-        self.assertEqual({pane.leaf for pane in inventory.panes},
-                         {"leaf-105", "leaf-106", "leaf-107"})
+        self.assertEqual({pane.leaf for pane in inventory.panes}, {"leaf-105", "leaf-106", "leaf-107"})
         self.assertTrue(inventory.layout.supported)
         self.assertTrue(inventory.layout.known_workspace)
         # The measured case, at the transport: one pty drawn, the other two listed and not.
@@ -538,20 +587,32 @@ class RuntimePaneInventoryTransportTests(unittest.TestCase):
     def test_drawn_panes_are_found_wherever_the_tree_nests_them(self) -> None:
         """Robustness, not a claimed contract: a container this module has never seen must not
         silently turn every pty into an undrawn one."""
-        host, _calls = self._host(lambda _args: {
-            "terminals": MEASURED_TERMINALS,
-            "visualLayouts": [{
-                "worktreePath": self.workspace,
-                "root": {"type": "group", "tabs": [{"tabId": "tab-2", "panes": {
-                    "type": "group",
-                    "direction": "row",
-                    "children": [
-                        {"type": "terminal", "handle": "term-106", "leafId": "leaf-106"},
-                        {"type": "terminal", "handle": "term-105", "leafId": "leaf-105"},
-                    ],
-                }}]},
-            }],
-        })
+        host, _calls = self._host(
+            lambda _args: {
+                "terminals": MEASURED_TERMINALS,
+                "visualLayouts": [
+                    {
+                        "worktreePath": self.workspace,
+                        "root": {
+                            "type": "group",
+                            "tabs": [
+                                {
+                                    "tabId": "tab-2",
+                                    "panes": {
+                                        "type": "group",
+                                        "direction": "row",
+                                        "children": [
+                                            {"type": "terminal", "handle": "term-106", "leafId": "leaf-106"},
+                                            {"type": "terminal", "handle": "term-105", "leafId": "leaf-105"},
+                                        ],
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ],
+            }
+        )
 
         layout = host.workspace_inventory(self.workspace).layout
 
@@ -563,10 +624,12 @@ class RuntimePaneInventoryTransportTests(unittest.TestCase):
         from triggered_agents.runtime.pane_host import OrcaSessionHost
 
         host = OrcaSessionHost(
-            lambda _args: {"terminals": [
-                {"handle": "t", "leafId": "l", "connected": True, "paneRuntimeId": -1},
-                {"handle": "u", "leafId": "m", "connected": True},
-            ]}
+            lambda _args: {
+                "terminals": [
+                    {"handle": "t", "leafId": "l", "connected": True, "paneRuntimeId": -1},
+                    {"handle": "u", "leafId": "m", "connected": True},
+                ]
+            }
         )
 
         panes = {pane.leaf: pane for pane in host.panes(self.workspace)}

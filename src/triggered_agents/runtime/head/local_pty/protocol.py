@@ -45,6 +45,7 @@ The limits are values with reasons, not round numbers:
     without ever attaching — a probe that leaks, a client stuck mid-frame — from costing the
     supervisor a descriptor plus an inbox of up to `FRAME_MAX_BYTES` without any limit at all.
 """
+
 from __future__ import annotations
 
 import base64

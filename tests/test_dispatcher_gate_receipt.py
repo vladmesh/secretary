@@ -15,9 +15,13 @@ class GateReceiptPolicyTests(unittest.TestCase):
             validated_sha="a" * 40,
             base_sha="b" * 40,
             gate_mode=mode,
-            required_checks=[{
-                "name": "unit", "conclusion": "SUCCESS", "url": "https://ci.invalid/1",
-            }],
+            required_checks=[
+                {
+                    "name": "unit",
+                    "conclusion": "SUCCESS",
+                    "url": "https://ci.invalid/1",
+                }
+            ],
             check_set_identity="python3 -m unittest",
         )
         assert receipt is not None
@@ -66,21 +70,21 @@ class GateReceiptPolicyTests(unittest.TestCase):
 
     def test_unknown_mode_is_invalid_even_when_receiptless_or_noop(self) -> None:
         for noop in (False, True):
-            accepted = AcceptedGreenGate.accept(
-                None, current_sha="a" * 40, gate_mode="alternate", noop=noop
-            )
+            accepted = AcceptedGreenGate.accept(None, current_sha="a" * 40, gate_mode="alternate", noop=noop)
             self.assertFalse(accepted.valid)
 
     def test_only_full_sha1_or_sha256_object_ids_are_receipts(self) -> None:
         for length in (7, 12, 39, 41, 63, 65):
             with self.subTest(length=length):
-                self.assertIsNone(mint_gate_receipt(
-                    validated_sha="a" * length,
-                    base_sha="b" * 40,
-                    gate_mode="local",
-                    required_checks=[{"name": "unit", "conclusion": "SUCCESS", "url": ""}],
-                    check_set_identity="unit",
-                ))
+                self.assertIsNone(
+                    mint_gate_receipt(
+                        validated_sha="a" * length,
+                        base_sha="b" * 40,
+                        gate_mode="local",
+                        required_checks=[{"name": "unit", "conclusion": "SUCCESS", "url": ""}],
+                        check_set_identity="unit",
+                    )
+                )
         abbreviated_base = self.receipt()
         abbreviated_base["base_sha"] = "b" * 12
         self.assertIsNone(GateReceipt.accept(abbreviated_base, current_sha="a" * 40))

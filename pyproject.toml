@@ -15,6 +15,11 @@ target-version = "py311"
 # other ruff refuse to run instead of silently reporting a different set of findings; install
 # the matching one with `pip install -e '.[dev]'`.
 required-version = "==0.16.4"
+# The formatter's width, chosen from what the tree already is rather than from the default:
+# p95 of the existing lines is 97 columns and p99 is 105, so 88 would rewrap working code for
+# no reason. Long prose and command examples in comments and strings are not reflowed at all,
+# which is why the lint side still ignores E501.
+line-length = 110
 
 [tool.ruff.lint]
 # Keep the initial debt finite and explicit. These are the rules that find issues in

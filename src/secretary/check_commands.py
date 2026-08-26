@@ -15,6 +15,7 @@ Reuse is authorized in exactly one place — ``usable_receipt``, read through
 ``ReceiptLookup.authorized()``. Both commands here ask that one question, so ``check show`` cannot
 report "not usable" while ``--reuse`` quietly skips the run.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -65,11 +66,14 @@ def add_check_subcommands(subparsers) -> None:
     )
     _common(broad)
     broad.add_argument(
-        "--timeout-seconds", type=float, default=0.0,
+        "--timeout-seconds",
+        type=float,
+        default=0.0,
         help="kill the check after this long; the receipt then records an incomplete run",
     )
     broad.add_argument(
-        "--reuse", action="store_true",
+        "--reuse",
+        action="store_true",
         help="skip the run when an intact receipt already describes this exact content",
     )
     broad.set_defaults(handler=run_check_broad)
@@ -92,12 +96,12 @@ def _common(parser: argparse.ArgumentParser) -> None:
     shape.add_argument(
         "--module",
         help="run `python -m MODULE` in this workspace; the standard shape, which attests the "
-             "project the check process imported",
+        "project the check process imported",
     )
     shape.add_argument(
         "--command",
         help="run an arbitrary command through bash -lc; its receipt attests no import provenance "
-             "and is never reused in place of a run",
+        "and is never reused in place of a run",
     )
     parser.add_argument(
         "--module-arg", action="append", default=[], help="argument passed to --module, repeatable"
@@ -108,6 +112,7 @@ def _missing(message: str):
     def handler(_args: argparse.Namespace) -> int:
         print(json.dumps({"error": {"code": "usage", "message": message}}))
         return 2
+
     return handler
 
 
@@ -119,12 +124,15 @@ def _fail(exc: BroadCheckError) -> int:
 def _spec(args: argparse.Namespace) -> ResolvedCheck:
     if args.module:
         contract = _module_contract(Path(args.root), Path(args.instance))
-        return ResolvedCheck(CheckSpec.for_module(
-            args.module,
-            args.module_arg,
-            interpreter=contract.interpreter,
-            import_package=contract.import_package,
-        ), contract.as_dict())
+        return ResolvedCheck(
+            CheckSpec.for_module(
+                args.module,
+                args.module_arg,
+                interpreter=contract.interpreter,
+                import_package=contract.import_package,
+            ),
+            contract.as_dict(),
+        )
     if args.module_arg:
         raise BroadCheckError("module_arg_without_module", "--module-arg needs --module")
     return ResolvedCheck(CheckSpec.for_shell(args.command))
@@ -168,8 +176,9 @@ def _binding_for_workspace(root: Path, instance: Path) -> tuple[dict[str, object
         repo = binding.get("repo")
         if not isinstance(repo, str) or not repo:
             continue
-        if not _same_repository(root, Path(repo).expanduser(), first_common=root_common,
-                                first_common_known=True):
+        if not _same_repository(
+            root, Path(repo).expanduser(), first_common=root_common, first_common_known=True
+        ):
             continue
         if binding.get("enabled") is True:
             enabled.append(binding)
@@ -241,7 +250,9 @@ def run_check_broad(args: argparse.Namespace) -> int:
             authorized = lookup.authorized()
             if authorized is not None:
                 payload = {
-                    "reused": True, "path": str(lookup.path), "receipt": authorized,
+                    "reused": True,
+                    "path": str(lookup.path),
+                    "receipt": authorized,
                     "summary": summarize(authorized),
                 }
                 if resolved.module_contract is not None:
@@ -262,7 +273,9 @@ def run_check_broad(args: argparse.Namespace) -> int:
     except BroadCheckError as exc:
         return _fail(exc)
     payload = {
-        "reused": False, "path": str(receipt_path(root, spec)), "receipt": receipt,
+        "reused": False,
+        "path": str(receipt_path(root, spec)),
+        "receipt": receipt,
         "summary": summarize(receipt),
     }
     if resolved.module_contract is not None:

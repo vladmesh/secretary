@@ -23,6 +23,7 @@ systemd gate can skip the run without spinning up a head.
 Retro's watermark/lock/runs.jsonl live under state/retro, independent of the curator's cursor,
 so the two harvest the same sources on separate schedules without clobbering each other.
 """
+
 from __future__ import annotations
 
 import json
@@ -65,9 +66,11 @@ def cmd_harvest(as_json: bool) -> int:
     since, until = _batch_window(batch)
     log = search_log.tail(since, until)
     if as_json:
-        print(json.dumps(
-            {"batch": batch, "search_log": log, "done_cleanup": cleanup},
-            ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {"batch": batch, "search_log": log, "done_cleanup": cleanup}, ensure_ascii=False, indent=2
+            )
+        )
     else:
         print("## Done cleanup")
         if cleanup["closed_refs"]:
@@ -155,8 +158,9 @@ def main(argv=None) -> int:
         import argparse
 
         p = argparse.ArgumentParser(prog="triggered_agents retro log-proposal")
-        p.add_argument("--ref", required=True, action="append",
-                       help="board card reference filed this run (repeatable)")
+        p.add_argument(
+            "--ref", required=True, action="append", help="board card reference filed this run (repeatable)"
+        )
         ns = p.parse_args(argv[1:])
         return cmd_log_proposal(ns.ref)
     print(__doc__)

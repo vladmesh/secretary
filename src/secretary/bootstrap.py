@@ -35,12 +35,15 @@ from secretary.tasks import KanboardClient, TaskError, all_project_cards
 
 KANBOARD_IMAGE = "kanboard/kanboard:v1.2.46"
 ORCA_VERSION = "v1.4.152"
-ORCA_APPIMAGE_URL = (
-    "https://github.com/stablyai/orca/releases/download/"
-    f"{ORCA_VERSION}/orca-linux.AppImage"
-)
+ORCA_APPIMAGE_URL = f"https://github.com/stablyai/orca/releases/download/{ORCA_VERSION}/orca-linux.AppImage"
 PIPELINE_COLUMNS = (
-    "Issues", "Ready", "In progress", "Validate", "Assessment", "Blocked", "Done",
+    "Issues",
+    "Ready",
+    "In progress",
+    "Validate",
+    "Assessment",
+    "Blocked",
+    "Done",
 )
 # The layout every live board carried before `Assessment` existed. It is not a supported
 # schema: it is the one older layout `board migrate-assessment` knows how to repair in place,
@@ -63,15 +66,11 @@ class BootstrapError(RuntimeError):
 def _host_supported(os_release: Path = Path("/etc/os-release")) -> None:
     try:
         fields = dict(
-            line.split("=", 1) for line in os_release.read_text(encoding="utf-8").splitlines()
-            if "=" in line
+            line.split("=", 1) for line in os_release.read_text(encoding="utf-8").splitlines() if "=" in line
         )
     except OSError:
         raise BootstrapError("could not identify the operating system") from None
-    if (
-        fields.get("ID", "").strip('"') != "ubuntu"
-        or fields.get("VERSION_ID", "").strip('"') != "24.04"
-    ):
+    if fields.get("ID", "").strip('"') != "ubuntu" or fields.get("VERSION_ID", "").strip('"') != "24.04":
         raise BootstrapError("bootstrap supports Ubuntu 24.04 only")
 
 
@@ -136,7 +135,9 @@ def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = Non
             if tasks:
                 hint = ""
                 if titles == list(LEGACY_PIPELINE_COLUMNS):
-                    hint = f"; run `secretary board migrate-assessment --instance {instance}` to add it in place"
+                    hint = (
+                        f"; run `secretary board migrate-assessment --instance {instance}` to add it in place"
+                    )
                 raise BootstrapError(
                     "Pipeline board has cards but an incompatible column schema: "
                     f"{', '.join(titles)} (expected: {', '.join(PIPELINE_COLUMNS)}; "
@@ -148,12 +149,13 @@ def ensure_pipeline_board(instance: Path, *, client: KanboardClient | None = Non
                 else:
                     api.call("addColumn", project_id=board_id, title=title)
             # Kanboard 1.2.46 creates four defaults. Remove surplus only while empty.
-            for column in columns[len(PIPELINE_COLUMNS):]:
+            for column in columns[len(PIPELINE_COLUMNS) :]:
                 if isinstance(column, dict) and column.get("id"):
                     api.call("removeColumn", column_id=int(column["id"]))
         lanes = api.call("getActiveSwimlanes", project_id=board_id) or []
         known = {
-            str(lane.get("name")) for lane in lanes
+            str(lane.get("name"))
+            for lane in lanes
             if isinstance(lane, dict) and isinstance(lane.get("name"), str)
         }
         for name in sorted(_project_lanes(instance) - known):
@@ -189,12 +191,15 @@ def _card_placement(api: KanboardClient, board_id: int) -> dict[int, tuple[int, 
         except (TypeError, ValueError):
             raise BootstrapError("Kanboard returned a Pipeline card without an id") from None
         placement[identifier] = (
-            int(card.get("column_id") or 0), int(card.get("position") or 0),
+            int(card.get("column_id") or 0),
+            int(card.get("position") or 0),
         )
     return placement
 
 
-def migrate_assessment_column(instance: Path | None = None, *, client: KanboardClient | None = None) -> dict[str, object]:
+def migrate_assessment_column(
+    instance: Path | None = None, *, client: KanboardClient | None = None
+) -> dict[str, object]:
     """Add the `Assessment` column to a populated Pipeline board, in place.
 
     `ensure_pipeline_board` refuses to reshape a board that holds cards, on purpose: a rename
@@ -219,8 +224,11 @@ def migrate_assessment_column(instance: Path | None = None, *, client: KanboardC
         titles = [str(column.get("title") or "") for column in columns if isinstance(column, dict)]
         if titles == list(PIPELINE_COLUMNS):
             return {
-                "ok": True, "action": "board migrate-assessment", "status": "unchanged",
-                "board_id": board_id, "columns": titles,
+                "ok": True,
+                "action": "board migrate-assessment",
+                "status": "unchanged",
+                "board_id": board_id,
+                "columns": titles,
             }
         before = _card_placement(api, board_id)
         if titles == list(LEGACY_PIPELINE_COLUMNS):
@@ -251,9 +259,7 @@ def migrate_assessment_column(instance: Path | None = None, *, client: KanboardC
                 f"Kanboard did not move {ASSESSMENT_COLUMN} to position {ASSESSMENT_POSITION}"
             )
         current = api.call("getColumns", project_id=board_id) or []
-        titles = [
-            str(column.get("title") or "") for column in current if isinstance(column, dict)
-        ]
+        titles = [str(column.get("title") or "") for column in current if isinstance(column, dict)]
         if titles != list(PIPELINE_COLUMNS):
             raise BootstrapError(
                 "Pipeline columns after the migration are "
@@ -266,8 +272,12 @@ def migrate_assessment_column(instance: Path | None = None, *, client: KanboardC
                 f"{len(before)} card(s) before, {len(after)} after"
             )
         return {
-            "ok": True, "action": "board migrate-assessment", "status": status,
-            "board_id": board_id, "columns": titles, "cards": len(after),
+            "ok": True,
+            "action": "board migrate-assessment",
+            "status": status,
+            "board_id": board_id,
+            "columns": titles,
+            "cards": len(after),
         }
     except TaskError as exc:
         raise BootstrapError(exc.message) from None
@@ -275,7 +285,9 @@ def migrate_assessment_column(instance: Path | None = None, *, client: KanboardC
 
 def _compose_file(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_text_atomic(path, f"""services:
+    write_text_atomic(
+        path,
+        f"""services:
   kanboard:
     image: {KANBOARD_IMAGE}
     restart: unless-stopped
@@ -287,7 +299,8 @@ def _compose_file(path: Path) -> None:
       - kanboard-data:/var/www/app/data
 volumes:
   kanboard-data:
-""")
+""",
+    )
     path.chmod(0o600)
 
 
@@ -307,7 +320,12 @@ def _install_platform(*, dry_run: bool, runtime_user: str | None = None) -> None
         # Orca is an Electron AppImage.  These are its explicit runtime
         # dependencies on the one supported host release, not merely FUSE.
         packages = [
-            "curl", "fuse", "libnss3", "libgtk-3-0t64", "libgbm1", "libasound2t64",
+            "curl",
+            "fuse",
+            "libnss3",
+            "libgtk-3-0t64",
+            "libgbm1",
+            "libasound2t64",
             "xvfb",
         ]
         if needs_docker:
@@ -442,7 +460,10 @@ def bootstrap(args: argparse.Namespace) -> int:
         except RuntimeEnvMissing:
             values = {}
         ensure_from_runtime_values(
-            target, legacy_values=values, runtime_env=runtime, dry_run=args.dry_run,
+            target,
+            legacy_values=values,
+            runtime_env=runtime,
+            dry_run=args.dry_run,
             allow_default=clone_detail.startswith(("cloned", "would clone")),
         )
         if not args.dry_run:
@@ -451,7 +472,20 @@ def bootstrap(args: argparse.Namespace) -> int:
             _install_platform(dry_run=False, runtime_user=args.installation_user)
             compose = Path("/opt/secretary/kanboard-compose.yml")
             _compose_file(compose)
-            _run(["docker", "compose", "--env-file", str(transport_path(target)), "-f", str(compose), "up", "--detach"], label="start Kanboard", timeout=180)
+            _run(
+                [
+                    "docker",
+                    "compose",
+                    "--env-file",
+                    str(transport_path(target)),
+                    "-f",
+                    str(compose),
+                    "up",
+                    "--detach",
+                ],
+                label="start Kanboard",
+                timeout=180,
+            )
             _wait_for_kanboard(target)
             ensure_pipeline_board(target, client=KanboardClient.for_instance(target))
         print("secretary bootstrap\nstatus: " + ("preview" if args.dry_run else "ok"))

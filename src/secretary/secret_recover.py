@@ -66,16 +66,12 @@ class SecretRecovery:
                 f"{len(self.missing)} missing; rerun with the recovery phrase"
             )
         parts = [
-            f"{len(self.materialized)} env file(s) written"
-            if self.materialized
-            else "nothing to materialize"
+            f"{len(self.materialized)} env file(s) written" if self.materialized else "nothing to materialize"
         ]
         if self.missing:
             parts.append(f"{len(self.missing)} secret(s) missing from the repo")
         if self.withheld:
-            parts.append(
-                "not written: " + ", ".join(str(path) for path in sorted(self.withheld))
-            )
+            parts.append("not written: " + ", ".join(str(path) for path in sorted(self.withheld)))
         return "; ".join(parts)
 
     def report(self) -> dict[str, Any]:
@@ -126,7 +122,9 @@ def recover_secrets(
 
     # Old board tuples are intentionally ignored, even when locked: transport
     # now comes from board-transport.env and clean recovery needs no phrase for it.
-    entries = [dict(entry) for entry in list_secrets(instance_dir) if entry.get("id") not in LEGACY_BOARD_SECRET_IDS]
+    entries = [
+        dict(entry) for entry in list_secrets(instance_dir) if entry.get("id") not in LEGACY_BOARD_SECRET_IDS
+    ]
     missing = tuple(
         _describe(instance_dir, entry)
         for entry in entries
@@ -137,11 +135,7 @@ def recover_secrets(
         return SecretRecovery(
             store_present=True,
             unlocked=False,
-            locked=tuple(
-                _describe(instance_dir, entry)
-                for entry in entries
-                if entry["id"] not in stored
-            ),
+            locked=tuple(_describe(instance_dir, entry) for entry in entries if entry["id"] not in stored),
             missing=missing,
         )
 

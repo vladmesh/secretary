@@ -41,9 +41,16 @@ class IncrementalMemoryIndexTests(unittest.TestCase):
         with self.export.open("w", encoding="utf-8") as handle:
             for fact_id, text in facts:
                 raw = "---\nsource: test\ncreated: 2026-07-17\n---\n" + text + "\n"
-                handle.write(json.dumps({
-                    "id": fact_id, "path": f"{fact_id}.md", "text": raw,
-                }) + "\n")
+                handle.write(
+                    json.dumps(
+                        {
+                            "id": fact_id,
+                            "path": f"{fact_id}.md",
+                            "text": raw,
+                        }
+                    )
+                    + "\n"
+                )
 
     def rows(self):
         conn = memory_service.db(self.db)
@@ -59,8 +66,13 @@ class IncrementalMemoryIndexTests(unittest.TestCase):
 
     def update(self):
         return memory_service.incremental_update(
-            self.canon, self.export, self.db, "test-model", 4,
-            document_embed=self.embed, allow_empty=True,
+            self.canon,
+            self.export,
+            self.db,
+            "test-model",
+            4,
+            document_embed=self.embed,
+            allow_empty=True,
         )
 
     def test_add_update_delete_reuses_unchanged_embedding(self):
@@ -168,8 +180,13 @@ class IncrementalMemoryIndexTests(unittest.TestCase):
             memory_service, "build_document_embedder", return_value=self.embed
         ) as build_embedder:
             result = memory_service.offline_rebuild(
-                self.canon, self.export, self.db, "test-model", 4,
-                cache_dir=cache_dir, threads=2,
+                self.canon,
+                self.export,
+                self.db,
+                "test-model",
+                4,
+                cache_dir=cache_dir,
+                threads=2,
             )
 
         self.assertTrue(result["ok"])
@@ -180,8 +197,13 @@ class IncrementalMemoryIndexTests(unittest.TestCase):
         with mock.patch.object(memory_service, "offline_rebuild", return_value={"ok": True}) as rebuild:
             self.assertEqual(
                 memory_reindex.rebuild(
-                    self.canon, self.export, self.db, "test-model", 4,
-                    cache_dir=cache_dir, threads=2,
+                    self.canon,
+                    self.export,
+                    self.db,
+                    "test-model",
+                    4,
+                    cache_dir=cache_dir,
+                    threads=2,
                 ),
                 {"ok": True},
             )

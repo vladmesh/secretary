@@ -64,36 +64,47 @@ class StatusCliTests(unittest.TestCase):
             (data_dir / "board").mkdir()
             (data_dir / "board" / "cards.ndjson").write_text('{"ref":"secretary-727"}\n', encoding="utf-8")
             (data_dir / "dispatcher" / "pause.json").write_text(
-                json.dumps({"mode": "freeze", "actor": "secretary", "since": "2999-01-01T00:00:00Z"}), encoding="utf-8"
+                json.dumps({"mode": "freeze", "actor": "secretary", "since": "2999-01-01T00:00:00Z"}),
+                encoding="utf-8",
             )
             (data_dir / "dispatcher" / "production-state.json").write_text(
-                json.dumps({
-                    "phase": "production",
-                    "last_tick_finished_at": "2026-07-26T00:00:00Z",
-                    "records": {
-                        "secretary-727": {"attempt_id": "a1", "head": "codex", "workspace": "/work", "worker_progress_at": 1, "worker_respawns": 1, "paused_worker_at": 1}
-                    },
-                    "controlled_divergences": [
-                        {
-                            "id": "div_open0000000000",
-                            "at": "2026-07-25T00:00:00Z",
-                            "pilot_ref": "secretary-730",
-                            "step": "production-recovery",
-                            "reason": "active_claim_mismatch",
-                            "status": "open",
+                json.dumps(
+                    {
+                        "phase": "production",
+                        "last_tick_finished_at": "2026-07-26T00:00:00Z",
+                        "records": {
+                            "secretary-727": {
+                                "attempt_id": "a1",
+                                "head": "codex",
+                                "workspace": "/work",
+                                "worker_progress_at": 1,
+                                "worker_respawns": 1,
+                                "paused_worker_at": 1,
+                            }
                         },
-                        {
-                            "id": "div_closed00000000",
-                            "at": "2026-07-01T00:00:00Z",
-                            "pilot_ref": "secretary-716",
-                            "step": "production-recovery",
-                            "reason": "active_claim_mismatch",
-                            "status": "closed",
-                            "closed_at": "2026-07-02T00:00:00Z",
-                            "closed_reason": "card left the active dispatcher cycle (state=issues)",
-                        },
-                    ],
-                }), encoding="utf-8"
+                        "controlled_divergences": [
+                            {
+                                "id": "div_open0000000000",
+                                "at": "2026-07-25T00:00:00Z",
+                                "pilot_ref": "secretary-730",
+                                "step": "production-recovery",
+                                "reason": "active_claim_mismatch",
+                                "status": "open",
+                            },
+                            {
+                                "id": "div_closed00000000",
+                                "at": "2026-07-01T00:00:00Z",
+                                "pilot_ref": "secretary-716",
+                                "step": "production-recovery",
+                                "reason": "active_claim_mismatch",
+                                "status": "closed",
+                                "closed_at": "2026-07-02T00:00:00Z",
+                                "closed_reason": "card left the active dispatcher cycle (state=issues)",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
             )
             instance = root / "instance.yaml"
             instance.write_text(
@@ -118,7 +129,9 @@ class StatusCliTests(unittest.TestCase):
                 report.instance,
                 report.bindings,
                 packaged=resolve_packaged(
-                    report.instance, instance_path=root, data_dir=report.data_dir,
+                    report.instance,
+                    instance_path=root,
+                    data_dir=report.data_dir,
                 ),
                 data_dir=report.data_dir,
             )
@@ -130,13 +143,22 @@ class StatusCliTests(unittest.TestCase):
             )
             output = io.StringIO()
             checkpoint = {
-                "last_commit": "abc123", "last_commit_at": "2026-07-25T12:00:00Z",
-                "last_push_at": "2026-07-25T11:50:00Z", "last_push_commit": "old123",
-                "lag_commits": 9, "lag_minutes": 7, "push_status": "pending",
-                "push_reason": "", "push_failures": 0, "remote_diverged": False,
+                "last_commit": "abc123",
+                "last_commit_at": "2026-07-25T12:00:00Z",
+                "last_push_at": "2026-07-25T11:50:00Z",
+                "last_push_commit": "old123",
+                "lag_commits": 9,
+                "lag_minutes": 7,
+                "push_status": "pending",
+                "push_reason": "",
+                "push_failures": 0,
+                "remote_diverged": False,
                 "blocked_reason": "",
             }
-            with contextlib.redirect_stdout(output), mock.patch("secretary.status.checkpoint_snapshot", return_value=checkpoint):
+            with (
+                contextlib.redirect_stdout(output),
+                mock.patch("secretary.status.checkpoint_snapshot", return_value=checkpoint),
+            ):
                 code = main(["status", "--json", "--host-fixture", str(fixture), "--instance", str(instance)])
 
         self.assertEqual(code, 0, output.getvalue())
@@ -177,9 +199,16 @@ class StatusCliTests(unittest.TestCase):
             root = Path(tmp)
             data_dir = root / "data"
             (data_dir / "dispatcher").mkdir(parents=True)
-            (data_dir / "dispatcher" / "production-state.json").write_text(json.dumps({"records": {
-                "secretary-727": {"head": "codex", "worker_progress_at": 1, "worker_respawns": 2}
-            }}), encoding="utf-8")
+            (data_dir / "dispatcher" / "production-state.json").write_text(
+                json.dumps(
+                    {
+                        "records": {
+                            "secretary-727": {"head": "codex", "worker_progress_at": 1, "worker_respawns": 2}
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
             instance = root / "instance.yaml"
             instance.write_text(
                 "version: 1\nname: test\ndata_dir: " + str(data_dir) + "\n"
@@ -190,17 +219,21 @@ class StatusCliTests(unittest.TestCase):
             output = io.StringIO()
             inventory = HostInventory(units=set(), unit_states={})
             panel = {"known": True, "live": True, "reason": "pane-active"}
-            with contextlib.redirect_stdout(output), mock.patch(
-                "secretary.status.LiveHostSource.collect", return_value=CollectResult(inventory)
-            ), mock.patch("secretary.status.command_terminal_status", return_value=panel), mock.patch(
-                "secretary.status.checkpoint_snapshot", return_value={"lag_minutes": 4}
+            with (
+                contextlib.redirect_stdout(output),
+                mock.patch("secretary.status.LiveHostSource.collect", return_value=CollectResult(inventory)),
+                mock.patch("secretary.status.command_terminal_status", return_value=panel),
+                mock.patch("secretary.status.checkpoint_snapshot", return_value={"lag_minutes": 4}),
             ):
                 code = main(["status", "--instance", str(instance)])
             report = validate_instance(instance)
-            with mock.patch("secretary.status.LiveHostSource.collect", return_value=CollectResult(inventory)), mock.patch(
-                "secretary.status.command_terminal_status", return_value=panel
-            ), mock.patch("secretary.status.checkpoint_snapshot", return_value={"lag_minutes": 4}):
+            with (
+                mock.patch("secretary.status.LiveHostSource.collect", return_value=CollectResult(inventory)),
+                mock.patch("secretary.status.command_terminal_status", return_value=panel),
+                mock.patch("secretary.status.checkpoint_snapshot", return_value={"lag_minutes": 4}),
+            ):
                 from secretary.status import collect_status
+
                 snapshot = collect_status(report)
 
         self.assertEqual(code, 0)
@@ -214,9 +247,7 @@ class StatusCliTests(unittest.TestCase):
             data_dir = root / "data"
             (data_dir / "dispatcher").mkdir(parents=True)
             (data_dir / "dispatcher" / "production-state.json").write_text(
-                json.dumps({"records": {
-                    "secretary-727": {"workspace": "/work", "handle": "term:1"}
-                }}),
+                json.dumps({"records": {"secretary-727": {"workspace": "/work", "handle": "term:1"}}}),
                 encoding="utf-8",
             )
             instance = root / "instance.yaml"
@@ -230,15 +261,16 @@ class StatusCliTests(unittest.TestCase):
             report = validate_instance(instance)
             inventory = HostInventory(units=set(), unit_states={})
             terminal_list = json.dumps({"terminals": [{"handle": "term:1", "connected": True}]})
-            with mock.patch(
-                "secretary.status.LiveHostSource.collect", return_value=CollectResult(inventory)
-            ), mock.patch(
-                "secretary.status._proc.run",
-                return_value=subprocess.CompletedProcess([], 0, terminal_list, ""),
-            ) as run, mock.patch(
-                "secretary.dispatcher_review._head_run_process_status", return_value={"known": False}
-            ), mock.patch(
-                "secretary.status.checkpoint_snapshot", return_value={"lag_minutes": 4}
+            with (
+                mock.patch("secretary.status.LiveHostSource.collect", return_value=CollectResult(inventory)),
+                mock.patch(
+                    "secretary.status._proc.run",
+                    return_value=subprocess.CompletedProcess([], 0, terminal_list, ""),
+                ) as run,
+                mock.patch(
+                    "secretary.dispatcher_review._head_run_process_status", return_value={"known": False}
+                ),
+                mock.patch("secretary.status.checkpoint_snapshot", return_value={"lag_minutes": 4}),
             ):
                 snapshot = collect_status(report)
 
@@ -254,7 +286,9 @@ class StatusCliTests(unittest.TestCase):
             root = Path(tmp)
             data_dir = root / "data"
             (data_dir / "dispatcher").mkdir(parents=True)
-            (data_dir / "dispatcher" / "production-state.json").write_text(json.dumps({"records": {}}), encoding="utf-8")
+            (data_dir / "dispatcher" / "production-state.json").write_text(
+                json.dumps({"records": {}}), encoding="utf-8"
+            )
             instance = root / "instance.yaml"
             instance.write_text(
                 "version: 1\nname: test\n"
@@ -266,28 +300,50 @@ class StatusCliTests(unittest.TestCase):
             )
             board = FakeKanboard()
             board.add_sprint(
-                "sprint:1", status="stopped",
+                "sprint:1",
+                status="stopped",
                 sprint_budget=json.dumps({"by_type": {"blocked": 2}}),
-                sprint_resume=json.dumps({
-                    "selected_step": "fix", "selected_why": "blocked", "rejected_alternatives": "wait",
-                    "current_task": "secretary-510-pilot", "dod_state": "pending", "next_safe_step": "test",
-                    "recorded_at": "2020-01-01T00:00:00Z",
-                }),
+                sprint_resume=json.dumps(
+                    {
+                        "selected_step": "fix",
+                        "selected_why": "blocked",
+                        "rejected_alternatives": "wait",
+                        "current_task": "secretary-510-pilot",
+                        "dod_state": "pending",
+                        "next_safe_step": "test",
+                        "recorded_at": "2020-01-01T00:00:00Z",
+                    }
+                ),
             )
             board.metadata[12]["sprint_ref"] = "sprint:1"
-            TaskAudit(data_dir).append("later-card-event", {
-                "event_id": "evt_later_card_event", "request_id": "later-card-event", "ref": "secretary-510-pilot", "kind": "moved",
-                "outcome": "success", "payload": {"to": "assessment"},
-                "occurred_at": "2026-07-27T00:00:00Z",
-            })
+            TaskAudit(data_dir).append(
+                "later-card-event",
+                {
+                    "event_id": "evt_later_card_event",
+                    "request_id": "later-card-event",
+                    "ref": "secretary-510-pilot",
+                    "kind": "moved",
+                    "outcome": "success",
+                    "payload": {"to": "assessment"},
+                    "occurred_at": "2026-07-27T00:00:00Z",
+                },
+            )
             output = io.StringIO()
             report = validate_instance(instance)
-            with contextlib.redirect_stdout(output), mock.patch(
-                "secretary.status.checkpoint_snapshot", return_value={
-                    "last_commit": None, "lag_minutes": None, "remote_diverged": False, "blocked_reason": None,
-                }
+            with (
+                contextlib.redirect_stdout(output),
+                mock.patch(
+                    "secretary.status.checkpoint_snapshot",
+                    return_value={
+                        "last_commit": None,
+                        "lag_minutes": None,
+                        "remote_diverged": False,
+                        "blocked_reason": None,
+                    },
+                ),
             ):
                 from secretary.status import collect_status
+
                 snapshot = collect_status(report, offline=True, sprint_client=board)
 
         self.assertEqual(validate(snapshot, "status", "status.json"), [])
@@ -305,6 +361,7 @@ class StatusCliTests(unittest.TestCase):
 
     def test_status_json_reads_the_task_audit_once_however_many_sprints_exist(self):
         """`secretary status --json` costs one audit traversal, not one per sprint."""
+
         def snapshot(sprint_count: int, *, open_first: bool = True) -> tuple[dict, int]:
             with tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp)
@@ -326,19 +383,31 @@ class StatusCliTests(unittest.TestCase):
                     board.add_sprint(
                         f"sprint:{index}",
                         status="open" if index == 0 and open_first else "closed",
-                        sprint_resume=json.dumps({
-                            "selected_step": "fix", "selected_why": "blocked",
-                            "rejected_alternatives": "wait", "current_task": "secretary-510-pilot",
-                            "dod_state": "pending", "next_safe_step": "test",
-                            "recorded_at": "2020-01-01T00:00:00Z",
-                        }),
+                        sprint_resume=json.dumps(
+                            {
+                                "selected_step": "fix",
+                                "selected_why": "blocked",
+                                "rejected_alternatives": "wait",
+                                "current_task": "secretary-510-pilot",
+                                "dod_state": "pending",
+                                "next_safe_step": "test",
+                                "recorded_at": "2020-01-01T00:00:00Z",
+                            }
+                        ),
                     )
                 board.metadata[12]["sprint_ref"] = "sprint:0"
-                TaskAudit(data_dir).append("later-card-event", {
-                    "event_id": "evt_later_card_event", "request_id": "later-card-event",
-                    "ref": "secretary-510-pilot", "kind": "moved", "outcome": "success",
-                    "payload": {"to": "assessment"}, "occurred_at": "2026-07-27T00:00:00Z",
-                })
+                TaskAudit(data_dir).append(
+                    "later-card-event",
+                    {
+                        "event_id": "evt_later_card_event",
+                        "request_id": "later-card-event",
+                        "ref": "secretary-510-pilot",
+                        "kind": "moved",
+                        "outcome": "success",
+                        "payload": {"to": "assessment"},
+                        "occurred_at": "2026-07-27T00:00:00Z",
+                    },
+                )
                 report = validate_instance(instance)
                 traversals = 0
                 original = TaskAudit.events
@@ -348,10 +417,18 @@ class StatusCliTests(unittest.TestCase):
                     traversals += 1
                     return original(audit, *args, **kwargs)
 
-                with mock.patch("secretary.status.checkpoint_snapshot", return_value={
-                    "last_commit": None, "lag_minutes": None, "remote_diverged": False,
-                    "blocked_reason": None,
-                }), mock.patch.object(TaskAudit, "events", counting):
+                with (
+                    mock.patch(
+                        "secretary.status.checkpoint_snapshot",
+                        return_value={
+                            "last_commit": None,
+                            "lag_minutes": None,
+                            "remote_diverged": False,
+                            "blocked_reason": None,
+                        },
+                    ),
+                    mock.patch.object(TaskAudit, "events", counting),
+                ):
                     collected = collect_status(report, offline=True, sprint_client=board)
                 return collected, traversals
 
@@ -402,7 +479,13 @@ class StatusCliTests(unittest.TestCase):
             fixture = Path(tmp)
             text_output = io.StringIO()
             json_output = io.StringIO()
-            arguments = ["doctor", "--host-fixture", str(fixture), "--instance", str(root / "examples" / "instance")]
+            arguments = [
+                "doctor",
+                "--host-fixture",
+                str(fixture),
+                "--instance",
+                str(root / "examples" / "instance"),
+            ]
             with contextlib.redirect_stdout(text_output):
                 text_code = main(arguments)
             with contextlib.redirect_stdout(json_output):
@@ -435,7 +518,16 @@ class StatusCliTests(unittest.TestCase):
             )
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                code = main(["doctor", "--json", "--host-fixture", str(fixture), "--instance", str(root / "examples" / "instance")])
+                code = main(
+                    [
+                        "doctor",
+                        "--json",
+                        "--host-fixture",
+                        str(fixture),
+                        "--instance",
+                        str(root / "examples" / "instance"),
+                    ]
+                )
         payload = json.loads(output.getvalue())
         self.assertEqual(code, 1, payload)
         self.assertTrue(any(finding["code"] == "unit_runtime" for finding in payload["findings"]))
@@ -447,12 +539,15 @@ class StatusCliTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         # The example installation runs this checkout: status compares a host against the units of
         # the product the installation is configured with, not the module's own directory.
-        with tempfile.TemporaryDirectory() as tmp, \
-             mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(root)}):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(root)}),
+        ):
             fixture = Path(tmp)
             report = validate_instance(root / "examples" / "instance")
             expected = build_doctor_expectations(
-                report.instance, report.bindings,
+                report.instance,
+                report.bindings,
                 packaged=resolve_packaged(
                     report.instance,
                     packaging_root(root),
@@ -463,21 +558,33 @@ class StatusCliTests(unittest.TestCase):
                 data_dir=report.data_dir,
             )
             oneshot = next(
-                name for name, (need_enabled, need_active) in expected.unit_runtime.items()
+                name
+                for name, (need_enabled, need_active) in expected.unit_runtime.items()
                 if not need_enabled and not need_active
             )
             (fixture / "units.txt").write_text("\n".join(sorted(expected.units)), encoding="utf-8")
             (fixture / "unit-states.txt").write_text(
-                "\n".join([
-                    *(f"{name} enabled active" for name in sorted(expected.units) if name != oneshot),
-                    f"{oneshot} static inactive",
-                    "orca-server.service enabled active",
-                ]),
+                "\n".join(
+                    [
+                        *(f"{name} enabled active" for name in sorted(expected.units) if name != oneshot),
+                        f"{oneshot} static inactive",
+                        "orca-server.service enabled active",
+                    ]
+                ),
                 encoding="utf-8",
             )
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                code = main(["status", "--json", "--host-fixture", str(fixture), "--instance", str(root / "examples" / "instance")])
+                code = main(
+                    [
+                        "status",
+                        "--json",
+                        "--host-fixture",
+                        str(fixture),
+                        "--instance",
+                        str(root / "examples" / "instance"),
+                    ]
+                )
         payload = json.loads(output.getvalue())
         self.assertEqual(code, 0, payload)
         oneshot_row = next(row for row in payload["host"]["units"] if row["name"] == oneshot)
@@ -498,7 +605,8 @@ class StatusCliTests(unittest.TestCase):
             fixture = Path(tmp)
             report = validate_instance(root / "examples" / "instance")
             expected = build_doctor_expectations(
-                report.instance, report.bindings,
+                report.instance,
+                report.bindings,
                 packaged=resolve_packaged(
                     report.instance,
                     instance_path=root / "examples" / "instance",
@@ -508,22 +616,37 @@ class StatusCliTests(unittest.TestCase):
             )
             (fixture / "units.txt").write_text("\n".join(sorted(expected.units)), encoding="utf-8")
             (fixture / "unit-states.txt").write_text(
-                "\n".join([
-                    *(f"{name} enabled active" for name in sorted(expected.units)),
-                    "orca-server.service not-found inactive",
-                ]),
+                "\n".join(
+                    [
+                        *(f"{name} enabled active" for name in sorted(expected.units)),
+                        "orca-server.service not-found inactive",
+                    ]
+                ),
                 encoding="utf-8",
             )
             json_output = io.StringIO()
             with contextlib.redirect_stdout(json_output):
-                json_code = main([
-                    "status", "--json", "--host-fixture", str(fixture), "--instance", str(root / "examples" / "instance"),
-                ])
+                json_code = main(
+                    [
+                        "status",
+                        "--json",
+                        "--host-fixture",
+                        str(fixture),
+                        "--instance",
+                        str(root / "examples" / "instance"),
+                    ]
+                )
             text_output = io.StringIO()
             with contextlib.redirect_stdout(text_output):
-                text_code = main([
-                    "doctor", "--host-fixture", str(fixture), "--instance", str(root / "examples" / "instance"),
-                ])
+                text_code = main(
+                    [
+                        "doctor",
+                        "--host-fixture",
+                        str(fixture),
+                        "--instance",
+                        str(root / "examples" / "instance"),
+                    ]
+                )
         payload = json.loads(json_output.getvalue())
         self.assertEqual(json_code, 0, payload)
         self.assertEqual(payload["host"]["external_runtime"]["name"], "orca-server.service")
@@ -543,20 +666,23 @@ class StatusCliTests(unittest.TestCase):
                 json.dumps({"phase": "cutover_committed", "legacy_decommissioned": True}), encoding="utf-8"
             )
             (data_dir / "dispatcher" / "production-state.json").write_text(
-                json.dumps({
-                    "phase": "production",
-                    "owner": "secretary-production",
-                    "records": {},
-                    "controlled_divergences": [
-                        {
-                            "id": "div_open0000000001",
-                            "pilot_ref": "secretary-730",
-                            "step": "production-recovery",
-                            "reason": "active_claim_mismatch",
-                            "status": "open",
-                        },
-                    ],
-                }), encoding="utf-8"
+                json.dumps(
+                    {
+                        "phase": "production",
+                        "owner": "secretary-production",
+                        "records": {},
+                        "controlled_divergences": [
+                            {
+                                "id": "div_open0000000001",
+                                "pilot_ref": "secretary-730",
+                                "step": "production-recovery",
+                                "reason": "active_claim_mismatch",
+                                "status": "open",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
             )
             instance = Path(tmp) / "instance.yaml"
             instance.write_text(
@@ -572,7 +698,10 @@ class StatusCliTests(unittest.TestCase):
         self.assertEqual(code, 1, payload)
         dispatcher_findings = [f for f in payload["findings"] if f["code"] == "dispatcher"]
         self.assertTrue(
-            any("unresolved controlled divergence" in f["message"] and "secretary-730" in f["message"] for f in dispatcher_findings),
+            any(
+                "unresolved controlled divergence" in f["message"] and "secretary-730" in f["message"]
+                for f in dispatcher_findings
+            ),
             dispatcher_findings,
         )
 
@@ -620,9 +749,9 @@ class HeadRegistrySourceTests(unittest.TestCase):
             instance = self._instance(root)
             (root / "heads").mkdir()
             (root / "heads" / "heads.toml").write_text(
-                "[resources.own]\naccount = \"own\"\n"
-                "[profiles.own-head]\nresource = \"own\"\nadapter = \"claude\"\n"
-                "[role_defaults]\nnew_card = \"own-head\"\n",
+                '[resources.own]\naccount = "own"\n'
+                '[profiles.own-head]\nresource = "own"\nadapter = "claude"\n'
+                '[role_defaults]\nnew_card = "own-head"\n',
                 encoding="utf-8",
             )
             product_root = Path(__file__).resolve().parents[1]
@@ -698,9 +827,15 @@ class SecretStoreObservabilityTests(unittest.TestCase):
 
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                code = main([
-                    "status", "--json", "--offline", "--instance", str(instance_dir / "instance.yaml"),
-                ])
+                code = main(
+                    [
+                        "status",
+                        "--json",
+                        "--offline",
+                        "--instance",
+                        str(instance_dir / "instance.yaml"),
+                    ]
+                )
 
         self.assertEqual(code, 0, output.getvalue())
         payload = json.loads(output.getvalue())
@@ -723,9 +858,15 @@ class SecretStoreObservabilityTests(unittest.TestCase):
 
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                code = main([
-                    "status", "--json", "--offline", "--instance", str(instance_dir / "instance.yaml"),
-                ])
+                code = main(
+                    [
+                        "status",
+                        "--json",
+                        "--offline",
+                        "--instance",
+                        str(instance_dir / "instance.yaml"),
+                    ]
+                )
 
         self.assertEqual(code, 0, output.getvalue())
         payload = json.loads(output.getvalue())
@@ -750,9 +891,15 @@ class SecretStoreObservabilityTests(unittest.TestCase):
 
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                code = main([
-                    "doctor", "--dry-run", "--offline", "--instance", str(instance_dir / "instance.yaml"),
-                ])
+                code = main(
+                    [
+                        "doctor",
+                        "--dry-run",
+                        "--offline",
+                        "--instance",
+                        str(instance_dir / "instance.yaml"),
+                    ]
+                )
 
         self.assertEqual(code, 0, output.getvalue())
         self.assertNotIn("secret store findings", output.getvalue())
@@ -775,9 +922,15 @@ class SecretStoreObservabilityTests(unittest.TestCase):
 
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                code = main([
-                    "doctor", "--dry-run", "--offline", "--instance", str(instance_dir / "instance.yaml"),
-                ])
+                code = main(
+                    [
+                        "doctor",
+                        "--dry-run",
+                        "--offline",
+                        "--instance",
+                        str(instance_dir / "instance.yaml"),
+                    ]
+                )
 
         self.assertEqual(code, 0, output.getvalue())
         self.assertNotIn("secret store findings", output.getvalue())
@@ -801,14 +954,27 @@ class SecretStoreObservabilityTests(unittest.TestCase):
 
             text_output = io.StringIO()
             with contextlib.redirect_stdout(text_output):
-                text_code = main([
-                    "doctor", "--dry-run", "--offline", "--instance", str(instance_dir / "instance.yaml"),
-                ])
+                text_code = main(
+                    [
+                        "doctor",
+                        "--dry-run",
+                        "--offline",
+                        "--instance",
+                        str(instance_dir / "instance.yaml"),
+                    ]
+                )
             json_output = io.StringIO()
             with contextlib.redirect_stdout(json_output):
-                json_code = main([
-                    "doctor", "--dry-run", "--offline", "--json", "--instance", str(instance_dir / "instance.yaml"),
-                ])
+                json_code = main(
+                    [
+                        "doctor",
+                        "--dry-run",
+                        "--offline",
+                        "--json",
+                        "--instance",
+                        str(instance_dir / "instance.yaml"),
+                    ]
+                )
 
         self.assertEqual(text_code, 1, text_output.getvalue())
         self.assertIn("secret store findings:", text_output.getvalue())
@@ -835,9 +1001,7 @@ class SecretStoreObservabilityTests(unittest.TestCase):
                 purpose="board api",
                 actor="tester",
             )
-            raw_key = (instance_dir / "secrets" / "installation.key").read_text(
-                encoding="utf-8"
-            ).strip()
+            raw_key = (instance_dir / "secrets" / "installation.key").read_text(encoding="utf-8").strip()
             params_path = instance_dir / "secrets" / "installation-key.json"
             params = json.loads(params_path.read_text(encoding="utf-8"))
             params["version"] = raw_key
@@ -845,14 +1009,27 @@ class SecretStoreObservabilityTests(unittest.TestCase):
 
             text_output = io.StringIO()
             with contextlib.redirect_stdout(text_output):
-                text_code = main([
-                    "doctor", "--dry-run", "--offline", "--instance", str(instance_dir / "instance.yaml"),
-                ])
+                text_code = main(
+                    [
+                        "doctor",
+                        "--dry-run",
+                        "--offline",
+                        "--instance",
+                        str(instance_dir / "instance.yaml"),
+                    ]
+                )
             json_output = io.StringIO()
             with contextlib.redirect_stdout(json_output):
-                json_code = main([
-                    "doctor", "--dry-run", "--offline", "--json", "--instance", str(instance_dir / "instance.yaml"),
-                ])
+                json_code = main(
+                    [
+                        "doctor",
+                        "--dry-run",
+                        "--offline",
+                        "--json",
+                        "--instance",
+                        str(instance_dir / "instance.yaml"),
+                    ]
+                )
 
         self.assertEqual(text_code, 1, text_output.getvalue())
         self.assertNotIn(raw_key, text_output.getvalue())
@@ -872,19 +1049,38 @@ class SecretStoreObservabilityTests(unittest.TestCase):
 
             text_output = io.StringIO()
             with contextlib.redirect_stdout(text_output):
-                text_code = main([
-                    "doctor", "--dry-run", "--offline", "--instance", str(instance_dir / "instance.yaml"),
-                ])
+                text_code = main(
+                    [
+                        "doctor",
+                        "--dry-run",
+                        "--offline",
+                        "--instance",
+                        str(instance_dir / "instance.yaml"),
+                    ]
+                )
             json_output = io.StringIO()
             with contextlib.redirect_stdout(json_output):
-                json_code = main([
-                    "doctor", "--dry-run", "--offline", "--json", "--instance", str(instance_dir / "instance.yaml"),
-                ])
+                json_code = main(
+                    [
+                        "doctor",
+                        "--dry-run",
+                        "--offline",
+                        "--json",
+                        "--instance",
+                        str(instance_dir / "instance.yaml"),
+                    ]
+                )
             status_output = io.StringIO()
             with contextlib.redirect_stdout(status_output):
-                status_code = main([
-                    "status", "--json", "--offline", "--instance", str(instance_dir / "instance.yaml"),
-                ])
+                status_code = main(
+                    [
+                        "status",
+                        "--json",
+                        "--offline",
+                        "--instance",
+                        str(instance_dir / "instance.yaml"),
+                    ]
+                )
 
         self.assertEqual(text_code, 1, text_output.getvalue())
         self.assertIn("secret store findings:", text_output.getvalue())

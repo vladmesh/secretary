@@ -4,6 +4,7 @@ It is deliberately not an agent. What the substrate has to prove is ownership of
 session of its own, a terminal that resizes, bytes in and bytes out, an exit status that is read
 back — and every one of those is visible with a program that echoes lines.
 """
+
 from __future__ import annotations
 
 import fcntl

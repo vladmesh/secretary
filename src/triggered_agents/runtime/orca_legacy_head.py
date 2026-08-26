@@ -49,6 +49,7 @@ verb on the protocol: the six are what every backend owes, and this is a composi
 with state that is the runtime's own. The backend that comes next will owe the same composition, and
 the protocol grows then, once, on purpose.
 """
+
 from __future__ import annotations
 
 import threading
@@ -96,9 +97,7 @@ from .tui_delivery import (
 )
 
 # What Orca can be asked to give a caller of `attach`, which is an address and not a stream.
-ATTACH_UNSUPPORTED = (
-    "orca-legacy heads have no attachable stream: a pane is addressed by handle, not joined"
-)
+ATTACH_UNSUPPORTED = "orca-legacy heads have no attachable stream: a pane is addressed by handle, not joined"
 DRAIN_UNSUPPORTED = (
     "orca-legacy heads have no wind-down protocol: this runtime stops handing the head work, "
     "and the head itself is not signalled"
@@ -364,7 +363,12 @@ class OrcaLegacyHeadRuntime:
                 # not a fact about this head, and swallowing it would hide it from the caller that
                 # does know what it means.
                 return _unobservable(
-                    run, OBSERVE_INVENTORY_UNREADABLE, epoch, lease, rotatable, evidence=str(exc),
+                    run,
+                    OBSERVE_INVENTORY_UNREADABLE,
+                    epoch,
+                    lease,
+                    rotatable,
+                    evidence=str(exc),
                 )
             pane = _pane_for(panes, run)
             if pane is None:
@@ -743,7 +747,13 @@ def _delivery_status(exc: head_ops.HeadOperationError) -> str:
 
 
 def _unobservable(
-    run: HeadRun, reason: str, epoch: int, lease: Any, rotatable: bool, *, evidence: Any = None,
+    run: HeadRun,
+    reason: str,
+    epoch: int,
+    lease: Any,
+    rotatable: bool,
+    *,
+    evidence: Any = None,
 ) -> ObserveReceipt:
     """An observation Orca could not make, said as that and not as an answer about the head."""
     return ObserveReceipt(

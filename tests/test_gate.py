@@ -42,13 +42,20 @@ class GateTests(unittest.TestCase):
         adapter = {
             "setup": {"commands": [setup]},
             "smoke": {"command": smoke},
-            "validation": {"ci": "none", "missing": ["tests"]} if no_tests else {"ci": "local", "command": validation},
+            "validation": {"ci": "none", "missing": ["tests"]}
+            if no_tests
+            else {"ci": "local", "command": validation},
             "artifact_policy": {"write_project_files": False},
         }
-        result = {"version": 1, "run_id": self.task["run_id"],
-                  "identity": {"id": "sample-project", "adapter": "sample-project"},
-                  "input_revision": dict(self.task["input_revision"]), "status": "drafted",
-                  "adapter": adapter, "project_local_adapter": {"proposed": False, "requires_opt_in": True}}
+        result = {
+            "version": 1,
+            "run_id": self.task["run_id"],
+            "identity": {"id": "sample-project", "adapter": "sample-project"},
+            "input_revision": dict(self.task["input_revision"]),
+            "status": "drafted",
+            "adapter": adapter,
+            "project_local_adapter": {"proposed": False, "requires_opt_in": True},
+        }
         path = self.instance / "result.yaml"
         path.write_text(yaml.safe_dump(result, sort_keys=False), encoding="utf-8")
         code, output = apply_provision_result(str(self.instance), "sample-project", str(path))
@@ -63,7 +70,9 @@ class GateTests(unittest.TestCase):
         self.assertEqual(code, 0, result)
         self.assertEqual(validate(result, "gate-result", "result"), [])
         self.assertTrue(load_config(self.binding)["enabled"])
-        self.assertEqual(load_config(self.instance / "adapter-drafts/sample-project.yaml")["gate"]["status"], "passed")
+        self.assertEqual(
+            load_config(self.instance / "adapter-drafts/sample-project.yaml")["gate"]["status"], "passed"
+        )
         self.assert_no_derived_artifacts()
         self.assertEqual(run_gate(str(self.instance), "sample-project"), (0, result))
         dry_code, dry_result = project_add(str(self.repo), str(self.instance), dry_run=True)
@@ -235,7 +244,9 @@ class GateTests(unittest.TestCase):
         self.provision()
         code, current = run_gate(str(self.instance), "sample-project")
         self.assertEqual(code, 0, current)
-        self.assertGreaterEqual(len(list((self.instance / "gate-runs/sample-project").glob("*/result.json"))), 2)
+        self.assertGreaterEqual(
+            len(list((self.instance / "gate-runs/sample-project").glob("*/result.json"))), 2
+        )
 
         repeat_code, repeated = run_gate(str(self.instance), "sample-project")
 
@@ -252,9 +263,7 @@ class GateTests(unittest.TestCase):
 
     def test_command_timeout_is_a_redacted_stage_failure(self):
         self.provision(setup="slow command")
-        expired = subprocess.TimeoutExpired(
-            "slow command", 300, output="AKIAABCDEFGHIJKLMNOP", stderr=""
-        )
+        expired = subprocess.TimeoutExpired("slow command", 300, output="AKIAABCDEFGHIJKLMNOP", stderr="")
         with mock.patch("secretary.gate._command", return_value=_timed_out(expired)):
             code, result = run_gate(str(self.instance), "sample-project")
         self.assertEqual(code, 1)

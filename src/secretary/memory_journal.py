@@ -119,9 +119,7 @@ def export_memory_snapshot(data_dir: Path, instance_dir: Path) -> MemoryExportSn
     with _memory_journal_lock(memory_dir):
         source_head = _journal_head(instance_dir) or "unknown"
         try:
-            staging = Path(
-                tempfile.mkdtemp(prefix=".memory-export-", suffix=".tmp", dir=memory_dir)
-            )
+            staging = Path(tempfile.mkdtemp(prefix=".memory-export-", suffix=".tmp", dir=memory_dir))
         except OSError as exc:
             raise RuntimeError(f"could not create memory export staging: {exc}") from None
         try:
@@ -186,9 +184,7 @@ def verify_memory_journal(data_dir: Path, instance_dir: Path) -> MemoryVerify:
             export_ids = _read_export_fact_ids(export_path)
             export_count = len(export_ids)
             if fact_count and export_count != fact_count:
-                findings.append(
-                    f"memory export count mismatch: export={export_count} journal={fact_count}"
-                )
+                findings.append(f"memory export count mismatch: export={export_count} journal={fact_count}")
 
         index_path = memory_dir / "index.sqlite"
         if not index_path.is_file():
@@ -196,9 +192,7 @@ def verify_memory_journal(data_dir: Path, instance_dir: Path) -> MemoryVerify:
         else:
             index_count = _read_index_fact_count(index_path)
             if fact_count and index_count != fact_count:
-                findings.append(
-                    f"memory index count mismatch: index={index_count} journal={fact_count}"
-                )
+                findings.append(f"memory index count mismatch: index={index_count} journal={fact_count}")
 
     return MemoryVerify(
         facts_dir=facts_dir,
@@ -393,9 +387,7 @@ def _publish_memory_export(
 ) -> None:
     reject_legacy_memory_journal(memory_dir)
     try:
-        staging = Path(
-            tempfile.mkdtemp(prefix=".memory-export-", suffix=".tmp", dir=memory_dir)
-        )
+        staging = Path(tempfile.mkdtemp(prefix=".memory-export-", suffix=".tmp", dir=memory_dir))
     except OSError as exc:
         raise RuntimeError(f"could not create memory export staging: {exc}") from None
     try:
@@ -452,9 +444,7 @@ def _memory_manifest(
         "changed": changed,
     }
     provenance_keys = ("source_head", "journal_commit", "fact_count")
-    if record_import and (
-        not imports or any(imports[-1].get(key) != entry[key] for key in provenance_keys)
-    ):
+    if record_import and (not imports or any(imports[-1].get(key) != entry[key] for key in provenance_keys)):
         imports = [*imports, entry]
     return {
         "version": 1,

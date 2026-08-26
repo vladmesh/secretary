@@ -5,6 +5,7 @@ gone (secretary-1135) and its two surviving callers — ops.add_comment for stew
 steward's own precheck error path — now read it from the runtime. These pin what has to keep
 being masked and, just as important, what must not be: a git sha in a CI-failure comment.
 """
+
 from __future__ import annotations
 
 import tempfile
@@ -76,9 +77,7 @@ class ScrubSecretsTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            output = redact(
-                "pat opaque-pat-value identity opaque-identity-value", env_files=[runtime]
-            )
+            output = redact("pat opaque-pat-value identity opaque-identity-value", env_files=[runtime])
 
             self.assertNotIn("opaque-pat-value", output)
             self.assertNotIn("opaque-identity-value", output)
@@ -100,9 +99,7 @@ class ScrubSecretsTests(unittest.TestCase):
             default.write_text("SERVICE_TOKEN=default-secret-value\n", encoding="utf-8")
             selected.write_text("SERVICE_TOKEN=selected-secret-value\n", encoding="utf-8")
             with mock.patch("triggered_agents.runtime.redact.DEFAULT_ENV_FILES", [default]):
-                output = redact(
-                    "default-secret-value selected-secret-value", env_files=[selected]
-                )
+                output = redact("default-secret-value selected-secret-value", env_files=[selected])
 
         self.assertNotIn("default-secret-value", output)
         self.assertNotIn("selected-secret-value", output)

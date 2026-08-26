@@ -35,6 +35,7 @@ report is written. ops.move_card gates it further — the card must actually car
 META_STEWARD_REPORT, so this can never become a side door for closing an ordinary code/research
 card out of review.
 """
+
 from __future__ import annotations
 
 import os
@@ -143,7 +144,7 @@ TRANSITIONS: dict[str, set[tuple[str, str]]] = {
     "dispatcher": {
         ("In progress", "Validate"),
         ("In progress", "Blocked"),
-        ("In progress", "Ready"),   # watchdog auto-retry requeue (teardown -> Ready -> reclaim)
+        ("In progress", "Ready"),  # watchdog auto-retry requeue (teardown -> Ready -> reclaim)
         ("Validate", "In progress"),
         ("Validate", "Blocked"),
         ("Validate", "Done"),
@@ -163,9 +164,12 @@ TRANSITIONS: dict[str, set[tuple[str, str]]] = {
     # hatch, see module docstring). Done is deliberately absent as a source, there is nothing
     # left to escalate on a finished card.
     "steward": {
-        ("Issues", "Ready"), ("Blocked", "Ready"), ("Blocked", "Done"),
+        ("Issues", "Ready"),
+        ("Blocked", "Ready"),
+        ("Blocked", "Done"),
         ("In progress", "Done"),
-    } | STEWARD_ESCALATIONS,
+    }
+    | STEWARD_ESCALATIONS,
 }
 
 # The one transition in TRANSITIONS that needs more than a role/column check: a non-empty

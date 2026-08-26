@@ -77,16 +77,24 @@ class RestoreTests(unittest.TestCase):
         card["fields"]["task_type"] = ""
         card["fields"]["project"] = ""
         card["metadata"] = {
-            "record_type": "product", "product_id": "secretary", "product_projects": projects,
+            "record_type": "product",
+            "product_id": "secretary",
+            "product_projects": projects,
         }
         return card
 
     def test_assessment_card_round_trips_through_export_validation_and_restore(self):
         """secretary-1025: a card parked in Assessment survives the durability path intact."""
         live_card = {
-            "id": 42, "reference": "secretary-1025", "title": "Parked",
-            "description": "waiting for the observer", "column": "Assessment",
-            "swimlane": "Secretary", "position": 1, "task_type": "code", "project": "secretary",
+            "id": 42,
+            "reference": "secretary-1025",
+            "title": "Parked",
+            "description": "waiting for the observer",
+            "column": "Assessment",
+            "swimlane": "Secretary",
+            "position": 1,
+            "task_type": "code",
+            "project": "secretary",
             "metadata": {"record_type": "task", "project": "secretary", "task_type": "code"},
             "comments": [{"ts": "10", "text": "[reviewer]\nverdict"}],
         }
@@ -100,7 +108,9 @@ class RestoreTests(unittest.TestCase):
                     stdout=json.dumps([live_card]), stderr="", returncode=0
                 ),
             ):
-                export = export_board(data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard())
+                export = export_board(
+                    data_dir, instance_dir=Path(tmpdir), command=["pipeline"], sprint_client=SprintKanboard()
+                )
 
             self.assertEqual(export.count, 1)
             exported = json.loads((data_dir / "board" / "cards.json").read_text(encoding="utf-8"))
@@ -142,22 +152,33 @@ class RestoreTests(unittest.TestCase):
             def call(self, method: str, **params: object) -> object:
                 if method == "getColumns":
                     return [
-                        {"id": 1, "title": "Issues"}, {"id": 2, "title": "Ready"},
-                        {"id": 3, "title": "In progress"}, {"id": 4, "title": "Validate"},
-                        {"id": 5, "title": "Blocked"}, {"id": 6, "title": "Done"},
+                        {"id": 1, "title": "Issues"},
+                        {"id": 2, "title": "Ready"},
+                        {"id": 3, "title": "In progress"},
+                        {"id": 4, "title": "Validate"},
+                        {"id": 5, "title": "Blocked"},
+                        {"id": 6, "title": "Done"},
                     ]
                 return super().call(method, **params)
 
         with tempfile.TemporaryDirectory() as tmpdir:
             data_dir = Path(tmpdir) / "secretary-data"
             init_layout(data_dir)
-            card = _restore_card(reference="issue:12", column="Issues", position=2, comments=[{"text": "[issue:closed]\nresolved"}])
+            card = _restore_card(
+                reference="issue:12",
+                column="Issues",
+                position=2,
+                comments=[{"text": "[issue:closed]\nresolved"}],
+            )
             card["closed"] = True
             card["fields"]["task_type"] = ""
             card["fields"]["project"] = ""
             card["metadata"] = {
-                "record_type": "issue", "issue_product": "secretary", "issue_kind": "bug",
-                "issue_priority": "P0", "issue_closed_reason": "resolved",
+                "record_type": "issue",
+                "issue_product": "secretary",
+                "issue_kind": "bug",
+                "issue_priority": "P0",
+                "issue_closed_reason": "resolved",
             }
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [self._product_card(), card]}), encoding="utf-8"
@@ -176,9 +197,12 @@ class RestoreTests(unittest.TestCase):
             def call(self, method: str, **params: object) -> object:
                 if method == "getColumns":
                     return [
-                        {"id": 1, "title": "Issues"}, {"id": 2, "title": "Ready"},
-                        {"id": 3, "title": "In progress"}, {"id": 4, "title": "Validate"},
-                        {"id": 5, "title": "Blocked"}, {"id": 6, "title": "Done"},
+                        {"id": 1, "title": "Issues"},
+                        {"id": 2, "title": "Ready"},
+                        {"id": 3, "title": "In progress"},
+                        {"id": 4, "title": "Validate"},
+                        {"id": 5, "title": "Blocked"},
+                        {"id": 6, "title": "Done"},
                     ]
                 if method == "saveTaskMetadata" and "issue_priority" in params.get("values", {}):
                     values = dict(params["values"])
@@ -193,7 +217,9 @@ class RestoreTests(unittest.TestCase):
             card["fields"]["task_type"] = ""
             card["fields"]["project"] = ""
             card["metadata"] = {
-                "record_type": "issue", "issue_product": "secretary", "issue_kind": "bug",
+                "record_type": "issue",
+                "issue_product": "secretary",
+                "issue_kind": "bug",
                 "issue_priority": "P0",
             }
             (data_dir / "board" / "cards.json").write_text(
@@ -212,11 +238,20 @@ class RestoreTests(unittest.TestCase):
                 json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
             )
             client = _EmptyWriteKanboard()
-            client.tasks.append({
-                "id": 99, "reference": "secretary-closed", "title": "Old closed card",
-                "description": "", "column_id": 2, "position": 1, "swimlane_id": 0,
-                "is_active": 0, "date_creation": "1720000000", "date_modification": "1720000000",
-            })
+            client.tasks.append(
+                {
+                    "id": 99,
+                    "reference": "secretary-closed",
+                    "title": "Old closed card",
+                    "description": "",
+                    "column_id": 2,
+                    "position": 1,
+                    "swimlane_id": 0,
+                    "is_active": 0,
+                    "date_creation": "1720000000",
+                    "date_modification": "1720000000",
+                }
+            )
             client.metadata[99] = {"project": "secretary", "task_type": "code"}
             client.comments[99] = []
 
@@ -236,7 +271,9 @@ class RestoreTests(unittest.TestCase):
             duplicate = self._product_card()
             duplicate["reference"] = "product:other"
             duplicate["metadata"] = {
-                "record_type": "product", "product_id": "secretary", "product_projects": '["secretary"]',
+                "record_type": "product",
+                "product_id": "secretary",
+                "product_projects": '["secretary"]',
             }
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [self._product_card(projects='["unknown"]'), duplicate]}),
@@ -261,7 +298,10 @@ class RestoreTests(unittest.TestCase):
             init_layout(data_dir)
             issue = _restore_card(reference="issue:12", column="Issues")
             issue["metadata"] = {
-                "record_type": "issue", "issue_product": "missing", "issue_kind": "invalid", "issue_priority": "P4",
+                "record_type": "issue",
+                "issue_product": "missing",
+                "issue_kind": "invalid",
+                "issue_priority": "P4",
             }
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [issue]}), encoding="utf-8"
@@ -325,14 +365,33 @@ class RestoreTests(unittest.TestCase):
             init_layout(data_dir)
             exported = normalize_board_card(
                 {
-                    "id": 12, "reference": "secretary-1", "title": "Restore", "column": "Ready",
-                    "swimlane": "Secretary", "position": 1, "task_type": "code", "project": "secretary",
+                    "id": 12,
+                    "reference": "secretary-1",
+                    "title": "Restore",
+                    "column": "Ready",
+                    "swimlane": "Secretary",
+                    "position": 1,
+                    "task_type": "code",
+                    "project": "secretary",
                 },
                 {
-                    "id": 12, "reference": "secretary-1", "title": "Restore", "description": "body",
-                    "column": "Ready", "task_type": "code", "project": "secretary",
-                    "claim": "worker", "blocked_by": "secretary-0",
-                    "metadata": {"record_type": "task", "claim": "worker", "blocked_by": "secretary-0", "complexity": "hard", "resolved_head": "", "resolved_review_head": ""},
+                    "id": 12,
+                    "reference": "secretary-1",
+                    "title": "Restore",
+                    "description": "body",
+                    "column": "Ready",
+                    "task_type": "code",
+                    "project": "secretary",
+                    "claim": "worker",
+                    "blocked_by": "secretary-0",
+                    "metadata": {
+                        "record_type": "task",
+                        "claim": "worker",
+                        "blocked_by": "secretary-0",
+                        "complexity": "hard",
+                        "resolved_head": "",
+                        "resolved_review_head": "",
+                    },
                     "comments": [
                         {"ts": "2024-07-03T09:47:00Z", "text": "[worker]\\nfirst"},
                         {"ts": "2024-07-03T09:48:00Z", "text": "[report:done]\\nrestored"},
@@ -372,9 +431,7 @@ class RestoreTests(unittest.TestCase):
             (data_dir / "memory" / "index.sqlite").write_bytes(b"broken")
 
             self.assertEqual(
-                rebuild_memory_index(
-                    data_dir, None, runner=lambda *_: {"parity": {"indexed": 1}}
-                ),
+                rebuild_memory_index(data_dir, None, runner=lambda *_: {"parity": {"indexed": 1}}),
                 1,
             )
             self.assertIn("board restore is incomplete", restore_findings(data_dir))
@@ -389,11 +446,17 @@ class RestoreTests(unittest.TestCase):
             init_layout(data_dir)
             instance = _write_instance_to(root / "instance", "test", data_dir, heads=True)
             (data_dir / "restore-state.json").write_text(
-                json.dumps({
-                    "version": 1, "board": "complete", "board_parity": "complete",
-                    "board_count": 2, "memory_index": "complete", "memory_index_count": 5,
-                    "reconcile": "complete",
-                }),
+                json.dumps(
+                    {
+                        "version": 1,
+                        "board": "complete",
+                        "board_parity": "complete",
+                        "board_count": 2,
+                        "memory_index": "complete",
+                        "memory_index_count": 5,
+                        "reconcile": "complete",
+                    }
+                ),
                 encoding="utf-8",
             )
 
@@ -405,10 +468,16 @@ class RestoreTests(unittest.TestCase):
             data_dir = Path(tmpdir) / "secretary-data"
             init_layout(data_dir)
             (data_dir / "restore-state.json").write_text(
-                json.dumps({
-                    "version": 1, "board": "complete", "board_parity": "complete",
-                    "sprints": "pending", "memory_index": "complete", "reconcile": "complete",
-                }),
+                json.dumps(
+                    {
+                        "version": 1,
+                        "board": "complete",
+                        "board_parity": "complete",
+                        "sprints": "pending",
+                        "memory_index": "complete",
+                        "reconcile": "complete",
+                    }
+                ),
                 encoding="utf-8",
             )
 
@@ -483,10 +552,16 @@ class RestoreTests(unittest.TestCase):
             self.assertEqual(client.tasks[0]["position"], 1)
             self.assertEqual(restore_state(data_dir)["board_parity"], "complete")
             self.assertIn(
-                ("moveTaskPosition", {
-                    "project_id": 7, "task_id": 12, "column_id": 2,
-                    "position": 1, "swimlane_id": 0,
-                }),
+                (
+                    "moveTaskPosition",
+                    {
+                        "project_id": 7,
+                        "task_id": 12,
+                        "column_id": 2,
+                        "position": 1,
+                        "swimlane_id": 0,
+                    },
+                ),
                 client.calls,
             )
 
@@ -547,7 +622,12 @@ class RestoreTests(unittest.TestCase):
             with mock.patch("secretary.restore.subprocess.run", return_value=completed) as run:
                 self.assertEqual(
                     rebuild_memory_index(
-                        data_dir, instance, python=venv_python, script=script, model="test", dim=4,
+                        data_dir,
+                        instance,
+                        python=venv_python,
+                        script=script,
+                        model="test",
+                        dim=4,
                         threads=2,
                     ),
                     2,
@@ -577,8 +657,12 @@ class RestoreTests(unittest.TestCase):
             with mock.patch("secretary.restore.subprocess.run", return_value=completed):
                 with self.assertRaisesRegex(RestoreError, "index parity failed"):
                     rebuild_memory_index(
-                        data_dir, instance, python=Path(sys.executable), script=script,
-                        model="test", dim=4,
+                        data_dir,
+                        instance,
+                        python=Path(sys.executable),
+                        script=script,
+                        model="test",
+                        dim=4,
                     )
 
     def test_reindex_timeout_is_a_restore_error(self):
@@ -591,13 +675,15 @@ class RestoreTests(unittest.TestCase):
             script = Path(tmpdir) / "reindex.py"
             script.write_text("", encoding="utf-8")
             script.chmod(0o755)
-            with mock.patch(
-                "secretary.restore.subprocess.run", side_effect=subprocess.TimeoutExpired([], 1)
-            ):
+            with mock.patch("secretary.restore.subprocess.run", side_effect=subprocess.TimeoutExpired([], 1)):
                 with self.assertRaisesRegex(RestoreError, "could not rebuild memory index"):
                     rebuild_memory_index(
-                        data_dir, instance, python=Path(sys.executable), script=script,
-                        model="test", dim=4,
+                        data_dir,
+                        instance,
+                        python=Path(sys.executable),
+                        script=script,
+                        model="test",
+                        dim=4,
                     )
 
     def test_restore_board_wraps_missing_backend_configuration(self):
@@ -615,7 +701,9 @@ class RestoreTests(unittest.TestCase):
             data_dir = Path(tmpdir) / "secretary-data"
             init_layout(data_dir)
             card = _restore_card()
-            card["metadata"].update({"complexity": "legacy", "family_preference": "", "blocked_by": "secretary-0"})
+            card["metadata"].update(
+                {"complexity": "legacy", "family_preference": "", "blocked_by": "secretary-0"}
+            )
             card["fields"]["blocked_by"] = ""
             (data_dir / "board" / "cards.json").write_text(
                 json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
@@ -641,9 +729,7 @@ class RestoreTests(unittest.TestCase):
 
             self.assertEqual(import_normalized_board(data_dir, client=_EmptyWriteKanboard()), 1)
             self.assertEqual(
-                rebuild_memory_index(
-                    data_dir, instance, runner=lambda *_: {"parity": {"indexed": 1}}
-                ),
+                rebuild_memory_index(data_dir, instance, runner=lambda *_: {"parity": {"indexed": 1}}),
                 1,
             )
 
@@ -668,23 +754,33 @@ class RestoreTests(unittest.TestCase):
                 fixture.mkdir()
                 live_units = {resource.name for resource in desired if resource.kind == "unit"}
                 live_units.add("secretary-supervisor.timer")
-                (fixture / "units.txt").write_text(
-                    "\n".join(sorted(live_units)), encoding="utf-8"
+                (fixture / "units.txt").write_text("\n".join(sorted(live_units)), encoding="utf-8")
+                self.assertEqual(
+                    main(
+                        [
+                            "reconcile",
+                            "plan",
+                            "--instance",
+                            str(instance),
+                            "--host-fixture",
+                            str(fixture),
+                        ],
+                        orca_executable=legacy_orca,
+                    ),
+                    0,
                 )
-                self.assertEqual(main([
-                    "reconcile", "plan", "--instance", str(instance), "--host-fixture", str(fixture),
-                ], orca_executable=legacy_orca), 0)
 
                 inventory = HostInventory(units=live_units)
                 source = mock.Mock()
                 source.collect.return_value = CollectResult(inventory=inventory)
                 with mock.patch.object(restore_commands, "LiveHostSource", return_value=source):
-                    self.assertEqual(main(
-                        ["restore-reconcile", "--instance", str(instance)], orca_executable=legacy_orca
-                    ), 0)
-            self.assertEqual(main(
-                ["doctor", "--offline", "--instance", str(instance)], orca_executable=legacy_orca
-            ), 0)
+                    self.assertEqual(
+                        main(["restore-reconcile", "--instance", str(instance)], orca_executable=legacy_orca),
+                        0,
+                    )
+            self.assertEqual(
+                main(["doctor", "--offline", "--instance", str(instance)], orca_executable=legacy_orca), 0
+            )
             self.assertEqual(restore_findings(data_dir), [])
 
     def test_restore_reconcile_fails_closed_before_marking_state(self):
@@ -710,9 +806,12 @@ class RestoredNonTaskSwimlaneTests(unittest.TestCase):
     """
 
     COLUMNS = [
-        {"id": 1, "title": "Issues"}, {"id": 2, "title": "Ready"},
-        {"id": 3, "title": "In progress"}, {"id": 4, "title": "Validate"},
-        {"id": 5, "title": "Blocked"}, {"id": 6, "title": "Done"},
+        {"id": 1, "title": "Issues"},
+        {"id": 2, "title": "Ready"},
+        {"id": 3, "title": "In progress"},
+        {"id": 4, "title": "Validate"},
+        {"id": 5, "title": "Blocked"},
+        {"id": 6, "title": "Done"},
     ]
 
     def _seed(self, data_dir: Path) -> None:
@@ -721,7 +820,9 @@ class RestoredNonTaskSwimlaneTests(unittest.TestCase):
         issue["fields"]["task_type"] = ""
         issue["fields"]["project"] = ""
         issue["metadata"] = {
-            "record_type": "issue", "issue_product": "secretary", "issue_kind": "bug",
+            "record_type": "issue",
+            "issue_product": "secretary",
+            "issue_kind": "bug",
             "issue_priority": "P0",
         }
         (data_dir / "board" / "cards.json").write_text(
@@ -756,6 +857,7 @@ class RestoredNonTaskSwimlaneTests(unittest.TestCase):
         дорожки проектов. Без создания по имени восстановление уронило бы обе записи в чужую
         дорожку — то есть перенесло бы их, чего восстановление делать не должно.
         """
+
         class ProjectLanesOnlyBoard(_EmptyWriteKanboard):
             def __init__(self) -> None:
                 super().__init__()
@@ -812,8 +914,8 @@ class RestoredCodexLaunchModeTests(unittest.TestCase):
     @staticmethod
     def _card(mode: str) -> dict[str, object]:
         return {
-            "fields": {}, "metadata": {"project": "secretary", "task_type": "code",
-                                       "codex_launch_mode": mode},
+            "fields": {},
+            "metadata": {"project": "secretary", "task_type": "code", "codex_launch_mode": mode},
         }
 
     def test_a_legacy_exec_card_restores_with_no_launch_mode(self) -> None:
@@ -836,9 +938,7 @@ class RestoredCodexLaunchModeTests(unittest.TestCase):
             data_dir = Path(tmpdir) / "secretary-data"
             init_layout(data_dir)
             board = data_dir / "board"
-            (board / "cards.json").write_text(
-                json.dumps({"version": 1, "cards": [card]}), encoding="utf-8"
-            )
+            (board / "cards.json").write_text(json.dumps({"version": 1, "cards": [card]}), encoding="utf-8")
             (board / "cards.ndjson").write_text(json.dumps(card) + "\n", encoding="utf-8")
             (board / "export.json").write_text("{}", encoding="utf-8")
 
@@ -865,22 +965,30 @@ class RestoredCodexLaunchModeTests(unittest.TestCase):
     def test_the_export_and_live_views_of_a_legacy_card_agree(self) -> None:
         """Both sides of the restore comparison read that card as carrying no mode, so a
         legitimately restored card is never reported as a parity mismatch."""
-        exported = restore_module._core_from_export({
-            "reference": "secretary-1", "title": "t", "description": "d", "column": "Ready",
-            "fields": {}, "metadata": {"project": "secretary", "task_type": "code",
-                                       "codex_launch_mode": "exec"},
-        })
-        live = restore_module._core_from_live({
-            "ref": "secretary-1", "title": "t", "description": "d", "state": "ready",
-            "project": "secretary", "type": "code",
-            "routing": {"complexity": "standard", "family_preference": "auto",
-                        "codex_launch_mode": None},
-        })
+        exported = restore_module._core_from_export(
+            {
+                "reference": "secretary-1",
+                "title": "t",
+                "description": "d",
+                "column": "Ready",
+                "fields": {},
+                "metadata": {"project": "secretary", "task_type": "code", "codex_launch_mode": "exec"},
+            }
+        )
+        live = restore_module._core_from_live(
+            {
+                "ref": "secretary-1",
+                "title": "t",
+                "description": "d",
+                "state": "ready",
+                "project": "secretary",
+                "type": "code",
+                "routing": {"complexity": "standard", "family_preference": "auto", "codex_launch_mode": None},
+            }
+        )
 
         self.assertIsNone(exported["routing"]["codex_launch_mode"])
-        self.assertEqual(
-            exported["routing"]["codex_launch_mode"], live["routing"]["codex_launch_mode"]
-        )
+        self.assertEqual(exported["routing"]["codex_launch_mode"], live["routing"]["codex_launch_mode"])
 
 
 class RestoredOrderParityTests(unittest.TestCase):
@@ -895,20 +1003,37 @@ class RestoredOrderParityTests(unittest.TestCase):
     """
 
     @staticmethod
-    def _card(reference: str, position: int, *, column: str = "Issues",
-              swimlane: str = "secretary", closed: bool = False) -> dict[str, object]:
+    def _card(
+        reference: str,
+        position: int,
+        *,
+        column: str = "Issues",
+        swimlane: str = "secretary",
+        closed: bool = False,
+    ) -> dict[str, object]:
         return {
-            "reference": reference, "column": column, "swimlane": swimlane,
-            "position": position, "closed": closed,
+            "reference": reference,
+            "column": column,
+            "swimlane": swimlane,
+            "position": position,
+            "closed": closed,
         }
 
     def test_gaps_and_duplicates_pass_when_the_order_holds(self) -> None:
         cards = [
-            self._card("a", 13), self._card("b", 15), self._card("c", 126),
-            self._card("d", 126), self._card("e", 141),
+            self._card("a", 13),
+            self._card("b", 15),
+            self._card("c", 126),
+            self._card("d", 126),
+            self._card("e", 141),
         ]
-        actual = {"a": {"position": 1}, "b": {"position": 2}, "c": {"position": 3},
-                  "d": {"position": 4}, "e": {"position": 5}}
+        actual = {
+            "a": {"position": 1},
+            "b": {"position": 2},
+            "c": {"position": 3},
+            "d": {"position": 4},
+            "e": {"position": 5},
+        }
 
         self.assertFalse(_restored_order_mismatch(cards, actual))
 
@@ -927,11 +1052,12 @@ class RestoredOrderParityTests(unittest.TestCase):
 
     def test_swimlanes_are_ordered_independently(self) -> None:
         cards = [
-            self._card("a", 1, swimlane="secretary"), self._card("b", 2, swimlane="secretary"),
-            self._card("c", 1, swimlane="codegen"), self._card("d", 2, swimlane="codegen"),
+            self._card("a", 1, swimlane="secretary"),
+            self._card("b", 2, swimlane="secretary"),
+            self._card("c", 1, swimlane="codegen"),
+            self._card("d", 2, swimlane="codegen"),
         ]
-        actual = {"a": {"position": 1}, "b": {"position": 2},
-                  "c": {"position": 1}, "d": {"position": 2}}
+        actual = {"a": {"position": 1}, "b": {"position": 2}, "c": {"position": 1}, "d": {"position": 2}}
 
         self.assertFalse(_restored_order_mismatch(cards, actual))
 

@@ -1,4 +1,5 @@
 """Shell prefixes that make the provisioned secretary source importable to a head."""
+
 from __future__ import annotations
 
 import os
@@ -12,8 +13,7 @@ SECRETARY_REPO_ENV = "TA_SECRETARY_REPO"
 # and run by a head in its own shell, so the home has to be the one that head runs as rather than
 # the one this process resolved.
 SECRETARY_SOURCE_SHELL = (
-    f'"${{{SECRETARY_REPO_ENV}:-$HOME/{PRODUCT_DIRNAME}}}/src'
-    '${PYTHONPATH:+:$PYTHONPATH}"'
+    f'"${{{SECRETARY_REPO_ENV}:-$HOME/{PRODUCT_DIRNAME}}}/src${{PYTHONPATH:+:$PYTHONPATH}}"'
 )
 
 
@@ -37,7 +37,4 @@ def pythonpath_prefix(environ: dict[str, str] | None = None) -> str:
     """
     if environ is None:
         return f"PYTHONPATH={SECRETARY_SOURCE_SHELL}"
-    return (
-        f"PYTHONPATH={shlex.quote(str(secretary_repo(environ) / 'src'))}"
-        '"${PYTHONPATH:+:$PYTHONPATH}"'
-    )
+    return f'PYTHONPATH={shlex.quote(str(secretary_repo(environ) / "src"))}"${{PYTHONPATH:+:$PYTHONPATH}}"'

@@ -98,21 +98,27 @@ def run_probe(resource: str, probe: str, now: float) -> HeadReadiness:
     """
     try:
         completed = subprocess.run(
-            probe, shell=True, text=True, capture_output=True, timeout=PROBE_TIMEOUT_SECONDS,
+            probe,
+            shell=True,
+            text=True,
+            capture_output=True,
+            timeout=PROBE_TIMEOUT_SECONDS,
             env=probe_env(),
         )
     except subprocess.TimeoutExpired:
         # A probe that started and then hung says nothing about the account either way.
         return HeadReadiness(resource, "unknown", "probe timed out", now)
     except OSError as exc:
-        return HeadReadiness(
-            resource, PROBE_BROKEN, f"probe could not be started: {type(exc).__name__}", now)
+        return HeadReadiness(resource, PROBE_BROKEN, f"probe could not be started: {type(exc).__name__}", now)
     except Exception as exc:  # a broken probe must not turn into a false resource outage
         return HeadReadiness(resource, "unknown", f"probe could not run: {type(exc).__name__}", now)
     if completed.returncode == 0:
         return HeadReadiness(resource, "ready", "probe succeeded", now)
     text = " ".join((completed.stdout or "", completed.stderr or "")).lower()
-    if any(marker in text for marker in ("login", "not authenticated", "unauthorized", "authentication", " 401", " 403")):
+    if any(
+        marker in text
+        for marker in ("login", "not authenticated", "unauthorized", "authentication", " 401", " 403")
+    ):
         return HeadReadiness(resource, "unauthenticated", "resource authentication failed", now)
     # A spent subscription answers in its own words, and none of them is "rate limit": codex
     # says "You've hit your usage limit … purchase more credits or try again at <date>".
@@ -123,7 +129,10 @@ def run_probe(resource: str, probe: str, now: float) -> HeadReadiness:
     # watchdog ceiling stopped it.
     if any(marker in text for marker in ("usage limit", "quota", "credits", "insufficient_quota", "billing")):
         return HeadReadiness(resource, "exhausted", "resource quota is spent", now)
-    if any(marker in text for marker in ("503", "circuit_open", "unavailable", "rate limit", " 429", "connection", "network")):
+    if any(
+        marker in text
+        for marker in ("503", "circuit_open", "unavailable", "rate limit", " 429", "connection", "network")
+    ):
         return HeadReadiness(resource, "unavailable", "resource provider is unavailable", now)
     # Last, so that a provider which happens to word its refusal like a missing file is still read
     # as the provider talking: everything above is something only a reached provider says.
@@ -131,7 +140,8 @@ def run_probe(resource: str, probe: str, now: float) -> HeadReadiness:
         marker in text for marker in PROBE_LAUNCH_MARKERS
     ):
         return HeadReadiness(
-            resource, PROBE_BROKEN, f"probe could not be launched: {_probe_detail(completed)}", now)
+            resource, PROBE_BROKEN, f"probe could not be launched: {_probe_detail(completed)}", now
+        )
     return HeadReadiness(resource, "unknown", "probe returned an unclassified failure", now)
 
 
@@ -185,8 +195,7 @@ class HeadChoice:
         if not self.head and len(self.rejected) < 2:
             return self.readiness.reason
         rejected = "; ".join(
-            f"{head} on {readiness.resource or '(no resource)'} is {readiness.status}"
-            f" ({readiness.reason})"
+            f"{head} on {readiness.resource or '(no resource)'} is {readiness.status} ({readiness.reason})"
             for head, readiness in self.rejected
         )
         if not self.head:
@@ -204,9 +213,7 @@ class HeadChoice:
             "head": self.head,
             "substituted": self.substituted,
             "readiness": self.readiness.to_json(),
-            "rejected": [
-                dict(readiness.to_json(), head=head) for head, readiness in self.rejected
-            ],
+            "rejected": [dict(readiness.to_json(), head=head) for head, readiness in self.rejected],
             "reason": self.reason,
         }
 
@@ -246,16 +253,23 @@ def resolve_head_chain(
         seen.add(candidate)
         chain = fallback_of(candidate)
         if chain is None and candidate != preferred:
-            rejected.append((candidate, HeadReadiness(
-                "", MISSING_HEAD, f"head {candidate} is not in the registry", time.time())))
+            rejected.append(
+                (
+                    candidate,
+                    HeadReadiness("", MISSING_HEAD, f"head {candidate} is not in the registry", time.time()),
+                )
+            )
             continue
         readiness = readiness_of(candidate)
         if readiness.launch_allowed:
             return HeadChoice(preferred, candidate, readiness, tuple(rejected))
         rejected.append((candidate, readiness))
         queue.extend(chain or ())
-    first = rejected[0][1] if rejected else HeadReadiness(
-        "", MISSING_HEAD, f"head {preferred} is not in the registry", time.time())
+    first = (
+        rejected[0][1]
+        if rejected
+        else HeadReadiness("", MISSING_HEAD, f"head {preferred} is not in the registry", time.time())
+    )
     return HeadChoice(preferred, "", first, tuple(rejected))
 
 
@@ -281,7 +295,9 @@ class HeadHealth:
         # way it answers every other unreadable configuration — unknown, not a crash on the
         # claim-time walk that is only asking whether this candidate is usable.
         except (AttributeError, HostError, KeyError, TypeError, ValueError) as exc:
-            return HeadReadiness("", "unknown", f"head health configuration unavailable: {type(exc).__name__}", time.time())
+            return HeadReadiness(
+                "", "unknown", f"head health configuration unavailable: {type(exc).__name__}", time.time()
+            )
         if not probe:
             return HeadReadiness(resource, "unknown", "resource has no probe command", time.time())
 
@@ -289,7 +305,13 @@ class HeadHealth:
         entry = cache.get(resource)
         now = time.time()
         if isinstance(entry, dict) and now - float(entry.get("checked_at") or 0) < PROBE_TTL_SECONDS:
-            return HeadReadiness(resource, str(entry.get("status") or "unknown"), str(entry.get("reason") or ""), float(entry["checked_at"]), True)
+            return HeadReadiness(
+                resource,
+                str(entry.get("status") or "unknown"),
+                str(entry.get("reason") or ""),
+                float(entry["checked_at"]),
+                True,
+            )
 
         verdict = self._run(resource, probe, now)
         cache[resource] = verdict.to_json()

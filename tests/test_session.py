@@ -20,8 +20,7 @@ class OperatorEnvTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env_file = _write_env(
                 Path(tmp),
-                "KANBOARD_ADMIN_PASSWORD=hunter2\n"
-                "GITHUB_TOKEN=gh-test-token\n",
+                "KANBOARD_ADMIN_PASSWORD=hunter2\nGITHUB_TOKEN=gh-test-token\n",
             )
             ensure_board_transport(Path(tmp), allow_default=True)
             env = session.operator_env(env_file, base_env={"PATH": "/bin", "SECRETARY_INSTANCE": tmp})
@@ -44,8 +43,14 @@ class OperatorEnvTest(unittest.TestCase):
 # than whichever profiles the shipped default happens to carry.
 HERMES_REGISTRY = head_registry.Registry(
     {"openrouter": {"account": "pooled"}},
-    {"hermes": {"resource": "openrouter", "adapter": "hermes",
-                "model": "openai/gpt-5.5", "provider": "openrouter"}},
+    {
+        "hermes": {
+            "resource": "openrouter",
+            "adapter": "hermes",
+            "model": "openai/gpt-5.5",
+            "provider": "openrouter",
+        }
+    },
 )
 
 
@@ -53,9 +58,7 @@ class ResolveHeadTest(unittest.TestCase):
     def test_adapter_aliases(self):
         self.assertEqual(session.resolve_profile_id("claude"), "claude-default")
         self.assertEqual(session.resolve_profile_id("codex"), "codex")
-        self.assertEqual(
-            session.resolve_profile_id("hermes", registry=HERMES_REGISTRY), "hermes"
-        )
+        self.assertEqual(session.resolve_profile_id("hermes", registry=HERMES_REGISTRY), "hermes")
         self.assertEqual(session.resolve_profile_id(None), session.DEFAULT_HEAD)
 
     def test_profile_passthrough_and_unknown(self):
@@ -106,9 +109,7 @@ class RenderInteractiveTest(unittest.TestCase):
             self.assertNotIn("codex exec", command, head)
 
     def test_hermes_is_repl_not_seeded(self):
-        command = session.render_interactive(
-            "hermes", workspace="/tmp/ws", registry=HERMES_REGISTRY
-        )
+        command = session.render_interactive("hermes", workspace="/tmp/ws", registry=HERMES_REGISTRY)
         self.assertIn("--cli", command)
         self.assertIn("--yolo", command)
         self.assertNotIn(" -z ", command)

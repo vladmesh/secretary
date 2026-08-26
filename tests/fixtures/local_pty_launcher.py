@@ -5,6 +5,7 @@ process: a signal sent to the launcher's *process group* must not reach the head
 supervisor must still be there once the launcher itself has exited. Both need a launcher whose
 group and lifetime are not the test runner's.
 """
+
 from __future__ import annotations
 
 import argparse

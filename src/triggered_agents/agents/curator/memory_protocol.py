@@ -1,4 +1,5 @@
 """Adapter from curator runs to the secretary memory writer protocol."""
+
 from __future__ import annotations
 
 import json
@@ -55,14 +56,17 @@ def write_fact(
     saved = _read_json(state_path)
     if saved is None:
         proposal = _run_memory_json(runner, _propose_args(request), request)
-        _write_json(state_path, {
-            "propose_id": proposal["propose_id"],
-            "actor": request.actor,
-            "scope": request.scope,
-            "slug": request.slug,
-            "fact": proposal.get("fact"),
-            "source": proposal.get("source"),
-        })
+        _write_json(
+            state_path,
+            {
+                "propose_id": proposal["propose_id"],
+                "actor": request.actor,
+                "scope": request.scope,
+                "slug": request.slug,
+                "fact": proposal.get("fact"),
+                "source": proposal.get("source"),
+            },
+        )
         propose_id = str(proposal["propose_id"])
     else:
         propose_id = str(saved["propose_id"])
@@ -83,10 +87,14 @@ def write_fact(
 
 def _propose_args(request: MemoryWriteRequest) -> list[str]:
     args = _base_args(request, "propose") + [
-        "--actor", request.actor,
-        "--scope", request.scope,
-        "--slug", request.slug,
-        "--file", str(request.fact_file),
+        "--actor",
+        request.actor,
+        "--scope",
+        request.scope,
+        "--slug",
+        request.slug,
+        "--file",
+        str(request.fact_file),
     ]
     source = request.source or request.actor
     args += ["--source", source]
@@ -101,8 +109,10 @@ def _propose_args(request: MemoryWriteRequest) -> list[str]:
 
 def _commit_args(request: MemoryWriteRequest, propose_id: str) -> list[str]:
     return _base_args(request, "commit") + [
-        "--actor", request.actor,
-        "--propose-id", propose_id,
+        "--actor",
+        request.actor,
+        "--propose-id",
+        propose_id,
     ]
 
 
@@ -131,11 +141,13 @@ def _run_memory_json(runner: Runner, args: list[str], request: MemoryWriteReques
             }
         raise MemoryProtocolError(payload)
     if payload is None:
-        raise MemoryProtocolError({
-            "ok": False,
-            "error": "runtime",
-            "message": "secretary memory returned non-json output",
-        })
+        raise MemoryProtocolError(
+            {
+                "ok": False,
+                "error": "runtime",
+                "message": "secretary memory returned non-json output",
+            }
+        )
     if not payload.get("ok"):
         raise MemoryProtocolError(payload)
     return payload

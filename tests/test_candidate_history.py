@@ -127,9 +127,7 @@ class CandidateHistoryTests(unittest.TestCase):
     def test_a_terminal_example_without_a_blank_separator_is_not_a_git_trailer(self) -> None:
         commits = [
             _commit(
-                "Document the policy\n"
-                "A literal example follows:\n"
-                "Co-Authored-By: Codex <codex@openai.com>\n"
+                "Document the policy\nA literal example follows:\nCo-Authored-By: Codex <codex@openai.com>\n"
             )
         ]
 
@@ -209,14 +207,17 @@ class GeneratedPacketInvariantTests(unittest.TestCase):
 
         ignored = subprocess.run(
             ["git", "-C", str(repo), "check-ignore", "TASK.md", "REVIEW.md"],
-            text=True, capture_output=True,
+            text=True,
+            capture_output=True,
         )
 
         self.assertEqual(ignored.returncode, 0, ignored.stderr)
         self.assertEqual(sorted(ignored.stdout.split()), ["REVIEW.md", "TASK.md"])
         tracked = subprocess.run(
             ["git", "-C", str(repo), "ls-files", "TASK.md", "REVIEW.md"],
-            text=True, capture_output=True, check=True,
+            text=True,
+            capture_output=True,
+            check=True,
         )
         self.assertEqual(tracked.stdout.strip(), "")
 

@@ -11,6 +11,7 @@ anomaly kind, so a condition that has not changed since the last run does not re
 every hour. `scan` is read-only; `advance` folds the scanned state into the watermark, two-phase,
 so a crash between the two re-scans instead of silently dropping a signal.
 """
+
 from __future__ import annotations
 
 import json
@@ -102,14 +103,20 @@ def _pipeline_tick_signals(mark: dict) -> tuple[list[dict], dict]:
     if not telemetry.available:
         STATE.log_run(telemetry.unavailable, level="warn", path=str(telemetry.path))
         # The watermark does not move over a source that could not be read.
-        return ([{"event": telemetry.unavailable, "level": "warn", "path": str(telemetry.path)}],
-                {"pipeline_incident_total": mark["pipeline_incident_total"],
-                 "pipeline_recovery_total": mark["pipeline_recovery_total"],
-                 "pipeline_telemetry_generation": mark["pipeline_telemetry_generation"]})
+        return (
+            [{"event": telemetry.unavailable, "level": "warn", "path": str(telemetry.path)}],
+            {
+                "pipeline_incident_total": mark["pipeline_incident_total"],
+                "pipeline_recovery_total": mark["pipeline_recovery_total"],
+                "pipeline_telemetry_generation": mark["pipeline_telemetry_generation"],
+            },
+        )
     generation = telemetry.generation
-    pending = {"pipeline_incident_total": telemetry.incident_total,
-               "pipeline_recovery_total": telemetry.recovery_total,
-               "pipeline_telemetry_generation": generation}
+    pending = {
+        "pipeline_incident_total": telemetry.incident_total,
+        "pipeline_recovery_total": telemetry.recovery_total,
+        "pipeline_telemetry_generation": generation,
+    }
     seen_incidents = mark["pipeline_incident_total"]
     if seen_incidents is None:
         return [], pending
@@ -117,20 +124,32 @@ def _pipeline_tick_signals(mark: dict) -> tuple[list[dict], dict]:
     seen_generation = str(mark["pipeline_telemetry_generation"] or "")
     replaced = bool(generation and seen_generation and generation != seen_generation)
     hits: list[dict] = []
-    if (replaced or telemetry.incident_total < seen_incidents
-            or telemetry.recovery_total < seen_recoveries):
+    if replaced or telemetry.incident_total < seen_incidents or telemetry.recovery_total < seen_recoveries:
         # The history restarted: the state file was replaced (a restore, a rebuilt installation, a
         # hand edit), either under a new generation or with a counter that went BACKWARDS. Report
         # the reset itself and treat whatever the new history holds as unseen.
-        STATE.log_run("pipeline-telemetry-reset", level="warn", path=str(telemetry.path),
-                      cursor=seen_incidents, incident_total=telemetry.incident_total,
-                      recovery_total=telemetry.recovery_total,
-                      generation=generation, seen_generation=seen_generation)
-        hits.append({"event": "pipeline-telemetry-reset", "level": "warn",
-                     "path": str(telemetry.path), "cursor": seen_incidents,
-                     "incident_total": telemetry.incident_total,
-                     "recovery_total": telemetry.recovery_total,
-                     "generation": generation, "seen_generation": seen_generation})
+        STATE.log_run(
+            "pipeline-telemetry-reset",
+            level="warn",
+            path=str(telemetry.path),
+            cursor=seen_incidents,
+            incident_total=telemetry.incident_total,
+            recovery_total=telemetry.recovery_total,
+            generation=generation,
+            seen_generation=seen_generation,
+        )
+        hits.append(
+            {
+                "event": "pipeline-telemetry-reset",
+                "level": "warn",
+                "path": str(telemetry.path),
+                "cursor": seen_incidents,
+                "incident_total": telemetry.incident_total,
+                "recovery_total": telemetry.recovery_total,
+                "generation": generation,
+                "seen_generation": seen_generation,
+            }
+        )
         seen_incidents = 0
         seen_recoveries = 0
     new_incidents = telemetry.incident_total - seen_incidents
@@ -208,12 +227,12 @@ def ensure_pipeline_baseline(batch: dict) -> None:
             stored["pipeline_incident_total"] = baseline
             # Incidents and recoveries are one dedup state, taken from one read: a baseline that
             # kept only half of it would replay the recovery of an incident it never reported.
-            stored["pipeline_recovery_total"] = batch["pending"].get(
-                "pipeline_recovery_total", 0)
+            stored["pipeline_recovery_total"] = batch["pending"].get("pipeline_recovery_total", 0)
             # The counters only mean anything next to the history they were taken from, so the
             # generation is written with them and never after them.
             stored["pipeline_telemetry_generation"] = batch["pending"].get(
-                "pipeline_telemetry_generation", "")
+                "pipeline_telemetry_generation", ""
+            )
             STATE.save_watermark(stored)
     except SystemExit:
         return
@@ -224,8 +243,9 @@ def _blocked_signals(mark: dict) -> tuple[list[str], list[str]]:
     # A steward report card may intentionally end in Blocked when the run found items that need
     # a human. That report is an accounting artifact, not a fresh anomaly for the next hourly
     # sweep. Stale still catches report cards left in In progress after a dead head.
-    blocked = [c["reference"] for c in pipeline_ops.list_cards(column="Blocked")
-               if c.get("steward_report") != "1"]
+    blocked = [
+        c["reference"] for c in pipeline_ops.list_cards(column="Blocked") if c.get("steward_report") != "1"
+    ]
     seen = set(mark["notified_blocked"])
     new = [r for r in blocked if r not in seen]
     return new, blocked
@@ -325,8 +345,11 @@ def _orphan_signals(mark: dict) -> tuple[list[str], list[str]]:
             continue
         prefixes = _active_card_id_prefixes(project_dir.name)
         for ws in sorted(project_dir.iterdir()):
-            if (ws.is_dir() and _PIPELINE_WS_RE.match(ws.name)
-                    and not any(ws.name.startswith(p) for p in prefixes)):
+            if (
+                ws.is_dir()
+                and _PIPELINE_WS_RE.match(ws.name)
+                and not any(ws.name.startswith(p) for p in prefixes)
+            ):
                 orphans.append(str(ws))
     notified = set(mark["notified_orphans"])
     new = [o for o in orphans if o not in notified]
@@ -362,8 +385,13 @@ def scan() -> dict:
 
 def has_signal(batch: dict) -> bool:
     s = batch["signals"]
-    return bool(s["pipeline_ticks"] or s["new_blocked"] or s["stale"] or s["resource_flip"]
-                or s["new_orphan_workspaces"])
+    return bool(
+        s["pipeline_ticks"]
+        or s["new_blocked"]
+        or s["stale"]
+        or s["resource_flip"]
+        or s["new_orphan_workspaces"]
+    )
 
 
 def render_markdown(batch: dict) -> str:
@@ -377,8 +405,10 @@ def render_markdown(batch: dict) -> str:
         lines.append("")
     if s["pipeline_ticks"]:
         lines.append(f"## Tick incidents of the production dispatcher ({len(s['pipeline_ticks'])})")
-        lines += [f"- {rec.get('ts', '?')} [{rec.get('event', '?')}] "
-                  f"{json.dumps(rec, ensure_ascii=False)}" for rec in s["pipeline_ticks"]]
+        lines += [
+            f"- {rec.get('ts', '?')} [{rec.get('event', '?')}] {json.dumps(rec, ensure_ascii=False)}"
+            for rec in s["pipeline_ticks"]
+        ]
         lines.append("")
     if s["stale"]:
         lines.append(f"## Stuck in a column longer than {STALE_HOURS:g}h ({len(s['stale'])})")

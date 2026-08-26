@@ -107,7 +107,9 @@ def load_specs(
         try:
             raw = tomllib.loads(spec_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
-            raise AutomationError(f"{entry.name}: automation spec is unreadable: {exc.__class__.__name__}") from None
+            raise AutomationError(
+                f"{entry.name}: automation spec is unreadable: {exc.__class__.__name__}"
+            ) from None
         if raw.get("dispatcher") or not raw.get("skill"):
             continue
         name = raw.get("name") or entry.name
@@ -182,7 +184,9 @@ def drifted_fields(spec: AutomationSpec, live: dict[str, Any]) -> tuple[str, ...
     return tuple(sorted(drifted))
 
 
-def plan_automations(specs: Iterable[AutomationSpec], live: Iterable[dict[str, Any]]) -> list[AutomationChange]:
+def plan_automations(
+    specs: Iterable[AutomationSpec], live: Iterable[dict[str, Any]]
+) -> list[AutomationChange]:
     by_name: dict[str, dict[str, Any]] = {}
     for record in live:
         name = record.get("name")
@@ -211,8 +215,10 @@ def repoint_argv(spec: AutomationSpec, automation_id: str) -> list[str]:
 
 def _spec_argv(spec: AutomationSpec) -> list[str]:
     argv = [
-        "--prompt", spec.prompt,
-        "--provider", spec.provider,
+        "--prompt",
+        spec.prompt,
+        "--provider",
+        spec.provider,
     ]
     # Orca selectors are mutually exclusive. An existing workspace already
     # identifies its repository, while a new-per-run automation needs the repo

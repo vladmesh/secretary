@@ -58,9 +58,7 @@ def nudge_for(path: str | Path, note: str = "") -> str:
     """
     location = str(path)
     if not os.path.isabs(location):
-        raise PromptDocumentError(
-            f"a nudge names its document by absolute path, and {location!r} is not one"
-        )
+        raise PromptDocumentError(f"a nudge names its document by absolute path, and {location!r} is not one")
     if any(ord(char) < 0x20 or ord(char) == 0x7F for char in location):
         raise PromptDocumentError("a document path carrying control bytes cannot be nudged at")
     try:
@@ -82,9 +80,7 @@ def nudge_for(path: str | Path, note: str = "") -> str:
     return nudge
 
 
-def write_prompt_document(
-    path: str | Path, text: str, *, outside: str | Path | None = None
-) -> Path:
+def write_prompt_document(path: str | Path, text: str, *, outside: str | Path | None = None) -> Path:
     """Put one head's task where it can read it, and where nothing else has to account for it.
 
     `outside` is the worktree this document describes; a path inside it is a programming error caught
@@ -96,9 +92,7 @@ def write_prompt_document(
     """
     document = Path(path)
     if not document.is_absolute():
-        raise PromptDocumentError(
-            f"a prompt document is written by absolute path, and {document} is not one"
-        )
+        raise PromptDocumentError(f"a prompt document is written by absolute path, and {document} is not one")
     if outside is not None:
         _refuse_inside(document, Path(outside))
     directory = document.parent
@@ -123,9 +117,7 @@ def _make_private(document: Path) -> None:
         if stat.S_IMODE(document.stat().st_mode) != _DOCUMENT_MODE:
             os.chmod(document, _DOCUMENT_MODE)
     except OSError as exc:
-        raise PromptDocumentError(
-            f"prompt document {document} could not be made private: {exc}"
-        ) from None
+        raise PromptDocumentError(f"prompt document {document} could not be made private: {exc}") from None
 
 
 def _encoded(text: str) -> bytes:
@@ -148,8 +140,7 @@ def _refuse_inside(document: Path, worktree: Path) -> None:
     tree = Path(os.path.realpath(worktree))
     if resolved == tree or tree in resolved.parents:
         raise PromptDocumentError(
-            f"a prompt document may not live inside the worktree it describes: "
-            f"{resolved} is under {tree}"
+            f"a prompt document may not live inside the worktree it describes: {resolved} is under {tree}"
         )
 
 
@@ -169,9 +160,7 @@ def _replace_atomically(document: Path, text: str) -> None:
     """
     temp_path: Path | None = None
     try:
-        fd, temp_name = tempfile.mkstemp(
-            prefix=f".{document.name}.", suffix=".tmp", dir=document.parent
-        )
+        fd, temp_name = tempfile.mkstemp(prefix=f".{document.name}.", suffix=".tmp", dir=document.parent)
         temp_path = Path(temp_name)
         os.chmod(temp_path, _DOCUMENT_MODE)
         with os.fdopen(fd, "wb") as handle:

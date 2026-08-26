@@ -10,6 +10,7 @@ so a failing production tick was invisible to both.
 These tests pin all three ends: what the dispatcher records, what the readers make of it, and that
 neither reader can be answered with a stale or missing source as if it were a healthy one.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -197,13 +198,15 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         """
         return mock.patch(
             "secretary.dispatcher_production._reconcile_production",
-            return_value=[{
-                "status": "degraded",
-                "step": "production-reconcile",
-                "ref": "secretary-900",
-                "action": "launch-intent-stop-unconfirmed",
-                "reason": reason,
-            }],
+            return_value=[
+                {
+                    "status": "degraded",
+                    "step": "production-reconcile",
+                    "ref": "secretary-900",
+                    "action": "launch-intent-stop-unconfirmed",
+                    "reason": reason,
+                }
+            ],
         )
 
     def test_a_degraded_action_makes_the_tick_degraded_and_is_never_recorded_healthy(self) -> None:
@@ -218,19 +221,20 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         self.assertFalse(telemetry.last["healthy"])
         self.assertEqual(telemetry.last["error_count"], 0)
         self.assertEqual(telemetry.last["degraded_count"], 1)
-        self.assertEqual(telemetry.last["degradations"][0], {
-            "ref": "secretary-900",
-            "step": "production-reconcile",
-            "status": "degraded",
-            "action": "launch-intent-stop-unconfirmed",
-            "reason": "the head of an unresolved launch could not be stopped",
-        })
+        self.assertEqual(
+            telemetry.last["degradations"][0],
+            {
+                "ref": "secretary-900",
+                "step": "production-reconcile",
+                "status": "degraded",
+                "action": "launch-intent-stop-unconfirmed",
+                "reason": "the head of an unresolved launch could not be stopped",
+            },
+        )
         self.assertEqual(telemetry.unhealthy_total, 1)
         self.assertEqual(telemetry.last_healthy_at, healthy_at)
 
-        with mock.patch.dict(
-            os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}
-        ):
+        with mock.patch.dict(os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}):
             problems, _ = health._pipeline_status()
         self.assertTrue(any("last tick unhealthy" in problem for problem in problems))
         self.assertTrue(any("launch-intent-stop-unconfirmed" in problem for problem in problems))
@@ -245,17 +249,23 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         """
         state = AgentState("steward", state_dir=self.data_dir / "steward")
         with contextlib.ExitStack() as stack:
-            stack.enter_context(mock.patch.dict(
-                os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}))
+            stack.enter_context(
+                mock.patch.dict(os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)})
+            )
             stack.enter_context(mock.patch.object(steward_signals, "STATE", state))
             stack.enter_context(mock.patch.object(steward_cli, "STATE", state))
-            stack.enter_context(mock.patch.object(steward_signals.pipeline_ops, "list_cards",
-                                                  return_value=[]))
-            stack.enter_context(mock.patch.object(steward_signals, "WORKSPACES_ROOT",
-                                                  self.data_dir / "no-workspaces"))
-            stack.enter_context(mock.patch.dict(
-                os.environ,
-                {"TA_PRODUCTION_RESOURCE_HEALTH": str(self.data_dir / "no-resource-health.json")}))
+            stack.enter_context(
+                mock.patch.object(steward_signals.pipeline_ops, "list_cards", return_value=[])
+            )
+            stack.enter_context(
+                mock.patch.object(steward_signals, "WORKSPACES_ROOT", self.data_dir / "no-workspaces")
+            )
+            stack.enter_context(
+                mock.patch.dict(
+                    os.environ,
+                    {"TA_PRODUCTION_RESOURCE_HEALTH": str(self.data_dir / "no-resource-health.json")},
+                )
+            )
             stack.enter_context(mock.patch("sys.stdout", new=io.StringIO()))
             stack.enter_context(mock.patch("sys.stderr", new=io.StringIO()))
 
@@ -273,8 +283,9 @@ class ProductionTickTelemetryTests(unittest.TestCase):
             self.runtime.production_tick()
             self.assertEqual(steward_cli.cmd_precheck(), 0)
             after = steward_signals.scan()["signals"]["pipeline_ticks"]
-            self.assertEqual([hit["event"] for hit in after],
-                             ["pipeline-tick-unhealthy", "pipeline-tick-recovered"])
+            self.assertEqual(
+                [hit["event"] for hit in after], ["pipeline-tick-unhealthy", "pipeline-tick-recovered"]
+            )
             self.assertEqual({hit["incident"] for hit in after}, {hits[0]["incident"]})
 
             self.assertEqual(steward_cli.cmd_scan(True), 0)
@@ -292,8 +303,12 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         ref = "secretary-510-pilot"
         self.runtime.production_tick()  # claims the card and launches its worker
         self.host.worker_status_result = {
-            "known": True, "live": True, "reason": "live", "last_activity": time.time(),
-            "pid_confirmed": True, "idle": True,
+            "known": True,
+            "live": True,
+            "reason": "live",
+            "last_activity": time.time(),
+            "pid_confirmed": True,
+            "idle": True,
         }
         self.runtime.production_tick()  # baseline: a quiet head below every threshold
         self._age_worker_episode(seconds=idle_stall_seconds() + 60)
@@ -322,9 +337,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         )
         self.assertIn("generation 1", degradation["reason"])
 
-        with mock.patch.dict(
-            os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}
-        ):
+        with mock.patch.dict(os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}):
             problems, _ = health._pipeline_status()
         self.assertTrue(any("worker-respawned" in problem for problem in problems))
 
@@ -348,8 +361,14 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         """
         with mock.patch(
             "secretary.dispatcher_production._reconcile_production",
-            return_value=[{"status": "blocked", "step": "production-recovery", "ref": "secretary-901",
-                           "reason": "active task claim no longer matches production record"}],
+            return_value=[
+                {
+                    "status": "blocked",
+                    "step": "production-recovery",
+                    "ref": "secretary-901",
+                    "reason": "active task claim no longer matches production record",
+                }
+            ],
         ):
             result = self.runtime.production_tick()
 
@@ -368,10 +387,13 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         self.runtime.production_tick()
         healthy = self.read_through_the_agent_reader()
 
-        with mock.patch(
-            "secretary.dispatcher_production._production_tasks",
-            side_effect=TaskError("backend_unavailable", "board is down", 1),
-        ), self.assertRaises(TaskError):
+        with (
+            mock.patch(
+                "secretary.dispatcher_production._production_tasks",
+                side_effect=TaskError("backend_unavailable", "board is down", 1),
+            ),
+            self.assertRaises(TaskError),
+        ):
             self.runtime.production_tick()
 
         telemetry = self.read_through_the_agent_reader()
@@ -386,9 +408,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         self.assertEqual(telemetry.incident["opened"]["errors"][0]["code"], "backend_unavailable")
         self.assertEqual(telemetry.recovery, {})
 
-        with mock.patch.dict(
-            os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}
-        ):
+        with mock.patch.dict(os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}):
             problems, _ = health._pipeline_status()
         self.assertTrue(any("last tick unhealthy" in problem for problem in problems))
         self.assertTrue(any("backend_unavailable" in problem for problem in problems))
@@ -406,17 +426,23 @@ class ProductionTickTelemetryTests(unittest.TestCase):
             side_effect=TaskError("backend_unavailable", "board is down", 1),
         )
         with contextlib.ExitStack() as stack:
-            stack.enter_context(mock.patch.dict(
-                os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}))
+            stack.enter_context(
+                mock.patch.dict(os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)})
+            )
             stack.enter_context(mock.patch.object(steward_signals, "STATE", state))
             stack.enter_context(mock.patch.object(steward_cli, "STATE", state))
-            stack.enter_context(mock.patch.object(steward_signals.pipeline_ops, "list_cards",
-                                                  return_value=[]))
-            stack.enter_context(mock.patch.object(steward_signals, "WORKSPACES_ROOT",
-                                                  self.data_dir / "no-workspaces"))
-            stack.enter_context(mock.patch.dict(
-                os.environ,
-                {"TA_PRODUCTION_RESOURCE_HEALTH": str(self.data_dir / "no-resource-health.json")}))
+            stack.enter_context(
+                mock.patch.object(steward_signals.pipeline_ops, "list_cards", return_value=[])
+            )
+            stack.enter_context(
+                mock.patch.object(steward_signals, "WORKSPACES_ROOT", self.data_dir / "no-workspaces")
+            )
+            stack.enter_context(
+                mock.patch.dict(
+                    os.environ,
+                    {"TA_PRODUCTION_RESOURCE_HEALTH": str(self.data_dir / "no-resource-health.json")},
+                )
+            )
             stack.enter_context(mock.patch("sys.stdout", new=io.StringIO()))
             stack.enter_context(mock.patch("sys.stderr", new=io.StringIO()))
 
@@ -436,8 +462,9 @@ class ProductionTickTelemetryTests(unittest.TestCase):
             incident = hits[0]["incident"]
             # A repeated precheck before `advance` sees the same one incident, not another.
             self.assertEqual(steward_cli.cmd_precheck(), 0)
-            self.assertEqual([hit["incident"] for hit in
-                              steward_signals.scan()["signals"]["pipeline_ticks"]], [incident])
+            self.assertEqual(
+                [hit["incident"] for hit in steward_signals.scan()["signals"]["pipeline_ticks"]], [incident]
+            )
             self.assertEqual(steward_cli.cmd_scan(True), 0)
             self.assertEqual(steward_cli.cmd_advance(), 0)
             self.assertEqual(steward_cli.cmd_precheck(), PRECHECK_SKIP)
@@ -472,10 +499,13 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         self.runtime.production_tick()
         before = json.loads(self.runtime.production_state.path.read_text(encoding="utf-8"))
 
-        with mock.patch(
-            "secretary.dispatcher_production._reconcile_production",
-            side_effect=RuntimeError("host is gone"),
-        ), self.assertRaises(RuntimeError):
+        with (
+            mock.patch(
+                "secretary.dispatcher_production._reconcile_production",
+                side_effect=RuntimeError("host is gone"),
+            ),
+            self.assertRaises(RuntimeError),
+        ):
             self.runtime.production_tick()
 
         after = json.loads(self.runtime.production_state.path.read_text(encoding="utf-8"))
@@ -490,9 +520,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         instance = _instance(self.data_dir / "instance", self.data_dir)
         self.runtime.production_tick()
 
-        with mock.patch.dict(
-            os.environ, {"SECRETARY_INSTANCE": str(instance)}, clear=False
-        ):
+        with mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(instance)}, clear=False):
             os.environ.pop("TA_PRODUCTION_STATE", None)
             os.environ.pop("SECRETARY_DATA_DIR", None)
             telemetry = production_telemetry.read()
@@ -519,16 +547,21 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         retries the stop instead of walking away from a live terminal.
         """
         payload = self.runtime.production_state.load()
-        put_observers(payload, {ref: ObserverRecord(
-            sprint=ref,
-            head="observer",
-            workspace=str(self.data_dir / "workspaces" / "observer"),
-            handle=f"observer:{ref}",
-            launches=1,
-            head_possible=True,
-            state=STATE_PAUSE_STOP_PENDING,
-            stopped_reason="pipeline frozen: host maintenance",
-        )})
+        put_observers(
+            payload,
+            {
+                ref: ObserverRecord(
+                    sprint=ref,
+                    head="observer",
+                    workspace=str(self.data_dir / "workspaces" / "observer"),
+                    handle=f"observer:{ref}",
+                    launches=1,
+                    head_possible=True,
+                    state=STATE_PAUSE_STOP_PENDING,
+                    stopped_reason="pipeline frozen: host maintenance",
+                )
+            },
+        )
         self.runtime.production_state.save(payload)
 
     def test_a_freeze_that_cannot_stop_a_head_is_not_a_healthy_terminal_tick(self) -> None:
@@ -546,8 +579,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         result = self.runtime.production_tick()
 
         self.assertEqual(result["status"], "degraded")
-        self.assertEqual([row["action"] for row in result["observer_stops"]],
-                         ["observer-stop-failed"])
+        self.assertEqual([row["action"] for row in result["observer_stops"]], ["observer-stop-failed"])
 
         telemetry = self.read_through_the_agent_reader()
         self.assertFalse(telemetry.last["healthy"])
@@ -559,21 +591,25 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         self.assertEqual(telemetry.unhealthy_total, 1)
         self.assertFalse(telemetry.last_healthy_at)
 
-        with mock.patch.dict(
-            os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}
-        ):
+        with mock.patch.dict(os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}):
             problems, _ = health._pipeline_status()
         self.assertTrue(any("last tick unhealthy" in problem for problem in problems))
         self.assertTrue(any("observer-stop-failed" in problem for problem in problems))
 
         # ...and the steward hears about it, on the same records.
         state = AgentState("steward", state_dir=self.data_dir / "steward")
-        state.save_watermark(dict(steward_signals._empty_watermark(),
-                                  pipeline_incident_total=0, pipeline_recovery_total=0,
-                                  pipeline_telemetry_generation=telemetry.generation))
+        state.save_watermark(
+            dict(
+                steward_signals._empty_watermark(),
+                pipeline_incident_total=0,
+                pipeline_recovery_total=0,
+                pipeline_telemetry_generation=telemetry.generation,
+            )
+        )
         with contextlib.ExitStack() as stack:
-            stack.enter_context(mock.patch.dict(
-                os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)}))
+            stack.enter_context(
+                mock.patch.dict(os.environ, {"TA_PRODUCTION_STATE": str(self.runtime.production_state.path)})
+            )
             stack.enter_context(mock.patch.object(steward_signals, "STATE", state))
             hits, _ = steward_signals._pipeline_tick_signals(state.load_watermark())
         self.assertEqual([hit["event"] for hit in hits], ["pipeline-tick-unhealthy"])
@@ -587,8 +623,7 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         result = self.runtime.production_tick()
 
         self.assertEqual(result["status"], "skipped")
-        self.assertEqual([row["action"] for row in result["observer_stops"]],
-                         ["observer-stopped-by-pause"])
+        self.assertEqual([row["action"] for row in result["observer_stops"]], ["observer-stopped-by-pause"])
         telemetry = self.read_through_the_agent_reader()
         self.assertTrue(telemetry.last["healthy"])
         self.assertEqual(telemetry.unhealthy_total, 0)
@@ -599,13 +634,15 @@ class ProductionTickTelemetryTests(unittest.TestCase):
         The evidence of a blocked dispatcher is that it stops producing healthy ticks; writing
         across the ownership fence to say so would be worse than the silence.
         """
-        self.runtime.production_state.save({
-            "version": 1,
-            "mode": "production",
-            "phase": "production",
-            "owner": "another-dispatcher",
-            "records": {},
-        })
+        self.runtime.production_state.save(
+            {
+                "version": 1,
+                "mode": "production",
+                "phase": "production",
+                "owner": "another-dispatcher",
+                "records": {},
+            }
+        )
 
         result = self.runtime.production_tick()
 
@@ -615,8 +652,14 @@ class ProductionTickTelemetryTests(unittest.TestCase):
     def test_unhealthy_ring_is_bounded_while_the_counter_keeps_growing(self) -> None:
         payload: dict = {}
         for _ in range(TICK_TELEMETRY_UNHEALTHY_KEPT + 5):
-            record_tick_telemetry(payload, {"status": "degraded", "step": "production-tick",
-                                            "errors": [{"ref": "x", "code": "boom", "message": ""}]})
+            record_tick_telemetry(
+                payload,
+                {
+                    "status": "degraded",
+                    "step": "production-tick",
+                    "errors": [{"ref": "x", "code": "boom", "message": ""}],
+                },
+            )
 
         telemetry = payload["tick_telemetry"]
         self.assertEqual(len(telemetry["unhealthy"]), TICK_TELEMETRY_UNHEALTHY_KEPT)
@@ -636,8 +679,15 @@ class ProductionTickTelemetryTests(unittest.TestCase):
 
     def test_degraded_actions_recorded_per_tick_are_capped_but_counted_in_full(self) -> None:
         payload: dict = {}
-        actions = [{"status": "degraded", "step": "production-reconcile", "ref": f"ref-{i}",
-                    "action": "launch-intent-stop-unconfirmed"} for i in range(9)]
+        actions = [
+            {
+                "status": "degraded",
+                "step": "production-reconcile",
+                "ref": f"ref-{i}",
+                "action": "launch-intent-stop-unconfirmed",
+            }
+            for i in range(9)
+        ]
 
         record_tick_telemetry(payload, {"status": "ok", "step": "production-tick", "actions": actions})
 
@@ -662,8 +712,12 @@ class ProductionStatePathTests(unittest.TestCase):
         env = mock.patch.dict(os.environ, {"HOME": str(self.root / "home")})
         env.start()
         self.addCleanup(env.stop)
-        for name in ("TA_PRODUCTION_STATE", "SECRETARY_DATA_DIR", "SECRETARY_INSTANCE",
-                     "TA_RUNTIME_ENV_FILE"):
+        for name in (
+            "TA_PRODUCTION_STATE",
+            "SECRETARY_DATA_DIR",
+            "SECRETARY_INSTANCE",
+            "TA_RUNTIME_ENV_FILE",
+        ):
             os.environ.pop(name, None)
 
     def test_instance_data_dir_is_the_dispatchers_own(self) -> None:
@@ -759,12 +813,13 @@ class EnvDataDirConflictTests(unittest.TestCase):
 
     def writer_state_path(self) -> Path:
         """Where the packaged unit's own command line lands, parsed by the real CLI parser."""
-        args = build_parser().parse_args(
-            ["dispatcher", "production-tick", "--instance", str(self.instance)]
-        )
+        args = build_parser().parse_args(["dispatcher", "production-tick", "--instance", str(self.instance)])
         with mock.patch("secretary.dispatcher.KanboardClient"):
             runtime = runtime_from_args(
-                args.instance, args.data_dir, host_mode="noop", owner="secretary-production",
+                args.instance,
+                args.data_dir,
+                host_mode="noop",
+                owner="secretary-production",
             )
         return runtime.production_state.path
 
@@ -776,9 +831,14 @@ class EnvDataDirConflictTests(unittest.TestCase):
         # A degraded tick written where the dispatcher writes must reach both readers. Left in the
         # instance's data dir it would be invisible to them, and health would stay green.
         payload: dict = {}
-        record_tick_telemetry(payload, {"status": "degraded", "step": "production-tick",
-                                        "errors": [{"ref": "secretary-1", "code": "boom",
-                                                    "message": "host is gone"}]})
+        record_tick_telemetry(
+            payload,
+            {
+                "status": "degraded",
+                "step": "production-tick",
+                "errors": [{"ref": "secretary-1", "code": "boom", "message": "host is gone"}],
+            },
+        )
         _telemetry_state(writer, payload["tick_telemetry"])
 
         problems, detail = health._pipeline_status()
@@ -787,8 +847,7 @@ class EnvDataDirConflictTests(unittest.TestCase):
         self.assertIn("last tick", detail)
 
         hits, pending = steward_signals._pipeline_tick_signals(
-            dict(steward_signals._empty_watermark(), pipeline_incident_total=0,
-                 pipeline_recovery_total=0)
+            dict(steward_signals._empty_watermark(), pipeline_incident_total=0, pipeline_recovery_total=0)
         )
         self.assertEqual([hit["event"] for hit in hits], ["pipeline-tick-unhealthy"])
         self.assertEqual(pending["pipeline_incident_total"], 1)
@@ -797,8 +856,13 @@ class EnvDataDirConflictTests(unittest.TestCase):
         """Proof the two directories really are different: the readers do not silently find it."""
         _telemetry_state(
             self.root / "instance-data" / "dispatcher" / "production-state.json",
-            {"tick_seq": 3, "last": _tick(3, healthy=True), "last_healthy_at": _ts(1),
-             "unhealthy": [], "unhealthy_total": 0},
+            {
+                "tick_seq": 3,
+                "last": _tick(3, healthy=True),
+                "last_healthy_at": _ts(1),
+                "unhealthy": [],
+                "unhealthy_total": 0,
+            },
         )
 
         self.assertEqual(production_telemetry.read().unavailable, "production-state-missing")
@@ -845,7 +909,7 @@ class PackagedStewardUnitEnvTests(unittest.TestCase):
         env = {}
         for line in rendered.splitlines():
             if line.startswith("Environment="):
-                key, value = line[len("Environment="):].split("=", 1)
+                key, value = line[len("Environment=") :].split("=", 1)
                 env[key] = value
         return env
 
@@ -853,7 +917,8 @@ class PackagedStewardUnitEnvTests(unittest.TestCase):
         for name in self.UNITS:
             with self.subTest(unit=name):
                 env = role_env.runtime_env(
-                    "steward", base_env=self.unit_env(name),
+                    "steward",
+                    base_env=self.unit_env(name),
                     env_file=self.instance / "runtime.env",
                 )
 
@@ -893,7 +958,8 @@ class PackagedStewardUnitEnvTests(unittest.TestCase):
         for name in self.UNITS:
             with self.subTest(unit=name):
                 env = role_env.runtime_env(
-                    "steward", base_env=self.unit_env(name),
+                    "steward",
+                    base_env=self.unit_env(name),
                     env_file=self.instance / "runtime.env",
                 )
 
@@ -927,8 +993,12 @@ class StewardResourceSignalTests(unittest.TestCase):
         env = mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(self.instance)})
         env.start()
         self.addCleanup(env.stop)
-        for name in ("TA_PRODUCTION_RESOURCE_HEALTH", "SECRETARY_DATA_DIR", "TA_RUNTIME_ENV_FILE",
-                     "TA_PIPELINE_STATE_DIR"):
+        for name in (
+            "TA_PRODUCTION_RESOURCE_HEALTH",
+            "SECRETARY_DATA_DIR",
+            "TA_RUNTIME_ENV_FILE",
+            "TA_PIPELINE_STATE_DIR",
+        ):
             os.environ.pop(name, None)
         workspaces = mock.patch.object(steward_signals, "WORKSPACES_ROOT", self.root / "workspaces")
         workspaces.start()
@@ -937,25 +1007,40 @@ class StewardResourceSignalTests(unittest.TestCase):
     def write_production(self, statuses: dict[str, str]) -> None:
         path = HeadHealth(None, self.data_dir).path
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({
-            rid: {"resource": rid, "status": status, "reason": "probe", "checked_at": 1.0,
-                  "cached": False}
-            for rid, status in statuses.items()
-        }), encoding="utf-8")
+        path.write_text(
+            json.dumps(
+                {
+                    rid: {
+                        "resource": rid,
+                        "status": status,
+                        "reason": "probe",
+                        "checked_at": 1.0,
+                        "cached": False,
+                    }
+                    for rid, status in statuses.items()
+                }
+            ),
+            encoding="utf-8",
+        )
 
     def write_legacy_worktree(self, statuses: dict[str, str]) -> None:
         """The pipeline worktree copy, which must not answer for the production dispatcher."""
-        path = (self.root / "workspaces" / "secretary" / "pipeline" / "state" / "pipeline"
-                / "resource_health.json")
+        path = (
+            self.root
+            / "workspaces"
+            / "secretary"
+            / "pipeline"
+            / "state"
+            / "pipeline"
+            / "resource_health.json"
+        )
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({
-            rid: {"status": status} for rid, status in statuses.items()
-        }), encoding="utf-8")
+        path.write_text(
+            json.dumps({rid: {"status": status} for rid, status in statuses.items()}), encoding="utf-8"
+        )
 
     def test_the_reader_lands_where_the_dispatcher_caches(self) -> None:
-        self.assertEqual(
-            production_telemetry.resource_health_path(), HeadHealth(None, self.data_dir).path
-        )
+        self.assertEqual(production_telemetry.resource_health_path(), HeadHealth(None, self.data_dir).path)
 
     def test_a_production_only_flip_is_reported(self) -> None:
         self.write_production({"claude": "unauthenticated"})
@@ -1060,10 +1145,13 @@ class HealthAgentStateTests(unittest.TestCase):
         self.assertIn("last healthy tick", problems[0])
 
     def test_a_fresh_error_does_not_pass_as_a_healthy_tick(self) -> None:
-        self.write_runs("steward", [
-            {"ts": _ts(60 * 24), "event": "precheck", "result": "no-change"},
-            {"ts": _ts(1), "event": "precheck", "result": "error"},
-        ])
+        self.write_runs(
+            "steward",
+            [
+                {"ts": _ts(60 * 24), "event": "precheck", "result": "no-change"},
+                {"ts": _ts(1), "event": "precheck", "result": "error"},
+            ],
+        )
 
         problems, _ = health._runs_status("steward")
 
@@ -1083,13 +1171,16 @@ class HealthPipelineLineTests(unittest.TestCase):
         self.addCleanup(env.stop)
 
     def test_fresh_healthy_tick_is_green(self) -> None:
-        _telemetry_state(self.path, {
-            "tick_seq": 7,
-            "last": _tick(7, healthy=True),
-            "last_healthy_at": _ts(1),
-            "unhealthy": [],
-            "unhealthy_total": 0,
-        })
+        _telemetry_state(
+            self.path,
+            {
+                "tick_seq": 7,
+                "last": _tick(7, healthy=True),
+                "last_healthy_at": _ts(1),
+                "unhealthy": [],
+                "unhealthy_total": 0,
+            },
+        )
 
         problems, detail = health._pipeline_status()
 
@@ -1097,15 +1188,22 @@ class HealthPipelineLineTests(unittest.TestCase):
         self.assertIn("last healthy", detail)
 
     def test_fresh_degraded_tick_is_red_even_with_a_recent_healthy_one(self) -> None:
-        _telemetry_state(self.path, {
-            "tick_seq": 8,
-            "last": _tick(8, healthy=False, reason="",
-                          error_count=1,
-                          errors=[{"ref": "secretary-1", "code": "backend_unavailable", "message": "x"}]),
-            "last_healthy_at": _ts(2),
-            "unhealthy": [],
-            "unhealthy_total": 1,
-        })
+        _telemetry_state(
+            self.path,
+            {
+                "tick_seq": 8,
+                "last": _tick(
+                    8,
+                    healthy=False,
+                    reason="",
+                    error_count=1,
+                    errors=[{"ref": "secretary-1", "code": "backend_unavailable", "message": "x"}],
+                ),
+                "last_healthy_at": _ts(2),
+                "unhealthy": [],
+                "unhealthy_total": 1,
+            },
+        )
 
         problems, _ = health._pipeline_status()
 
@@ -1115,17 +1213,29 @@ class HealthPipelineLineTests(unittest.TestCase):
 
     def test_a_tick_red_only_from_an_action_names_the_degradation(self) -> None:
         """No caught error at all: the line has to say which operation could not finish."""
-        _telemetry_state(self.path, {
-            "tick_seq": 9,
-            "last": _tick(9, healthy=False, degraded_count=1,
-                          degradations=[{"ref": "secretary-900", "step": "production-reconcile",
-                                         "status": "degraded",
-                                         "action": "launch-intent-stop-unconfirmed",
-                                         "reason": "the head could not be stopped"}]),
-            "last_healthy_at": _ts(2),
-            "unhealthy": [],
-            "unhealthy_total": 1,
-        })
+        _telemetry_state(
+            self.path,
+            {
+                "tick_seq": 9,
+                "last": _tick(
+                    9,
+                    healthy=False,
+                    degraded_count=1,
+                    degradations=[
+                        {
+                            "ref": "secretary-900",
+                            "step": "production-reconcile",
+                            "status": "degraded",
+                            "action": "launch-intent-stop-unconfirmed",
+                            "reason": "the head could not be stopped",
+                        }
+                    ],
+                ),
+                "last_healthy_at": _ts(2),
+                "unhealthy": [],
+                "unhealthy_total": 1,
+            },
+        )
 
         problems, _ = health._pipeline_status()
 
@@ -1135,13 +1245,16 @@ class HealthPipelineLineTests(unittest.TestCase):
 
     def test_stale_healthy_tick_is_red(self) -> None:
         old = _ts(60 * 6)
-        _telemetry_state(self.path, {
-            "tick_seq": 3,
-            "last": _tick(3, healthy=True, at=old),
-            "last_healthy_at": old,
-            "unhealthy": [],
-            "unhealthy_total": 0,
-        })
+        _telemetry_state(
+            self.path,
+            {
+                "tick_seq": 3,
+                "last": _tick(3, healthy=True, at=old),
+                "last_healthy_at": old,
+                "unhealthy": [],
+                "unhealthy_total": 0,
+            },
+        )
 
         problems, _ = health._pipeline_status()
 
@@ -1198,12 +1311,16 @@ class StewardPipelineSignalTests(unittest.TestCase):
         """
         body = {} if payload is None else payload
         for tick in ticks:
-            record_tick_telemetry(body, {
-                "status": "ok" if tick == "." else "degraded",
-                "step": "production-tick",
-                "errors": [] if tick == "." else [
-                    {"ref": "", "code": "backend_unavailable", "message": "TaskError"}],
-            })
+            record_tick_telemetry(
+                body,
+                {
+                    "status": "ok" if tick == "." else "degraded",
+                    "step": "production-tick",
+                    "errors": []
+                    if tick == "."
+                    else [{"ref": "", "code": "backend_unavailable", "message": "TaskError"}],
+                },
+            )
         telemetry = dict(body["tick_telemetry"])
         telemetry["generation"] = generation
         body["tick_telemetry"] = telemetry
@@ -1212,8 +1329,13 @@ class StewardPipelineSignalTests(unittest.TestCase):
 
     def baseline(self, **fields) -> dict:
         """A watermark that has already taken a baseline of the current history."""
-        return {**steward_signals._empty_watermark(), "pipeline_incident_total": 0,
-                "pipeline_recovery_total": 0, "pipeline_telemetry_generation": "gen-a", **fields}
+        return {
+            **steward_signals._empty_watermark(),
+            "pipeline_incident_total": 0,
+            "pipeline_recovery_total": 0,
+            "pipeline_telemetry_generation": "gen-a",
+            **fields,
+        }
 
     @contextlib.contextmanager
     def steward_cli_env(self):
@@ -1221,14 +1343,24 @@ class StewardPipelineSignalTests(unittest.TestCase):
         gate does with the pipeline record is the only thing under test."""
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.object(steward_cli, "STATE", self.state))
-            stack.enter_context(mock.patch.object(steward_signals.pipeline_ops, "list_cards",
-                                                  return_value=[]))
-            stack.enter_context(mock.patch.object(steward_signals, "WORKSPACES_ROOT",
-                                                  Path(self.tmpdir.name) / "no-workspaces"))
-            stack.enter_context(mock.patch.dict(
-                os.environ,
-                {"TA_PRODUCTION_RESOURCE_HEALTH":
-                 str(Path(self.tmpdir.name) / "no-resource-health.json")}))
+            stack.enter_context(
+                mock.patch.object(steward_signals.pipeline_ops, "list_cards", return_value=[])
+            )
+            stack.enter_context(
+                mock.patch.object(
+                    steward_signals, "WORKSPACES_ROOT", Path(self.tmpdir.name) / "no-workspaces"
+                )
+            )
+            stack.enter_context(
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "TA_PRODUCTION_RESOURCE_HEALTH": str(
+                            Path(self.tmpdir.name) / "no-resource-health.json"
+                        )
+                    },
+                )
+            )
             stack.enter_context(mock.patch("sys.stdout", new=io.StringIO()))
             stack.enter_context(mock.patch("sys.stderr", new=io.StringIO()))
             yield
@@ -1242,8 +1374,7 @@ class StewardPipelineSignalTests(unittest.TestCase):
     def test_first_scan_takes_a_baseline_instead_of_replaying_the_record(self) -> None:
         self.write("xxx")
 
-        hits, pending = steward_signals._pipeline_tick_signals(
-            steward_signals._empty_watermark())
+        hits, pending = steward_signals._pipeline_tick_signals(steward_signals._empty_watermark())
 
         self.assertEqual(hits, [])
         self.assertEqual(pending["pipeline_incident_total"], 1)
@@ -1302,8 +1433,10 @@ class StewardPipelineSignalTests(unittest.TestCase):
 
         # Before `advance` the same recovery is still the batch, and further healthy ticks do not
         # repeat it afterwards.
-        self.assertEqual([hit["incident"] for hit in
-                          steward_signals._pipeline_tick_signals(mark)[0]], [recovered["incident"]])
+        self.assertEqual(
+            [hit["incident"] for hit in steward_signals._pipeline_tick_signals(mark)[0]],
+            [recovered["incident"]],
+        )
         mark = dict(mark, **pending)
         payload = self.write("..", payload=payload)
         self.assertEqual(steward_signals._pipeline_tick_signals(mark)[0], [])
@@ -1329,8 +1462,9 @@ class StewardPipelineSignalTests(unittest.TestCase):
 
         hits, _ = steward_signals._pipeline_tick_signals(mark)
 
-        self.assertEqual([hit["event"] for hit in hits],
-                         ["pipeline-tick-unhealthy", "pipeline-tick-recovered"])
+        self.assertEqual(
+            [hit["event"] for hit in hits], ["pipeline-tick-unhealthy", "pipeline-tick-recovered"]
+        )
         self.assertEqual(hits[0]["incident"], hits[1]["incident"])
         self.assertEqual(hits[0]["errors"][0]["code"], "backend_unavailable")
 
@@ -1384,8 +1518,14 @@ class StewardPipelineSignalTests(unittest.TestCase):
         self.assertEqual([hit["event"] for hit in hits], ["production-state-missing"])
         self.assertEqual(hits[0]["level"], "warn")
         # The watermark does not move over a source that could not be read.
-        self.assertEqual(pending, {"pipeline_incident_total": 2, "pipeline_recovery_total": 1,
-                                   "pipeline_telemetry_generation": "gen-a"})
+        self.assertEqual(
+            pending,
+            {
+                "pipeline_incident_total": 2,
+                "pipeline_recovery_total": 1,
+                "pipeline_telemetry_generation": "gen-a",
+            },
+        )
         self.assertEqual([run["event"] for run in self.steward_runs()], ["production-state-missing"])
 
     def test_a_quiet_precheck_keeps_the_baseline_so_a_later_failure_still_fires(self) -> None:
@@ -1434,13 +1574,24 @@ class StewardPipelineSignalTests(unittest.TestCase):
 
     def test_the_baseline_write_never_overwrites_a_watermark_or_invents_one(self) -> None:
         self.write("x.")
-        self.state.save_watermark(dict(steward_signals._empty_watermark(),
-                                       pipeline_incident_total=2, pipeline_recovery_total=2,
-                                       notified_blocked=["ref-1"]))
+        self.state.save_watermark(
+            dict(
+                steward_signals._empty_watermark(),
+                pipeline_incident_total=2,
+                pipeline_recovery_total=2,
+                notified_blocked=["ref-1"],
+            )
+        )
 
         steward_signals.ensure_pipeline_baseline(
-            {"pending": {"pipeline_incident_total": 4, "pipeline_recovery_total": 4,
-                         "pipeline_telemetry_generation": "gen-a"}})
+            {
+                "pending": {
+                    "pipeline_incident_total": 4,
+                    "pipeline_recovery_total": 4,
+                    "pipeline_telemetry_generation": "gen-a",
+                }
+            }
+        )
 
         mark = self.state.load_watermark()
         self.assertEqual(mark["pipeline_incident_total"], 2)
@@ -1450,8 +1601,14 @@ class StewardPipelineSignalTests(unittest.TestCase):
         # or the next scan would replay a recovery, or fail to tell a replaced state from this one.
         self.state.watermark_file.unlink()
         steward_signals.ensure_pipeline_baseline(
-            {"pending": {"pipeline_incident_total": 4, "pipeline_recovery_total": 3,
-                         "pipeline_telemetry_generation": "gen-a"}})
+            {
+                "pending": {
+                    "pipeline_incident_total": 4,
+                    "pipeline_recovery_total": 3,
+                    "pipeline_telemetry_generation": "gen-a",
+                }
+            }
+        )
         mark = self.state.load_watermark()
         self.assertEqual(mark["pipeline_recovery_total"], 3)
         self.assertEqual(mark["pipeline_telemetry_generation"], "gen-a")
@@ -1462,9 +1619,15 @@ class StewardPipelineSignalTests(unittest.TestCase):
         self.assertIsNone(self.state.load_watermark().get("pipeline_incident_total"))
 
     def test_a_hit_is_a_signal_and_renders(self) -> None:
-        batch = {"signals": {"pipeline_ticks": [{"event": "pipeline-tick-unhealthy", "ts": _ts(1)}],
-                             "new_blocked": [], "stale": [], "resource_flip": {},
-                             "new_orphan_workspaces": []}}
+        batch = {
+            "signals": {
+                "pipeline_ticks": [{"event": "pipeline-tick-unhealthy", "ts": _ts(1)}],
+                "new_blocked": [],
+                "stale": [],
+                "resource_flip": {},
+                "new_orphan_workspaces": [],
+            }
+        }
 
         self.assertTrue(steward_signals.has_signal(batch))
         self.assertIn("production dispatcher", steward_signals.render_markdown(batch))
@@ -1493,9 +1656,7 @@ class StewardStaleColumnsTests(unittest.TestCase):
         with mock.patch.object(steward_signals.pipeline_ops, "list_cards", side_effect=list_cards):
             hits, notified = steward_signals._stale_signals({"notified_stale": {}})
 
-        self.assertEqual(
-            hits, [{"reference": "secretary-1025", "column": "Assessment", "since": _LONG_AGO}]
-        )
+        self.assertEqual(hits, [{"reference": "secretary-1025", "column": "Assessment", "since": _LONG_AGO}])
         self.assertEqual(notified, {"secretary-1025": _LONG_AGO})
         self.assertIn("Assessment", looked_at)
         # Issues and Done stay out: an untriaged proposal and a finished card may sit forever.
@@ -1504,10 +1665,10 @@ class StewardStaleColumnsTests(unittest.TestCase):
 
     def test_a_stale_assessment_card_fires_only_once_per_dwell(self) -> None:
         with mock.patch.object(
-            steward_signals.pipeline_ops, "list_cards",
+            steward_signals.pipeline_ops,
+            "list_cards",
             side_effect=lambda column=None, **_kwargs: (
-                [{"reference": "secretary-1025", "date_moved": _LONG_AGO}]
-                if column == "Assessment" else []
+                [{"reference": "secretary-1025", "date_moved": _LONG_AGO}] if column == "Assessment" else []
             ),
         ):
             hits, notified = steward_signals._stale_signals({"notified_stale": {"secretary-1025": _LONG_AGO}})

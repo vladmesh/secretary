@@ -17,6 +17,7 @@ There is deliberately no third name and no free text. A profile naming anything 
 when the registry is read, so a head refused when the table loads and a head refused when it is
 raised are refused by one rule.
 """
+
 from __future__ import annotations
 
 #: The Orca path this product has always run: a head is a pane, and Orca owns its process.

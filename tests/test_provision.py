@@ -205,9 +205,7 @@ class ProvisionTests(unittest.TestCase):
         binding["enabled"] = True
         self.binding_path.write_text(yaml.safe_dump(binding), encoding="utf-8")
 
-        code, artifact = project_add(
-            str(self.repo), str(self.instance), dry_run=False, re_onboard=True
-        )
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
 
         self.assertEqual(code, 0, artifact)
         self.assertFalse(load_config(self.binding_path)["enabled"])
@@ -265,9 +263,7 @@ class ProvisionTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
 
-        code, artifact = project_add(
-            str(self.repo), str(self.instance), dry_run=False, re_onboard=True
-        )
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
 
         self.assertEqual(code, 0, artifact)
         self.assertFalse(load_config(self.binding_path)["enabled"])
@@ -285,9 +281,7 @@ class ProvisionTests(unittest.TestCase):
         draft_bytes = self.draft_path.read_bytes()
         adapter_bytes = self.adapter_path.read_bytes()
 
-        code, artifact = project_add(
-            str(self.repo), str(self.instance), dry_run=False, re_onboard=True
-        )
+        code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
 
         self.assertEqual(code, 0, artifact)
         self.assertEqual(artifact["provision"]["status"], "drafted")
@@ -305,9 +299,7 @@ class ProvisionTests(unittest.TestCase):
         before = self.binding_path.read_bytes(), self.draft_path.read_bytes()
 
         with mock.patch("pathlib.Path.unlink", side_effect=PermissionError("injected")):
-            code, artifact = project_add(
-                str(self.repo), str(self.instance), dry_run=False, re_onboard=True
-            )
+            code, artifact = project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
 
         self.assertEqual(code, 1)
         self.assertEqual(artifact["draft"]["findings"][-1]["code"], "draft.invalid")
@@ -405,13 +397,17 @@ class ProvisionTests(unittest.TestCase):
 
         foreign = self.drafted_result(task)
         foreign["identity"]["id"] = "other"
-        code, result = apply_provision_result(str(self.instance), "sample-project", str(self.write_result(foreign)))
+        code, result = apply_provision_result(
+            str(self.instance), "sample-project", str(self.write_result(foreign))
+        )
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "result_foreign")
 
         stale = self.drafted_result(task)
         stale["input_revision"]["scanner_head"] = "different"
-        code, result = apply_provision_result(str(self.instance), "sample-project", str(self.write_result(stale)))
+        code, result = apply_provision_result(
+            str(self.instance), "sample-project", str(self.write_result(stale))
+        )
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "stale_input")
         self.assertFalse(self.adapter_path.exists())
@@ -435,19 +431,25 @@ class ProvisionTests(unittest.TestCase):
         task = self.start()["task"]
         missing_ci = self.drafted_result(task)
         missing_ci["adapter"]["validation"] = {}
-        code, result = apply_provision_result(str(self.instance), "sample-project", str(self.write_result(missing_ci)))
+        code, result = apply_provision_result(
+            str(self.instance), "sample-project", str(self.write_result(missing_ci))
+        )
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "ci_undeclared")
 
         invalid = self.drafted_result(task)
         invalid["adapter"]["setup"]["commands"] = []
-        code, result = apply_provision_result(str(self.instance), "sample-project", str(self.write_result(invalid)))
+        code, result = apply_provision_result(
+            str(self.instance), "sample-project", str(self.write_result(invalid))
+        )
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "adapter_invalid")
 
         local_write = self.drafted_result(task)
         local_write["adapter"]["artifact_policy"]["write_project_files"] = True
-        code, result = apply_provision_result(str(self.instance), "sample-project", str(self.write_result(local_write)))
+        code, result = apply_provision_result(
+            str(self.instance), "sample-project", str(self.write_result(local_write))
+        )
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "result_invalid")
         self.assertFalse(self.adapter_path.exists())
@@ -458,7 +460,9 @@ class ProvisionTests(unittest.TestCase):
             "path": ".secretary/adapter.yaml",
             "requires_opt_in": True,
         }
-        code, result = apply_provision_result(str(self.instance), "sample-project", str(self.write_result(proposal)))
+        code, result = apply_provision_result(
+            str(self.instance), "sample-project", str(self.write_result(proposal))
+        )
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "result_invalid")
 
@@ -477,7 +481,9 @@ class ProvisionTests(unittest.TestCase):
                 "retry": "same-run",
             },
         }
-        code, result = apply_provision_result(str(self.instance), "sample-project", str(self.write_result(env)))
+        code, result = apply_provision_result(
+            str(self.instance), "sample-project", str(self.write_result(env))
+        )
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "environment_failed")
         self.assertEqual(result["environment"]["summary"], "required dependency is missing")
@@ -493,7 +499,9 @@ class ProvisionTests(unittest.TestCase):
         restarted = self.start()
         self.assertEqual(restarted["task"]["run_id"], task["run_id"])
         ok = self.drafted_result(task)
-        code, result = apply_provision_result(str(self.instance), "sample-project", str(self.write_result(ok)))
+        code, result = apply_provision_result(
+            str(self.instance), "sample-project", str(self.write_result(ok))
+        )
         self.assertEqual(code, 0, result)
         self.assertTrue(self.adapter_path.exists())
 
@@ -514,7 +522,9 @@ class ProvisionTests(unittest.TestCase):
         }
 
         with mock.patch("secretary._fsutil.os.replace", side_effect=OSError(5, "injected")):
-            code, result = apply_provision_result(str(self.instance), "sample-project", str(self.write_result(env)))
+            code, result = apply_provision_result(
+                str(self.instance), "sample-project", str(self.write_result(env))
+            )
 
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "publication_failed")
@@ -523,9 +533,7 @@ class ProvisionTests(unittest.TestCase):
     def test_environment_failure_after_success_is_transition_conflict(self):
         task = self.start()["task"]
         result_path = self.write_result(self.drafted_result(task))
-        code, result = apply_provision_result(
-            str(self.instance), "sample-project", str(result_path)
-        )
+        code, result = apply_provision_result(str(self.instance), "sample-project", str(result_path))
         self.assertEqual(code, 0, result)
         draft_before = self.draft_path.read_bytes()
         adapter_before = self.adapter_path.read_bytes()
@@ -544,9 +552,7 @@ class ProvisionTests(unittest.TestCase):
             },
         }
         result_path = self.write_result(environment_failed)
-        code, result = apply_provision_result(
-            str(self.instance), "sample-project", str(result_path)
-        )
+        code, result = apply_provision_result(str(self.instance), "sample-project", str(result_path))
 
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "transition_conflict")
@@ -572,7 +578,9 @@ class ProvisionTests(unittest.TestCase):
             },
         }
 
-        code, result = apply_provision_result(str(self.instance), "sample-project", str(self.write_result(env)))
+        code, result = apply_provision_result(
+            str(self.instance), "sample-project", str(self.write_result(env))
+        )
 
         rendered = json.dumps(result, sort_keys=True)
         self.assertEqual(code, 1)
@@ -605,28 +613,32 @@ class ProvisionTests(unittest.TestCase):
     def test_cli_provision_commands_use_explicit_instance_root(self):
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            code = main([
-                "project",
-                "provision-start",
-                "sample-project",
-                "--instance",
-                str(self.instance),
-            ])
+            code = main(
+                [
+                    "project",
+                    "provision-start",
+                    "sample-project",
+                    "--instance",
+                    str(self.instance),
+                ]
+            )
         self.assertEqual(code, 0, output.getvalue())
         task = json.loads(output.getvalue())["task"]
         result_path = self.write_result(self.drafted_result(task))
 
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
-            code = main([
-                "project",
-                "provision-apply",
-                "sample-project",
-                "--instance",
-                str(self.instance),
-                "--result",
-                str(result_path),
-            ])
+            code = main(
+                [
+                    "project",
+                    "provision-apply",
+                    "sample-project",
+                    "--instance",
+                    str(self.instance),
+                    "--result",
+                    str(result_path),
+                ]
+            )
 
         self.assertEqual(code, 0, output.getvalue())
         result = json.loads(output.getvalue())

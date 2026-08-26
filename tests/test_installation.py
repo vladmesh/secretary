@@ -54,11 +54,19 @@ CARD = {
 
 
 SPRINT = {
-    "reference": "sprint:41", "goal": "Ship sprint entities", "definition_of_done": "restore rebuilds it",
-    "repositories": ["secretary"], "status": "closed", "budget": {"by_type": {"red_ci": 1}},
-    "current_task": "secretary-1", "resume": None,
-    "audit": {"created_at": "2026-07-01T00:00:00Z", "updated_at": "2026-07-02T00:00:00Z",
-              "board": "Secretary sprints"},
+    "reference": "sprint:41",
+    "goal": "Ship sprint entities",
+    "definition_of_done": "restore rebuilds it",
+    "repositories": ["secretary"],
+    "status": "closed",
+    "budget": {"by_type": {"red_ci": 1}},
+    "current_task": "secretary-1",
+    "resume": None,
+    "audit": {
+        "created_at": "2026-07-01T00:00:00Z",
+        "updated_at": "2026-07-02T00:00:00Z",
+        "board": "Secretary sprints",
+    },
     "comments": [{"ts": "2026-07-01T10:00:00Z", "text": "[po]\nnote"}],
 }
 
@@ -119,8 +127,14 @@ class InstallationTests(unittest.TestCase):
         target = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, target)
         args = SimpleNamespace(
-            instance_dir=str(target), instance_remote="remote", installation_user=getpass.getuser(),
-            recover=True, adopt=False, dry_run=True, runtime_env=None, product_root=str(PRODUCT_ROOT),
+            instance_dir=str(target),
+            instance_remote="remote",
+            installation_user=getpass.getuser(),
+            recover=True,
+            adopt=False,
+            dry_run=True,
+            runtime_env=None,
+            product_root=str(PRODUCT_ROOT),
         )
         unlocked = installation.SecretRecovery(store_present=True, unlocked=True)
         with (
@@ -146,7 +160,9 @@ class InstallationTests(unittest.TestCase):
 
             with (
                 mock.patch("secretary.installation.validate_instance", return_value=SimpleNamespace(ok=True)),
-                mock.patch("secretary.installation.resolve_runtime_owner", return_value=("operator", root / "home")),
+                mock.patch(
+                    "secretary.installation.resolve_runtime_owner", return_value=("operator", root / "home")
+                ),
                 mock.patch("secretary.installation.run_steps", side_effect=run),
             ):
                 installation.materialize_host(
@@ -166,13 +182,18 @@ class InstallationTests(unittest.TestCase):
                 json.dumps({"source": "runs.jsonl", "line": 1, "record": record}) + "\n",
                 encoding="utf-8",
             )
-            state_dir = root / "home" / "orca" / "workspaces" / "secretary" / "pipeline" / "state" / "pipeline"
+            state_dir = (
+                root / "home" / "orca" / "workspaces" / "secretary" / "pipeline" / "state" / "pipeline"
+            )
 
             first = materialize_pipeline_state(instance, state_dir)
             self.assertEqual((first.records, first.changed), (1, True))
 
             self.assertEqual(
-                [json.loads(line) for line in (state_dir / "runs.jsonl").read_text(encoding="utf-8").splitlines()],
+                [
+                    json.loads(line)
+                    for line in (state_dir / "runs.jsonl").read_text(encoding="utf-8").splitlines()
+                ],
                 [record],
             )
             stamp = (state_dir / "runs.jsonl").stat().st_mtime_ns
@@ -267,10 +288,14 @@ class InstallationTests(unittest.TestCase):
             _git(source, "commit", "-m", "initial")
             subprocess.run(
                 ["git", "clone", "--bare", str(source), str(remote)],
-                check=True, capture_output=True, text=True,
+                check=True,
+                capture_output=True,
+                text=True,
             )
             binding = {
-                "id": "demo", "repo": str(target), "remote": str(remote),
+                "id": "demo",
+                "repo": str(target),
+                "remote": str(remote),
                 "default_branch": "main",
             }
 
@@ -387,13 +412,19 @@ class InstallationTests(unittest.TestCase):
             target.mkdir()
             (target / ".secretary-bootstrap").write_text("bootstrap\n", encoding="utf-8")
             args = SimpleNamespace(
-                instance_dir=str(target), instance_remote="remote",
-                installation_user=getpass.getuser(), recover=False, adopt=False,
-                dry_run=False, runtime_env=None,
+                instance_dir=str(target),
+                instance_remote="remote",
+                installation_user=getpass.getuser(),
+                recover=False,
+                adopt=False,
+                dry_run=False,
+                runtime_env=None,
             )
             with (
                 mock.patch("secretary.installation._ensure_installation_user") as ensure_user,
-                mock.patch("secretary.installation._clone_or_reuse", return_value="reused checkpoint checkout"),
+                mock.patch(
+                    "secretary.installation._clone_or_reuse", return_value="reused checkpoint checkout"
+                ),
                 mock.patch(
                     "secretary.installation.read_runtime_env",
                     side_effect=RuntimeEnvError("stop after user check"),
@@ -472,19 +503,34 @@ class InstallationTests(unittest.TestCase):
             instance.mkdir()
             _checkpoint(instance, data)
             event = {
-                "event_id": "evt_routing", "schema_version": 1, "kind": "routing",
-                "occurred_at": "2026-07-24T00:00:00Z", "outcome": "success",
+                "event_id": "evt_routing",
+                "schema_version": 1,
+                "kind": "routing",
+                "occurred_at": "2026-07-24T00:00:00Z",
+                "outcome": "success",
                 "actor": {"role": "dispatcher", "id": "secretary-dispatcher"},
-                "task_id": "task_kanboard_1", "ref": "secretary-1",
+                "task_id": "task_kanboard_1",
+                "ref": "secretary-1",
                 "backend": {"kind": "kanboard", "task_id": 1, "revision": "updated_at:x"},
                 "request_id": "routing-verdict",
                 "payload": {
-                    "attempt": 1, "attempt_id": "attempt-1", "phase": "verdict", "outcome": "red",
+                    "attempt": 1,
+                    "attempt_id": "attempt-1",
+                    "phase": "verdict",
+                    "outcome": "red",
                     "heads": [
-                        {"role": "worker", "head": "codex", "model": "gpt-5.6-terra",
-                         "model_source": "profile"},
-                        {"role": "reviewer", "head": "claude-opus", "model": "opus",
-                         "model_source": "profile"},
+                        {
+                            "role": "worker",
+                            "head": "codex",
+                            "model": "gpt-5.6-terra",
+                            "model_source": "profile",
+                        },
+                        {
+                            "role": "reviewer",
+                            "head": "claude-opus",
+                            "model": "opus",
+                            "model_source": "profile",
+                        },
                     ],
                 },
             }
@@ -533,8 +579,12 @@ class InstallationTests(unittest.TestCase):
             _git(source, "config", "user.email", "test@example.invalid")
             _git(source, "add", ".")
             _git(source, "commit", "-m", "checkpoint")
-            subprocess.run(["git", "clone", "--bare", str(source), str(remote)], check=True,
-                           capture_output=True, text=True)
+            subprocess.run(
+                ["git", "clone", "--bare", str(source), str(remote)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             # The config identity is the clone URL the recovery command verifies.
             text = (source / "instance.yaml").read_text(encoding="utf-8")
             (source / "instance.yaml").write_text(text.replace("placeholder", str(remote)), encoding="utf-8")
@@ -544,9 +594,14 @@ class InstallationTests(unittest.TestCase):
 
             # An install materializes the checkout it is told to, and this one is not `~/secretary`.
             base = [
-                "--instance-remote", str(remote), "--instance-dir", str(target),
-                "--installation-user", getpass.getuser(),
-                "--product-root", str(PRODUCT_ROOT),
+                "--instance-remote",
+                str(remote),
+                "--instance-dir",
+                str(target),
+                "--installation-user",
+                getpass.getuser(),
+                "--product-root",
+                str(PRODUCT_ROOT),
             ]
             host = SimpleNamespace(steps=[SimpleNamespace(status="changed")])
             patches = (
@@ -558,8 +613,16 @@ class InstallationTests(unittest.TestCase):
                 mock.patch("secretary.installation.restore_findings", return_value=[]),
                 mock.patch("secretary.bootstrap.ensure_pipeline_board"),
             )
-            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], \
-                    mock.patch("secretary.installation._set_installation_owner") as set_owner:
+            with (
+                patches[0],
+                patches[1],
+                patches[2],
+                patches[3],
+                patches[4],
+                patches[5],
+                patches[6],
+                mock.patch("secretary.installation._set_installation_owner") as set_owner,
+            ):
                 with mock.patch("secretary.installation._ensure_installation_user"):
                     first_code, first_output = self._cli(["install", *base])
                 second_code, second_output = self._cli(["recover", *base])
@@ -567,7 +630,8 @@ class InstallationTests(unittest.TestCase):
 
             self.assertEqual(first_code, 0, first_output)
             self.assertIn(
-                mock.call(target / ".gitignore", getpass.getuser()), set_owner.call_args_list,
+                mock.call(target / ".gitignore", getpass.getuser()),
+                set_owner.call_args_list,
             )
             self.assertTrue((target / ".git").exists())
             self.assertFalse((target / "runtime.env").exists())
@@ -590,11 +654,7 @@ class InstallationTests(unittest.TestCase):
             source.mkdir()
             _checkpoint(source, data)
             materialize_checkpoint(source, data)
-            before = {
-                path.relative_to(data): path.read_bytes()
-                for path in data.rglob("*")
-                if path.is_file()
-            }
+            before = {path.relative_to(data): path.read_bytes() for path in data.rglob("*") if path.is_file()}
             _git(source, "init")
             _git(source, "config", "user.name", "Test")
             _git(source, "config", "user.email", "test@example.invalid")
@@ -621,23 +681,24 @@ class InstallationTests(unittest.TestCase):
                 mock.patch("secretary.installation.materialize_host") as host,
                 mock.patch("secretary.installation.mark_reconcile_applied") as reconcile,
             ):
-                code, output = self._cli([
-                    "recover",
-                    "--instance-remote", str(source),
-                    "--instance-dir", str(target),
-                    "--installation-user", getpass.getuser(),
-                    "--dry-run",
-                ])
+                code, output = self._cli(
+                    [
+                        "recover",
+                        "--instance-remote",
+                        str(source),
+                        "--instance-dir",
+                        str(target),
+                        "--installation-user",
+                        getpass.getuser(),
+                        "--dry-run",
+                    ]
+                )
 
             self.assertEqual(code, 0, output)
             self.assertIn("would-change checkpoint", output)
             self.assertIn("preview made no recovery changes", output)
             self.assertTrue(prerequisites.call_args.args[0].token)
-            after = {
-                path.relative_to(data): path.read_bytes()
-                for path in data.rglob("*")
-                if path.is_file()
-            }
+            after = {path.relative_to(data): path.read_bytes() for path in data.rglob("*") if path.is_file()}
             self.assertEqual(after, before)
             board.assert_not_called()
             memory.assert_not_called()
@@ -656,14 +717,22 @@ class InstallationTests(unittest.TestCase):
             _git(source, "config", "user.email", "test@example.invalid")
             _git(source, "add", ".")
             _git(source, "commit", "-m", "checkpoint")
-            subprocess.run(["git", "clone", str(source), str(target)], check=True,
-                           capture_output=True, text=True)
+            subprocess.run(
+                ["git", "clone", str(source), str(target)], check=True, capture_output=True, text=True
+            )
 
             with mock.patch("secretary.installation._ensure_installation_user"):
-                code, output = self._cli([
-                    "install", "--instance-remote", str(source), "--instance-dir", str(target),
-                    "--installation-user", getpass.getuser(),
-                ])
+                code, output = self._cli(
+                    [
+                        "install",
+                        "--instance-remote",
+                        str(source),
+                        "--instance-dir",
+                        str(target),
+                        "--installation-user",
+                        getpass.getuser(),
+                    ]
+                )
             self.assertEqual(code, 1)
             self.assertIn("choose --recover", output)
             self.assertIn("adopt", output)

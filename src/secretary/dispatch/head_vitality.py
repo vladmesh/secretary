@@ -159,8 +159,7 @@ class VitalitySnapshot:
         # snapshot built from a chatty diagnostic and its serialised form compare equal.
         object.__setattr__(self, "run_id", str(self.run_id))
         object.__setattr__(self, "observed_at", observed_at)
-        object.__setattr__(self, "cursor",
-                           None if self.cursor is None else str(self.cursor)[:CURSOR_LIMIT])
+        object.__setattr__(self, "cursor", None if self.cursor is None else str(self.cursor)[:CURSOR_LIMIT])
         object.__setattr__(self, "reason", str(self.reason or "")[:REASON_LIMIT])
 
     @property
@@ -229,9 +228,7 @@ class VitalitySnapshot:
         )
 
     @classmethod
-    def from_pid_heartbeat(
-        cls, status: Any, *, run_id: str, observed_at: float
-    ) -> VitalitySnapshot:
+    def from_pid_heartbeat(cls, status: Any, *, run_id: str, observed_at: float) -> VitalitySnapshot:
         """Wrap one ``dispatcher_watchdog.head_process_status`` answer.
 
         The heartbeat is authoritative about the ``Process`` axis and about nothing else. Its
@@ -243,7 +240,9 @@ class VitalitySnapshot:
         """
         if not isinstance(status, dict):
             return cls._unavailable(
-                run_id=run_id, observed_at=observed_at, source=SnapshotSource.PID_HEARTBEAT,
+                run_id=run_id,
+                observed_at=observed_at,
+                source=SnapshotSource.PID_HEARTBEAT,
                 reason="pid heartbeat status is not an object",
             )
         state = str(status.get("state") or "")
@@ -253,11 +252,7 @@ class VitalitySnapshot:
                 source=SnapshotSource.PID_HEARTBEAT,
                 observed_at=observed_at,
                 availability=SourceAvailability.AVAILABLE,
-                process=(
-                    ProcessState.SUSPENDED
-                    if bool(status.get("stopped"))
-                    else ProcessState.RUNNING
-                ),
+                process=(ProcessState.SUSPENDED if bool(status.get("stopped")) else ProcessState.RUNNING),
                 reason="",
             )
         if state == HEARTBEAT_DEAD:
@@ -271,12 +266,16 @@ class VitalitySnapshot:
             )
         if state == HEARTBEAT_IDENTITY_MISMATCH:
             return cls._unavailable(
-                run_id=run_id, observed_at=observed_at, source=SnapshotSource.PID_HEARTBEAT,
+                run_id=run_id,
+                observed_at=observed_at,
+                source=SnapshotSource.PID_HEARTBEAT,
                 reason="pid heartbeat belongs to another live HeadRun",
             )
         # ``not-yet-written``, ``unreadable`` and their kin: the channel said why it cannot answer.
         return cls._unavailable(
-            run_id=run_id, observed_at=observed_at, source=SnapshotSource.PID_HEARTBEAT,
+            run_id=run_id,
+            observed_at=observed_at,
+            source=SnapshotSource.PID_HEARTBEAT,
             reason=f"pid heartbeat is inconclusive: {state or 'no classification'}",
         )
 
@@ -301,7 +300,9 @@ class VitalitySnapshot:
         """
         if not isinstance(evidence, dict):
             return cls._unavailable(
-                run_id=run_id, observed_at=observed_at, source=SnapshotSource.PROVIDER_CURSOR,
+                run_id=run_id,
+                observed_at=observed_at,
+                source=SnapshotSource.PROVIDER_CURSOR,
                 reason="provider cursor evidence is not an object",
             )
         if (
@@ -312,18 +313,24 @@ class VitalitySnapshot:
             if str(evidence.get("state") or "") == "identity_mismatch":
                 detail = detail or "provider cursor is bound to another HeadRun"
             return cls._unavailable(
-                run_id=run_id, observed_at=observed_at, source=SnapshotSource.PROVIDER_CURSOR,
+                run_id=run_id,
+                observed_at=observed_at,
+                source=SnapshotSource.PROVIDER_CURSOR,
                 reason=f"provider cursor is not admitted: {detail}".strip(": "),
             )
         if str(evidence.get("head_run_id") or "") != str(run_id):
             return cls._unavailable(
-                run_id=run_id, observed_at=observed_at, source=SnapshotSource.PROVIDER_CURSOR,
+                run_id=run_id,
+                observed_at=observed_at,
+                source=SnapshotSource.PROVIDER_CURSOR,
                 reason="provider cursor names a HeadRun other than the snapshot's run",
             )
         cursor = str(evidence.get("cursor") or "")
         if not cursor:
             return cls._unavailable(
-                run_id=run_id, observed_at=observed_at, source=SnapshotSource.PROVIDER_CURSOR,
+                run_id=run_id,
+                observed_at=observed_at,
+                source=SnapshotSource.PROVIDER_CURSOR,
                 reason="admitted provider cursor carries no cursor value",
             )
         if not previous_cursor:
@@ -348,9 +355,7 @@ class VitalitySnapshot:
         )
 
     @classmethod
-    def from_pane_readiness(
-        cls, status: Any, *, run_id: str, observed_at: float
-    ) -> VitalitySnapshot:
+    def from_pane_readiness(cls, status: Any, *, run_id: str, observed_at: float) -> VitalitySnapshot:
         """Wrap one pane readiness answer (`{"idle": bool}` as callers of ``PaneHost`` build it).
 
         Advisory by construction: the session manager answers whether a pane will take input, which
@@ -368,15 +373,16 @@ class VitalitySnapshot:
             reason = ""
         else:
             turn = TurnState.UNKNOWN
-            detail = str(status.get("reason") or "").strip()[:REASON_LIMIT] \
-                if isinstance(status, dict) else ""
-            reason = f"pane readiness did not answer: {detail}" if detail \
-                else "pane readiness did not answer"
+            detail = (
+                str(status.get("reason") or "").strip()[:REASON_LIMIT] if isinstance(status, dict) else ""
+            )
+            reason = f"pane readiness did not answer: {detail}" if detail else "pane readiness did not answer"
         return cls(
             run_id=run_id,
             source=SnapshotSource.PANE_ADVISORY,
             observed_at=observed_at,
-            availability=SourceAvailability.AVAILABLE if isinstance(idle, bool)
+            availability=SourceAvailability.AVAILABLE
+            if isinstance(idle, bool)
             else SourceAvailability.UNAVAILABLE,
             turn=turn,
             reason=reason,
@@ -434,7 +440,5 @@ def snapshots_from_status(
             )
         )
     if "idle" in status:
-        snapshots.append(
-            VitalitySnapshot.from_pane_readiness(status, run_id=run_id, observed_at=observed_at)
-        )
+        snapshots.append(VitalitySnapshot.from_pane_readiness(status, run_id=run_id, observed_at=observed_at))
     return snapshots

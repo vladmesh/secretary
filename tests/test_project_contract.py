@@ -144,7 +144,8 @@ class ProjectContractTests(unittest.TestCase):
         self.assertEqual(contract.import_package, "codegen_orchestrator")
         self.assertEqual(contract.as_dict(), {"source": "adapter"})
         self.assertEqual(
-            contract.reason, "",
+            contract.reason,
+            "",
             "an adapter that declares a contract is not judged by the checkout's layout: the "
             "receipt's own provenance is what catches a check that imported elsewhere",
         )
@@ -198,17 +199,14 @@ class ProjectContractTests(unittest.TestCase):
                 self.assertEqual(self.refusal().shape, ADAPTER_INVALID)
 
     def test_an_interpreter_that_cannot_run_names_that_shape(self) -> None:
-        missing = ADAPTER_BODY + (
-            "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n"
-        )
+        missing = ADAPTER_BODY + ("broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n")
         unreadable = self.repo / "not-executable"
         unreadable.write_text("", encoding="utf-8")
         unreadable.chmod(stat.S_IRUSR)
         cases = {
             "no such file": missing,
-            "not executable": ADAPTER_BODY + (
-                f"broad_check:\n  interpreter: {unreadable}\n  import_package: thing\n"
-            ),
+            "not executable": ADAPTER_BODY
+            + (f"broad_check:\n  interpreter: {unreadable}\n  import_package: thing\n"),
         }
         for name, body in cases.items():
             with self.subTest(case=name):
@@ -218,7 +216,8 @@ class ProjectContractTests(unittest.TestCase):
 
                 self.assertEqual(refused.shape, INTERPRETER_UNAVAILABLE)
                 self.assertEqual(
-                    refused.code, "interpreter_start_failed",
+                    refused.code,
+                    "interpreter_start_failed",
                     "the worker already reported this condition under that code when it "
                     "discovered it by trying to start the process; the preflight only finds it "
                     "earlier, and never under a second name",
@@ -238,8 +237,7 @@ class ProjectContractTests(unittest.TestCase):
         tree.
         """
         self.adapter(
-            ADAPTER_BODY
-            + "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n"
+            ADAPTER_BODY + "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n"
         )
         interpreter = self.relative_interpreter(self.repo)
 
@@ -266,7 +264,8 @@ class ProjectContractTests(unittest.TestCase):
                 "the state carries what could not be decided and why, for whoever logs it",
             )
         self.assertEqual(
-            with_a_venv, without_one,
+            with_a_venv,
+            without_one,
             "the registered checkout's contents never entered the answer",
         )
 
@@ -274,32 +273,29 @@ class ProjectContractTests(unittest.TestCase):
         """The other half of the same boundary: the side holding the tree decides, both ways, and
         it never leaves the question open."""
         self.adapter(
-            ADAPTER_BODY
-            + "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n"
+            ADAPTER_BODY + "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n"
         )
         workspace = self.root / "worktree"
         workspace.mkdir()
         self.relative_interpreter(self.repo)
 
-        refused = decide(
-            self.binding(), instance=self.instance, project_root=workspace, workspace=workspace
-        )
+        refused = decide(self.binding(), instance=self.instance, project_root=workspace, workspace=workspace)
 
         self.assertEqual(refused.state, CONTRACT_REFUSED)
         self.assertEqual(refused.refusal.shape, INTERPRETER_UNAVAILABLE)
         self.assertIn(
-            str(workspace), refused.refusal.message,
+            str(workspace),
+            refused.refusal.message,
             "the worker's refusal is about the worktree it was given, not the registered checkout",
         )
         with self.assertRaises(ContractUnusable):
             module_contract(self.binding(), instance=self.instance, project_root=workspace)
 
         in_the_worktree = self.relative_interpreter(workspace)
-        resolved = module_contract(
-            self.binding(), instance=self.instance, project_root=workspace
-        )
+        resolved = module_contract(self.binding(), instance=self.instance, project_root=workspace)
         self.assertEqual(
-            resolved.interpreter, str(in_the_worktree),
+            resolved.interpreter,
+            str(in_the_worktree),
             "and the contract it resolves runs that tree's own interpreter, not the checkout's",
         )
 
@@ -313,15 +309,11 @@ class ProjectContractTests(unittest.TestCase):
             "no adapter file": None,
             "invalid adapter": "setup:\n  commands: ['true']\n",
             "legacy default": ADAPTER_BODY,
-            "blank runtime": ADAPTER_BODY + (
-                "broad_check:\n  interpreter: '   '\n  import_package: thing\n"
-            ),
-            "relative interpreter": ADAPTER_BODY + (
-                "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n"
-            ),
-            "absolute interpreter": ADAPTER_BODY + (
-                f"broad_check:\n  interpreter: {sys.executable}\n  import_package: thing\n"
-            ),
+            "blank runtime": ADAPTER_BODY + ("broad_check:\n  interpreter: '   '\n  import_package: thing\n"),
+            "relative interpreter": ADAPTER_BODY
+            + ("broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n"),
+            "absolute interpreter": ADAPTER_BODY
+            + (f"broad_check:\n  interpreter: {sys.executable}\n  import_package: thing\n"),
         }
         for name, body in bodies.items():
             with self.subTest(case=name):
@@ -332,7 +324,9 @@ class ProjectContractTests(unittest.TestCase):
                     self.adapter(body)
 
                 verdict = decide(
-                    self.binding(), instance=self.instance, project_root=self.repo,
+                    self.binding(),
+                    instance=self.instance,
+                    project_root=self.repo,
                     workspace=workspace,
                 )
 
@@ -351,9 +345,7 @@ class ProjectContractTests(unittest.TestCase):
             contract_of(ContractVerdict.as_refused(ADAPTER_INVALID, "example", "why"))
         with self.assertRaises(ContractStateError):
             contract_of(
-                ContractVerdict.as_undecidable(
-                    UNDECIDABLE_RELATIVE_INTERPRETER, "example", "no workspace"
-                )
+                ContractVerdict.as_undecidable(UNDECIDABLE_RELATIVE_INTERPRETER, "example", "no workspace")
             )
         with self.assertRaises(ContractStateError):
             contract_of(ContractVerdict(state="who-knows", adapter="example"))
@@ -363,13 +355,9 @@ class ProjectContractTests(unittest.TestCase):
         outside them rather than minting a state nobody can branch on."""
         self.assertEqual(CONTRACT_STATES, (CONTRACT_FIT, CONTRACT_REFUSED, CONTRACT_UNDECIDABLE))
         for shape in CONTRACT_REFUSALS:
-            self.assertEqual(
-                ContractVerdict.as_refused(shape, "example", "why").refusal.shape, shape
-            )
+            self.assertEqual(ContractVerdict.as_refused(shape, "example", "why").refusal.shape, shape)
         for question in UNDECIDABLE_QUESTIONS:
-            self.assertEqual(
-                ContractVerdict.as_undecidable(question, "example", "why").question, question
-            )
+            self.assertEqual(ContractVerdict.as_undecidable(question, "example", "why").question, question)
         with self.assertRaises(ContractStateError):
             ContractVerdict.as_refused("invented", "example", "why")
         with self.assertRaises(ContractStateError):
@@ -396,9 +384,8 @@ class ProjectContractTests(unittest.TestCase):
         cases = {
             ADAPTER_UNAVAILABLE: None,
             ADAPTER_INVALID: "setup:\n  commands: ['true']\n",
-            BROAD_CHECK_INCOMPLETE: ADAPTER_BODY + (
-                "broad_check:\n  interpreter: '   '\n  import_package: thing\n"
-            ),
+            BROAD_CHECK_INCOMPLETE: ADAPTER_BODY
+            + ("broad_check:\n  interpreter: '   '\n  import_package: thing\n"),
             CANNOT_ATTEST_PROJECT: ADAPTER_BODY,
         }
         self.package("codegen_orchestrator")
@@ -471,7 +458,8 @@ class CatalogContractTests(unittest.TestCase):
         (instance / "projects").mkdir()
         (instance / "adapters").mkdir()
         (instance / "instance.yaml").write_text(
-            "version: 1\nname: contract\ndata_dir: " + str(self.root / "data")
+            "version: 1\nname: contract\ndata_dir: "
+            + str(self.root / "data")
             + "\noffsite:\n  instance_remote: git@example.invalid:x/y.git\n"
             + "host:\n  unit_prefix: secretary-\n",
             encoding="utf-8",
@@ -490,8 +478,7 @@ class CatalogContractTests(unittest.TestCase):
             encoding="utf-8",
         )
         (instance / "projects" / "example.yaml").write_text(
-            f"id: example\nrepo: {self.repo}\nadapter: example\nenabled: true\n"
-            "default_branch: main\n",
+            f"id: example\nrepo: {self.repo}\nadapter: example\nenabled: true\ndefault_branch: main\n",
             encoding="utf-8",
         )
         if adapter_body is not None:
@@ -517,8 +504,7 @@ class CatalogContractTests(unittest.TestCase):
         """The third state through the real catalog, with `workspace=None` supplied there and
         nowhere else: the dispatcher never has a candidate workspace to answer with."""
         verdict = self.catalog(
-            ADAPTER_BODY
-            + "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n"
+            ADAPTER_BODY + "broad_check:\n  interpreter: .venv/bin/python\n  import_package: thing\n"
         ).broad_check_verdict("example")
 
         self.assertEqual(verdict.state, CONTRACT_UNDECIDABLE)

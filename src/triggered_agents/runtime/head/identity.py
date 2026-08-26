@@ -19,6 +19,7 @@ integer name a process?" is not the question any of these answer: `boot_id` and
 a match. Missing, half-written, malformed and legacy pid-only files keep their own inconclusive
 states: a reader that cannot tell must never be read as one that said no.
 """
+
 from __future__ import annotations
 
 import json
@@ -47,7 +48,7 @@ def _proc_starttime_ticks(pid: int) -> str:
     """
     stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     close = stat.rfind(")")
-    fields = stat[close + 2:].split()
+    fields = stat[close + 2 :].split()
     if close < 0 or len(fields) <= 19:
         raise ValueError("/proc stat has no process start time")
     return fields[19]
@@ -83,8 +84,7 @@ def _is_stopped(pid: int) -> bool:
 
 
 def _unreadable(reason: str) -> dict[str, Any]:
-    return {"known": False, "alive": False, "match": False, "state": HEARTBEAT_UNREADABLE,
-            "reason": reason}
+    return {"known": False, "alive": False, "match": False, "state": HEARTBEAT_UNREADABLE, "reason": reason}
 
 
 def _record_matches_expected(record: Mapping[str, Any], expected: Mapping[str, Any] | None) -> bool:
@@ -104,8 +104,7 @@ def _read_record(pid_file: str) -> tuple[dict[str, Any] | None, dict[str, Any] |
     try:
         raw = Path(pid_file).read_text(encoding="utf-8")
     except FileNotFoundError:
-        return None, {"known": False, "alive": False, "match": False,
-                      "state": HEARTBEAT_NOT_YET_WRITTEN}
+        return None, {"known": False, "alive": False, "match": False, "state": HEARTBEAT_NOT_YET_WRITTEN}
     except OSError as exc:
         return None, _unreadable(type(exc).__name__)
     try:
@@ -128,9 +127,7 @@ def _read_record(pid_file: str) -> tuple[dict[str, Any] | None, dict[str, Any] |
     return record, None
 
 
-def head_process_status(
-    pid_file: str, *, expected: Mapping[str, Any] | None = None
-) -> dict[str, Any]:
+def head_process_status(pid_file: str, *, expected: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Classify a launch-identity heartbeat without trusting PID reuse.
 
     A readable record has one of ``live-match``, ``dead`` or ``identity-mismatch``. Missing,
@@ -144,8 +141,14 @@ def head_process_status(
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return {"known": True, "alive": False, "match": False, "state": HEARTBEAT_DEAD,
-                "pid": pid, "record": record}
+        return {
+            "known": True,
+            "alive": False,
+            "match": False,
+            "state": HEARTBEAT_DEAD,
+            "pid": pid,
+            "record": record,
+        }
     except PermissionError:
         # A normal dispatcher head is owned by us.  Treat an uninspectable process as inconclusive:
         # a weak permission answer cannot authorize a signal or a replacement.
@@ -159,8 +162,14 @@ def head_process_status(
         return _unreadable(type(exc).__name__)
     alive = not _is_zombie(pid)
     if not alive:
-        return {"known": True, "alive": False, "match": False, "state": HEARTBEAT_DEAD,
-                "pid": pid, "record": record}
+        return {
+            "known": True,
+            "alive": False,
+            "match": False,
+            "state": HEARTBEAT_DEAD,
+            "pid": pid,
+            "record": record,
+        }
     if not boot_matches or not start_matches or not _record_matches_expected(record, expected):
         return {
             "known": True,

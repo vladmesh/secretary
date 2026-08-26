@@ -141,7 +141,9 @@ def restore_plan_components(policy: BackupPolicy, *, empty: bool = False) -> tup
     components = tuple(
         {
             "name": component.name,
-            "action": "initialized" if empty and component.restore_action == "restore" else component.restore_action,
+            "action": "initialized"
+            if empty and component.restore_action == "restore"
+            else component.restore_action,
         }
         for component in policy.components
     )
@@ -212,10 +214,7 @@ def is_memory_journal_git_runtime_entry(relative: Path) -> bool:
     git_path = relative.parts[3:]
     if git_path[:1] == ("objects",):
         return git_path[:2] == ("objects", "info") and len(git_path) > 2
-    return not (
-        git_path[:1] == ("refs",)
-        or git_path in {("HEAD",), ("packed-refs",)}
-    )
+    return not (git_path[:1] == ("refs",) or git_path in {("HEAD",), ("packed-refs",)})
 
 
 def _skip_core_data_entry(relative: Path) -> bool:

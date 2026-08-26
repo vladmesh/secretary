@@ -15,6 +15,7 @@ turns, watermarked by (mtime, size) instead of a line count, but sharing the sam
 dict and the same two-phase harvest/advance handshake. The curator never edits or deletes
 these files — read-only in, canon out.
 """
+
 from __future__ import annotations
 
 import json

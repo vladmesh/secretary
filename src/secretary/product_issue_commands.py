@@ -1,4 +1,5 @@
 """Public CLI for the Product and Issue board records."""
+
 from __future__ import annotations
 
 import argparse
@@ -43,7 +44,8 @@ def add_product_issue_subcommands(subparsers) -> None:
     )
     _common(lanes)
     lanes.add_argument(
-        "--apply", action="store_true",
+        "--apply",
+        action="store_true",
         help="perform the planned moves; without it the command writes nothing",
     )
     lanes.set_defaults(handler=run_product_reconcile_lanes)
@@ -106,12 +108,15 @@ def _missing(message: str):
     def handler(_args: argparse.Namespace) -> int:
         print(json.dumps({"error": {"code": "usage", "message": message}}))
         return 2
+
     return handler
 
 
 def _store(args: argparse.Namespace) -> ProductIssueStore:
     return ProductIssueStore(
-        KanboardClient.for_instance(args.instance), data_dir=resolve_data_dir(args), instance=args.instance,
+        KanboardClient.for_instance(args.instance),
+        data_dir=resolve_data_dir(args),
+        instance=args.instance,
     )
 
 
@@ -120,19 +125,87 @@ def _run(args: argparse.Namespace, callback) -> int:
 
 
 def run_product_create(args):
-    return _run(args, lambda store: store.create_product(product_id=args.id, projects=args.project, title=args.title, description=args.description, actor=args.actor, request_id=args.request_id))
-def run_product_list(args): return _run(args, lambda store: store.list_products())
-def run_product_show(args): return _run(args, lambda store: store.show_product(args.id))
-def run_product_reconcile_lanes(args): return _run(args, lambda store: store.reconcile_lanes(apply=args.apply))
+    return _run(
+        args,
+        lambda store: store.create_product(
+            product_id=args.id,
+            projects=args.project,
+            title=args.title,
+            description=args.description,
+            actor=args.actor,
+            request_id=args.request_id,
+        ),
+    )
+
+
+def run_product_list(args):
+    return _run(args, lambda store: store.list_products())
+
+
+def run_product_show(args):
+    return _run(args, lambda store: store.show_product(args.id))
+
+
+def run_product_reconcile_lanes(args):
+    return _run(args, lambda store: store.reconcile_lanes(apply=args.apply))
+
+
 def run_issue_create(args):
-    return _run(args, lambda store: store.create_issue(product=args.product, issue_kind=args.kind, priority=args.priority, title=args.title, description=args.description, actor=args.actor, request_id=args.request_id))
-def run_issue_list(args): return _run(args, lambda store: store.list_issues(product=args.product, include_closed=args.closed))
-def run_issue_show(args): return _run(args, lambda store: store.show_issue(args.ref))
+    return _run(
+        args,
+        lambda store: store.create_issue(
+            product=args.product,
+            issue_kind=args.kind,
+            priority=args.priority,
+            title=args.title,
+            description=args.description,
+            actor=args.actor,
+            request_id=args.request_id,
+        ),
+    )
+
+
+def run_issue_list(args):
+    return _run(args, lambda store: store.list_issues(product=args.product, include_closed=args.closed))
+
+
+def run_issue_show(args):
+    return _run(args, lambda store: store.show_issue(args.ref))
+
+
 def run_issue_priority(args):
-    return _run(args, lambda store: store.update_priority(reference=args.ref, priority=args.priority, reason=args.reason, actor=args.actor, request_id=args.request_id))
+    return _run(
+        args,
+        lambda store: store.update_priority(
+            reference=args.ref,
+            priority=args.priority,
+            reason=args.reason,
+            actor=args.actor,
+            request_id=args.request_id,
+        ),
+    )
+
+
 def run_issue_close(args):
-    return _run(args, lambda store: store.close_issue(reference=args.ref, reason=args.reason, actor=args.actor, request_id=args.request_id))
-def run_transaction_list(args): return _run(args, lambda store: store.list_transactions())
-def run_transaction_retry(args): return _run(args, lambda store: store.retry_transaction(args.request_id))
-def run_transaction_discard(args): return _run(args, lambda store: store.discard_transaction(args.request_id))
-def run_transaction_adopt(args): return _run(args, lambda store: store.adopt_transaction(args.path))
+    return _run(
+        args,
+        lambda store: store.close_issue(
+            reference=args.ref, reason=args.reason, actor=args.actor, request_id=args.request_id
+        ),
+    )
+
+
+def run_transaction_list(args):
+    return _run(args, lambda store: store.list_transactions())
+
+
+def run_transaction_retry(args):
+    return _run(args, lambda store: store.retry_transaction(args.request_id))
+
+
+def run_transaction_discard(args):
+    return _run(args, lambda store: store.discard_transaction(args.request_id))
+
+
+def run_transaction_adopt(args):
+    return _run(args, lambda store: store.adopt_transaction(args.path))

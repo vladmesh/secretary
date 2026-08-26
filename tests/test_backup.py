@@ -23,9 +23,7 @@ class BackupTests(unittest.TestCase):
         self.env_patch = mock.patch.dict(os.environ, {"BOARD_ROLE": ""})
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
-        self.workspace_patch = mock.patch(
-            "secretary.backup._claimed_workspace_from_cwd", return_value=None
-        )
+        self.workspace_patch = mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None)
         self.workspace_patch.start()
         self.addCleanup(self.workspace_patch.stop)
 
@@ -35,9 +33,7 @@ class BackupTests(unittest.TestCase):
             instance = root / "instance"
             data_dir = root / "secretary-data"
             _write_instance(instance, data_dir)
-            (instance / "runtime.env").write_text(
-                "KANBOARD_API_TOKEN=do-not-archive\n", encoding="utf-8"
-            )
+            (instance / "runtime.env").write_text("KANBOARD_API_TOKEN=do-not-archive\n", encoding="utf-8")
 
             pipeline_calls: list[str] = []
 
@@ -95,7 +91,9 @@ class BackupTests(unittest.TestCase):
             self.assertIn("secretary-backup/versions.json", names)
             self.assertIn("secretary-backup/instance/instance.yaml", names)
             self.assertIn("secretary-backup/secretary-data/board/cards.json", names)
-            self.assertIn("secretary-backup/secretary-data/board/kanboard-raw-20260710T000000Z/data/db.sqlite", names)
+            self.assertIn(
+                "secretary-backup/secretary-data/board/kanboard-raw-20260710T000000Z/data/db.sqlite", names
+            )
             self.assertIn("secretary-backup/secretary-data/runs/runs.ndjson", names)
             self.assertIn("secretary-backup/secretary-data/runs/cards.json", names)
             self.assertIn("secretary-backup/secretary-data/artifacts/inventory.json", names)
@@ -113,9 +111,7 @@ class BackupTests(unittest.TestCase):
             _write_instance(instance, data_dir)
             _write_export_surface(data_dir)
             git_dir = data_dir / "memory" / "facts" / ".git"
-            subprocess.run(
-                ["git", "init", str(git_dir.parent)], check=True, stdout=subprocess.DEVNULL
-            )
+            subprocess.run(["git", "init", str(git_dir.parent)], check=True, stdout=subprocess.DEVNULL)
             (git_dir / "hooks").mkdir(exist_ok=True)
             (git_dir / "hooks" / "post-checkout").write_text("exit 1\n", encoding="utf-8")
             (git_dir / "config").write_text("[core]\nfsmonitor = bad\n", encoding="utf-8")
@@ -135,10 +131,12 @@ class BackupTests(unittest.TestCase):
                 "artifacts": DataExport(data_dir / "artifacts" / "inventory.json", 1, "test"),
             }
 
-            with mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}), \
-                 mock.patch("secretary.backup._pipeline_action", return_value=None), \
-                 mock.patch("secretary.backup.raw_kanboard_dump", return_value=SimpleNamespace(dump_dir=raw)), \
-                 mock.patch("secretary.backup.export_all", return_value=exports):
+            with (
+                mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
+                mock.patch("secretary.backup._pipeline_action", return_value=None),
+                mock.patch("secretary.backup.raw_kanboard_dump", return_value=SimpleNamespace(dump_dir=raw)),
+                mock.patch("secretary.backup.export_all", return_value=exports),
+            ):
                 result = create_backup(
                     instance,
                 )
@@ -147,12 +145,8 @@ class BackupTests(unittest.TestCase):
                 names = set(archive.getnames())
             self.assertIn("secretary-backup/secretary-data/memory/facts/.git/HEAD", names)
             self.assertNotIn("secretary-backup/secretary-data/memory/facts/.git/config", names)
-            self.assertNotIn(
-                "secretary-backup/secretary-data/memory/facts/.git/hooks/post-checkout", names
-            )
-            self.assertNotIn(
-                "secretary-backup/secretary-data/memory/facts/.git/modules/nested/config", names
-            )
+            self.assertNotIn("secretary-backup/secretary-data/memory/facts/.git/hooks/post-checkout", names)
+            self.assertNotIn("secretary-backup/secretary-data/memory/facts/.git/modules/nested/config", names)
             self.assertEqual(
                 verify_backup(
                     result.archive,
@@ -181,7 +175,10 @@ class BackupTests(unittest.TestCase):
                 mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
                 mock.patch("secretary.backup._pipeline_action", return_value=None),
                 mock.patch("secretary.backup.raw_kanboard_dump") as raw_dump,
-                mock.patch("secretary.backup.export_all", side_effect=lambda data_dir, *_args, **_kwargs: _fake_exports(data_dir)),
+                mock.patch(
+                    "secretary.backup.export_all",
+                    side_effect=lambda data_dir, *_args, **_kwargs: _fake_exports(data_dir),
+                ),
             ):
                 raw_dump.side_effect = lambda data_dir: SimpleNamespace(dump_dir=data_dir / "board" / "raw")
                 create_backup(instance)
@@ -222,9 +219,7 @@ class BackupTests(unittest.TestCase):
 
             with (
                 mock.patch.dict(os.environ, {"BOARD_ROLE": ""}),
-                mock.patch(
-                    "secretary.backup._claimed_workspace_from_cwd", return_value=workspace
-                ),
+                mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=workspace),
             ):
                 with self.assertRaisesRegex(RuntimeError, "claimed worker"):
                     create_backup(instance)
@@ -350,8 +345,7 @@ class BackupTests(unittest.TestCase):
             raise subprocess.CalledProcessError(
                 returncode=2,
                 cmd=args,
-                stderr="secretary pause: error: unrecognized arguments: "
-                "--exclude-workspace /ws/backup\n",
+                stderr="secretary pause: error: unrecognized arguments: --exclude-workspace /ws/backup\n",
             )
 
         with mock.patch("secretary.backup.subprocess.run", side_effect=fake_run):
@@ -430,7 +424,8 @@ class BackupTests(unittest.TestCase):
                 mock.patch(
                     "secretary.backup._pipeline_action",
                     side_effect=AssertionError("pause action should not run"),
-                ),self.assertRaisesRegex(RuntimeError, "already paused")
+                ),
+                self.assertRaisesRegex(RuntimeError, "already paused"),
             ):
                 create_backup(instance)
 
@@ -650,9 +645,9 @@ class BackupTests(unittest.TestCase):
 
             with tarfile.open(result.archive, "r") as archive:
                 cards = json.loads(
-                    archive.extractfile(
-                        "secretary-backup/secretary-data/board/cards.json"
-                    ).read().decode("utf-8")
+                    archive.extractfile("secretary-backup/secretary-data/board/cards.json")
+                    .read()
+                    .decode("utf-8")
                 )
                 manifest = json.loads(
                     archive.extractfile("secretary-backup/versions.json").read().decode("utf-8")
@@ -769,8 +764,7 @@ class BackupTests(unittest.TestCase):
 
         self.assertEqual(result.code, 1)
         self.assertIn(
-            "missing required archive entry: "
-            "secretary-backup/secretary-data/memory/export.ndjson",
+            "missing required archive entry: secretary-backup/secretary-data/memory/export.ndjson",
             result.findings,
         )
 
@@ -920,9 +914,7 @@ class BackupTests(unittest.TestCase):
             )
 
         self.assertEqual(result.code, 1)
-        self.assertTrue(
-            any("unexpected transcript payload copy" in item for item in result.findings)
-        )
+        self.assertTrue(any("unexpected transcript payload copy" in item for item in result.findings))
 
     def test_git_commit_uses_product_repo_root(self):
         from secretary.backup import _git_commit
@@ -943,9 +935,7 @@ class ShouldSkipDataEntryTests(unittest.TestCase):
     def test_data_manifest_is_admitted_only_at_the_top_level(self):
         for policy in POLICIES.values():
             with self.subTest(kind=policy.kind):
-                self.assertFalse(
-                    should_skip_data_entry(Path("data-manifest.json"), policy=policy)
-                )
+                self.assertFalse(should_skip_data_entry(Path("data-manifest.json"), policy=policy))
                 for smuggled in (
                     "evil/data-manifest.json",
                     "evil/deep/nested/data-manifest.json",
@@ -977,9 +967,7 @@ class ShouldSkipDataEntryTests(unittest.TestCase):
             policy = POLICIES[kind]
             for relative in relatives:
                 with self.subTest(kind=kind, relative=relative):
-                    self.assertFalse(
-                        should_skip_data_entry(Path(relative), policy=policy)
-                    )
+                    self.assertFalse(should_skip_data_entry(Path(relative), policy=policy))
 
 
 def _write_instance(instance: Path, data_dir: Path) -> None:
@@ -1131,9 +1119,7 @@ class BackupMemoryCanonTests(unittest.TestCase):
         self.env_patch = mock.patch.dict(os.environ, {"BOARD_ROLE": ""})
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
-        self.workspace_patch = mock.patch(
-            "secretary.backup._claimed_workspace_from_cwd", return_value=None
-        )
+        self.workspace_patch = mock.patch("secretary.backup._claimed_workspace_from_cwd", return_value=None)
         self.workspace_patch.start()
         self.addCleanup(self.workspace_patch.stop)
 
@@ -1154,9 +1140,7 @@ class BackupMemoryCanonTests(unittest.TestCase):
                 subprocess.run(command, cwd=instance, check=True)
             facts = state_repo.memory_facts_dir(instance)
             (facts / "global").mkdir(parents=True)
-            (facts / "global" / "live.md").write_text(
-                "live fact from the private repo\n", encoding="utf-8"
-            )
+            (facts / "global" / "live.md").write_text("live fact from the private repo\n", encoding="utf-8")
             subprocess.run(["git", "add", "-A", "."], cwd=instance, check=True)
             subprocess.run(["git", "commit", "--quiet", "-m", "facts"], cwd=instance, check=True)
 
@@ -1168,9 +1152,7 @@ class BackupMemoryCanonTests(unittest.TestCase):
                 return SimpleNamespace(dump_dir=raw)
 
             def stub(name):
-                return lambda data_dir_arg, **_kwargs: DataExport(
-                    data_dir_arg / name, 1, name
-                )
+                return lambda data_dir_arg, **_kwargs: DataExport(data_dir_arg / name, 1, name)
 
             with (
                 mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
@@ -1184,9 +1166,7 @@ class BackupMemoryCanonTests(unittest.TestCase):
                 result = create_backup(instance, backup_kind="core")
 
             with tarfile.open(result.archive, "r") as archive:
-                member = archive.extractfile(
-                    "secretary-backup/secretary-data/memory/export.ndjson"
-                )
+                member = archive.extractfile("secretary-backup/secretary-data/memory/export.ndjson")
                 exported = member.read().decode("utf-8")
 
             self.assertIn("live fact from the private repo", exported)

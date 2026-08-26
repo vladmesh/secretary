@@ -32,43 +32,63 @@ THRESHOLDS = VitalityThresholds(suspect_after=300.0, confirm_after=600.0)
 
 
 def heartbeat(
-    observed_at: float, *, process: ProcessState = ProcessState.RUNNING,
-    run_id: str = RUN_ID, available: bool = True,
+    observed_at: float,
+    *,
+    process: ProcessState = ProcessState.RUNNING,
+    run_id: str = RUN_ID,
+    available: bool = True,
 ) -> VitalitySnapshot:
     """A pid-heartbeat snapshot with only the Process axis filled."""
     if not available:
         return VitalitySnapshot(
-            run_id=run_id, source=SnapshotSource.PID_HEARTBEAT, observed_at=observed_at,
+            run_id=run_id,
+            source=SnapshotSource.PID_HEARTBEAT,
+            observed_at=observed_at,
             availability=SourceAvailability.UNAVAILABLE,
             reason="pid heartbeat is inconclusive: not-yet-written",
         )
     return VitalitySnapshot(
-        run_id=run_id, source=SnapshotSource.PID_HEARTBEAT, observed_at=observed_at,
-        availability=SourceAvailability.AVAILABLE, process=process,
+        run_id=run_id,
+        source=SnapshotSource.PID_HEARTBEAT,
+        observed_at=observed_at,
+        availability=SourceAvailability.AVAILABLE,
+        process=process,
     )
 
 
 def provider(
-    observed_at: float, *, progress: ProgressState = ProgressState.QUIET,
-    run_id: str = RUN_ID, cursor: str = "12:abc", available: bool = True,
+    observed_at: float,
+    *,
+    progress: ProgressState = ProgressState.QUIET,
+    run_id: str = RUN_ID,
+    cursor: str = "12:abc",
+    available: bool = True,
 ) -> VitalitySnapshot:
     """A provider-cursor snapshot with only the Progress axis filled."""
     if not available:
         return VitalitySnapshot(
-            run_id=run_id, source=SnapshotSource.PROVIDER_CURSOR, observed_at=observed_at,
+            run_id=run_id,
+            source=SnapshotSource.PROVIDER_CURSOR,
+            observed_at=observed_at,
             availability=SourceAvailability.UNAVAILABLE,
             reason="provider cursor is not admitted",
         )
     return VitalitySnapshot(
-        run_id=run_id, source=SnapshotSource.PROVIDER_CURSOR, observed_at=observed_at,
-        availability=SourceAvailability.AVAILABLE, progress=progress, cursor=cursor,
+        run_id=run_id,
+        source=SnapshotSource.PROVIDER_CURSOR,
+        observed_at=observed_at,
+        availability=SourceAvailability.AVAILABLE,
+        progress=progress,
+        cursor=cursor,
     )
 
 
 def pane(observed_at: float, *, idle: bool = True, run_id: str = RUN_ID) -> VitalitySnapshot:
     """An advisory pane snapshot with only the Turn axis filled."""
     return VitalitySnapshot(
-        run_id=run_id, source=SnapshotSource.PANE_ADVISORY, observed_at=observed_at,
+        run_id=run_id,
+        source=SnapshotSource.PANE_ADVISORY,
+        observed_at=observed_at,
         availability=SourceAvailability.AVAILABLE,
         turn=TurnState.IDLE if idle else TurnState.ACTIVE,
     )
@@ -100,7 +120,8 @@ class IdentityTests(unittest.TestCase):
                 # Another run's advancement, stale or misrouted into this batch.
                 provider(999.0, progress=ProgressState.ADVANCING, run_id="run-other"),
             ],
-            now=400.0, thresholds=THRESHOLDS,
+            now=400.0,
+            thresholds=THRESHOLDS,
         )
 
         # The foreign advancement must not end this episode's suspicion.
@@ -114,7 +135,8 @@ class IdentityTests(unittest.TestCase):
         reduced = reduce_vitality(
             previous,
             [heartbeat(1000.0, run_id="run-respawned")],
-            now=1000.0, thresholds=THRESHOLDS,
+            now=1000.0,
+            thresholds=THRESHOLDS,
         )
 
         # A respawned head is not the old stall's continuation.
@@ -127,7 +149,8 @@ class IdentityTests(unittest.TestCase):
         reduced = reduce_vitality(
             None,
             [heartbeat(1000.0), provider(1000.0, run_id="run-other")],
-            now=1000.0, thresholds=THRESHOLDS,
+            now=1000.0,
+            thresholds=THRESHOLDS,
         )
 
         self.assertEqual(reduced.run_id, RUN_ID)
@@ -145,7 +168,8 @@ class ProcessAxisTests(unittest.TestCase):
                 provider(1000.0, progress=ProgressState.ADVANCING),
                 pane(1000.0, idle=False),
             ],
-            now=1000.0, thresholds=THRESHOLDS,
+            now=1000.0,
+            thresholds=THRESHOLDS,
         )
 
         self.assertEqual(reduced.verdict, VitalityVerdict.DEAD)
@@ -155,7 +179,8 @@ class ProcessAxisTests(unittest.TestCase):
         reduced = reduce_vitality(
             previous,
             [heartbeat(1000.0, process=ProcessState.SUSPENDED), provider(1000.0)],
-            now=1000.0, thresholds=THRESHOLDS,
+            now=1000.0,
+            thresholds=THRESHOLDS,
         )
 
         self.assertEqual(reduced.verdict, VitalityVerdict.SUSPENDED)
@@ -168,7 +193,8 @@ class ProcessAxisTests(unittest.TestCase):
         frozen = reduce_vitality(
             previous,
             [heartbeat(120.0, process=ProcessState.SUSPENDED), provider(120.0)],
-            now=120.0, thresholds=THRESHOLDS,
+            now=120.0,
+            thresholds=THRESHOLDS,
         )
 
         self.assertEqual(frozen.stall_frozen_since, 120.0)
@@ -177,7 +203,8 @@ class ProcessAxisTests(unittest.TestCase):
         resumed = reduce_vitality(
             frozen,
             [heartbeat(3000.0), provider(3000.0)],
-            now=3000.0, thresholds=THRESHOLDS,
+            now=3000.0,
+            thresholds=THRESHOLDS,
         )
 
         self.assertEqual(resumed.stall_frozen_since, 0.0)
@@ -199,7 +226,8 @@ class ProgressTests(unittest.TestCase):
         reduced = reduce_vitality(
             previous,
             [provider(1000.0, progress=ProgressState.ADVANCING), heartbeat(1000.0)],
-            now=1000.0, thresholds=THRESHOLDS,
+            now=1000.0,
+            thresholds=THRESHOLDS,
         )
 
         self.assertEqual(reduced.verdict, VitalityVerdict.HEALTHY_ACTIVE)
@@ -214,7 +242,10 @@ class ProgressTests(unittest.TestCase):
         # source answered; only a *later* reduction can call it advancement. Here the pid
         # heartbeat alone is present, so the verdict rests at healthy without inventing quiet.
         reduced = reduce_vitality(
-            None, [heartbeat(1000.0)], now=1000.0, thresholds=THRESHOLDS,
+            None,
+            [heartbeat(1000.0)],
+            now=1000.0,
+            thresholds=THRESHOLDS,
         )
 
         self.assertEqual(reduced.verdict, VitalityVerdict.HEALTHY_QUIET)
@@ -227,13 +258,17 @@ class UnavailableTests(unittest.TestCase):
     def test_an_unavailable_source_does_not_advance_stall_timers(self) -> None:
         previous = episode(last_progress_at=0.0)
         first = reduce_vitality(
-            previous, [heartbeat(100.0), provider(100.0, available=False)],
-            now=100.0, thresholds=THRESHOLDS,
+            previous,
+            [heartbeat(100.0), provider(100.0, available=False)],
+            now=100.0,
+            thresholds=THRESHOLDS,
         )
         # The provider stays dark for a long time.
         second = reduce_vitality(
-            first, [heartbeat(1000.0), provider(2000.0, available=False)],
-            now=2000.0, thresholds=THRESHOLDS,
+            first,
+            [heartbeat(1000.0), provider(2000.0, available=False)],
+            now=2000.0,
+            thresholds=THRESHOLDS,
         )
 
         # The pid heartbeat answers "alive, no progress source" -- which is not quiet evidence,
@@ -244,23 +279,27 @@ class UnavailableTests(unittest.TestCase):
 
     def test_a_returning_source_leaves_the_unavailable_map(self) -> None:
         first = reduce_vitality(
-            episode(), [heartbeat(100.0), provider(100.0, available=False)],
-            now=100.0, thresholds=THRESHOLDS,
+            episode(),
+            [heartbeat(100.0), provider(100.0, available=False)],
+            now=100.0,
+            thresholds=THRESHOLDS,
         )
         second = reduce_vitality(
-            first, [heartbeat(200.0), provider(200.0)],
-            now=200.0, thresholds=THRESHOLDS,
+            first,
+            [heartbeat(200.0), provider(200.0)],
+            now=200.0,
+            thresholds=THRESHOLDS,
         )
 
         self.assertNotIn(SnapshotSource.PROVIDER_CURSOR.value, second.unavailable_since)
-        self.assertEqual(
-            second.evidence_cursors.get(SnapshotSource.PROVIDER_CURSOR.value), "12:abc"
-        )
+        self.assertEqual(second.evidence_cursors.get(SnapshotSource.PROVIDER_CURSOR.value), "12:abc")
 
     def test_all_strong_sources_dark_is_unverifiable(self) -> None:
         reduced = reduce_vitality(
-            None, [heartbeat(1000.0, available=False), pane(1000.0)],
-            now=1000.0, thresholds=THRESHOLDS,
+            None,
+            [heartbeat(1000.0, available=False), pane(1000.0)],
+            now=1000.0,
+            thresholds=THRESHOLDS,
         )
 
         self.assertEqual(reduced.verdict, VitalityVerdict.UNVERIFIABLE)
@@ -270,7 +309,8 @@ class UnavailableTests(unittest.TestCase):
         reduced = reduce_vitality(
             confirmed,
             [heartbeat(1000.0, available=False), provider(1000.0, available=False)],
-            now=1000.0, thresholds=THRESHOLDS,
+            now=1000.0,
+            thresholds=THRESHOLDS,
         )
 
         self.assertEqual(reduced.verdict, VitalityVerdict.CONFIRMED_STALL)
@@ -281,7 +321,10 @@ class UnavailableTests(unittest.TestCase):
         phase has run."""
         previous = episode(last_progress_at=0.0)
         confirmed = reduce_vitality(
-            previous, [heartbeat(1000.0), provider(1000.0)], now=1000.0, thresholds=THRESHOLDS,
+            previous,
+            [heartbeat(1000.0), provider(1000.0)],
+            now=1000.0,
+            thresholds=THRESHOLDS,
         )
         self.assertEqual(confirmed.verdict, VitalityVerdict.CONFIRMED_STALL)
         self.assertEqual(confirmed.confirmed_since, 900.0)
@@ -290,7 +333,8 @@ class UnavailableTests(unittest.TestCase):
         blind = reduce_vitality(
             confirmed,
             [heartbeat(2000.0, available=False), provider(2000.0, available=False)],
-            now=2000.0, thresholds=THRESHOLDS,
+            now=2000.0,
+            thresholds=THRESHOLDS,
         )
 
         self.assertEqual(blind.verdict, VitalityVerdict.CONFIRMED_STALL)
@@ -307,7 +351,10 @@ class UnavailableTests(unittest.TestCase):
         """
         previous = episode(last_progress_at=0.0)
         confirmed = reduce_vitality(
-            previous, [heartbeat(1000.0), provider(1000.0)], now=1000.0, thresholds=THRESHOLDS,
+            previous,
+            [heartbeat(1000.0), provider(1000.0)],
+            now=1000.0,
+            thresholds=THRESHOLDS,
         )
         self.assertEqual(confirmed.verdict, VitalityVerdict.CONFIRMED_STALL)
         self.assertEqual(confirmed.confirmed_since, 900.0)
@@ -317,20 +364,23 @@ class UnavailableTests(unittest.TestCase):
         dark = reduce_vitality(
             confirmed,
             [heartbeat(1300.0), provider(1300.0, available=False)],
-            now=1300.0, thresholds=THRESHOLDS,
+            now=1300.0,
+            thresholds=THRESHOLDS,
         )
 
         self.assertEqual(dark.verdict, VitalityVerdict.CONFIRMED_STALL)
         self.assertEqual(dark.confirmed_since, 900.0)
         self.assertEqual(dark.suspected_since, 300.0)
         self.assertIn(
-            "preserved-confirmation:provider-dark-pid-alive", dark.basis,
+            "preserved-confirmation:provider-dark-pid-alive",
+            dark.basis,
         )
         # Much later ticks change nothing: no aging past a terminal phase.
         later = reduce_vitality(
             dark,
             [heartbeat(900_000.0), provider(900_000.0, available=False)],
-            now=900_000.0, thresholds=THRESHOLDS,
+            now=900_000.0,
+            thresholds=THRESHOLDS,
         )
         self.assertEqual(later.verdict, VitalityVerdict.CONFIRMED_STALL)
         self.assertEqual(later.confirmed_since, 900.0)
@@ -338,9 +388,9 @@ class UnavailableTests(unittest.TestCase):
         # And only the four authorised endings still move it: real progress first.
         resumed = reduce_vitality(
             dark,
-            [heartbeat(900_100.0), provider(900_100.0, progress=ProgressState.ADVANCING,
-                                            cursor="13:def")],
-            now=900_100.0, thresholds=THRESHOLDS,
+            [heartbeat(900_100.0), provider(900_100.0, progress=ProgressState.ADVANCING, cursor="13:def")],
+            now=900_100.0,
+            thresholds=THRESHOLDS,
         )
         self.assertEqual(resumed.verdict, VitalityVerdict.HEALTHY_ACTIVE)
         self.assertEqual(resumed.confirmed_since, 0.0)
@@ -357,7 +407,10 @@ class UnavailableTests(unittest.TestCase):
         """
         previous = episode(last_progress_at=0.0)
         suspected = reduce_vitality(
-            previous, [heartbeat(400.0), provider(400.0)], now=400.0, thresholds=THRESHOLDS,
+            previous,
+            [heartbeat(400.0), provider(400.0)],
+            now=400.0,
+            thresholds=THRESHOLDS,
         )
         self.assertEqual(suspected.verdict, VitalityVerdict.SUSPECTED_STALL)
         self.assertEqual(suspected.suspected_since, 300.0)
@@ -366,7 +419,8 @@ class UnavailableTests(unittest.TestCase):
         dark = reduce_vitality(
             suspected,
             [heartbeat(500.0), provider(500.0, available=False)],
-            now=500.0, thresholds=THRESHOLDS,
+            now=500.0,
+            thresholds=THRESHOLDS,
         )
 
         # The suspicion stands frozen: same phase, same onset, no aging past it.
@@ -381,7 +435,8 @@ class UnavailableTests(unittest.TestCase):
         later = reduce_vitality(
             dark,
             [heartbeat(900_000.0), provider(900_000.0, available=False)],
-            now=900_000.0, thresholds=THRESHOLDS,
+            now=900_000.0,
+            thresholds=THRESHOLDS,
         )
         self.assertEqual(later.verdict, VitalityVerdict.SUSPECTED_STALL)
         self.assertEqual(later.suspected_since, 300.0)
@@ -390,9 +445,9 @@ class UnavailableTests(unittest.TestCase):
         # And only the four authorised endings still move it: real progress first.
         resumed = reduce_vitality(
             later,
-            [heartbeat(900_100.0), provider(900_100.0, progress=ProgressState.ADVANCING,
-                                            cursor="13:def")],
-            now=900_100.0, thresholds=THRESHOLDS,
+            [heartbeat(900_100.0), provider(900_100.0, progress=ProgressState.ADVANCING, cursor="13:def")],
+            now=900_100.0,
+            thresholds=THRESHOLDS,
         )
         self.assertEqual(resumed.verdict, VitalityVerdict.HEALTHY_ACTIVE)
         self.assertEqual(resumed.suspected_since, 0.0)
@@ -403,7 +458,10 @@ class AdvisoryTests(unittest.TestCase):
 
     def test_advisory_idle_alone_stays_unverifiable_and_never_suspected(self) -> None:
         reduced = reduce_vitality(
-            None, [pane(1000.0)], now=1000.0, thresholds=THRESHOLDS,
+            None,
+            [pane(1000.0)],
+            now=1000.0,
+            thresholds=THRESHOLDS,
         )
 
         self.assertEqual(reduced.verdict, VitalityVerdict.UNVERIFIABLE)
@@ -417,8 +475,10 @@ class AdvisoryTests(unittest.TestCase):
 
     def test_advisory_corroboration_appears_in_basis_alongside_strong_quiet(self) -> None:
         reduced = reduce_vitality(
-            None, [heartbeat(1000.0), provider(1000.0), pane(1000.0)],
-            now=1000.0, thresholds=THRESHOLDS,
+            None,
+            [heartbeat(1000.0), provider(1000.0), pane(1000.0)],
+            now=1000.0,
+            thresholds=THRESHOLDS,
         )
 
         self.assertTrue(any(token.startswith("advisory:") for token in reduced.basis))
@@ -431,18 +491,27 @@ class QuietLadderTests(unittest.TestCase):
     def test_quiet_climbs_healthy_then_suspected_then_confirmed(self) -> None:
         previous = episode(last_progress_at=0.0)
         quiet = reduce_vitality(
-            previous, [heartbeat(100.0), provider(100.0)], now=100.0, thresholds=THRESHOLDS,
+            previous,
+            [heartbeat(100.0), provider(100.0)],
+            now=100.0,
+            thresholds=THRESHOLDS,
         )
         self.assertEqual(quiet.verdict, VitalityVerdict.HEALTHY_QUIET)
 
         suspected = reduce_vitality(
-            quiet, [heartbeat(400.0), provider(400.0)], now=400.0, thresholds=THRESHOLDS,
+            quiet,
+            [heartbeat(400.0), provider(400.0)],
+            now=400.0,
+            thresholds=THRESHOLDS,
         )
         self.assertEqual(suspected.verdict, VitalityVerdict.SUSPECTED_STALL)
         self.assertEqual(suspected.suspected_since, 300.0)
 
         confirmed = reduce_vitality(
-            suspected, [heartbeat(1000.0), provider(1000.0)], now=1000.0, thresholds=THRESHOLDS,
+            suspected,
+            [heartbeat(1000.0), provider(1000.0)],
+            now=1000.0,
+            thresholds=THRESHOLDS,
         )
         self.assertEqual(confirmed.verdict, VitalityVerdict.CONFIRMED_STALL)
         self.assertEqual(confirmed.confirmed_since, 900.0)
@@ -454,30 +523,42 @@ class QuietLadderTests(unittest.TestCase):
         burst = previous
         for tick in (10.0, 20.0, 30.0, 40.0):
             burst = reduce_vitality(
-                burst, [heartbeat(tick), provider(tick)], now=tick, thresholds=THRESHOLDS,
+                burst,
+                [heartbeat(tick), provider(tick)],
+                now=tick,
+                thresholds=THRESHOLDS,
             )
         self.assertEqual(burst.verdict, VitalityVerdict.HEALTHY_QUIET)
 
         # One long-silent stretch lands exactly on the threshold the wall clock says.
         crossed = reduce_vitality(
-            burst, [heartbeat(300.0), provider(300.0)], now=300.0, thresholds=THRESHOLDS,
+            burst,
+            [heartbeat(300.0), provider(300.0)],
+            now=300.0,
+            thresholds=THRESHOLDS,
         )
         self.assertEqual(crossed.verdict, VitalityVerdict.SUSPECTED_STALL)
 
     def test_fresh_advancement_restarts_the_quiet_reference(self) -> None:
         previous = episode(last_progress_at=0.0)
         quiet = reduce_vitality(
-            previous, [heartbeat(100.0), provider(100.0)], now=100.0, thresholds=THRESHOLDS,
+            previous,
+            [heartbeat(100.0), provider(100.0)],
+            now=100.0,
+            thresholds=THRESHOLDS,
         )
         advanced = reduce_vitality(
             quiet,
-            [heartbeat(200.0), provider(200.0, progress=ProgressState.ADVANCING,
-                                        cursor="13:def")],
-            now=200.0, thresholds=THRESHOLDS,
+            [heartbeat(200.0), provider(200.0, progress=ProgressState.ADVANCING, cursor="13:def")],
+            now=200.0,
+            thresholds=THRESHOLDS,
         )
         # Quiet measured from the new progress, not from the episode start.
         still_healthy = reduce_vitality(
-            advanced, [heartbeat(400.0), provider(400.0)], now=400.0, thresholds=THRESHOLDS,
+            advanced,
+            [heartbeat(400.0), provider(400.0)],
+            now=400.0,
+            thresholds=THRESHOLDS,
         )
 
         self.assertEqual(advanced.last_progress_at, 200.0)
@@ -490,12 +571,15 @@ class HysteresisTests(unittest.TestCase):
     def test_one_quiet_tick_does_not_bounce_a_confirmed_episode_back(self) -> None:
         confirmed = episode(
             verdict=VitalityVerdict.CONFIRMED_STALL,
-            suspected_since=300.0, confirmed_since=900.0, last_progress_at=0.0,
+            suspected_since=300.0,
+            confirmed_since=900.0,
+            last_progress_at=0.0,
         )
         reduced = reduce_vitality(
             confirmed,
             [heartbeat(1000.0), provider(1000.0)],
-            now=1000.0, thresholds=THRESHOLDS,
+            now=1000.0,
+            thresholds=THRESHOLDS,
         )
 
         self.assertEqual(reduced.verdict, VitalityVerdict.CONFIRMED_STALL)
@@ -503,13 +587,13 @@ class HysteresisTests(unittest.TestCase):
     def test_only_progress_suspension_death_or_identity_ends_a_confirmation(self) -> None:
         confirmed = episode(
             verdict=VitalityVerdict.CONFIRMED_STALL,
-            suspected_since=300.0, confirmed_since=900.0, last_progress_at=0.0,
+            suspected_since=300.0,
+            confirmed_since=900.0,
+            last_progress_at=0.0,
         )
         ends = [
-            ("progress", [heartbeat(1000.0), provider(1000.0,
-                                                       progress=ProgressState.ADVANCING)]),
-            ("suspended", [heartbeat(1000.0, process=ProcessState.SUSPENDED),
-                           provider(1000.0)]),
+            ("progress", [heartbeat(1000.0), provider(1000.0, progress=ProgressState.ADVANCING)]),
+            ("suspended", [heartbeat(1000.0, process=ProcessState.SUSPENDED), provider(1000.0)]),
             ("dead", [heartbeat(1000.0, process=ProcessState.DEAD), provider(1000.0)]),
             ("identity", [heartbeat(1000.0, run_id="run-respawned")]),
         ]
@@ -544,23 +628,32 @@ class PurityTests(unittest.TestCase):
 
     def test_the_previous_episode_is_not_mutated_by_a_reduction(self) -> None:
         previous = episode(
-            verdict=VitalityVerdict.SUSPECTED_STALL, suspected_since=300.0, last_progress_at=0.0,
+            verdict=VitalityVerdict.SUSPECTED_STALL,
+            suspected_since=300.0,
+            last_progress_at=0.0,
         )
         frozen_previous = replace_episode(previous)
         reduce_vitality(
             previous,
             [heartbeat(1000.0), provider(1000.0, progress=ProgressState.ADVANCING)],
-            now=1000.0, thresholds=THRESHOLDS,
+            now=1000.0,
+            thresholds=THRESHOLDS,
         )
 
         self.assertEqual(previous, frozen_previous)
 
     def test_snapshot_order_in_a_batch_does_not_change_the_verdict(self) -> None:
         first = reduce_vitality(
-            None, [heartbeat(1000.0), provider(1000.0)], now=1000.0, thresholds=THRESHOLDS,
+            None,
+            [heartbeat(1000.0), provider(1000.0)],
+            now=1000.0,
+            thresholds=THRESHOLDS,
         )
         second = reduce_vitality(
-            None, [provider(1000.0), heartbeat(1000.0)], now=1000.0, thresholds=THRESHOLDS,
+            None,
+            [provider(1000.0), heartbeat(1000.0)],
+            now=1000.0,
+            thresholds=THRESHOLDS,
         )
 
         self.assertEqual(first, second)
@@ -571,15 +664,15 @@ class PurityTests(unittest.TestCase):
         previous = episode(verdict=VitalityVerdict.SUSPECTED_STALL, suspected_since=300.0)
         forward = reduce_vitality(
             previous,
-            [heartbeat(400.0), provider(400.0), pane(400.0),
-             provider(401.0, run_id="run-other")],
-            now=400.0, thresholds=THRESHOLDS,
+            [heartbeat(400.0), provider(400.0), pane(400.0), provider(401.0, run_id="run-other")],
+            now=400.0,
+            thresholds=THRESHOLDS,
         )
         backward = reduce_vitality(
             previous,
-            [provider(401.0, run_id="run-other"), pane(400.0),
-             provider(400.0), heartbeat(400.0)],
-            now=400.0, thresholds=THRESHOLDS,
+            [provider(401.0, run_id="run-other"), pane(400.0), provider(400.0), heartbeat(400.0)],
+            now=400.0,
+            thresholds=THRESHOLDS,
         )
 
         self.assertEqual(forward, backward)
@@ -685,11 +778,11 @@ class ThresholdTests(unittest.TestCase):
         from secretary.dispatcher_watchdog import IDLE_STALL_DEFAULT
 
         self.assertEqual(DEFAULT_VITALITY_THRESHOLDS.suspect_after, float(IDLE_STALL_DEFAULT))
+        self.assertEqual(DEFAULT_VITALITY_THRESHOLDS.confirm_after, 2.0 * float(IDLE_STALL_DEFAULT))
         self.assertEqual(
-            DEFAULT_VITALITY_THRESHOLDS.confirm_after, 2.0 * float(IDLE_STALL_DEFAULT)
+            (DEFAULT_VITALITY_THRESHOLDS.suspect_after, DEFAULT_VITALITY_THRESHOLDS.confirm_after),
+            (300.0, 600.0),
         )
-        self.assertEqual((DEFAULT_VITALITY_THRESHOLDS.suspect_after,
-                          DEFAULT_VITALITY_THRESHOLDS.confirm_after), (300.0, 600.0))
 
 
 def replace_episode(value: VitalityEpisode) -> VitalityEpisode:

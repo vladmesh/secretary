@@ -136,7 +136,7 @@ _HTTP_STATUS_RE = re.compile(r"(?i)\bhttp(?:/\d(?:\.\d)?)?[ /](\d{3})\b|returned
 #      git push      ->  ! [rejected]        main -> main (fetch first)
 #                        remote: policy: branch is protected
 _ANSWERED_RE = re.compile(
-    r'(?im)(\bgraphql:\s|^\s*remote:\s|!\s*\[(?:rejected|remote rejected|deleted|no match)\]'
+    r"(?im)(\bgraphql:\s|^\s*remote:\s|!\s*\[(?:rejected|remote rejected|deleted|no match)\]"
     r'|^\s*\{\s*"(?:errors|message)")'
 )
 # 4. `git fetch` reporting that the requested remote ref does not exist. This is a terminal
@@ -306,9 +306,7 @@ def _candidate_history_gate(host, workspace: str, base: str) -> GateResult | Non
                 "gate candidate history message",
             )
         except UnicodeError as exc:
-            raise HostError(
-                f"gate candidate history could not be decoded for {sha[:12]}"
-            ) from exc
+            raise HostError(f"gate candidate history could not be decoded for {sha[:12]}") from exc
         if message.returncode != 0:
             raise HostError(
                 f"gate candidate history could not be read for {sha[:12]}: "
@@ -405,28 +403,42 @@ def _local_gate(host, task: dict, record, workspace: str) -> GateResult:
     post_run_sha = _head_sha(host, workspace)
     if not is_exact_sha(post_run_sha) or post_run_sha != pre_run_sha:
         detail = (
-            f"HEAD changed while local validation ran ({pre_run_sha} -> "
-            f"{post_run_sha or '(unavailable)'})"
+            f"HEAD changed while local validation ran ({pre_run_sha} -> {post_run_sha or '(unavailable)'})"
         )
         return GateResult(
-            "red", "local validation did not preserve the validated HEAD", detail,
+            "red",
+            "local validation did not preserve the validated HEAD",
+            detail,
             fingerprint=_fingerprint("local-head-mutated", pre_run_sha, post_run_sha),
         )
     receipt = mint_gate_receipt(
         validated_sha=pre_run_sha,
-        base_sha=_base_sha(host, workspace, host.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))),
+        base_sha=_base_sha(
+            host,
+            workspace,
+            host.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch")),
+        ),
         gate_mode="local",
-        required_checks=[{"name": "local validation", "conclusion": "SUCCESS" if completed.returncode == 0 else "FAILURE", "url": ""}],
+        required_checks=[
+            {
+                "name": "local validation",
+                "conclusion": "SUCCESS" if completed.returncode == 0 else "FAILURE",
+                "url": "",
+            }
+        ],
         check_set_identity=command,
     )
     if completed.returncode == 0:
         return GateResult("green", "local validation passed", attestation=receipt)
-    tail = _tail((completed.stderr or completed.stdout or "").strip(), GATE_LOG_FRAGMENT_LINES) or "(no output)"
+    tail = (
+        _tail((completed.stderr or completed.stdout or "").strip(), GATE_LOG_FRAGMENT_LINES) or "(no output)"
+    )
     # A local command carries no Actions job/step provenance.  Do not infer infrastructure from
     # arbitrary test output here: it could be a test fixture mentioning a registry or a workflow
     # setup script the worker must fix.
-    return GateResult("red", "local validation failed", tail,
-                      fingerprint=_fingerprint("local", tail), attestation=receipt)
+    return GateResult(
+        "red", "local validation failed", tail, fingerprint=_fingerprint("local", tail), attestation=receipt
+    )
 
 
 def _github_gate(
@@ -437,9 +449,7 @@ def _github_gate(
         host, ["git", "-C", workspace, "push", "origin", f"{branch}:{branch}"], "gate publish branch"
     )
     if push.returncode != 0:
-        raise HostError(
-            f"gate publish branch failed: {_tail((push.stderr or push.stdout or '').strip())}"
-        )
+        raise HostError(f"gate publish branch failed: {_tail((push.stderr or push.stdout or '').strip())}")
     _ensure_pr(host, workspace, task, record, branch, base)
     sha = host._run(["git", "-C", workspace, "rev-parse", "HEAD"], "gate head sha").stdout.strip()
     repo = _name_with_owner(host, workspace)
@@ -464,7 +474,8 @@ def _github_gate(
         required_checks=[_terminal_check(item) for item in checked],
         check_set_identity=json.dumps(
             {"required": sorted(required or [_check_name(item) for item in checked])},
-            sort_keys=True, separators=(",", ":"),
+            sort_keys=True,
+            separators=(",", ":"),
         ),
     )
     short = sha[:12] or sha
@@ -475,7 +486,7 @@ def _github_gate(
         fragment = _failed_log(host, repo, failed or {})
         where = f"job «{job}»"
         if fragment.step:
-            where += f", step \"{safe_one_line(fragment.step)}\""
+            where += f', step "{safe_one_line(fragment.step)}"'
         summary = f"CI red: {where} failed on `{branch}` @ `{short}`"
         if fragment.failure_class == "infrastructure":
             summary += f"; infrastructure failure: {fragment.failure_reason}"
@@ -484,22 +495,33 @@ def _github_gate(
         fingerprint = _fingerprint("github", job, fragment.step, cause)
         failed_run_id = _actions_run_id(failed or {})
         return GateResult(
-            "red", summary, log, fingerprint=fingerprint,
-            failure_class=fragment.failure_class, failure_reason=fragment.failure_reason,
-            failed_run_id=failed_run_id, failed_run_repo=repo,
+            "red",
+            summary,
+            log,
+            fingerprint=fingerprint,
+            failure_class=fragment.failure_class,
+            failure_reason=fragment.failure_reason,
+            failed_run_id=failed_run_id,
+            failed_run_repo=repo,
             attestation=receipt,
         )
     return GateResult(
-        "pending", f"CI {rollup.lower()} for `{branch}` @ `{short}` — no terminal result yet",
+        "pending",
+        f"CI {rollup.lower()} for `{branch}` @ `{short}` — no terminal result yet",
         attestation=receipt,
     )
 
 
 def _actions_run_id(item: dict) -> str:
-    match = _RUN_URL_RE.search(str(
-        item.get("details_url") or item.get("html_url") or item.get("targetUrl")
-        or item.get("target_url") or ""
-    ))
+    match = _RUN_URL_RE.search(
+        str(
+            item.get("details_url")
+            or item.get("html_url")
+            or item.get("targetUrl")
+            or item.get("target_url")
+            or ""
+        )
+    )
     return match.group(2) if match else ""
 
 
@@ -632,11 +654,14 @@ def _remember_pr(host, workspace: str, record, number: int, title: str, body: st
     stored = _pr_view(host, workspace, number)
     if stored is None:
         return
-    host.commit_gate_pr_authorship(record, {
-        "number": int(number),
-        "digest": _pr_digest(str(stored.get("title") or ""), str(stored.get("body") or "")),
-        "sent": _pr_digest(title, body),
-    })
+    host.commit_gate_pr_authorship(
+        record,
+        {
+            "number": int(number),
+            "digest": _pr_digest(str(stored.get("title") or ""), str(stored.get("body") or "")),
+            "sent": _pr_digest(title, body),
+        },
+    )
 
 
 def _gate_owns_pr(record, number: int, title: str, body: str) -> bool:
@@ -757,8 +782,7 @@ def _ensure_pr(host, workspace: str, task: dict, record, branch: str, base: str)
         if isinstance(exc, GateTransportError):
             raise
         raise HostError(
-            f"gate could not open a PR for {branch!r}: {_tail(text)}; "
-            f"and the open-PR probe failed too: {exc}"
+            f"gate could not open a PR for {branch!r}: {_tail(text)}; and the open-PR probe failed too: {exc}"
         ) from None
     raise HostError(f"gate could not open a PR for {branch!r}: {_tail(text)}")
 
@@ -794,9 +818,7 @@ def _open_pr_number(host, workspace: str, branch: str) -> int | None:
         cwd=Path(workspace),
     )
     if completed.returncode != 0:
-        raise HostError(
-            f"gate pr list failed: {_tail((completed.stderr or completed.stdout or '').strip())}"
-        )
+        raise HostError(f"gate pr list failed: {_tail((completed.stderr or completed.stdout or '').strip())}")
     text = (completed.stdout or "").strip()
     try:
         return int(text) if text else None
@@ -804,7 +826,9 @@ def _open_pr_number(host, workspace: str, branch: str) -> int | None:
         return None
 
 
-def _poll_ci(host, repo: str, sha: str, required: list[str] | None = None) -> tuple[str, dict | None, list[dict]]:
+def _poll_ci(
+    host, repo: str, sha: str, required: list[str] | None = None
+) -> tuple[str, dict | None, list[dict]]:
     """Combined CI rollup for `sha`: GitHub-Actions check-runs plus legacy commit statuses,
     narrowed to `required` when the adapter declares a required set."""
     items: list[dict] = []
@@ -821,7 +845,9 @@ def _poll_ci(host, repo: str, sha: str, required: list[str] | None = None) -> tu
 def _selected_checks(items: list[dict], required: list[str]) -> list[dict]:
     """The exact checks the gate judged, in stable order, for an attestation receipt."""
     selected = [item for item in items if not required or _check_name(item) in required]
-    return sorted(selected, key=lambda item: (_check_name(item), str(item.get("id") or item.get("context") or "")))
+    return sorted(
+        selected, key=lambda item: (_check_name(item), str(item.get("id") or item.get("context") or ""))
+    )
 
 
 def _terminal_check(item: dict) -> dict[str, str]:
@@ -829,7 +855,13 @@ def _terminal_check(item: dict) -> dict[str, str]:
     return {
         "name": safe_one_line(_check_name(item)),
         "conclusion": conclusion,
-        "url": safe_one_line(item.get("details_url") or item.get("html_url") or item.get("target_url") or item.get("targetUrl") or ""),
+        "url": safe_one_line(
+            item.get("details_url")
+            or item.get("html_url")
+            or item.get("target_url")
+            or item.get("targetUrl")
+            or ""
+        ),
     }
 
 
@@ -837,7 +869,9 @@ def _head_sha(host, workspace: str) -> str:
     if not workspace:
         return ""
     try:
-        return host._run(["git", "-C", workspace, "rev-parse", "HEAD"], "gate attestation head").stdout.strip()
+        return host._run(
+            ["git", "-C", workspace, "rev-parse", "HEAD"], "gate attestation head"
+        ).stdout.strip()
     except HostError:
         return ""
 
@@ -846,7 +880,9 @@ def _base_sha(host, workspace: str, base: str) -> str:
     if not workspace or not base:
         return ""
     try:
-        return host._run(["git", "-C", workspace, "rev-parse", f"origin/{base}"], "gate attestation base").stdout.strip()
+        return host._run(
+            ["git", "-C", workspace, "rev-parse", f"origin/{base}"], "gate attestation base"
+        ).stdout.strip()
     except HostError:
         return ""
 
@@ -944,13 +980,17 @@ def _failed_log(host, repo: str, item: dict, lines: int = GATE_LOG_FRAGMENT_LINE
     `##[error]` line that is not the runner's generic completion echo, which carries the same
     marker as a real cause; a job whose error was never marked at all falls back to its own tail.
     """
-    match = _RUN_URL_RE.search(str(
-        item.get("details_url") or item.get("html_url") or item.get("targetUrl")
-        or item.get("target_url") or ""
-    ))
+    match = _RUN_URL_RE.search(
+        str(
+            item.get("details_url")
+            or item.get("html_url")
+            or item.get("targetUrl")
+            or item.get("target_url")
+            or ""
+        )
+    )
     if not match:
-        return _LogFragment(available=False,
-                            reason="the entry is not an Actions run (no run link)")
+        return _LogFragment(available=False, reason="the entry is not an Actions run (no run link)")
     run_id = match.group(2)
     try:
         completed = _backend_call(
@@ -985,8 +1025,11 @@ def _failed_log(host, repo: str, item: dict, lines: int = GATE_LOG_FRAGMENT_LINE
         return _LogFragment(available=False, reason="the gate received an empty log")
     failure_class, failure_reason = _classify_failed_step(step, text)
     return _LogFragment(
-        available=True, step=step, text=text,
-        failure_class=failure_class, failure_reason=failure_reason,
+        available=True,
+        step=step,
+        text=text,
+        failure_class=failure_class,
+        failure_reason=failure_reason,
     )
 
 
@@ -1004,10 +1047,17 @@ def _classify_failed_step(step: str, text: str) -> tuple[str, str]:
         return "infrastructure", "action-download-http-5xx"
     if "set up docker buildx" in lowered_step and _REGISTRY_UNAVAILABLE_RE.search(text):
         return "infrastructure", "buildx-registry-unavailable"
-    if any(token in lowered_step for token in (
-        "initialize containers", "initialize container", "pull image", "pulling image",
-        "docker pull", "load image",
-    )) and _REGISTRY_UNAVAILABLE_RE.search(text):
+    if any(
+        token in lowered_step
+        for token in (
+            "initialize containers",
+            "initialize container",
+            "pull image",
+            "pulling image",
+            "docker pull",
+            "load image",
+        )
+    ) and _REGISTRY_UNAVAILABLE_RE.search(text):
         return "infrastructure", "image-registry-unavailable"
     if "set up job" in lowered_step and _RUNNER_UNAVAILABLE_RE.search(text):
         return "infrastructure", "runner-unavailable"

@@ -168,10 +168,9 @@ def turn_started_confirm(
     ever worked keeps saying it. Used as a second opinion after a journal that says "not yet", it
     is not a criterion — it is a yes for every pane that was ever busy.
     """
+
     def confirm(sent_at: float) -> bool:
-        recorded = provider_turn_started(
-            workspace, sent_at, adapter=adapter, session_root=session_root
-        )
+        recorded = provider_turn_started(workspace, sent_at, adapter=adapter, session_root=session_root)
         if recorded is not None:
             return recorded
         return terminal_turn_started(handle, run_json=run_json, host=host, adapter=adapter)
@@ -231,14 +230,10 @@ def terminal_turn_started(
             return bool(latest_claude_user_turn_for(workspace, since))
         if adapter == "codex":
             return bool(latest_user_turn_for(workspace, since, session_root=session_root))
-    return _screen_started_turn(
-        read_terminal_text(handle, run_json=run_json, host=host), adapter=adapter
-    )
+    return _screen_started_turn(read_terminal_text(handle, run_json=run_json, host=host), adapter=adapter)
 
 
-def read_terminal_text(
-    handle: str, *, run_json: RunJson | None = None, host: PaneHost | None = None
-) -> str:
+def read_terminal_text(handle: str, *, run_json: RunJson | None = None, host: PaneHost | None = None) -> str:
     """The pane's text, read the one way the delivery boundary reads it."""
     return read_pane_text(handle, run_json=run_json, host=host)
 
@@ -344,10 +339,19 @@ def bind_claude_provider_progress_source(run: HeadRun) -> HeadRun:
         return _replace_progress_source(run, {**source, "state": "unavailable", "reason": reason})
     root = Path(str(source.get("root") or ""))
     baseline = source.get("baseline")
-    if not root.is_dir() or not isinstance(baseline, list) or not all(isinstance(path, str) for path in baseline):
-        return _replace_progress_source(run, {
-            **source, "state": "unavailable", "reason": "Claude source baseline is unavailable or malformed",
-        })
+    if (
+        not root.is_dir()
+        or not isinstance(baseline, list)
+        or not all(isinstance(path, str) for path in baseline)
+    ):
+        return _replace_progress_source(
+            run,
+            {
+                **source,
+                "state": "unavailable",
+                "reason": "Claude source baseline is unavailable or malformed",
+            },
+        )
     try:
         root_resolved = root.resolve(strict=True)
         candidates = [
@@ -357,30 +361,46 @@ def bind_claude_provider_progress_source(run: HeadRun) -> HeadRun:
         ]
         candidates = [path for path in candidates if path.is_relative_to(root_resolved)]
     except (OSError, ValueError):
-        return _replace_progress_source(run, {
-            **source, "state": "unavailable", "reason": "Claude source cannot be enumerated",
-        })
+        return _replace_progress_source(
+            run,
+            {
+                **source,
+                "state": "unavailable",
+                "reason": "Claude source cannot be enumerated",
+            },
+        )
     if len(candidates) != 1:
-        return _replace_progress_source(run, {
-            **source,
-            "state": "unavailable",
-            "reason": "Claude source is ambiguous or absent after launch",
-        })
+        return _replace_progress_source(
+            run,
+            {
+                **source,
+                "state": "unavailable",
+                "reason": "Claude source is ambiguous or absent after launch",
+            },
+        )
     try:
         stat = candidates[0].stat()
     except OSError:
-        return _replace_progress_source(run, {
-            **source, "state": "unavailable", "reason": "Claude source cannot be inspected",
-        })
-    return _replace_progress_source(run, {
-        **source,
-        "state": "bound",
-        "path": str(candidates[0]),
-        "device": int(stat.st_dev),
-        "inode": int(stat.st_ino),
-        "initial_size": int(stat.st_size),
-        "initial_mtime_ns": int(stat.st_mtime_ns),
-    })
+        return _replace_progress_source(
+            run,
+            {
+                **source,
+                "state": "unavailable",
+                "reason": "Claude source cannot be inspected",
+            },
+        )
+    return _replace_progress_source(
+        run,
+        {
+            **source,
+            "state": "bound",
+            "path": str(candidates[0]),
+            "device": int(stat.st_dev),
+            "inode": int(stat.st_ino),
+            "initial_size": int(stat.st_size),
+            "initial_mtime_ns": int(stat.st_mtime_ns),
+        },
+    )
 
 
 def provider_progress_for_run(run: HeadRun) -> dict[str, str]:
@@ -442,15 +462,16 @@ def _codex_provider_progress_for_run(run: HeadRun, run_id: str, fingerprint: str
     except (OSError, ValueError):
         return _unavailable("Codex bound provider source cannot be verified", "codex-session")
     meta, lines = parsed
-    if (
-        str(meta.get("session_id") or "") != str(source.get("session_id") or "")
-        or not lines
-    ):
+    if str(meta.get("session_id") or "") != str(source.get("session_id") or "") or not lines:
         return _unavailable("Codex bound provider source identity changed", "codex-session", identity=True)
     cursor = f"{lines[-1].number}:{lines[-1].digest}"
     return _observed(
-        "codex-session", _source_fingerprint(source), cursor, stat.st_mtime,
-        run_id, fingerprint,
+        "codex-session",
+        _source_fingerprint(source),
+        cursor,
+        stat.st_mtime,
+        run_id,
+        fingerprint,
     )
 
 
@@ -467,7 +488,9 @@ def _claude_provider_progress_for_run(run: HeadRun, run_id: str, fingerprint: st
         root_resolved = root.resolve(strict=True)
         path_resolved = path.resolve(strict=True)
         stat = path_resolved.stat()
-        allowed = {candidate.resolve(strict=True) for candidate in claude_session_paths(run.workspace, root=root)}
+        allowed = {
+            candidate.resolve(strict=True) for candidate in claude_session_paths(run.workspace, root=root)
+        }
         if (
             not path_resolved.is_relative_to(root_resolved)
             or path_resolved not in allowed
@@ -480,8 +503,12 @@ def _claude_provider_progress_for_run(run: HeadRun, run_id: str, fingerprint: st
         return _unavailable("Claude bound provider source cannot be verified", "claude-session")
     cursor = f"{int(stat.st_size)}:{int(stat.st_mtime_ns)}"
     return _observed(
-        "claude-session", _source_fingerprint(source), cursor, stat.st_mtime,
-        run_id, fingerprint,
+        "claude-session",
+        _source_fingerprint(source),
+        cursor,
+        stat.st_mtime,
+        run_id,
+        fingerprint,
     )
 
 
@@ -512,10 +539,24 @@ def _source_matches_run(source: dict[str, Any], run: HeadRun) -> str:
 
 def _source_fingerprint(source: dict[str, Any]) -> str:
     stable = {
-        key: source.get(key) for key in (
-            "version", "kind", "run_id", "head_run_fingerprint", "workspace", "role",
-            "task_ref", "root", "path", "session_id", "parent_thread_id", "initial_range",
-            "device", "inode", "initial_size", "initial_mtime_ns",
+        key: source.get(key)
+        for key in (
+            "version",
+            "kind",
+            "run_id",
+            "head_run_fingerprint",
+            "workspace",
+            "role",
+            "task_ref",
+            "root",
+            "path",
+            "session_id",
+            "parent_thread_id",
+            "initial_range",
+            "device",
+            "inode",
+            "initial_size",
+            "initial_mtime_ns",
         )
     }
     raw = json.dumps(stable, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
@@ -523,8 +564,12 @@ def _source_fingerprint(source: dict[str, Any]) -> str:
 
 
 def _observed(
-    source: str, source_fingerprint: str, cursor: str, observed_at: float,
-    run_id: str, run_fingerprint: str,
+    source: str,
+    source_fingerprint: str,
+    cursor: str,
+    observed_at: float,
+    run_id: str,
+    run_fingerprint: str,
 ) -> dict[str, str]:
     return {
         "state": "observed",
@@ -556,9 +601,7 @@ def _legacy_unbound_v1_codex_source(source: dict[str, Any], run: HeadRun) -> boo
         and _is_canonical_absolute_path(root)
         and isinstance(baseline, list)
         and all(
-            _is_canonical_absolute_path(path)
-            and Path(path).is_relative_to(Path(root))
-            for path in baseline
+            _is_canonical_absolute_path(path) and Path(path).is_relative_to(Path(root)) for path in baseline
         )
         and not _source_matches_run(source, run)
     )
@@ -648,7 +691,11 @@ def _session_cwd(path: Path) -> str | None:
 
 def _recent_day_dirs(root: Path, limit: int = 2) -> list[Path]:
     try:
-        years = sorted((path for path in root.iterdir() if path.is_dir() and path.name.isdigit()), key=lambda path: path.name, reverse=True)
+        years = sorted(
+            (path for path in root.iterdir() if path.is_dir() and path.name.isdigit()),
+            key=lambda path: path.name,
+            reverse=True,
+        )
     except OSError:
         return [root]
     if not years:
@@ -656,12 +703,18 @@ def _recent_day_dirs(root: Path, limit: int = 2) -> list[Path]:
     days: list[Path] = []
     for year in years:
         try:
-            months = sorted((path for path in year.iterdir() if path.is_dir()), key=lambda path: path.name, reverse=True)
+            months = sorted(
+                (path for path in year.iterdir() if path.is_dir()), key=lambda path: path.name, reverse=True
+            )
         except OSError:
             continue
         for month in months:
             try:
-                leaves = sorted((path for path in month.iterdir() if path.is_dir()), key=lambda path: path.name, reverse=True)
+                leaves = sorted(
+                    (path for path in month.iterdir() if path.is_dir()),
+                    key=lambda path: path.name,
+                    reverse=True,
+                )
             except OSError:
                 continue
             for day in leaves:

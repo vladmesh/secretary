@@ -20,9 +20,15 @@ from secretary.tasks import KanboardClient, TaskError
 
 PIPELINE_BOARD = 7
 SPRINT_BOARD = 8
-COLUMNS = [{"id": 1, "title": "Issues"}, {"id": 2, "title": "Ready"}, {"id": 3, "title": "In progress"},
-           {"id": 4, "title": "Validate"}, {"id": 7, "title": "Assessment"}, {"id": 5, "title": "Blocked"},
-           {"id": 6, "title": "Done"}]
+COLUMNS = [
+    {"id": 1, "title": "Issues"},
+    {"id": 2, "title": "Ready"},
+    {"id": 3, "title": "In progress"},
+    {"id": 4, "title": "Validate"},
+    {"id": 7, "title": "Assessment"},
+    {"id": 5, "title": "Blocked"},
+    {"id": 6, "title": "Done"},
+]
 
 
 def _client() -> KanboardClient:
@@ -39,32 +45,57 @@ class _Board:
     def __init__(self, *, sprints: int, cards: int) -> None:
         self.posts: list[list[str]] = []
         self.sprint_rows = [
-            {"id": 100 + index, "reference": f"sprint:{100 + index}", "title": "sprint",
-             "description": "", "column_id": 1, "position": index, "swimlane_id": 0,
-             "date_creation": "1720000000", "date_modification": "1720000000"}
+            {
+                "id": 100 + index,
+                "reference": f"sprint:{100 + index}",
+                "title": "sprint",
+                "description": "",
+                "column_id": 1,
+                "position": index,
+                "swimlane_id": 0,
+                "date_creation": "1720000000",
+                "date_modification": "1720000000",
+            }
             for index in range(sprints)
         ]
         self.card_rows = [
-            {"id": 200 + index, "reference": f"secretary-{200 + index}", "title": "card",
-             "description": "", "column_id": 2, "position": index, "swimlane_id": 4,
-             "date_creation": "1720000000", "date_modification": "1720000000"}
+            {
+                "id": 200 + index,
+                "reference": f"secretary-{200 + index}",
+                "title": "card",
+                "description": "",
+                "column_id": 2,
+                "position": index,
+                "swimlane_id": 4,
+                "date_creation": "1720000000",
+                "date_modification": "1720000000",
+            }
             for index in range(cards)
         ]
         self.metadata = {
-            **{row["id"]: {"sprint_goal": "goal", "sprint_status": "open",
-                           "sprint_repositories": json.dumps(["secretary"])}
-               for row in self.sprint_rows},
-            **{row["id"]: {"project": "secretary", "task_type": "code",
-                           "sprint": f"sprint:{100 + (index % max(sprints, 1))}"}
-               for index, row in enumerate(self.card_rows)},
+            **{
+                row["id"]: {
+                    "sprint_goal": "goal",
+                    "sprint_status": "open",
+                    "sprint_repositories": json.dumps(["secretary"]),
+                }
+                for row in self.sprint_rows
+            },
+            **{
+                row["id"]: {
+                    "project": "secretary",
+                    "task_type": "code",
+                    "sprint": f"sprint:{100 + (index % max(sprints, 1))}",
+                }
+                for index, row in enumerate(self.card_rows)
+            },
         }
 
     def post(self, payload):
         requests = payload if isinstance(payload, list) else [payload]
         self.posts.append([str(request["method"]) for request in requests])
         answers = [
-            {"jsonrpc": "2.0", "id": request["id"], "result": self._answer(request)}
-            for request in requests
+            {"jsonrpc": "2.0", "id": request["id"], "result": self._answer(request)} for request in requests
         ]
         return answers if isinstance(payload, list) else answers[0]
 
@@ -107,8 +138,10 @@ class CallBatchTransportTests(unittest.TestCase):
         self.assertEqual(len(posts), 1)
         self.assertEqual(
             posts[0],
-            [{"jsonrpc": "2.0", "id": 0, "method": "first"},
-             {"jsonrpc": "2.0", "id": 1, "method": "second", "params": {"task_id": 2}}],
+            [
+                {"jsonrpc": "2.0", "id": 0, "method": "first"},
+                {"jsonrpc": "2.0", "id": 1, "method": "second", "params": {"task_id": 2}},
+            ],
         )
 
     def test_calls_are_chunked_with_ids_unique_across_chunks(self) -> None:
@@ -118,8 +151,10 @@ class CallBatchTransportTests(unittest.TestCase):
             seen.append([request["id"] for request in payload])
             return [{"jsonrpc": "2.0", "id": request["id"], "result": request["id"]} for request in payload]
 
-        with mock.patch("secretary.tasks._BATCH_CHUNK", 2), \
-             mock.patch.object(KanboardClient, "_post", lambda _self, payload: post(payload)):
+        with (
+            mock.patch("secretary.tasks._BATCH_CHUNK", 2),
+            mock.patch.object(KanboardClient, "_post", lambda _self, payload: post(payload)),
+        ):
             results = _client().call_batch([("m", {"i": index}) for index in range(5)])
 
         self.assertEqual(results, [0, 1, 2, 3, 4])
@@ -135,12 +170,19 @@ class CallBatchTransportTests(unittest.TestCase):
     def test_a_missing_or_failed_entry_fails_the_batch_instead_of_leaving_a_hole(self) -> None:
         for answer, description in (
             ([{"jsonrpc": "2.0", "id": 0, "result": "only"}], "one answer for two calls"),
-            ([{"jsonrpc": "2.0", "id": 0, "result": None},
-              {"jsonrpc": "2.0", "id": 1, "error": {"code": -32601}}], "an rpc error"),
+            (
+                [
+                    {"jsonrpc": "2.0", "id": 0, "result": None},
+                    {"jsonrpc": "2.0", "id": 1, "error": {"code": -32601}},
+                ],
+                "an rpc error",
+            ),
             ({"jsonrpc": "2.0", "id": 0, "result": "single"}, "a server without batch support"),
         ):
             with self.subTest(answer=description):
-                with mock.patch.object(KanboardClient, "_post", lambda _self, _payload, answer=answer: answer):
+                with mock.patch.object(
+                    KanboardClient, "_post", lambda _self, _payload, answer=answer: answer
+                ):
                     with self.assertRaises(TaskError) as raised:
                         _client().call_batch([("a", {}), ("b", {})])
                 self.assertEqual(raised.exception.code, "backend_error")
@@ -162,22 +204,33 @@ class MassStatusTransportTests(unittest.TestCase):
         many = self._posts(sprints=40, cards=120)
 
         # One row per post: the method it carried, and how many calls travelled in it.
-        self.assertEqual([(post[0], len(post)) for post in one], [
-            ("getProjectByName", 1),    # the sprint board
-            ("getAllTasks", 1),         # its rows
-            ("getTaskMetadata", 1),     # their metadata, batched into one post
-            ("getProjectByName", 1),    # the Pipeline, read once for all sprints together
-            ("getColumns", 1),
-            ("getActiveSwimlanes", 1),
-            ("getAllTasks", 1),
-            ("getTaskMetadata", 3),     # every card's metadata, batched into one post
-        ])
+        self.assertEqual(
+            [(post[0], len(post)) for post in one],
+            [
+                ("getProjectByName", 1),  # the sprint board
+                ("getAllTasks", 1),  # its rows
+                ("getTaskMetadata", 1),  # their metadata, batched into one post
+                ("getProjectByName", 1),  # the Pipeline, read once for all sprints together
+                ("getColumns", 1),
+                ("getActiveSwimlanes", 1),
+                ("getAllTasks", 1),
+                ("getTaskMetadata", 3),  # every card's metadata, batched into one post
+            ],
+        )
         self.assertEqual([post[0] for post in many], [post[0] for post in one])
-        self.assertEqual([(post[0], len(post)) for post in many], [
-            ("getProjectByName", 1), ("getAllTasks", 1), ("getTaskMetadata", 40),
-            ("getProjectByName", 1), ("getColumns", 1), ("getActiveSwimlanes", 1),
-            ("getAllTasks", 1), ("getTaskMetadata", 120),
-        ])
+        self.assertEqual(
+            [(post[0], len(post)) for post in many],
+            [
+                ("getProjectByName", 1),
+                ("getAllTasks", 1),
+                ("getTaskMetadata", 40),
+                ("getProjectByName", 1),
+                ("getColumns", 1),
+                ("getActiveSwimlanes", 1),
+                ("getAllTasks", 1),
+                ("getTaskMetadata", 120),
+            ],
+        )
         self.assertTrue(all(len(set(post)) == 1 for post in many))
 
     def test_a_board_larger_than_one_chunk_splits_into_bounded_posts(self) -> None:

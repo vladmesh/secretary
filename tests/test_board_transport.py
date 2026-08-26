@@ -61,7 +61,9 @@ class BoardTransportTests(unittest.TestCase):
 
             with (
                 mock.patch("secretary.tasks.urllib.request.urlopen", side_effect=open_request),
-                mock.patch("triggered_agents.runtime.kanboard.urllib.request.urlopen", side_effect=open_request),
+                mock.patch(
+                    "triggered_agents.runtime.kanboard.urllib.request.urlopen", side_effect=open_request
+                ),
                 mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": str(instance)}, clear=True),
             ):
                 KanboardClient.for_instance(instance).call("getVersion")
@@ -75,7 +77,8 @@ class BoardTransportTests(unittest.TestCase):
             runtime = instance / "runtime.env"
             runtime.write_text(
                 "OTHER=value\nKANBOARD_URL=http://legacy/jsonrpc.php\n"
-                "KANBOARD_API_USER=jsonrpc\nKANBOARD_API_TOKEN=legacy-token\n", encoding="utf-8"
+                "KANBOARD_API_USER=jsonrpc\nKANBOARD_API_TOKEN=legacy-token\n",
+                encoding="utf-8",
             )
             runtime.chmod(0o600)
             outcome = self.migrate(instance, runtime)
@@ -107,12 +110,15 @@ class BoardTransportTests(unittest.TestCase):
             external = Path(tmp) / "operator.env"
             external.write_text(
                 "OTHER=value\nKANBOARD_URL=http://legacy/jsonrpc.php\n"
-                "KANBOARD_API_USER=jsonrpc\nKANBOARD_API_TOKEN=legacy-token\n", encoding="utf-8",
+                "KANBOARD_API_USER=jsonrpc\nKANBOARD_API_TOKEN=legacy-token\n",
+                encoding="utf-8",
             )
             external.chmod(0o600)
             values = read_runtime_env(instance, str(external), require_ignored=False)
             outcome = ensure_from_runtime_values(
-                instance, legacy_values=values, runtime_env=external,
+                instance,
+                legacy_values=values,
+                runtime_env=external,
             )
             self.assertEqual(
                 outcome.render(),
@@ -127,13 +133,15 @@ class BoardTransportTests(unittest.TestCase):
             runtime = instance / "runtime.env"
             runtime.write_text(
                 "KANBOARD_URL=http://legacy/jsonrpc.php\nKANBOARD_API_USER=jsonrpc\n"
-                "KANBOARD_API_TOKEN=legacy-token\n", encoding="utf-8",
+                "KANBOARD_API_TOKEN=legacy-token\n",
+                encoding="utf-8",
             )
             runtime.chmod(0o600)
             self.migrate(instance, runtime)
             runtime.write_text(
                 "KANBOARD_URL=http://legacy/jsonrpc.php\nKANBOARD_API_USER=jsonrpc\n"
-                "KANBOARD_API_TOKEN=legacy-token\n", encoding="utf-8",
+                "KANBOARD_API_TOKEN=legacy-token\n",
+                encoding="utf-8",
             )
             runtime.chmod(0o600)
 
@@ -152,7 +160,8 @@ class BoardTransportTests(unittest.TestCase):
             runtime = instance / "runtime.env"
             runtime.write_text(
                 "KANBOARD_URL=http://other/jsonrpc.php\nKANBOARD_API_USER=jsonrpc\n"
-                "KANBOARD_API_TOKEN=other-token\n", encoding="utf-8"
+                "KANBOARD_API_TOKEN=other-token\n",
+                encoding="utf-8",
             )
             runtime.chmod(0o600)
             with self.assertRaisesRegex(BoardTransportError, "board transport mismatch"):
@@ -163,19 +172,27 @@ class BoardTransportTests(unittest.TestCase):
             runtime = Path(tmp) / "runtime.env"
             runtime.write_text(
                 "KANBOARD_URL=http://legacy/jsonrpc.php\nKANBOARD_URL=http://other/jsonrpc.php\n"
-                "KANBOARD_API_USER=jsonrpc\nKANBOARD_API_TOKEN=legacy-token\n", encoding="utf-8"
+                "KANBOARD_API_USER=jsonrpc\nKANBOARD_API_TOKEN=legacy-token\n",
+                encoding="utf-8",
             )
             runtime.chmod(0o600)
             with self.assertRaisesRegex(RuntimeEnvError, "ambiguous"):
                 self.migrate(Path(tmp), runtime)
 
     def test_normal_client_does_not_use_ambient_legacy_values(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {
-            "SECRETARY_INSTANCE": str(Path(tmp) / "missing-instance"),
-            "KANBOARD_URL": "http://legacy/jsonrpc.php",
-            "KANBOARD_API_USER": "jsonrpc",
-            "KANBOARD_API_TOKEN": "legacy-token",
-        }, clear=True):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.dict(
+                os.environ,
+                {
+                    "SECRETARY_INSTANCE": str(Path(tmp) / "missing-instance"),
+                    "KANBOARD_URL": "http://legacy/jsonrpc.php",
+                    "KANBOARD_API_USER": "jsonrpc",
+                    "KANBOARD_API_TOKEN": "legacy-token",
+                },
+                clear=True,
+            ),
+        ):
             with self.assertRaisesRegex(TaskError, "configuration is unavailable"):
                 KanboardClient.for_instance(Path(tmp))
 
@@ -210,7 +227,9 @@ class BoardTransportTests(unittest.TestCase):
             try:
                 os.chdir(cwd)
                 with mock.patch.dict(os.environ, {"SECRETARY_INSTANCE": ""}, clear=True):
-                    self.assertEqual(KanboardClient.for_instance(instance).url, "http://127.0.0.1:8080/jsonrpc.php")
+                    self.assertEqual(
+                        KanboardClient.for_instance(instance).url, "http://127.0.0.1:8080/jsonrpc.php"
+                    )
             finally:
                 os.chdir(previous)
 
@@ -242,7 +261,9 @@ class BoardTransportTests(unittest.TestCase):
                 with self.subTest(spelling=spelling):
                     writer = TaskWriter(KanboardClient.for_instance(spelling), data_dir=instance / "data")
                     secret = "MIGRATED-LIVE-TOKEN-0123456789"
-                    with mock.patch("secretary.secret_store.redaction_values", return_value=(secret,)) as values:
+                    with mock.patch(
+                        "secretary.secret_store.redaction_values", return_value=(secret,)
+                    ) as values:
                         self.assertNotIn(secret, writer._redact_for_board(f"token {secret}"))
                     values.assert_called_once_with(instance)
 
@@ -250,8 +271,11 @@ class BoardTransportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
             ensure(instance, allow_default=True)
-            for args in (("init", "--quiet"), ("config", "user.name", "Test"),
-                         ("config", "user.email", "test@example.invalid")):
+            for args in (
+                ("init", "--quiet"),
+                ("config", "user.name", "Test"),
+                ("config", "user.email", "test@example.invalid"),
+            ):
                 subprocess.run(["git", "-C", str(instance), *args], check=True)
             preview = ensure(instance, dry_run=True)
             applied = ensure(instance)
@@ -263,15 +287,20 @@ class BoardTransportTests(unittest.TestCase):
     def test_fresh_transport_reports_the_ignore_change_in_preview_and_apply(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
-            for args in (("init", "--quiet"), ("config", "user.name", "Test"),
-                         ("config", "user.email", "test@example.invalid")):
+            for args in (
+                ("init", "--quiet"),
+                ("config", "user.name", "Test"),
+                ("config", "user.email", "test@example.invalid"),
+            ):
                 subprocess.run(["git", "-C", str(instance), *args], check=True)
             preview = ensure(instance, allow_default=True, dry_run=True)
             applied = ensure(instance, allow_default=True)
         self.assertEqual(
             (preview.render(dry_run=True), applied.render()),
-            ("would create default transport; would add transport ignore",
-             "created default transport; added transport ignore"),
+            (
+                "would create default transport; would add transport ignore",
+                "created default transport; added transport ignore",
+            ),
         )
 
     def test_insecure_transport_without_a_matching_legacy_tuple_fails_closed(self) -> None:
@@ -280,7 +309,8 @@ class BoardTransportTests(unittest.TestCase):
             path = instance / "board-transport.env"
             path.write_text(
                 "KANBOARD_URL=http://attacker.invalid/jsonrpc.php\nKANBOARD_API_USER=attacker\n"
-                "KANBOARD_API_TOKEN=attacker-token\n", encoding="utf-8",
+                "KANBOARD_API_TOKEN=attacker-token\n",
+                encoding="utf-8",
             )
             path.chmod(0o644)
             with self.assertRaisesRegex(BoardTransportError, "contents are unconfirmed"):
@@ -290,8 +320,11 @@ class BoardTransportTests(unittest.TestCase):
     def test_tracked_transport_is_reported_before_any_token_is_resolved(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
-            for args in (("init", "--quiet"), ("config", "user.name", "Test"),
-                         ("config", "user.email", "test@example.invalid")):
+            for args in (
+                ("init", "--quiet"),
+                ("config", "user.name", "Test"),
+                ("config", "user.email", "test@example.invalid"),
+            ):
                 subprocess.run(["git", "-C", str(instance), *args], check=True)
             path = instance / "board-transport.env"
             path.write_text("not a transport\n", encoding="utf-8")
@@ -306,8 +339,11 @@ class BoardTransportTests(unittest.TestCase):
     def test_confirmed_repair_reports_every_simultaneous_lifecycle_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)
-            for args in (("init", "--quiet"), ("config", "user.name", "Test"),
-                         ("config", "user.email", "test@example.invalid")):
+            for args in (
+                ("init", "--quiet"),
+                ("config", "user.name", "Test"),
+                ("config", "user.email", "test@example.invalid"),
+            ):
                 subprocess.run(["git", "-C", str(instance), *args], check=True)
             runtime = instance / "runtime.env"
             body = (

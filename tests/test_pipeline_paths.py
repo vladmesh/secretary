@@ -5,6 +5,7 @@ checkout defaults, the launcher PYTHONPATH, the OpenRouter key location, and the
 candidate lists. They pin the new behaviour so a future edit can't silently repoint them back at
 a dead path.
 """
+
 from __future__ import annotations
 
 import os
@@ -31,8 +32,7 @@ class PortableDefaultTests(unittest.TestCase):
     SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 
     def test_the_instance_and_checkout_defaults_follow_the_running_user(self):
-        with tempfile.TemporaryDirectory() as tmp, \
-             mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"HOME": tmp}, clear=False):
             self.assertEqual(paths.default_instance_path(), Path(tmp) / "secretary-instance")
             self.assertEqual(paths.default_product_root(), Path(tmp) / "secretary")
 
@@ -75,14 +75,20 @@ class LauncherCheckoutTests(unittest.TestCase):
         )
         result = subprocess.run(
             ["/bin/sh", "-c", f'set -u\n{line}\nprintf "%s" "$PYTHONPATH"'],
-            capture_output=True, text=True, env=env, timeout=60,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout
 
     def test_every_launcher_prefers_the_explicit_runtime_path(self):
-        env = {"HOME": "/home/nobody", "TA_RUNTIME_PYTHONPATH": "/srv/named",
-               "TA_SECRETARY_REPO": "/srv/configured"}
+        env = {
+            "HOME": "/home/nobody",
+            "TA_RUNTIME_PYTHONPATH": "/srv/named",
+            "TA_SECRETARY_REPO": "/srv/configured",
+        }
         for script in self.LAUNCHERS:
             with self.subTest(script):
                 self.assertEqual(self.script_pythonpath(script, env), "/srv/named/src")
@@ -101,30 +107,24 @@ class LauncherCheckoutTests(unittest.TestCase):
         env = {"HOME": "/home/nobody"}
         for script in self.LAUNCHERS:
             with self.subTest(script):
-                self.assertEqual(
-                    self.script_pythonpath(script, env), "/home/nobody/secretary/src"
-                )
+                self.assertEqual(self.script_pythonpath(script, env), "/home/nobody/secretary/src")
 
     def test_the_module_launcher_with_nothing_configured_uses_its_own_checkout(self):
         """A module already imported knows its tree is importable; a home path may not exist."""
         with mock.patch.dict(os.environ, {"HOME": "/home/nobody"}, clear=True):
-            self.assertEqual(
-                runtime_role_env.runtime_pythonpath(), str(runtime_role_env.REPO_ROOT / "src")
-            )
+            self.assertEqual(runtime_role_env.runtime_pythonpath(), str(runtime_role_env.REPO_ROOT / "src"))
 
     def test_a_shell_launcher_keeps_an_inherited_pythonpath_behind_the_checkout(self):
-        env = {"HOME": "/home/nobody", "TA_SECRETARY_REPO": "/srv/configured",
-               "PYTHONPATH": "/srv/extra"}
+        env = {"HOME": "/home/nobody", "TA_SECRETARY_REPO": "/srv/configured", "PYTHONPATH": "/srv/extra"}
         for script in self.LAUNCHERS:
             with self.subTest(script):
-                self.assertEqual(
-                    self.script_pythonpath(script, env), "/srv/configured/src:/srv/extra"
-                )
+                self.assertEqual(self.script_pythonpath(script, env), "/srv/configured/src:/srv/extra")
 
     def test_the_launched_role_command_carries_the_configured_checkout(self):
         """`wrap_shell_command` renders the path the launcher resolved into the command itself."""
-        with mock.patch.dict(os.environ, {"HOME": "/home/nobody",
-                                          "TA_SECRETARY_REPO": "/srv/configured"}, clear=True):
+        with mock.patch.dict(
+            os.environ, {"HOME": "/home/nobody", "TA_SECRETARY_REPO": "/srv/configured"}, clear=True
+        ):
             command = runtime_role_env.wrap_shell_command("steward", "true")
 
         self.assertIn("PYTHONPATH=/srv/configured/src", command)
@@ -138,8 +138,10 @@ class OpenRouterKeyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env = Path(tmp) / ".env"
             env.write_text("# comment\nOPENROUTER_API_KEY=sk-or-hermes\n", encoding="utf-8")
-            with mock.patch.object(health, "_OPENROUTER_ENV_FILE", env), \
-                 mock.patch.dict(os.environ, {}, clear=False):
+            with (
+                mock.patch.object(health, "_OPENROUTER_ENV_FILE", env),
+                mock.patch.dict(os.environ, {}, clear=False),
+            ):
                 os.environ.pop("TA_OPENROUTER_KEY", None)
                 self.assertEqual(health._read_openrouter_key(), "sk-or-hermes")
 
@@ -147,8 +149,10 @@ class OpenRouterKeyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             env = Path(tmp) / ".env"
             env.write_text('open_router_key="sk-or-legacy"\n', encoding="utf-8")
-            with mock.patch.object(health, "_OPENROUTER_ENV_FILE", env), \
-                 mock.patch.dict(os.environ, {}, clear=False):
+            with (
+                mock.patch.object(health, "_OPENROUTER_ENV_FILE", env),
+                mock.patch.dict(os.environ, {}, clear=False),
+            ):
                 os.environ.pop("TA_OPENROUTER_KEY", None)
                 self.assertEqual(health._read_openrouter_key(), "sk-or-legacy")
 
@@ -159,8 +163,10 @@ class OpenRouterKeyTests(unittest.TestCase):
         self.assertEqual(os.environ.get("TA_OPENROUTER_KEY"), override)
 
     def test_missing_file_yields_no_key(self):
-        with mock.patch.object(health, "_OPENROUTER_ENV_FILE", Path("/no/such/hermes/.env")), \
-             mock.patch.dict(os.environ, {}, clear=False):
+        with (
+            mock.patch.object(health, "_OPENROUTER_ENV_FILE", Path("/no/such/hermes/.env")),
+            mock.patch.dict(os.environ, {}, clear=False),
+        ):
             os.environ.pop("TA_OPENROUTER_KEY", None)
             self.assertIsNone(health._read_openrouter_key())
 
@@ -169,8 +175,12 @@ class LegacyMirrorPathTests(unittest.TestCase):
     """Where a pause mirrors its legacy flag. The removed `triggered-agents` checkout is not it:
     a mirror written there is a file none of the background roles read."""
 
-    ENV = ("SECRETARY_LEGACY_PAUSE_FILE", "SECRETARY_LEGACY_PIPELINE_STATE_DIR",
-           "TA_PIPELINE_STATE_DIR", "TA_STATE")
+    ENV = (
+        "SECRETARY_LEGACY_PAUSE_FILE",
+        "SECRETARY_LEGACY_PIPELINE_STATE_DIR",
+        "TA_PIPELINE_STATE_DIR",
+        "TA_STATE",
+    )
 
     def test_legacy_mirror_path_is_not_the_removed_checkout(self):
         with mock.patch.dict(os.environ, {}, clear=False):

@@ -82,8 +82,7 @@ class WindowExpiryTests(DispatcherRuntimeFixture, unittest.TestCase):
         comments = [
             str(comment.get("body") or "")
             for comment in self.reader.show(CARD_REF)["comments"]
-            if isinstance(comment, dict)
-            and "past the response window" in str(comment.get("body") or "")
+            if isinstance(comment, dict) and "past the response window" in str(comment.get("body") or "")
         ]
         self.assertEqual(len(comments), 1, comments)
         self.assertIn("NOT stopped or replaced", comments[0])
@@ -100,8 +99,7 @@ class WindowExpiryTests(DispatcherRuntimeFixture, unittest.TestCase):
         comments_after = [
             str(comment.get("body") or "")
             for comment in self.reader.show(CARD_REF)["comments"]
-            if isinstance(comment, dict)
-            and "past the response window" in str(comment.get("body") or "")
+            if isinstance(comment, dict) and "past the response window" in str(comment.get("body") or "")
         ]
         self.assertEqual(len(comments_after), 1, "the escalation is idempotent per span")
 
@@ -148,7 +146,9 @@ class RealStoppedChildTests(DispatcherRuntimeFixture, unittest.TestCase):
         """Launch a real sleeping process behind a real heartbeat file, like a launch does."""
         pid_file = str(Path(self.data_dir) / name)
         identity = heartbeat_identity(
-            run_id=run_id, role="worker", task="card:s1-5-real",
+            run_id=run_id,
+            role="worker",
+            task="card:s1-5-real",
         )
         wrapped = with_pid_heartbeat("sleep 30", pid_file, identity=identity)
         proc = subprocess.Popen(["/bin/sh", "-lc", wrapped])
@@ -188,9 +188,16 @@ class RealStoppedChildTests(DispatcherRuntimeFixture, unittest.TestCase):
     def _record_for(self, pid_file: str, run_id: str) -> DispatcherRecord:
         """A minimal record pointing the worker role at this real heartbeat."""
         return DispatcherRecord(
-            worker="pilot", review_head="", attempt_id="", comment_baseline=0,
-            review_baseline=0, state="claimed", claimed_at=0.0,
-            workspace="", handle="", head="",
+            worker="pilot",
+            review_head="",
+            attempt_id="",
+            comment_baseline=0,
+            review_baseline=0,
+            state="claimed",
+            claimed_at=0.0,
+            workspace="",
+            handle="",
+            head="",
             worker_pid_file=pid_file,
             worker_head_run={"run_id": run_id},
         )
@@ -231,22 +238,24 @@ class RealStoppedChildTests(DispatcherRuntimeFixture, unittest.TestCase):
             if number == 0:
                 return real_kill(pid, number)
             if number != signal.SIGCONT:
-                raise AssertionError(
-                    f"the recovery path tried to send {number!r}, not SIGCONT"
-                )
+                raise AssertionError(f"the recovery path tried to send {number!r}, not SIGCONT")
             signalled.append(number)
             return real_kill(pid, number)
 
         def audit_killpg(group, number):
             signalled.append(number)
             return real_killpg(group, number)
-        with mock.patch.object(secretary_dispatcher.os, "kill", side_effect=audit_kill), \
-                mock.patch.object(secretary_dispatcher.os, "killpg", side_effect=audit_killpg):
+
+        with (
+            mock.patch.object(secretary_dispatcher.os, "kill", side_effect=audit_kill),
+            mock.patch.object(secretary_dispatcher.os, "killpg", side_effect=audit_killpg),
+        ):
             self.assertTrue(
                 self.runtime._sigcont_head({"ref": "s1-5-real"}, record, kind="worker"),
             )
         self.assertEqual(
-            signalled, [signal.SIGCONT],
+            signalled,
+            [signal.SIGCONT],
             f"only SIGCONT may leave the recovery path, saw {signalled}",
         )
 

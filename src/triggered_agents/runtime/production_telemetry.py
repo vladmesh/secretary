@@ -18,6 +18,7 @@ dispatcher unit is started with. A reader's own unit gets that instance from `SE
 falling back to the directory of its rendered `TA_RUNTIME_ENV_FILE`. `TA_PRODUCTION_STATE`
 overrides the whole file.
 """
+
 from __future__ import annotations
 
 import json
@@ -160,7 +161,8 @@ def read() -> TickTelemetry:
         last=last if isinstance(last, dict) else {},
         last_healthy_at=str(telemetry.get("last_healthy_at") or ""),
         unhealthy=tuple(item for item in (unhealthy or []) if isinstance(item, dict))
-        if isinstance(unhealthy, list) else (),
+        if isinstance(unhealthy, list)
+        else (),
         unhealthy_total=_counter(telemetry.get("unhealthy_total")),
         tick_seq=_counter(telemetry.get("tick_seq")),
         generation=str(telemetry.get("generation") or ""),
@@ -218,8 +220,10 @@ def describe_incident(incident: dict) -> str:
     if not incident:
         return ""
     opened = incident.get("opened")
-    parts = [f"since {incident.get('opened_at') or '?'}",
-             f"{_counter(incident.get('unhealthy_ticks'))} unhealthy tick(s)"]
+    parts = [
+        f"since {incident.get('opened_at') or '?'}",
+        f"{_counter(incident.get('unhealthy_ticks'))} unhealthy tick(s)",
+    ]
     cause = describe(opened) if isinstance(opened, dict) else ""
     if cause:
         parts.append(cause)

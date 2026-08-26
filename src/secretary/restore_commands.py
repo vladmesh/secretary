@@ -32,7 +32,9 @@ from secretary.restore import (
 
 
 def add_restore_subcommands(subparsers) -> None:
-    bootstrap = subparsers.add_parser("bootstrap", help="bootstrap a host or create an empty secretary-data target")
+    bootstrap = subparsers.add_parser(
+        "bootstrap", help="bootstrap a host or create an empty secretary-data target"
+    )
     bootstrap.add_argument("--empty", action="store_true", help="create an empty secretary-data target")
     bootstrap.add_argument("--instance", help="instance for --empty")
     bootstrap.add_argument("--instance-remote", help="private instance remote for host bootstrap")
@@ -90,9 +92,16 @@ def run_bootstrap(args: argparse.Namespace) -> int:
     if not args.empty:
         required = (args.instance_remote, args.instance_dir, args.installation_user)
         if not all(required):
-            _print_json({"ok": False, "action": "bootstrap", "error": "host bootstrap requires --instance-remote, --instance-dir and --installation-user"})
+            _print_json(
+                {
+                    "ok": False,
+                    "action": "bootstrap",
+                    "error": "host bootstrap requires --instance-remote, --instance-dir and --installation-user",
+                }
+            )
             return 2
         from secretary.bootstrap import bootstrap as bootstrap_host
+
         return bootstrap_host(args)
     if not args.instance:
         _print_json({"ok": False, "action": "bootstrap", "error": "--empty requires --instance"})
@@ -144,7 +153,9 @@ def run_restore_reconcile(args: argparse.Namespace) -> int:
         return 2
     assert report.data_dir is not None
     packaged = resolve_installed_packaged(
-        report.instance, instance_path=report.instance_path.parent, data_dir=report.data_dir,
+        report.instance,
+        instance_path=report.instance_path.parent,
+        data_dir=report.data_dir,
     )
     if plan_input_errors(report.instance, report.bindings, packaged=packaged):
         _print_json({"ok": False, "action": "restore-reconcile", "error": "invalid desired state"})
@@ -168,7 +179,9 @@ def run_restore_reconcile(args: argparse.Namespace) -> int:
         foreign_units(report.host),
     )
     if not changes or any(change.action != "unchanged" for change in changes):
-        _print_json({"ok": False, "action": "restore-reconcile", "error": "managed reconcile has not been applied"})
+        _print_json(
+            {"ok": False, "action": "restore-reconcile", "error": "managed reconcile has not been applied"}
+        )
         return 1
     try:
         mark_reconcile_applied(data_dir)

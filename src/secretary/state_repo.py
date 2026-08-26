@@ -116,9 +116,12 @@ def git_command(instance_dir: Path, args: list[str]) -> list[str]:
     instance_dir = Path(instance_dir).expanduser().resolve()
     return [
         "git",
-        "-c", f"safe.directory={instance_dir}",
-        "-c", "core.hooksPath=/dev/null",
-        "-C", str(instance_dir),
+        "-c",
+        f"safe.directory={instance_dir}",
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-C",
+        str(instance_dir),
         *args,
     ]
 
@@ -145,7 +148,11 @@ def git_env(base: dict[str, str] | None = None) -> dict[str, str]:
 
 
 def run_git(
-    instance_dir: Path, args: list[str], *, label: str, timeout: float = 120,
+    instance_dir: Path,
+    args: list[str],
+    *,
+    label: str,
+    timeout: float = 120,
 ) -> subprocess.CompletedProcess[str]:
     """Run one instance-repository Git command through its privilege boundary.
 
@@ -174,7 +181,10 @@ def run_git(
                 # inherited repository selection can come back after the owner
                 # crossing.
                 command = [
-                    "runuser", "--user", pwd.getpwuid(owner.st_uid).pw_name, "--",
+                    "runuser",
+                    "--user",
+                    pwd.getpwuid(owner.st_uid).pw_name,
+                    "--",
                     "env",
                     *[argument for name in GIT_SELECTION_VARIABLES for argument in ("--unset", name)],
                     f"GIT_TERMINAL_PROMPT={env['GIT_TERMINAL_PROMPT']}",
@@ -258,7 +268,11 @@ def commit(instance_dir: Path, pathspec: tuple[str, ...], message: str) -> str |
 
 
 def ensure_ignored(
-    instance_dir: Path, entry: str, *, dry_run: bool = False, _locked: bool = False,
+    instance_dir: Path,
+    entry: str,
+    *,
+    dry_run: bool = False,
+    _locked: bool = False,
 ) -> bool:
     """Durably exclude one local file from an instance repository.
 
@@ -313,7 +327,11 @@ def is_ignored(instance_dir: Path, entry: str) -> bool:
 def is_tracked(instance_dir: Path, entry: str) -> bool:
     """Whether an entry is already in the instance index."""
     try:
-        git(instance_dir, ["ls-files", "--error-unmatch", "--", entry.lstrip("/")], label="inspect tracked entry")
+        git(
+            instance_dir,
+            ["ls-files", "--error-unmatch", "--", entry.lstrip("/")],
+            label="inspect tracked entry",
+        )
     except StateRepoError:
         return False
     return True

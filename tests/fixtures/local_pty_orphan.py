@@ -9,6 +9,7 @@ So this one says so explicitly — `SIGHUP` ignored, nothing read from the termi
 to it — and it stays up until it is killed. Its only output is one line, so a test can tell that it
 started.
 """
+
 from __future__ import annotations
 
 import signal

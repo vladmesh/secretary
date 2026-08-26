@@ -516,10 +516,12 @@ HEAD_STOP_POLL_SECONDS = 0.1
 # The verdicts from which the wait/watchdog path may take its destructive steps (S1-4).
 # Everything else waits: this is the vocabulary the vitality guard enforces, spelled here
 # so telemetry can name which comments describe decisions rather than shadow records.
-DESTRUCTIVE_VERDICTS = frozenset({
-    VitalityVerdict.CONFIRMED_STALL,
-    VitalityVerdict.DEAD,
-})
+DESTRUCTIVE_VERDICTS = frozenset(
+    {
+        VitalityVerdict.CONFIRMED_STALL,
+        VitalityVerdict.DEAD,
+    }
+)
 
 # What two provider-source descriptors have to agree on before one launch may keep the copy it was
 # already prepared with. These are the facts preflight fixes for the lifetime of the source: its
@@ -528,7 +530,14 @@ DESTRUCTIVE_VERDICTS = frozenset({
 # session can produce. A difference in any of them is a foreign descriptor, not a stale one, and is
 # left to fail the handoff merge as the identity conflict it is.
 _PREPARED_SOURCE_IDENTITY_KEYS = (
-    "version", "kind", "run_id", "head_run_fingerprint", "workspace", "role", "task_ref", "root",
+    "version",
+    "kind",
+    "run_id",
+    "head_run_fingerprint",
+    "workspace",
+    "role",
+    "task_ref",
+    "root",
 )
 
 
@@ -639,17 +648,21 @@ class InstanceCatalog:
 
     def worker_head(self, task: dict[str, Any]) -> str:
         requested = task.get("routing", {}).get("head_override")
-        head = self._resolved_head(str(requested) if requested else str(
-            self._heads.get("role_defaults", {}).get("new_card") or "codex"
-        ))
+        head = self._resolved_head(
+            str(requested)
+            if requested
+            else str(self._heads.get("role_defaults", {}).get("new_card") or "codex")
+        )
         self._head_profile(head)
         return head
 
     def review_head(self, task: dict[str, Any]) -> str:
         requested = task.get("routing", {}).get("review_head_override")
-        head = self._resolved_head(str(requested) if requested else str(
-            self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer"
-        ))
+        head = self._resolved_head(
+            str(requested)
+            if requested
+            else str(self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer")
+        )
         self._head_profile(head)
         return head
 
@@ -703,7 +716,12 @@ class InstanceCatalog:
         return head
 
     def head_run(
-        self, task: dict[str, Any], *, role: str, head: str = "", workspace: str = "",
+        self,
+        task: dict[str, Any],
+        *,
+        role: str,
+        head: str = "",
+        workspace: str = "",
         failover: bool = False,
     ) -> HeadRun:
         """The launch record for one head of `role`: the profile id plus the configuration it is
@@ -712,14 +730,18 @@ class InstanceCatalog:
         routing = task.get("routing") or {}
         if role == "worker":
             override = routing.get("head_override")
-            asked = self._resolved_head(str(override) if override else str(
-                self._heads.get("role_defaults", {}).get("new_card") or "codex"
-            ))
+            asked = self._resolved_head(
+                str(override)
+                if override
+                else str(self._heads.get("role_defaults", {}).get("new_card") or "codex")
+            )
         else:
             override = routing.get("review_head_override")
-            asked = self._resolved_head(str(override) if override else str(
-                self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer"
-            ))
+            asked = self._resolved_head(
+                str(override)
+                if override
+                else str(self._heads.get("role_defaults", {}).get("reviewer") or "codex-reviewer")
+            )
         launched = str(head) if head else asked
         if launched != asked:
             head_source = HEAD_FROM_FALLBACK if failover else HEAD_FROM_RECORD
@@ -846,8 +868,7 @@ class InstanceCatalog:
 
 @dataclass(frozen=True)
 class DispatcherHeadTransport:
-    """How this dispatcher delivers to a head and closes its pane, against whatever host it is on.
-    """
+    """How this dispatcher delivers to a head and closes its pane, against whatever host it is on."""
 
     runtime: CommandHostRuntime
     workspace: str = ""
@@ -970,7 +991,10 @@ class CommandHostRuntime:
         if run.spec.adapter != "codex" or not isinstance(source, dict):
             return
         self._codex_provider_ingresses[run.run_id] = CodexProviderEventIngress(
-            run, persist, stop=stop, block=block,
+            run,
+            persist,
+            stop=stop,
+            block=block,
         )
 
     def poll_codex_provider_ingress(self, run: head_ops.HeadRun) -> None:
@@ -990,8 +1014,7 @@ class CommandHostRuntime:
 
     @contextlib.contextmanager
     def committing(self, flush: Callable[[], None]):
-        """Lend this runtime a way to flush the durable state, for as long as the caller holds it.
-        """
+        """Lend this runtime a way to flush the durable state, for as long as the caller holds it."""
         previous = self.commit_state
         self.commit_state = flush
         try:
@@ -1089,10 +1112,7 @@ class CommandHostRuntime:
             # A fresh attestation that established no source of its own has nothing to hand over,
             # and never erases the durable one; the handoff merge keeps what is already on disk.
             return attested
-        if any(
-            prepared_source.get(key) != fresh_source.get(key)
-            for key in _PREPARED_SOURCE_IDENTITY_KEYS
-        ):
+        if any(prepared_source.get(key) != fresh_source.get(key) for key in _PREPARED_SOURCE_IDENTITY_KEYS):
             return attested
         policy = dict(attested.fanout_policy)
         policy["provider_source"] = dict(prepared_source)
@@ -1138,9 +1158,7 @@ class CommandHostRuntime:
                 # The card was requeued onto the checkout its own last attempt preserved, and that
                 # checkout is gone. No host repairs it and no later tick finds it: this is the one
                 # bring-up family that is about the card rather than the host.
-                raise HostError(
-                    "resume workspace is missing", bring_up_cause=CAUSE_WORKSPACE_CONTRACT
-                )
+                raise HostError("resume workspace is missing", bring_up_cause=CAUSE_WORKSPACE_CONTRACT)
             workspace = self._create_workspace(project, worker_id, base, expected=workspace)
             self._set_worker_branch(workspace, _legacy_worker_branch(task["ref"]))
             self._run_setup(project, workspace)
@@ -1184,12 +1202,8 @@ class CommandHostRuntime:
         elif not workspace.is_dir():
             # Same family as the missing resume workspace above: the checkout this card's rework
             # continues in is not there, which is this card's own bring-up contract, not the host's.
-            raise HostError(
-                "rework workspace is missing", bring_up_cause=CAUSE_WORKSPACE_CONTRACT
-            )
-        base = self.catalog.default_branch(
-            task["project"], task.get("workspace", {}).get("base_branch")
-        )
+            raise HostError("rework workspace is missing", bring_up_cause=CAUSE_WORKSPACE_CONTRACT)
+        base = self.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
         self._clear_report_bodies(task["ref"])
         self._write_prompt(
             workspace / "TASK.md",
@@ -1216,13 +1230,9 @@ class CommandHostRuntime:
         interactive secretary session's checkout: the observer reads reports and slices cards, it
         owns no branch of the project it watches."""
         if self.mode == "noop":
-            return str(
-                self.data_dir / "dispatcher" / OBSERVER_WORKSPACE_DIR / _request_token(reference)
-            )
+            return str(self.data_dir / "dispatcher" / OBSERVER_WORKSPACE_DIR / _request_token(reference))
         root = Path(
-            os.environ.get(
-                "SECRETARY_DISPATCHER_WORKSPACES_ROOT", str(Path.home() / "orca" / "workspaces")
-            )
+            os.environ.get("SECRETARY_DISPATCHER_WORKSPACES_ROOT", str(Path.home() / "orca" / "workspaces"))
         )
         return str(root / OBSERVER_WORKSPACE_DIR / _request_token(reference))
 
@@ -1238,17 +1248,30 @@ class CommandHostRuntime:
             repo.mkdir(parents=True, exist_ok=True)
             self._run(
                 [
-                    "git", "-C", str(repo), "init", "--quiet",
-                    "--initial-branch", OBSERVER_REPO_BRANCH,
+                    "git",
+                    "-C",
+                    str(repo),
+                    "init",
+                    "--quiet",
+                    "--initial-branch",
+                    OBSERVER_REPO_BRANCH,
                 ],
                 "observer repo init",
             )
             self._run(
                 [
-                    "git", "-C", str(repo),
-                    "-c", "user.name=secretary-dispatcher",
-                    "-c", "user.email=dispatcher@localhost",
-                    "commit", "--quiet", "--allow-empty", "-m", "observer root",
+                    "git",
+                    "-C",
+                    str(repo),
+                    "-c",
+                    "user.name=secretary-dispatcher",
+                    "-c",
+                    "user.email=dispatcher@localhost",
+                    "commit",
+                    "--quiet",
+                    "--allow-empty",
+                    "-m",
+                    "observer root",
                 ],
                 "observer repo commit",
             )
@@ -1263,9 +1286,7 @@ class CommandHostRuntime:
         answer, and an unanswered question must not pass for a free path.
         """
         try:
-            self._run_json(
-                ["orca", "worktree", "show", "--worktree", f"path:{workspace}", "--json"]
-            )
+            self._run_json(["orca", "worktree", "show", "--worktree", f"path:{workspace}", "--json"])
         except HostError as exc:
             if "selector_not_found" in str(exc):
                 return False
@@ -1273,23 +1294,30 @@ class CommandHostRuntime:
         return True
 
     def _create_observer_workspace(self, reference: str) -> Path:
-        """The observer's workspace, registered with Orca and at the path the record already names.
-        """
+        """The observer's workspace, registered with Orca and at the path the record already names."""
         workspace = Path(self.observer_workspace(reference))
         if self._observer_workspace_registered(str(workspace)):
             return workspace
         if workspace.exists():
             shutil.rmtree(workspace, ignore_errors=True)
         repo = self._observer_repo()
-        result = self._run_json([
-            "orca", "worktree", "create",
-            "--repo", f"path:{repo}",
-            "--name", workspace.name,
-            "--base-branch", OBSERVER_REPO_BRANCH,
-            "--setup", "skip",
-            "--no-parent",
-            "--json",
-        ])
+        result = self._run_json(
+            [
+                "orca",
+                "worktree",
+                "create",
+                "--repo",
+                f"path:{repo}",
+                "--name",
+                workspace.name,
+                "--base-branch",
+                OBSERVER_REPO_BRANCH,
+                "--setup",
+                "skip",
+                "--no-parent",
+                "--json",
+            ]
+        )
         worktree = result.get("worktree") if isinstance(result.get("worktree"), dict) else result
         path = worktree.get("path") if isinstance(worktree, dict) else None
         if not isinstance(path, str) or not path:
@@ -1393,7 +1421,8 @@ class CommandHostRuntime:
                 nonlocal bound_run
                 if ingress is not None:
                     bound_run = head_ops.post_delivery_run(
-                        lifecycle_run, ingress.bind_before_delivery(),
+                        lifecycle_run,
+                        ingress.bind_before_delivery(),
                     )
                 return bound_run
 
@@ -1523,9 +1552,7 @@ class CommandHostRuntime:
             task=f"sprint:{getattr(record, 'sprint', '')}",
             leaf=observer_leaf,
         )
-        self._run_json([
-            "orca", "worktree", "rm", "--worktree", f"path:{workspace}", "--force", "--json"
-        ])
+        self._run_json(["orca", "worktree", "rm", "--worktree", f"path:{workspace}", "--force", "--json"])
 
     def observer_activity_epoch(self, record: Any) -> int:
         """This observer head's activity epoch, to hand back to a stop that must only run if quiet.
@@ -1631,9 +1658,7 @@ class CommandHostRuntime:
                     adapter="unknown",
                 ),
                 workspace=workspace,
-                task_ref=head_ops.TaskRef.sprint(
-                    str(getattr(record, "sprint", "") or "unknown-sprint")
-                ),
+                task_ref=head_ops.TaskRef.sprint(str(getattr(record, "sprint", "") or "unknown-sprint")),
                 role=OBSERVER_ROLE,
                 pid_file=str(getattr(record, "pid_file", "") or ""),
             )
@@ -1698,9 +1723,7 @@ class CommandHostRuntime:
         if evidence_line:
             message += f" Sprint delivery evidence to carry into your closing resume: {evidence_line}."
         try:
-            adapter = self._prompt_adapter(
-                getattr(record, "run", {}), str(getattr(record, "head", ""))
-            )
+            adapter = self._prompt_adapter(getattr(record, "run", {}), str(getattr(record, "head", "")))
             # A wake carries both proofs a delivery can have, and either one confirms it. The head
             # is live and working, so the screen evidence this used to rely on alone is the weaker
             # of them: Orca reports a working Codex as idle, and the pane the wake is delivered
@@ -1713,7 +1736,10 @@ class CommandHostRuntime:
                 waking,
                 head_ops.NudgePointer(text=message),
                 transport=self._head_transport(
-                    workspace, adapter=adapter, role=OBSERVER_ROLE, ack_out_of_band=True,
+                    workspace,
+                    adapter=adapter,
+                    role=OBSERVER_ROLE,
+                    ack_out_of_band=True,
                 ),
                 subject="observer-wake",
             )
@@ -1762,10 +1788,14 @@ class CommandHostRuntime:
         run = self._observer_lifecycle_run(record)
         if run.settled:
             run = replace(
-                run, run_id=head_ops.new_run_id(), lifecycle=head_ops.SPAWNED, stopped_by=None,
+                run,
+                run_id=head_ops.new_run_id(),
+                lifecycle=head_ops.SPAWNED,
+                stopped_by=None,
             )
         receipt = self.head_runtime_for(run).stop(
-            replace(run, handle=handle, leaf=""), head_ops.StopInitiator(actor=STOPPED_BY_DISPATCHER),
+            replace(run, handle=handle, leaf=""),
+            head_ops.StopInitiator(actor=STOPPED_BY_DISPATCHER),
         )
         if not receipt.ok:
             raise HostError(f"observer terminal close failed: {receipt.reason}")
@@ -1778,9 +1808,7 @@ class CommandHostRuntime:
                 role=OBSERVER_ROLE, head=head, adapter="unknown", model_source=MODEL_UNKNOWN
             ).to_json()
 
-    def provider_progress(
-        self, task: dict[str, Any], record: DispatcherRecord, kind: str
-    ) -> dict[str, str]:
+    def provider_progress(self, task: dict[str, Any], record: DispatcherRecord, kind: str) -> dict[str, str]:
         """Read an opaque provider cursor for this exact role's persisted HeadRun."""
         run = record.review_head_run if kind == "review" else record.worker_head_run
         expected_workspace = record.workspace
@@ -1938,9 +1966,7 @@ class CommandHostRuntime:
             failure.evidence = _delivery_evidence_json(exc, "reviewer-launch")
             raise failure from None
         if not receipt.ok:
-            failure = HostError(
-                f"retained reviewer document nudge was not delivered: {receipt.reason}"
-            )
+            failure = HostError(f"retained reviewer document nudge was not delivered: {receipt.reason}")
             failure.evidence = _delivery_evidence_json(receipt.failure, "reviewer-launch")
             raise failure from None
         return {
@@ -1956,16 +1982,12 @@ class CommandHostRuntime:
     def review_status(self, task: dict[str, Any], record: DispatcherRecord) -> dict[str, Any]:
         return _command_terminal_status(self, task, record, kind="review")
 
-    def stop_review(
-        self, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER
-    ) -> None:
+    def stop_review(self, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER) -> None:
         """End the reviewer's lifecycle alone. `stop` would take the whole worktree down with it,
         which on a red verdict means killing the checkout's terminals the worker is about to get
         back. Closing the reviewer's own split leaf removes that pane and leaves the rest alone.
         """
-        if self.mode == "noop" or not (
-            record.review_handle or record.review_leaf or record.review_pid_file
-        ):
+        if self.mode == "noop" or not (record.review_handle or record.review_leaf or record.review_pid_file):
             return
         self.stop_head(record, "review", initiator)
 
@@ -1975,9 +1997,7 @@ class CommandHostRuntime:
         if self.mode == "noop" or not record.workspace:
             return ""
         try:
-            completed = self._run(
-                ["git", "-C", record.workspace, "rev-parse", "HEAD"], "review head sha"
-            )
+            completed = self._run(["git", "-C", record.workspace, "rev-parse", "HEAD"], "review head sha")
         except HostError:
             return ""
         return completed.stdout.strip()
@@ -2013,7 +2033,15 @@ class CommandHostRuntime:
                 "review recovery local head",
             ).stdout.strip()
             self._run(
-                ["git", "-C", record.workspace, "merge-base", "--is-ancestor", reviewed_commit, current_commit],
+                [
+                    "git",
+                    "-C",
+                    record.workspace,
+                    "merge-base",
+                    "--is-ancestor",
+                    reviewed_commit,
+                    current_commit,
+                ],
                 "review recovery ancestry",
             )
         except HostError:
@@ -2061,7 +2089,9 @@ class CommandHostRuntime:
         """
         if self.mode == "noop":
             return str(self.data_dir / "dispatcher" / "workspaces" / worker)
-        root = Path(os.environ.get("SECRETARY_DISPATCHER_WORKSPACES_ROOT", str(Path.home() / "orca" / "workspaces")))
+        root = Path(
+            os.environ.get("SECRETARY_DISPATCHER_WORKSPACES_ROOT", str(Path.home() / "orca" / "workspaces"))
+        )
         return str(root / self._orca_binding_name(str(task.get("project") or "")) / worker)
 
     def _orca_binding_name(self, project: str) -> str:
@@ -2173,7 +2203,9 @@ class CommandHostRuntime:
             return False
         return True
 
-    def _merge_github_pr(self, task: dict[str, Any], record: DispatcherRecord, branch: str, base: str) -> None:
+    def _merge_github_pr(
+        self, task: dict[str, Any], record: DispatcherRecord, branch: str, base: str
+    ) -> None:
         """Land a github-CI project through its PR, then fast-forward the project's own checkout so the
         next worktree bases on the merged tree.
 
@@ -2227,12 +2259,13 @@ class CommandHostRuntime:
         # destructive call, not afterwards when a live process may already have lost its pane.
         for pid_file, run, kind, leaf in heartbeats:
             self._guard_head_run(run, kind, pid_file=pid_file, leaf=leaf)
-        self._stop_recorded_heads(
-            record.workspace, [(run, kind) for _, run, kind, _ in heartbeats]
-        )
+        self._stop_recorded_heads(record.workspace, [(run, kind) for _, run, kind, _ in heartbeats])
         for pid_file, run, kind, leaf in heartbeats:
             self._confirm_head_process_gone(
-                pid_file, run=run, role=kind, leaf=leaf,
+                pid_file,
+                run=run,
+                role=kind,
+                leaf=leaf,
             )
 
     def _stop_recorded_heads(self, workspace: str, runs: Sequence[tuple[Any, str]]) -> None:
@@ -2266,12 +2299,11 @@ class CommandHostRuntime:
                 # bound to learn what the record already says.
                 continue
             receipt = self.head_runtime_for(run).stop(
-                run, head_ops.StopInitiator(actor=STOPPED_BY_DISPATCHER),
+                run,
+                head_ops.StopInitiator(actor=STOPPED_BY_DISPATCHER),
             )
             if not receipt.ok:
-                raise HostError(
-                    f"the {role} head of {workspace} was not stopped: {receipt.reason}"
-                )
+                raise HostError(f"the {role} head of {workspace} was not stopped: {receipt.reason}")
         if live and all(_head_runtime_name(run) != ORCA_LEGACY_RUNTIME for run, _ in live):
             return
         try:
@@ -2280,9 +2312,7 @@ class CommandHostRuntime:
             if "selector_not_found" not in str(exc):
                 raise
 
-    def stop_head(
-        self, record: DispatcherRecord, kind: str, initiator: str = STOPPED_BY_DISPATCHER
-    ) -> None:
+    def stop_head(self, record: DispatcherRecord, kind: str, initiator: str = STOPPED_BY_DISPATCHER) -> None:
         """Stop one role's head through the head operation, recording who ended it."""
         if self.mode == "noop":
             return
@@ -2291,9 +2321,7 @@ class CommandHostRuntime:
             return
         self.stop_worker_head(record, initiator)
 
-    def stop_review_head(
-        self, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER
-    ) -> None:
+    def stop_review_head(self, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER) -> None:
         """End this card's reviewer through the head operation, recording who ended it."""
         run = self.review_lifecycle_run(record)
         receipt = self.head_runtime_for(run).stop(
@@ -2303,7 +2331,9 @@ class CommandHostRuntime:
             commit=lambda finishing: self._commit_review_run(record, finishing),
             preflight=lambda current: self._guard_head_run(current, "reviewer"),
             confirm_gone=lambda path: self._confirm_head_process_gone(
-                path, run=run, role="reviewer",
+                path,
+                run=run,
+                role="reviewer",
             ),
         )
         if not receipt.ok:
@@ -2312,8 +2342,7 @@ class CommandHostRuntime:
         self._commit_review_run(record, receipt.run)
 
     def _commit_review_run(self, record: DispatcherRecord, run: head_ops.HeadRun) -> None:
-        """Write this reviewer's run onto the record, flushing it when the caller lent us the state.
-        """
+        """Write this reviewer's run onto the record, flushing it when the caller lent us the state."""
         record.review_head_run = run.to_json()
         if self.commit_state is not None:
             self.commit_state()
@@ -2339,9 +2368,7 @@ class CommandHostRuntime:
                 workspace=record.workspace,
                 # The reviewer's own worker id is the card's, as the claim built it: `<ref>-<slug>`.
                 # Inventing a card reference this call never received would not be truthful.
-                task_ref=head_ops.TaskRef.card(
-                    record.worker or record.review_head or "unknown-reviewer"
-                ),
+                task_ref=head_ops.TaskRef.card(record.worker or record.review_head or "unknown-reviewer"),
             )
         return replace(
             run,
@@ -2351,9 +2378,7 @@ class CommandHostRuntime:
             pid_file=record.review_pid_file,
         )
 
-    def stop_worker_head(
-        self, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER
-    ) -> None:
+    def stop_worker_head(self, record: DispatcherRecord, initiator: str = STOPPED_BY_DISPATCHER) -> None:
         """End this card's worker through the head operation, recording who ended it."""
         run = self.worker_lifecycle_run(record)
         receipt = self.head_runtime_for(run).stop(
@@ -2363,7 +2388,9 @@ class CommandHostRuntime:
             commit=lambda finishing: self._commit_worker_run(record, finishing),
             preflight=lambda current: self._guard_head_run(current, "worker"),
             confirm_gone=lambda path: self._confirm_head_process_gone(
-                path, run=run, role="worker",
+                path,
+                run=run,
+                role="worker",
             ),
         )
         if not receipt.ok:
@@ -2372,8 +2399,7 @@ class CommandHostRuntime:
         self._commit_worker_run(record, receipt.run)
 
     def _commit_worker_run(self, record: DispatcherRecord, run: head_ops.HeadRun) -> None:
-        """Write this worker's run onto the record, and flush it if the caller gave us the state.
-        """
+        """Write this worker's run onto the record, and flush it if the caller gave us the state."""
         record.worker_head_run = run.to_json()
         if self.commit_state is not None:
             self.commit_state()
@@ -2430,7 +2456,11 @@ class CommandHostRuntime:
         """Classify a head through its persisted run whenever one is available."""
         if run is not None:
             return _head_run_process_status(
-                pid_file, run=run, role=role, task=task, leaf=leaf,
+                pid_file,
+                run=run,
+                role=role,
+                task=task,
+                leaf=leaf,
             )
         return _head_process_status(pid_file, expected=expected)
 
@@ -2452,7 +2482,11 @@ class CommandHostRuntime:
             return {"known": False, "reason": "missing-pid-file"}
         try:
             return _guard_head_run_identity(
-                pid_file, run=run, role=role, task=task, leaf=leaf,
+                pid_file,
+                run=run,
+                role=role,
+                task=task,
+                leaf=leaf,
             )
         except _HeadRunIdentityMismatch:
             raise HostError(f"head heartbeat from {pid_file} has a mismatching launch identity") from None
@@ -2472,7 +2506,12 @@ class CommandHostRuntime:
             return
         for signal_number in (signal.SIGTERM, signal.SIGKILL):
             status = self._head_status(
-                pid_file, run=run, role=role, task=task, leaf=leaf, expected=expected,
+                pid_file,
+                run=run,
+                role=role,
+                task=task,
+                leaf=leaf,
+                expected=expected,
             )
             if _heartbeat_is_mismatch(status):
                 raise HostError(f"head heartbeat from {pid_file} has a mismatching launch identity")
@@ -2484,18 +2523,38 @@ class CommandHostRuntime:
             # the graceful signal, or the green handoff waits out the grace period and then kills it.
             if signal_number == signal.SIGTERM:
                 self._signal_head(
-                    pid_file, signal.SIGCONT,
-                    run=run, role=role, task=task, leaf=leaf, expected=expected,
+                    pid_file,
+                    signal.SIGCONT,
+                    run=run,
+                    role=role,
+                    task=task,
+                    leaf=leaf,
+                    expected=expected,
                 )
             self._signal_head(
-                pid_file, signal_number,
-                run=run, role=role, task=task, leaf=leaf, expected=expected,
+                pid_file,
+                signal_number,
+                run=run,
+                role=role,
+                task=task,
+                leaf=leaf,
+                expected=expected,
             )
             self._await_head_exit(
-                pid_file, run=run, role=role, task=task, leaf=leaf, expected=expected,
+                pid_file,
+                run=run,
+                role=role,
+                task=task,
+                leaf=leaf,
+                expected=expected,
             )
         status = self._head_status(
-            pid_file, run=run, role=role, task=task, leaf=leaf, expected=expected,
+            pid_file,
+            run=run,
+            role=role,
+            task=task,
+            leaf=leaf,
+            expected=expected,
         )
         if _heartbeat_is_mismatch(status):
             raise HostError(f"head heartbeat from {pid_file} has a mismatching launch identity")
@@ -2516,7 +2575,12 @@ class CommandHostRuntime:
         expected: dict[str, str] | None = None,
     ) -> None:
         status = self._head_status(
-            pid_file, run=run, role=role, task=task, leaf=leaf, expected=expected,
+            pid_file,
+            run=run,
+            role=role,
+            task=task,
+            leaf=leaf,
+            expected=expected,
         )
         if not _heartbeat_is_live_match(status):
             return
@@ -2548,7 +2612,12 @@ class CommandHostRuntime:
         deadline = time.monotonic() + HEAD_STOP_GRACE_SECONDS
         while time.monotonic() < deadline:
             status = self._head_status(
-                pid_file, run=run, role=role, task=task, leaf=leaf, expected=expected,
+                pid_file,
+                run=run,
+                role=role,
+                task=task,
+                leaf=leaf,
+                expected=expected,
             )
             if _heartbeat_is_mismatch(status):
                 return
@@ -2579,13 +2648,13 @@ class CommandHostRuntime:
         except HostError:
             return
         try:
-            self._run_json(["orca", "worktree", "rm", "--worktree", f"path:{record.workspace}", "--force", "--json"])
+            self._run_json(
+                ["orca", "worktree", "rm", "--worktree", f"path:{record.workspace}", "--force", "--json"]
+            )
         except HostError:
             pass
 
-    def _create_workspace(
-        self, project: str, worker_id: str, base: str, *, expected: str = ""
-    ) -> str:
+    def _create_workspace(self, project: str, worker_id: str, base: str, *, expected: str = "") -> str:
         """Cut the card's worktree and accept it only as this card's workspace of this repo.
 
         What Orca returns is checked against what Orca itself registered — the repo registration this
@@ -2604,16 +2673,24 @@ class CommandHostRuntime:
             raise HostError(f"project repo for {project!r} is unavailable")
         registration = self._orca_repo(project)
         self._run(["git", "-C", str(repo), "fetch", "origin", base], "git fetch")
-        result = self._run_json([
-            "orca", "worktree", "create",
-            "--repo", f"path:{repo}",
-            "--name", worker_id,
-            "--base-branch", f"origin/{base}",
-            "--setup", "skip",
-            "--no-parent",
-            "--activate",
-            "--json",
-        ])
+        result = self._run_json(
+            [
+                "orca",
+                "worktree",
+                "create",
+                "--repo",
+                f"path:{repo}",
+                "--name",
+                worker_id,
+                "--base-branch",
+                f"origin/{base}",
+                "--setup",
+                "skip",
+                "--no-parent",
+                "--activate",
+                "--json",
+            ]
+        )
         worktree = result.get("worktree") if isinstance(result.get("worktree"), dict) else result
         path = worktree.get("path") if isinstance(worktree, dict) else None
         if not isinstance(path, str) or not path:
@@ -2623,17 +2700,13 @@ class CommandHostRuntime:
             raise HostError(f"{reason}{self._discard_workspace(path)}")
         return path
 
-    def _workspace_rejection(
-        self, path: str, repo_id: str, worker_id: str, expected: str
-    ) -> str:
+    def _workspace_rejection(self, path: str, repo_id: str, worker_id: str, expected: str) -> str:
         """Why this returned worktree may not be adopted, or "" when it may.
 
         A worktree Orca will not describe is a rejection rather than a pass.
         """
         try:
-            shown = self._run_json(
-                ["orca", "worktree", "show", "--worktree", f"path:{path}", "--json"]
-            )
+            shown = self._run_json(["orca", "worktree", "show", "--worktree", f"path:{path}", "--json"])
         except HostError as exc:
             return f"orca will not describe the worker workspace at {path}: {exc}"
         worktree = shown.get("worktree") if isinstance(shown.get("worktree"), dict) else shown
@@ -2656,9 +2729,7 @@ class CommandHostRuntime:
     def _discard_workspace(self, path: str) -> str:
         """Remove a worktree that was created but must not be adopted, and say what is left."""
         try:
-            self._run_json(
-                ["orca", "worktree", "rm", "--worktree", f"path:{path}", "--force", "--json"]
-            )
+            self._run_json(["orca", "worktree", "rm", "--worktree", f"path:{path}", "--force", "--json"])
         except HostError as exc:
             return f"; the rejected worktree at {path} could not be removed either: {exc}"
         return ""
@@ -2669,9 +2740,7 @@ class CommandHostRuntime:
             return
         path = Path(workspace)
         if not path.is_dir():
-            raise HostError(
-                "resume workspace is not a directory", bring_up_cause=CAUSE_WORKSPACE_CONTRACT
-            )
+            raise HostError("resume workspace is not a directory", bring_up_cause=CAUSE_WORKSPACE_CONTRACT)
         try:
             top_level = self._run(
                 ["git", "-C", workspace, "rev-parse", "--show-toplevel"], "resume workspace git check"
@@ -2737,8 +2806,7 @@ class CommandHostRuntime:
         failover: bool = False,
         heartbeat_run_id: str = "",
     ) -> LaunchedHead:
-        """Bring one head up and hand back the pane together with the configuration it started with.
-        """
+        """Bring one head up and hand back the pane together with the configuration it started with."""
         pid_file = _pid_file_path(_watchdog_kind(role), task["ref"]) if task else ""
         task_ref = self._task_ref(task, role, prompt_document)
         run_id = heartbeat_run_id or head_ops.new_run_id()
@@ -2758,11 +2826,18 @@ class CommandHostRuntime:
             except CodexFanoutPolicyError as exc:
                 raise HostError(str(exc)) from None
             return self._launched(
-                f"noop:{head}:{Path(workspace).name}:{Path(prompt_file).name}", head, task, role,
-                workspace, failover, head_run=preflight_run.to_json(),
+                f"noop:{head}:{Path(workspace).name}:{Path(prompt_file).name}",
+                head,
+                task,
+                role,
+                workspace,
+                failover,
+                head_run=preflight_run.to_json(),
             )
         heartbeat = heartbeat_identity(
-            run_id=run_id, role=role, task_ref=task_ref.to_json(),
+            run_id=run_id,
+            role=role,
+            task_ref=task_ref.to_json(),
         )
         if pid_file:
             # Drop any pid a previous launch in this workspace left behind, so a respawn cannot read
@@ -2817,7 +2892,10 @@ class CommandHostRuntime:
             pid_file=pid_file,
             split_from=split_from,
             transport=self._head_transport(
-                workspace, prompt_file, adapter, role,
+                workspace,
+                prompt_file,
+                adapter,
+                role,
                 before_send=ingress.bind_before_delivery if ingress is not None else None,
             ),
             subject=subject,
@@ -2852,16 +2930,13 @@ class CommandHostRuntime:
             workspace,
             failover,
             leaf=receipt.run.leaf,
-            delivery_evidence=(
-                _delivery_evidence_json(delivery, subject) if delivery is not None else {}
-            ),
+            delivery_evidence=(_delivery_evidence_json(delivery, subject) if delivery is not None else {}),
             head_run=receipt.run.to_json(),
             fallback_reason=receipt.fallback_reason,
         )
 
     def _head_spec(self, head: str, adapter: str) -> HeadSpec:
-        """The launch shape the run is recorded with, degrading rather than failing a live bring-up.
-        """
+        """The launch shape the run is recorded with, degrading rather than failing a live bring-up."""
         try:
             return HeadSpec.from_profile(head, self.catalog.head_profile(head))
         except (HeadSpecError, HostError, AttributeError, KeyError, TypeError):
@@ -2888,13 +2963,22 @@ class CommandHostRuntime:
         the host it is running on.
         """
         return DispatcherHeadTransport(
-            self, workspace, prompt_file, adapter, role, before_send, ack_out_of_band,
+            self,
+            workspace,
+            prompt_file,
+            adapter,
+            role,
+            before_send,
+            ack_out_of_band,
         )
 
     @staticmethod
     def _run_heartbeat_identity(run: head_ops.HeadRun, role: str) -> dict[str, str]:
         return heartbeat_identity(
-            run_id=run.run_id, role=role, task_ref=run.task_ref.to_json(), leaf=run.leaf,
+            run_id=run.run_id,
+            role=role,
+            task_ref=run.task_ref.to_json(),
+            leaf=run.leaf,
         )
 
     def _record_heartbeat_status(self, record: DispatcherRecord, kind: str) -> dict[str, Any]:
@@ -2902,14 +2986,16 @@ class CommandHostRuntime:
         pid_file = record.review_pid_file if kind == "review" else record.worker_pid_file
         leaf = record.review_leaf if kind == "review" else record.worker_leaf
         return self._head_status(
-            pid_file, run=getattr(record, field, {}), role=kind, leaf=leaf,
+            pid_file,
+            run=getattr(record, field, {}),
+            role=kind,
+            leaf=leaf,
         )
 
     def _launch_failure(
         self, exc: head_ops.HeadOperationError, workspace: str, pid_file: str, subject: str
     ) -> Exception:
-        """Translate one operation's refusal into the failure the dispatcher's callers already read.
-        """
+        """Translate one operation's refusal into the failure the dispatcher's callers already read."""
         evidence = _delivery_evidence_json(exc, subject)
         if isinstance(exc, head_ops.HeadSpawnAborted):
             return HeadLaunchAborted(
@@ -2962,26 +3048,48 @@ class CommandHostRuntime:
         except Exception as exc:  # noqa: BLE001 — any refusal, whatever the transport called it
             status = (
                 self._head_status(
-                    pid_file, run=run, role=role, task=task, leaf=leaf, expected=expected,
-                ) if pid_file else {"known": False}
+                    pid_file,
+                    run=run,
+                    role=role,
+                    task=task,
+                    leaf=leaf,
+                    expected=expected,
+                )
+                if pid_file
+                else {"known": False}
             )
             if not status.get("known"):
                 raise HostError(f"head terminal close failed: {exc}") from None
             if _heartbeat_is_mismatch(status):
                 raise HostError("head terminal close found a mismatching launch identity") from None
         self._confirm_head_process_gone(
-            pid_file, run=run, role=role, task=task, leaf=leaf, expected=expected,
+            pid_file,
+            run=run,
+            role=role,
+            task=task,
+            leaf=leaf,
+            expected=expected,
         )
 
     def _launched(
-        self, handle: str, head: str, task: dict[str, Any] | None, role: str, workspace: str = "",
-        failover: bool = False, leaf: str = "", delivery_evidence: dict[str, Any] | None = None,
-        head_run: dict[str, Any] | None = None, fallback_reason: str = "",
+        self,
+        handle: str,
+        head: str,
+        task: dict[str, Any] | None,
+        role: str,
+        workspace: str = "",
+        failover: bool = False,
+        leaf: str = "",
+        delivery_evidence: dict[str, Any] | None = None,
+        head_run: dict[str, Any] | None = None,
+        fallback_reason: str = "",
     ) -> LaunchedHead:
         """Pair the pane with the launch snapshot of the head running in it."""
         if task is None:
             return LaunchedHead(
-                handle=handle, head=head, leaf=leaf,
+                handle=handle,
+                head=head,
+                leaf=leaf,
                 delivery_evidence=dict(delivery_evidence or {}),
                 head_run=dict(head_run or {}),
                 fallback_reason=fallback_reason,
@@ -2991,9 +3099,7 @@ class CommandHostRuntime:
                 task, role=role, head=head, workspace=workspace, failover=failover
             ).to_json()
         except (HostError, AttributeError, KeyError, TypeError):
-            run = HeadRun(
-                role=role, head=head, adapter="unknown", model_source=MODEL_UNKNOWN
-            ).to_json()
+            run = HeadRun(role=role, head=head, adapter="unknown", model_source=MODEL_UNKNOWN).to_json()
         return LaunchedHead(
             handle=handle,
             head=head,
@@ -3072,9 +3178,7 @@ class CommandHostRuntime:
         """
         return OrcaSessionHost(self._run_json)
 
-    def _open_head_pane(
-        self, run: head_ops.HeadRun, title: str, command: str
-    ) -> head_ops.HeadRun:
+    def _open_head_pane(self, run: head_ops.HeadRun, title: str, command: str) -> head_ops.HeadRun:
         """Bring a head up in a pane of its own, with no prompt delivered by the bring-up.
 
         The observer is the one head whose delivery contour is its own: it opens the pane, then puts
@@ -3333,15 +3437,15 @@ class CommandHostRuntime:
         subject: str,
         before_send: Callable[[], None] | None = None,
     ) -> None:
-        """Point this card's live worker at one thing, through the head operation (secretary-1412).
-        """
+        """Point this card's live worker at one thing, through the head operation (secretary-1412)."""
         run = self.worker_lifecycle_run(record)
         try:
             receipt = self.head_runtime_for(run).deliver(
                 run,
                 pointer,
                 transport=self._head_transport(
-                    record.workspace, "TASK.md",
+                    record.workspace,
+                    "TASK.md",
                     self._prompt_adapter(record.worker_run, record.head),
                     before_send=before_send,
                 ),
@@ -3367,9 +3471,7 @@ class CommandHostRuntime:
     def _write_prompt(self, path: Path, body: str) -> None:
         write_text_atomic(path, body)
 
-    def _review_document(
-        self, task: dict[str, Any], record: DispatcherRecord
-    ) -> tuple[Path, str]:
+    def _review_document(self, task: dict[str, Any], record: DispatcherRecord) -> tuple[Path, str]:
         """This round's review task, on disk, and the one line that points a reviewer at it.
 
         The text never travels through the pane; only a bounded pointer does. A retry re-renders the
@@ -3377,9 +3479,7 @@ class CommandHostRuntime:
         a pane is opened. Nothing here writes to or removes anything from the candidate checkout.
         """
         document = self._prompt_document_path(REVIEW_ROLE, task["ref"], record.review_baseline)
-        prompt = self._review_prompt(
-            task, record.attempt_id, record.review_baseline, record=record
-        )
+        prompt = self._review_prompt(task, record.attempt_id, record.review_baseline, record=record)
         try:
             _write_prompt_document(document, prompt, outside=Path(record.workspace))
             nudge = _nudge_for(document)
@@ -3422,7 +3522,7 @@ class CommandHostRuntime:
         for entry in entries:
             if not entry.startswith(prefix) or not entry.endswith(".md"):
                 continue
-            if not entry[len(prefix):-len(".md")].isdigit():
+            if not entry[len(prefix) : -len(".md")].isdigit():
                 continue
             try:
                 os.unlink(os.path.join(directory, entry))
@@ -3442,7 +3542,11 @@ class CommandHostRuntime:
         )
 
     def _worker_task_doc(
-        self, task: dict[str, Any], base: str, attempt_id: str, generation: int = 0,
+        self,
+        task: dict[str, Any],
+        base: str,
+        attempt_id: str,
+        generation: int = 0,
         decision: str = "",
     ) -> str:
         branch = _legacy_worker_branch(task["ref"])
@@ -3623,9 +3727,9 @@ class CommandHostRuntime:
             "either way this round is left waiting. Copy the command from here, never from an",
             "earlier turn of this conversation.",
             *_body_file_instructions(body_file),
-            f'{_CONTROL_PLANE_TASK_COMMAND} report --ref {task["ref"]} --role worker --kind done --request-id {request} --body-file {body_file}',
-            f'{_CONTROL_PLANE_TASK_COMMAND} report --ref {task["ref"]} --role worker --kind blocked --classification external_fact --request-id {blocked_requests["external_fact"]} --body-file {body_file}',
-            f'{_CONTROL_PLANE_TASK_COMMAND} report --ref {task["ref"]} --role worker --kind blocked --classification wrong_task_definition --request-id {blocked_requests["wrong_task_definition"]} --body-file {body_file}',
+            f"{_CONTROL_PLANE_TASK_COMMAND} report --ref {task['ref']} --role worker --kind done --request-id {request} --body-file {body_file}",
+            f"{_CONTROL_PLANE_TASK_COMMAND} report --ref {task['ref']} --role worker --kind blocked --classification external_fact --request-id {blocked_requests['external_fact']} --body-file {body_file}",
+            f"{_CONTROL_PLANE_TASK_COMMAND} report --ref {task['ref']} --role worker --kind blocked --classification wrong_task_definition --request-id {blocked_requests['wrong_task_definition']} --body-file {body_file}",
             "",
             f"Base branch: {base}",
             f"Worker branch: {branch}",
@@ -3642,8 +3746,12 @@ class CommandHostRuntime:
         return "\n".join(sections)
 
     def _review_prompt(
-        self, task: dict[str, Any], attempt_id: str, review_round: int,
-        *, record: DispatcherRecord | None = None,
+        self,
+        task: dict[str, Any],
+        attempt_id: str,
+        review_round: int,
+        *,
+        record: DispatcherRecord | None = None,
     ) -> str:
         # The round belongs in the key like it does in the worker report id: a card that goes red
         # twice in one attempt reuses attempt_id, and a round-less id replays the first verdict.
@@ -3686,8 +3794,8 @@ class CommandHostRuntime:
             "",
             "Post exactly one review verdict through the secretary task protocol:",
             *_body_file_instructions(body_file),
-            f'{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task["ref"]} --role reviewer --kind green --request-id {green_request} --body-file {body_file}',
-            f'{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task["ref"]} --role reviewer --kind red --request-id {red_request} --body-file {body_file}',
+            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind green --request-id {green_request} --body-file {body_file}",
+            f"{_CONTROL_PLANE_TASK_COMMAND} verdict --ref {task['ref']} --role reviewer --kind red --request-id {red_request} --body-file {body_file}",
             "",
         ]
         if attestation:
@@ -3766,7 +3874,10 @@ class CommandHostRuntime:
             return "(delta unavailable; inspect only the necessary history)"
         names = (paths.stdout or "").strip()
         summary = (stat.stdout or "").strip()
-        return "\n".join(_safe_one_line(part, limit=4000) for part in (names, summary) if part) or "(no changed paths)"
+        return (
+            "\n".join(_safe_one_line(part, limit=4000) for part in (names, summary) if part)
+            or "(no changed paths)"
+        )
 
     def _run_shell(self, command: str, cwd: Path, label: str) -> None:
         self._run(["bash", "-lc", command], label, cwd=cwd)
@@ -3779,7 +3890,9 @@ class CommandHostRuntime:
             raise HostError(f"{args[0]} returned invalid JSON") from None
         return loaded.get("result", loaded) if isinstance(loaded, dict) else {}
 
-    def _run(self, args: list[str], label: str, *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self, args: list[str], label: str, *, cwd: Path | None = None
+    ) -> subprocess.CompletedProcess[str]:
         try:
             completed = subprocess.run(args, cwd=cwd, text=True, capture_output=True, timeout=900)
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -3789,7 +3902,9 @@ class CommandHostRuntime:
             raise HostError(f"{label} failed: {_tail(text)}")
         return completed
 
-    def run_capture(self, args: list[str], label: str, *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    def run_capture(
+        self, args: list[str], label: str, *, cwd: Path | None = None
+    ) -> subprocess.CompletedProcess[str]:
         """Like _run but returns the CompletedProcess regardless of exit status (the gate reads a
         non-zero code as a red verdict, not a host failure). Still raises HostError when the process
         can't run at all."""
@@ -3830,8 +3945,10 @@ class DispatcherRuntime:
         # Sprint entities live on their own board, so they need their own reader, not the card one.
         instance = getattr(catalog, "instance", {})
         limits = budget_thresholds(instance if isinstance(instance, dict) else None)
-        self.sprints = sprints if sprints is not None else SprintReader(
-            reader.client, data_dir=Path(audit.board_dir).parent, thresholds=limits
+        self.sprints = (
+            sprints
+            if sprints is not None
+            else SprintReader(reader.client, data_dir=Path(audit.board_dir).parent, thresholds=limits)
         )
 
     def head_readiness(self, head: str) -> HeadReadiness:
@@ -3873,9 +3990,7 @@ class DispatcherRuntime:
         reference: str,
     ) -> None:
         """Give a persisted Codex HeadRun its only provider-event ingress."""
-        stored = (
-            record.worker_head_run if role == WORKER_ROLE else record.review_head_run
-        )
+        stored = record.worker_head_run if role == WORKER_ROLE else record.review_head_run
         intent = dict(record.launch_intent or {})
         if not isinstance(stored, dict) or not stored.get("run_id"):
             candidate = intent.get("head_run")
@@ -4068,9 +4183,7 @@ class DispatcherRuntime:
             "attempt_id": attempt_id,
         }
 
-    def _failover_collapse(
-        self, worker: HeadChoice, review: HeadChoice
-    ) -> dict[str, Any] | None:
+    def _failover_collapse(self, worker: HeadChoice, review: HeadChoice) -> dict[str, Any] | None:
         """The refusal when a failover would hand both roles to one head, else None.
 
         Only a failover can collapse the pair here: two roles pointed at one head by the canon itself
@@ -4126,7 +4239,8 @@ class DispatcherRuntime:
         project = str(task.get("project") or "")
         if not project:
             return ContractVerdict.as_undecidable(
-                UNDECIDABLE_NO_REGISTERED_PROJECT, "",
+                UNDECIDABLE_NO_REGISTERED_PROJECT,
+                "",
                 f"card {task.get('ref')!r} names no registered project, so it has no adapter and "
                 "no broad-check contract to judge",
             )
@@ -4134,13 +4248,19 @@ class DispatcherRuntime:
             return self.catalog.broad_check_verdict(project)
         except HostError as exc:
             return ContractVerdict.as_undecidable(
-                UNDECIDABLE_PROJECT_UNAVAILABLE, "",
+                UNDECIDABLE_PROJECT_UNAVAILABLE,
+                "",
                 f"registered project {project!r} could not be read: {exc}",
             )
 
     def _contract_preflight_decision(
-        self, task: dict[str, Any], verdict: ContractVerdict, *, attempt_id: str,
-        head: str, review_head: str,
+        self,
+        task: dict[str, Any],
+        verdict: ContractVerdict,
+        *,
+        attempt_id: str,
+        head: str,
+        review_head: str,
     ) -> tuple[BringUpFailure, str, ContractUnusable] | None:
         """What the verdict buys this card: the outcome that stops it, or None to issue it.
 
@@ -4157,7 +4277,10 @@ class DispatcherRuntime:
         """
         if verdict.state == CONTRACT_REFUSED and verdict.refusal is not None:
             failure, reason = self._contract_preflight_outcome(
-                task, attempt_id=attempt_id, head=head, review_head=review_head,
+                task,
+                attempt_id=attempt_id,
+                head=head,
+                review_head=review_head,
                 refusal=verdict.refusal,
             )
             return failure, reason, verdict.refusal
@@ -4196,11 +4319,24 @@ class DispatcherRuntime:
         # bring-up attempts of a pane that was never ready, which this failure is not; the claim's
         # own identity is what the outcome carries.
         unclaimed = DispatcherRecord(
-            worker=_worker_id(task), workspace="", handle="", head=head, review_head=review_head,
-            attempt_id=attempt_id, comment_baseline=0, review_baseline=0, state="", claimed_at=0.0,
+            worker=_worker_id(task),
+            workspace="",
+            handle="",
+            head=head,
+            review_head=review_head,
+            attempt_id=attempt_id,
+            comment_baseline=0,
+            review_baseline=0,
+            state="",
+            claimed_at=0.0,
         )
         failure = _classify_bring_up_failure(
-            None, unclaimed, WORKER_ROLE, stage=STAGE_CLAIM, attempt_id=attempt_id, detail=detail,
+            None,
+            unclaimed,
+            WORKER_ROLE,
+            stage=STAGE_CLAIM,
+            attempt_id=attempt_id,
+            detail=detail,
         )
         reason = (
             "the card was not given to a worker: this project's broad-check contract cannot "
@@ -4329,15 +4465,18 @@ class DispatcherRuntime:
                 # A preempt out of Validate leaves the worker pane closed by `start_review` but the
                 # reviewer up; left alone its verdict would land on the new attempt.
                 unconfirmed = self._end_review_pane_confirmed(
-                    active, records, payload, ref, step="claim", attempt_id=attempt_id,
+                    active,
+                    records,
+                    payload,
+                    ref,
+                    step="claim",
+                    attempt_id=attempt_id,
                     initiator=STOPPED_BY_REPLACEMENT,
                 )
                 if unconfirmed is not None:
                     return unconfirmed
             if active.needs_settling():
-                unconfirmed = self._stop_worker_confirmed(
-                    active, ref, step="claim", attempt_id=attempt_id
-                )
+                unconfirmed = self._stop_worker_confirmed(active, ref, step="claim", attempt_id=attempt_id)
                 if unconfirmed is not None:
                     return unconfirmed
         if retry_after_block or requeued:
@@ -4353,7 +4492,11 @@ class DispatcherRuntime:
         # transition below there is no step that can fail and leave the card In progress with no
         # outcome on it.
         contract_outcome = self._contract_preflight_decision(
-            task, contract_verdict, attempt_id=attempt_id, head=head, review_head=review_head,
+            task,
+            contract_verdict,
+            attempt_id=attempt_id,
+            head=head,
+            review_head=review_head,
         )
         self.writer.claim(
             role="dispatcher",
@@ -4369,8 +4512,13 @@ class DispatcherRuntime:
         if contract_outcome is not None:
             failure, blocked_reason, refusal = contract_outcome
             return self._contract_preflight_blocked(
-                ref, records, payload,
-                attempt_id=attempt_id, refusal=refusal, failure=failure, reason=blocked_reason,
+                ref,
+                records,
+                payload,
+                attempt_id=attempt_id,
+                refusal=refusal,
+                failure=failure,
+                reason=blocked_reason,
             )
         # Before the card is read back, so the comment is inside the baseline the record takes: a
         # failover head is written onto the card, where the reviewer and the observer read it.
@@ -4392,9 +4540,7 @@ class DispatcherRuntime:
             # Empty unless the walk left the card's preference behind. The pair lets the review
             # document name the head that did the work without re-resolving a moved role default.
             preferred_head=worker_choice.preferred if worker_choice.substituted else "",
-            preferred_review_head=(
-                review_choice.preferred if review_choice.substituted else ""
-            ),
+            preferred_review_head=(review_choice.preferred if review_choice.substituted else ""),
         )
         # The journal, not the board, knows how many rounds a card has had: a return to Ready adds one.
         self.open_worker_round(record, round_number=self._journal_round(ref) + 1)
@@ -4498,7 +4644,11 @@ class DispatcherRuntime:
         # The launch intent already contains the exact preflight HeadRun. Bind its provider source
         # before `prepare_worker` can create a pane, not after TASK.md has been delivered.
         self.bind_codex_provider_ingress(
-            record, records, payload, role=WORKER_ROLE, reference=ref,
+            record,
+            records,
+            payload,
+            role=WORKER_ROLE,
+            reference=ref,
         )
         try:
             prepared = self.host.prepare_worker(
@@ -4557,7 +4707,9 @@ class DispatcherRuntime:
             records.pop(ref, None)
             self.save_records(payload, records)
             return {
-                "status": "blocked", "step": "claim", "pilot_ref": ref,
+                "status": "blocked",
+                "step": "claim",
+                "pilot_ref": ref,
                 "reason": "host bring-up failed",
                 **failure.outcome_fields(reason),
             }
@@ -4639,8 +4791,7 @@ class DispatcherRuntime:
         attempt_id: str,
         initiator: str,
     ) -> dict[str, Any] | None:
-        """End the reviewer before a replacement head opens. Returns the tick's outcome on refusal.
-        """
+        """End the reviewer before a replacement head opens. Returns the tick's outcome on refusal."""
         try:
             _end_review_pane(self.host, record, initiator)
         except HostError as exc:
@@ -4714,8 +4865,7 @@ class DispatcherRuntime:
         step: str,
         attempt_id: str,
     ) -> dict[str, Any] | None:
-        """The aborted-launch outcome when this failure may have left a worker running, else None.
-        """
+        """The aborted-launch outcome when this failure may have left a worker running, else None."""
         _record_worker_delivery_evidence(record, exc, failure=True)
         if not isinstance(exc, HeadLaunchAborted):
             if not _launch_left_a_head(record):
@@ -4730,9 +4880,7 @@ class DispatcherRuntime:
             payload, records, ref, record, exc, step=step, attempt_id=attempt_id
         )
 
-    def _settle_worker_pane(
-        self, ref: str, record: DispatcherRecord, handle: str, leaf: str
-    ) -> None:
+    def _settle_worker_pane(self, ref: str, record: DispatcherRecord, handle: str, leaf: str) -> None:
         """Put the pane identity of a worker head that is already up onto its record."""
         record.handle = handle
         record.worker_leaf = leaf
@@ -4761,7 +4909,11 @@ class DispatcherRuntime:
         try:
             self._require_head_ready(record.head)
             self.bind_codex_provider_ingress(
-                record, records, payload, role=WORKER_ROLE, reference=ref,
+                record,
+                records,
+                payload,
+                role=WORKER_ROLE,
+                reference=ref,
             )
             launched = self.host.restart_worker(
                 task, record, heartbeat_run_id=str((record.launch_intent or {}).get("run_id") or "")
@@ -4806,8 +4958,14 @@ class DispatcherRuntime:
         # The head is up. Its pane, launch configuration and own run go into the intent before
         # anything else, so an adoption gets the run that launched rather than a fresh identity.
         _confirm_launch_intent(
-            self, payload, records, ref, record,
-            handle=launched.handle, leaf=launched.leaf, run=launched.run,
+            self,
+            payload,
+            records,
+            ref,
+            record,
+            handle=launched.handle,
+            leaf=launched.leaf,
+            run=launched.run,
             head_run=dict(launched.head_run),
         )
         _record_worker_delivery_evidence(record, launched.delivery_evidence)
@@ -4883,7 +5041,9 @@ class DispatcherRuntime:
         marker = _round_report_marker(
             self.audit,
             ref,
-            _round_report_ids(record.workspace, record.attempt_id or attempt_id, ref, record.report_generation),
+            _round_report_ids(
+                record.workspace, record.attempt_id or attempt_id, ref, record.report_generation
+            ),
         )
         continuation = record.worker_continuation
         if continuation.delivery_pending:
@@ -4894,26 +5054,38 @@ class DispatcherRuntime:
                 records[ref] = record
                 self.save_records(payload, records)
                 return self._finish_retained_worker_resume(
-                    task, record, records, payload, attempt_id,
+                    task,
+                    record,
+                    records,
+                    payload,
+                    attempt_id,
                     phase=continuation.phase or "gate",
                 )
             # Progress is sampled before the persisted readiness backoff is interpreted. A new
             # provider cursor beats a busy pane and resets only that ladder, never the HeadRun.
             now = time.time()
-            provider_observation = self._observe_retained_continuation_progress(
-                task, record, now=now
-            )
+            provider_observation = self._observe_retained_continuation_progress(task, record, now=now)
             blocked = self._block_unadmitted_continuation_liveness(
-                task, record, records, payload, attempt_id,
-                phase=continuation.phase or "gate", observation=provider_observation,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                phase=continuation.phase or "gate",
+                observation=provider_observation,
             )
             if blocked is not None:
                 return blocked
             fresh_provider_progress = provider_observation == "progressed"
             pending = self._continuation_recovery_window(
-                task, record, records, payload, attempt_id,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
                 phase=continuation.phase or "gate",
-                fresh_provider_progress=fresh_provider_progress, now=now,
+                fresh_provider_progress=fresh_provider_progress,
+                now=now,
             )
             if pending is not None:
                 return pending
@@ -4926,13 +5098,14 @@ class DispatcherRuntime:
             ):
                 continuation.busy_next_at = now + BUSY_RETRY_INITIAL_SECONDS
                 return _retained_worker_busy_deferred(
-                    ref, record, attempt_id, continuation.phase or "gate",
+                    ref,
+                    record,
+                    attempt_id,
+                    continuation.phase or "gate",
                     delay=BUSY_RETRY_INITIAL_SECONDS,
                 )
             if not continuation.busy_retry_due(time.time()):
-                return _retained_worker_busy_deferred(
-                    ref, record, attempt_id, continuation.phase or "gate"
-                )
+                return _retained_worker_busy_deferred(ref, record, attempt_id, continuation.phase or "gate")
             # Nothing is woken from here: the suspension is a fact of the tick that died, and
             # re-entering the transition is what asks the heartbeat again before reopening.
             return self._deliver_red_continuation(
@@ -4962,13 +5135,17 @@ class DispatcherRuntime:
                 )
                 record.state = "validate"
                 self.save_records(payload, records)
-                return {"status": "ok", "step": "advance", "pilot_ref": ref, "attempt_id": attempt_id, "to": "validate"}
+                return {
+                    "status": "ok",
+                    "step": "advance",
+                    "pilot_ref": ref,
+                    "attempt_id": attempt_id,
+                    "to": "validate",
+                }
             try:
                 self.host.verify_worker_result(task, record)
             except HostError as exc:
-                unconfirmed = self._stop_worker_confirmed(
-                    record, ref, step="advance", attempt_id=attempt_id
-                )
+                unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
                 if unconfirmed is not None:
                     return unconfirmed
                 self.writer.move(
@@ -4993,7 +5170,12 @@ class DispatcherRuntime:
             if current_sha and current_sha == record.rejected_sha:
                 if record.rejected_failure_class == "infrastructure":
                     return self._accept_stale_infrastructure_done(
-                        task, record, records, payload, attempt_id, current_sha,
+                        task,
+                        record,
+                        records,
+                        payload,
+                        attempt_id,
+                        current_sha,
                     )
                 return self._reject_stale_done(task, record, records, payload, attempt_id, current_sha)
             record.rejected_done_reports = 0
@@ -5034,11 +5216,15 @@ class DispatcherRuntime:
                 continuation.confirm_validation_move()
             record.state = "validate"
             self.save_records(payload, records)
-            return {"status": "ok", "step": "advance", "pilot_ref": ref, "attempt_id": attempt_id, "to": "validate"}
+            return {
+                "status": "ok",
+                "step": "advance",
+                "pilot_ref": ref,
+                "attempt_id": attempt_id,
+                "to": "validate",
+            }
         if marker == "report:blocked":
-            unconfirmed = self._stop_worker_confirmed(
-                record, ref, step="advance", attempt_id=attempt_id
-            )
+            unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
             if unconfirmed is not None:
                 return unconfirmed
             self.writer.move(
@@ -5050,7 +5236,13 @@ class DispatcherRuntime:
                 request_id=_attempt_request_id(record.attempt_id or attempt_id, "worker-blocked", ref),
             )
             records.pop(ref, None)
-            return {"status": "ok", "step": "advance", "pilot_ref": ref, "attempt_id": attempt_id, "to": "blocked"}
+            return {
+                "status": "ok",
+                "step": "advance",
+                "pilot_ref": ref,
+                "attempt_id": attempt_id,
+                "to": "blocked",
+            }
         watchdog = self._wait_watchdog(task, record, records, payload, attempt_id, kind="worker")
         if watchdog is not None:
             return watchdog
@@ -5080,7 +5272,12 @@ class DispatcherRuntime:
         ref = task["ref"]
         if record.rejected_done_reports:
             return self._block_repeated_infrastructure_done(
-                task, record, records, payload, attempt_id, sha,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                sha,
             )
         try:
             self.host.retain_worker(record)
@@ -5111,7 +5308,9 @@ class DispatcherRuntime:
                 "No worker rework round was opened."
             ),
             request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, "stale-done-infrastructure-retry", ref,
+                record.attempt_id or attempt_id,
+                "stale-done-infrastructure-retry",
+                ref,
                 str(record.report_generation),
             ),
         )
@@ -5125,24 +5324,34 @@ class DispatcherRuntime:
             reference=ref,
             target="validate",
             reason=(
-                "worker report:done retries an infrastructure-classified mechanical gate on the "
-                "same SHA"
+                "worker report:done retries an infrastructure-classified mechanical gate on the same SHA"
             ),
             request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, "stale-done-infrastructure-validate", ref,
+                record.attempt_id or attempt_id,
+                "stale-done-infrastructure-validate",
+                ref,
                 str(record.report_generation),
             ),
         )
         record.state = "validate"
         self.save_records(payload, records)
         return {
-            "status": "ok", "step": "advance", "pilot_ref": ref, "attempt_id": attempt_id,
-            "to": "validate", "action": "stale-done-infrastructure-retry",
+            "status": "ok",
+            "step": "advance",
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "to": "validate",
+            "action": "stale-done-infrastructure-retry",
         }
 
     def _block_repeated_infrastructure_done(
-        self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
-        payload: dict[str, Any], attempt_id: str, sha: str,
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        sha: str,
     ) -> dict[str, Any]:
         """A second stale infra report cannot add evidence after the accepted gate retry."""
         ref = task["ref"]
@@ -5151,7 +5360,10 @@ class DispatcherRuntime:
             return unconfirmed
         reports = record.rejected_done_reports + 1
         self.writer.move(
-            role="dispatcher", actor=self.owner, reference=ref, target="blocked",
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            target="blocked",
             reason=(
                 f"The worker reported done {reports} times on unchanged infrastructure-classified "
                 f"HEAD {sha} ({record.rejected_failure_reason or 'enumerated CI-service signature'}). "
@@ -5159,13 +5371,21 @@ class DispatcherRuntime:
                 "identical report has no new gate evidence."
             ),
             request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, "stale-done-infrastructure-blocked", ref, str(reports),
+                record.attempt_id or attempt_id,
+                "stale-done-infrastructure-blocked",
+                ref,
+                str(reports),
             ),
         )
         records.pop(ref, None)
         self.save_records(payload, records)
-        return {"status": "blocked", "step": "advance", "pilot_ref": ref, "attempt_id": attempt_id,
-                "action": "stale-done-infrastructure-blocked"}
+        return {
+            "status": "blocked",
+            "step": "advance",
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "action": "stale-done-infrastructure-blocked",
+        }
 
     def _reject_stale_done(
         self,
@@ -5180,9 +5400,7 @@ class DispatcherRuntime:
         ref = task["ref"]
         rejected = record.rejected_done_reports + 1
         if rejected >= 2:
-            unconfirmed = self._stop_worker_confirmed(
-                record, ref, step="advance", attempt_id=attempt_id
-            )
+            unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
             if unconfirmed is not None:
                 return unconfirmed
             record.rejected_done_reports = rejected
@@ -5197,7 +5415,10 @@ class DispatcherRuntime:
                     "this."
                 ),
                 request_id=_attempt_request_id(
-                    record.attempt_id or attempt_id, "stale-done-blocked", ref, str(record.rejected_done_reports)
+                    record.attempt_id or attempt_id,
+                    "stale-done-blocked",
+                    ref,
+                    str(record.rejected_done_reports),
                 ),
             )
             records.pop(ref, None)
@@ -5243,9 +5464,7 @@ class DispatcherRuntime:
         _reset_wait(record, "worker")
         _reset_wait(record, "review")
         moved = self.reader.show(ref)
-        failure = self._worker_relaunch_intent(
-            payload, records, ref, record, action="stale-done-rework"
-        )
+        failure = self._worker_relaunch_intent(payload, records, ref, record, action="stale-done-rework")
         if failure is not None:
             return _launch_intent_unwritable(
                 step="advance",
@@ -5318,7 +5537,12 @@ class DispatcherRuntime:
             # first: ending the reviewer forgets the commit it judged and the park has to keep it.
             reviewed = record.review_commit or self.host.head_commit(record)
             unconfirmed = self._end_review_pane_confirmed(
-                record, records, payload, ref, step="review", attempt_id=attempt_id,
+                record,
+                records,
+                payload,
+                ref,
+                step="review",
+                attempt_id=attempt_id,
                 initiator=STOPPED_BY_REVIEW_VERDICT,
             )
             if unconfirmed is not None:
@@ -5341,14 +5565,25 @@ class DispatcherRuntime:
                         task, record, records, payload, attempt_id, reds=reds
                     )
                 return self._begin_red_transition(
-                    task, record, records, payload, attempt_id, phase="review",
-                    move_reason="review:red", verdict_outcome="red",
+                    task,
+                    record,
+                    records,
+                    payload,
+                    attempt_id,
+                    phase="review",
+                    move_reason="review:red",
+                    verdict_outcome="red",
                 )
             # The worker of this round stays suspended through the park: the observer may send the
             # findings back to it, and that conversation is only worth keeping if nothing else writes.
             self._record_verdict_routing(ref, record, "red")
             return self._begin_park(
-                task, record, records, payload, attempt_id, verdict_outcome="red",
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                verdict_outcome="red",
                 reviewed_commit=reviewed,
                 move_reason=(
                     "review:red. The card is parked in Assessment: the reviewer is stopped and "
@@ -5369,9 +5604,7 @@ class DispatcherRuntime:
                 # The record remembers a suspended worker the host cannot confirm is frozen.
                 # Ambiguous liveness is never permission to leave it beside the reviewer, so the
                 # confirmed stop runs before the reviewer launch intent is written.
-                unconfirmed = self._stop_worker_confirmed(
-                    record, ref, step="review", attempt_id=attempt_id
-                )
+                unconfirmed = self._stop_worker_confirmed(record, ref, step="review", attempt_id=attempt_id)
                 if unconfirmed is not None:
                     return unconfirmed
                 records[ref] = record
@@ -5414,10 +5647,20 @@ class DispatcherRuntime:
     ) -> dict[str, Any] | None:
         """Watch an open-ended wait without confusing a bad Orca inventory for a dead head."""
         if getattr(record, f"paused_{'reviewer' if kind == 'review' else 'worker'}_at"):
-            return {"status": "ok", "step": "review" if kind == "review" else "advance", "pilot_ref": task["ref"], "attempt_id": attempt_id, "action": f"{kind}-paused"}
+            return {
+                "status": "ok",
+                "step": "review" if kind == "review" else "advance",
+                "pilot_ref": task["ref"],
+                "attempt_id": attempt_id,
+                "action": f"{kind}-paused",
+            }
         runtime_reason = ""
         try:
-            status = self.host.review_status(task, record) if kind == "review" else self.host.worker_status(task, record)
+            status = (
+                self.host.review_status(task, record)
+                if kind == "review"
+                else self.host.worker_status(task, record)
+            )
         except Exception as exc:
             # Orca may be down or between reconnects. That is no evidence this head died, so do not
             # restart it; it also cannot prove progress, so the ordinary wait ceiling stays.
@@ -5452,9 +5695,18 @@ class DispatcherRuntime:
         # that vanished while the heartbeat stays live is decided by evidence, not by
         # the inventory.
         return self._decide_wait_by_verdict(
-            task, record, records, payload, attempt_id,
-            kind=kind, status=status, episode=episode, now=now,
-            runtime_reason=runtime_reason, activity=activity, progress_at=progress_at,
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            kind=kind,
+            status=status,
+            episode=episode,
+            now=now,
+            runtime_reason=runtime_reason,
+            activity=activity,
+            progress_at=progress_at,
         )
 
     def _decide_wait_by_verdict(
@@ -5508,9 +5760,12 @@ class DispatcherRuntime:
         def plain_wait() -> dict[str, Any] | None:
             if runtime_reason:
                 return {
-                    "status": "degraded", "step": "review" if kind == "review" else "advance",
-                    "pilot_ref": ref, "attempt_id": attempt_id,
-                    "action": f"{kind}-runtime-unavailable", "reason": runtime_reason,
+                    "status": "degraded",
+                    "step": "review" if kind == "review" else "advance",
+                    "pilot_ref": ref,
+                    "attempt_id": attempt_id,
+                    "action": f"{kind}-runtime-unavailable",
+                    "reason": runtime_reason,
                 }
             return None
 
@@ -5518,7 +5773,12 @@ class DispatcherRuntime:
             # The heartbeat names a gone process: the existing not-live handling, from
             # the same evidence the reduction used.
             return self._trigger_wait_watchdog(
-                task, record, records, payload, attempt_id, kind=kind,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                kind=kind,
                 trigger="the pid heartbeat names a gone or unreaped process",
             )
         if verdict is VitalityVerdict.CONFIRMED_STALL:
@@ -5539,8 +5799,14 @@ class DispatcherRuntime:
             # Degraded, not ok: an `ok` bounce would write healthy telemetry over the
             # one signal that says this card needs looking at before it reaches Blocked.
             return self._trigger_wait_watchdog(
-                task, record, records, payload, attempt_id, kind=kind,
-                trigger=reason, degraded=True,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                kind=kind,
+                trigger=reason,
+                degraded=True,
             )
         if verdict is VitalityVerdict.SUSPECTED_STALL:
             # One idempotent nudge, then wait: the suspicion phase exists so a single
@@ -5548,7 +5814,11 @@ class DispatcherRuntime:
             suspicion_basis = episode.reason or "strong quiet past the suspect threshold"
             if kind == "worker":
                 prompted, trigger = self._prompt_worker_report(
-                    task, record, records, payload, attempt_id,
+                    task,
+                    record,
+                    records,
+                    payload,
+                    attempt_id,
                     trigger=(
                         f"the {kind} head's vitality episode suspects a stall "
                         f"({suspicion_basis}) with no {expectation}"
@@ -5561,13 +5831,16 @@ class DispatcherRuntime:
                 return {
                     "status": "degraded",
                     "step": "review" if kind == "review" else "advance",
-                    "pilot_ref": ref, "attempt_id": attempt_id,
-                    "action": f"{kind}-stall-suspected", "reason": trigger,
+                    "pilot_ref": ref,
+                    "attempt_id": attempt_id,
+                    "action": f"{kind}-stall-suspected",
+                    "reason": trigger,
                 }
             return {
                 "status": "degraded",
                 "step": "review" if kind == "review" else "advance",
-                "pilot_ref": ref, "attempt_id": attempt_id,
+                "pilot_ref": ref,
+                "attempt_id": attempt_id,
                 "action": f"{kind}-stall-suspected",
                 "reason": (
                     f"the review head's vitality episode suspects a stall "
@@ -5579,8 +5852,14 @@ class DispatcherRuntime:
             # suspension span, then a bounded response window, then operator escalation --
             # never a stop. The comment is keyed per span so it cannot flood.
             return self._execute_recovery_intent(
-                task, record, records, payload, attempt_id,
-                episode=episode, kind=kind, now=now,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                episode=episode,
+                kind=kind,
+                now=now,
             )
         if verdict in (VitalityVerdict.HEALTHY_ACTIVE, VitalityVerdict.HEALTHY_QUIET):
             # Fresh evidence of life: renew the outer window and wait. No clock on this
@@ -5588,7 +5867,13 @@ class DispatcherRuntime:
             # lands here too; the policy's rung reset rides the same recovery decision,
             # persisted back onto this same role's episode slot.
             self._run_recovery_policy(
-                task, record, records, payload, episode=episode, kind=kind, now=now,
+                task,
+                record,
+                records,
+                payload,
+                episode=episode,
+                kind=kind,
+                now=now,
             )
             setattr(record, f"{kind}_waiting_since", now)
             self.save_records(payload, records)
@@ -5608,7 +5893,14 @@ class DispatcherRuntime:
         # deterministic refusal riding this tick's unavailable snapshot (the 1194 class)
         # escalates after N identical sightings instead of waiting out any ceiling.
         policy_outcome = self._recovery_policy_outcome(
-            task, record, records, payload, attempt_id, episode=episode, kind=kind, now=now,
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            episode=episode,
+            kind=kind,
+            now=now,
         )
         if policy_outcome is not None:
             return policy_outcome
@@ -5617,17 +5909,29 @@ class DispatcherRuntime:
         started_at = float(getattr(record, f"{kind}_started_at") or 0.0)
         pid_confirmed = bool(status.get("pid_confirmed"))
         if (
-            not pid_confirmed and activity and started_at
+            not pid_confirmed
+            and activity
+            and started_at
             and float(activity) <= started_at
             and now - started_at > _initial_output_stall_seconds()
         ):
             return self._trigger_wait_watchdog(
-                task, record, records, payload, attempt_id, kind=kind,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                kind=kind,
                 trigger=f"no terminal output since launch for {int(now - started_at)}s",
             )
         if progress_at and now - progress_at > stall:
             return self._trigger_wait_watchdog(
-                task, record, records, payload, attempt_id, kind=kind,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                kind=kind,
                 trigger=f"no terminal output for {int(now - progress_at)}s",
             )
         if not waiting_since:
@@ -5637,8 +5941,12 @@ class DispatcherRuntime:
         unobserved_for = now - waiting_since
         if unobserved_for >= stall:
             return self._escalate_unobservable_wait(
-                task, record, attempt_id, kind=kind,
-                seconds=int(unobserved_for), ceiling=stall,
+                task,
+                record,
+                attempt_id,
+                kind=kind,
+                seconds=int(unobserved_for),
+                ceiling=stall,
                 runtime_reason=runtime_reason,
             )
         return plain_wait()
@@ -5680,7 +5988,9 @@ class DispatcherRuntime:
                 "waiting until someone looks or the head becomes observable again."
             ),
             request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, f"{kind}-unobserved-wait", ref,
+                record.attempt_id or attempt_id,
+                f"{kind}-unobserved-wait",
+                ref,
                 _wait_cycle_token(record),
             ),
         )
@@ -5726,8 +6036,7 @@ class DispatcherRuntime:
         # An observe with unchanged state rewrites nothing: persisting per tick would churn
         # the record for zero information. Only a rung/refusal change is worth a save.
         if decision.intent is _RecoveryIntent.OBSERVE and (
-            episode.recovery_rung == decision.rung
-            and episode.deterministic_refusals == decision.refusals
+            episode.recovery_rung == decision.rung and episode.deterministic_refusals == decision.refusals
         ):
             return decision, episode
         updated = _apply_rung_state(episode, decision)
@@ -5771,12 +6080,22 @@ class DispatcherRuntime:
         decision, updated = asked
         if updated is not episode:
             self._store_recovery_episode(
-                record, records, payload, task["ref"], kind=kind, episode=updated,
+                record,
+                records,
+                payload,
+                task["ref"],
+                kind=kind,
+                episode=updated,
             )
         if decision.intent is not _RecoveryIntent.ESCALATE_OPERATOR:
             return None
         return self._escalate_recovery_to_operator(
-            task, record, attempt_id, kind=kind, decision=decision, now=now,
+            task,
+            record,
+            attempt_id,
+            kind=kind,
+            decision=decision,
+            now=now,
         )
 
     def _run_recovery_policy(
@@ -5811,7 +6130,12 @@ class DispatcherRuntime:
         _, updated = asked
         if updated is not episode:
             self._store_recovery_episode(
-                record, records, payload, task["ref"], kind=kind, episode=updated,
+                record,
+                records,
+                payload,
+                task["ref"],
+                kind=kind,
+                episode=updated,
             )
 
     def _execute_recovery_intent(
@@ -5843,9 +6167,12 @@ class DispatcherRuntime:
         asked = self._recovery_policy_decision(episode=episode, kind=kind, now=now)
         if asked is None:
             return {
-                "status": "degraded", "step": "review" if kind == "review" else "advance",
-                "pilot_ref": ref, "attempt_id": attempt_id,
-                "action": f"{kind}-suspension-observed", "reason": "no vitality episode on file",
+                "status": "degraded",
+                "step": "review" if kind == "review" else "advance",
+                "pilot_ref": ref,
+                "attempt_id": attempt_id,
+                "action": f"{kind}-suspension-observed",
+                "reason": "no vitality episode on file",
             }
         decision, updated = asked
         self._store_recovery_episode(record, records, payload, ref, kind=kind, episode=updated)
@@ -5858,8 +6185,8 @@ class DispatcherRuntime:
                 + (
                     f"Sent one identity-fenced SIGCONT; holding a "
                     f"{int(decision.detail['response_window_seconds'])}s response window before escalating."
-                    if sent else
-                    "Could NOT verify the process identity, so nothing was signalled; "
+                    if sent
+                    else "Could NOT verify the process identity, so nothing was signalled; "
                     "holding the response window and watching."
                 )
                 + " The head was not stopped."
@@ -5870,12 +6197,16 @@ class DispatcherRuntime:
                 reference=ref,
                 body=body,
                 request_id=_attempt_request_id(
-                    record.attempt_id or attempt_id, f"{kind}-vitality-sigcont", ref,
+                    record.attempt_id or attempt_id,
+                    f"{kind}-vitality-sigcont",
+                    ref,
                     suffix=_request_token(f"sigcont@{decision.detail['span_started_at']:.0f}"),
                 ),
             )
             return {
-                "status": "degraded", "step": step, "pilot_ref": ref,
+                "status": "degraded",
+                "step": step,
+                "pilot_ref": ref,
                 "attempt_id": attempt_id,
                 "action": f"{kind}-sigcont-sent" if sent else f"{kind}-sigcont-fenced",
                 "reason": decision.reason,
@@ -5883,10 +6214,16 @@ class DispatcherRuntime:
             }
         if decision.intent is _RecoveryIntent.ESCALATE_OPERATOR:
             self._escalate_suspended_head(
-                task, record, attempt_id, kind=kind, decision=decision,
+                task,
+                record,
+                attempt_id,
+                kind=kind,
+                decision=decision,
             )
             return {
-                "status": "degraded", "step": step, "pilot_ref": ref,
+                "status": "degraded",
+                "step": step,
+                "pilot_ref": ref,
                 "attempt_id": attempt_id,
                 "action": f"{kind}-suspension-escalated",
                 "reason": decision.reason,
@@ -5895,7 +6232,9 @@ class DispatcherRuntime:
         # Observe: inside the response window (or already escalated and holding).
         return {
             "status": "ok" if decision.rung < _RUNG_ESCALATED else "degraded",
-            "step": step, "pilot_ref": ref, "attempt_id": attempt_id,
+            "step": step,
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
             "action": f"{kind}-suspension-observed",
             "reason": decision.reason,
             "recovery": decision.to_json(),
@@ -5929,7 +6268,11 @@ class DispatcherRuntime:
         leaf = record.review_leaf if kind == "review" else record.worker_leaf
         try:
             status = _guard_head_run_identity(
-                pid_file, run=run, role=kind, task=f"card:{task['ref']}", leaf=leaf,
+                pid_file,
+                run=run,
+                role=kind,
+                task=f"card:{task['ref']}",
+                leaf=leaf,
             )
         except _HeadRunIdentityMismatch:
             return False
@@ -5978,8 +6321,10 @@ class DispatcherRuntime:
                 f", heartbeat {record.review_pid_file if kind == 'review' else record.worker_pid_file})."
             ),
             request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, f"{kind}-suspension-window-expired",
-                task["ref"], suffix=_request_token(f"suspended@{window:.0f}"),
+                record.attempt_id or attempt_id,
+                f"{kind}-suspension-window-expired",
+                task["ref"],
+                suffix=_request_token(f"suspended@{window:.0f}"),
             ),
         )
 
@@ -6015,8 +6360,10 @@ class DispatcherRuntime:
                 "instead of re-sending; nothing was stopped or replaced."
             ),
             request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, f"{kind}-deterministic-refusal",
-                ref, str(detail.get("identical_refusals") or 0),
+                record.attempt_id or attempt_id,
+                f"{kind}-deterministic-refusal",
+                ref,
+                str(detail.get("identical_refusals") or 0),
             ),
         )
         return {
@@ -6043,9 +6390,10 @@ class DispatcherRuntime:
             getattr(record, field_name),
             action,
             time.time(),
-            current_run_id=current_run_id or str(
-                ((record.review_head_run if kind == "review" else record.worker_head_run)
-                 or {}).get("run_id") or ""
+            current_run_id=current_run_id
+            or str(
+                ((record.review_head_run if kind == "review" else record.worker_head_run) or {}).get("run_id")
+                or ""
             ),
             pid_only_outer_ceiling_seconds=float(_stall_seconds(kind)),
         )
@@ -6073,7 +6421,10 @@ class DispatcherRuntime:
         the wait-cycle token, like every other watchdog comment).
         """
         decision = self._vitality_guard_decision(
-            record, kind=kind, action=action, current_run_id=current_run_id,
+            record,
+            kind=kind,
+            action=action,
+            current_run_id=current_run_id,
         )
         if decision.allowed:
             return proceed()
@@ -6151,8 +6502,11 @@ class DispatcherRuntime:
             return None
         pid_status = status.get("pid_status")
         provider_progress = status.get("provider_progress")
-        if not isinstance(pid_status, dict) and not isinstance(provider_progress, dict) \
-                and "idle" not in status:
+        if (
+            not isinstance(pid_status, dict)
+            and not isinstance(provider_progress, dict)
+            and "idle" not in status
+        ):
             # Nothing was observed at all (the noop host, a runtime-unavailable tick): there is
             # no reduction to run and no episode to write, so return before saving anything.
             # Writing one would both rewrite the state file every such tick and stamp an
@@ -6166,7 +6520,8 @@ class DispatcherRuntime:
             run_id=run_id,
             previous_cursor=(
                 (previous.evidence_cursors or {}).get(_SnapshotSource.PROVIDER_CURSOR.value, "")
-                if previous is not None else ""
+                if previous is not None
+                else ""
             ),
             observed_at=now,
         )
@@ -6182,7 +6537,9 @@ class DispatcherRuntime:
                 reference=task["ref"],
                 body=f"Vitality shadow reduction failed and was skipped: {scrub_host_output(str(exc))[:160]}",
                 request_id=_attempt_request_id(
-                    record.attempt_id or "", f"{kind}-vitality-error", task["ref"],
+                    record.attempt_id or "",
+                    f"{kind}-vitality-error",
+                    task["ref"],
                     suffix=_request_token(str(now)),
                 ),
             )
@@ -6210,8 +6567,12 @@ class DispatcherRuntime:
         # `secretary head-status` (`dispatch/head_status.py`, the row's `episode.basis`).
         # Anything a future edit wants to add here has to enter the suffix above with it.
         request_id = _attempt_request_id(
-            record.attempt_id or "", f"{kind}-vitality-verdict", task["ref"],
-            suffix=_request_token(f"{previous.verdict.value if previous else 'none'}->{episode.verdict.value}"),
+            record.attempt_id or "",
+            f"{kind}-vitality-verdict",
+            task["ref"],
+            suffix=_request_token(
+                f"{previous.verdict.value if previous else 'none'}->{episode.verdict.value}"
+            ),
         )
         self.writer.comment(
             role="dispatcher",
@@ -6223,7 +6584,8 @@ class DispatcherRuntime:
                 + ". The basis and the live measurement behind this verdict stay on the"
                 + " durable vitality episode; read them with `secretary head-status`."
                 + (
-                    "" if episode.verdict in DESTRUCTIVE_VERDICTS
+                    ""
+                    if episode.verdict in DESTRUCTIVE_VERDICTS
                     else " Recorded only - does not authorise destruction."
                 )
             ),
@@ -6312,8 +6674,17 @@ class DispatcherRuntime:
         }, trigger
 
     def _trigger_wait_watchdog(
-        self, task, record, records, payload, attempt_id, *, kind: str, trigger: str,
-        stall: int | None = None, degraded: bool = False,
+        self,
+        task,
+        record,
+        records,
+        payload,
+        attempt_id,
+        *,
+        kind: str,
+        trigger: str,
+        stall: int | None = None,
+        degraded: bool = False,
     ):
         """The verdict-driven recovery entry point (S1-4): respawn once, then escalate.
 
@@ -6324,19 +6695,38 @@ class DispatcherRuntime:
         verdict that does not authorise destruction turns into a visible wait instead of
         a stop.
         """
-        action = f"{kind}-escalate" \
-            if int(getattr(record, f"{kind}_respawns") or 0) >= 1 else f"{kind}-respawn"
+        action = (
+            f"{kind}-escalate" if int(getattr(record, f"{kind}_respawns") or 0) >= 1 else f"{kind}-respawn"
+        )
         return self._guard_or_wait(
-            task, record, records, payload, attempt_id, kind=kind, now=time.time(),
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            kind=kind,
+            now=time.time(),
             action=action,
             proceed=lambda: (
                 self._respawn_wait(
-                    task, record, records, payload, attempt_id, kind=kind,
-                    now=time.time(), trigger=trigger, degraded=degraded,
+                    task,
+                    record,
+                    records,
+                    payload,
+                    attempt_id,
+                    kind=kind,
+                    now=time.time(),
+                    trigger=trigger,
+                    degraded=degraded,
                 )
                 if action == f"{kind}-respawn"
                 else self._escalate_wait(
-                    task, record, records, payload, attempt_id, kind=kind,
+                    task,
+                    record,
+                    records,
+                    payload,
+                    attempt_id,
+                    kind=kind,
                     stall=_stall_seconds(kind) if stall is None else stall,
                     trigger=trigger,
                 )
@@ -6362,7 +6752,12 @@ class DispatcherRuntime:
             # Only the reviewer is stalled; its pane goes and the workspace stays. A stall is not a
             # death, so an unconfirmed stop ends the tick rather than adding a second reviewer.
             unconfirmed = self._end_review_pane_confirmed(
-                record, records, payload, ref, step=step, attempt_id=attempt_id,
+                record,
+                records,
+                payload,
+                ref,
+                step=step,
+                attempt_id=attempt_id,
                 initiator=STOPPED_BY_WATCHDOG,
             )
             if unconfirmed is not None:
@@ -6376,14 +6771,10 @@ class DispatcherRuntime:
                 return outcome
         else:
             # Same as the reviewer above: a silent worker is not a dead one.
-            unconfirmed = self._stop_worker_confirmed(
-                record, ref, step=step, attempt_id=attempt_id
-            )
+            unconfirmed = self._stop_worker_confirmed(record, ref, step=step, attempt_id=attempt_id)
             if unconfirmed is not None:
                 return unconfirmed
-            failure = self._worker_relaunch_intent(
-                payload, records, ref, record, action="worker-respawn"
-            )
+            failure = self._worker_relaunch_intent(payload, records, ref, record, action="worker-respawn")
             if failure is not None:
                 return _launch_intent_unwritable(
                     step=step,
@@ -6434,7 +6825,8 @@ class DispatcherRuntime:
                 + (
                     " The report round did not move: the same TASK.md is back in the checkout, "
                     f"with the report commands for generation {record.report_generation}."
-                    if kind == "worker" else ""
+                    if kind == "worker"
+                    else ""
                 )
                 + " Another stall escalates to Blocked."
             ),
@@ -6474,19 +6866,20 @@ class DispatcherRuntime:
             # The reviewer may still hold the checkout when its second stall escalates. End it
             # through the same confirmed boundary; a refused stop leaves the record for the retry.
             unconfirmed = self._end_review_pane_confirmed(
-                record, records, payload, ref, step=step, attempt_id=attempt_id,
+                record,
+                records,
+                payload,
+                ref,
+                step=step,
+                attempt_id=attempt_id,
                 initiator=STOPPED_BY_WATCHDOG,
             )
             if unconfirmed is not None:
                 return unconfirmed
             # Review starts over a retained worker: settle that role before dropping the record.
-            unconfirmed = self._stop_worker_confirmed(
-                record, ref, step=step, attempt_id=attempt_id
-            )
+            unconfirmed = self._stop_worker_confirmed(record, ref, step=step, attempt_id=attempt_id)
         else:
-            unconfirmed = self._stop_worker_confirmed(
-                record, ref, step=step, attempt_id=attempt_id
-            )
+            unconfirmed = self._stop_worker_confirmed(record, ref, step=step, attempt_id=attempt_id)
         if unconfirmed is not None:
             return unconfirmed
         self.writer.move(
@@ -6494,10 +6887,7 @@ class DispatcherRuntime:
             actor=self.owner,
             reference=ref,
             target="blocked",
-            reason=(
-                f"wait watchdog: {trigger} after respawn "
-                f"(ceiling {stall}s), blocked for the operator"
-            ),
+            reason=(f"wait watchdog: {trigger} after respawn (ceiling {stall}s), blocked for the operator"),
             request_id=_attempt_request_id(
                 record.attempt_id or attempt_id, f"{kind}-wait-stall", ref, _wait_cycle_token(record)
             ),
@@ -6527,12 +6917,23 @@ class DispatcherRuntime:
             result = self.host.gate_check(task, record)
         except GateTransportError as exc:
             retry = self._gate_transport_retry(
-                task, record, records, payload, attempt_id, exc, step="gate",
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                exc,
+                step="gate",
             )
             if retry is not None:
                 return retry
             return self._block_gate_transport(
-                task, record, records, payload, attempt_id, step="gate",
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                step="gate",
                 action="gate-transport-blocked",
             )
         except HostError as exc:
@@ -6581,10 +6982,15 @@ class DispatcherRuntime:
                 return self._block_missing_gate_receipt(task, record, records, payload, attempt_id)
             step = "assessment" if stage == "release" else "review"
             return self._block_merge_path(
-                task, record, records, payload, attempt_id,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
                 action=f"{stage}-gate-receipt-blocked",
                 reason=f"{stage} gate reported green without a valid exact-SHA receipt",
-                step=step, outcome=f"{stage} gate receipt unavailable",
+                step=step,
+                outcome=f"{stage} gate receipt unavailable",
             )
         record.gate_state = "green"
         record.gate_pending_since = 0.0
@@ -6613,7 +7019,9 @@ class DispatcherRuntime:
                     + f"\n\n{closing}"
                 ),
                 request_id=_attempt_request_id(
-                    record.attempt_id or attempt_id, f"gate-attestation-{stage}", ref,
+                    record.attempt_id or attempt_id,
+                    f"gate-attestation-{stage}",
+                    ref,
                     audit_key,
                 ),
             )
@@ -6666,7 +7074,13 @@ class DispatcherRuntime:
         ref = task["ref"]
         if result.failure_class == "infrastructure":
             return self._retry_infrastructure_gate(
-                task, record, records, payload, attempt_id, result, phase=phase,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                result,
+                phase=phase,
             )
         record.rejected_sha = self.host.head_commit(record)
         record.rejected_failure_class = "substantive"
@@ -6678,25 +7092,37 @@ class DispatcherRuntime:
         # SHA-independent identity here rather than losing repeat detection outright.
         fingerprint = result.fingerprint or _gate_fingerprint("fallback", log or detail)
         repeat = _gate_red_repeat_count(task, fingerprint)
-        prefix = (f"Repeat return (round {repeat + 1}, the reason has not changed). "
-                  if repeat else "")
-        body = (f"{prefix}The mechanical validation gate is red: {detail}. The card is back in "
-                f"In progress for rework.")
+        prefix = f"Repeat return (round {repeat + 1}, the reason has not changed). " if repeat else ""
+        body = (
+            f"{prefix}The mechanical validation gate is red: {detail}. The card is back in "
+            f"In progress for rework."
+        )
         if log:
             body += f"\nTail:\n```\n{log}\n```"
         body += f"\n<!-- gate-fingerprint: {fingerprint} -->"
         # The reviewer must be gone before a retained worker resumes, but the worker stays
         # suspended until the continuation is delivered or falls back to a replacement.
         unconfirmed = self._end_review_pane_confirmed(
-            record, records, payload, ref, step="gate", attempt_id=attempt_id,
+            record,
+            records,
+            payload,
+            ref,
+            step="gate",
+            attempt_id=attempt_id,
             initiator=STOPPED_BY_REPLACEMENT,
         )
         if unconfirmed is not None:
             return unconfirmed
         # The round ends with no reviewer verdict: the outcome names the gate, not a reviewer.
         return self._begin_red_transition(
-            task, record, records, payload, attempt_id, phase=phase,
-            move_reason=body, verdict_outcome=f"{phase}_red",
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            phase=phase,
+            move_reason=body,
+            verdict_outcome=f"{phase}_red",
         )
 
     def _retry_infrastructure_gate(
@@ -6724,13 +7150,25 @@ class DispatcherRuntime:
         spent = record.gate_infrastructure_reruns
         if spent >= GATE_INFRASTRUCTURE_RERUN_MAX_ATTEMPTS:
             return self._block_infrastructure_reruns_exhausted(
-                task, record, records, payload, attempt_id, result, phase=phase,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                result,
+                phase=phase,
             )
         try:
             self.host.rerun_failed_ci(task, record, result)
         except GateTransportError as exc:
             retry = self._gate_rerun_transport_retry(
-                task, record, records, payload, attempt_id, exc, step=phase,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                exc,
+                step=phase,
             )
             if retry is not None:
                 return retry
@@ -6740,11 +7178,25 @@ class DispatcherRuntime:
                 f"{record.gate_rerun_transport_error}"
             )
             return self._block_infrastructure_rerun_unavailable(
-                task, record, records, payload, attempt_id, result, exhausted, phase=phase,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                result,
+                exhausted,
+                phase=phase,
             )
         except HostError as exc:
             return self._block_infrastructure_rerun_unavailable(
-                task, record, records, payload, attempt_id, result, exc, phase=phase,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                result,
+                exc,
+                phase=phase,
             )
         record.rejected_sha = sha
         record.rejected_failure_class = "infrastructure"
@@ -6777,15 +7229,21 @@ class DispatcherRuntime:
             reference=ref,
             body=body,
             request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, "gate-infrastructure-rerun", ref,
+                record.attempt_id or attempt_id,
+                "gate-infrastructure-rerun",
+                ref,
                 f"{sha}:{record.gate_infrastructure_reruns}:{fingerprint}",
             ),
         )
         records[ref] = record
         self.save_records(payload, records)
         return {
-            "status": "ok", "step": "gate", "pilot_ref": ref, "attempt_id": attempt_id,
-            "action": "gate-infrastructure-rerun", "reason": result.failure_reason,
+            "status": "ok",
+            "step": "gate",
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "action": "gate-infrastructure-rerun",
+            "reason": result.failure_reason,
         }
 
     @staticmethod
@@ -6798,8 +7256,15 @@ class DispatcherRuntime:
         record.gate_rerun_transport_error = ""
 
     def _block_infrastructure_reruns_exhausted(
-        self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
-        payload: dict[str, Any], attempt_id: str, result: GateResult, *, phase: str,
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        result: GateResult,
+        *,
+        phase: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
         self.host.stop(record)
@@ -6811,20 +7276,40 @@ class DispatcherRuntime:
             "the bounded automatic recovery is exhausted."
         )
         self.writer.move(
-            role="dispatcher", actor=self.owner, reference=ref, target="blocked", reason=reason,
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            target="blocked",
+            reason=reason,
             request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, f"{phase}-infrastructure-reruns-exhausted", ref,
+                record.attempt_id or attempt_id,
+                f"{phase}-infrastructure-reruns-exhausted",
+                ref,
                 str(record.gate_infrastructure_reruns),
             ),
         )
         records.pop(ref, None)
         self.save_records(payload, records)
-        return {"status": "blocked", "step": phase, "pilot_ref": ref, "attempt_id": attempt_id,
-                "action": "gate-infrastructure-reruns-exhausted", "reason": result.failure_reason}
+        return {
+            "status": "blocked",
+            "step": phase,
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "action": "gate-infrastructure-reruns-exhausted",
+            "reason": result.failure_reason,
+        }
 
     def _block_infrastructure_rerun_unavailable(
-        self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
-        payload: dict[str, Any], attempt_id: str, result: GateResult, exc: Exception, *, phase: str,
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        result: GateResult,
+        exc: Exception,
+        *,
+        phase: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
         self.host.stop(record)
@@ -6835,18 +7320,39 @@ class DispatcherRuntime:
             "the same terminal result."
         )
         self.writer.move(
-            role="dispatcher", actor=self.owner, reference=ref, target="blocked", reason=reason,
-            request_id=_attempt_request_id(record.attempt_id or attempt_id, f"{phase}-infrastructure-rerun-blocked", ref),
+            role="dispatcher",
+            actor=self.owner,
+            reference=ref,
+            target="blocked",
+            reason=reason,
+            request_id=_attempt_request_id(
+                record.attempt_id or attempt_id, f"{phase}-infrastructure-rerun-blocked", ref
+            ),
         )
         records.pop(ref, None)
         self.save_records(payload, records)
-        return {"status": "blocked", "step": phase, "pilot_ref": ref, "attempt_id": attempt_id,
-                "action": "gate-infrastructure-rerun-blocked", "reason": result.failure_reason}
+        return {
+            "status": "blocked",
+            "step": phase,
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "action": "gate-infrastructure-rerun-blocked",
+            "reason": result.failure_reason,
+        }
 
     def _begin_red_transition(
-        self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
-        payload: dict[str, Any], attempt_id: str, *, phase: str, move_reason: str,
-        verdict_outcome: str, decision: str = "", decision_body: str = "",
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        phase: str,
+        move_reason: str,
+        verdict_outcome: str,
+        decision: str = "",
+        decision_body: str = "",
     ) -> dict[str, Any]:
         """The only way a card goes back to In progress for rework.
 
@@ -6862,7 +7368,11 @@ class DispatcherRuntime:
         # hands one rework round two generations. The observer's instruction is frozen in the same
         # write, so what the round is for cannot be re-read from a newer decision comment.
         record.worker_continuation.begin_red_transition(
-            phase, baseline, move_reason, verdict_outcome, decision,
+            phase,
+            baseline,
+            move_reason,
+            verdict_outcome,
+            decision,
             reserved_generation=record.report_generation + 1,
             decision_body=decision_body,
         )
@@ -6871,8 +7381,13 @@ class DispatcherRuntime:
         return self._complete_red_transition(record, records, payload, attempt_id, ref=ref)
 
     def _complete_red_transition(
-        self, record: DispatcherRecord, records: dict[str, DispatcherRecord],
-        payload: dict[str, Any], attempt_id: str, *, ref: str,
+        self,
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        ref: str,
     ) -> dict[str, Any]:
         """Finish the open red transition from the board as it is now.
 
@@ -6908,9 +7423,7 @@ class DispatcherRuntime:
         # The rework's generation is the one this transition reserved before the move: assigned,
         # never advanced. A legacy transition without a reservation falls back to the advance it
         # was written with.
-        record.report_generation = (
-            continuation.reserved_generation or record.report_generation + 1
-        )
+        record.report_generation = continuation.reserved_generation or record.report_generation + 1
         # And the instruction that round is opened on, from the same transition. Always assigned,
         # never merged: a red gate has no decision, and inheriting the prior round's would hand a
         # worker an adjudication of review findings its code has already answered.
@@ -6927,13 +7440,17 @@ class DispatcherRuntime:
         _reset_wait(record, "worker")
         records[ref] = record
         self.save_records(payload, records)
-        return self._deliver_red_continuation(
-            moved, record, records, payload, attempt_id, phase=phase
-        )
+        return self._deliver_red_continuation(moved, record, records, payload, attempt_id, phase=phase)
 
     def _deliver_red_continuation(
-        self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
-        payload: dict[str, Any], attempt_id: str, *, phase: str,
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        phase: str,
     ) -> dict[str, Any]:
         """Hand a red verdict back to the session that wrote the code, or to one replacement.
 
@@ -6948,19 +7465,28 @@ class DispatcherRuntime:
         fresh_provider_progress = False
         if continuation.delivery_pending:
             now = time.time()
-            provider_observation = self._observe_retained_continuation_progress(
-                task, record, now=now
-            )
+            provider_observation = self._observe_retained_continuation_progress(task, record, now=now)
             blocked = self._block_unadmitted_continuation_liveness(
-                task, record, records, payload, attempt_id, phase=phase,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                phase=phase,
                 observation=provider_observation,
             )
             if blocked is not None:
                 return blocked
             fresh_provider_progress = provider_observation == "progressed"
             pending = self._continuation_recovery_window(
-                task, record, records, payload, attempt_id, phase=phase,
-                fresh_provider_progress=fresh_provider_progress, now=now,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                phase=phase,
+                fresh_provider_progress=fresh_provider_progress,
+                now=now,
             )
             if pending is not None:
                 return pending
@@ -6975,8 +7501,13 @@ class DispatcherRuntime:
                     records[ref] = record
                     self.save_records(payload, records)
                     return self._restart_red_worker(
-                        task, record, records, payload, attempt_id,
-                        continuation_reason="safe recovery resume was already spent", phase=phase,
+                        task,
+                        record,
+                        records,
+                        payload,
+                        attempt_id,
+                        continuation_reason="safe recovery resume was already spent",
+                        phase=phase,
                     )
                 # A once-only capability: persist spending it before delivery touches the pane.
                 records[ref] = record
@@ -6988,28 +7519,35 @@ class DispatcherRuntime:
                 self.host.confirm_worker_retained(record)
             except HostError as exc:
                 reason = scrub_host_output(str(exc))
-                unconfirmed = self._stop_worker_confirmed(
-                    record, ref, step=step, attempt_id=attempt_id
-                )
+                unconfirmed = self._stop_worker_confirmed(record, ref, step=step, attempt_id=attempt_id)
                 if unconfirmed is not None:
                     return unconfirmed
                 return self._restart_red_worker(
-                    task, record, records, payload, attempt_id,
-                    continuation_reason=reason, phase=phase, worker_stopped=True,
+                    task,
+                    record,
+                    records,
+                    payload,
+                    attempt_id,
+                    continuation_reason=reason,
+                    phase=phase,
+                    worker_stopped=True,
                 )
             if opening_delivery:
                 # Persist the delivery boundary before waking the worker, or a tick that dies after
                 # delivery replays with the old done marker read as the new round's completion.
                 continuation.begin_delivery(phase, time.time())
-                record.worker_continuation_liveness = WorkerContinuationLiveness.begin(
-                    record.worker_head_run
-                )
+                record.worker_continuation_liveness = WorkerContinuationLiveness.begin(record.worker_head_run)
                 # Establish the provider cursor before SIGCONT: the first observation is a baseline.
                 provider_observation = self._observe_retained_continuation_progress(
                     task, record, now=time.time()
                 )
                 blocked = self._block_unadmitted_continuation_liveness(
-                    task, record, records, payload, attempt_id, phase=phase,
+                    task,
+                    record,
+                    records,
+                    payload,
+                    attempt_id,
+                    phase=phase,
                     observation=provider_observation,
                 )
                 if blocked is not None:
@@ -7018,8 +7556,14 @@ class DispatcherRuntime:
                 records[ref] = record
                 self.save_records(payload, records)
                 pending = self._continuation_recovery_window(
-                    task, record, records, payload, attempt_id, phase=phase,
-                    fresh_provider_progress=fresh_provider_progress, now=time.time(),
+                    task,
+                    record,
+                    records,
+                    payload,
+                    attempt_id,
+                    phase=phase,
+                    fresh_provider_progress=fresh_provider_progress,
+                    now=time.time(),
                 )
                 if pending is not None:
                     return pending
@@ -7043,7 +7587,10 @@ class DispatcherRuntime:
                         records[ref] = record
                         self.save_records(payload, records)
                         return _retained_worker_busy_deferred(
-                            ref, record, attempt_id, phase,
+                            ref,
+                            record,
+                            attempt_id,
+                            phase,
                             delay=BUSY_RETRY_INITIAL_SECONDS,
                         )
                     if liveness.state != ContinuationLivenessState.STALLED:
@@ -7053,11 +7600,13 @@ class DispatcherRuntime:
                         records[ref] = record
                         self.save_records(payload, records)
                         return _retained_worker_busy_deferred(
-                            ref, record, attempt_id, phase, delay=BUSY_RETRY_INITIAL_SECONDS,
+                            ref,
+                            record,
+                            attempt_id,
+                            phase,
+                            delay=BUSY_RETRY_INITIAL_SECONDS,
                         )
-                    liveness.no_progress_evidence = _continuation_no_progress_evidence(
-                        record, liveness.state
-                    )
+                    liveness.no_progress_evidence = _continuation_no_progress_evidence(record, liveness.state)
                     liveness.note_busy(time.time())
                     continuation.busy_attempts = max(0, liveness.busy_attempts - 1)
                     delay = continuation.defer_busy(time.time())
@@ -7067,19 +7616,27 @@ class DispatcherRuntime:
                     records[ref] = record
                     self.save_records(payload, records)
                     bounded = self._advance_no_progress_continuation(
-                        task, record, records, payload, attempt_id, phase=phase,
+                        task,
+                        record,
+                        records,
+                        payload,
+                        attempt_id,
+                        phase=phase,
                     )
                     if bounded is not None:
                         return bounded
-                    return _retained_worker_busy_deferred(
-                        ref, record, attempt_id, phase, delay=delay
-                    )
+                    return _retained_worker_busy_deferred(ref, record, attempt_id, phase, delay=delay)
                 _record_worker_delivery_evidence(record, exc, failure=True)
                 records[ref] = record
                 self.save_records(payload, records)
                 return self._restart_red_worker(
-                    task, record, records, payload, attempt_id,
-                    continuation_reason=scrub_host_output(str(exc)), phase=phase,
+                    task,
+                    record,
+                    records,
+                    payload,
+                    attempt_id,
+                    continuation_reason=scrub_host_output(str(exc)),
+                    phase=phase,
                 )
             continuation.confirm_delivery()
             records[ref] = record
@@ -7090,19 +7647,31 @@ class DispatcherRuntime:
         # Same reservation as the retained branch: the rework round is fixed on disk with the
         # intent, so adoption resumes it rather than the round the verdict closed.
         return self._restart_red_worker(
-            task, record, records, payload, attempt_id,
-            continuation_reason="no retained worker session was available", phase=phase,
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            continuation_reason="no retained worker session was available",
+            phase=phase,
         )
 
     def _observe_retained_continuation_progress(
-        self, task: dict[str, Any], record: DispatcherRecord, *, now: float,
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        *,
+        now: float,
     ) -> str:
         """Persist provider progress before a continuation interprets `tui-idle`."""
         try:
             evidence = getattr(
-                self.host, "provider_progress", lambda _task, _record, _kind: {
-                    "state": "unavailable", "reason": "host has no provider-progress probe",
-                }
+                self.host,
+                "provider_progress",
+                lambda _task, _record, _kind: {
+                    "state": "unavailable",
+                    "reason": "host has no provider-progress probe",
+                },
             )(task, record, "worker")
         except Exception as exc:
             evidence = {
@@ -7113,7 +7682,8 @@ class DispatcherRuntime:
         if not liveness.bound and record.worker_continuation.busy_attempts:
             # An old busy count is audit data, never an exact-source observation for the ladder.
             liveness.legacy_busy_attempts = max(
-                liveness.legacy_busy_attempts, record.worker_continuation.busy_attempts,
+                liveness.legacy_busy_attempts,
+                record.worker_continuation.busy_attempts,
             )
         observation = liveness.observe_provider(evidence, now, head_run=record.worker_head_run)
         if liveness.admitted:
@@ -7134,7 +7704,10 @@ class DispatcherRuntime:
         observation: str,
     ) -> dict[str, Any] | None:
         """Take the explicit safe outcome when the liveness trust boundary is unprovable."""
-        if observation in {"baseline", "stalled", "progressed"} and record.worker_continuation_liveness.admitted:
+        if (
+            observation in {"baseline", "stalled", "progressed"}
+            and record.worker_continuation_liveness.admitted
+        ):
             return None
         if observation == ContinuationProviderCondition.LEGACY_UNBOUND_V1.value:
             return self._restart_red_worker(
@@ -7159,7 +7732,9 @@ class DispatcherRuntime:
             ),
             request_id=_attempt_request_id(
                 record.attempt_id or attempt_id,
-                "continuation-liveness-unavailable", ref, phase,
+                "continuation-liveness-unavailable",
+                ref,
+                phase,
             ),
         )
         records[ref] = record
@@ -7191,7 +7766,11 @@ class DispatcherRuntime:
             # The stop path is the only component allowed to resolve this: it either confirms the
             # old HeadRun stopped and launches one replacement, or refuses. Neither takes a pane.
             return self._restart_red_worker(
-                task, record, records, payload, attempt_id,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
                 continuation_reason="continuation liveness HeadRun identity is fenced",
                 phase=phase,
             )
@@ -7201,7 +7780,10 @@ class DispatcherRuntime:
             records[ref] = record
             self.save_records(payload, records)
             return _retained_worker_recovery_window(
-                ref, record, attempt_id, phase,
+                ref,
+                record,
+                attempt_id,
+                phase,
                 remaining=max(0, int(liveness.recovery_response_deadline - now)),
             )
         if fresh_provider_progress:
@@ -7213,7 +7795,11 @@ class DispatcherRuntime:
         records[ref] = record
         self.save_records(payload, records)
         return self._restart_red_worker(
-            task, record, records, payload, attempt_id,
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
             continuation_reason="safe recovery response window showed no provider progress",
             phase=phase,
         )
@@ -7230,12 +7816,14 @@ class DispatcherRuntime:
     ) -> dict[str, Any] | None:
         """Spend the sole safe-recovery rung, then take one identity-fenced terminal outcome."""
         liveness = record.worker_continuation_liveness
-        if (
-            not liveness.admitted
-            or liveness.state != ContinuationLivenessState.STALLED
-        ):
+        if not liveness.admitted or liveness.state != ContinuationLivenessState.STALLED:
             return self._block_unadmitted_continuation_liveness(
-                task, record, records, payload, attempt_id, phase=phase,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                phase=phase,
                 observation=liveness.state.value,
             )
         if liveness.busy_attempts < CONTINUATION_NO_PROGRESS_BUSY_ATTEMPTS:
@@ -7263,10 +7851,12 @@ class DispatcherRuntime:
             self.save_records(payload, records)
             try:
                 result = getattr(
-                    self.host, "safe_recover_worker_continuation", lambda *_args: {
+                    self.host,
+                    "safe_recover_worker_continuation",
+                    lambda *_args: {
                         "state": "unavailable",
                         "reason": "host has no provider/terminal-safe recovery capability",
-                    }
+                    },
                 )(task, record, liveness.to_json())
             except Exception as exc:
                 result = {"state": "unavailable", "reason": scrub_host_output(str(exc))}
@@ -7283,18 +7873,27 @@ class DispatcherRuntime:
                 records[task["ref"]] = record
                 self.save_records(payload, records)
                 return _retained_worker_recovery_window(
-                    task["ref"], record, attempt_id, phase, remaining=30,
+                    task["ref"],
+                    record,
+                    attempt_id,
+                    phase,
+                    remaining=30,
                 )
             reason = (
                 str(result.get("reason") or "safe recovery capability is unavailable")
-                if isinstance(result, dict) else "safe recovery capability returned an invalid shape"
+                if isinstance(result, dict)
+                else "safe recovery capability returned an invalid shape"
             )
             liveness.recovery_rung = ContinuationRecoveryRung.SAFE_RECOVERY_UNAVAILABLE
             liveness.terminalize("replacement", f"safe recovery unavailable: {reason}")
             records[task["ref"]] = record
             self.save_records(payload, records)
         return self._restart_red_worker(
-            task, record, records, payload, attempt_id,
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
             continuation_reason=(
                 "provider progress remained absent after bounded continuation recovery: "
                 f"{record.worker_continuation_liveness.reason}"
@@ -7303,8 +7902,14 @@ class DispatcherRuntime:
         )
 
     def _finish_retained_worker_resume(
-        self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
-        payload: dict[str, Any], attempt_id: str, *, phase: str,
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        phase: str,
     ) -> dict[str, Any]:
         ref = task["ref"]
         step = "review" if phase == "review" else "gate"
@@ -7323,13 +7928,23 @@ class DispatcherRuntime:
         records[ref] = record
         self.save_records(payload, records)
         return {
-            "status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id,
+            "status": "ok",
+            "step": step,
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
             "action": f"{phase}-red-reused-worker",
         }
 
     def _restart_red_worker(
-        self, task: dict[str, Any], record: DispatcherRecord, records: dict[str, DispatcherRecord],
-        payload: dict[str, Any], attempt_id: str, *, continuation_reason: str, phase: str,
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        continuation_reason: str,
+        phase: str,
         worker_stopped: bool = False,
     ) -> dict[str, Any]:
         """Launch the red-verdict fallback only after its worker was conclusively stopped."""
@@ -7339,19 +7954,12 @@ class DispatcherRuntime:
         blocked_kind = "rework-blocked" if review else f"{phase}-red-blocked"
         action = "rework-started" if review else f"{phase}-red-rework"
         continuation = "replacement"
-        if (
-            record.worker_continuation_liveness.bound
-            and not record.worker_continuation_liveness.terminal
-        ):
-            record.worker_continuation_liveness.terminalize(
-                "replacement", continuation_reason
-            )
+        if record.worker_continuation_liveness.bound and not record.worker_continuation_liveness.terminal:
+            record.worker_continuation_liveness.terminalize("replacement", continuation_reason)
         # Unconditional on purpose: a record written by an older dispatcher, or adopted after a
         # crash, may lack the retained timestamp while its worker lives. Ambiguity is no permission.
         if not worker_stopped:
-            unconfirmed = self._stop_worker_confirmed(
-                record, ref, step=step, attempt_id=attempt_id
-            )
+            unconfirmed = self._stop_worker_confirmed(record, ref, step=step, attempt_id=attempt_id)
             if unconfirmed is not None:
                 return unconfirmed
         rework_round = record.attempt_round + 1
@@ -7464,9 +8072,7 @@ class DispatcherRuntime:
         failure = _classify_bring_up_failure(
             error, record, WORKER_ROLE, stage=stage, attempt_id=record.attempt_id or attempt_id
         )
-        blocked_reason = _bring_up_blocked_reason(
-            reason, error, record, WORKER_ROLE, failure=failure
-        )
+        blocked_reason = _bring_up_blocked_reason(reason, error, record, WORKER_ROLE, failure=failure)
         self.writer.move(
             role="dispatcher",
             actor=self.owner,
@@ -7486,7 +8092,10 @@ class DispatcherRuntime:
         records.pop(ref, None)
         self.save_records(payload, records)
         return {
-            "status": "blocked", "step": step, "pilot_ref": ref, "reason": reason,
+            "status": "blocked",
+            "step": step,
+            "pilot_ref": ref,
+            "reason": reason,
             **failure.outcome_fields(blocked_reason),
         }
 
@@ -7608,7 +8217,11 @@ class DispatcherRuntime:
             f"Last transport error: {last}"
         )
         return self._block_merge_path(
-            task, record, records, payload, attempt_id,
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
             action=action,
             reason=f"{prefix}{reason}" if prefix else reason,
             step=step,
@@ -7646,7 +8259,13 @@ class DispatcherRuntime:
         if not record.gate_pending_since:
             record.gate_pending_since = now
             self.save_records(payload, records)
-            return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "action": action}
+            return {
+                "status": "ok",
+                "step": step,
+                "pilot_ref": ref,
+                "attempt_id": attempt_id,
+                "action": action,
+            }
         # The worker head's vitality, observed and acted on exactly as the report wait does.
         # A reduction failure or an unobservable head degrades to None here, which leaves
         # this method on its ordinary path: the gate ceiling remains the outer bound for a
@@ -7656,19 +8275,37 @@ class DispatcherRuntime:
             episode = vitality
             if episode.verdict is VitalityVerdict.SUSPENDED:
                 return self._execute_recovery_intent(
-                    task, record, records, payload, attempt_id,
-                    episode=episode, kind="worker", now=now,
+                    task,
+                    record,
+                    records,
+                    payload,
+                    attempt_id,
+                    episode=episode,
+                    kind="worker",
+                    now=now,
                 )
             # Any other verdict still rides the policy once: a deterministic refusal on
             # file escalates fast even mid-gate, and a recovered suspension resets its rung.
             outcome = self._recovery_policy_outcome(
-                task, record, records, payload, attempt_id,
-                episode=episode, kind="worker", now=now,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                episode=episode,
+                kind="worker",
+                now=now,
             )
             if outcome is not None:
                 return outcome
         if now - record.gate_pending_since <= GATE_PENDING_STALL_SECONDS:
-            return {"status": "ok", "step": step, "pilot_ref": ref, "attempt_id": attempt_id, "action": action}
+            return {
+                "status": "ok",
+                "step": step,
+                "pilot_ref": ref,
+                "attempt_id": attempt_id,
+                "action": action,
+            }
         self.host.stop(record)
         self.writer.move(
             role="dispatcher",
@@ -7719,7 +8356,13 @@ class DispatcherRuntime:
             return record.worker_vitality_episode
         try:
             return self._reduce_and_store_vitality_episode(
-                task, record, records, payload, status, kind="worker", now=time.time(),
+                task,
+                record,
+                records,
+                payload,
+                status,
+                kind="worker",
+                now=time.time(),
             )
         except Exception:  # noqa: BLE001 - shadow-mode failure degrades to no episode
             return None
@@ -7780,13 +8423,23 @@ class DispatcherRuntime:
         kind, result, detail = self._merge_readiness(task, record)
         if kind == "transport":
             retry = self._gate_transport_retry(
-                task, record, records, payload, attempt_id,
-                GateTransportError(detail), step="review",
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                GateTransportError(detail),
+                step="review",
             )
             if retry is not None:
                 return retry
             return self._block_gate_transport(
-                task, record, records, payload, attempt_id, step="review",
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                step="review",
                 action="merge-gate-transport-blocked",
             )
         if kind == "drift":
@@ -7797,41 +8450,75 @@ class DispatcherRuntime:
         self._gate_answered(ref, record, records, payload)
         if kind == "failed":
             return self._block_merge_path(
-                task, record, records, payload, attempt_id,
-                action="merge-gate-blocked", reason=f"merge gate failed: {detail}",
-                step="review", outcome="merge gate failed",
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                action="merge-gate-blocked",
+                reason=f"merge gate failed: {detail}",
+                step="review",
+                outcome="merge gate failed",
             )
         if kind == "pending":
             if result is None:
                 return self._block_merge_path(
-                    task, record, records, payload, attempt_id,
+                    task,
+                    record,
+                    records,
+                    payload,
+                    attempt_id,
                     action="merge-gate-result-blocked",
                     reason="merge gate returned pending without a result payload",
-                    step="review", outcome="merge gate result unavailable",
+                    step="review",
+                    outcome="merge gate result unavailable",
                 )
             return self._gate_pending(
-                task, record, records, payload, attempt_id, result,
-                step="review", action="merge-gate-pending",
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                result,
+                step="review",
+                action="merge-gate-pending",
             )
         if kind != "green":
             if result is None:
                 return self._block_merge_path(
-                    task, record, records, payload, attempt_id,
+                    task,
+                    record,
+                    records,
+                    payload,
+                    attempt_id,
                     action="merge-gate-result-blocked",
                     reason="merge gate returned a non-green state without a result payload",
-                    step="review", outcome="merge gate result unavailable",
+                    step="review",
+                    outcome="merge gate result unavailable",
                 )
-            return self._gate_red_to_worker(task, record, records, payload, attempt_id, result, phase="merge-gate")
+            return self._gate_red_to_worker(
+                task, record, records, payload, attempt_id, result, phase="merge-gate"
+            )
         if result is None:
             return self._block_merge_path(
-                task, record, records, payload, attempt_id,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
                 action="merge-gate-result-blocked",
                 reason="merge gate returned green without a result payload",
-                step="review", outcome="merge gate result unavailable",
+                step="review",
+                outcome="merge gate result unavailable",
             )
         parks = self._parks_for_decision(task)
         blocked = self._accept_green_gate(
-            task, record, records, payload, attempt_id, result,
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            result,
             stage="assessment" if parks else "release",
         )
         if blocked is not None:
@@ -7839,20 +8526,35 @@ class DispatcherRuntime:
         if not parks:
             # No observer to release it, so the green verdict merges on its own tick.
             return self._release_effect(
-                task, record, records, payload, attempt_id, step="review",
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                step="review",
                 move_reason="review:green",
             )
         # The checkout must be quiet while the card waits, so the reviewer's pane goes here — but
         # its commit is read first, because ending the reviewer forgets the commit it judged.
         reviewed = record.review_commit or self.host.head_commit(record)
         unconfirmed = self._end_review_pane_confirmed(
-            record, records, payload, ref, step="review", attempt_id=attempt_id,
+            record,
+            records,
+            payload,
+            ref,
+            step="review",
+            attempt_id=attempt_id,
             initiator=STOPPED_BY_REVIEW_VERDICT,
         )
         if unconfirmed is not None:
             return unconfirmed
         return self._begin_park(
-            task, record, records, payload, attempt_id, verdict_outcome="green",
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            verdict_outcome="green",
             reviewed_commit=reviewed,
             move_reason=(
                 "review:green. The card is parked in Assessment: the mechanical gate is green "
@@ -7889,8 +8591,13 @@ class DispatcherRuntime:
         return self._complete_park(record, records, payload, attempt_id, ref=ref)
 
     def _complete_park(
-        self, record: DispatcherRecord, records: dict[str, DispatcherRecord],
-        payload: dict[str, Any], attempt_id: str, *, ref: str,
+        self,
+        record: DispatcherRecord,
+        records: dict[str, DispatcherRecord],
+        payload: dict[str, Any],
+        attempt_id: str,
+        *,
+        ref: str,
     ) -> dict[str, Any]:
         """Finish an open park from the board as it is now.
 
@@ -7905,7 +8612,9 @@ class DispatcherRuntime:
             target="assessment",
             reason=continuation.move_reason,
             request_id=_attempt_request_id(
-                record.attempt_id or attempt_id, "review-assessment", ref,
+                record.attempt_id or attempt_id,
+                "review-assessment",
+                ref,
                 str(continuation.report_baseline),
             ),
         )
@@ -7915,8 +8624,12 @@ class DispatcherRuntime:
         records[ref] = record
         self.save_records(payload, records)
         return {
-            "status": "ok", "step": "review", "pilot_ref": ref, "attempt_id": attempt_id,
-            "to": "assessment", "verdict": continuation.verdict_outcome,
+            "status": "ok",
+            "step": "review",
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "to": "assessment",
+            "verdict": continuation.verdict_outcome,
         }
 
     def _advance_assessment(
@@ -7955,7 +8668,10 @@ class DispatcherRuntime:
         decision, reason = self._recorded_decision(task)
         if not decision:
             return {
-                "status": "ok", "step": "assessment", "pilot_ref": ref, "attempt_id": attempt_id,
+                "status": "ok",
+                "step": "assessment",
+                "pilot_ref": ref,
+                "attempt_id": attempt_id,
                 "action": "waiting-observer-decision",
             }
         if decision == "rework":
@@ -7987,7 +8703,12 @@ class DispatcherRuntime:
         # stopped. Either way nothing is woken beside a head the host will not confirm gone.
         if record.owns_head("review"):
             unconfirmed = self._end_review_pane_confirmed(
-                record, records, payload, ref, step="assessment", attempt_id=attempt_id,
+                record,
+                records,
+                payload,
+                ref,
+                step="assessment",
+                attempt_id=attempt_id,
                 initiator=STOPPED_BY_REVIEW_VERDICT,
             )
             if unconfirmed is not None:
@@ -7995,9 +8716,16 @@ class DispatcherRuntime:
         # The findings are not repeated in the move: the rework prompt reads the card's last red
         # verdict directly. The decision is what the round is for, so it is frozen with the round.
         return self._begin_red_transition(
-            task, record, records, payload, attempt_id, phase="review",
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            phase="review",
             move_reason=f"Observer decision: rework. {reason}".strip(),
-            verdict_outcome="red", decision="rework", decision_body=reason,
+            verdict_outcome="red",
+            decision="rework",
+            decision_body=reason,
         )
 
     def _reslice_parked(
@@ -8033,8 +8761,12 @@ class DispatcherRuntime:
         records.pop(ref, None)
         self.save_records(payload, records)
         return {
-            "status": "ok", "step": "assessment", "pilot_ref": ref, "attempt_id": attempt_id,
-            "to": "blocked", "decision": "reslice",
+            "status": "ok",
+            "step": "assessment",
+            "pilot_ref": ref,
+            "attempt_id": attempt_id,
+            "to": "blocked",
+            "decision": "reslice",
         }
 
     def _block_merge_path(
@@ -8085,7 +8817,11 @@ class DispatcherRuntime:
         """
         self._record_verdict_routing(task["ref"], record, "red")
         return self._block_merge_path(
-            task, record, records, payload, attempt_id,
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
             action="red-review-ceiling",
             reason=(
                 f"review:red. This card has now collected {reds} substantive red reviews and its "
@@ -8114,13 +8850,23 @@ class DispatcherRuntime:
         if kind == "transport":
             # A release that could not ask the gate is not a release that was refused.
             retry = self._gate_transport_retry(
-                task, record, records, payload, attempt_id,
-                GateTransportError(detail), step="assessment",
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                GateTransportError(detail),
+                step="assessment",
             )
             if retry is not None:
                 return retry
             return self._block_gate_transport(
-                task, record, records, payload, attempt_id, step="assessment",
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                step="assessment",
                 action="release-gate-transport-blocked",
                 prefix="Observer decision: release. ",
             )
@@ -8130,14 +8876,25 @@ class DispatcherRuntime:
         if kind == "pending":
             if result is None:
                 return self._block_merge_path(
-                    task, record, records, payload, attempt_id,
+                    task,
+                    record,
+                    records,
+                    payload,
+                    attempt_id,
                     action="release-gate-result-blocked",
                     reason="merge gate returned pending without a result payload",
-                    step="assessment", outcome="merge gate result unavailable",
+                    step="assessment",
+                    outcome="merge gate result unavailable",
                 )
             return self._gate_pending(
-                task, record, records, payload, attempt_id, result,
-                step="assessment", action="merge-gate-pending",
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                result,
+                step="assessment",
+                action="merge-gate-pending",
             )
         if kind != "green":
             summary = {
@@ -8145,24 +8902,38 @@ class DispatcherRuntime:
                 "failed": f"the merge gate could not be read: {detail}",
             }.get(kind, "the mechanical gate is no longer green for the checkout this release was decided on")
             return self._block_merge_path(
-                task, record, records, payload, attempt_id,
-                action=f"release-{kind}-blocked", reason=f"Observer decision: release. {summary}",
-                step="assessment", outcome=f"release {kind}",
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                action=f"release-{kind}-blocked",
+                reason=f"Observer decision: release. {summary}",
+                step="assessment",
+                outcome=f"release {kind}",
             )
         if result is None:
             return self._block_merge_path(
-                task, record, records, payload, attempt_id,
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
                 action="release-gate-result-blocked",
                 reason="merge gate returned green without a result payload",
-                step="assessment", outcome="merge gate result unavailable",
+                step="assessment",
+                outcome="merge gate result unavailable",
             )
-        blocked = self._accept_green_gate(
-            task, record, records, payload, attempt_id, result, stage="release"
-        )
+        blocked = self._accept_green_gate(task, record, records, payload, attempt_id, result, stage="release")
         if blocked is not None:
             return blocked
         return self._release_effect(
-            task, record, records, payload, attempt_id, step="assessment",
+            task,
+            record,
+            records,
+            payload,
+            attempt_id,
+            step="assessment",
             move_reason=f"Observer decision: release. {reason}".strip(),
             decision="release",
         )
@@ -8187,9 +8958,15 @@ class DispatcherRuntime:
             # A rejected merge must land the card in Blocked rather than escape the tick: an
             # escaping error leaves the verdict standing and every later tick retries the merge.
             return self._block_merge_path(
-                task, record, records, payload, attempt_id,
-                action="merge-blocked", reason=f"merge failed: {scrub_host_output(str(exc))}",
-                step=step, outcome="merge failed",
+                task,
+                record,
+                records,
+                payload,
+                attempt_id,
+                action="merge-blocked",
+                reason=f"merge failed: {scrub_host_output(str(exc))}",
+                step=step,
+                outcome="merge failed",
             )
         self.host.teardown(record)
         self.writer.move(
@@ -8225,7 +9002,12 @@ class DispatcherRuntime:
         )
 
     def head_run_snapshot(
-        self, task: dict[str, Any], *, role: str, head: str = "", workspace: str = "",
+        self,
+        task: dict[str, Any],
+        *,
+        role: str,
+        head: str = "",
+        workspace: str = "",
         failover: bool = False,
     ) -> dict[str, Any]:
         """The launch snapshot for a head the runtime has no launcher record of, or a marked
@@ -8236,9 +9018,7 @@ class DispatcherRuntime:
                 task, role=role, head=head, workspace=workspace, failover=failover
             ).to_json()
         except (HostError, AttributeError, KeyError, TypeError):
-            return HeadRun(
-                role=role, head=str(head), adapter="unknown", model_source=MODEL_UNKNOWN
-            ).to_json()
+            return HeadRun(role=role, head=str(head), adapter="unknown", model_source=MODEL_UNKNOWN).to_json()
 
     def _journal_round(self, ref: str) -> int:
         """The last worker round the journal holds for this card. Survives a lost dispatcher record,
@@ -8247,8 +9027,7 @@ class DispatcherRuntime:
         return history[-1].attempt if history else 0
 
     def open_worker_round(self, record: DispatcherRecord, *, round_number: int = 0) -> None:
-        """Start the card's next worker round: stamp its number and drop the previous round's heads.
-        """
+        """Start the card's next worker round: stamp its number and drop the previous round's heads."""
         record.attempt_round = round_number or (record.attempt_round + 1)
         record.worker_run = {}
         record.review_run = {}
@@ -8261,7 +9040,10 @@ class DispatcherRuntime:
         if not record.attempt_round:
             record.attempt_round = self._journal_round(ref) + 1
         record.worker_run = run or self.head_run_snapshot(
-            task, role="worker", head=record.head, workspace=record.workspace,
+            task,
+            role="worker",
+            head=record.head,
+            workspace=record.workspace,
             failover=bool(record.preferred_head),
         )
         self._record_routing(ref, record, phase="worker", heads=[record.worker_run])
@@ -8274,7 +9056,10 @@ class DispatcherRuntime:
         if not record.attempt_round:
             record.attempt_round = self._journal_round(ref) + 1
         record.review_run = run or self.head_run_snapshot(
-            task, role="reviewer", head=record.review_head, workspace=record.workspace,
+            task,
+            role="reviewer",
+            head=record.review_head,
+            workspace=record.workspace,
             failover=bool(record.preferred_review_head),
         )
         self._record_routing(ref, record, phase="review", heads=[record.review_run])
@@ -8308,9 +9093,7 @@ class DispatcherRuntime:
                 heads=heads,
                 outcome=outcome,
             ),
-            request_id=_attempt_request_id(
-                record.attempt_id, f"routing-{phase}", ref, "-".join(parts)
-            ),
+            request_id=_attempt_request_id(record.attempt_id, f"routing-{phase}", ref, "-".join(parts)),
         )
 
     def _record_verdict_routing(self, ref: str, record: DispatcherRecord, outcome: str) -> None:
@@ -8347,9 +9130,7 @@ class DispatcherRuntime:
         # The report generation is dispatcher state, lost on this path. The TASK.md names the round
         # the live worker is in; the board's reports are the floor with no readable document. Both
         # are lower bounds, so the larger one is taken: a generation may skip, never repeat.
-        report_generation = max(
-            _task_doc_report_generation(workspace), _spent_report_generations(task) + 1
-        )
+        report_generation = max(_task_doc_report_generation(workspace), _spent_report_generations(task) + 1)
         # And the decision that round was opened on, from the same document. The card's newest
         # decision comment answers "what was decided since", which must not reach a running round.
         report_decision = _task_doc_decision(workspace)
@@ -8396,7 +9177,10 @@ class DispatcherRuntime:
                 pid_file=pid_file,
             )
             verified = _head_run_process_status(
-                pid_file, run=recovered, role=WORKER_ROLE, leaf=recovered.leaf,
+                pid_file,
+                run=recovered,
+                role=WORKER_ROLE,
+                leaf=recovered.leaf,
             )
             if _heartbeat_is_live_match(verified):
                 record.worker_head_run = recovered.to_json()
@@ -8410,7 +9194,9 @@ class DispatcherRuntime:
         return self.audit.committed_event(_review_launch_request_id(task["ref"], review_baseline)) is not None
 
 
-def runtime_from_args(instance: str, data_dir: str | None, *, host_mode: str, owner: str) -> DispatcherRuntime:
+def runtime_from_args(
+    instance: str, data_dir: str | None, *, host_mode: str, owner: str
+) -> DispatcherRuntime:
     instance_path = Path(instance)
     data = Path(data_dir).expanduser() if data_dir else default_data_dir(instance_path)
     client = KanboardClient.for_instance(instance_path)
@@ -8542,7 +9328,8 @@ def _retained_worker_recovery_window(
 
 
 def _continuation_no_progress_evidence(
-    record: DispatcherRecord, state: ContinuationLivenessState,
+    record: DispatcherRecord,
+    state: ContinuationLivenessState,
 ) -> str:
     """Classify unchanged provider evidence without retaining or interpreting pane text."""
     if state == ContinuationLivenessState.UNAVAILABLE:

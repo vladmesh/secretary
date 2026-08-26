@@ -184,10 +184,7 @@ def _string_ids(value: Any, key: str = "") -> set[str]:
         for child in value:
             found.update(_string_ids(child, key))
     elif isinstance(value, str) and (
-        key == "thread_id"
-        or key == "session_id"
-        or key.endswith("_thread_id")
-        or key.endswith("_thread_ids")
+        key == "thread_id" or key == "session_id" or key.endswith("_thread_id") or key.endswith("_thread_ids")
     ):
         found.add(value)
     return found
@@ -253,7 +250,11 @@ def summarize_rollout(
             continue
         if item.get("type") == "collab_tool_call":
             receivers = item.get("receiver_thread_ids")
-            receiver_ids = [value for value in receivers if isinstance(value, str)] if isinstance(receivers, list) else []
+            receiver_ids = (
+                [value for value in receivers if isinstance(value, str)]
+                if isinstance(receivers, list)
+                else []
+            )
             record = {
                 "sequence": sequence,
                 "event": event.get("type"),
@@ -278,9 +279,7 @@ def summarize_rollout(
         elif item.get("type") == "agent_message" and isinstance(item.get("text"), str):
             agent_messages.append(item["text"])
 
-    configuration = _configuration_evidence(
-        raw_stdout, raw_stderr, strict_config_flags=strict_config_flags
-    )
+    configuration = _configuration_evidence(raw_stdout, raw_stderr, strict_config_flags=strict_config_flags)
     attempted_spawn = any(record["tool"] == "spawn_agent" for record in collaboration)
     if configuration["strict_config_status"] == "rejected":
         policy_result = "configuration_rejected: native_boundary_not_evaluated"
@@ -363,9 +362,7 @@ def _run_variant(
         stdout = exc.stdout if isinstance(exc.stdout, bytes) else b""
         stderr = exc.stderr if isinstance(exc.stderr, bytes) else b""
         exit_status = 124
-    result = summarize_rollout(
-        stdout, stderr, exit_status=exit_status, strict_config_flags=flags
-    )
+    result = summarize_rollout(stdout, stderr, exit_status=exit_status, strict_config_flags=flags)
     result.update(
         {
             "variant": name,

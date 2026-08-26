@@ -85,6 +85,7 @@ class BoardEventCanon:
             # Kept local so secretary.tasks can import board transition values
             # without recursively loading its own TaskAudit definition.
             from secretary.tasks import TaskAudit
+
             audit = TaskAudit(data_dir)
         self.audit = audit
 
@@ -208,7 +209,8 @@ class MutationEventTransaction:
             # backend write.  Never run the backend effect a second time, and
             # never resolve the record on a read that could not confirm it.
             result = self._confirm_or_raise(
-                confirm, "pending backend effect is unconfirmed; protocol event repair is required",
+                confirm,
+                "pending backend effect is unconfirmed; protocol event repair is required",
             )
             self._finish_or_raise(finish, result)
             self._commit_or_raise()
@@ -226,7 +228,8 @@ class MutationEventTransaction:
             raise
         # The effect completed.  From here the record survives every outcome.
         result = self._confirm_or_raise(
-            confirm, "backend effect completed but is unconfirmed; protocol event repair is required",
+            confirm,
+            "backend effect completed but is unconfirmed; protocol event repair is required",
         )
         self._finish_or_raise(finish, result)
         self._commit_or_raise()

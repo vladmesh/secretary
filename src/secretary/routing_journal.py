@@ -231,8 +231,7 @@ def routing_events(events: Iterable[dict[str, Any]], reference: str = "") -> lis
 
 
 def attempts(events: Iterable[dict[str, Any]], reference: str = "") -> list[AttemptRecord]:
-    """The card's attempt sequence in journal order: who worked it, who reviewed it, how it ended.
-    """
+    """The card's attempt sequence in journal order: who worked it, who reviewed it, how it ended."""
     found: dict[int, AttemptRecord] = {}
     order: list[int] = []
     for event in routing_events(events, reference):

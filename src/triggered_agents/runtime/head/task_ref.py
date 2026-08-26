@@ -22,6 +22,7 @@ for a head whose task document is the board entity itself. Nothing here reads th
 is `prompt_document`'s job — and nothing here decides what a head is told; this only fixes what a
 run is a run *of*, so that the record of a stopped head still says what it was doing.
 """
+
 from __future__ import annotations
 
 import os
@@ -54,18 +55,14 @@ class TaskRef:
 
     def __post_init__(self) -> None:
         if self.kind not in TASK_KINDS:
-            raise TaskRefError(
-                f"a task pointer is one of {', '.join(TASK_KINDS)}, not {self.kind!r}"
-            )
+            raise TaskRefError(f"a task pointer is one of {', '.join(TASK_KINDS)}, not {self.kind!r}")
         if not self.ref:
             raise TaskRefError(f"a {self.kind} task pointer names its task, and this one is empty")
         if self.document and not os.path.isabs(self.document):
             # Same rule as the nudge that will name it: a head's own working directory is not
             # something the pointer's writer knows, so a relative path is a different file in
             # every pane it could be delivered to.
-            raise TaskRefError(
-                f"a task document is named by absolute path, and {self.document!r} is not one"
-            )
+            raise TaskRefError(f"a task document is named by absolute path, and {self.document!r} is not one")
 
     @classmethod
     def card(cls, ref: str, *, document: str = "") -> TaskRef:

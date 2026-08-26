@@ -110,7 +110,9 @@ def import_normalized_board(
     # installation over its limit with resources two sprints both claim.
     with file_lock(data_dir / "board" / ".restore.lock"), sprint_admission_lock(data_dir):
         try:
-            cards = _normalized_cards(data_dir, registered_project_ids=(registered_projects(instance) if instance else None))
+            cards = _normalized_cards(
+                data_dir, registered_project_ids=(registered_projects(instance) if instance else None)
+            )
             sprints = _normalized_sprints(data_dir)
             # Before the first backend write of either set. A recovery that cannot produce a valid
             # installation must not produce half of one, and the sprint entities are written after
@@ -135,17 +137,18 @@ def import_normalized_board(
             # which records a retry must not append twice, and whether the audit this data dir
             # carries was written against this backend or an earlier one.
             existing_sprints = _existing_sprints(data_dir, client, sprints)
-            prefix = _restore_request_prefix(
-                data_dir, writer.audit, set(existing) | set(existing_sprints)
-            )
+            prefix = _restore_request_prefix(data_dir, writer.audit, set(existing) | set(existing_sprints))
             for card in sorted(cards, key=_restore_card_order):
                 current = existing.get(card["reference"])
                 if current is None:
                     _create_restored_card(writer, card, prefix)
                 target = _state_for_column(card["column"])
                 writer.restore_card(
-                    reference=card["reference"], metadata=_restore_board_metadata(card), target=target or "",
-                    position=_restore_position(card), swimlane=str(card.get("swimlane") or ""),
+                    reference=card["reference"],
+                    metadata=_restore_board_metadata(card),
+                    target=target or "",
+                    position=_restore_position(card),
+                    swimlane=str(card.get("swimlane") or ""),
                     request_id=f"{prefix}card:{card['reference']}",
                 )
                 live_comments = Counter(
@@ -159,7 +162,9 @@ def import_normalized_board(
                     if live_comments[comment] > occurrence:
                         continue
                     writer.restore_comment(
-                        reference=card["reference"], body=comment, occurrence=occurrence,
+                        reference=card["reference"],
+                        body=comment,
+                        occurrence=occurrence,
                         request_id=f"{prefix}comment:{card['reference']}:{index}",
                     )
                 if card.get("closed"):
@@ -197,10 +202,7 @@ def _existing_sprints(
         return {}
     from secretary.sprints import SprintReader
 
-    return {
-        sprint["ref"]: sprint
-        for sprint in SprintReader(client, data_dir=data_dir).export()
-    }
+    return {sprint["ref"]: sprint for sprint in SprintReader(client, data_dir=data_dir).export()}
 
 
 def _existing_board_cards(reader: TaskReader) -> dict[str, dict[str, Any]]:
@@ -220,8 +222,11 @@ def _existing_board_cards(reader: TaskReader) -> dict[str, dict[str, Any]]:
 
 
 def _import_sprints(
-    data_dir: Path, client: KanboardClient, sprints: list[dict[str, Any]],
-    existing: dict[str, dict[str, Any]], prefix: str,
+    data_dir: Path,
+    client: KanboardClient,
+    sprints: list[dict[str, Any]],
+    existing: dict[str, dict[str, Any]],
+    prefix: str,
 ) -> None:
     """Recreate the sprint entities and prove they match the export."""
     if not sprints:
@@ -241,8 +246,10 @@ def _import_sprints(
         reference = sprint["reference"]
         if reference not in existing:
             writer.restore_create(
-                goal=sprint["goal"], definition_of_done=sprint["definition_of_done"],
-                repositories=list(sprint["repositories"]), reference=reference,
+                goal=sprint["goal"],
+                definition_of_done=sprint["definition_of_done"],
+                repositories=list(sprint["repositories"]),
+                reference=reference,
                 request_id=f"{prefix}sprint-create:{reference}",
                 # Status and observer land with the fields, before the reference makes the row
                 # readable: recovery must not publish an open sprint that momentarily declares
@@ -251,12 +258,12 @@ def _import_sprints(
                 status=str(sprint["status"]),
             )
         writer.restore(
-            reference=reference, values=_restore_sprint_metadata(sprint),
+            reference=reference,
+            values=_restore_sprint_metadata(sprint),
             request_id=f"{prefix}sprint:{reference}",
         )
         live_comments = Counter(
-            str(comment.get("body") or "")
-            for comment in existing.get(reference, {}).get("comments", [])
+            str(comment.get("body") or "") for comment in existing.get(reference, {}).get("comments", [])
         )
         occurrences: dict[str, int] = {}
         for index, comment in enumerate(str(entry["text"]) for entry in sprint["comments"]):
@@ -265,21 +272,31 @@ def _import_sprints(
             if live_comments[comment] > occurrence:
                 continue
             writer.restore_comment(
-                reference=reference, body=comment, occurrence=occurrence,
+                reference=reference,
+                body=comment,
+                occurrence=occurrence,
                 request_id=f"{prefix}sprint-comment:{reference}:{index}",
             )
     live = {entity["reference"]: entity for entity in map(normalize_sprint_entity, reader.export())}
-    if any(
-        _sprint_core(live.get(sprint["reference"], {})) != _sprint_core(sprint)
-        for sprint in sprints
-    ):
+    if any(_sprint_core(live.get(sprint["reference"], {})) != _sprint_core(sprint) for sprint in sprints):
         _update_restore_state(data_dir, sprints="failed", sprint_parity="failed")
         raise RestoreError("sprint parity check failed")
 
 
 SPRINT_PARITY_FIELDS = (
-    "reference", "goal", "definition_of_done", "repositories", "product", "issues",
-    "reservations", "status", "budget", "current_task", "resume", "audit", "observer",
+    "reference",
+    "goal",
+    "definition_of_done",
+    "repositories",
+    "product",
+    "issues",
+    "reservations",
+    "status",
+    "budget",
+    "current_task",
+    "resume",
+    "audit",
+    "observer",
 )
 
 
@@ -318,8 +335,7 @@ def _check_restored_observers(sprints: list[dict[str, Any]], instance: Path | No
             continue
         if status == "open" and not is_executable(value):
             problems.append(
-                f"{reference}: an open sprint may not carry migration provenance "
-                f"({value.get('source')})"
+                f"{reference}: an open sprint may not carry migration provenance ({value.get('source')})"
             )
             continue
         if status == "open":
@@ -376,9 +392,7 @@ def _sprint_core(sprint: dict[str, Any]) -> dict[str, Any]:
         field: sprint[field] if field in sprint else _ABSENT for field in SPRINT_PARITY_FIELDS
     }
     core["comments"] = [
-        str(comment.get("text") or "")
-        for comment in sprint.get("comments", [])
-        if isinstance(comment, dict)
+        str(comment.get("text") or "") for comment in sprint.get("comments", []) if isinstance(comment, dict)
     ]
     return core
 
@@ -386,7 +400,8 @@ def _sprint_core(sprint: dict[str, Any]) -> dict[str, Any]:
 def _restore_sprint_metadata(sprint: dict[str, Any]) -> dict[str, str]:
     resume = sprint.get("resume")
     ownership = {
-        key: value for key, value in (
+        key: value
+        for key, value in (
             ("sprint_product", str(sprint.get("product") or "")),
             ("sprint_issues", json.dumps(list(sprint.get("issues") or []), separators=(",", ":"))),
             (
@@ -407,20 +422,18 @@ def _restore_sprint_metadata(sprint: dict[str, Any]) -> dict[str, str]:
             {"by_type": sprint["budget"]["by_type"]}, sort_keys=True, separators=(",", ":")
         ),
         **(
-            {"sprint_budget_uncharged": json.dumps(
-                sprint["budget"]["uncharged"], sort_keys=True, separators=(",", ":")
-            )}
-            if sprint["budget"].get("uncharged") else {}
+            {
+                "sprint_budget_uncharged": json.dumps(
+                    sprint["budget"]["uncharged"], sort_keys=True, separators=(",", ":")
+                )
+            }
+            if sprint["budget"].get("uncharged")
+            else {}
         ),
         "sprint_current_task": str(sprint["current_task"]),
-        "sprint_resume": (
-            json.dumps(resume, sort_keys=True, separators=(",", ":")) if resume else ""
-        ),
+        "sprint_resume": (json.dumps(resume, sort_keys=True, separators=(",", ":")) if resume else ""),
         "sprint_source_audit": json.dumps(sprint["audit"], sort_keys=True, separators=(",", ":")),
-        **(
-            {"sprint_observer": encode_observer(sprint["observer"])}
-            if "observer" in sprint else {}
-        ),
+        **({"sprint_observer": encode_observer(sprint["observer"])} if "observer" in sprint else {}),
     }
 
 
@@ -429,9 +442,15 @@ DEFAULT_MEMORY_DIM = 1024
 
 
 def rebuild_memory_index(
-    data_dir: Path, instance_dir: Path | None, *, python: Path | None = None,
-    script: Path | None = None, model: str | None = None, dim: int | None = None,
-    threads: int | None = None, runner=None,
+    data_dir: Path,
+    instance_dir: Path | None,
+    *,
+    python: Path | None = None,
+    script: Path | None = None,
+    model: str | None = None,
+    dim: int | None = None,
+    threads: int | None = None,
+    runner=None,
 ) -> int:
     """Replace the derived index from restored canon."""
     data_dir = data_dir.expanduser().resolve()
@@ -442,7 +461,13 @@ def rebuild_memory_index(
             result = runner(facts_dir, memory_dir / "export.ndjson", memory_dir / "index.sqlite")
             count = int(result["parity"]["indexed"])
         elif python is not None or script is not None:
-            if python is None or script is None or not isinstance(model, str) or not model or not isinstance(dim, int):
+            if (
+                python is None
+                or script is None
+                or not isinstance(model, str)
+                or not model
+                or not isinstance(dim, int)
+            ):
                 raise RuntimeError("external memory rebuild contract is not configured")
             python = python.expanduser().absolute()
             script = script.expanduser().resolve()
@@ -450,9 +475,18 @@ def rebuild_memory_index(
                 raise RuntimeError("external memory rebuild argv contract is unavailable")
             completed = _proc.run(
                 [
-                    str(python), str(script), "--canon", str(facts_dir), "--export",
-                    str(memory_dir / "export.ndjson"), "--target-db",
-                    str(memory_dir / "index.sqlite"), "--model", model, "--dim", str(dim),
+                    str(python),
+                    str(script),
+                    "--canon",
+                    str(facts_dir),
+                    "--export",
+                    str(memory_dir / "export.ndjson"),
+                    "--target-db",
+                    str(memory_dir / "index.sqlite"),
+                    "--model",
+                    model,
+                    "--dim",
+                    str(dim),
                 ],
                 timeout=MEMORY_REINDEX_TIMEOUT_SECONDS,
                 env={
@@ -462,9 +496,7 @@ def rebuild_memory_index(
                 },
             )
             if completed.returncode:
-                raise RuntimeError(
-                    "memory reindex command failed: " + _reindex_error_detail(completed)
-                )
+                raise RuntimeError("memory reindex command failed: " + _reindex_error_detail(completed))
             result = json.loads(completed.stdout)
             if not isinstance(result, dict) or result.get("ok") is not True:
                 raise RuntimeError("memory reindex command reported failure")
@@ -553,9 +585,7 @@ def _normalized_cards(
         if not isinstance(card.get("fields"), dict) or not isinstance(card.get("metadata"), dict):
             raise RestoreError("normalized board export has invalid task data")
         if card["metadata"].get("record_type") not in _RECORD_TYPES:
-            raise RestoreError(
-                f"normalized board export card {card['reference']} has no record type"
-            )
+            raise RestoreError(f"normalized board export card {card['reference']} has no record type")
         if not isinstance(card.get("title"), str) or not isinstance(card.get("description"), str):
             raise RestoreError("normalized board export has invalid task text")
         if "closed" in card and not isinstance(card["closed"], bool):
@@ -586,9 +616,9 @@ def _normalized_sprints(data_dir: Path) -> list[dict[str, Any]]:
     if not isinstance(sprints, list) or any(not isinstance(sprint, dict) for sprint in sprints):
         raise RestoreError("normalized sprint export is invalid")
     refs = [sprint.get("reference") for sprint in sprints]
-    if any(
-        not isinstance(ref, str) or not ref.startswith(SPRINT_REFERENCE_PREFIX) for ref in refs
-    ) or len(set(refs)) != len(refs):
+    if any(not isinstance(ref, str) or not ref.startswith(SPRINT_REFERENCE_PREFIX) for ref in refs) or len(
+        set(refs)
+    ) != len(refs):
         raise RestoreError("normalized sprint export has invalid references")
     for sprint in sprints:
         if not isinstance(sprint.get("goal"), str) or not sprint["goal"].strip():
@@ -611,16 +641,17 @@ def _normalized_sprints(data_dir: Path) -> list[dict[str, Any]]:
             if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
                 raise RestoreError(f"normalized sprint export has invalid {field}")
         budget = sprint.get("budget")
-        if not isinstance(budget, dict) or not isinstance(budget.get("by_type"), dict) or any(
-            not isinstance(count, int) for count in budget["by_type"].values()
+        if (
+            not isinstance(budget, dict)
+            or not isinstance(budget.get("by_type"), dict)
+            or any(not isinstance(count, int) for count in budget["by_type"].values())
         ):
             raise RestoreError("normalized sprint export has an invalid budget")
         # A pre-uncharged export carries no such key at all, and restores a sprint whose uncharged
         # counts read as zero.
         uncharged = budget.get("uncharged", {})
         if not isinstance(uncharged, dict) or any(
-            not isinstance(count, int) or isinstance(count, bool) or count < 0
-            for count in uncharged.values()
+            not isinstance(count, int) or isinstance(count, bool) or count < 0 for count in uncharged.values()
         ):
             raise RestoreError("normalized sprint export has an invalid budget")
         if sprint.get("resume") is not None and not isinstance(sprint.get("resume"), dict):
@@ -652,9 +683,7 @@ def _restore_request_prefix(data_dir: Path, audit: TaskAudit, live_refs: set[str
         # `sprints` is also what marks a restore state as one that tracks the sprint step
         # at all; a recovery staged before sprint entities joined the checkpoint has no
         # such key, and doctor reads its absence as nothing left to restore.
-        _update_restore_state(
-            data_dir, restore_namespace=token, sprints=state.get("sprints", "pending")
-        )
+        _update_restore_state(data_dir, restore_namespace=token, sprints=state.get("sprints", "pending"))
     return f"restore:{token}:"
 
 
@@ -676,12 +705,23 @@ def _create_restored_card(writer: TaskWriter, card: dict[str, Any], prefix: str)
         _create_restored_non_task(writer, card)
         return
     writer.create(
-        role="steward", actor="restore", project=fields["project"] or "product-backlog",
-        task_type=fields["task_type"] or "research", target="ready", restoring=True,
-        title=card["title"], description=card["description"], reference=card["reference"],
-        blocked_by=fields["blocked_by"], head=fields["head"], review_head=fields["review_head"],
-        slug=fields["slug"], base_branch=fields["base_branch"], complexity=fields["complexity"],
-        family_preference=fields["family_preference"], codex_launch_mode=fields["codex_launch_mode"],
+        role="steward",
+        actor="restore",
+        project=fields["project"] or "product-backlog",
+        task_type=fields["task_type"] or "research",
+        target="ready",
+        restoring=True,
+        title=card["title"],
+        description=card["description"],
+        reference=card["reference"],
+        blocked_by=fields["blocked_by"],
+        head=fields["head"],
+        review_head=fields["review_head"],
+        slug=fields["slug"],
+        base_branch=fields["base_branch"],
+        complexity=fields["complexity"],
+        family_preference=fields["family_preference"],
+        codex_launch_mode=fields["codex_launch_mode"],
         request_id=f"{prefix}create:{card['reference']}",
     )
 
@@ -778,18 +818,24 @@ def _restore_fields(card: dict[str, Any]) -> dict[str, str]:
     metadata = card["metadata"]
     value = lambda name: str(metadata.get(name, fields.get(name, "")) or "")
     return {
-        "project": value("project"), "task_type": value("task_type"), "blocked_by": value("blocked_by"),
-        "head": value("head"), "review_head": value("review_head"), "slug": value("slug"),
+        "project": value("project"),
+        "task_type": value("task_type"),
+        "blocked_by": value("blocked_by"),
+        "head": value("head"),
+        "review_head": value("review_head"),
+        "slug": value("slug"),
         "base_branch": value("base_branch"),
-        "complexity": _enum_or_default(value("complexity"), {"cheap", "standard", "hard", "frontier"}, "standard"),
-        "family_preference": _enum_or_default(value("family_preference"), {"auto", "claude", "codex"}, "auto"),
+        "complexity": _enum_or_default(
+            value("complexity"), {"cheap", "standard", "hard", "frontier"}, "standard"
+        ),
+        "family_preference": _enum_or_default(
+            value("family_preference"), {"auto", "claude", "codex"}, "auto"
+        ),
         # A checkpoint older than the TUI-only rule still carries `exec` here. It is read without
         # failing and restored as no mode at all: recreating the card with it would put a launch
         # shape the product removed back on a live board, and `TaskWriter.create` refuses it
         # anyway. Every mode the product still has round-trips unchanged.
-        "codex_launch_mode": _enum_or_default(
-            value("codex_launch_mode"), {"", *CODEX_LAUNCH_MODES}, ""
-        ),
+        "codex_launch_mode": _enum_or_default(value("codex_launch_mode"), {"", *CODEX_LAUNCH_MODES}, ""),
     }
 
 
@@ -801,26 +847,56 @@ def _core_from_export(card: dict[str, Any]) -> dict[str, Any]:
     fields = _restore_fields(card)
     metadata = card["metadata"]
     return {
-            "ref": card["reference"], "title": card["title"], "description": card["description"],
-            "state": _state_for_column(card["column"]), "closed": bool(card.get("closed", False)), "project": fields["project"],
-            "type": fields["task_type"], "blocked_by": fields["blocked_by"] or None,
-            "claim": {"worker": metadata.get("claim") or None, "claimed_at": None},
-            "routing": {"complexity": fields["complexity"], "family_preference": fields["family_preference"], "head": fields["head"] or None, "review_head": fields["review_head"] or None, "resolved_head": metadata.get("resolved_head") or None, "resolved_review_head": metadata.get("resolved_review_head") or None, "codex_launch_mode": fields["codex_launch_mode"] or None},
-            "workspace": {"slug": metadata.get("slug") or None, "base_branch": metadata.get("base_branch") or None},
-            # position здесь не сравнивается: см. _restored_order_mismatch
-            "swimlane": str(card.get("swimlane") or "") or None,
-            "comments": [{"body": body} for body in _restore_comments(card)],
-            "product_issue_metadata": _product_issue_metadata(card["metadata"]),
+        "ref": card["reference"],
+        "title": card["title"],
+        "description": card["description"],
+        "state": _state_for_column(card["column"]),
+        "closed": bool(card.get("closed", False)),
+        "project": fields["project"],
+        "type": fields["task_type"],
+        "blocked_by": fields["blocked_by"] or None,
+        "claim": {"worker": metadata.get("claim") or None, "claimed_at": None},
+        "routing": {
+            "complexity": fields["complexity"],
+            "family_preference": fields["family_preference"],
+            "head": fields["head"] or None,
+            "review_head": fields["review_head"] or None,
+            "resolved_head": metadata.get("resolved_head") or None,
+            "resolved_review_head": metadata.get("resolved_review_head") or None,
+            "codex_launch_mode": fields["codex_launch_mode"] or None,
+        },
+        "workspace": {
+            "slug": metadata.get("slug") or None,
+            "base_branch": metadata.get("base_branch") or None,
+        },
+        # position здесь не сравнивается: см. _restored_order_mismatch
+        "swimlane": str(card.get("swimlane") or "") or None,
+        "comments": [{"body": body} for body in _restore_comments(card)],
+        "product_issue_metadata": _product_issue_metadata(card["metadata"]),
     }
 
 
 def _core_from_live(card: dict[str, Any]) -> dict[str, Any]:
     extensions = card.get("extensions", {}).get("kanboard", {})
     return {
-        "ref": card.get("ref"), "title": card.get("title"), "description": card.get("description"),
-        "state": card.get("state"), "closed": bool(card.get("closed", False)), "project": card.get("project"), "type": card.get("type"),
-        "blocked_by": card.get("blocked_by"), "claim": card.get("claim"),
-        "routing": {"complexity": card["routing"].get("complexity"), "family_preference": card["routing"].get("family_preference"), "head": card["routing"].get("head_override"), "review_head": card["routing"].get("review_head_override"), "resolved_head": card["routing"].get("resolved_worker_head"), "resolved_review_head": card["routing"].get("resolved_review_head"), "codex_launch_mode": card["routing"].get("codex_launch_mode")},
+        "ref": card.get("ref"),
+        "title": card.get("title"),
+        "description": card.get("description"),
+        "state": card.get("state"),
+        "closed": bool(card.get("closed", False)),
+        "project": card.get("project"),
+        "type": card.get("type"),
+        "blocked_by": card.get("blocked_by"),
+        "claim": card.get("claim"),
+        "routing": {
+            "complexity": card["routing"].get("complexity"),
+            "family_preference": card["routing"].get("family_preference"),
+            "head": card["routing"].get("head_override"),
+            "review_head": card["routing"].get("review_head_override"),
+            "resolved_head": card["routing"].get("resolved_worker_head"),
+            "resolved_review_head": card["routing"].get("resolved_review_head"),
+            "codex_launch_mode": card["routing"].get("codex_launch_mode"),
+        },
         "workspace": card.get("workspace"),
         "swimlane": extensions.get("swimlane"),
         "comments": [{"body": str(comment.get("body") or "")} for comment in card.get("comments", [])],
@@ -832,11 +908,7 @@ def _product_issue_metadata(metadata: dict[str, Any]) -> dict[str, str]:
     record_type = metadata.get("record_type")
     if record_type not in {"issue", "product"}:
         return {}
-    return {
-        key: str(metadata[key])
-        for key in _PRODUCT_ISSUE_METADATA
-        if key in metadata
-    }
+    return {key: str(metadata[key]) for key in _PRODUCT_ISSUE_METADATA if key in metadata}
 
 
 def _state_for_column(column: str) -> str | None:

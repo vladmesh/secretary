@@ -129,7 +129,10 @@ class WorkerContinuationLiveness:
 
     @classmethod
     def unknown(
-        cls, reason: str = "missing", *, legacy_busy_attempts: int = 0,
+        cls,
+        reason: str = "missing",
+        *,
+        legacy_busy_attempts: int = 0,
     ) -> WorkerContinuationLiveness:
         return cls(
             state=ContinuationLivenessState.UNKNOWN,
@@ -156,9 +159,15 @@ class WorkerContinuationLiveness:
 
     @property
     def admitted(self) -> bool:
-        return self.bound and self.baseline_established and self.state not in {
-            ContinuationLivenessState.UNKNOWN, ContinuationLivenessState.UNAVAILABLE,
-        }
+        return (
+            self.bound
+            and self.baseline_established
+            and self.state
+            not in {
+                ContinuationLivenessState.UNKNOWN,
+                ContinuationLivenessState.UNAVAILABLE,
+            }
+        )
 
     @property
     def terminal(self) -> bool:
@@ -217,9 +226,7 @@ class WorkerContinuationLiveness:
                 )
                 self.last_provider_observed_at = now
                 return "unknown"
-            self.state = (
-                ContinuationLivenessState.UNAVAILABLE
-            )
+            self.state = ContinuationLivenessState.UNAVAILABLE
             self.reason = str(evidence.get("reason") or "provider source was not admitted")[:240]
             self.last_provider_observed_at = now
             return self.state.value
@@ -243,10 +250,7 @@ class WorkerContinuationLiveness:
             self.reason = ""
             self.last_provider_observed_at = now
             return "baseline"
-        if (
-            source != self.provider_source
-            or source_fingerprint != self.provider_source_fingerprint
-        ):
+        if source != self.provider_source or source_fingerprint != self.provider_source_fingerprint:
             self._reject_as_unknown("provider source does not match the persisted v1 baseline")
             return "unknown"
         self.last_provider_observed_at = now
@@ -262,7 +266,8 @@ class WorkerContinuationLiveness:
         self.busy_attempts = 0
         self.recovery_rung = (
             ContinuationRecoveryRung.SAFE_RECOVERY_RESPONSE_WINDOW
-            if response_window else ContinuationRecoveryRung.NONE
+            if response_window
+            else ContinuationRecoveryRung.NONE
         )
         self.recovery_attempted_at = 0.0
         self.recovery_response_deadline = 0.0
@@ -353,8 +358,12 @@ class WorkerContinuationLiveness:
             numeric = {
                 name: float(value.get(name) or 0.0)
                 for name in (
-                    "first_observed_at", "first_busy_at", "last_provider_progress_at", "last_provider_observed_at",
-                    "recovery_attempted_at", "recovery_response_deadline",
+                    "first_observed_at",
+                    "first_busy_at",
+                    "last_provider_progress_at",
+                    "last_provider_observed_at",
+                    "recovery_attempted_at",
+                    "recovery_response_deadline",
                 )
             }
             if any(number < 0 for number in numeric.values()):
@@ -378,46 +387,83 @@ class WorkerContinuationLiveness:
         outcome = str(value.get("terminal_outcome") or "")[:80]
         explicit_unknown = (
             state == ContinuationLivenessState.UNKNOWN
-            and not run_id and not fingerprint and not source and not source_fingerprint and not cursor
-            and baseline_established is False and busy_attempts == 0
-            and rung == ContinuationRecoveryRung.NONE and not outcome
+            and not run_id
+            and not fingerprint
+            and not source
+            and not source_fingerprint
+            and not cursor
+            and baseline_established is False
+            and busy_attempts == 0
+            and rung == ContinuationRecoveryRung.NONE
+            and not outcome
             and all(not numeric[name] for name in numeric)
         )
         if explicit_unknown and not source_rejected:
-            return cls.unknown(str(value.get("reason") or "unknown"), legacy_busy_attempts=legacy_busy_attempts)
+            return cls.unknown(
+                str(value.get("reason") or "unknown"), legacy_busy_attempts=legacy_busy_attempts
+            )
         if not run_id or not _fingerprint(fingerprint):
             return cls.unknown("malformed HeadRun binding", legacy_busy_attempts=legacy_busy_attempts)
         if not isinstance(baseline_established, bool):
-            return cls.unknown("historical v1 liveness lacks a baseline", legacy_busy_attempts=legacy_busy_attempts)
+            return cls.unknown(
+                "historical v1 liveness lacks a baseline", legacy_busy_attempts=legacy_busy_attempts
+            )
         if state == ContinuationLivenessState.UNKNOWN:
             # A foreign or changing source seals an otherwise exact episode.  Its retained
             # fields are audit-only: no retry may read them back as a new source baseline.
             if not source_rejected:
-                return cls.unknown("unknown liveness episode lacks a source-rejection fence", legacy_busy_attempts=legacy_busy_attempts)
+                return cls.unknown(
+                    "unknown liveness episode lacks a source-rejection fence",
+                    legacy_busy_attempts=legacy_busy_attempts,
+                )
             if baseline_established:
                 if not source or not cursor or not _fingerprint(source_fingerprint):
-                    return cls.unknown("incoherent source-rejected liveness baseline", legacy_busy_attempts=legacy_busy_attempts)
+                    return cls.unknown(
+                        "incoherent source-rejected liveness baseline",
+                        legacy_busy_attempts=legacy_busy_attempts,
+                    )
             elif (
-                source or source_fingerprint or cursor or busy_attempts
-                or rung != ContinuationRecoveryRung.NONE or outcome
-                or numeric["first_busy_at"] or numeric["last_provider_progress_at"]
-                or numeric["recovery_attempted_at"] or numeric["recovery_response_deadline"]
-                or recovery_attempts or bool(value.get("recovery_resume_used", False))
+                source
+                or source_fingerprint
+                or cursor
+                or busy_attempts
+                or rung != ContinuationRecoveryRung.NONE
+                or outcome
+                or numeric["first_busy_at"]
+                or numeric["last_provider_progress_at"]
+                or numeric["recovery_attempted_at"]
+                or numeric["recovery_response_deadline"]
+                or recovery_attempts
+                or bool(value.get("recovery_resume_used", False))
             ):
-                return cls.unknown("incoherent source-rejected pending baseline", legacy_busy_attempts=legacy_busy_attempts)
+                return cls.unknown(
+                    "incoherent source-rejected pending baseline", legacy_busy_attempts=legacy_busy_attempts
+                )
         elif state == ContinuationLivenessState.BASELINE_PENDING:
             if (
-                baseline_established or source or source_fingerprint or cursor or busy_attempts
-                or rung != ContinuationRecoveryRung.NONE or outcome or any(numeric.values())
-                or recovery_attempts or bool(value.get("recovery_resume_used", False))
+                baseline_established
+                or source
+                or source_fingerprint
+                or cursor
+                or busy_attempts
+                or rung != ContinuationRecoveryRung.NONE
+                or outcome
+                or any(numeric.values())
+                or recovery_attempts
+                or bool(value.get("recovery_resume_used", False))
             ):
-                return cls.unknown("incoherent pending liveness baseline", legacy_busy_attempts=legacy_busy_attempts)
+                return cls.unknown(
+                    "incoherent pending liveness baseline", legacy_busy_attempts=legacy_busy_attempts
+                )
         elif state in {
-            ContinuationLivenessState.BASELINED, ContinuationLivenessState.STALLED,
+            ContinuationLivenessState.BASELINED,
+            ContinuationLivenessState.STALLED,
             ContinuationLivenessState.PROGRESSED,
         }:
             if not baseline_established or not source or not cursor or not _fingerprint(source_fingerprint):
-                return cls.unknown("incoherent bound liveness baseline", legacy_busy_attempts=legacy_busy_attempts)
+                return cls.unknown(
+                    "incoherent bound liveness baseline", legacy_busy_attempts=legacy_busy_attempts
+                )
         elif state == ContinuationLivenessState.UNAVAILABLE:
             # An unavailable probe is a durable observation of this already-bound episode, not an
             # unbound historical value.  In particular, preserve it across a reload so a missing
@@ -436,18 +482,27 @@ class WorkerContinuationLiveness:
                         legacy_busy_attempts=legacy_busy_attempts,
                     )
             elif (
-                source or source_fingerprint or cursor or busy_attempts
+                source
+                or source_fingerprint
+                or cursor
+                or busy_attempts
                 or rung not in {ContinuationRecoveryRung.NONE, ContinuationRecoveryRung.TERMINAL}
-                or numeric["first_busy_at"] or numeric["last_provider_progress_at"]
-                or numeric["recovery_attempted_at"] or numeric["recovery_response_deadline"]
-                or recovery_attempts or bool(value.get("recovery_resume_used", False))
+                or numeric["first_busy_at"]
+                or numeric["last_provider_progress_at"]
+                or numeric["recovery_attempted_at"]
+                or numeric["recovery_response_deadline"]
+                or recovery_attempts
+                or bool(value.get("recovery_resume_used", False))
             ):
                 return cls.unknown(
                     "incoherent unavailable pending baseline",
                     legacy_busy_attempts=legacy_busy_attempts,
                 )
         else:
-            return cls.unknown("unavailable liveness episode is not safely recoverable", legacy_busy_attempts=legacy_busy_attempts)
+            return cls.unknown(
+                "unavailable liveness episode is not safely recoverable",
+                legacy_busy_attempts=legacy_busy_attempts,
+            )
         if state == ContinuationLivenessState.UNKNOWN:
             return cls(
                 version=CONTINUATION_LIVENESS_VERSION,
@@ -476,21 +531,32 @@ class WorkerContinuationLiveness:
             )
         if rung == ContinuationRecoveryRung.TERMINAL:
             if not outcome:
-                return cls.unknown("terminal liveness outcome is missing", legacy_busy_attempts=legacy_busy_attempts)
+                return cls.unknown(
+                    "terminal liveness outcome is missing", legacy_busy_attempts=legacy_busy_attempts
+                )
         elif outcome:
-            return cls.unknown("non-terminal liveness carries a terminal outcome", legacy_busy_attempts=legacy_busy_attempts)
+            return cls.unknown(
+                "non-terminal liveness carries a terminal outcome", legacy_busy_attempts=legacy_busy_attempts
+            )
         elif rung != ContinuationRecoveryRung.NONE and state not in {
-            ContinuationLivenessState.STALLED, ContinuationLivenessState.PROGRESSED,
+            ContinuationLivenessState.STALLED,
+            ContinuationLivenessState.PROGRESSED,
             ContinuationLivenessState.UNAVAILABLE,
         }:
-            return cls.unknown("recovery rung lacks verified no-progress episode", legacy_busy_attempts=legacy_busy_attempts)
+            return cls.unknown(
+                "recovery rung lacks verified no-progress episode", legacy_busy_attempts=legacy_busy_attempts
+            )
         if rung == ContinuationRecoveryRung.SAFE_RECOVERY_RESPONSE_WINDOW and (
             recovery_attempts != 1
             or numeric["recovery_response_deadline"] <= numeric["recovery_attempted_at"]
         ):
-            return cls.unknown("safe recovery response window is incoherent", legacy_busy_attempts=legacy_busy_attempts)
+            return cls.unknown(
+                "safe recovery response window is incoherent", legacy_busy_attempts=legacy_busy_attempts
+            )
         if rung == ContinuationRecoveryRung.SAFE_RECOVERY_RESUME_ONCE and recovery_attempts != 1:
-            return cls.unknown("safe recovery resume is incoherent", legacy_busy_attempts=legacy_busy_attempts)
+            return cls.unknown(
+                "safe recovery resume is incoherent", legacy_busy_attempts=legacy_busy_attempts
+            )
         return cls(
             version=CONTINUATION_LIVENESS_VERSION,
             state=state,
@@ -710,9 +776,7 @@ class WorkerContinuation:
             raise ValueError(f"cannot confirm validation move from {self.stage}")
         self.stage = WorkerContinuationStage.RETAINED
 
-    def begin_park(
-        self, phase: str, report_baseline: int, move_reason: str, verdict_outcome: str
-    ) -> None:
+    def begin_park(self, phase: str, report_baseline: int, move_reason: str, verdict_outcome: str) -> None:
         """Record the reviewer's verdict before the card is parked in Assessment.
 
         The verdict is durable here, and nothing has yet merged, resumed a worker or moved the board. A
@@ -741,8 +805,14 @@ class WorkerContinuation:
         self.stage = WorkerContinuationStage.ASSESSMENT_PARKED
 
     def begin_red_transition(
-        self, phase: str, report_baseline: int, move_reason: str, verdict_outcome: str,
-        decision: str = "", reserved_generation: int = 0, decision_body: str = "",
+        self,
+        phase: str,
+        report_baseline: int,
+        move_reason: str,
+        verdict_outcome: str,
+        decision: str = "",
+        reserved_generation: int = 0,
+        decision_body: str = "",
     ) -> None:
         """Record the red verdict before the board is moved.
 

@@ -27,6 +27,7 @@ from typing import Any
 from secretary.dispatcher_heartbeat import run_heartbeat_identity
 from secretary.dispatcher_state import request_token
 from secretary.infra.env import positive_int
+
 # The launch-identity record is written by the head's own shell (`head.command.with_pid_heartbeat`)
 # and classified beside that writer, so this module names the one reader rather than keeping a
 # second one. Re-exported here because every caller in the control plane reaches it by this name.
@@ -129,7 +130,8 @@ SUSPENSION_RESPONSE_WINDOW_DEFAULT = 5 * 60
 def suspension_response_window_seconds() -> int:
     """The SIGCONT response window for the recovery policy's second rung."""
     return positive_int(
-        "SECRETARY_HEAD_SUSPENSION_RESPONSE_SECONDS", SUSPENSION_RESPONSE_WINDOW_DEFAULT,
+        "SECRETARY_HEAD_SUSPENSION_RESPONSE_SECONDS",
+        SUSPENSION_RESPONSE_WINDOW_DEFAULT,
     )
 
 
@@ -255,9 +257,7 @@ def _replace_json(path: Path, payload: Mapping[str, Any]) -> bool:
     return True
 
 
-def bind_head_heartbeat(
-    pid_file: str, *, expected: Mapping[str, Any], leaf: str
-) -> bool:
+def bind_head_heartbeat(pid_file: str, *, expected: Mapping[str, Any], leaf: str) -> bool:
     """Durably hand a pane leaf to the heartbeat writer and bind an existing record.
 
     The shell and terminal-create reply have no ordering guarantee. First write the handoff, so a
@@ -267,10 +267,7 @@ def bind_head_heartbeat(
     """
     handoff = {
         "version": HEARTBEAT_VERSION,
-        "expected": {
-            name: str(expected.get(name) or "")
-            for name in ("run_id", "role", "task")
-        },
+        "expected": {name: str(expected.get(name) or "") for name in ("run_id", "role", "task")},
         "leaf": str(leaf or ""),
     }
     if not _replace_json(_heartbeat_handoff_path(pid_file), handoff):

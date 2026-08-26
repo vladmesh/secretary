@@ -52,7 +52,9 @@ class HeadHealthTests(unittest.TestCase):
         used to fall through to `unknown`, which allows a launch. The dispatcher then claimed a
         card and put two heads into a resource that was out until the quota reset."""
         spent = subprocess.CompletedProcess(
-            "probe", 1, "",
+            "probe",
+            1,
+            "",
             "ERROR: You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage "
             "to purchase more credits or try again at Aug 8th, 2026 9:13 PM.",
         )
@@ -67,7 +69,10 @@ class HeadHealthTests(unittest.TestCase):
         """`unavailable` and `exhausted` mean different things to an operator, and a body can carry
         both vocabularies: a 429 quota refusal is spent credit, not a provider having a bad minute."""
         both = subprocess.CompletedProcess(
-            "probe", 1, "", "429 insufficient_quota: you exceeded your current quota",
+            "probe",
+            1,
+            "",
+            "429 insufficient_quota: you exceeded your current quota",
         )
         with mock.patch("secretary.head_health.subprocess.run", return_value=both):
             result = self.health.check("openai-sub")
@@ -76,7 +81,9 @@ class HeadHealthTests(unittest.TestCase):
         self.assertFalse(result.launch_allowed)
 
     def test_probe_failure_is_unknown_and_allows_launch(self) -> None:
-        with mock.patch("secretary.head_health.subprocess.run", side_effect=subprocess.TimeoutExpired("probe", 20)):
+        with mock.patch(
+            "secretary.head_health.subprocess.run", side_effect=subprocess.TimeoutExpired("probe", 20)
+        ):
             result = self.health.check("openai-sub")
 
         self.assertEqual(result.status, "unknown")
@@ -93,8 +100,11 @@ CHAINS = {
     "lonely": [],
 }
 RESOURCES = {
-    "codex": "openai-sub", "codex-reviewer": "openai-sub",
-    "claude-opus": "claude-sub", "claude-default": "claude-sub", "lonely": "claude-sub",
+    "codex": "openai-sub",
+    "codex-reviewer": "openai-sub",
+    "claude-opus": "claude-sub",
+    "claude-default": "claude-sub",
+    "lonely": "claude-sub",
 }
 
 
@@ -178,12 +188,16 @@ class ResolveHeadChainTests(unittest.TestCase):
         self.assertEqual(choice.head, "mystery")
 
 
-
 # The PATH `packaging/systemd/secretary-dispatcher-production.service` pins for the dispatcher: the
 # ordinary system directories and nothing else. The unit starts the dispatcher from its venv but
 # never puts that venv on PATH, which is what this test environment reproduces.
 UNIT_PATH_DIRECTORIES = (
-    "/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin",
+    "/usr/local/sbin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
 )
 SRC = Path(__file__).resolve().parents[1] / "src"
 # A probe that reaches no provider and answers exactly the question the real one dies on: can the
@@ -243,8 +257,10 @@ class ProbeInterpreterTests(unittest.TestCase):
         self.tmpdir.cleanup()
 
     def test_a_path_without_the_venv_still_finds_the_product(self) -> None:
-        with mock.patch.dict(os.environ, self.unit_env, clear=True), \
-                mock.patch.object(head_health.sys, "executable", str(self.venv)):
+        with (
+            mock.patch.dict(os.environ, self.unit_env, clear=True),
+            mock.patch.object(head_health.sys, "executable", str(self.venv)),
+        ):
             result = self.health.check("openai-sub")
 
         self.assertEqual(result.status, "ready", result.reason)
@@ -254,8 +270,10 @@ class ProbeInterpreterTests(unittest.TestCase):
         """The pre-fix production shape, kept as the negative control: when prepending our own
         interpreter changes nothing because that interpreter is the one without the product, the
         probe is reported as unrunnable rather than as an unknown resource."""
-        with mock.patch.dict(os.environ, self.unit_env, clear=True), \
-                mock.patch.object(head_health.sys, "executable", str(self.system)):
+        with (
+            mock.patch.dict(os.environ, self.unit_env, clear=True),
+            mock.patch.object(head_health.sys, "executable", str(self.system)),
+        ):
             result = self.health.check("openai-sub")
 
         self.assertEqual(result.status, head_health.PROBE_BROKEN)
@@ -289,8 +307,11 @@ class BrokenProbeStatusTests(unittest.TestCase):
             return health.check("openai-sub")
 
     def test_a_missing_module_is_a_broken_probe(self) -> None:
-        result = self.check(subprocess.CompletedProcess(
-            "probe", 1, "", "/usr/bin/python3: No module named triggered_agents\n"))
+        result = self.check(
+            subprocess.CompletedProcess(
+                "probe", 1, "", "/usr/bin/python3: No module named triggered_agents\n"
+            )
+        )
 
         self.assertEqual(result.status, head_health.PROBE_BROKEN)
         self.assertEqual(
@@ -300,8 +321,7 @@ class BrokenProbeStatusTests(unittest.TestCase):
         self.assertFalse(result.launch_allowed)
 
     def test_a_command_the_shell_cannot_find_is_a_broken_probe(self) -> None:
-        result = self.check(subprocess.CompletedProcess(
-            "probe", 127, "", "sh: 1: python3: not found\n"))
+        result = self.check(subprocess.CompletedProcess("probe", 127, "", "sh: 1: python3: not found\n"))
 
         self.assertEqual(result.status, head_health.PROBE_BROKEN)
         self.assertFalse(result.launch_allowed)
@@ -318,7 +338,9 @@ class BrokenProbeStatusTests(unittest.TestCase):
         """A probe that started and hung says nothing about the account, and that semantics is
         deliberately unchanged: `unknown` still means "nothing is known" and still lets a claim
         through."""
-        with mock.patch("secretary.head_health.subprocess.run", side_effect=subprocess.TimeoutExpired("probe", 20)):
+        with mock.patch(
+            "secretary.head_health.subprocess.run", side_effect=subprocess.TimeoutExpired("probe", 20)
+        ):
             result = self.health.check("openai-sub")
 
         self.assertEqual(result.status, "unknown")
@@ -350,8 +372,7 @@ class BrokenProbeChainTests(unittest.TestCase):
     """secretary-1464: a resource nobody can probe is walked past, not launched into."""
 
     def test_a_broken_probe_is_not_claimable_and_the_chain_is_walked(self) -> None:
-        choice = resolve_head_chain(
-            "codex", _readiness({"openai-sub": head_health.PROBE_BROKEN}), _fallback)
+        choice = resolve_head_chain("codex", _readiness({"openai-sub": head_health.PROBE_BROKEN}), _fallback)
 
         self.assertEqual(choice.head, "claude-opus")
         self.assertTrue(choice.substituted)

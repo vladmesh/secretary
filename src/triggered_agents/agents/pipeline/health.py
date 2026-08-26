@@ -22,6 +22,7 @@ When a probe records red, the `head-health` line carries a `reason` object. Look
 resource_health.json says a resource is red. stdout, stderr, and exception text are scrubbed and
 capped before logging so telemetry stays useful without storing secrets or whole CLI transcripts.
 """
+
 from __future__ import annotations
 
 import json
@@ -114,26 +115,45 @@ def _display_command(command: str | list[str]) -> str:
     return command if isinstance(command, str) else shlex.join(command)
 
 
-def _run_subprocess_probe(command: str | list[str], probe_class: str, *,
-                          shell: bool = False, env: dict | None = None,
-                          display_command: str | None = None) -> ProbeResult:
+def _run_subprocess_probe(
+    command: str | list[str],
+    probe_class: str,
+    *,
+    shell: bool = False,
+    env: dict | None = None,
+    display_command: str | None = None,
+) -> ProbeResult:
     shown = display_command or _display_command(command)
     try:
         p = subprocess.run(
-            command, shell=shell, capture_output=True, text=True, timeout=PROBE_TIMEOUT_S, env=env)
+            command, shell=shell, capture_output=True, text=True, timeout=PROBE_TIMEOUT_S, env=env
+        )
     except subprocess.TimeoutExpired as e:
         return ProbeResult(
-            False, probe_class, command=shown, status="timeout",
-            timeout_s=float(e.timeout or PROBE_TIMEOUT_S), stdout=e.output, stderr=e.stderr,
-            exception=_exception_text(e))
+            False,
+            probe_class,
+            command=shown,
+            status="timeout",
+            timeout_s=float(e.timeout or PROBE_TIMEOUT_S),
+            stdout=e.output,
+            stderr=e.stderr,
+            exception=_exception_text(e),
+        )
     except OSError as e:
-        return ProbeResult(False, probe_class, command=shown, status="exception",
-                           exception=_exception_text(e))
+        return ProbeResult(
+            False, probe_class, command=shown, status="exception", exception=_exception_text(e)
+        )
     if p.returncode == 0:
         return ProbeResult(True, probe_class, command=shown)
     return ProbeResult(
-        False, probe_class, command=shown, status="non-zero-exit", exit_code=p.returncode,
-        stdout=p.stdout, stderr=p.stderr)
+        False,
+        probe_class,
+        command=shown,
+        status="non-zero-exit",
+        exit_code=p.returncode,
+        stdout=p.stdout,
+        stderr=p.stderr,
+    )
 
 
 def _run_probe_cmd(cmd: str) -> ProbeResult:
@@ -146,8 +166,9 @@ def _run_probe_cmd(cmd: str) -> ProbeResult:
 def _coerce_probe_result(value, *, command: str) -> ProbeResult:
     if isinstance(value, ProbeResult):
         return value
-    return ProbeResult(bool(value), "shell-command", command=command,
-                       status="ok" if value else "probe-failed")
+    return ProbeResult(
+        bool(value), "shell-command", command=command, status="ok" if value else "probe-failed"
+    )
 
 
 def _probe_failure_reason(resource_id: str, result: ProbeResult) -> dict:
@@ -178,10 +199,12 @@ def _reason_key(reason: dict) -> str:
 
 def format_probe_failure(resource_id: str, result: ProbeResult) -> str:
     reason = _probe_failure_reason(resource_id, result)
-    parts = [f"resource {resource_id} probe failed",
-             f"class={reason['probe_class']}", f"status={reason['status']}"]
-    for key in ("command", "exit_code", "timeout_s", "http_status", "stderr", "stdout",
-                "exception"):
+    parts = [
+        f"resource {resource_id} probe failed",
+        f"class={reason['probe_class']}",
+        f"status={reason['status']}",
+    ]
+    for key in ("command", "exit_code", "timeout_s", "http_status", "stderr", "stdout", "exception"):
         if key in reason:
             parts.append(f"{key}={reason[key]}")
     return "; ".join(parts)
@@ -189,12 +212,13 @@ def format_probe_failure(resource_id: str, result: ProbeResult) -> str:
 
 def _forced_red_result(resource_id: str) -> ProbeResult:
     return ProbeResult(
-        False, "forced-red", status="forced-red",
-        exception=f"{_FORCE_RED_ENV} contains {resource_id!r}")
+        False, "forced-red", status="forced-red", exception=f"{_FORCE_RED_ENV} contains {resource_id!r}"
+    )
 
 
-def _log_health_event(resource_id: str, old_status: str | None, new_status: str,
-                      reason: dict | None, *, confirmed: bool = False) -> None:
+def _log_health_event(
+    resource_id: str, old_status: str | None, new_status: str, reason: dict | None, *, confirmed: bool = False
+) -> None:
     fields = {"resource": resource_id, "from": old_status, "to": new_status}
     if confirmed:
         fields["confirmed"] = True
@@ -223,8 +247,11 @@ def refresh(registry: heads_mod.Registry | None = None) -> dict[str, str]:
             statuses[rid] = entry["status"]
             continue
         command = res.get("probe", "true")
-        result = _forced_red_result(rid) if rid in forced else _coerce_probe_result(
-            _run_probe_cmd(command), command=command)
+        result = (
+            _forced_red_result(rid)
+            if rid in forced
+            else _coerce_probe_result(_run_probe_cmd(command), command=command)
+        )
         new_status = GREEN if result.ok else RED
         old_status = entry["status"] if entry else None
         reason = None if result.ok else _probe_failure_reason(rid, result)
@@ -235,8 +262,7 @@ def refresh(registry: heads_mod.Registry | None = None) -> dict[str, str]:
             cache_entry["reason_key"] = reason_key
             logged_key = entry.get("logged_reason_key") if entry else None
             if old_status != RED or logged_key != reason_key:
-                _log_health_event(rid, old_status, new_status, reason,
-                                  confirmed=(old_status == RED))
+                _log_health_event(rid, old_status, new_status, reason, confirmed=(old_status == RED))
                 cache_entry["logged_reason_key"] = reason_key
             elif logged_key:
                 cache_entry["logged_reason_key"] = logged_key
@@ -261,8 +287,9 @@ def resource_of(profile_id: str, registry: heads_mod.Registry | None = None) -> 
         return None
 
 
-def resolve_head(preferred: str, statuses: dict[str, str],
-                 registry: heads_mod.Registry | None = None) -> str | None:
+def resolve_head(
+    preferred: str, statuses: dict[str, str], registry: heads_mod.Registry | None = None
+) -> str | None:
     """The profile to actually launch for `preferred`: itself if its resource is green, else the
     first profile — breadth-first over the ordered fallback chain, recursively — whose resource is
     green. None when `preferred` and everything reachable through its fallback chain sits on a red
@@ -289,8 +316,7 @@ def resolve_head(preferred: str, statuses: dict[str, str],
 # not resource-id-dispatched inside `refresh`/`_run_probe_cmd` above (those stay pure "run this
 # shell command" — heads.toml's `probe` field is the single source of what each resource runs);
 # these are just what that field's command, for these ids, happens to invoke.
-_OPENROUTER_ENV_FILE = Path(os.environ.get("TA_OPENROUTER_ENV_FILE",
-                                          str(Path.home() / ".hermes" / ".env")))
+_OPENROUTER_ENV_FILE = Path(os.environ.get("TA_OPENROUTER_ENV_FILE", str(Path.home() / ".hermes" / ".env")))
 # Which assignment inside _OPENROUTER_ENV_FILE carries the key. The canonical hermes .env writes
 # OPENROUTER_API_KEY; the old decommissioned-repo .env used open_router_key. Accept both so the
 # probe resolves against the live hermes file without a per-host tweak; TA_OPENROUTER_ENV_KEY pins
@@ -326,8 +352,8 @@ def probe_claude_sub_result() -> ProbeResult:
     subscription is rate-limited or the CLI can't reach the API, otherwise green. Costs one cheap
     call per PROBE_TTL_S, never per tick."""
     return _run_subprocess_probe(
-        ["claude", "-p", "ping", "--model", "haiku", "--dangerously-skip-permissions"],
-        "builtin:claude-sub")
+        ["claude", "-p", "ping", "--model", "haiku", "--dangerously-skip-permissions"], "builtin:claude-sub"
+    )
 
 
 def probe_claude_sub() -> bool:
@@ -355,15 +381,20 @@ def probe_openrouter_result() -> ProbeResult:
     command = "POST https://openrouter.ai/api/v1/chat/completions model=google/gemini-2.5-flash max_tokens=1"
     key = _read_openrouter_key()
     if not key:
-        return ProbeResult(False, "builtin:openrouter", command=command, status="auth",
-                           exception="missing OpenRouter key")
-    body = json.dumps({
-        "model": "google/gemini-2.5-flash",
-        "messages": [{"role": "user", "content": "ping"}],
-        "max_tokens": 1,
-    }).encode("utf-8")
+        return ProbeResult(
+            False, "builtin:openrouter", command=command, status="auth", exception="missing OpenRouter key"
+        )
+    body = json.dumps(
+        {
+            "model": "google/gemini-2.5-flash",
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+        }
+    ).encode("utf-8")
     req = urllib.request.Request(
-        "https://openrouter.ai/api/v1/chat/completions", data=body, method="POST",
+        "https://openrouter.ai/api/v1/chat/completions",
+        data=body,
+        method="POST",
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
     )
     try:
@@ -371,19 +402,40 @@ def probe_openrouter_result() -> ProbeResult:
             status = getattr(resp, "status", None)
             if status is not None and 200 <= status < 300:
                 return ProbeResult(True, "builtin:openrouter", command=command)
-            return ProbeResult(False, "builtin:openrouter", command=command,
-                               status=_http_failure_status(status), http_status=status)
+            return ProbeResult(
+                False,
+                "builtin:openrouter",
+                command=command,
+                status=_http_failure_status(status),
+                http_status=status,
+            )
     except urllib.error.HTTPError as e:
         return ProbeResult(
-            False, "builtin:openrouter", command=command,
-            status=_http_failure_status(e.code), http_status=e.code,
-            stderr=_read_http_error_body(e), exception=_exception_text(e))
+            False,
+            "builtin:openrouter",
+            command=command,
+            status=_http_failure_status(e.code),
+            http_status=e.code,
+            stderr=_read_http_error_body(e),
+            exception=_exception_text(e),
+        )
     except TimeoutError as e:
-        return ProbeResult(False, "builtin:openrouter", command=command, status="timeout",
-                           timeout_s=float(PROBE_TIMEOUT_S), exception=_exception_text(e))
+        return ProbeResult(
+            False,
+            "builtin:openrouter",
+            command=command,
+            status="timeout",
+            timeout_s=float(PROBE_TIMEOUT_S),
+            exception=_exception_text(e),
+        )
     except Exception as e:  # noqa: BLE001 — any transport outcome is just "red"
-        return ProbeResult(False, "builtin:openrouter", command=command, status="transport-error",
-                           exception=_exception_text(e))
+        return ProbeResult(
+            False,
+            "builtin:openrouter",
+            command=command,
+            status="transport-error",
+            exception=_exception_text(e),
+        )
 
 
 def probe_openrouter() -> bool:
@@ -400,8 +452,11 @@ def probe_openai_sub_result() -> ProbeResult:
     env = {**os.environ, "CODEX_HOME": heads_mod.CODEX_HOME}
     cmd = ["codex", "exec", "--skip-git-repo-check", "-s", "read-only", "ping"]
     return _run_subprocess_probe(
-        cmd, "builtin:openai-sub", env=env,
-        display_command=f"CODEX_HOME={heads_mod.CODEX_HOME} {_display_command(cmd)}")
+        cmd,
+        "builtin:openai-sub",
+        env=env,
+        display_command=f"CODEX_HOME={heads_mod.CODEX_HOME} {_display_command(cmd)}",
+    )
 
 
 def probe_openai_sub() -> bool:

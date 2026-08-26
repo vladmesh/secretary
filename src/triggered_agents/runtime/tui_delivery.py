@@ -36,15 +36,31 @@ from .pane_host import pane_host as resolve_pane_host
 from .prompt_document import NUDGE_FILE_MODE
 from .tui_delivery_types import RunJson
 
-TUI_IDLE_TIMEOUT_MS = int(os.environ.get("SECRETARY_TUI_IDLE_TIMEOUT_MS", os.environ.get("TA_TUI_IDLE_TIMEOUT_MS", "60000")))
+TUI_IDLE_TIMEOUT_MS = int(
+    os.environ.get("SECRETARY_TUI_IDLE_TIMEOUT_MS", os.environ.get("TA_TUI_IDLE_TIMEOUT_MS", "60000"))
+)
 # Orca decides `tui-idle` from the pane's agent status and, failing that, from a quiescence window
 # it polls. A probe shorter than that window would report every quiet pane as busy, so it is set
 # above both rather than tuned for the fastest answer.
-TUI_IDLE_PROBE_TIMEOUT_MS = int(os.environ.get("SECRETARY_TUI_IDLE_PROBE_TIMEOUT_MS", os.environ.get("TA_TUI_IDLE_PROBE_TIMEOUT_MS", "6000")))
-TUI_DELIVERY_RETRIES = int(os.environ.get("SECRETARY_TUI_DELIVERY_RETRIES", os.environ.get("TA_TUI_DELIVERY_RETRIES", "2")))
-TUI_DELIVERY_TIMEOUT_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_TIMEOUT_S", os.environ.get("TA_TUI_DELIVERY_TIMEOUT_S", "12")))
-TUI_DELIVERY_POLL_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_POLL_S", os.environ.get("TA_TUI_DELIVERY_POLL_S", "0.25")))
-TUI_DELIVERY_RESEND_GRACE_S = float(os.environ.get("SECRETARY_TUI_DELIVERY_RESEND_GRACE_S", os.environ.get("TA_TUI_DELIVERY_RESEND_GRACE_S", "1")))
+TUI_IDLE_PROBE_TIMEOUT_MS = int(
+    os.environ.get(
+        "SECRETARY_TUI_IDLE_PROBE_TIMEOUT_MS", os.environ.get("TA_TUI_IDLE_PROBE_TIMEOUT_MS", "6000")
+    )
+)
+TUI_DELIVERY_RETRIES = int(
+    os.environ.get("SECRETARY_TUI_DELIVERY_RETRIES", os.environ.get("TA_TUI_DELIVERY_RETRIES", "2"))
+)
+TUI_DELIVERY_TIMEOUT_S = float(
+    os.environ.get("SECRETARY_TUI_DELIVERY_TIMEOUT_S", os.environ.get("TA_TUI_DELIVERY_TIMEOUT_S", "12"))
+)
+TUI_DELIVERY_POLL_S = float(
+    os.environ.get("SECRETARY_TUI_DELIVERY_POLL_S", os.environ.get("TA_TUI_DELIVERY_POLL_S", "0.25"))
+)
+TUI_DELIVERY_RESEND_GRACE_S = float(
+    os.environ.get(
+        "SECRETARY_TUI_DELIVERY_RESEND_GRACE_S", os.environ.get("TA_TUI_DELIVERY_RESEND_GRACE_S", "1")
+    )
+)
 # How much of a pane is fingerprinted. The screen is read for evidence, never for content, so the
 # bound is on the input to the digest rather than on anything that is kept.
 TUI_FINGERPRINT_LIMIT = 4000
@@ -54,7 +70,9 @@ TUI_FINGERPRINT_LIMIT = 4000
 # window. What follows the last of them is then transcript rather than a composer, and a live
 # observer pane really did answer with the text of an earlier nudge sitting after its last `›`.
 # A read bounded to the bottom is what makes this evidence about the pane's current screen.
-TUI_COMPOSER_READ_LINES = int(os.environ.get("SECRETARY_TUI_COMPOSER_READ_LINES", os.environ.get("TA_TUI_COMPOSER_READ_LINES", "24")))
+TUI_COMPOSER_READ_LINES = int(
+    os.environ.get("SECRETARY_TUI_COMPOSER_READ_LINES", os.environ.get("TA_TUI_COMPOSER_READ_LINES", "24"))
+)
 # How much of the payload has to be found in the composer for the composer to count as holding it.
 # Short enough to survive the TUI wrapping the line it painted, long enough that no hint text,
 # footer or spinner ever matches it by accident.
@@ -302,7 +320,10 @@ def payload_fingerprint(prompt: str) -> tuple[int, str]:
 
 
 def read_pane(
-    handle: str, *, run_json: RunJson | None = None, host: PaneHost | None = None,
+    handle: str,
+    *,
+    run_json: RunJson | None = None,
+    host: PaneHost | None = None,
     limit: int | None = None,
 ) -> PaneRead:
     """One pane read: the tail, ANSI stripped, and the session manager's output cursor with it.
@@ -315,7 +336,9 @@ def read_pane(
         data = resolve_pane_host(run_json, host=host).read(handle, limit=limit)
     except Exception:
         return PaneRead()
-    terminal = data.get("terminal") if isinstance(data, dict) and isinstance(data.get("terminal"), dict) else data
+    terminal = (
+        data.get("terminal") if isinstance(data, dict) and isinstance(data.get("terminal"), dict) else data
+    )
     if not isinstance(terminal, dict):
         return PaneRead()
     text = ""
@@ -341,7 +364,10 @@ def read_pane(
 
 
 def read_pane_text(
-    handle: str, *, run_json: RunJson | None = None, host: PaneHost | None = None,
+    handle: str,
+    *,
+    run_json: RunJson | None = None,
+    host: PaneHost | None = None,
     limit: int | None = None,
 ) -> str:
     """The pane's text alone, for callers that read a screen rather than a position."""
@@ -364,7 +390,7 @@ def composer_region(screen: str) -> str | None:
     marker = max(screen.rfind(char) for char in COMPOSER_MARKERS)
     if marker < 0:
         return None
-    return " ".join(screen[marker + 1:][:TUI_FINGERPRINT_LIMIT].split())
+    return " ".join(screen[marker + 1 :][:TUI_FINGERPRINT_LIMIT].split())
 
 
 def composer_fingerprint(screen: str) -> str:
@@ -423,7 +449,10 @@ def output_cursor(read: PaneRead) -> tuple[str, bool]:
 
 
 def probe_pane(
-    handle: str, *, run_json: RunJson | None = None, host: PaneHost | None = None,
+    handle: str,
+    *,
+    run_json: RunJson | None = None,
+    host: PaneHost | None = None,
     payload: str = "",
 ) -> PaneProbe:
     """Readiness, composer and output cursor in one look, for the evidence of one attempt.
@@ -452,7 +481,10 @@ def _advance(evidence: DeliveryEvidence, stage: str) -> None:
 
 
 def wait_for_tui_idle(
-    handle: str, *, run_json: RunJson | None = None, host: PaneHost | None = None,
+    handle: str,
+    *,
+    run_json: RunJson | None = None,
+    host: PaneHost | None = None,
     timeout_ms: int | None = None,
 ) -> None:
     """Wait until the session manager reports the pane ready for input; a refusal reaches the caller.
@@ -466,7 +498,10 @@ def wait_for_tui_idle(
 
 
 def terminal_readiness(
-    handle: str, *, run_json: RunJson | None = None, host: PaneHost | None = None,
+    handle: str,
+    *,
+    run_json: RunJson | None = None,
+    host: PaneHost | None = None,
     timeout_ms: int | None = None,
 ) -> str:
     """Ask whether the pane is ready for input, and answer in three states, not two.
@@ -705,9 +740,7 @@ def _send_payload(
 ) -> None:
     """Run the one provider-aware body/submit transport and merge its metadata-only receipt."""
     try:
-        receipt = send_agent_prompt(
-            handle, prompt, run_json=run_json, host=host, submit_only=submit_only
-        )
+        receipt = send_agent_prompt(handle, prompt, run_json=run_json, host=host, submit_only=submit_only)
     except AgentPromptTransportError as exc:
         _record_transport_receipt(evidence, exc.receipt)
         if exc.receipt.body_write_accepted:
@@ -857,7 +890,11 @@ def _record_probe(evidence: DeliveryEvidence, before: PaneProbe, probe: PaneProb
     evidence.modal_after = probe.modal
     evidence.cursor_after = probe.cursor
     evidence.payload_left_in_composer = probe.holds_payload
-    if not evidence.payload_left_in_composer and evidence.stage == STAGE_PAYLOAD_WRITTEN and probe.screen_read:
+    if (
+        not evidence.payload_left_in_composer
+        and evidence.stage == STAGE_PAYLOAD_WRITTEN
+        and probe.screen_read
+    ):
         _advance(evidence, STAGE_ENTER_ACCEPTED)
     evidence.cursor_from_backend = probe.cursor_from_backend
     if (

@@ -11,6 +11,7 @@ Timestamps: Claude transcript ts are UTC (trailing Z); the search log writes nai
 (memory-mcp uses datetime.utcnow().isoformat()). Both normalize to naive UTC for comparison;
 the window slack absorbs minor skew.
 """
+
 from __future__ import annotations
 
 import json

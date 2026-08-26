@@ -77,9 +77,15 @@ class StateRepoPrivilegeTests(unittest.TestCase):
         command = run.call_args.args[0]
         git = command.index("git")
         self.assertEqual(command[:4], ["runuser", "--user", "runtime", "--"])
-        self.assertEqual(command[git + 1:git + 5], [
-            "-c", f"safe.directory={instance.resolve()}", "-c", "core.hooksPath=/dev/null",
-        ])
+        self.assertEqual(
+            command[git + 1 : git + 5],
+            [
+                "-c",
+                f"safe.directory={instance.resolve()}",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ],
+        )
 
     def test_non_root_calls_git_directly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -192,9 +198,7 @@ class ForeignRepositorySelectionTests(unittest.TestCase):
 
         target_head_before = _git(self.target, "rev-parse", "HEAD").strip()
         with mock.patch.dict(os.environ, self.contamination, clear=False):
-            commit = state_repo.commit(
-                self.target, state_repo.MEMORY_PATHSPEC, "memory: one fact"
-            )
+            commit = state_repo.commit(self.target, state_repo.MEMORY_PATHSPEC, "memory: one fact")
 
         self.assertIsNotNone(commit)
         self.assertNotEqual(commit, target_head_before)
@@ -210,9 +214,7 @@ class ForeignRepositorySelectionTests(unittest.TestCase):
     def test_checkpoint_snapshot_reads_the_target_repository(self) -> None:
         with mock.patch.dict(os.environ, self.contamination, clear=False):
             snapshot = checkpoint.checkpoint_snapshot(self.target)
-        self.assertEqual(
-            snapshot["last_commit"], _git(self.target, "rev-parse", "HEAD").strip()
-        )
+        self.assertEqual(snapshot["last_commit"], _git(self.target, "rev-parse", "HEAD").strip())
         self.assertNotEqual(snapshot["last_commit"], self.foreign_head)
 
 

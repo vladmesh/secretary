@@ -323,9 +323,7 @@ class ObserverDelivery:
             last_failure_at=_float(payload.get("last_failure_at")),
             last_failure_method=str(payload.get("last_failure_method") or ""),
             last_evidence=(
-                dict(payload["last_evidence"])
-                if isinstance(payload.get("last_evidence"), dict)
-                else {}
+                dict(payload["last_evidence"]) if isinstance(payload.get("last_evidence"), dict) else {}
             ),
         )
 
@@ -474,7 +472,8 @@ class ObserverRecord:
             wake_liveness=ObserverWakeLiveness.from_json(payload.get("wake_liveness")),
             retired_wake_liveness=(
                 dict(payload["retired_wake_liveness"])
-                if isinstance(payload.get("retired_wake_liveness"), dict) else {}
+                if isinstance(payload.get("retired_wake_liveness"), dict)
+                else {}
             ),
         )
 
@@ -484,9 +483,7 @@ def load_observers(payload: dict[str, Any]) -> dict[str, ObserverRecord]:
     if not isinstance(raw, dict):
         return {}
     return {
-        str(ref): ObserverRecord.from_json(record)
-        for ref, record in raw.items()
-        if isinstance(record, dict)
+        str(ref): ObserverRecord.from_json(record) for ref, record in raw.items() if isinstance(record, dict)
     }
 
 
@@ -558,37 +555,39 @@ def observer_snapshot(payload: dict[str, Any]) -> list[dict[str, Any]]:
     rows = []
     for ref, record in sorted(load_observers(payload).items()):
         liveness = observer_alive(record)
-        rows.append({
-            "sprint": ref,
-            "head": record.head,
-            "state": record.state,
-            "workspace": record.workspace,
-            "handle": record.handle,
-            "leaf": record.leaf,
-            "launches": record.launches,
-            "alive": liveness["alive"],
-            "pid_known": liveness["pid_known"],
-            "heartbeat_state": liveness["reason"],
-            # A head adopted from a launch intent is watching its sprint, but its terminal handle
-            # died with the tick that started it: it is stopped by workspace, not by handle.
-            "handle_known": bool(record.handle),
-            "abandoned_handle": record.abandoned_handle,
-            # Whether the head that is up was launched with its sprint binding. False on a head
-            # from before the binding: it is alive and every write of its role is refused, which
-            # reads as a watched sprint from every other field.
-            "bound": record.bound,
-            "last_action": record.last_action,
-            "last_action_at": record.last_action_at,
-            "deferred_reason": record.deferred_reason,
-            "stopped_reason": record.stopped_reason,
-            "paused": record.paused_at > 0,
-            "idle_since": record.idle_since,
-            "idle_reason": record.idle_reason,
-            "delivery": record.delivery.to_json(),
-            "wake_liveness": record.wake_liveness.to_json(),
-            "launch_attempts": record.launch_attempts,
-            "launch_next_at": record.launch_next_at,
-        })
+        rows.append(
+            {
+                "sprint": ref,
+                "head": record.head,
+                "state": record.state,
+                "workspace": record.workspace,
+                "handle": record.handle,
+                "leaf": record.leaf,
+                "launches": record.launches,
+                "alive": liveness["alive"],
+                "pid_known": liveness["pid_known"],
+                "heartbeat_state": liveness["reason"],
+                # A head adopted from a launch intent is watching its sprint, but its terminal handle
+                # died with the tick that started it: it is stopped by workspace, not by handle.
+                "handle_known": bool(record.handle),
+                "abandoned_handle": record.abandoned_handle,
+                # Whether the head that is up was launched with its sprint binding. False on a head
+                # from before the binding: it is alive and every write of its role is refused, which
+                # reads as a watched sprint from every other field.
+                "bound": record.bound,
+                "last_action": record.last_action,
+                "last_action_at": record.last_action_at,
+                "deferred_reason": record.deferred_reason,
+                "stopped_reason": record.stopped_reason,
+                "paused": record.paused_at > 0,
+                "idle_since": record.idle_since,
+                "idle_reason": record.idle_reason,
+                "delivery": record.delivery.to_json(),
+                "wake_liveness": record.wake_liveness.to_json(),
+                "launch_attempts": record.launch_attempts,
+                "launch_next_at": record.launch_next_at,
+            }
+        )
     return rows
 
 
@@ -628,12 +627,14 @@ def reconcile_observers(
             return []
         # The board could not be asked. A record is never dropped on that evidence: an unreachable
         # sprint board must not read as a closed sprint and take a live head down with it.
-        return [{
-            "status": "degraded",
-            "step": "observer-reconcile",
-            "action": "sprint-board-unavailable",
-            "reason": getattr(exc, "message", str(exc)),
-        }]
+        return [
+            {
+                "status": "degraded",
+                "step": "observer-reconcile",
+                "action": "sprint-board-unavailable",
+                "reason": getattr(exc, "message", str(exc)),
+            }
+        ]
     if not open_sprints and not observers:
         return []
 
@@ -646,8 +647,12 @@ def reconcile_observers(
         for ref in sorted(open_sprints):
             outcomes.append(
                 _reconcile_open_sprint(
-                    runtime, payload, observers, ref,
-                    pause_mode=pause_mode, sprint=open_sprints[ref],
+                    runtime,
+                    payload,
+                    observers,
+                    ref,
+                    pause_mode=pause_mode,
+                    sprint=open_sprints[ref],
                 )
             )
     finally:
@@ -688,9 +693,7 @@ def _reconcile_open_sprint(
         # earlier declaration is stopped, or the sprint would keep paying for a head it no longer
         # declares.
         if record is not None:
-            return _stop_observer(
-                runtime, payload, observers, ref, reason="sprint declares no observer"
-            )
+            return _stop_observer(runtime, payload, observers, ref, reason="sprint declares no observer")
         return {
             "status": "ok",
             "step": "observer-reconcile",
@@ -745,7 +748,10 @@ def _reconcile_open_sprint(
         and _head_may_be_running(record)
     ):
         return _stop_observer(
-            runtime, payload, observers, ref,
+            runtime,
+            payload,
+            observers,
+            ref,
             reason="observer head predates the sprint binding and cannot authenticate its writes",
         )
     # A terminal left over from an aborted bring-up is skipped here whatever its pid says: that
@@ -759,16 +765,25 @@ def _reconcile_open_sprint(
     # A durable cursor is a prerequisite for every existing head path, including a legacy record
     # left in `pending`. Otherwise a dead/missing head can be relaunched from an unknowable point
     # and replay or skip board work before the normal recovery branch gets a chance to validate it.
-    if record is not None and not unresolved_intent and (
-        record.delivery.acknowledged_through
-        or (record.delivery.stage != DeliveryStage.IDLE and record.delivery.through_event)
+    if (
+        record is not None
+        and not unresolved_intent
+        and (
+            record.delivery.acknowledged_through
+            or (record.delivery.stage != DeliveryStage.IDLE and record.delivery.through_event)
+        )
     ):
         event_state = _observer_event_state(runtime, ref, record)
         if not event_state.get("known", True):
             _set_observer_state(record, "degraded", reason=event_state["reason"])
-            return {"status": "degraded", "step": "observer-reconcile", "sprint": ref,
-                    "action": "observer-cursor-unavailable", "head": record.head,
-                    "reason": event_state["reason"]}
+            return {
+                "status": "degraded",
+                "step": "observer-reconcile",
+                "sprint": ref,
+                "action": "observer-cursor-unavailable",
+                "head": record.head,
+                "reason": event_state["reason"],
+            }
     # Whether a head of this record may still be up, and whether it is the live observer of this
     # sprint. The two are separated because the answer to the second is the tick's judgement that
     # this head is finished, and everything a rotation further down hands to the conditional stop
@@ -780,19 +795,14 @@ def _reconcile_open_sprint(
     # intent and an abandoned handle both mean "not the live observer of this sprint" whatever the
     # process is doing — so the two are kept apart instead of one standing in for the other.
     head_status = observer_head_status(record) if head_may_be_running else {}
-    head_process_alive = head_may_be_running and bool(
-        observer_alive(record, status=head_status)["alive"]
-    )
+    head_process_alive = head_may_be_running and bool(observer_alive(record, status=head_status)["alive"])
     # Positive death of this record's launch identity, from the same reading. It is what makes a
     # bring-up over a headless open sprint conditional on the head rather than on the queue: a
     # process that is provably gone cannot be woken and cannot be the second head a launch would
     # put beside a live one.
     head_is_dead = head_may_be_running and observer_head_is_dead(head_status)
     head_is_live = (
-        head_may_be_running
-        and not unresolved_intent
-        and not record.abandoned_handle
-        and head_process_alive
+        head_may_be_running and not unresolved_intent and not record.abandoned_handle and head_process_alive
     )
     if head_is_live:
         if record.state in PENDING_STOP_STATES:
@@ -813,9 +823,14 @@ def _reconcile_open_sprint(
         event = event_state or _observer_event_state(runtime, ref, record)
         if not event.get("known", True):
             _set_observer_state(record, "degraded", reason=event["reason"])
-            return {"status": "degraded", "step": "observer-reconcile", "sprint": ref,
-                    "action": "observer-cursor-unavailable", "head": record.head,
-                    "reason": event["reason"]}
+            return {
+                "status": "degraded",
+                "step": "observer-reconcile",
+                "sprint": ref,
+                "action": "observer-cursor-unavailable",
+                "head": record.head,
+                "reason": event["reason"],
+            }
         if event["pending"]:
             return _wake_for_event(runtime, payload, observers, ref, record, event)
         work = _observer_work_state(runtime, ref, record)
@@ -866,9 +881,14 @@ def _reconcile_open_sprint(
         event = event_state or _observer_event_state(runtime, ref, record)
         if not event.get("known", True):
             _set_observer_state(record, "degraded", reason=event["reason"])
-            return {"status": "degraded", "step": "observer-reconcile", "sprint": ref,
-                    "action": "observer-cursor-unavailable", "head": record.head,
-                    "reason": event["reason"]}
+            return {
+                "status": "degraded",
+                "step": "observer-reconcile",
+                "sprint": ref,
+                "action": "observer-cursor-unavailable",
+                "head": record.head,
+                "reason": event["reason"],
+            }
         if event["pending"]:
             pending_event = event
         elif record.state == "deferred":
@@ -961,9 +981,7 @@ def _reconcile_open_sprint(
     # `head_readiness`, `observer_skill_delivery`, the wake-liveness write — happens after it.
     judgement = QuietStopJudgement(
         activity_epoch=(
-            _observer_activity_epoch(runtime, record)
-            if head_may_be_running and not head_is_live
-            else 0
+            _observer_activity_epoch(runtime, record) if head_may_be_running and not head_is_live else 0
         ),
         head_process_alive=head_process_alive,
     )
@@ -1032,10 +1050,9 @@ def _observer_event_state(runtime: Any, ref: str, record: ObserverRecord) -> dic
             return {"known": False, "pending": False, "reason": "active observer cursor is unavailable"}
         if not is_significant_observer_event(events[active_at], linked_refs=refs, sprint_ref=ref):
             active_legacy_at = active_at
-    following = events[cursor_at + 1:] if cursor_at >= 0 else events
+    following = events[cursor_at + 1 :] if cursor_at >= 0 else events
     significant = [
-        event for event in following
-        if is_significant_observer_event(event, linked_refs=refs, sprint_ref=ref)
+        event for event in following if is_significant_observer_event(event, linked_refs=refs, sprint_ref=ref)
     ]
     if active_legacy_at >= 0:
         # Retire the obsolete batch without skipping semantic work which arrived after the prior
@@ -1120,9 +1137,7 @@ def _reset_delivery_to_idle(
     delivery.reason = ""
 
 
-def _acknowledge_delivery_from_resume(
-    delivery: ObserverDelivery, resumes: list[dict[str, Any]]
-) -> None:
+def _acknowledge_delivery_from_resume(delivery: ObserverDelivery, resumes: list[dict[str, Any]]) -> None:
     """Advance only when the active batch's marker was written by its observer.
 
     A refused delivery counts here too: the marker only exists in a prompt that reached the head, so
@@ -1388,7 +1403,13 @@ def _fail_delivery(
     # gone; a stop that refused because it looked busy would leave the sprint on the head that is
     # not working and park the replacement behind a bounded backoff for as long as it stays stuck.
     replaced = _launch_observer(
-        runtime, payload, observers, ref, record, pending_event=event, conditional_stop=False,
+        runtime,
+        payload,
+        observers,
+        ref,
+        record,
+        pending_event=event,
+        conditional_stop=False,
     )
     unlaunched = str(replaced.get("reason") or "")
     replaced["reason"] = f"{reason}; the observer head was replaced after {attempts} failed wakes"
@@ -1410,9 +1431,7 @@ def _wake_pending(ref: str, record: ObserverRecord) -> dict[str, Any]:
     }
 
 
-def _redelivery_reason(
-    status: dict[str, Any], delivery: ObserverDelivery, *, now: float
-) -> str:
+def _redelivery_reason(status: dict[str, Any], delivery: ObserverDelivery, *, now: float) -> str:
     """Why an active delivery is sent again, or an empty string to keep waiting for its deadline.
 
     The head being idle is the first reason and does not wait the deadline out. Idle evidence is the
@@ -1544,9 +1563,11 @@ def _observe_observer_wake_progress(record: ObserverRecord, runtime: Any, *, now
 def _observer_no_progress_evidence(record: ObserverRecord, status: dict[str, Any]) -> str:
     """Classify a stale exact cursor without making screen text liveness authority."""
     evidence = record.delivery.last_evidence if isinstance(record.delivery.last_evidence, dict) else {}
-    evidence = {**evidence, **(status.get("delivery_evidence") or {})} if isinstance(
-        status.get("delivery_evidence"), dict
-    ) else evidence
+    evidence = (
+        {**evidence, **(status.get("delivery_evidence") or {})}
+        if isinstance(status.get("delivery_evidence"), dict)
+        else evidence
+    )
     if str(evidence.get("reason") or "") == "payload-left-in-composer":
         return "completed_turn_residual_composer"
     composer_before = str(evidence.get("composer_before") or "")
@@ -1589,7 +1610,13 @@ def _replace_observer_for_no_progress(
     # An emergency replacement too: the head is up and showing no provider progress, so it is
     # being taken down for being stuck rather than for being finished.
     replaced = _launch_observer(
-        runtime, payload, observers, ref, record, pending_event=event, conditional_stop=False,
+        runtime,
+        payload,
+        observers,
+        ref,
+        record,
+        pending_event=event,
+        conditional_stop=False,
     )
     original = str(replaced.get("reason") or "")
     replaced["reason"] = reason + (f"; {original}" if original else "")
@@ -1681,14 +1708,10 @@ def _wake_for_event(
     delivery = record.delivery
     event_id = str(event["event_id"])
     if delivery.stage == DeliveryStage.IDLE:
-        _set_delivery_waiting(
-            delivery, event, reason="observer has unacknowledged significant card work"
-        )
+        _set_delivery_waiting(delivery, event, reason="observer has unacknowledged significant card work")
         _begin_observer_wake_liveness(record)
     if _precontract_unbound_observer_source(record):
-        return _adopt_precontract_unbound_observer(
-            runtime, payload, observers, ref, record, event, now=now
-        )
+        return _adopt_precontract_unbound_observer(runtime, payload, observers, ref, record, event, now=now)
     provider_observation = _observe_observer_wake_progress(record, runtime, now=now)
     if provider_observation != "disabled":
         # The cursor and its admission are durable before a pane read can cause delivery,
@@ -1752,7 +1775,12 @@ def _wake_for_event(
                 now=now,
             )
         return _fail_delivery(
-            runtime, payload, observers, ref, record, event,
+            runtime,
+            payload,
+            observers,
+            ref,
+            record,
+            event,
             f"observer terminal could not be read: {exc}",
         )
     if not isinstance(status, dict) or not status.get("idle"):
@@ -1877,7 +1905,12 @@ def _wake_for_event(
                 evidence=evidence,
             )
         return _fail_delivery(
-            runtime, payload, observers, ref, record, event,
+            runtime,
+            payload,
+            observers,
+            ref,
+            record,
+            event,
             f"observer wake failed: {exc}",
             evidence=evidence,
         )
@@ -1946,11 +1979,7 @@ def _set_observer_state(record: ObserverRecord, state: str, *, reason: str = "")
 
 def _mark_idle_grace(record: ObserverRecord, *, since: float, reason: str) -> None:
     """Persist a completed queue while it waits for a new linked-card event."""
-    if (
-        record.state == "idle-grace"
-        and record.idle_since == since
-        and record.idle_reason == reason
-    ):
+    if record.state == "idle-grace" and record.idle_since == since and record.idle_reason == reason:
         return
     now = time.time()
     record.state = "idle-grace"
@@ -1980,9 +2009,7 @@ def _needs_teardown(record: ObserverRecord) -> bool:
 
 def _bring_up_request_id(ref: str, generation: str, attempt: int) -> str:
     """The id `_launch_observer` gave attempt number `attempt`. The first one is a launch."""
-    return observer_request_id(
-        "relaunch" if attempt > 1 else "launch", ref, generation, attempt
-    )
+    return observer_request_id("relaunch" if attempt > 1 else "launch", ref, generation, attempt)
 
 
 def _abandon_launch_intent(runtime: Any, ref: str, record: ObserverRecord) -> None:
@@ -2140,7 +2167,7 @@ def observer_skill_delivery(runtime: Any, head: str) -> dict[str, Any]:
             "delivered": False,
             "paths": [],
             "reason": f"the shell of head {head!r} could not be resolved: "
-                      f"{getattr(exc, 'message', str(exc))}",
+            f"{getattr(exc, 'message', str(exc))}",
         }
     if not shell:
         return {
@@ -2214,7 +2241,12 @@ def _launch_observer(
     readiness = runtime.head_readiness(head)
     if not readiness.launch_allowed:
         return _defer(
-            runtime, payload, observers, ref, record, head=head,
+            runtime,
+            payload,
+            observers,
+            ref,
+            record,
+            head=head,
             reason=f"head resource {readiness.resource} is {readiness.status}: {readiness.reason}",
             readiness=readiness.to_json(),
         )
@@ -2224,7 +2256,12 @@ def _launch_observer(
     delivery = observer_skill_delivery(runtime, head)
     if not delivery["delivered"]:
         return _defer(
-            runtime, payload, observers, ref, record, head=head,
+            runtime,
+            payload,
+            observers,
+            ref,
+            record,
+            head=head,
             reason=f"observer role skill is not available to this head: {delivery['reason']}",
         )
     if pending_event is not None and record.wake_liveness.bound and not record.wake_liveness.terminal:
@@ -2237,8 +2274,11 @@ def _launch_observer(
         observers[ref] = record
         if not _persist_quietly(runtime, payload, observers):
             return {
-                "status": "degraded", "step": "observer-reconcile", "sprint": ref,
-                "action": "observer-wake-liveness-persist-failed", "head": record.head,
+                "status": "degraded",
+                "step": "observer-reconcile",
+                "sprint": ref,
+                "action": "observer-wake-liveness-persist-failed",
+                "head": record.head,
                 "reason": "retiring observer wake-liveness outcome could not be persisted",
             }
     if _head_may_be_running(record):
@@ -2260,7 +2300,12 @@ def _launch_observer(
             judgement=judgement if conditional_stop else None,
         ):
             return _defer(
-                runtime, payload, observers, ref, record, head=head,
+                runtime,
+                payload,
+                observers,
+                ref,
+                record,
+                head=head,
                 reason=(
                     "the previous observer head was not quiet, or its terminal could not be stopped"
                     if conditional_stop
@@ -2273,7 +2318,12 @@ def _launch_observer(
         sprint = runtime.sprints.show(ref, include_cards=False, include_resume_freshness=False)
     except (HostError, TaskError) as exc:
         return _defer(
-            runtime, payload, observers, ref, record, head=head,
+            runtime,
+            payload,
+            observers,
+            ref,
+            record,
+            head=head,
             reason=f"observer bring-up failed: {getattr(exc, 'message', str(exc))}",
         )
     kind = EVENT_RELAUNCHED if relaunch else EVENT_LAUNCHED
@@ -2310,7 +2360,12 @@ def _launch_observer(
         if delivery_event_id:
             _defer_delivery(record, ref, f"observer launch event could not be staged: {exc}")
         return _defer(
-            runtime, payload, observers, ref, record, head=head,
+            runtime,
+            payload,
+            observers,
+            ref,
+            record,
+            head=head,
             reason=f"observer lifecycle event could not be staged: {exc}",
         )
     intent = _write_launch_intent(runtime, payload, observers, ref, record, head, attempt)
@@ -2321,7 +2376,12 @@ def _launch_observer(
         if delivery_event_id:
             _defer_delivery(record, ref, "observer launch delivery intent could not be persisted")
         return _defer(
-            runtime, payload, observers, ref, record, head=head,
+            runtime,
+            payload,
+            observers,
+            ref,
+            record,
+            head=head,
             reason=f"observer launch intent could not be persisted: {intent}",
         )
     _bind_codex_provider_ingress(runtime, payload, observers, ref, record)
@@ -2330,7 +2390,9 @@ def _launch_observer(
             sprint,
             head,
             prompt=render_observer_prompt(
-                sprint, skill_path=_first_path(delivery), delivery=record.delivery,
+                sprint,
+                skill_path=_first_path(delivery),
+                delivery=record.delivery,
             ),
             # The identity of the head being launched, read off its record: the sprint it is the
             # observer of and the generation that tells this lifecycle of that reference from the
@@ -2347,14 +2409,19 @@ def _launch_observer(
         _clear_launch_intent(record, head_possible=bool(exc.handle))
         if delivery_event_id:
             _defer_delivery(
-                record, ref, f"observer replacement launch failed: {exc}",
-                method="launch", evidence=dict(exc.evidence),
+                record,
+                ref,
+                f"observer replacement launch failed: {exc}",
+                method="launch",
+                evidence=dict(exc.evidence),
             )
         elif exc.evidence:
             # No batch was owed, so there is no retry state to write — but a prompt was delivered
             # to that head and did not land, and that is the sprint's evidence either way.
             _count_delivery_failure(
-                record.delivery, "launch", f"observer launch prompt failed: {exc}",
+                record.delivery,
+                "launch",
+                f"observer launch prompt failed: {exc}",
                 dict(exc.evidence),
             )
         if exc.handle:
@@ -2365,7 +2432,12 @@ def _launch_observer(
             record.run = exc.run or record.run
             record.abandoned_handle = True
         return _defer(
-            runtime, payload, observers, ref, record, head=head,
+            runtime,
+            payload,
+            observers,
+            ref,
+            record,
+            head=head,
             reason=f"observer bring-up failed: {exc}",
         )
     except (HostError, TaskError) as exc:
@@ -2383,7 +2455,12 @@ def _launch_observer(
                 evidence=_evidence_of(exc),
             )
         return _defer(
-            runtime, payload, observers, ref, record, head=head,
+            runtime,
+            payload,
+            observers,
+            ref,
+            record,
+            head=head,
             reason=f"observer bring-up failed: {getattr(exc, 'message', str(exc))}",
         )
     now = time.time()
@@ -2550,7 +2627,9 @@ def _poll_codex_provider_ingress(
         runtime.host.poll_codex_provider_ingress(run)
     except (CodexProviderSourceError, CodexFanoutRecordingError) as exc:
         return {
-            "status": "blocked", "step": "observer-reconcile", "sprint": ref,
+            "status": "blocked",
+            "step": "observer-reconcile",
+            "sprint": ref,
             "action": "codex-provider-fanout-blocked",
             "policy_evidence": {"kind": "codex_provider_fanout", "state": "unknown"},
             "reason": str(exc),
@@ -2961,17 +3040,23 @@ def retry_pending_observer_stops(runtime: Any, payload: dict[str, Any]) -> list[
                     {"head": record.head, "reason": reason, "launches": record.launches},
                 )
             except OSError as exc:
-                rows.append(_retry_row(
-                    ref, "observer-stop-failed",
-                    f"{reason}, and the stop could not be staged in the audit log: {exc}",
-                ))
+                rows.append(
+                    _retry_row(
+                        ref,
+                        "observer-stop-failed",
+                        f"{reason}, and the stop could not be staged in the audit log: {exc}",
+                    )
+                )
                 continue
             if not stop_observer_head(runtime, record):
                 discard_event(runtime, request_id)
-                rows.append(_retry_row(
-                    ref, "observer-stop-failed",
-                    f"{reason}, and the observer terminal could not be stopped",
-                ))
+                rows.append(
+                    _retry_row(
+                        ref,
+                        "observer-stop-failed",
+                        f"{reason}, and the observer terminal could not be stopped",
+                    )
+                )
                 continue
             observers.pop(ref)
             commit_event(runtime, event)
@@ -3015,14 +3100,17 @@ def resume_observers(payload: dict[str, Any]) -> list[str]:
 
 def observer_request_id(action: str, reference: str, generation: str, launches: int) -> str:
     """One id per (record, action, launch counter): the same tick retried is the same request."""
-    return "-".join(
-        ("dispatcher-observer", action, request_token(reference), generation, str(launches))
-    )
+    return "-".join(("dispatcher-observer", action, request_token(reference), generation, str(launches)))
 
 
 def stage_event(
-    runtime: Any, kind: str, reference: str, request_id: str, payload: dict[str, Any],
-    *, outcome: str = "success",
+    runtime: Any,
+    kind: str,
+    reference: str,
+    request_id: str,
+    payload: dict[str, Any],
+    *,
+    outcome: str = "success",
 ) -> dict[str, Any] | None:
     """Put one lifecycle event on durable disk before the host call it describes.
 
@@ -3050,9 +3138,7 @@ def stage_event(
     return event
 
 
-def _persist_quietly(
-    runtime: Any, payload: dict[str, Any], observers: dict[str, ObserverRecord]
-) -> bool:
+def _persist_quietly(runtime: Any, payload: dict[str, Any], observers: dict[str, ObserverRecord]) -> bool:
     """Flush the observer records mid-tick. False means only the tick's own save carries them now.
 
     Never raised at the caller: the head this record describes is already up or already gone, and
@@ -3118,9 +3204,7 @@ def discard_event(runtime: Any, request_id: str) -> None:
         pass
 
 
-def record_event(
-    runtime: Any, kind: str, reference: str, request_id: str, payload: dict[str, Any]
-) -> bool:
+def record_event(runtime: Any, kind: str, reference: str, request_id: str, payload: dict[str, Any]) -> bool:
     """Stage and commit an event with no host call to protect. False when neither landed."""
     try:
         event = stage_event(runtime, kind, reference, request_id, payload)
@@ -3143,7 +3227,10 @@ def _first_path(delivery: dict[str, Any]) -> str:
 
 
 def render_observer_prompt(
-    sprint: dict[str, Any], *, skill_path: str = "", delivery: ObserverDelivery | None = None,
+    sprint: dict[str, Any],
+    *,
+    skill_path: str = "",
+    delivery: ObserverDelivery | None = None,
 ) -> str:
     """The observer's launch document: the sprint entity, and the skill that says what to do.
 
@@ -3210,31 +3297,36 @@ def render_observer_prompt(
         "Hard threshold reached." if budget.get("hard_reached") else "Hard threshold not reached.",
         *(
             [f"{infrastructure} infrastructure bring-up outcomes recorded, charged to no threshold."]
-            if infrastructure else []
+            if infrastructure
+            else []
         ),
         "",
     ]
     if marker[0]:
-        sections.extend([
-            "## Pending delivery acknowledgement",
-            "",
-            f"delivery_id: {marker[0]}",
-            f"through_event: {marker[1]}",
-            "",
-        ])
+        sections.extend(
+            [
+                "## Pending delivery acknowledgement",
+                "",
+                f"delivery_id: {marker[0]}",
+                f"through_event: {marker[1]}",
+                "",
+            ]
+        )
     evidence = delivery_evidence_summary(delivery) if delivery is not None else ""
     if evidence:
         # A replacement head has no memory of the wakes its predecessor never received, and the
         # closing resume is written by whichever head is up at the end. The counts come with the
         # document so that head can report them instead of reporting zero.
-        sections.extend([
-            "## Delivery evidence",
-            "",
-            evidence,
-            "",
-            "Report these counts in your closing resume; do not retry delivery yourself.",
-            "",
-        ])
+        sections.extend(
+            [
+                "## Delivery evidence",
+                "",
+                evidence,
+                "",
+                "Report these counts in your closing resume; do not retry delivery yourself.",
+                "",
+            ]
+        )
     return "\n".join(sections)
 
 

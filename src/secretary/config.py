@@ -224,9 +224,7 @@ def instance_data_dir(path: Path) -> Path:
         raise DataDirError(str(exc)) from None
     errors = validate(instance, "instance", instance_file.name)
     if errors:
-        raise DataDirError(
-            f"invalid instance {instance_file}: " + "; ".join(map(str, errors))
-        )
+        raise DataDirError(f"invalid instance {instance_file}: " + "; ".join(map(str, errors)))
     assert isinstance(instance, dict)
     return _configured_data_dir(instance_file, instance)
 
@@ -262,9 +260,7 @@ def validate_instance(path: Path) -> InstanceReport:
 
     errors += validate(instance, "instance", instance_file.name)
     data_dir = (
-        _configured_data_dir(instance_file, instance)
-        if isinstance(instance, dict) and not errors
-        else None
+        _configured_data_dir(instance_file, instance) if isinstance(instance, dict) and not errors else None
     )
     if isinstance(instance, dict):
         # Resolve omitted values before comparing the limits.  Runtime does the same,
@@ -272,16 +268,22 @@ def validate_instance(path: Path) -> InstanceReport:
         try:
             budget_thresholds(instance)
         except TaskError:
-            errors.append(SchemaError(instance_file.name, "sprint_budget", "hard threshold must not be below signal threshold"))
+            errors.append(
+                SchemaError(
+                    instance_file.name, "sprint_budget", "hard threshold must not be below signal threshold"
+                )
+            )
         # The schema says which values are accepted; this says what the installation
         # does with one it refuses, because failing closed is silent otherwise: the
         # limit stays at one open sprint and an operator who set 3 sees no effect.
         if open_sprint_limit_invalid(instance):
-            errors.append(SchemaError(
-                instance_file.name,
-                "open_sprint_limit",
-                "must be the integer 1 or 2; this installation holds one open sprint until it is",
-            ))
+            errors.append(
+                SchemaError(
+                    instance_file.name,
+                    "open_sprint_limit",
+                    "must be the integer 1 or 2; this installation holds one open sprint until it is",
+                )
+            )
     name = instance.get("name", "") if isinstance(instance, dict) else ""
     host = instance.get("host", {}) if isinstance(instance, dict) else {}
     if not isinstance(host, dict):
@@ -289,9 +291,7 @@ def validate_instance(path: Path) -> InstanceReport:
 
     projects = _validate_dir(instance_dir / "projects", "project-binding", errors)
     adapters = _validate_dir(instance_dir / "adapters", "adapter", errors)
-    adapter_drafts = _validate_dir(
-        instance_dir / "adapter-drafts", "onboarding-contract", errors
-    )
+    adapter_drafts = _validate_dir(instance_dir / "adapter-drafts", "onboarding-contract", errors)
     bindings = _load_bindings(instance_dir / "projects")
 
     manifest_file = _find_manifest(instance_dir, data_dir)

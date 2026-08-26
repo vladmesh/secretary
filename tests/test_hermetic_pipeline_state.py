@@ -67,9 +67,7 @@ class SuitePipelineStateDirTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             frozen = _write_production_like_state_dir(Path(tmp) / "workspaces")
             with mock.patch.object(shared_state, "WORKSPACES_ROOT", Path(tmp) / "workspaces"):
-                self.assertEqual(
-                    shared_state.resolve_pipeline_state_dir(), tests._SUITE_PIPELINE_STATE_DIR
-                )
+                self.assertEqual(shared_state.resolve_pipeline_state_dir(), tests._SUITE_PIPELINE_STATE_DIR)
                 self.assertNotEqual(pipeline_pause.PAUSE_FILE, frozen / "pause.json")
                 self.assertFalse(pipeline_pause.is_paused())
 
@@ -90,7 +88,11 @@ class SuitePipelineStateDirTests(unittest.TestCase):
             )
             done = subprocess.run(
                 [sys.executable, "-c", probe],
-                cwd=str(_REPO_ROOT), env=env, capture_output=True, text=True, timeout=120,
+                cwd=str(_REPO_ROOT),
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=120,
             )
         self.assertEqual(done.returncode, 0, done.stderr)
         seen = json.loads(done.stdout.strip().splitlines()[-1])
@@ -140,15 +142,17 @@ class TriggeredDispatchIgnoresAProductionFreezeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             workspaces = Path(tmp) / "workspaces"
             _write_production_like_state_dir(workspaces)
-            with mock.patch.object(shared_state, "WORKSPACES_ROOT", workspaces), \
-                 mock.patch.object(dispatch, "_workspace", return_value=self.workspace), \
-                 mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)), \
-                 mock.patch.object(dispatch, "_is_idle", return_value=True), \
-                 mock.patch.object(dispatch, "_is_ephemeral", return_value=False), \
-                 mock.patch.object(dispatch, "_reuse_head_is_red", return_value=False), \
-                 mock.patch.object(dispatch, "_dispatch_command", return_value=self.command), \
-                 mock.patch("triggered_agents.runtime.dispatch.time.sleep"), \
-                 mock.patch.object(dispatch, "_claude_user_turn_after", side_effect=[False, True]):
+            with (
+                mock.patch.object(shared_state, "WORKSPACES_ROOT", workspaces),
+                mock.patch.object(dispatch, "_workspace", return_value=self.workspace),
+                mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)),
+                mock.patch.object(dispatch, "_is_idle", return_value=True),
+                mock.patch.object(dispatch, "_is_ephemeral", return_value=False),
+                mock.patch.object(dispatch, "_reuse_head_is_red", return_value=False),
+                mock.patch.object(dispatch, "_dispatch_command", return_value=self.command),
+                mock.patch("triggered_agents.runtime.dispatch.time.sleep"),
+                mock.patch.object(dispatch, "_claude_user_turn_after", side_effect=[False, True]),
+            ):
                 self.assertEqual(dispatch.run("retro", host=host), 0)
 
         self.assertEqual(self._actions(), ["reused"])

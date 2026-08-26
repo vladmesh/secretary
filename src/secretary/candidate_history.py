@@ -39,33 +39,37 @@ _IDENTITY_RE = re.compile(r"^(?P<name>.*?)\s*<(?P<address>[^<>]*)>\s*$")
 # Exact name/address pairs registered for the agent accounts this pipeline actually encounters.
 # Neither half is matched independently, so a vendor employee or a human with an ambiguous local
 # part stays an ordinary co-author.
-_REGISTERED_AGENT_IDENTITIES = frozenset({
-    ("claude", "noreply@anthropic.com"),
-    ("claude code", "noreply@anthropic.com"),
-    ("codex", "codex@openai.com"),
-    ("openai codex", "codex@openai.com"),
-    ("github copilot", "copilot@users.noreply.github.com"),
-    ("copilot", "copilot@users.noreply.github.com"),
-})
+_REGISTERED_AGENT_IDENTITIES = frozenset(
+    {
+        ("claude", "noreply@anthropic.com"),
+        ("claude code", "noreply@anthropic.com"),
+        ("codex", "codex@openai.com"),
+        ("openai codex", "codex@openai.com"),
+        ("github copilot", "copilot@users.noreply.github.com"),
+        ("copilot", "copilot@users.noreply.github.com"),
+    }
+)
 
 # Exact identities for the malformed trailer git would never write itself: `Co-Authored-By: Claude`
 # with no address. Compared whole, after collapsing whitespace and casing, so "Claude Martin" —
 # a person — is not one of them.
-_AGENT_NAMES = frozenset({
-    "aider",
-    "anthropic",
-    "chatgpt",
-    "claude",
-    "claude code",
-    "codex",
-    "copilot",
-    "cursor",
-    "devin",
-    "gemini",
-    "github copilot",
-    "openai",
-    "openai codex",
-})
+_AGENT_NAMES = frozenset(
+    {
+        "aider",
+        "anthropic",
+        "chatgpt",
+        "claude",
+        "claude code",
+        "codex",
+        "copilot",
+        "cursor",
+        "devin",
+        "gemini",
+        "github copilot",
+        "openai",
+        "openai codex",
+    }
+)
 
 _GITHUB_NOREPLY_ID_RE = re.compile(r"^\d+\+")
 _OBJECT_ID_RE = re.compile(r"^[0-9a-f]{40}(?:[0-9a-f]{24})?$")

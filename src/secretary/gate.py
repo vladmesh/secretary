@@ -52,16 +52,14 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
         if isinstance(existing_draft, dict) and existing_draft.get("gate", {}).get("status") == "passed":
             adapter_path = instance / "adapters" / f"{existing_binding['adapter']}.yaml"
             try:
-                current_head = scan_repo(
-                    Path(existing_binding["repo"]), existing_binding["default_branch"]
-                )["repo"]["head"]
+                current_head = scan_repo(Path(existing_binding["repo"]), existing_binding["default_branch"])[
+                    "repo"
+                ]["head"]
             except (OSError, KeyError, ScannerError, subprocess.TimeoutExpired):
                 current_head = "unavailable"
             expected_head = existing_draft["scanner"]["repo"]["head"]
             if current_head != expected_head:
-                return _disable_stale_enabled(
-                    instance, project_id, existing_binding, existing_draft, None
-                )
+                return _disable_stale_enabled(instance, project_id, existing_binding, existing_draft, None)
             try:
                 current_digest = "sha256:" + hashlib.sha256(adapter_path.read_bytes()).hexdigest()
             except OSError as exc:
@@ -77,8 +75,11 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
                     previous = load_config(expected_path)
                 except ConfigError:
                     return 1, {"status": "conflict", "finding": "current gate result is corrupt"}
-                if (isinstance(previous, dict) and previous.get("status") == "passed" and
-                        previous.get("adapter_digest") == current_digest):
+                if (
+                    isinstance(previous, dict)
+                    and previous.get("status") == "passed"
+                    and previous.get("adapter_digest") == current_digest
+                ):
                     return 0, previous
             for candidate_path in (instance / "gate-runs" / project_id).glob("*/result.json"):
                 try:
@@ -86,9 +87,11 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
                 except ConfigError:
                     continue
                 revision = candidate.get("input_revision", {}) if isinstance(candidate, dict) else {}
-                if (candidate.get("status") == "passed" and
-                        revision.get("scanner_head") == expected_head and
-                        revision.get("provision_run_id") == provision_run):
+                if (
+                    candidate.get("status") == "passed"
+                    and revision.get("scanner_head") == expected_head
+                    and revision.get("provision_run_id") == provision_run
+                ):
                     return _disable_stale_enabled(
                         instance, project_id, existing_binding, existing_draft, candidate
                     )
@@ -120,9 +123,7 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
         try:
             previous = load_config(result_path)
         except ConfigError:
-            return 1, _conflict_result(
-                draft, run_id, provision_run, digest, "current gate result is corrupt"
-            )
+            return 1, _conflict_result(draft, run_id, provision_run, digest, "current gate result is corrupt")
         if previous.get("status") == "passed" and binding.get("enabled") is True:
             return 0, previous
         if previous.get("status") == "passed":
@@ -142,7 +143,9 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
         try:
             add = subprocess.run(
                 ["git", "-C", str(repo), "worktree", "add", "--detach", str(worktree), head],
-                capture_output=True, text=True, timeout=_GIT_TIMEOUT,
+                capture_output=True,
+                text=True,
+                timeout=_GIT_TIMEOUT,
             )
         except subprocess.TimeoutExpired as exc:
             add = _timed_out(exc)
@@ -174,7 +177,8 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
             try:
                 subprocess.run(
                     ["git", "-C", str(repo), "worktree", "remove", "--force", str(worktree)],
-                    capture_output=True, timeout=_GIT_TIMEOUT,
+                    capture_output=True,
+                    timeout=_GIT_TIMEOUT,
                 )
             except subprocess.TimeoutExpired:
                 pass
@@ -191,9 +195,11 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
 
     updated = copy.deepcopy(draft)
     updated["gate"] = {
-        "owner": "onboarding-gate", "status": "passed",
+        "owner": "onboarding-gate",
+        "status": "passed",
         "checks": {key: value["status"] for key, value in result["checks"].items()},
-        "binding": {"enabled": True}, "findings": [],
+        "binding": {"enabled": True},
+        "findings": [],
     }
     enabled = copy.deepcopy(binding)
     enabled["enabled"] = True
@@ -219,27 +225,50 @@ def _run_gate_locked(instance: Path, project_id: str) -> tuple[int, dict[str, An
 
 
 def _base_result(draft: dict[str, Any], run_id: str, provision_run: str, digest: str) -> dict[str, Any]:
-    return {"version": 1, "run_id": run_id,
-            "identity": {field: copy.deepcopy(draft["identity"][field]) for field in IDENTITY_FIELDS},
-            "input_revision": {"scanner_head": draft["scanner"]["repo"]["head"], "provision_run_id": provision_run},
-            "adapter_digest": digest, "status": "failed",
-            "checks": {name: {"status": "not-run"} for name in ("clean_worktree", "setup", "smoke", "validation", "artifact_policy")},
-            "findings": []}
+    return {
+        "version": 1,
+        "run_id": run_id,
+        "identity": {field: copy.deepcopy(draft["identity"][field]) for field in IDENTITY_FIELDS},
+        "input_revision": {
+            "scanner_head": draft["scanner"]["repo"]["head"],
+            "provision_run_id": provision_run,
+        },
+        "adapter_digest": digest,
+        "status": "failed",
+        "checks": {
+            name: {"status": "not-run"}
+            for name in ("clean_worktree", "setup", "smoke", "validation", "artifact_policy")
+        },
+        "findings": [],
+    }
 
 
 def _command(command: str, cwd: Path) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
-            command, cwd=cwd, shell=True, capture_output=True, text=True,
-            stdin=subprocess.DEVNULL, timeout=_COMMAND_TIMEOUT,
+            command,
+            cwd=cwd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+            timeout=_COMMAND_TIMEOUT,
         )
     except subprocess.TimeoutExpired as exc:
         return _timed_out(exc)
 
 
-def _publish_failure(path: Path, result: dict[str, Any], stage: str, outcome: subprocess.CompletedProcess[str]) -> tuple[int, dict[str, Any]]:
+def _publish_failure(
+    path: Path, result: dict[str, Any], stage: str, outcome: subprocess.CompletedProcess[str]
+) -> tuple[int, dict[str, Any]]:
     result["checks"][stage] = {"status": "failed"}
-    result["findings"] = [{"code": f"{stage}.failed", "message": f"{stage} command failed", "log_tail": _redact((outcome.stdout + outcome.stderr)[-_TAIL:])}]
+    result["findings"] = [
+        {
+            "code": f"{stage}.failed",
+            "message": f"{stage} command failed",
+            "log_tail": _redact((outcome.stdout + outcome.stderr)[-_TAIL:]),
+        }
+    ]
     return _publish_result(path, result)
 
 
@@ -254,10 +283,12 @@ def _publish_result(path: Path, result: dict[str, Any]) -> tuple[int, dict[str, 
         publish_state_atomic([(path, json.dumps(result, indent=2, sort_keys=True) + "\n")])
     except OSError as exc:
         result["status"] = "failed"
-        result["findings"] = [{
-            "code": "publication.failed",
-            "message": _redact(exc.strerror or "I/O error"),
-        }]
+        result["findings"] = [
+            {
+                "code": "publication.failed",
+                "message": _redact(exc.strerror or "I/O error"),
+            }
+        ]
     return 1, result
 
 
@@ -272,7 +303,9 @@ def _gate_run_id(project_id: str, head: str, provision_run: str, digest: str) ->
     return "gate-" + hashlib.sha256(payload).hexdigest()[:20]
 
 
-def _conflict_result(draft: dict[str, Any], run_id: str, provision_run: str, digest: str, message: str) -> dict[str, Any]:
+def _conflict_result(
+    draft: dict[str, Any], run_id: str, provision_run: str, digest: str, message: str
+) -> dict[str, Any]:
     result = _base_result(draft, run_id, provision_run, digest)
     result["status"] = "conflict"
     result["findings"] = [{"code": "result.conflict", "message": message}]
@@ -294,20 +327,26 @@ def _disable_stale_enabled(
     disabled["enabled"] = False
     updated = copy.deepcopy(draft)
     updated["gate"] = {
-        "owner": "onboarding-gate", "status": "failed",
-        "checks": {name: "not-run" for name in ("clean_worktree", "setup", "smoke", "validation", "artifact_policy")},
+        "owner": "onboarding-gate",
+        "status": "failed",
+        "checks": {
+            name: "not-run" for name in ("clean_worktree", "setup", "smoke", "validation", "artifact_policy")
+        },
         "binding": {"enabled": False},
         "findings": [{"code": "stale.input", "severity": "error", "message": "enabled gate inputs changed"}],
     }
-    stale = copy.deepcopy(previous) if previous is not None else {
-        "status": "stale", "findings": []
-    }
+    stale = copy.deepcopy(previous) if previous is not None else {"status": "stale", "findings": []}
     stale["status"] = "stale"
     stale["findings"] = [{"code": "stale.input", "message": "enabled gate inputs changed"}]
     try:
         publish_state_atomic(
-            [(instance / "projects" / f"{project_id}.yaml", yaml.safe_dump(disabled, sort_keys=False)),
-             (instance / "adapter-drafts" / f"{project_id}.yaml", yaml.safe_dump(updated, sort_keys=False))],
+            [
+                (instance / "projects" / f"{project_id}.yaml", yaml.safe_dump(disabled, sort_keys=False)),
+                (
+                    instance / "adapter-drafts" / f"{project_id}.yaml",
+                    yaml.safe_dump(updated, sort_keys=False),
+                ),
+            ],
         )
     except OSError as exc:
         return 1, {"status": "publication_failed", "finding": _redact(exc.strerror or "I/O error")}

@@ -13,6 +13,7 @@ default. Both go through the same validator.
 Pure and I/O-light (`load_registry` caches its read per process): no Kanboard, no orca, no
 subprocess.
 """
+
 from __future__ import annotations
 
 import os
@@ -69,6 +70,7 @@ def registry_path() -> Path:
     if override:
         return Path(override).expanduser()
     return installed_registry_path() or HEADS_TOML
+
 
 # The CODEX_HOME shared by Orca-managed Codex sessions and pipeline heads. One physical home keeps
 # auth refresh, MCP, skills, hooks, and quota probes on the same state. Pinned explicitly because
@@ -149,8 +151,7 @@ def resolve_head_id(profile_id: str, profiles: Mapping[str, Any]) -> str:
             return candidate
     known = ", ".join(sorted(profiles)) or "(none)"
     raise HeadRegistryError(
-        f"codex head {profile_id!r} has no interactive Codex profile left to run on "
-        f"(known: {known})"
+        f"codex head {profile_id!r} has no interactive Codex profile left to run on (known: {known})"
     )
 
 
@@ -280,8 +281,7 @@ def validate_registry(resources: dict, profiles: dict) -> None:
             raise HeadRegistryError(str(exc)) from None
         fallback = prof.get("fallback") or []
         if not isinstance(fallback, list):
-            raise HeadRegistryError(f"profile {pid!r} fallback must be a list, got "
-                                    f"{type(fallback).__name__}")
+            raise HeadRegistryError(f"profile {pid!r} fallback must be a list, got {type(fallback).__name__}")
         for fb in fallback:
             fb = _named(fb, f"profile {pid!r} fallback entry")
             if fb not in profiles:
@@ -291,14 +291,14 @@ def validate_registry(resources: dict, profiles: dict) -> None:
 def validate_role_defaults(role_defaults: dict, profiles: dict) -> None:
     """A role routed to a head nobody defined is a routing hole, not a stale line to ignore."""
     if not isinstance(role_defaults, dict):
-        raise HeadRegistryError(
-            f"[role_defaults] must be a table, got {type(role_defaults).__name__}"
-        )
+        raise HeadRegistryError(f"[role_defaults] must be a table, got {type(role_defaults).__name__}")
     for role, head in role_defaults.items():
         head = _named(head, f"role {role!r} head")
         if head not in profiles:
-            raise HeadRegistryError(f"role {role!r} routes to unknown head {head!r} "
-                                    f"(known: {', '.join(sorted(profiles)) or '(none)'})")
+            raise HeadRegistryError(
+                f"role {role!r} routes to unknown head {head!r} "
+                f"(known: {', '.join(sorted(profiles)) or '(none)'})"
+            )
 
 
 def _parse_registry(path: Path) -> dict:

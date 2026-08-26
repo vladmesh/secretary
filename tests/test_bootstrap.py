@@ -38,7 +38,10 @@ class Board:
         if method == "createProject":
             self.project = {"id": 7, "name": params["name"]}
             # Kanboard 1.2.46 creates these four columns for a new project.
-            self.columns = [{"id": n, "title": title} for n, title in enumerate(("Backlog", "Ready", "Work in progress", "Done"), 1)]
+            self.columns = [
+                {"id": n, "title": title}
+                for n, title in enumerate(("Backlog", "Ready", "Work in progress", "Done"), 1)
+            ]
             return 7
         if method == "getColumns":
             return self.columns
@@ -46,10 +49,7 @@ class Board:
             status = params.get("status_id")
             if status not in {0, 1}:
                 return []
-            return [
-                task for task in self.tasks
-                if (int(task.get("is_active", 1) or 0) != 0) == (status == 1)
-            ]
+            return [task for task in self.tasks if (int(task.get("is_active", 1) or 0) != 0) == (status == 1)]
         if method == "updateColumn":
             for column in self.columns:
                 if column["id"] == params["column_id"]:
@@ -59,9 +59,7 @@ class Board:
             self.columns.append({"id": len(self.columns) + 1, "title": params["title"]})
             return len(self.columns)
         if method == "changeColumnPosition":
-            column = next(
-                (item for item in self.columns if item["id"] == params["column_id"]), None
-            )
+            column = next((item for item in self.columns if item["id"] == params["column_id"]), None)
             if column is None:
                 return False
             self.columns.remove(column)
@@ -82,10 +80,7 @@ def _legacy_board() -> Board:
     """A live board on the pre-Assessment layout, with cards spread over its columns."""
     board = Board()
     board.project = {"id": 7, "name": "Pipeline"}
-    board.columns = [
-        {"id": index, "title": title}
-        for index, title in enumerate(LEGACY_PIPELINE_COLUMNS, 1)
-    ]
+    board.columns = [{"id": index, "title": title} for index, title in enumerate(LEGACY_PIPELINE_COLUMNS, 1)]
     board.tasks = [
         {"id": 11, "column_id": 2, "position": 1, "is_active": 1},
         {"id": 12, "column_id": 4, "position": 1, "is_active": 1},
@@ -275,9 +270,7 @@ class BootstrapBoardTests(unittest.TestCase):
             projects = instance / "projects"
             projects.mkdir()
             (projects / "api.yaml").write_text("id: api\n", encoding="utf-8")
-            (projects / "web.yaml").write_text(
-                "id: web\norca_binding: web_runtime\n", encoding="utf-8"
-            )
+            (projects / "web.yaml").write_text("id: web\norca_binding: web_runtime\n", encoding="utf-8")
             board_state = instance / "state" / "board"
             board_state.mkdir(parents=True)
             (board_state / "cards.ndjson").write_text(
@@ -335,8 +328,7 @@ class BootstrapBoardTests(unittest.TestCase):
             board = Board()
             board.project = {"id": 7, "name": "Pipeline"}
             board.columns = [
-                {"id": index, "title": f"old-{index}"}
-                for index in range(1, len(PIPELINE_COLUMNS) + 1)
+                {"id": index, "title": f"old-{index}"} for index in range(1, len(PIPELINE_COLUMNS) + 1)
             ]
 
             def declined(method: str, **params: object) -> object:
@@ -357,9 +349,7 @@ class BootstrapBoardTests(unittest.TestCase):
             instance = Path(temporary)
             board = Board()
             board.project = {"id": 7, "name": "Pipeline"}
-            board.columns = [
-                {"id": index, "title": f"old-{index}"} for index in range(1, 9)
-            ]
+            board.columns = [{"id": index, "title": f"old-{index}"} for index in range(1, 9)]
 
             ensure_pipeline_board(instance, client=board)
 
@@ -415,8 +405,18 @@ class BootstrapBoardTests(unittest.TestCase):
 
         self.assertIn(
             [
-                "apt-get", "install", "--yes", "curl", "fuse", "libnss3", "libgtk-3-0t64",
-                "libgbm1", "libasound2t64", "xvfb", "docker.io", "docker-compose-v2",
+                "apt-get",
+                "install",
+                "--yes",
+                "curl",
+                "fuse",
+                "libnss3",
+                "libgtk-3-0t64",
+                "libgbm1",
+                "libasound2t64",
+                "xvfb",
+                "docker.io",
+                "docker-compose-v2",
             ],
             [call.args[0] for call in run.call_args_list],
         )
@@ -457,9 +457,12 @@ class BootstrapBoardTests(unittest.TestCase):
                 directory.mkdir()
                 subprocess.run(["git", "init", "--quiet", str(directory)], check=True)
                 subprocess.run(["git", "-C", str(directory), "config", "user.name", "Test"], check=True)
-                subprocess.run(["git", "-C", str(directory), "config", "user.email", "test@example.invalid"], check=True)
+                subprocess.run(
+                    ["git", "-C", str(directory), "config", "user.email", "test@example.invalid"], check=True
+                )
                 (directory / "instance.yaml").write_text(
-                    "version: 1\nname: bootstrap\ndata_dir: " + str(directory.parent / "data")
+                    "version: 1\nname: bootstrap\ndata_dir: "
+                    + str(directory.parent / "data")
                     + "\noffsite:\n  instance_remote: git@example.invalid:bootstrap/instance\n"
                     + "host:\n  unit_prefix: secretary-\n",
                     encoding="utf-8",
@@ -467,7 +470,10 @@ class BootstrapBoardTests(unittest.TestCase):
                 return "cloned private instance remote"
 
             args = SimpleNamespace(
-                instance_dir=str(target), instance_remote="remote", installation_user="dev", dry_run=False,
+                instance_dir=str(target),
+                instance_remote="remote",
+                installation_user="dev",
+                dry_run=False,
             )
             with (
                 mock.patch("secretary.bootstrap.os.geteuid", return_value=0),
@@ -489,8 +495,9 @@ class BootstrapBoardTests(unittest.TestCase):
             self.assertIn("/board-transport.env", (target / ".gitignore").read_text(encoding="utf-8"))
             transport = (target / "board-transport.env").read_text(encoding="utf-8")
             self.assertIn("KANBOARD_API_USER=jsonrpc\n", transport)
-            compose = (target.parent / "compose.yml")
+            compose = target.parent / "compose.yml"
             from secretary.bootstrap import _compose_file
+
             _compose_file(compose)
             contents = compose.read_text(encoding="utf-8")
             self.assertIn("API_AUTHENTICATION_TOKEN: ${KANBOARD_API_TOKEN}", contents)
@@ -498,7 +505,10 @@ class BootstrapBoardTests(unittest.TestCase):
 
     def test_rejects_unsupported_host_before_creating_user_or_checkout(self) -> None:
         args = SimpleNamespace(
-            instance_dir="/tmp/instance", instance_remote="remote", installation_user="dev", dry_run=False,
+            instance_dir="/tmp/instance",
+            instance_remote="remote",
+            installation_user="dev",
+            dry_run=False,
         )
         with (
             mock.patch("secretary.bootstrap.os.geteuid", return_value=0),

@@ -32,9 +32,7 @@ from secretary.tasks import TaskAudit
 
 
 def git(repo: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(repo), *args], text=True, capture_output=True, check=True
-    )
+    result = subprocess.run(["git", "-C", str(repo), *args], text=True, capture_output=True, check=True)
     return result.stdout
 
 
@@ -66,7 +64,11 @@ SPRINT = {
     "budget": {"by_type": {"red_ci": 1}},
     "current_task": "secretary-637",
     "resume": None,
-    "audit": {"created_at": "2026-07-01T00:00:00Z", "updated_at": "2026-07-02T00:00:00Z", "board": "Secretary sprints"},
+    "audit": {
+        "created_at": "2026-07-01T00:00:00Z",
+        "updated_at": "2026-07-02T00:00:00Z",
+        "board": "Secretary sprints",
+    },
     "comments": [],
 }
 
@@ -134,9 +136,7 @@ class CheckpointWriterTests(unittest.TestCase):
             json.dumps(
                 {
                     "version": 1,
-                    "run_record_count": (
-                        run_record_count if run_record_count is not None else len(records)
-                    ),
+                    "run_record_count": (run_record_count if run_record_count is not None else len(records)),
                     "watermark_count": 0,
                     "claim_count": 0,
                 }
@@ -178,9 +178,7 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertIn("state/runs/claims.json", files)
         self.assertIn("state/runs/watermarks.json", files)
         self.assertIn("state/runs/export.json", files)
-        self.assertEqual(
-            git(self.instance_dir, "rev-parse", "HEAD").strip(), result.commit
-        )
+        self.assertEqual(git(self.instance_dir, "rev-parse", "HEAD").strip(), result.commit)
 
     def test_optional_entry_that_vanished_from_the_source_leaves_the_checkpoint(self):
         self.write()
@@ -195,10 +193,14 @@ class CheckpointWriterTests(unittest.TestCase):
 
     def test_live_typed_event_is_staged_as_a_board_checkpoint_artifact(self):
         host = FakeBoardHost(data_dir=self.data_dir)
-        host.create(Create(
-            Card("secretary-1419", "Typed event canon", CardState.READY),
-            Actor("po", "operator"), "accepted into the sprint", request_id="checkpoint-event-1",
-        ))
+        host.create(
+            Create(
+                Card("secretary-1419", "Typed event canon", CardState.READY),
+                Actor("po", "operator"),
+                "accepted into the sprint",
+                request_id="checkpoint-event-1",
+            )
+        )
 
         result = self.write()
 
@@ -210,11 +212,22 @@ class CheckpointWriterTests(unittest.TestCase):
 
     def test_invalid_typed_event_blocks_checkpoint_but_generic_history_stays_allowed(self):
         (self.data_dir / "board" / "events.ndjson").write_text(
-            json.dumps({
-                "schema_version": 2, "record_type": "board.protocol_event", "request_id": "bad",
-                "event_id": "bad", "kind": "card.started", "subject": {"kind": "card", "ref": "x"},
-                "actor": {"role": "worker", "id": "w"}, "reason": "missing occurrence", "related_refs": [],
-            }) + "\n" + json.dumps({"event_id": "released-generic", "request_id": "old", "kind": "moved"}) + "\n",
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "record_type": "board.protocol_event",
+                    "request_id": "bad",
+                    "event_id": "bad",
+                    "kind": "card.started",
+                    "subject": {"kind": "card", "ref": "x"},
+                    "actor": {"role": "worker", "id": "w"},
+                    "reason": "missing occurrence",
+                    "related_refs": [],
+                }
+            )
+            + "\n"
+            + json.dumps({"event_id": "released-generic", "request_id": "old", "kind": "moved"})
+            + "\n",
             encoding="utf-8",
         )
 
@@ -233,7 +246,11 @@ class CheckpointWriterTests(unittest.TestCase):
         self.assertEqual(result.status, "blocked")
         self.assertIn("non-empty canonical run history", result.reason)
         self.assertEqual(
-            len((self.instance_dir / "state" / "runs" / "runs.ndjson").read_text(encoding="utf-8").splitlines()),
+            len(
+                (self.instance_dir / "state" / "runs" / "runs.ndjson")
+                .read_text(encoding="utf-8")
+                .splitlines()
+            ),
             1,
         )
 
@@ -255,10 +272,12 @@ class CheckpointWriterTests(unittest.TestCase):
         old = {"source": "z-runs.jsonl", "line": 1, "record": {"event": "claim"}}
         self.seed_runs([old])
         self.assertEqual(self.write().status, "committed")
-        self.seed_runs([
-            {"source": "a-runs.jsonl", "line": 1, "record": {"event": "new"}},
-            old,
-        ])
+        self.seed_runs(
+            [
+                {"source": "a-runs.jsonl", "line": 1, "record": {"event": "new"}},
+                old,
+            ]
+        )
 
         result = self.write()
 
@@ -292,7 +311,10 @@ class CheckpointWriterTests(unittest.TestCase):
         (self.instance_dir / "projects").mkdir()
         (self.instance_dir / "projects" / "secretary.yaml").write_text("id: secretary\n", encoding="utf-8")
         product = {
-            "reference": "product:secretary", "title": "Secretary", "column": "Issues", "closed": False,
+            "reference": "product:secretary",
+            "title": "Secretary",
+            "column": "Issues",
+            "closed": False,
             "metadata": {"record_type": "product", "product_id": "secretary", "product_projects": "[]"},
         }
         self.seed_board([product])
@@ -325,13 +347,25 @@ class CheckpointWriterTests(unittest.TestCase):
         checkpoint has to hand back the worker/reviewer pair of every attempt."""
         audit = TaskAudit(self.data_dir)
         worker = {
-            "role": "worker", "head": "codex", "head_source": "role_default", "adapter": "codex",
-            "model": "gpt-5.6-terra", "model_source": "profile", "effort": "default",
-            "codex_mode": "tui", "resource": "openai-sub", "account": "openai-subscription",
+            "role": "worker",
+            "head": "codex",
+            "head_source": "role_default",
+            "adapter": "codex",
+            "model": "gpt-5.6-terra",
+            "model_source": "profile",
+            "effort": "default",
+            "codex_mode": "tui",
+            "resource": "openai-sub",
+            "account": "openai-subscription",
         }
         reviewer = {
-            "role": "reviewer", "head": "claude-default", "head_source": "card", "adapter": "claude",
-            "model": "", "model_source": "cli_default", "resource": "claude-sub",
+            "role": "reviewer",
+            "head": "claude-default",
+            "head_source": "card",
+            "adapter": "claude",
+            "model": "",
+            "model_source": "cli_default",
+            "resource": "claude-sub",
             "account": "claude-subscription",
         }
         for phase, heads, outcome in (
@@ -342,15 +376,22 @@ class CheckpointWriterTests(unittest.TestCase):
             audit.append(
                 f"routing-{phase}",
                 {
-                    "event_id": f"evt_{phase}", "schema_version": 1, "kind": "routing",
-                    "occurred_at": "2026-07-24T00:00:00Z", "outcome": "success",
+                    "event_id": f"evt_{phase}",
+                    "schema_version": 1,
+                    "kind": "routing",
+                    "occurred_at": "2026-07-24T00:00:00Z",
+                    "outcome": "success",
                     "actor": {"role": "dispatcher", "id": "secretary-dispatcher"},
-                    "task_id": "task_kanboard_1", "ref": "secretary-637",
+                    "task_id": "task_kanboard_1",
+                    "ref": "secretary-637",
                     "backend": {"kind": "kanboard", "task_id": 1, "revision": "updated_at:x"},
                     "request_id": f"routing-{phase}",
                     "payload": {
-                        "attempt": 1, "attempt_id": "attempt-1", "phase": phase,
-                        "outcome": outcome, "heads": heads,
+                        "attempt": 1,
+                        "attempt_id": "attempt-1",
+                        "phase": phase,
+                        "outcome": outcome,
+                        "heads": heads,
                     },
                 },
             )
@@ -431,27 +472,31 @@ class CheckpointWriterTests(unittest.TestCase):
     def test_nonsecret_board_transport_text_in_a_card_does_not_block_the_checkpoint(self):
         transport = ensure_board_transport(self.instance_dir, allow_default=True).transport
         contents = (self.instance_dir / "board-transport.env").read_text(encoding="utf-8")
-        self.seed_board([{
-            **CARD,
-            "description": f"Board configuration:\n{contents}",
-            "comments": [{"text": f"report comment:\n{contents}"}],
-        }])
+        self.seed_board(
+            [
+                {
+                    **CARD,
+                    "description": f"Board configuration:\n{contents}",
+                    "comments": [{"text": f"report comment:\n{contents}"}],
+                }
+            ]
+        )
         (self.data_dir / "board" / "export.json").write_text(
-            json.dumps({
-                "version": 1,
-                "card_count": 1,
-                "sprint_count": 0,
-                "report": f"exported board configuration:\n{contents}",
-            }),
+            json.dumps(
+                {
+                    "version": 1,
+                    "card_count": 1,
+                    "sprint_count": 0,
+                    "report": f"exported board configuration:\n{contents}",
+                }
+            ),
             encoding="utf-8",
         )
 
         result = self.write()
 
         self.assertEqual(result.status, "committed")
-        published = (self.instance_dir / "state" / "board" / "cards.ndjson").read_text(
-            encoding="utf-8"
-        )
+        published = (self.instance_dir / "state" / "board" / "cards.ndjson").read_text(encoding="utf-8")
         self.assertIn(transport.url, published)
         self.assertIn("KANBOARD_API_USER=jsonrpc", published)
         self.assertIn("KANBOARD_API_TOKEN=secretary-local-kanboard-jsonrpc-v1", published)
@@ -493,9 +538,7 @@ class CheckpointWriterTests(unittest.TestCase):
 
     def test_named_runtime_secret_in_a_card_still_blocks_the_checkpoint(self):
         secret = "opaque-token-value"
-        (self.instance_dir / "runtime.env").write_text(
-            f"EXAMPLE_API_TOKEN={secret}\n", encoding="utf-8"
-        )
+        (self.instance_dir / "runtime.env").write_text(f"EXAMPLE_API_TOKEN={secret}\n", encoding="utf-8")
         self.seed_board([{**CARD, "description": f"token {secret}"}])
 
         result = self.write()
@@ -521,9 +564,7 @@ class CheckpointWriterTests(unittest.TestCase):
                 },
             },
         ):
-            initialize_store(
-                self.instance_dir, phrase=" ".join(RECOVERY_WORDS[:16]), actor="tester"
-            )
+            initialize_store(self.instance_dir, phrase=" ".join(RECOVERY_WORDS[:16]), actor="tester")
         set_secret(
             self.instance_dir,
             secret_id="binary.value",
@@ -582,9 +623,7 @@ class CheckpointWriterTests(unittest.TestCase):
                 },
             },
         ):
-            initialize_store(
-                self.instance_dir, phrase=" ".join(RECOVERY_WORDS[:16]), actor="tester"
-            )
+            initialize_store(self.instance_dir, phrase=" ".join(RECOVERY_WORDS[:16]), actor="tester")
         import_env_file(
             self.instance_dir,
             source=runtime,
@@ -592,9 +631,7 @@ class CheckpointWriterTests(unittest.TestCase):
             purpose="imported runtime",
             actor="tester",
         )
-        self.seed_board(
-            [{**CARD, "description": f"data={data_dir} repo={product_root} board={url}"}]
-        )
+        self.seed_board([{**CARD, "description": f"data={data_dir} repo={product_root} board={url}"}])
 
         result = self.write()
 
@@ -607,9 +644,7 @@ class CheckpointWriterTests(unittest.TestCase):
 
         self.assertEqual(blocked.status, "blocked")
         self.assertEqual(git(self.instance_dir, "rev-parse", "HEAD").strip(), first.commit)
-        published = (self.instance_dir / "state" / "board" / "cards.ndjson").read_text(
-            encoding="utf-8"
-        )
+        published = (self.instance_dir / "state" / "board" / "cards.ndjson").read_text(encoding="utf-8")
         self.assertNotIn("ghp_", published)
 
     def test_export_failure_blocks_without_touching_state(self):
@@ -645,9 +680,7 @@ class CheckpointWriterTests(unittest.TestCase):
 
         self.write()
 
-        committed = git(
-            self.instance_dir, "show", "--name-only", "--format=", "HEAD"
-        ).split()
+        committed = git(self.instance_dir, "show", "--name-only", "--format=", "HEAD").split()
         self.assertNotIn("instance.yaml", committed)
         self.assertIn("state/board/cards.ndjson", committed)
 
@@ -685,7 +718,7 @@ class CheckpointPusherPrivilegeTests(unittest.TestCase):
 
         def run_git(command: list[str], **_kwargs):
             commands.append(command)
-            args = command[command.index("-C") + 2:]
+            args = command[command.index("-C") + 2 :]
             if args[:3] == ["symbolic-ref", "--quiet", "--short"]:
                 return self.result(args, stdout="main\n")
             if args == ["remote"]:
@@ -703,7 +736,9 @@ class CheckpointPusherPrivilegeTests(unittest.TestCase):
             self.fail(f"unexpected pusher Git command: {args}")
 
         with (
-            mock.patch("secretary.checkpoint.state_repo.state_repo_lock", return_value=contextlib.nullcontext()),
+            mock.patch(
+                "secretary.checkpoint.state_repo.state_repo_lock", return_value=contextlib.nullcontext()
+            ),
             mock.patch("secretary.state_repo.os.getuid", return_value=0),
             mock.patch("secretary.state_repo.pwd.getpwuid", return_value=SimpleNamespace(pw_name="runtime")),
             mock.patch("secretary.state_repo.subprocess.run", side_effect=run_git),
@@ -712,7 +747,7 @@ class CheckpointPusherPrivilegeTests(unittest.TestCase):
 
         self.assertEqual(state["status"], "pushed")
         self.assertEqual(
-            [command[command.index("-C") + 2:] for command in commands],
+            [command[command.index("-C") + 2 :] for command in commands],
             [
                 ["symbolic-ref", "--quiet", "--short", "HEAD"],
                 ["remote"],
@@ -728,9 +763,15 @@ class CheckpointPusherPrivilegeTests(unittest.TestCase):
             self.assertEqual(command[:5], ["runuser", "--user", "runtime", "--", "env"])
             self.assertIn("GIT_TERMINAL_PROMPT=0", command)
             self.assertIn("GIT_SSH_COMMAND=ssh -o BatchMode=yes", command)
-            self.assertEqual(command[git + 1:git + 5], [
-                "-c", f"safe.directory={self.instance.resolve()}", "-c", "core.hooksPath=/dev/null",
-            ])
+            self.assertEqual(
+                command[git + 1 : git + 5],
+                [
+                    "-c",
+                    f"safe.directory={self.instance.resolve()}",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                ],
+            )
 
     def test_branch_discovery_failure_remains_actionable_not_no_branch(self):
         failure = self.result(
@@ -991,7 +1032,11 @@ class CheckpointSnapshotTests(unittest.TestCase):
     def test_a_pushed_checkpoint_reports_no_lag(self):
         snapshot = checkpoint_snapshot(
             self.instance_dir,
-            push_state={"status": "pushed", "last_push_at": "2026-07-20T10:00:00Z", "last_push_commit": self.head},
+            push_state={
+                "status": "pushed",
+                "last_push_at": "2026-07-20T10:00:00Z",
+                "last_push_commit": self.head,
+            },
         )
 
         self.assertEqual(snapshot["last_commit"], self.head)
@@ -1015,7 +1060,11 @@ class CheckpointSnapshotTests(unittest.TestCase):
         snapshot = checkpoint_snapshot(
             self.instance_dir,
             write_state={"status": "blocked", "reason": "secret detected in state/board/cards.ndjson"},
-            push_state={"status": "diverged", "reason": "remote origin/main is at deadbeef", "remote_diverged": True},
+            push_state={
+                "status": "diverged",
+                "reason": "remote origin/main is at deadbeef",
+                "remote_diverged": True,
+            },
         )
 
         self.assertEqual(snapshot["blocked_reason"], "secret detected in state/board/cards.ndjson")

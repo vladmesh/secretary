@@ -4,6 +4,7 @@ The production tick opens an attempt per claim (`dispatcher_production`) and rea
 one off the record for a card already in flight. A test that calls `_tick_task` directly has
 neither, so it opens one here.
 """
+
 from __future__ import annotations
 
 from typing import Any

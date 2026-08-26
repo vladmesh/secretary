@@ -47,9 +47,12 @@ class _BoardFixture:
             return {"id": 7}
         if method == "getColumns":
             return [
-                {"id": 1, "title": "Issues"}, {"id": 2, "title": "Ready"},
-                {"id": 3, "title": "In progress"}, {"id": 4, "title": "Validate"},
-                {"id": 5, "title": "Blocked"}, {"id": 6, "title": "Done"},
+                {"id": 1, "title": "Issues"},
+                {"id": 2, "title": "Ready"},
+                {"id": 3, "title": "In progress"},
+                {"id": 4, "title": "Validate"},
+                {"id": 5, "title": "Blocked"},
+                {"id": 6, "title": "Done"},
             ]
         if method == "getActiveSwimlanes":
             return [{"id": 4, "name": "Secretary"}]
@@ -63,12 +66,19 @@ class _BoardFixture:
             return []
         if method == "createTask":
             task_id = len(self.tasks) + 1
-            self.tasks.append({
-                "id": task_id, "reference": "", "title": params["title"],
-                "description": params.get("description", ""), "column_id": params["column_id"],
-                "position": task_id, "swimlane_id": params.get("swimlane_id") or 0,
-                "date_creation": "1720000200", "date_modification": "1720000200",
-            })
+            self.tasks.append(
+                {
+                    "id": task_id,
+                    "reference": "",
+                    "title": params["title"],
+                    "description": params.get("description", ""),
+                    "column_id": params["column_id"],
+                    "position": task_id,
+                    "swimlane_id": params.get("swimlane_id") or 0,
+                    "date_creation": "1720000200",
+                    "date_modification": "1720000200",
+                }
+            )
             self.metadata[task_id] = {}
             return task_id
         if method == "updateTask":
@@ -136,14 +146,24 @@ def main() -> int:
         bootstrap_empty(instance)
         card = normalize_board_card(
             {
-                "id": 1, "reference": "secretary-restore-e2e", "title": "Restore e2e",
-                "column": "Ready", "swimlane": "Secretary", "position": 1,
-                "task_type": "code", "project": "secretary",
+                "id": 1,
+                "reference": "secretary-restore-e2e",
+                "title": "Restore e2e",
+                "column": "Ready",
+                "swimlane": "Secretary",
+                "position": 1,
+                "task_type": "code",
+                "project": "secretary",
             },
             {
-                "id": 1, "reference": "secretary-restore-e2e", "title": "Restore e2e",
-                "description": "cross-repository restore fixture", "column": "Ready",
-                "task_type": "code", "project": "secretary", "comments": [],
+                "id": 1,
+                "reference": "secretary-restore-e2e",
+                "title": "Restore e2e",
+                "description": "cross-repository restore fixture",
+                "column": "Ready",
+                "task_type": "code",
+                "project": "secretary",
+                "comments": [],
                 "metadata": {"resolved_head": "", "resolved_review_head": ""},
             },
         )
@@ -207,9 +227,19 @@ def main() -> int:
         (fixture / "units.txt").write_text(
             "\n".join(resource.name for resource in desired if resource.kind == "unit"), encoding="utf-8"
         )
-        if secretary_main([
-            "reconcile", "plan", "--instance", str(instance), "--host-fixture", str(fixture),
-        ]) != 0:
+        if (
+            secretary_main(
+                [
+                    "reconcile",
+                    "plan",
+                    "--instance",
+                    str(instance),
+                    "--host-fixture",
+                    str(fixture),
+                ]
+            )
+            != 0
+        ):
             raise AssertionError("reconcile plan did not confirm the restored desired state")
         inventory = HostInventory(units={resource.name for resource in desired if resource.kind == "unit"})
         source = mock.Mock()

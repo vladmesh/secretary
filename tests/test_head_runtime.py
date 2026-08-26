@@ -178,9 +178,7 @@ class HeadRuntimeContractTests(unittest.TestCase):
         """The distinction the product has killed live heads by collapsing."""
         self.host.refuse_close = True
 
-        receipt = self.bring_up(
-            pointer=NudgePointer.line("report now"), transport=RefusingTransport()
-        )
+        receipt = self.bring_up(pointer=NudgePointer.line("report now"), transport=RefusingTransport())
 
         self.assertEqual(receipt.status, HEAD_ALIVE)
         self.assertIsInstance(receipt.failure, HeadSpawnAborted)
@@ -188,9 +186,7 @@ class HeadRuntimeContractTests(unittest.TestCase):
         self.assertEqual(receipt.run.workspace, WORKSPACE)
 
     def test_a_bring_up_whose_pane_closed_cleanly_left_nothing(self) -> None:
-        receipt = self.bring_up(
-            pointer=NudgePointer.line("report now"), transport=RefusingTransport()
-        )
+        receipt = self.bring_up(pointer=NudgePointer.line("report now"), transport=RefusingTransport())
 
         self.assertEqual(receipt.status, HEAD_GONE)
         self.assertIsInstance(receipt.failure, HeadSpawnFailed)
@@ -200,9 +196,7 @@ class HeadRuntimeContractTests(unittest.TestCase):
     def test_a_pane_that_was_busy_and_never_took_its_prompt_is_worth_retrying(self) -> None:
         self.host.idle = False
 
-        receipt = self.bring_up(
-            pointer=NudgePointer.line("report now"), transport=RefusingTransport()
-        )
+        receipt = self.bring_up(pointer=NudgePointer.line("report now"), transport=RefusingTransport())
 
         self.assertEqual(receipt.status, HEAD_BUSY)
         self.assertTrue(receipt.deferred)
@@ -327,9 +321,7 @@ class HeadRuntimeContractTests(unittest.TestCase):
         run = self.live_run()
         opened = self.runtime.activity.epoch(run.run_id)
 
-        delivered = self.runtime.deliver(
-            run, NudgePointer.line("report now"), transport=CONFIRMING
-        ).epoch
+        delivered = self.runtime.deliver(run, NudgePointer.line("report now"), transport=CONFIRMING).epoch
         self.host.last_output_at = 2000.0
         printed = self.runtime.observe(run).epoch
 
@@ -348,9 +340,7 @@ class HeadRuntimeContractTests(unittest.TestCase):
     def test_the_turn_ends_when_the_backend_sees_the_pane_take_input_again(self) -> None:
         run = self.live_run()
         self.host.idle = False
-        granted = self.runtime.deliver(
-            run, NudgePointer.line("report now"), transport=CONFIRMING
-        ).lease
+        granted = self.runtime.deliver(run, NudgePointer.line("report now"), transport=CONFIRMING).lease
         self.assertIsInstance(granted, TurnLease)
         self.assertIs(self.runtime.observe(run).busy, True)
 
@@ -491,9 +481,7 @@ class SerialisedHeadTests(unittest.TestCase):
         run, lease = self.working()
         typed = len(self.host.sent)
 
-        second = self.runtime.deliver(
-            run, NudgePointer.line("and this too"), transport=CONFIRMING
-        )
+        second = self.runtime.deliver(run, NudgePointer.line("and this too"), transport=CONFIRMING)
 
         self.assertEqual(second.status, HEAD_BUSY)
         self.assertTrue(second.deferred, "a busy head is worth delivering to again, later")
@@ -557,7 +545,7 @@ class SerialisedHeadTests(unittest.TestCase):
         )
 
     def test_an_observation_of_a_pane_with_no_output_clock_is_not_activity(self) -> None:
-        """"I looked and the pane cannot say when it last printed" is not "the head printed"."""
+        """ "I looked and the pane cannot say when it last printed" is not "the head printed"."""
         run = self.bring_up()
         self.host.last_output_at = 0.0
         quiet = self.epoch(run)
@@ -644,7 +632,7 @@ class SerialisedHeadTests(unittest.TestCase):
         self.assertIsNone(self.runtime.activity.lease(run.run_id))
 
     def test_a_stop_if_quiescent_refuses_a_turn_the_probe_could_not_say_had_ended(self) -> None:
-        """"I could not tell" is not permission for a *live* head: it keeps its pane.
+        """ "I could not tell" is not permission for a *live* head: it keeps its pane.
 
         The refusal is bounded by the head being alive, and that is what makes it a refusal a caller
         can wait out: this head is running and will finish its turn. The same pane answer about a
@@ -754,9 +742,7 @@ class SerialisedHeadTests(unittest.TestCase):
         run = self.bring_up()
         stale = self.epoch(run)
         self.host.idle = False
-        self.assertTrue(
-            self.runtime.deliver(run, NudgePointer.line("one more"), transport=CONFIRMING).ok
-        )
+        self.assertTrue(self.runtime.deliver(run, NudgePointer.line("one more"), transport=CONFIRMING).ok)
 
         receipt = self.runtime.stop_if_quiescent(
             run, self.stopper, expected_activity_epoch=stale, head_process_alive=False
@@ -788,9 +774,7 @@ class SerialisedHeadTests(unittest.TestCase):
         # A delivery lands between that judgement and the stop, and takes a turn.
         self.host.idle = False
         self.assertTrue(
-            self.runtime.deliver(
-                run, NudgePointer.line("one more thing"), transport=CONFIRMING
-            ).ok
+            self.runtime.deliver(run, NudgePointer.line("one more thing"), transport=CONFIRMING).ok
         )
         self.assertNotEqual(self.epoch(run), stale)
         probed: list[str] = []
@@ -805,7 +789,9 @@ class SerialisedHeadTests(unittest.TestCase):
         self.assertEqual(receipt.reason, STOP_ACTIVITY_SINCE)
         self.assertEqual(self.host.closed, [], "nothing was stopped")
         self.assertEqual(
-            probed, [], "a head that moved is refused without asking its pane anything",
+            probed,
+            [],
+            "a head that moved is refused without asking its pane anything",
         )
 
     def test_a_stop_that_could_not_be_confirmed_puts_the_head_back_in_service(self) -> None:
@@ -831,9 +817,7 @@ class SerialisedHeadTests(unittest.TestCase):
             run, self.stopper, expected_activity_epoch=self.epoch(run), head_process_alive=True
         )
 
-        self.assertFalse(
-            self.runtime.activity.admits(run.run_id), "the drain outlives the stop that failed"
-        )
+        self.assertFalse(self.runtime.activity.admits(run.run_id), "the drain outlives the stop that failed")
 
     def test_a_teardown_owns_its_own_failure_and_the_head_stays_in_service(self) -> None:
         """The observer's stop is Orca's worktree teardown, and it runs inside the same section."""
@@ -880,9 +864,7 @@ class SerialisedHeadTests(unittest.TestCase):
         """
         run = self.bring_up()
         self.host.idle = True
-        self.assertTrue(
-            self.runtime.deliver(run, NudgePointer.line("work"), transport=CONFIRMING).ok
-        )
+        self.assertTrue(self.runtime.deliver(run, NudgePointer.line("work"), transport=CONFIRMING).ok)
         before = self.epoch(run)
         self.assertGreater(before, 1)
 
@@ -972,9 +954,7 @@ class SerialisedHeadTests(unittest.TestCase):
 
         self.assertTrue(receipt.ok)
         self.assertTrue(got_in, "the wedge never ran, so this proved nothing")
-        self.assertEqual(
-            set(got_in), {False}, "the delivery held the lock across every host call it made"
-        )
+        self.assertEqual(set(got_in), {False}, "the delivery held the lock across every host call it made")
 
     def test_a_workspace_teardown_is_inside_the_same_critical_section_as_the_verbs(self) -> None:
         """For an observer head the worktree teardown *is* the stop, so it is serialised too."""
@@ -1011,9 +991,7 @@ class SerialisedHeadTests(unittest.TestCase):
             if call != "send" or wedged:
                 return
             wedged.append(None)
-            wedged[0] = self.runtime.deliver(
-                run, NudgePointer.line("second"), transport=CONFIRMING
-            )
+            wedged[0] = self.runtime.deliver(run, NudgePointer.line("second"), transport=CONFIRMING)
 
         self.host.on_call = deliver_again
         first = self.runtime.deliver(run, NudgePointer.line("first"), transport=CONFIRMING)
@@ -1052,9 +1030,7 @@ class OrcaLegacyContractTests(HeadRuntimeContract, unittest.TestCase):
         )
 
     def deliver_line(self, run, text, *, subject=""):
-        return self.runtime.deliver(
-            run, NudgePointer.line(text), transport=CONFIRMING, subject=subject
-        )
+        return self.runtime.deliver(run, NudgePointer.line(text), transport=CONFIRMING, subject=subject)
 
     def begin_turn(self, run, *, subject=""):
         """A pane that is working on the prompt it was just given."""

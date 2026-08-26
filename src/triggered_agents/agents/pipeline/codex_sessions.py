@@ -16,6 +16,7 @@ Two hard rules, both from review 373:
   poll cares about heads alive right now, and a long-lived CODEX_HOME accumulates years
   of rollouts that a per-tick rglob would keep re-reading.
 """
+
 from __future__ import annotations
 
 import json
@@ -58,8 +59,9 @@ def _recent_day_dirs(root: Path, limit: int = SCAN_DAY_DIRS) -> list[Path]:
     An unexpected layout (flat dir, no digit-named years) degrades to scanning `root`
     itself: a full scan is slower but correct, a skipped tree would be a blind spot."""
     try:
-        years = sorted((d for d in root.iterdir() if d.is_dir() and d.name.isdigit()),
-                       key=lambda d: d.name, reverse=True)
+        years = sorted(
+            (d for d in root.iterdir() if d.is_dir() and d.name.isdigit()), key=lambda d: d.name, reverse=True
+        )
     except OSError:
         return [root]
     if not years:
@@ -67,14 +69,14 @@ def _recent_day_dirs(root: Path, limit: int = SCAN_DAY_DIRS) -> list[Path]:
     days: list[Path] = []
     for year in years:
         try:
-            months = sorted((d for d in year.iterdir() if d.is_dir()),
-                            key=lambda d: d.name, reverse=True)
+            months = sorted((d for d in year.iterdir() if d.is_dir()), key=lambda d: d.name, reverse=True)
         except OSError:
             continue
         for month in months:
             try:
-                leaves = sorted((d for d in month.iterdir() if d.is_dir()),
-                                key=lambda d: d.name, reverse=True)
+                leaves = sorted(
+                    (d for d in month.iterdir() if d.is_dir()), key=lambda d: d.name, reverse=True
+                )
             except OSError:
                 continue
             for day in leaves:

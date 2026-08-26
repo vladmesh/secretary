@@ -4,6 +4,7 @@ The placement rule is `product_swimlane_id`; these tests are about the rows that
 that a restore brought back into the lane an old checkpoint recorded.  Nothing here touches a live
 board: every case is a fixture whose lanes, columns and positions behave like Kanboard's.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -43,46 +44,80 @@ class LaneBoard(ProductBoard):
             task["column_id"] = int(task.get("column_id") or 0)
             task["swimlane_id"] = int(task.get("swimlane_id") or 0)
             task["position"] = int(task["position"]) if str(task.get("position") or "").isdigit() else 1
-        self.record(100, "product:secretary", {"record_type": "product", "product_id": "secretary",
-                                               "product_projects": '["secretary"]'},
-                    swimlane_id=1, position=1)
-        self.record(110, "issue:s1", self._issue("secretary"), swimlane_id=1, position=2,
-                    comments=("[issue:priority]\nbecause", ))
+        self.record(
+            100,
+            "product:secretary",
+            {"record_type": "product", "product_id": "secretary", "product_projects": '["secretary"]'},
+            swimlane_id=1,
+            position=1,
+        )
+        self.record(
+            110,
+            "issue:s1",
+            self._issue("secretary"),
+            swimlane_id=1,
+            position=2,
+            comments=("[issue:priority]\nbecause",),
+        )
         self.record(111, "issue:s2", self._issue("secretary"), swimlane_id=1, position=3)
         self.record(112, "issue:c1", self._issue("codegen"), swimlane_id=1, position=4)
         self.record(115, "issue:done", self._issue("codegen"), swimlane_id=1, position=5, closed=True)
         self.record(116, "issue:ghost", self._issue("nowhere"), swimlane_id=1, position=6)
         self.record(117, "issue:blank", self._issue(""), swimlane_id=1, position=7)
-        self.record(101, "product:codegen", {"record_type": "product", "product_id": "codegen",
-                                             "product_projects": '["codegen"]'},
-                    swimlane_id=4, position=1)
+        self.record(
+            101,
+            "product:codegen",
+            {"record_type": "product", "product_id": "codegen", "product_projects": '["codegen"]'},
+            swimlane_id=4,
+            position=1,
+        )
         self.record(113, "issue:c2", self._issue("codegen"), swimlane_id=4, position=2)
-        self.record(102, "product:butler", {"record_type": "product", "product_id": "butler",
-                                            "product_projects": '["butler"]'},
-                    swimlane_id=5, position=1)
+        self.record(
+            102,
+            "product:butler",
+            {"record_type": "product", "product_id": "butler", "product_projects": '["butler"]'},
+            swimlane_id=5,
+            position=1,
+        )
         self.record(114, "issue:b1", self._issue("butler"), swimlane_id=5, position=2)
 
     @staticmethod
     def _issue(product: str) -> dict[str, str]:
         return {
-            "record_type": "issue", "issue_product": product, "issue_kind": "feature",
+            "record_type": "issue",
+            "issue_product": product,
+            "issue_kind": "feature",
             "issue_priority": "P2",
         }
 
     def record(
-        self, task_id: int, reference: str, metadata: dict[str, str], *, column_id: int = 1,
-        swimlane_id: int = 1, position: int = 1, closed: bool = False, comments: tuple = (),
+        self,
+        task_id: int,
+        reference: str,
+        metadata: dict[str, str],
+        *,
+        column_id: int = 1,
+        swimlane_id: int = 1,
+        position: int = 1,
+        closed: bool = False,
+        comments: tuple = (),
     ) -> None:
-        self.tasks.append({
-            "id": task_id, "reference": reference, "title": reference.upper(),
-            "description": f"body of {reference}", "column_id": column_id, "position": position,
-            "swimlane_id": swimlane_id, "is_active": 0 if closed else 1,
-            "date_creation": "1720000000", "date_modification": "1720000000",
-        })
+        self.tasks.append(
+            {
+                "id": task_id,
+                "reference": reference,
+                "title": reference.upper(),
+                "description": f"body of {reference}",
+                "column_id": column_id,
+                "position": position,
+                "swimlane_id": swimlane_id,
+                "is_active": 0 if closed else 1,
+                "date_creation": "1720000000",
+                "date_modification": "1720000000",
+            }
+        )
         self.metadata[task_id] = dict(metadata)
-        self.comments[task_id] = [
-            {"date_creation": "1720000020", "comment": text} for text in comments
-        ]
+        self.comments[task_id] = [{"date_creation": "1720000020", "comment": text} for text in comments]
 
     def call(self, method: str, **params: object) -> object:
         if method == "moveTaskPosition":
@@ -108,7 +143,9 @@ class ProductLaneReconcileTests(unittest.TestCase):
 
     def _store(self, client=None) -> ProductIssueStore:
         return ProductIssueStore(
-            client or self.client, data_dir=self.root / "data", instance=self.root,
+            client or self.client,
+            data_dir=self.root / "data",
+            instance=self.root,
         )
 
     def _row(self, reference: str) -> dict:
@@ -117,13 +154,15 @@ class ProductLaneReconcileTests(unittest.TestCase):
     def _lane_of(self, reference: str) -> str:
         identifier = int(self._row(reference)["swimlane_id"])
         return next(
-            (str(lane["name"]) for lane in self.client.swimlanes if int(lane["id"]) == identifier), "",
+            (str(lane["name"]) for lane in self.client.swimlanes if int(lane["id"]) == identifier),
+            "",
         )
 
     def _lane_order(self, name: str) -> list[str]:
         identifier = next(int(lane["id"]) for lane in self.client.swimlanes if lane["name"] == name)
         rows = [
-            task for task in self.client.tasks
+            task
+            for task in self.client.tasks
             if int(task.get("swimlane_id") or 0) == identifier and int(task.get("column_id") or 0) == 1
         ]
         return [str(row["reference"]) for row in sorted(rows, key=lambda row: int(row["position"]))]
@@ -131,17 +170,28 @@ class ProductLaneReconcileTests(unittest.TestCase):
     def _snapshot(self) -> dict:
         return {
             str(task["reference"]): {
-                "title": task["title"], "description": task.get("description", ""),
-                "column_id": task["column_id"], "is_active": task.get("is_active", 1),
+                "title": task["title"],
+                "description": task.get("description", ""),
+                "column_id": task["column_id"],
+                "is_active": task.get("is_active", 1),
                 "metadata": dict(self.client.metadata[int(task["id"])]),
                 "comments": list(self.client.comments[int(task["id"])]),
             }
-            for task in self.client.tasks if str(task.get("reference") or "")
+            for task in self.client.tasks
+            if str(task.get("reference") or "")
         }
 
     def _written(self, since: int = 0) -> list[str]:
-        writes = {"moveTaskPosition", "addSwimlane", "createTask", "updateTask", "saveTaskMetadata",
-                  "createComment", "closeTask", "removeTask"}
+        writes = {
+            "moveTaskPosition",
+            "addSwimlane",
+            "createTask",
+            "updateTask",
+            "saveTaskMetadata",
+            "createComment",
+            "closeTask",
+            "removeTask",
+        }
         return [method for method, _ in self.client.calls[since:] if method in writes]
 
     def test_the_plan_writes_nothing_and_names_every_move(self) -> None:
@@ -161,24 +211,45 @@ class ProductLaneReconcileTests(unittest.TestCase):
         # The `codegen` lane does not exist yet, so the plan says so instead of inventing an id.
         self.assertEqual(codegen["to"], {"swimlane": "codegen", "swimlane_id": None})
         self.assertEqual(result["lanes_to_create"], ["codegen"])
-        self.assertEqual(result["summary"], [
-            {"product": "butler", "lane": "butler", "move": 0, "in_place": 2, "closed": 0},
-            {"product": "codegen", "lane": "codegen", "move": 3, "in_place": 0, "closed": 1},
-            {"product": "secretary", "lane": "secretary", "move": 3, "in_place": 0, "closed": 0},
-        ])
-        self.assertEqual(result["totals"], {
-            "records": 11, "move": 6, "in_place": 2, "closed": 1, "unresolved": 2,
-        })
+        self.assertEqual(
+            result["summary"],
+            [
+                {"product": "butler", "lane": "butler", "move": 0, "in_place": 2, "closed": 0},
+                {"product": "codegen", "lane": "codegen", "move": 3, "in_place": 0, "closed": 1},
+                {"product": "secretary", "lane": "secretary", "move": 3, "in_place": 0, "closed": 0},
+            ],
+        )
+        self.assertEqual(
+            result["totals"],
+            {
+                "records": 11,
+                "move": 6,
+                "in_place": 2,
+                "closed": 1,
+                "unresolved": 2,
+            },
+        )
 
     def test_a_record_without_a_registered_product_is_listed_and_left_alone(self) -> None:
         result = self._store().reconcile_lanes(apply=True)
 
-        self.assertEqual(result["unresolved"], [
-            {"ref": "issue:ghost", "record_type": "issue", "product": "nowhere",
-             "reason": "product is not a registered Product"},
-            {"ref": "issue:blank", "record_type": "issue", "product": "",
-             "reason": "product is not stated on the record"},
-        ])
+        self.assertEqual(
+            result["unresolved"],
+            [
+                {
+                    "ref": "issue:ghost",
+                    "record_type": "issue",
+                    "product": "nowhere",
+                    "reason": "product is not a registered Product",
+                },
+                {
+                    "ref": "issue:blank",
+                    "record_type": "issue",
+                    "product": "",
+                    "reason": "product is not stated on the record",
+                },
+            ],
+        )
         for reference in ("issue:ghost", "issue:blank"):
             self.assertEqual(self._lane_of(reference), "Default swimlane")
         self.assertFalse(any(lane["name"] in {"nowhere", ""} for lane in self.client.swimlanes))
@@ -197,10 +268,12 @@ class ProductLaneReconcileTests(unittest.TestCase):
         old checkpoint can leave behind.  Its count is the evidence the closed decision is
         visible, so it must not depend on whether anybody can tell what the row belongs to.
         """
-        self.client.record(118, "issue:gone-blank", self.client._issue(""),
-                           swimlane_id=1, position=8, closed=True)
-        self.client.record(119, "issue:gone-ghost", self.client._issue("nowhere"),
-                           swimlane_id=1, position=9, closed=True)
+        self.client.record(
+            118, "issue:gone-blank", self.client._issue(""), swimlane_id=1, position=8, closed=True
+        )
+        self.client.record(
+            119, "issue:gone-ghost", self.client._issue("nowhere"), swimlane_id=1, position=9, closed=True
+        )
 
         plan = self._store().reconcile_lanes()
 
@@ -210,16 +283,14 @@ class ProductLaneReconcileTests(unittest.TestCase):
         self.assertNotIn("issue:gone-blank", [move["ref"] for move in plan["moves"]])
         self.assertNotIn("issue:gone-ghost", [move["ref"] for move in plan["moves"]])
         # No product exists to summarize, so none is invented for them.
-        self.assertEqual([entry["product"] for entry in plan["summary"]],
-                         ["butler", "codegen", "secretary"])
+        self.assertEqual([entry["product"] for entry in plan["summary"]], ["butler", "codegen", "secretary"])
 
         applied = self._store().reconcile_lanes(apply=True)
 
         self.assertEqual(applied["totals"]["closed"], 3)
         self.assertFalse(any(lane["name"] in {"nowhere", ""} for lane in self.client.swimlanes))
         moved = [
-            int(params["task_id"]) for method, params in self.client.calls
-            if method == "moveTaskPosition"
+            int(params["task_id"]) for method, params in self.client.calls if method == "moveTaskPosition"
         ]
         self.assertNotIn(118, moved)
         self.assertNotIn(119, moved)
@@ -291,10 +362,16 @@ class ProductLaneReconcileTests(unittest.TestCase):
         ):
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                code = main([
-                    "product", "reconcile-lanes", "--instance", str(self.root),
-                    "--data-dir", str(self.root / "data"),
-                ])
+                code = main(
+                    [
+                        "product",
+                        "reconcile-lanes",
+                        "--instance",
+                        str(self.root),
+                        "--data-dir",
+                        str(self.root / "data"),
+                    ]
+                )
             self.assertEqual(code, 0)
             planned = json.loads(output.getvalue())
             self.assertEqual(planned["mode"], "plan")
@@ -303,10 +380,17 @@ class ProductLaneReconcileTests(unittest.TestCase):
 
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                code = main([
-                    "product", "reconcile-lanes", "--instance", str(self.root),
-                    "--data-dir", str(self.root / "data"), "--apply",
-                ])
+                code = main(
+                    [
+                        "product",
+                        "reconcile-lanes",
+                        "--instance",
+                        str(self.root),
+                        "--data-dir",
+                        str(self.root / "data"),
+                        "--apply",
+                    ]
+                )
             self.assertEqual(code, 0)
             applied = json.loads(output.getvalue())
             self.assertEqual(applied["mode"], "apply")

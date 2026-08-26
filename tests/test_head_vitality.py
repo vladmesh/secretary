@@ -42,9 +42,7 @@ def _heartbeat_identity(run_id: str = RUN_ID) -> dict[str, str]:
     return {"run_id": run_id, "role": "worker", "task": "card:1194", "leaf": "leaf-1"}
 
 
-def _write_live_heartbeat(
-    directory: str, name: str, *, run_id: str = RUN_ID
-) -> tuple[str, subprocess.Popen]:
+def _write_live_heartbeat(directory: str, name: str, *, run_id: str = RUN_ID) -> tuple[str, subprocess.Popen]:
     """Launch a real sleeping process behind a real heartbeat file, like a launch does."""
     pid_file = os.path.join(directory, name)
     wrapped = with_pid_heartbeat("sleep 30", pid_file, identity=_heartbeat_identity(run_id))
@@ -174,8 +172,9 @@ class PidHeartbeatTests(unittest.TestCase):
             ["not", "a", "dict"], run_id=RUN_ID, observed_at=1000.0
         )
 
-        self.assertEqual((snapshot.process, snapshot.availability),
-                         (ProcessState.UNKNOWN, SourceAvailability.UNAVAILABLE))
+        self.assertEqual(
+            (snapshot.process, snapshot.availability), (ProcessState.UNKNOWN, SourceAvailability.UNAVAILABLE)
+        )
 
 
 class ProviderCursorTests(unittest.TestCase):
@@ -197,7 +196,9 @@ class ProviderCursorTests(unittest.TestCase):
 
     def test_a_moved_cursor_is_advancing_with_the_new_cursor_recorded(self) -> None:
         snapshot = VitalitySnapshot.from_provider_cursor(
-            self.admitted_evidence("12:abc"), run_id=RUN_ID, previous_cursor="11:aaa",
+            self.admitted_evidence("12:abc"),
+            run_id=RUN_ID,
+            previous_cursor="11:aaa",
             observed_at=1001.0,
         )
 
@@ -207,7 +208,9 @@ class ProviderCursorTests(unittest.TestCase):
 
     def test_one_unchanged_cursor_is_quiet_and_never_stagnant(self) -> None:
         snapshot = VitalitySnapshot.from_provider_cursor(
-            self.admitted_evidence("12:abc"), run_id=RUN_ID, previous_cursor="12:abc",
+            self.admitted_evidence("12:abc"),
+            run_id=RUN_ID,
+            previous_cursor="12:abc",
             observed_at=1002.0,
         )
 
@@ -286,8 +289,7 @@ class PaneReadinessTests(unittest.TestCase):
     """Pane answers fill the Turn axis only, are advisory, and never touch Process/Progress."""
 
     def test_a_ready_pane_reads_idle(self) -> None:
-        snapshot = VitalitySnapshot.from_pane_readiness({"idle": True}, run_id=RUN_ID,
-                                                        observed_at=5.0)
+        snapshot = VitalitySnapshot.from_pane_readiness({"idle": True}, run_id=RUN_ID, observed_at=5.0)
 
         self.assertEqual(snapshot.turn, TurnState.IDLE)
         self.assertEqual(snapshot.availability, SourceAvailability.AVAILABLE)
@@ -295,8 +297,7 @@ class PaneReadinessTests(unittest.TestCase):
         self.assertEqual(snapshot.source, SnapshotSource.PANE_ADVISORY)
 
     def test_a_busy_pane_reads_active(self) -> None:
-        snapshot = VitalitySnapshot.from_pane_readiness({"idle": False}, run_id=RUN_ID,
-                                                        observed_at=6.0)
+        snapshot = VitalitySnapshot.from_pane_readiness({"idle": False}, run_id=RUN_ID, observed_at=6.0)
 
         self.assertEqual(snapshot.turn, TurnState.ACTIVE)
         self.assertTrue(snapshot.advisory)
@@ -319,8 +320,13 @@ class AxisIndependenceTests(unittest.TestCase):
     def test_running_with_an_unknown_turn_round_trips_as_itself(self) -> None:
         snapshot = VitalitySnapshot.from_json(
             VitalitySnapshot.from_pid_heartbeat(
-                {"known": True, "alive": True, "match": True, "state": HEARTBEAT_LIVE_MATCH,
-                 "stopped": False},
+                {
+                    "known": True,
+                    "alive": True,
+                    "match": True,
+                    "state": HEARTBEAT_LIVE_MATCH,
+                    "stopped": False,
+                },
                 run_id=RUN_ID,
                 observed_at=1000.0,
             ).to_json()
@@ -334,8 +340,7 @@ class AxisIndependenceTests(unittest.TestCase):
     def test_suspended_process_alongside_a_busy_advisory_pane_is_representable(self) -> None:
         pane = VitalitySnapshot.from_pane_readiness({"idle": False}, run_id=RUN_ID, observed_at=7.0)
         heartbeat = VitalitySnapshot.from_pid_heartbeat(
-            {"known": True, "alive": True, "match": True, "state": HEARTBEAT_LIVE_MATCH,
-             "stopped": True},
+            {"known": True, "alive": True, "match": True, "state": HEARTBEAT_LIVE_MATCH, "stopped": True},
             run_id=RUN_ID,
             observed_at=8.0,
         )
@@ -351,9 +356,7 @@ class UnavailableIsNotNoProgressTests(unittest.TestCase):
     def test_every_failure_shape_keeps_progress_unknown(self) -> None:
         failures = [
             VitalitySnapshot.from_provider_cursor(None, run_id=RUN_ID, observed_at=1.0),
-            VitalitySnapshot.from_pid_heartbeat(
-                {"state": "unreadable"}, run_id=RUN_ID, observed_at=1.0
-            ),
+            VitalitySnapshot.from_pid_heartbeat({"state": "unreadable"}, run_id=RUN_ID, observed_at=1.0),
             VitalitySnapshot.from_pane_readiness("garbage", run_id=RUN_ID, observed_at=1.0),
         ]
         for snapshot in failures:
@@ -365,12 +368,12 @@ class UnavailableIsNotNoProgressTests(unittest.TestCase):
                 self.assertTrue(snapshot.reason)
 
     def test_unavailable_snapshots_are_distinct_from_a_quiet_observation(self) -> None:
-        unavailable = VitalitySnapshot.from_provider_cursor(
-            None, run_id=RUN_ID, observed_at=1.0
-        )
+        unavailable = VitalitySnapshot.from_provider_cursor(None, run_id=RUN_ID, observed_at=1.0)
         quiet = VitalitySnapshot.from_provider_cursor(
             {
-                "state": "observed", "admission": "accepted", "cursor": "9:xyz",
+                "state": "observed",
+                "admission": "accepted",
+                "cursor": "9:xyz",
                 "head_run_id": RUN_ID,
             },
             run_id=RUN_ID,
@@ -402,8 +405,7 @@ class SerialisationTests(unittest.TestCase):
         self.assertEqual(self.round_trip(snapshot), snapshot)
 
     def test_a_minimal_snapshot_keeps_its_unset_axes_none_cursor_included(self) -> None:
-        snapshot = VitalitySnapshot.from_pane_readiness({"idle": True}, run_id=RUN_ID,
-                                                        observed_at=3.0)
+        snapshot = VitalitySnapshot.from_pane_readiness({"idle": True}, run_id=RUN_ID, observed_at=3.0)
 
         restored = self.round_trip(snapshot)
 
@@ -424,9 +426,7 @@ class SerialisationTests(unittest.TestCase):
         self.assertEqual(len(self.round_trip(snapshot).cursor or ""), CURSOR_LIMIT)
 
     def test_from_json_refuses_payloads_that_change_meaning(self) -> None:
-        base = VitalitySnapshot.from_pane_readiness(
-            {"idle": True}, run_id=RUN_ID, observed_at=1.0
-        ).to_json()
+        base = VitalitySnapshot.from_pane_readiness({"idle": True}, run_id=RUN_ID, observed_at=1.0).to_json()
         cases = [
             {**base, "version": 99},
             {**base, "version": "1"},
@@ -442,25 +442,19 @@ class SerialisationTests(unittest.TestCase):
                 VitalitySnapshot.from_json(payload)
 
     def test_from_json_rejects_a_non_number_timestamp_before_coercing_it(self) -> None:
-        base = VitalitySnapshot.from_pane_readiness(
-            {"idle": True}, run_id=RUN_ID, observed_at=1.0
-        ).to_json()
+        base = VitalitySnapshot.from_pane_readiness({"idle": True}, run_id=RUN_ID, observed_at=1.0).to_json()
         with self.assertRaises(HeadVitalityError):
             VitalitySnapshot.from_json({**base, "observed_at": None})
 
     def test_from_json_rejects_a_boolean_version_that_compares_equal_to_one(self) -> None:
         """``True == 1`` in Python: an equality check alone would accept it."""
-        base = VitalitySnapshot.from_pane_readiness(
-            {"idle": True}, run_id=RUN_ID, observed_at=1.0
-        ).to_json()
+        base = VitalitySnapshot.from_pane_readiness({"idle": True}, run_id=RUN_ID, observed_at=1.0).to_json()
         for forged in (True, 1.0):
             with self.subTest(version=forged), self.assertRaises(HeadVitalityError):
                 VitalitySnapshot.from_json({**base, "version": forged})
 
     def test_from_json_rejects_non_finite_timestamps(self) -> None:
-        base = VitalitySnapshot.from_pane_readiness(
-            {"idle": True}, run_id=RUN_ID, observed_at=1.0
-        ).to_json()
+        base = VitalitySnapshot.from_pane_readiness({"idle": True}, run_id=RUN_ID, observed_at=1.0).to_json()
         for forged in (float("nan"), float("inf"), float("-inf")):
             with self.subTest(observed_at=forged), self.assertRaises(HeadVitalityError):
                 VitalitySnapshot.from_json({**base, "observed_at": forged})
@@ -468,9 +462,7 @@ class SerialisationTests(unittest.TestCase):
     def test_a_constructor_timestamp_must_be_finite_too(self) -> None:
         for forged in (float("nan"), float("inf")):
             with self.subTest(observed_at=forged), self.assertRaises(HeadVitalityError):
-                VitalitySnapshot.from_pane_readiness(
-                    {"idle": True}, run_id=RUN_ID, observed_at=forged
-                )
+                VitalitySnapshot.from_pane_readiness({"idle": True}, run_id=RUN_ID, observed_at=forged)
 
 
 if __name__ == "__main__":

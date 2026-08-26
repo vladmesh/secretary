@@ -274,9 +274,7 @@ def confirm_launch_intent(
     _persist_quietly(runtime, payload, records)
 
 
-def _remember_head_run(
-    record: DispatcherRecord, role: str, head_run: dict[str, Any] | None
-) -> None:
+def _remember_head_run(record: DispatcherRecord, role: str, head_run: dict[str, Any] | None) -> None:
     """Put one role's head run on the record. The caller's save is what makes it durable."""
     if head_run is None or not role:
         return
@@ -360,7 +358,8 @@ def merge_launch_head_run(current: dict[str, Any], later: dict[str, Any]) -> dic
     """Merge two source-bearing writers for one run, fencing foreign identity at the boundary."""
     try:
         return _merge_launch_head_runs(
-            head_ops.HeadRun.from_json(current), head_ops.HeadRun.from_json(later),
+            head_ops.HeadRun.from_json(current),
+            head_ops.HeadRun.from_json(later),
         ).to_json()
     except HostError:
         raise
@@ -384,8 +383,15 @@ def _newer_provider_policy(current: dict[str, Any], later: dict[str, Any]) -> di
     later_state = str(later_source.get("state") or "")
     if current_state == "unbound":
         preflight_keys = (
-            "version", "kind", "run_id", "head_run_fingerprint", "workspace", "role", "task_ref",
-            "root", "baseline",
+            "version",
+            "kind",
+            "run_id",
+            "head_run_fingerprint",
+            "workspace",
+            "role",
+            "task_ref",
+            "root",
+            "baseline",
         )
         if any(current_source.get(key) != later_source.get(key) for key in preflight_keys):
             raise HostError("preflight provider source conflicts for one launch HeadRun")
@@ -399,8 +405,19 @@ def _newer_provider_policy(current: dict[str, Any], later: dict[str, Any]) -> di
     if later_state != "bound":
         return dict(current)
     identity_keys = (
-        "version", "kind", "run_id", "head_run_fingerprint", "workspace", "role", "task_ref",
-        "root", "baseline", "path", "session_id", "parent_thread_id", "initial_range",
+        "version",
+        "kind",
+        "run_id",
+        "head_run_fingerprint",
+        "workspace",
+        "role",
+        "task_ref",
+        "root",
+        "baseline",
+        "path",
+        "session_id",
+        "parent_thread_id",
+        "initial_range",
     )
     if any(current_source.get(key) != later_source.get(key) for key in identity_keys):
         raise HostError("bound provider sources conflict for one launch HeadRun")
@@ -499,9 +516,7 @@ def mark_launch_aborted(
     _persist_quietly(runtime, payload, records)
 
 
-def launch_aborted(
-    *, step: str, ref: str, attempt_id: str, role: str, reason: str
-) -> dict[str, Any]:
+def launch_aborted(*, step: str, ref: str, attempt_id: str, role: str, reason: str) -> dict[str, Any]:
     """The outcome of a bring-up that may have left a head running and could not confirm it."""
     return {
         "status": "degraded",
@@ -752,7 +767,11 @@ def classify_bring_up_failure(
 
 
 def bring_up_blocked_reason(
-    default: str, exc: Exception, record: DispatcherRecord, role: str, *,
+    default: str,
+    exc: Exception,
+    record: DispatcherRecord,
+    role: str,
+    *,
     failure: BringUpFailure,
 ) -> str:
     """The card's Blocked reason for a bring-up that will not be retried.
@@ -770,9 +789,7 @@ def bring_up_blocked_reason(
     )
 
 
-def head_stop_unconfirmed(
-    *, step: str, ref: str, attempt_id: str, role: str, reason: str
-) -> dict[str, Any]:
+def head_stop_unconfirmed(*, step: str, ref: str, attempt_id: str, role: str, reason: str) -> dict[str, Any]:
     """The outcome of a tick that refused to launch because a stop was not confirmed.
 
     A head the host would not promise is gone may still be editing the checkout, so nothing takes
@@ -820,9 +837,7 @@ def launch_intent_liveness(intent: dict[str, Any], *, now: float | None = None) 
     record = status.get("record") if isinstance(status.get("record"), dict) else {}
     leaf = str(expected.get("leaf") or "")
     if status.get("state") == "identity-mismatch" and leaf and not str(record.get("leaf") or ""):
-        base_expected = {
-            name: str(expected.get(name) or "") for name in ("run_id", "role", "task")
-        }
+        base_expected = {name: str(expected.get(name) or "") for name in ("run_id", "role", "task")}
         bind_head_heartbeat(pid_file, expected=base_expected, leaf=leaf)
         status = head_process_status(pid_file, expected=expected)
     if status.get("state") == "identity-mismatch":
@@ -902,9 +917,7 @@ def resolve_launch_intent(
         # adoption boundary every completed reviewer launch uses.
         from secretary.dispatcher_review import retry_busy_reviewer_launch_delivery
 
-        deferred = retry_busy_reviewer_launch_delivery(
-            runtime, task, records, payload, record, intent, step
-        )
+        deferred = retry_busy_reviewer_launch_delivery(runtime, task, records, payload, record, intent, step)
         if deferred is not None:
             return deferred
         intent = launch_intent(record)
@@ -972,9 +985,7 @@ def stop_launch_intent(
     return None
 
 
-def _remember_launch_identity(
-    record: DispatcherRecord, intent: dict[str, Any], role: str
-) -> None:
+def _remember_launch_identity(record: DispatcherRecord, intent: dict[str, Any], role: str) -> None:
     """Put the launch's own identity on the record, so the stop paths can reach its head."""
     pid_file = str(intent.get("pid_file") or "")
     handle = str(intent.get("handle") or "")
@@ -1001,9 +1012,7 @@ def _remember_launch_identity(
         if run_id and separator and task_kind == "card" and task_ref:
             stored_run = head_ops.HeadRun(
                 run_id=run_id,
-                spec=head_ops.HeadSpec(
-                    profile_id=str(intent.get("head") or "unknown"), adapter="unknown"
-                ),
+                spec=head_ops.HeadSpec(profile_id=str(intent.get("head") or "unknown"), adapter="unknown"),
                 workspace=record.workspace,
                 task_ref=head_ops.TaskRef.card(task_ref),
                 handle=handle,
@@ -1043,9 +1052,7 @@ def _adopt_launch_intent(
         if run_id:
             stored_run = head_ops.HeadRun(
                 run_id=run_id,
-                spec=head_ops.HeadSpec(
-                    profile_id=str(intent.get("head") or "unknown"), adapter="unknown"
-                ),
+                spec=head_ops.HeadSpec(profile_id=str(intent.get("head") or "unknown"), adapter="unknown"),
                 workspace=record.workspace,
                 task_ref=head_ops.TaskRef.card(ref),
                 handle=handle,
@@ -1079,9 +1086,7 @@ def _adopt_launch_intent(
             # The worker is down and the reviewer writes no commits, so the checkout still sits
             # where the launch pinned it. The merge gate needs that sha to accept the verdict.
             record.review_commit = runtime.host.head_commit(record)
-        deferred = _record_adopted_routing(
-            runtime, task, records, payload, record, intent, role, step
-        )
+        deferred = _record_adopted_routing(runtime, task, records, payload, record, intent, role, step)
         if deferred is not None:
             return deferred
         clear_launch_intent(record)
@@ -1099,9 +1104,7 @@ def _adopt_launch_intent(
         record.handle = handle
         record.worker_leaf = leaf
         record.worker_started_at = record.worker_progress_at = launched_at
-        deferred = _record_adopted_routing(
-            runtime, task, records, payload, record, intent, role, step
-        )
+        deferred = _record_adopted_routing(runtime, task, records, payload, record, intent, role, step)
         if deferred is not None:
             return deferred
         clear_launch_intent(record)
@@ -1156,9 +1159,7 @@ def _record_adopted_routing(
     return None
 
 
-def _persist_quietly(
-    runtime: Any, payload: dict[str, Any], records: dict[str, DispatcherRecord]
-) -> bool:
+def _persist_quietly(runtime: Any, payload: dict[str, Any], records: dict[str, DispatcherRecord]) -> bool:
     """Flush the records mid-tick. False means this tick's own save is what carries them.
 
     Never raised at the caller: an adoption that is not persisted is repeated by the next tick from

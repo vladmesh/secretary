@@ -97,8 +97,7 @@ def create_backups(
     temp_paths: list[Path] = []
     with _backup_create_lock(backups_dir):
         final_archives = [
-            _unique_archive_path(backups_dir / f"secretary-backup-{kind}-{stamp}.tar")
-            for kind in kinds
+            _unique_archive_path(backups_dir / f"secretary-backup-{kind}-{stamp}.tar") for kind in kinds
         ]
         try:
             pre_pause = _pipeline_status(instance_file=instance_file, command=pipeline_command)
@@ -116,9 +115,7 @@ def create_backups(
 
             init_layout(data_dir)
             raw_dump = raw_kanboard_dump(data_dir)
-            exports = export_all(
-                data_dir, instance_file.parent, copy_transcripts=copy_transcripts
-            )
+            exports = export_all(data_dir, instance_file.parent, copy_transcripts=copy_transcripts)
 
             for kind, final_archive in zip(kinds, final_archives, strict=True):
                 policy = policy_for(kind)
@@ -140,9 +137,7 @@ def create_backups(
                 _copy_instance_config(instance_file.parent, payload / "instance")
                 _copy_data_snapshot(data_dir, payload / "secretary-data", backup_kind=kind)
                 if kind == "core":
-                    core_board_count = _filter_core_board_export(
-                        payload / "secretary-data" / "board"
-                    )
+                    core_board_count = _filter_core_board_export(payload / "secretary-data" / "board")
                     manifest["components"]["board"]["count"] = core_board_count
                 if kind == "full":
                     _write_orca_debug_snapshot(payload / "debug" / "orca-state")
@@ -180,9 +175,7 @@ def create_backups(
 
 def _reject_claimed_worker_context() -> None:
     if os.environ.get("BOARD_ROLE") == "worker" or _claimed_workspace_from_cwd() is not None:
-        raise RuntimeError(
-            "backup create must not run from a claimed worker; use an operator context"
-        )
+        raise RuntimeError("backup create must not run from a claimed worker; use an operator context")
 
 
 def _claimed_workspace_from_cwd(cwd: Path | None = None) -> Path | None:
@@ -338,9 +331,7 @@ def _copy_instance_config(source: Path, destination: Path) -> None:
         source,
         destination,
         skip=lambda relative: (
-            ".git" in relative.parts
-            or relative.name == "runtime.env"
-            or relative.name.startswith(".env")
+            ".git" in relative.parts or relative.name == "runtime.env" or relative.name.startswith(".env")
         ),
     )
 
@@ -368,7 +359,8 @@ def _filter_core_board_export(board_dir: Path) -> int:
     if not isinstance(cards, list):
         raise RuntimeError("core board export has no cards list")
     filtered = [
-        card for card in cards
+        card
+        for card in cards
         if not (isinstance(card, dict) and str(card.get("column", "")).casefold() == "done")
     ]
     payload["cards"] = filtered

@@ -52,15 +52,25 @@ class BoardHostContractTests(unittest.TestCase):
         self.actor = Actor("worker", "worker-1417", "head-run:1417")
 
     def test_create_read_and_transition_return_normalized_event_result(self) -> None:
-        created = self.host.create(Create(
-            Card("secretary-1417", "Protocol seam", CardState.READY, sprint_ref="sprint:943"),
-            self.actor, "accepted into the sprint", RelatedRefs(("sprint:943",)),
-        ))
+        created = self.host.create(
+            Create(
+                Card("secretary-1417", "Protocol seam", CardState.READY, sprint_ref="sprint:943"),
+                self.actor,
+                "accepted into the sprint",
+                RelatedRefs(("sprint:943",)),
+            )
+        )
 
-        result = self.host.transition(TransitionRequest(
-            EntityKind.CARD, "secretary-1417", CardState.IN_PROGRESS, self.actor,
-            "worker started", RelatedRefs(("sprint:943", "head-run:1417")),
-        ))
+        result = self.host.transition(
+            TransitionRequest(
+                EntityKind.CARD,
+                "secretary-1417",
+                CardState.IN_PROGRESS,
+                self.actor,
+                "worker started",
+                RelatedRefs(("sprint:943", "head-run:1417")),
+            )
+        )
 
         self.assertEqual(created.event.actor.head_run_ref, "head-run:1417")
         self.assertEqual(result.entity, self.host.read(EntityKind.CARD, "secretary-1417"))
@@ -69,19 +79,32 @@ class BoardHostContractTests(unittest.TestCase):
         self.assertEqual(result.event.related_refs.refs, ("sprint:943", "head-run:1417"))
 
     def test_same_state_card_transition_is_rejected_by_the_registry(self) -> None:
-        self.host.create(Create(Card("secretary-1417", "Protocol seam", CardState.READY), self.actor, "create"))
+        self.host.create(
+            Create(Card("secretary-1417", "Protocol seam", CardState.READY), self.actor, "create")
+        )
 
         with self.assertRaises(InvalidTransition):
-            self.host.transition(TransitionRequest(
-                EntityKind.CARD, "secretary-1417", CardState.READY, self.actor, "no lifecycle change",
-            ))
+            self.host.transition(
+                TransitionRequest(
+                    EntityKind.CARD,
+                    "secretary-1417",
+                    CardState.READY,
+                    self.actor,
+                    "no lifecycle change",
+                )
+            )
 
     def test_fake_sprint_replay_preserves_lifecycle_evidence(self) -> None:
         sprint = Sprint("sprint:943", "Host lifecycle", SprintState.OPEN, "product:secretary", ("issue:1",))
         host = FakeBoardHost([sprint])
         operation = TransitionRequest(
-            EntityKind.SPRINT, sprint.ref, SprintState.CLOSED, self.actor, "Sprint closed",
-            RelatedRefs(("product:secretary", "issue:1")), "close-943",
+            EntityKind.SPRINT,
+            sprint.ref,
+            SprintState.CLOSED,
+            self.actor,
+            "Sprint closed",
+            RelatedRefs(("product:secretary", "issue:1")),
+            "close-943",
         )
 
         first = host.transition(operation)
@@ -91,21 +114,41 @@ class BoardHostContractTests(unittest.TestCase):
         self.assertEqual(first.event.source_state, "open")
         self.assertEqual(first.event.target_state, "closed")
         with self.assertRaises(ValueError):
-            host.transition(TransitionRequest(
-                EntityKind.SPRINT, sprint.ref, SprintState.CLOSED, self.actor, "Sprint closed",
-                RelatedRefs(("product:secretary", "issue:1")), "close-943", SprintSupplement(observer="different"),
-            ))
+            host.transition(
+                TransitionRequest(
+                    EntityKind.SPRINT,
+                    sprint.ref,
+                    SprintState.CLOSED,
+                    self.actor,
+                    "Sprint closed",
+                    RelatedRefs(("product:secretary", "issue:1")),
+                    "close-943",
+                    SprintSupplement(observer="different"),
+                )
+            )
         with self.assertRaises(ValueError):
-            host.transition(TransitionRequest(
-                EntityKind.SPRINT, sprint.ref, SprintState.CLOSED, self.actor, "Sprint closed",
-                RelatedRefs(("product:secretary", "head-run:changed")), "close-943",
-            ))
+            host.transition(
+                TransitionRequest(
+                    EntityKind.SPRINT,
+                    sprint.ref,
+                    SprintState.CLOSED,
+                    self.actor,
+                    "Sprint closed",
+                    RelatedRefs(("product:secretary", "head-run:changed")),
+                    "close-943",
+                )
+            )
 
     def test_fake_sprint_pending_replay_rejects_changed_related_refs(self) -> None:
         sprint = Sprint("sprint:pending", "Host lifecycle", SprintState.OPEN)
         operation = TransitionRequest(
-            EntityKind.SPRINT, sprint.ref, SprintState.CLOSED, self.actor, "Sprint closed",
-            RelatedRefs(("head-run:first",)), "pending-close",
+            EntityKind.SPRINT,
+            sprint.ref,
+            SprintState.CLOSED,
+            self.actor,
+            "Sprint closed",
+            RelatedRefs(("head-run:first",)),
+            "pending-close",
         )
         with tempfile.TemporaryDirectory() as tmpdir:
             host = FakeBoardHost([sprint], data_dir=tmpdir)
@@ -114,10 +157,17 @@ class BoardHostContractTests(unittest.TestCase):
                     host.transition(operation)
 
             with self.assertRaises(ValueError):
-                host.transition(TransitionRequest(
-                    EntityKind.SPRINT, sprint.ref, SprintState.CLOSED, self.actor, "Sprint closed",
-                    RelatedRefs(("head-run:changed",)), "pending-close",
-                ))
+                host.transition(
+                    TransitionRequest(
+                        EntityKind.SPRINT,
+                        sprint.ref,
+                        SprintState.CLOSED,
+                        self.actor,
+                        "Sprint closed",
+                        RelatedRefs(("head-run:changed",)),
+                        "pending-close",
+                    )
+                )
             self.assertEqual(host.transition(operation).entity.state, SprintState.CLOSED)
 
     def test_fake_host_commits_each_sprint_edge_and_recovers_a_pending_edge(self) -> None:
@@ -132,7 +182,12 @@ class BoardHostContractTests(unittest.TestCase):
                 sprint = Sprint(f"sprint:{index}", "Sprint", source)
                 host = FakeBoardHost([sprint], data_dir=tmpdir)
                 operation = TransitionRequest(
-                    EntityKind.SPRINT, sprint.ref, target, self.actor, "checked edge", request_id=f"edge-{index}",
+                    EntityKind.SPRINT,
+                    sprint.ref,
+                    target,
+                    self.actor,
+                    "checked edge",
+                    request_id=f"edge-{index}",
                 )
                 if index == 0:
                     with mock.patch.object(host.canon.audit, "append", side_effect=OSError("disk full")):
@@ -147,20 +202,31 @@ class BoardHostContractTests(unittest.TestCase):
     def test_fake_sprint_refusal_precedes_event_staging(self) -> None:
         host = FakeBoardHost([Sprint("sprint:refusal", "Sprint", SprintState.CLOSED)])
         with self.assertRaises(InvalidTransition):
-            host.transition(TransitionRequest(
-                EntityKind.SPRINT, "sprint:refusal", SprintState.STOPPED, self.actor, "unsupported",
-                request_id="refused-sprint-edge",
-            ))
+            host.transition(
+                TransitionRequest(
+                    EntityKind.SPRINT,
+                    "sprint:refusal",
+                    SprintState.STOPPED,
+                    self.actor,
+                    "unsupported",
+                    request_id="refused-sprint-edge",
+                )
+            )
         self.assertEqual(host.events, [])
 
     def test_replace_cannot_bypass_the_lifecycle_registry(self) -> None:
-        self.host.create(Create(Card("secretary-1417", "Protocol seam", CardState.READY), self.actor, "create"))
+        self.host.create(
+            Create(Card("secretary-1417", "Protocol seam", CardState.READY), self.actor, "create")
+        )
 
         with self.assertRaises(InvalidTransition):
-            self.host.replace(Replace(
-                Card("secretary-1417", "Protocol seam", CardState.DONE),
-                self.actor, "skip review",
-            ))
+            self.host.replace(
+                Replace(
+                    Card("secretary-1417", "Protocol seam", CardState.DONE),
+                    self.actor,
+                    "skip review",
+                )
+            )
 
         self.assertEqual(self.host.read(EntityKind.CARD, "secretary-1417").state, CardState.READY)
 
@@ -202,18 +268,29 @@ class BoardHostContractTests(unittest.TestCase):
         env["PYTHONPATH"] = str(source_root)
         result = subprocess.run(
             [
-                sys.executable, "-P", "-c",
+                sys.executable,
+                "-P",
+                "-c",
                 "import secretary.tasks, sys; assert 'secretary.board.kanboard' not in sys.modules",
             ],
-            cwd=source_root, env=env, capture_output=True, text=True, check=False,
+            cwd=source_root,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_event_is_typed_deterministic_and_deduplicates_related_refs(self) -> None:
         event = Event(
-            "event-1", EventKind.CARD_STARTED, EntityKind.CARD, "secretary-1419",
-            self.actor, "worker started", datetime(2026, 8, 11, 18, 0, 0, tzinfo=UTC),
+            "event-1",
+            EventKind.CARD_STARTED,
+            EntityKind.CARD,
+            "secretary-1419",
+            self.actor,
+            "worker started",
+            datetime(2026, 8, 11, 18, 0, 0, tzinfo=UTC),
             RelatedRefs(("sprint:943", "head-run:1417", "sprint:943")),
         )
 
@@ -224,12 +301,25 @@ class BoardHostContractTests(unittest.TestCase):
         self.assertEqual(record["related_refs"], ["sprint:943", "head-run:1417"])
         self.assertEqual(Event.from_record(record), event)
         with self.assertRaisesRegex(ValueError, "EventKind"):
-            Event("event-2", "card.started", EntityKind.CARD, "secretary-1419", self.actor, "reason", event.occurred_at)
+            Event(
+                "event-2",
+                "card.started",
+                EntityKind.CARD,
+                "secretary-1419",
+                self.actor,
+                "reason",
+                event.occurred_at,
+            )
 
     def test_event_round_trip_preserves_fractional_occurrence_and_canonicalizes_timezone(self) -> None:
         event = Event(
-            "event-precise", EventKind.CARD_STARTED, EntityKind.CARD, "secretary-1419",
-            self.actor, "worker started", datetime(2026, 8, 11, 20, 0, 0, 123456, tzinfo=UTC),
+            "event-precise",
+            EventKind.CARD_STARTED,
+            EntityKind.CARD,
+            "secretary-1419",
+            self.actor,
+            "worker started",
+            datetime(2026, 8, 11, 20, 0, 0, 123456, tzinfo=UTC),
         )
 
         record = event.to_record("start-precise")
@@ -243,14 +333,23 @@ class BoardHostContractTests(unittest.TestCase):
     def test_durable_fake_mutations_append_one_complete_protocol_event(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             host = FakeBoardHost(data_dir=tmpdir)
-            result = host.create(Create(
-                Card("secretary-1419", "Typed canon", CardState.READY), self.actor,
-                "accepted", RelatedRefs(("sprint:943",)), "create-1",
-            ))
-            replacement = host.replace(Replace(
-                Card("secretary-1419", "Typed canon v2", CardState.READY), self.actor,
-                "correct title", request_id="replace-1",
-            ))
+            result = host.create(
+                Create(
+                    Card("secretary-1419", "Typed canon", CardState.READY),
+                    self.actor,
+                    "accepted",
+                    RelatedRefs(("sprint:943",)),
+                    "create-1",
+                )
+            )
+            replacement = host.replace(
+                Replace(
+                    Card("secretary-1419", "Typed canon v2", CardState.READY),
+                    self.actor,
+                    "correct title",
+                    request_id="replace-1",
+                )
+            )
 
             events = BoardEventCanon(tmpdir).events(ref="secretary-1419")
             self.assertEqual(events, (result.event, replacement.event))
@@ -262,27 +361,53 @@ class BoardHostContractTests(unittest.TestCase):
         """The protocol double exercises Product/Issue create, replace and close."""
         with tempfile.TemporaryDirectory() as tmpdir:
             host = FakeBoardHost(data_dir=tmpdir)
-            product = host.create(Create(
-                Product("product:secretary", "Secretary", projects=("secretary",)),
-                Actor("po", "po"), "Product created", request_id="product",
-            ))
-            issue = host.create(Create(
-                Issue("issue:1", "Crash", product.entity.ref, priority="P2", issue_kind="bug"),
-                Actor("po", "po"), "Issue created", RelatedRefs((product.entity.ref,)), "issue",
-            ))
-            priority = host.replace(Replace(
-                Issue("issue:1", "Crash", product.entity.ref, priority="P0", issue_kind="bug"),
-                Actor("po", "po"), "urgent", RelatedRefs((product.entity.ref,)), "priority",
-            ))
-            closed = host.transition(TransitionRequest(
-                EntityKind.ISSUE, issue.entity.ref, IssueState.CLOSED, Actor("po", "po"),
-                "resolved", RelatedRefs((product.entity.ref,)), "close",
-            ))
+            product = host.create(
+                Create(
+                    Product("product:secretary", "Secretary", projects=("secretary",)),
+                    Actor("po", "po"),
+                    "Product created",
+                    request_id="product",
+                )
+            )
+            issue = host.create(
+                Create(
+                    Issue("issue:1", "Crash", product.entity.ref, priority="P2", issue_kind="bug"),
+                    Actor("po", "po"),
+                    "Issue created",
+                    RelatedRefs((product.entity.ref,)),
+                    "issue",
+                )
+            )
+            priority = host.replace(
+                Replace(
+                    Issue("issue:1", "Crash", product.entity.ref, priority="P0", issue_kind="bug"),
+                    Actor("po", "po"),
+                    "urgent",
+                    RelatedRefs((product.entity.ref,)),
+                    "priority",
+                )
+            )
+            closed = host.transition(
+                TransitionRequest(
+                    EntityKind.ISSUE,
+                    issue.entity.ref,
+                    IssueState.CLOSED,
+                    Actor("po", "po"),
+                    "resolved",
+                    RelatedRefs((product.entity.ref,)),
+                    "close",
+                )
+            )
 
-            self.assertEqual([event.kind for event in BoardEventCanon(tmpdir).events()], [
-                EventKind.ENTITY_CREATED, EventKind.ENTITY_CREATED,
-                EventKind.ENTITY_UPDATED, EventKind.ISSUE_CLOSED,
-            ])
+            self.assertEqual(
+                [event.kind for event in BoardEventCanon(tmpdir).events()],
+                [
+                    EventKind.ENTITY_CREATED,
+                    EventKind.ENTITY_CREATED,
+                    EventKind.ENTITY_UPDATED,
+                    EventKind.ISSUE_CLOSED,
+                ],
+            )
             self.assertEqual(priority.entity.priority, "P0")
             self.assertEqual(closed.entity.state, IssueState.CLOSED)
 
@@ -307,10 +432,16 @@ class BoardHostContractTests(unittest.TestCase):
                 for edge_index, transition in enumerate(edges.values(), start=1):
                     entity = factories[entity_kind](transition.source, f"{index}-{edge_index}")
                     host = FakeBoardHost([entity], data_dir=tmpdir)
-                    result = host.transition(TransitionRequest(
-                        entity_kind, entity.ref, transition.target, self.actor, "registry edge",
-                        request_id=f"transition-{index}-{edge_index}",
-                    ))
+                    result = host.transition(
+                        TransitionRequest(
+                            entity_kind,
+                            entity.ref,
+                            transition.target,
+                            self.actor,
+                            "registry edge",
+                            request_id=f"transition-{index}-{edge_index}",
+                        )
+                    )
                     self.assertEqual(result.event.kind, transition.event_kind)
             recorded = BoardEventCanon(tmpdir).events()
             self.assertEqual(len(recorded), sum(len(edges) for edges in TRANSITIONS.values()))
@@ -319,16 +450,32 @@ class BoardHostContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             host = FakeBoardHost([Card("card:1", "Card", CardState.READY)], data_dir=tmpdir)
             mutations = (
-                lambda: host.create(Create(
-                    Card("card:2", "Card", CardState.READY), self.actor, "accepted", request_id="create-fail",
-                )),
-                lambda: host.replace(Replace(
-                    Card("card:1", "Card v2", CardState.READY), self.actor, "retitle", request_id="replace-fail",
-                )),
-                lambda: host.transition(TransitionRequest(
-                    EntityKind.CARD, "card:1", CardState.IN_PROGRESS, self.actor, "start",
-                    request_id="transition-fail",
-                )),
+                lambda: host.create(
+                    Create(
+                        Card("card:2", "Card", CardState.READY),
+                        self.actor,
+                        "accepted",
+                        request_id="create-fail",
+                    )
+                ),
+                lambda: host.replace(
+                    Replace(
+                        Card("card:1", "Card v2", CardState.READY),
+                        self.actor,
+                        "retitle",
+                        request_id="replace-fail",
+                    )
+                ),
+                lambda: host.transition(
+                    TransitionRequest(
+                        EntityKind.CARD,
+                        "card:1",
+                        CardState.IN_PROGRESS,
+                        self.actor,
+                        "start",
+                        request_id="transition-fail",
+                    )
+                ),
             )
 
             with mock.patch.object(host.canon.audit, "append", side_effect=OSError("disk full")):
@@ -341,23 +488,39 @@ class BoardHostContractTests(unittest.TestCase):
 
     def test_recreated_durable_hosts_never_reuse_an_event_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            first = FakeBoardHost(data_dir=tmpdir).create(Create(
-                Card("card:1", "First", CardState.READY), self.actor, "accepted", request_id="create-1",
-            ))
-            second = FakeBoardHost(data_dir=tmpdir).create(Create(
-                Card("card:2", "Second", CardState.READY), self.actor, "accepted", request_id="create-2",
-            ))
+            first = FakeBoardHost(data_dir=tmpdir).create(
+                Create(
+                    Card("card:1", "First", CardState.READY),
+                    self.actor,
+                    "accepted",
+                    request_id="create-1",
+                )
+            )
+            second = FakeBoardHost(data_dir=tmpdir).create(
+                Create(
+                    Card("card:2", "Second", CardState.READY),
+                    self.actor,
+                    "accepted",
+                    request_id="create-2",
+                )
+            )
             # The same request against a rebuilt host is still one occurrence, so it keeps
             # the identifier the journal already published for it.
-            replayed = FakeBoardHost([Card("card:1", "First", CardState.READY)], data_dir=tmpdir).create(Create(
-                Card("card:1", "First", CardState.READY), self.actor, "accepted", request_id="create-1",
-            ))
+            replayed = FakeBoardHost([Card("card:1", "First", CardState.READY)], data_dir=tmpdir).create(
+                Create(
+                    Card("card:1", "First", CardState.READY),
+                    self.actor,
+                    "accepted",
+                    request_id="create-1",
+                )
+            )
 
             recorded = BoardEventCanon(tmpdir).events()
             self.assertNotEqual(first.event.event_id, second.event.event_id)
             self.assertEqual(replayed.event, first.event)
             self.assertEqual(
-                [event.event_id for event in recorded], [first.event.event_id, second.event.event_id],
+                [event.event_id for event in recorded],
+                [first.event.event_id, second.event.event_id],
             )
 
 
@@ -366,8 +529,12 @@ class BoardMutationTransactionTests(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory()
         self.canon = BoardEventCanon(self.tmpdir.name)
         self.event = Event(
-            "event-transaction", EventKind.CARD_STARTED, EntityKind.CARD, "secretary-1419",
-            Actor("worker", "worker-1419"), "start work",
+            "event-transaction",
+            EventKind.CARD_STARTED,
+            EntityKind.CARD,
+            "secretary-1419",
+            Actor("worker", "worker-1419"),
+            "start work",
             datetime(2026, 8, 11, 18, 0, 0, tzinfo=UTC),
         )
 
@@ -377,9 +544,14 @@ class BoardMutationTransactionTests(unittest.TestCase):
     @staticmethod
     def _generic(request_id: str, event_id: str = "evt_generic") -> dict:
         return {
-            "event_id": event_id, "schema_version": 1, "occurred_at": "2026-08-11T18:00:00Z",
-            "actor": {"role": "worker", "id": "worker-1419"}, "kind": "moved",
-            "outcome": "success", "task_id": "task_kanboard_1", "ref": "secretary-1419",
+            "event_id": event_id,
+            "schema_version": 1,
+            "occurred_at": "2026-08-11T18:00:00Z",
+            "actor": {"role": "worker", "id": "worker-1419"},
+            "kind": "moved",
+            "outcome": "success",
+            "task_id": "task_kanboard_1",
+            "ref": "secretary-1419",
             "request_id": request_id,
             "backend": {"kind": "kanboard", "task_id": 1, "revision": "updated_at:1"},
             "payload": {"to": "in_progress"},
@@ -389,7 +561,9 @@ class BoardMutationTransactionTests(unittest.TestCase):
         transaction = MutationEventTransaction(self.canon, request_id="failure-1", event=self.event)
 
         with self.assertRaisesRegex(RuntimeError, "backend failed"):
-            transaction.execute(lambda: (_ for _ in ()).throw(RuntimeError("backend failed")), confirm=lambda: "never")
+            transaction.execute(
+                lambda: (_ for _ in ()).throw(RuntimeError("backend failed")), confirm=lambda: "never"
+            )
 
         self.assertIsNone(self.canon.event("failure-1"))
         self.assertEqual(self.canon.audit.status(), {"ok": True, "pending": 0})
@@ -402,7 +576,8 @@ class BoardMutationTransactionTests(unittest.TestCase):
         self.assertEqual(self.canon.audit.status(), {"ok": False, "pending": 1})
 
         recovered = transaction.execute(
-            lambda: (_ for _ in ()).throw(AssertionError("effect repeated")), confirm=lambda: "confirmed",
+            lambda: (_ for _ in ()).throw(AssertionError("effect repeated")),
+            confirm=lambda: "confirmed",
         )
         self.assertEqual(recovered, "confirmed")
         self.assertEqual(self.canon.events(), (self.event,))
@@ -412,7 +587,9 @@ class BoardMutationTransactionTests(unittest.TestCase):
         order: list[str] = []
         transaction = MutationEventTransaction(self.canon, request_id="finish-1", event=self.event)
         with mock.patch.object(
-            self.canon.audit, "append", side_effect=lambda *a, **k: order.append("commit"),
+            self.canon.audit,
+            "append",
+            side_effect=lambda *a, **k: order.append("commit"),
         ):
             result = transaction.execute(
                 lambda: order.append("effect"),
@@ -429,17 +606,24 @@ class BoardMutationTransactionTests(unittest.TestCase):
         A read that fails after the write returned is not evidence that the write did not
         happen, so every outcome after `effect` returns keeps the exact staged record.
         """
-        for index, (label, kwargs) in enumerate((
-            ("confirm", {"confirm": lambda: (_ for _ in ()).throw(RuntimeError("read timed out"))}),
-            ("finish", {
-                "confirm": lambda: "confirmed",
-                "finish": lambda _r: (_ for _ in ()).throw(RuntimeError("cleanup failed")),
-            }),
-        )):
+        for index, (label, kwargs) in enumerate(
+            (
+                ("confirm", {"confirm": lambda: (_ for _ in ()).throw(RuntimeError("read timed out"))}),
+                (
+                    "finish",
+                    {
+                        "confirm": lambda: "confirmed",
+                        "finish": lambda _r: (_ for _ in ()).throw(RuntimeError("cleanup failed")),
+                    },
+                ),
+            )
+        ):
             with self.subTest(label):
                 request_id = f"post-effect-{index}"
                 transaction = MutationEventTransaction(
-                    self.canon, request_id=request_id, event=self.event,
+                    self.canon,
+                    request_id=request_id,
+                    event=self.event,
                 )
 
                 with self.assertRaises(BoardEventPending):
@@ -450,7 +634,9 @@ class BoardMutationTransactionTests(unittest.TestCase):
                 self.canon.audit.discard(request_id, self.event.to_record(request_id))
 
         transaction = MutationEventTransaction(
-            self.canon, request_id="pre-effect", event=self.event,
+            self.canon,
+            request_id="pre-effect",
+            event=self.event,
         )
         with self.assertRaisesRegex(RuntimeError, "backend refused"):
             transaction.execute(
@@ -484,7 +670,8 @@ class BoardMutationTransactionTests(unittest.TestCase):
 
         with self.assertRaises(BoardEventPending):
             transaction.execute(
-                lambda: "backend result", confirm=lambda: "never",
+                lambda: "backend result",
+                confirm=lambda: "never",
                 finish=lambda _result: (_ for _ in ()).throw(RuntimeError("cleanup failed")),
             )
 
@@ -495,7 +682,8 @@ class BoardMutationTransactionTests(unittest.TestCase):
         finished: list[str] = []
         recovered = transaction.execute(
             lambda: (_ for _ in ()).throw(AssertionError("effect repeated")),
-            confirm=lambda: "confirmed", finish=finished.append,
+            confirm=lambda: "confirmed",
+            finish=finished.append,
         )
 
         self.assertEqual(recovered, "confirmed")
@@ -518,9 +706,15 @@ class BoardMutationTransactionTests(unittest.TestCase):
 
     def test_released_generic_records_share_the_journal_and_stay_readable(self) -> None:
         generic = {
-            "event_id": "evt_released", "schema_version": 1, "occurred_at": "2026-08-10T10:00:00Z",
-            "actor": {"role": "worker", "id": "worker-1"}, "kind": "moved", "outcome": "success",
-            "task_id": "task_kanboard_7", "ref": "secretary-1419", "request_id": "released-1",
+            "event_id": "evt_released",
+            "schema_version": 1,
+            "occurred_at": "2026-08-10T10:00:00Z",
+            "actor": {"role": "worker", "id": "worker-1"},
+            "kind": "moved",
+            "outcome": "success",
+            "task_id": "task_kanboard_7",
+            "ref": "secretary-1419",
+            "request_id": "released-1",
             "backend": {"kind": "kanboard", "task_id": 7, "revision": "updated_at:1"},
             "payload": {"to": "in_progress"},
         }
@@ -531,7 +725,9 @@ class BoardMutationTransactionTests(unittest.TestCase):
 
         # The released record is untouched and still visible to its own consumers,
         # while the typed canon reports only protocol events.
-        self.assertEqual(self.canon.audit.events("secretary-1419"), [generic, self.event.to_record("typed-1")])
+        self.assertEqual(
+            self.canon.audit.events("secretary-1419"), [generic, self.event.to_record("typed-1")]
+        )
         self.assertEqual(self.canon.events(ref="secretary-1419"), (self.event,))
         with self.assertRaisesRegex(ValueError, "generic audit record"):
             self.canon.event("released-1")
@@ -650,7 +846,9 @@ class BoardMutationTransactionTests(unittest.TestCase):
         typed_thread.join()
         generic_thread.join()
 
-        self.assertIn(sorted(outcomes), (["generic-refused", "typed-staged"], ["generic-staged", "typed-refused"]))
+        self.assertIn(
+            sorted(outcomes), (["generic-refused", "typed-staged"], ["generic-staged", "typed-refused"])
+        )
         pending = TaskAudit(self.tmpdir.name).pending_event(request_id)
         self.assertIn(pending, (generic, self.event.to_record(request_id)))
         self.assertEqual(TaskAudit(self.tmpdir.name).events(), [])
@@ -663,8 +861,12 @@ class BoardMutationTransactionTests(unittest.TestCase):
         """
         contenders = [
             Event(
-                f"event-race-{index}", EventKind.CARD_STARTED, EntityKind.CARD, "secretary-1419",
-                Actor("worker", f"worker-{index}"), "start work",
+                f"event-race-{index}",
+                EventKind.CARD_STARTED,
+                EntityKind.CARD,
+                "secretary-1419",
+                Actor("worker", f"worker-{index}"),
+                "start work",
                 datetime(2026, 8, 11, 18, 0, 0, tzinfo=UTC),
             )
             for index in range(4)
@@ -701,8 +903,13 @@ class BoardMutationTransactionTests(unittest.TestCase):
     def test_a_second_owner_of_the_request_id_is_refused_before_any_backend_effect(self) -> None:
         BoardEventCanon(self.tmpdir.name).stage("shared-1", self.event)
         conflicting = Event(
-            "event-conflicting", EventKind.CARD_BLOCKED, EntityKind.CARD, "secretary-1419",
-            Actor("steward", "steward-1419"), "blocked", self.event.occurred_at,
+            "event-conflicting",
+            EventKind.CARD_BLOCKED,
+            EntityKind.CARD,
+            "secretary-1419",
+            Actor("steward", "steward-1419"),
+            "blocked",
+            self.event.occurred_at,
         )
         transaction = MutationEventTransaction(self.canon, request_id="shared-1", event=conflicting)
 
@@ -717,8 +924,13 @@ class BoardMutationTransactionTests(unittest.TestCase):
 
     def test_staging_refuses_an_event_id_already_owned_by_another_request(self) -> None:
         duplicate = Event(
-            self.event.event_id, EventKind.CARD_BLOCKED, EntityKind.CARD, "secretary-1419",
-            Actor("steward", "steward-1419"), "blocked", self.event.occurred_at,
+            self.event.event_id,
+            EventKind.CARD_BLOCKED,
+            EntityKind.CARD,
+            "secretary-1419",
+            Actor("steward", "steward-1419"),
+            "blocked",
+            self.event.occurred_at,
         )
 
         self.canon.stage("owner-1", self.event)
@@ -742,18 +954,36 @@ class BoardMutationTransactionTests(unittest.TestCase):
             lambda: self.canon.stage("route-stage", self.event),
             lambda: self.canon.commit("route-commit", self.event),
             lambda: MutationEventTransaction(
-                self.canon, request_id="route-transaction", event=self.event,
+                self.canon,
+                request_id="route-transaction",
+                event=self.event,
             ).execute(lambda: "effect", confirm=lambda: "replay"),
-            lambda: host.create(Create(
-                Card("card:2", "Card", CardState.READY), actor, "accepted", request_id="route-create",
-            )),
-            lambda: host.replace(Replace(
-                Card("card:1", "Card v2", CardState.READY), actor, "retitle", request_id="route-replace",
-            )),
-            lambda: host.transition(TransitionRequest(
-                EntityKind.CARD, "card:1", CardState.IN_PROGRESS, actor, "start",
-                request_id="route-transition",
-            )),
+            lambda: host.create(
+                Create(
+                    Card("card:2", "Card", CardState.READY),
+                    actor,
+                    "accepted",
+                    request_id="route-create",
+                )
+            ),
+            lambda: host.replace(
+                Replace(
+                    Card("card:1", "Card v2", CardState.READY),
+                    actor,
+                    "retitle",
+                    request_id="route-replace",
+                )
+            ),
+            lambda: host.transition(
+                TransitionRequest(
+                    EntityKind.CARD,
+                    "card:1",
+                    CardState.IN_PROGRESS,
+                    actor,
+                    "start",
+                    request_id="route-transition",
+                )
+            ),
         )
 
         with mock.patch.object(TaskAudit, "claim", side_effect=ClaimReached):
@@ -773,7 +1003,8 @@ class BoardMutationTransactionTests(unittest.TestCase):
         with mock.patch.object(self.canon.audit, "claim", wraps=self.canon.audit.claim) as claim:
             self.assertEqual(
                 transaction.execute(
-                    lambda: (_ for _ in ()).throw(AssertionError("effect repeated")), confirm=lambda: "replayed",
+                    lambda: (_ for _ in ()).throw(AssertionError("effect repeated")),
+                    confirm=lambda: "replayed",
                 ),
                 "replayed",
             )
@@ -784,15 +1015,21 @@ class BoardMutationTransactionTests(unittest.TestCase):
 class KanboardBoardHostTests(unittest.TestCase):
     def test_cards_exclude_typed_rows_and_read_refuses_them(self) -> None:
         execution = {
-            "ref": "secretary-1417", "title": "Protocol seam", "state": "ready",
+            "ref": "secretary-1417",
+            "title": "Protocol seam",
+            "state": "ready",
             "record_type": "task",
         }
         issue = {
-            "ref": "issue:1417", "title": "Typed issue", "state": "issues",
+            "ref": "issue:1417",
+            "title": "Typed issue",
+            "state": "issues",
             "record_type": "issue",
         }
         product = {
-            "ref": "product:secretary", "title": "Typed product", "state": "issues",
+            "ref": "product:secretary",
+            "title": "Typed product",
+            "state": "issues",
             "record_type": "product",
         }
         with mock.patch("secretary.board.kanboard.TaskReader") as reader_class:
@@ -835,22 +1072,37 @@ class KanboardBoardHostTests(unittest.TestCase):
     def test_sprint_transition_rejects_a_raw_metadata_escape_before_any_backend_read(self) -> None:
         host = KanboardBoardHost(mock.sentinel.client, data_dir="/data", instance="/instance")
         with self.assertRaisesRegex(BoardProtocolError, "supplement must be normalized"):
-            host.transition(TransitionRequest(
-                EntityKind.SPRINT, "sprint:943", SprintState.STOPPED, Actor("po", "operator"), "hard stop",
-                request_id="raw-metadata", sprint={"sprint_status": "closed"},  # type: ignore[arg-type]
-            ))
+            host.transition(
+                TransitionRequest(
+                    EntityKind.SPRINT,
+                    "sprint:943",
+                    SprintState.STOPPED,
+                    Actor("po", "operator"),
+                    "hard stop",
+                    request_id="raw-metadata",
+                    sprint={"sprint_status": "closed"},  # type: ignore[arg-type]
+                )
+            )
 
     def test_sprint_product_ref_can_read_the_linked_product(self) -> None:
         sprint = {
-            "ref": "sprint:943", "goal": "Board protocol", "status": "open",
-            "product": "secretary", "issues": ["issue:1417"], "cards": [],
+            "ref": "sprint:943",
+            "goal": "Board protocol",
+            "status": "open",
+            "product": "secretary",
+            "issues": ["issue:1417"],
+            "cards": [],
         }
         product = {
-            "ref": "product:secretary", "title": "Secretary", "closed": False,
+            "ref": "product:secretary",
+            "title": "Secretary",
+            "closed": False,
             "projects": ["secretary"],
         }
-        with mock.patch("secretary.board.kanboard.SprintReader") as sprint_reader_class, \
-             mock.patch("secretary.board.kanboard.ProductIssueStore") as store_class:
+        with (
+            mock.patch("secretary.board.kanboard.SprintReader") as sprint_reader_class,
+            mock.patch("secretary.board.kanboard.ProductIssueStore") as store_class,
+        ):
             sprint_reader_class.return_value.show.return_value = sprint
             store_class.return_value.show_product.return_value = product
             host = KanboardBoardHost(mock.sentinel.client, data_dir="/data", instance="/instance")

@@ -7,6 +7,7 @@ is deterministic.  A pre-transport installation can import its complete legacy
 ``runtime.env`` tuple once; disagreement with an existing file is an operator
 action, never a silent repair.
 """
+
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -34,6 +35,7 @@ from triggered_agents.runtime.board_transport import (
 @dataclass(frozen=True)
 class TransportOutcome:
     """Independent lifecycle actions taken for one transport reconciliation."""
+
     transport: BoardTransport
     source: str = "existing"
     mode_repaired: bool = False
@@ -56,12 +58,13 @@ class TransportOutcome:
         if self.ignore_added:
             actions.append("would add transport ignore" if dry_run else "added transport ignore")
         if self.legacy_retired:
-            actions.append("would retire legacy runtime values" if dry_run else "retired legacy runtime values")
-        if self.legacy_external:
             actions.append(
-                "external runtime override retains legacy values; retire them manually"
+                "would retire legacy runtime values" if dry_run else "retired legacy runtime values"
             )
+        if self.legacy_external:
+            actions.append("external runtime override retains legacy values; retire them manually")
         return "; ".join(actions) if actions else "unchanged"
+
 
 def legacy_transport(values: Mapping[str, str] | None) -> BoardTransport | None:
     """Turn a complete old runtime tuple into a transport, rejecting partial state."""
@@ -71,14 +74,20 @@ def legacy_transport(values: Mapping[str, str] | None) -> BoardTransport | None:
     if not present:
         return None
     if len(present) != len(TRANSPORT_ENV):
-        raise BoardTransportError("legacy Kanboard runtime configuration is incomplete: " + ", ".join(
-            name for name in TRANSPORT_ENV if name not in present
-        ))
+        raise BoardTransportError(
+            "legacy Kanboard runtime configuration is incomplete: "
+            + ", ".join(name for name in TRANSPORT_ENV if name not in present)
+        )
     return BoardTransport(*(str(values[name]) for name in TRANSPORT_ENV))
 
 
-def ensure(instance_dir: Path | str, *, legacy_values: Mapping[str, str] | None = None,
-           dry_run: bool = False, allow_default: bool = False) -> TransportOutcome:
+def ensure(
+    instance_dir: Path | str,
+    *,
+    legacy_values: Mapping[str, str] | None = None,
+    dry_run: bool = False,
+    allow_default: bool = False,
+) -> TransportOutcome:
     """Create a deterministic file, or perform the one explicit legacy import."""
     path = transport_path(instance_dir)
     legacy = legacy_transport(legacy_values)
@@ -110,9 +119,15 @@ def ensure(instance_dir: Path | str, *, legacy_values: Mapping[str, str] | None 
     else:
         configured = legacy or DEFAULT_TRANSPORT
     try:
-        ignore_changed = state_repo.ensure_ignored(
-            path.parent, f"/{TRANSPORT_FILE}", dry_run=dry_run,
-        ) if (path.parent / ".git").exists() else False
+        ignore_changed = (
+            state_repo.ensure_ignored(
+                path.parent,
+                f"/{TRANSPORT_FILE}",
+                dry_run=dry_run,
+            )
+            if (path.parent / ".git").exists()
+            else False
+        )
     except state_repo.StateRepoError as exc:
         raise BoardTransportError(f"board transport ignore lifecycle failed: {exc}") from exc
     if mode is not None:
@@ -122,17 +137,22 @@ def ensure(instance_dir: Path | str, *, legacy_values: Mapping[str, str] | None 
             except OSError as exc:
                 raise BoardTransportError(f"could not secure board transport configuration: {exc}") from None
         return TransportOutcome(
-            configured, mode_repaired=needs_mode_repair, ignore_added=ignore_changed,
+            configured,
+            mode_repaired=needs_mode_repair,
+            ignore_added=ignore_changed,
         )
     if not dry_run:
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            write_text_atomic(path, "".join(f"{key}={value}\n" for key, value in configured.as_environ().items()))
+            write_text_atomic(
+                path, "".join(f"{key}={value}\n" for key, value in configured.as_environ().items())
+            )
             path.chmod(0o600)
         except OSError as exc:
             raise BoardTransportError(f"could not write board transport configuration: {exc}") from None
     return TransportOutcome(
-        configured, "imported-legacy" if legacy is not None else "created-default",
+        configured,
+        "imported-legacy" if legacy is not None else "created-default",
         ignore_added=ignore_changed,
     )
 
@@ -148,7 +168,10 @@ def ensure_from_runtime_values(
     """Reconcile caller-validated legacy values and retire their exact file entries."""
     path = Path(runtime_env) if runtime_env is not None else Path(instance_dir) / "runtime.env"
     outcome = ensure(
-        instance_dir, legacy_values=legacy_values, dry_run=dry_run, allow_default=allow_default,
+        instance_dir,
+        legacy_values=legacy_values,
+        dry_run=dry_run,
+        allow_default=allow_default,
     )
     try:
         retire_source = path.resolve() == (Path(instance_dir).expanduser().resolve() / "runtime.env")
@@ -162,8 +185,9 @@ def ensure_from_runtime_values(
             raw = path.read_text(encoding="utf-8")
         except OSError as exc:
             raise BoardTransportError(f"could not retire legacy runtime values: {exc}") from None
-        retained = [line for line in raw.splitlines(keepends=True)
-                    if line.split("=", 1)[0] not in legacy_keys]
+        retained = [
+            line for line in raw.splitlines(keepends=True) if line.split("=", 1)[0] not in legacy_keys
+        ]
         if not dry_run:
             write_text_atomic(path, "".join(retained))
         outcome = replace(outcome, legacy_retired=True)
@@ -184,7 +208,11 @@ def findings(instance_dir: Path | str) -> list[str]:
         ]
     # A pre-transport checkout has no lifecycle marker yet; it is not an unhealthy
     # configured installation. Once the durable ignore entry exists, absence is a finding.
-    if not path.exists() and not path.is_symlink() and not state_repo.is_ignored(path.parent, f"/{TRANSPORT_FILE}"):
+    if (
+        not path.exists()
+        and not path.is_symlink()
+        and not state_repo.is_ignored(path.parent, f"/{TRANSPORT_FILE}")
+    ):
         return []
     try:
         resolve(instance_dir)

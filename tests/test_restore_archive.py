@@ -41,7 +41,8 @@ class RestoreArchiveTests(unittest.TestCase):
             archive = _core_archive(root, "test")
 
             plan = restore_backup(
-                archive, instance,
+                archive,
+                instance,
             )
 
             data_dir = root / "secretary-data"
@@ -137,7 +138,8 @@ class RestoreArchiveTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RestoreError, "identity"):
                 restore_backup(
-                    archive, instance,
+                    archive,
+                    instance,
                 )
 
             self.assertFalse((root / "secretary-data").exists())
@@ -153,7 +155,8 @@ class RestoreArchiveTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RestoreError, "already exists"):
                 restore_backup(
-                    archive, instance,
+                    archive,
+                    instance,
                 )
             self.assertEqual((data_dir / "keep").read_text(encoding="utf-8"), "keep")
 
@@ -191,7 +194,8 @@ class RestoreArchiveTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RestoreError, "memory/export.ndjson"):
                 restore_backup(
-                    stripped, instance,
+                    stripped,
+                    instance,
                 )
             self.assertFalse((root / "secretary-data").exists())
 
@@ -223,7 +227,8 @@ class RestoreArchiveTests(unittest.TestCase):
             archive = _full_archive(root, "test")
 
             plan = restore_backup(
-                archive, instance,
+                archive,
+                instance,
             )
 
             actions = {component["name"]: component["action"] for component in plan.components}
@@ -240,7 +245,9 @@ class RestoreArchiveTests(unittest.TestCase):
             instance = _write_instance(root, "test")
             archive = _core_archive(root, "test")
             payload = root / ARCHIVE_ROOT
-            (payload / "secretary-data" / "board" / "cards.json").write_text('{"cards": ["changed"]}', encoding="utf-8")
+            (payload / "secretary-data" / "board" / "cards.json").write_text(
+                '{"cards": ["changed"]}', encoding="utf-8"
+            )
             with tarfile.open(archive, "w") as bundle:
                 bundle.add(payload, arcname=ARCHIVE_ROOT)
 
@@ -294,11 +301,7 @@ class RestoreArchiveTests(unittest.TestCase):
                         bundle.add(
                             payload,
                             arcname=ARCHIVE_ROOT,
-                            filter=lambda info: (
-                                None
-                                if top in Path(info.name).parts
-                                else info
-                            ),
+                            filter=lambda info: None if top in Path(info.name).parts else info,
                         )
                         bundle.add(
                             entry,
@@ -435,6 +438,7 @@ class RestoreArchiveTests(unittest.TestCase):
             instance = _write_instance(root, "test")
             archive = _core_archive(root, "test")
             from unittest import mock
+
             real_replace = os.replace
 
             def fail_publish(source, destination):
@@ -499,16 +503,16 @@ class RestoreArchiveTests(unittest.TestCase):
 
             for kind in ("core", "full"):
                 target_data = root / f"target-{kind}-data"
-                target_instance = _write_instance_to(
-                    root / f"target-{kind}-instance", "test", target_data
-                )
+                target_instance = _write_instance_to(root / f"target-{kind}-instance", "test", target_data)
                 with (
                     mock.patch("secretary.backup._reject_claimed_worker_context"),
                     mock.patch("secretary.backup._pipeline_status", return_value={"paused": False}),
                     mock.patch("secretary.backup._pipeline_action", return_value=None),
                     mock.patch(
                         "secretary.backup.raw_kanboard_dump",
-                        return_value=type("Dump", (), {"dump_dir": source_data / "board" / "kanboard-raw-test"})(),
+                        return_value=type(
+                            "Dump", (), {"dump_dir": source_data / "board" / "kanboard-raw-test"}
+                        )(),
                     ),
                     mock.patch(
                         "secretary.backup.export_all",
@@ -531,18 +535,13 @@ class RestoreArchiveTests(unittest.TestCase):
                 self.assertEqual(len(facts), manifest["components"]["memory"]["count"])
                 # A post-flatten archive carries the derived export byte for
                 # byte and no journal at all; canon travels in the private repo.
-                self.assertEqual(
-                    (target_data / "memory" / "export.ndjson").read_text(), source_export
-                )
+                self.assertEqual((target_data / "memory" / "export.ndjson").read_text(), source_export)
                 self.assertFalse((target_data / "memory" / "facts").exists())
                 with tarfile.open(backup.archive) as bundle:
                     names = bundle.getnames()
                 data_prefix = f"{ARCHIVE_ROOT}/secretary-data/"
                 self.assertEqual(
-                    [
-                        name for name in names
-                        if name.startswith(data_prefix) and "memory/facts" in name
-                    ],
+                    [name for name in names if name.startswith(data_prefix) and "memory/facts" in name],
                     [],
                 )
                 # Canon rides along with the instance config, which is where the

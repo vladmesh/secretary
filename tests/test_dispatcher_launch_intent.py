@@ -145,7 +145,8 @@ class LaunchIntentTests(unittest.TestCase):
         # for a decision: these tests drive the rework that decision opens.
         self.sprints = FakeSprints()
         self.sprints.rows["sprint:1031"] = {
-            "ref": "sprint:1031", "status": "open",
+            "ref": "sprint:1031",
+            "status": "open",
             "observer": {"kind": "head", "profile": "claude-observer"},
         }
         self.board.metadata[12]["sprint_ref"] = "sprint:1031"
@@ -162,13 +163,15 @@ class LaunchIntentTests(unittest.TestCase):
             owner="secretary-pilot",
             sprints=self.sprints,
         )
-        self.runtime.production_state.save({
-            "version": 1,
-            "mode": "production",
-            "phase": "production",
-            "owner": self.runtime.owner,
-            "records": {},
-        })
+        self.runtime.production_state.save(
+            {
+                "version": 1,
+                "mode": "production",
+                "phase": "production",
+                "owner": self.runtime.owner,
+                "records": {},
+            }
+        )
 
     # fixtures ---------------------------------------------------------------
 
@@ -201,7 +204,10 @@ class LaunchIntentTests(unittest.TestCase):
             return
         self.host.head_pid = self._dead_pid()
         self.host._write_head_pid(
-            "worker", REF, head_run=record.worker_head_run, leaf=record.worker_leaf,
+            "worker",
+            REF,
+            head_run=record.worker_head_run,
+            leaf=record.worker_leaf,
         )
 
     def kill_review_heartbeat(self) -> None:
@@ -211,7 +217,10 @@ class LaunchIntentTests(unittest.TestCase):
             return
         self.host.head_pid = self._dead_pid()
         self.host._write_head_pid(
-            "review", REF, head_run=record.review_head_run, leaf=record.review_leaf,
+            "review",
+            REF,
+            head_run=record.review_head_run,
+            leaf=record.review_leaf,
         )
 
     def _dead_pid(self) -> int:
@@ -309,9 +318,7 @@ class LaunchIntentTests(unittest.TestCase):
 
         def call(*args, **kwargs):
             result = real_call(*args, **kwargs)
-            reported = (
-                result.get("head_run") if isinstance(result, dict) else getattr(result, "head_run", {})
-            )
+            reported = result.get("head_run") if isinstance(result, dict) else getattr(result, "head_run", {})
             head_run.update(dict(reported or {}))
             launched["yet"] = True
             return result
@@ -389,8 +396,12 @@ class LaunchIntentTests(unittest.TestCase):
 
     def verdict(self, kind: str, body: str, request_id: str) -> None:
         self.writer.verdict(
-            role="reviewer", actor="reviewer", reference=REF, kind=kind,
-            body=body, request_id=request_id,
+            role="reviewer",
+            actor="reviewer",
+            reference=REF,
+            kind=kind,
+            body=body,
+            request_id=request_id,
         )
 
     def run_to_validate(self) -> None:
@@ -618,7 +629,8 @@ class LaunchIntentTests(unittest.TestCase):
         self.install_legacy_unbound_v1_worker_source()
         old_run_id = self.record().worker_head_run["run_id"]  # type: ignore[union-attr]
         _configure_production_shaped_codex_relaunch(
-            self.host, root=self.data_dir / "replacement-sessions",
+            self.host,
+            root=self.data_dir / "replacement-sessions",
         )
 
         with self.state_dies_after("restart_worker"):
@@ -734,8 +746,12 @@ class LaunchIntentTests(unittest.TestCase):
     def decide(self, kind: str, request_id: str = "") -> None:
         """The observer decision that releases a parked card. Nothing acts without one."""
         self.writer.decide(
-            role="observer", actor="observer", reference=REF, kind=kind,
-            body="observer decision", request_id=request_id or f"decision-{kind}",
+            role="observer",
+            actor="observer",
+            reference=REF,
+            kind=kind,
+            body="observer decision",
+            request_id=request_id or f"decision-{kind}",
         )
 
     def release_after_green_verdict(self) -> dict:
@@ -760,7 +776,8 @@ class LaunchIntentTests(unittest.TestCase):
         payload = self.runtime.production_state.load()
         stored = payload["records"][REF]
         stored["worker_head_run"] = _legacy_unbound_v1_run(
-            stored["worker_head_run"], root=self.data_dir / "codex-sessions",
+            stored["worker_head_run"],
+            root=self.data_dir / "codex-sessions",
         )
         self.runtime.production_state.save(payload)
         self.host.provider_progress = lambda _task, record, _kind: provider_progress_for_run(
@@ -810,8 +827,9 @@ class LaunchIntentTests(unittest.TestCase):
                 self.tick()
 
         intent = self.stored_intent()
-        self.assertEqual((intent["action"], intent["round"], intent["opens_round"]),
-                         ("gate-red-rework", 2, True))
+        self.assertEqual(
+            (intent["action"], intent["round"], intent["opens_round"]), ("gate-red-rework", 2, True)
+        )
 
         adopted = self.tick()
 
@@ -859,14 +877,19 @@ class LaunchIntentTests(unittest.TestCase):
 
     def test_an_unnamed_worker_is_swept_by_workspace_before_replacement(self) -> None:
         record = DispatcherRecord(
-            worker="worker", workspace=str(self.data_dir / "workspace"), handle="", head="codex",
-            review_head="codex-reviewer", attempt_id="attempt", comment_baseline=0,
-            review_baseline=0, state="claimed", claimed_at=0.0,
+            worker="worker",
+            workspace=str(self.data_dir / "workspace"),
+            handle="",
+            head="codex",
+            review_head="codex-reviewer",
+            attempt_id="attempt",
+            comment_baseline=0,
+            review_baseline=0,
+            state="claimed",
+            claimed_at=0.0,
         )
 
-        outcome = self.runtime._stop_worker_confirmed(
-            record, REF, step="gate", attempt_id="attempt"
-        )
+        outcome = self.runtime._stop_worker_confirmed(record, REF, step="gate", attempt_id="attempt")
 
         self.assertIsNone(outcome)
         self.assertIn("stop_workspace", self.host.calls)
@@ -966,9 +989,7 @@ class LaunchIntentTests(unittest.TestCase):
         # The worker stays suspended for the reviewer instead of being stopped: the checkout is
         # still untouched, and a red verdict has a conversation to hand the findings back to.
         self.assertNotIn("stop_head:worker", self.host.calls)
-        self.assertLess(
-            self.host.calls.index("confirm_worker_retained"), len(self.host.calls)
-        )
+        self.assertLess(self.host.calls.index("confirm_worker_retained"), len(self.host.calls))
 
     def fail_the_red_move(self):
         """The red intent reaches the disk and the board move behind it does not.
@@ -995,9 +1016,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertIn(self.reader.show(REF)["state"], ("validate", "assessment"))
         stranded = self.record()
         assert stranded is not None
-        self.assertEqual(
-            stranded.worker_continuation.stage, WorkerContinuationStage.RED_TRANSITION_PENDING
-        )
+        self.assertEqual(stranded.worker_continuation.stage, WorkerContinuationStage.RED_TRANSITION_PENDING)
         self.assertEqual(stranded.worker_continuation.phase, phase)
 
     def test_a_red_gate_intent_before_the_board_move_outranks_a_fresh_green_gate(self) -> None:
@@ -1043,9 +1062,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.host.calls.count("start_review"), 1, "no second reviewer is spawned")
         self.assertEqual(self.host.calls.count("resume_worker"), 1)
         self.assertEqual(self.host.calls.count("restart_worker"), 0)
-        self.assertIn(
-            "review red continuation: reused", self.reader.show(REF)["comments"][-1]["body"]
-        )
+        self.assertIn("review red continuation: reused", self.reader.show(REF)["comments"][-1]["body"])
 
     def test_a_red_gate_intent_without_a_session_still_moves_and_replaces_once(self) -> None:
         """Nothing to reuse is not a lesser transition: the replacement is owed just the same."""
@@ -1167,9 +1184,7 @@ class LaunchIntentTests(unittest.TestCase):
 
         confirmed = self.record()
         assert confirmed is not None
-        self.assertEqual(
-            confirmed.worker_continuation.stage, WorkerContinuationStage.DELIVERY_CONFIRMED
-        )
+        self.assertEqual(confirmed.worker_continuation.stage, WorkerContinuationStage.DELIVERY_CONFIRMED)
         self.assertEqual(confirmed.attempt_round, 1)
 
         recovered = self.tick()
@@ -1192,9 +1207,7 @@ class LaunchIntentTests(unittest.TestCase):
 
         confirmed = self.record()
         assert confirmed is not None
-        self.assertEqual(
-            confirmed.worker_continuation.stage, WorkerContinuationStage.DELIVERY_CONFIRMED
-        )
+        self.assertEqual(confirmed.worker_continuation.stage, WorkerContinuationStage.DELIVERY_CONFIRMED)
 
         recovered = self.tick()
 
@@ -1204,9 +1217,7 @@ class LaunchIntentTests(unittest.TestCase):
         record = self.record()
         assert record is not None
         self.assertEqual(record.attempt_round, 2)
-        self.assertIn(
-            "review red continuation: reused", self.reader.show(REF)["comments"][-1]["body"]
-        )
+        self.assertIn("review red continuation: reused", self.reader.show(REF)["comments"][-1]["body"])
 
     def test_a_session_that_lost_its_suspension_during_review_is_replaced_once(self) -> None:
         """The suspension confirmed before the reviewer started is not evidence at delivery time."""
@@ -1224,9 +1235,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.host.calls.count("resume_worker"), 0)
         self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
-        self.assertIn(
-            "review red continuation: replacement", self.reader.show(REF)["comments"][-1]["body"]
-        )
+        self.assertIn("review red continuation: replacement", self.reader.show(REF)["comments"][-1]["body"])
 
     def test_a_session_that_lost_its_suspension_before_the_red_gate_is_replaced_once(self) -> None:
         self.host.fail_resume_worker_reason = ""
@@ -1240,9 +1249,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.host.calls.count("resume_worker"), 0)
         self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
-        self.assertIn(
-            "gate red continuation: replacement", self.reader.show(REF)["comments"][-1]["body"]
-        )
+        self.assertIn("gate red continuation: replacement", self.reader.show(REF)["comments"][-1]["body"])
 
     def lose_the_suspension_after_the_send(self):
         """The dispatcher dies between the send and its checkpoint, and the head wakes meanwhile.
@@ -1271,15 +1278,14 @@ class LaunchIntentTests(unittest.TestCase):
 
         self.assertEqual(recovered["action"], "gate-red-rework")
         self.assertGreater(
-            self.host.calls.count("confirm_worker_retained"), confirmations,
+            self.host.calls.count("confirm_worker_retained"),
+            confirmations,
             "the suspension is confirmed again at the boundary, not inherited from the dead tick",
         )
         self.assertEqual(self.host.calls.count("resume_worker"), 1, "the woken head is not typed into")
         self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
-        self.assertIn(
-            "gate red continuation: replacement", self.reader.show(REF)["comments"][-1]["body"]
-        )
+        self.assertIn("gate red continuation: replacement", self.reader.show(REF)["comments"][-1]["body"])
 
     def test_a_pending_review_delivery_that_lost_its_suspension_is_replaced_once(self) -> None:
         self.host.fail_resume_worker_reason = ""
@@ -1297,9 +1303,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.host.calls.count("resume_worker"), 1)
         self.assertEqual(self.host.calls.count("stop_head:worker"), 1)
         self.assertEqual(self.host.calls.count("restart_worker"), 1)
-        self.assertIn(
-            "review red continuation: replacement", self.reader.show(REF)["comments"][-1]["body"]
-        )
+        self.assertIn("review red continuation: replacement", self.reader.show(REF)["comments"][-1]["body"])
 
     def without_a_retained_session(self) -> None:
         """A round whose worker has no conversation to keep: a one-shot head or a lost pane."""
@@ -1322,9 +1326,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(self.reader.show(REF)["state"], "in_progress")
         stranded = self.record()
         assert stranded is not None
-        self.assertEqual(
-            stranded.worker_continuation.stage, WorkerContinuationStage.RED_TRANSITION_PENDING
-        )
+        self.assertEqual(stranded.worker_continuation.stage, WorkerContinuationStage.RED_TRANSITION_PENDING)
         self.assertFalse(stranded.worker_continuation.retained)
         self.assertEqual(self.host.calls.count("restart_worker"), 0)
 
@@ -1344,9 +1346,7 @@ class LaunchIntentTests(unittest.TestCase):
 
         stranded = self.record()
         assert stranded is not None
-        self.assertEqual(
-            stranded.worker_continuation.stage, WorkerContinuationStage.RED_TRANSITION_PENDING
-        )
+        self.assertEqual(stranded.worker_continuation.stage, WorkerContinuationStage.RED_TRANSITION_PENDING)
         self.assertFalse(stranded.worker_continuation.retained)
         self.assertEqual(self.host.calls.count("restart_worker"), 0)
 
@@ -1375,9 +1375,7 @@ class LaunchIntentTests(unittest.TestCase):
                 WorkerContinuationStage.DELIVERY_PENDING,
             },
         )
-        self.assertFalse(
-            stranded.worker_continuation.retained, "the old session was stopped, not kept"
-        )
+        self.assertFalse(stranded.worker_continuation.retained, "the old session was stopped, not kept")
 
     def assert_one_replacement_on_the_rework_round(self, action: str) -> None:
         recovered = self.tick()
@@ -1852,9 +1850,7 @@ class LaunchIntentTests(unittest.TestCase):
         # the reading that used to respawn a reviewer beside a live one. The adopted head's
         # heartbeat names a gone process, so the reclaim is evidence-backed.
         self.kill_review_heartbeat()
-        self.host.review_status_result = {
-            "known": True, "live": False, "reason": "missing-terminal"
-        }
+        self.host.review_status_result = {"known": True, "live": False, "reason": "missing-terminal"}
 
         respawned = self.tick()
 
@@ -1970,8 +1966,11 @@ class LaunchIntentTests(unittest.TestCase):
         """
         self.run_to_validate()
         evidence = {
-            "subject": "reviewer-launch", "handle": f"review:{REF}", "stage": "payload_written",
-            "payload_bytes": 812, "payload_sha256": "0f1e2d3c4b5a6978",
+            "subject": "reviewer-launch",
+            "handle": f"review:{REF}",
+            "stage": "payload_written",
+            "payload_bytes": 812,
+            "payload_sha256": "0f1e2d3c4b5a6978",
             "reason": "payload-left-in-composer",
         }
         self.host.fail_review_error = HeadLaunchAborted(
@@ -2020,8 +2019,7 @@ class LaunchIntentTests(unittest.TestCase):
             "readiness_state": "busy",
             "reason": "readiness-busy",
             "transport_error": (
-                "orca terminal wait --for tui-idle failed: "
-                '{"error":{"code":"timeout","message":"timeout"}}'
+                'orca terminal wait --for tui-idle failed: {"error":{"code":"timeout","message":"timeout"}}'
             ),
         }
 
@@ -2036,9 +2034,7 @@ class LaunchIntentTests(unittest.TestCase):
                 record.workspace,
                 run_id=str(record.launch_intent["run_id"]),
             )
-            self.host._write_head_pid(
-                "review", task["ref"], head_run=launched.head_run, leaf=launched.leaf
-            )
+            self.host._write_head_pid("review", task["ref"], head_run=launched.head_run, leaf=launched.leaf)
             raise HeadLaunchAborted(
                 "reviewer document nudge met a busy pane before send",
                 handle=launched.handle,
@@ -2058,8 +2054,7 @@ class LaunchIntentTests(unittest.TestCase):
         self.assertEqual(intent["delivery"]["evidence"], evidence)
         self.assertGreater(intent["delivery"]["next_at"], time.time())
         preserved = {
-            key: intent[key]
-            for key in ("workspace", "handle", "leaf", "pid_file", "run_id", "head_run")
+            key: intent[key] for key in ("workspace", "handle", "leaf", "pid_file", "run_id", "head_run")
         }
         record = self.record()
         assert record is not None
@@ -2080,9 +2075,7 @@ class LaunchIntentTests(unittest.TestCase):
         payload = self.runtime.production_state.load()
         payload["records"][REF]["launch_intent"]["delivery"]["next_at"] = 0.0
         self.runtime.production_state.save(payload)
-        review_routes_before = sum(
-            1 for attempt in self.routing_history() if attempt.reviewer is not None
-        )
+        review_routes_before = sum(1 for attempt in self.routing_history() if attempt.reviewer is not None)
 
         confirmed = self.tick()
 
@@ -2120,12 +2113,14 @@ class LaunchIntentTests(unittest.TestCase):
 
         def busy_before_send(task: dict, record: DispatcherRecord) -> ReviewLaunch:
             launched = self.host._launched(
-                f"review:{task['ref']}", record.review_head, task, "reviewer", record.workspace,
+                f"review:{task['ref']}",
+                record.review_head,
+                task,
+                "reviewer",
+                record.workspace,
                 run_id=str(record.launch_intent["run_id"]),
             )
-            self.host._write_head_pid(
-                "review", task["ref"], head_run=launched.head_run, leaf=launched.leaf
-            )
+            self.host._write_head_pid("review", task["ref"], head_run=launched.head_run, leaf=launched.leaf)
             raise HeadLaunchAborted(
                 "reviewer document nudge met a busy pane before send",
                 handle=launched.handle,
@@ -2170,8 +2165,11 @@ class LaunchIntentTests(unittest.TestCase):
         """
         self.run_to_validate()
         evidence = {
-            "subject": "reviewer-launch", "handle": f"review:{REF}", "stage": "payload_written",
-            "payload_bytes": 812, "payload_sha256": "0f1e2d3c4b5a6978",
+            "subject": "reviewer-launch",
+            "handle": f"review:{REF}",
+            "stage": "payload_written",
+            "payload_bytes": 812,
+            "payload_sha256": "0f1e2d3c4b5a6978",
             "reason": "pane-stayed-ready",
         }
         self.host.fail_review_error = HeadPaneNotReady(
@@ -2262,9 +2260,7 @@ class LaunchIntentTests(unittest.TestCase):
 
         restarted = self.tick()
 
-        self.assertNotEqual(
-            restarted["action"], "review-launch-aborted", "a vanished worker must not loop"
-        )
+        self.assertNotEqual(restarted["action"], "review-launch-aborted", "a vanished worker must not loop")
         self.assertEqual(self.host.reviews, [REF, REF], "the reviewer is relaunched, not aborted")
         self.assertEqual(self.reader.show(REF)["state"], "validate", "the card is not blocked")
         record = self.record()
@@ -2471,8 +2467,12 @@ class LaunchIntentTests(unittest.TestCase):
         # And the retry after the operator requeues it launches exactly one head, on the path the
         # fresh intent names.
         self.writer.move(
-            role="po", actor="operator", reference=REF, target="ready",
-            reason="requeued", request_id="requeue-after-workspace-mismatch",
+            role="po",
+            actor="operator",
+            reference=REF,
+            target="ready",
+            reason="requeued",
+            request_id="requeue-after-workspace-mismatch",
             sprint_override=True,
             sprint_override_reason="the operator moves a card of a reserved project by hand",
         )
@@ -2575,11 +2575,11 @@ class LaunchIntentTests(unittest.TestCase):
 
     def test_recovery_binds_an_empty_leaf_from_the_exact_launch_intent(self) -> None:
         pid_file = self.data_dir / "busy-review.pid"
-        identity = heartbeat_identity(
-            run_id="review-run", role="reviewer", task=f"card:{REF}"
-        )
+        identity = heartbeat_identity(run_id="review-run", role="reviewer", task=f"card:{REF}")
         wrapped = with_pid_heartbeat(
-            "python3 -c 'import time; time.sleep(5)'", str(pid_file), identity=identity,
+            "python3 -c 'import time; time.sleep(5)'",
+            str(pid_file),
+            identity=identity,
         )
         proc = subprocess.Popen(["/bin/sh", "-lc", wrapped])
         self.addCleanup(proc.wait)
@@ -2588,8 +2588,12 @@ class LaunchIntentTests(unittest.TestCase):
         while time.monotonic() < deadline and not pid_file.exists():
             time.sleep(0.01)
         intent = {
-            "pid_file": str(pid_file), "at": time.time(), "run_id": "review-run",
-            "role": "reviewer", "task": f"card:{REF}", "leaf": "leaf-review",
+            "pid_file": str(pid_file),
+            "at": time.time(),
+            "run_id": "review-run",
+            "role": "reviewer",
+            "task": f"card:{REF}",
+            "leaf": "leaf-review",
         }
 
         liveness = launch_intent_liveness(intent)
@@ -2603,7 +2607,9 @@ class LaunchIntentTests(unittest.TestCase):
             run_id="review-run", role="reviewer", task=f"card:{REF}", leaf="foreign-leaf"
         )
         wrapped = with_pid_heartbeat(
-            "python3 -c 'import time; time.sleep(5)'", str(pid_file), identity=identity,
+            "python3 -c 'import time; time.sleep(5)'",
+            str(pid_file),
+            identity=identity,
         )
         proc = subprocess.Popen(["/bin/sh", "-lc", wrapped])
         self.addCleanup(proc.wait)
@@ -2612,8 +2618,12 @@ class LaunchIntentTests(unittest.TestCase):
         while time.monotonic() < deadline and not pid_file.exists():
             time.sleep(0.01)
         intent = {
-            "pid_file": str(pid_file), "at": time.time(), "run_id": "review-run",
-            "role": "reviewer", "task": f"card:{REF}", "leaf": "expected-leaf",
+            "pid_file": str(pid_file),
+            "at": time.time(),
+            "run_id": "review-run",
+            "role": "reviewer",
+            "task": f"card:{REF}",
+            "leaf": "expected-leaf",
         }
 
         liveness = launch_intent_liveness(intent)
@@ -2653,9 +2663,7 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
         self.created_path = str(self.workspaces / "codegen_orchestrator" / "card-1")
         self.created_record = {"repoId": self.REPO_ID, "displayName": "card-1"}
         self.rm_fails = False
-        self.env = mock.patch.dict(
-            os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.workspaces)}
-        )
+        self.env = mock.patch.dict(os.environ, {"SECRETARY_DISPATCHER_WORKSPACES_ROOT": str(self.workspaces)})
         self.env.start()
         self.addCleanup(self.env.stop)
 
@@ -2693,7 +2701,11 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
                 return {
                     "repos": [
                         {"id": "repo-other", "path": str(self.data_dir / "other"), "displayName": "other"},
-                        {"id": self.REPO_ID, "path": self.orca_repo_path, "displayName": "codegen_orchestrator"},
+                        {
+                            "id": self.REPO_ID,
+                            "path": self.orca_repo_path,
+                            "displayName": "codegen_orchestrator",
+                        },
                     ]
                 }
             if verb == "worktree create":
@@ -2721,9 +2733,7 @@ class WorkerWorkspaceBindingTests(unittest.TestCase):
                 yield
 
     def create(self, worker_id: str = "card-1", expected: str = ""):
-        return self.host._create_workspace(
-            "codegen-orchestrator", worker_id, "main", expected=expected
-        )
+        return self.host._create_workspace("codegen-orchestrator", worker_id, "main", expected=expected)
 
     def removed(self) -> list[str]:
         return [self.selector(call) for call in self.json_calls if call[1:3] == ["worktree", "rm"]]
@@ -2895,10 +2905,8 @@ class HostLaunchContourTests(unittest.TestCase):
         }
         if pid > 0 and Path(f"/proc/{pid}/stat").exists():
             stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-            identity["boot_id"] = Path("/proc/sys/kernel/random/boot_id").read_text(
-                encoding="utf-8"
-            ).strip()
-            identity["proc_starttime_ticks"] = stat[stat.rfind(")") + 2:].split()[19]
+            identity["boot_id"] = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
+            identity["proc_starttime_ticks"] = stat[stat.rfind(")") + 2 :].split()[19]
         else:
             identity["boot_id"] = "dead-process"
             identity["proc_starttime_ticks"] = "0"
@@ -2917,9 +2925,14 @@ class HostLaunchContourTests(unittest.TestCase):
         )
         record.worker_head_run = run.to_json()
         raw = json.loads(Path(record.worker_pid_file).read_text(encoding="utf-8"))
-        raw.update(run_heartbeat_identity(
-            record.worker_head_run, role="worker", task=f"card:{REF}", leaf=record.worker_leaf,
-        ))
+        raw.update(
+            run_heartbeat_identity(
+                record.worker_head_run,
+                role="worker",
+                task=f"card:{REF}",
+                leaf=record.worker_leaf,
+            )
+        )
         Path(record.worker_pid_file).write_text(json.dumps(raw), encoding="utf-8")
         return record
 
@@ -2936,7 +2949,8 @@ class HostLaunchContourTests(unittest.TestCase):
         repo = self.data_dir / "repo"
         repo.mkdir()
         self.host.catalog.binding = lambda project: {  # type: ignore[assignment]
-            "repo": str(repo), "orca_binding": "repo",
+            "repo": str(repo),
+            "orca_binding": "repo",
         }
         answers = {
             "repo list": {"repos": [{"id": "repo-1", "path": str(repo), "displayName": "repo"}]},
@@ -3000,7 +3014,8 @@ class HostLaunchContourTests(unittest.TestCase):
         a dispatcher-launched head gets on a headless serve. The heartbeat, not the refusal, is
         what says whether the head is still there."""
         self.host._close_head_pane(
-            "term:1", self.pid_file(str(DEAD_PID)),
+            "term:1",
+            self.pid_file(str(DEAD_PID)),
             host=self.ClosingHost(HostError("tab_not_found")),
         )
 
@@ -3028,15 +3043,20 @@ class HostLaunchContourTests(unittest.TestCase):
                 with self.run_json(created):
                     with mock.patch.object(self.host, "_launched", lambda *a, **k: "launched"):
                         with mock.patch.object(
-                            secretary_dispatcher, "_deliver_tui_prompt",
+                            secretary_dispatcher,
+                            "_deliver_tui_prompt",
                             mock.Mock(side_effect=TuiDeliveryError("the head never took the prompt")),
                         ):
                             yield
 
     def launch_worker(self):
         return self.host._launch(
-            str(self.data_dir), "title", "codex", "TASK.md",
-            role="worker", env_name="SECRETARY_UNSET_COMMAND",
+            str(self.data_dir),
+            "title",
+            "codex",
+            "TASK.md",
+            role="worker",
+            env_name="SECRETARY_UNSET_COMMAND",
             task={"ref": REF, "project": "secretary"},
         )
 
@@ -3062,10 +3082,13 @@ class HostLaunchContourTests(unittest.TestCase):
         """A busy delivery returns its live pane in ``run`` before the host translates it."""
         run_id = "host-test-run"
         leaf = "leaf:busy"
-        with mock.patch.dict(os.environ, {
-            "SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir),
-            "SECRETARY_UNSET_COMMAND": "run-worker",
-        }):
+        with mock.patch.dict(
+            os.environ,
+            {
+                "SECRETARY_DISPATCHER_BODY_DIR": str(self.data_dir),
+                "SECRETARY_UNSET_COMMAND": "run-worker",
+            },
+        ):
             pid_file = Path(pid_file_path("worker", REF))
 
             def busy_spawn(*_args: Any, **kwargs: Any):
@@ -3075,33 +3098,47 @@ class HostLaunchContourTests(unittest.TestCase):
                 base = head_process_status(
                     str(pid_file),
                     expected=heartbeat_identity(
-                        run_id=run_id, role="worker", task=f"card:{REF}",
+                        run_id=run_id,
+                        role="worker",
+                        task=f"card:{REF}",
                     ),
                 )
                 self.assertEqual((base["state"], base["record"]["leaf"]), ("live-match", ""))
                 error = head_ops.HeadPaneBusy(
-                    "the pane stayed busy", readiness="busy", pane="term:busy",
+                    "the pane stayed busy",
+                    readiness="busy",
+                    pane="term:busy",
                 )
                 error.run = run
                 raise error
 
             with mock.patch.object(
-                self.host.catalog, "prepare_head_workspace", lambda *_args, **_kwargs: None,
+                self.host.catalog,
+                "prepare_head_workspace",
+                lambda *_args, **_kwargs: None,
                 create=True,
             ):
                 with mock.patch.object(secretary_dispatcher.head_ops, "spawn", side_effect=busy_spawn):
                     with self.assertRaises(HeadPaneNotReady) as caught:
                         self.host._launch(
-                            str(self.data_dir), "title", "codex", "TASK.md",
-                            role="worker", env_name="SECRETARY_UNSET_COMMAND",
-                            task={"ref": REF, "project": "secretary"}, heartbeat_run_id=run_id,
+                            str(self.data_dir),
+                            "title",
+                            "codex",
+                            "TASK.md",
+                            role="worker",
+                            env_name="SECRETARY_UNSET_COMMAND",
+                            task={"ref": REF, "project": "secretary"},
+                            heartbeat_run_id=run_id,
                         )
 
         self.assertEqual(caught.exception.readiness, "busy")
         bound = head_process_status(
             str(pid_file),
             expected=heartbeat_identity(
-                run_id=run_id, role="worker", task=f"card:{REF}", leaf=leaf,
+                run_id=run_id,
+                role="worker",
+                task=f"card:{REF}",
+                leaf=leaf,
             ),
         )
         self.assertEqual((bound["state"], bound["record"]["leaf"]), ("live-match", leaf))
@@ -3113,9 +3150,7 @@ class HostLaunchContourTests(unittest.TestCase):
             # Production `terminal split --json` has no paneKey. Its just-created terminal is
             # still present in the fresh inventory under the returned handle, so the host can
             # persist its stable leaf before the reviewer reaches state.
-            "terminal split": {
-                "split": {"handle": "term:review", "tabId": "tab-1", "paneRuntimeId": -1}
-            },
+            "terminal split": {"split": {"handle": "term:review", "tabId": "tab-1", "paneRuntimeId": -1}},
             "terminal list": {"terminals": [{"handle": "term:review", "leafId": "leaf:review"}]},
             "terminal rename": rename,
         }
@@ -3135,8 +3170,13 @@ class HostLaunchContourTests(unittest.TestCase):
 
         with mock.patch.object(self.host, "catalog", Catalog()):
             return self.host._launch(
-                str(self.data_dir), "title", "codex-reviewer", "REVIEW.md",
-                role="reviewer", env_name="SECRETARY_UNSET_COMMAND", split_from="term:worker",
+                str(self.data_dir),
+                "title",
+                "codex-reviewer",
+                "REVIEW.md",
+                role="reviewer",
+                env_name="SECRETARY_UNSET_COMMAND",
+                split_from="term:worker",
                 task={"ref": REF, "project": "secretary"},
             )
 
@@ -3196,9 +3236,7 @@ class HostLaunchContourTests(unittest.TestCase):
 
     def test_a_live_foreign_heartbeat_is_never_signalled(self) -> None:
         pid_file = self.pid_file(str(os.getpid()))
-        expected = heartbeat_identity(
-            run_id="different-run", role="worker", task=f"card:{REF}"
-        )
+        expected = heartbeat_identity(run_id="different-run", role="worker", task=f"card:{REF}")
 
         with mock.patch.object(self.host, "_signal_head") as signal_head:
             with self.assertRaisesRegex(HostError, "mismatching launch identity"):
@@ -3211,9 +3249,17 @@ class HostLaunchContourTests(unittest.TestCase):
         head = subprocess.Popen(["sleep", "30"])
         self.addCleanup(head.kill)
         record = DispatcherRecord(
-            worker="w1", workspace=str(self.data_dir), handle="", head="codex",
-            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=0,
-            state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            worker="w1",
+            workspace=str(self.data_dir),
+            handle="",
+            head="codex",
+            review_head="codex-reviewer",
+            attempt_id="a1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="claimed",
+            claimed_at=0.0,
+            worker_pid_file=self.pid_file(str(head.pid)),
         )
         self.track_worker(record)
 
@@ -3227,9 +3273,17 @@ class HostLaunchContourTests(unittest.TestCase):
         head = subprocess.Popen(["sleep", "30"])
         self.addCleanup(head.kill)
         record = DispatcherRecord(
-            worker="w1", workspace=str(self.data_dir), handle="", head="codex",
-            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=0,
-            state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            worker="w1",
+            workspace=str(self.data_dir),
+            handle="",
+            head="codex",
+            review_head="codex-reviewer",
+            attempt_id="a1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="claimed",
+            claimed_at=0.0,
+            worker_pid_file=self.pid_file(str(head.pid)),
             worker_continuation=WorkerContinuation(
                 stage=WorkerContinuationStage.RETAINED,
                 retained_at=time.time(),
@@ -3245,14 +3299,21 @@ class HostLaunchContourTests(unittest.TestCase):
     def test_retention_stops_the_head_process_group(self) -> None:
         """A helper started by a worker is frozen with the worker, not left writing alone."""
         child_file = self.data_dir / "child.pid"
-        head = subprocess.Popen([
-            "setsid", "sh", "-c", f"sleep 30 & echo $! > {child_file}; wait",
-        ])
+        head = subprocess.Popen(
+            [
+                "setsid",
+                "sh",
+                "-c",
+                f"sleep 30 & echo $! > {child_file}; wait",
+            ]
+        )
+
         def reap_group() -> None:
             with contextlib.suppress(ProcessLookupError):
                 os.killpg(os.getpgid(head.pid), signal.SIGKILL)
             with contextlib.suppress(subprocess.TimeoutExpired):
                 head.wait(timeout=1)
+
         self.addCleanup(reap_group)
         for _ in range(50):
             if child_file.exists():
@@ -3261,9 +3322,17 @@ class HostLaunchContourTests(unittest.TestCase):
         child = int(child_file.read_text(encoding="utf-8"))
         self.addCleanup(lambda: os.kill(child, signal.SIGKILL))
         record = DispatcherRecord(
-            worker="w1", workspace=str(self.data_dir), handle="term:worker", head="codex",
-            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=0,
-            state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            worker="w1",
+            workspace=str(self.data_dir),
+            handle="term:worker",
+            head="codex",
+            review_head="codex-reviewer",
+            attempt_id="a1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="claimed",
+            claimed_at=0.0,
+            worker_pid_file=self.pid_file(str(head.pid)),
             worker_run={"adapter": "codex", "codex_mode": "tui", "head": "codex"},
         )
         self.track_worker(record)
@@ -3283,10 +3352,18 @@ class HostLaunchContourTests(unittest.TestCase):
         head = subprocess.Popen(["sleep", "30"])
         self.addCleanup(head.kill)
         record = DispatcherRecord(
-            worker="w1", workspace=str(self.data_dir), handle="term:worker", head="claude-opus",
-            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=3,
+            worker="w1",
+            workspace=str(self.data_dir),
+            handle="term:worker",
+            head="claude-opus",
+            review_head="codex-reviewer",
+            attempt_id="a1",
+            comment_baseline=0,
+            review_baseline=3,
             report_generation=3,
-            state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            state="claimed",
+            claimed_at=0.0,
+            worker_pid_file=self.pid_file(str(head.pid)),
             worker_run={"adapter": "claude", "head": "claude-opus"},
             worker_continuation=WorkerContinuation(
                 stage=WorkerContinuationStage.DELIVERY_PENDING,
@@ -3311,8 +3388,10 @@ class HostLaunchContourTests(unittest.TestCase):
                 return {"terminal": {"tail": ["✻ Thinking… (esc to interrupt)"]}}
             return {}
 
-        with mock.patch.object(self.host, "_run_json", run_json), \
-             mock.patch("secretary.dispatcher_tui.latest_claude_user_turn_for", return_value=1.0):
+        with (
+            mock.patch.object(self.host, "_run_json", run_json),
+            mock.patch("secretary.dispatcher_tui.latest_claude_user_turn_for", return_value=1.0),
+        ):
             self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
 
         self.assertIn("worker-report-done-secretary-510-pilot-3", task_at_delivery[0])
@@ -3346,9 +3425,17 @@ class HostLaunchContourTests(unittest.TestCase):
         head = subprocess.Popen(["sleep", "30"])
         self.addCleanup(head.kill)
         record = DispatcherRecord(
-            worker="w1", workspace=str(self.data_dir), handle="term:worker", head="claude-opus",
-            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=3,
-            state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            worker="w1",
+            workspace=str(self.data_dir),
+            handle="term:worker",
+            head="claude-opus",
+            review_head="codex-reviewer",
+            attempt_id="a1",
+            comment_baseline=0,
+            review_baseline=3,
+            state="claimed",
+            claimed_at=0.0,
+            worker_pid_file=self.pid_file(str(head.pid)),
             worker_run={"adapter": "claude", "head": "claude-opus"},
             worker_continuation=WorkerContinuation(
                 stage=WorkerContinuationStage.DELIVERY_PENDING,
@@ -3369,8 +3456,10 @@ class HostLaunchContourTests(unittest.TestCase):
             real_signal(pid_file, signal_number, **kwargs)
             raise DispatcherDied()
 
-        with mock.patch.object(self.host, "_signal_head", die_after_continuing), \
-             mock.patch.object(self.host, "_run_json", return_value={"wait": {"satisfied": True}}):
+        with (
+            mock.patch.object(self.host, "_signal_head", die_after_continuing),
+            mock.patch.object(self.host, "_run_json", return_value={"wait": {"satisfied": True}}),
+        ):
             with self.assertRaises(DispatcherDied):
                 self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
 
@@ -3389,11 +3478,13 @@ class HostLaunchContourTests(unittest.TestCase):
         def latest_turn(_workspace: Path, _since: float) -> float | None:
             return 1.0 if sent else None
 
-        with mock.patch.object(self.host, "_run_json", run_json), \
-             mock.patch(
-                 "secretary.dispatcher_tui.latest_claude_user_turn_for",
-                 side_effect=latest_turn,
-             ):
+        with (
+            mock.patch.object(self.host, "_run_json", run_json),
+            mock.patch(
+                "secretary.dispatcher_tui.latest_claude_user_turn_for",
+                side_effect=latest_turn,
+            ),
+        ):
             self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
 
         self.assertFalse(secretary_dispatcher._head_process_status(record.worker_pid_file).get("stopped"))
@@ -3410,9 +3501,17 @@ class HostLaunchContourTests(unittest.TestCase):
         head = subprocess.Popen(["sleep", "30"])
         self.addCleanup(head.kill)
         record = DispatcherRecord(
-            worker="w1", workspace=str(self.data_dir), handle="term:worker", head="claude-opus",
-            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=3,
-            state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            worker="w1",
+            workspace=str(self.data_dir),
+            handle="term:worker",
+            head="claude-opus",
+            review_head="codex-reviewer",
+            attempt_id="a1",
+            comment_baseline=0,
+            review_baseline=3,
+            state="claimed",
+            claimed_at=0.0,
+            worker_pid_file=self.pid_file(str(head.pid)),
             worker_run={"adapter": "claude", "head": "claude-opus"},
             worker_continuation=WorkerContinuation(
                 stage=WorkerContinuationStage.DELIVERY_PENDING,
@@ -3436,10 +3535,12 @@ class HostLaunchContourTests(unittest.TestCase):
                 return {"terminal": {"tail": ["✻ Thinking… (esc to interrupt)"] if sent else [""]}}
             return {}
 
-        with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(self.data_dir / "none")}), \
-             mock.patch.object(self.host, "_run_json", run_json), \
-             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 1), \
-             mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01):
+        with (
+            mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(self.data_dir / "none")}),
+            mock.patch.object(self.host, "_run_json", run_json),
+            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_TIMEOUT_S", 1),
+            mock.patch("triggered_agents.runtime.tui_delivery.TUI_DELIVERY_POLL_S", 0.01),
+        ):
             self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
 
         sends = [command for command in calls if command[2] == "send"]
@@ -3457,9 +3558,17 @@ class HostLaunchContourTests(unittest.TestCase):
         self.addCleanup(head.kill)
         sent_at = time.time() - 1
         record = DispatcherRecord(
-            worker="w1", workspace=str(self.data_dir), handle="term:worker", head="claude-opus",
-            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=3,
-            state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            worker="w1",
+            workspace=str(self.data_dir),
+            handle="term:worker",
+            head="claude-opus",
+            review_head="codex-reviewer",
+            attempt_id="a1",
+            comment_baseline=0,
+            review_baseline=3,
+            state="claimed",
+            claimed_at=0.0,
+            worker_pid_file=self.pid_file(str(head.pid)),
             worker_run={"adapter": "claude", "head": "claude-opus"},
             worker_continuation=WorkerContinuation(
                 stage=WorkerContinuationStage.DELIVERY_PENDING,
@@ -3478,8 +3587,10 @@ class HostLaunchContourTests(unittest.TestCase):
         )
         calls: list[list[str]] = []
 
-        with mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(projects)}), \
-             mock.patch.object(self.host, "_run_json", lambda command: calls.append(command) or {}):
+        with (
+            mock.patch.dict(os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(projects)}),
+            mock.patch.object(self.host, "_run_json", lambda command: calls.append(command) or {}),
+        ):
             self.host.resume_worker({"ref": REF, "project": "secretary", "workspace": {}}, record)
 
         self.assertEqual(calls, [])
@@ -3489,9 +3600,17 @@ class HostLaunchContourTests(unittest.TestCase):
         head = subprocess.Popen(["sleep", "30"])
         self.addCleanup(head.kill)
         record = DispatcherRecord(
-            worker="w1", workspace=str(self.data_dir), handle="term:worker", head="claude-opus",
-            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=3,
-            state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            worker="w1",
+            workspace=str(self.data_dir),
+            handle="term:worker",
+            head="claude-opus",
+            review_head="codex-reviewer",
+            attempt_id="a1",
+            comment_baseline=0,
+            review_baseline=3,
+            state="claimed",
+            claimed_at=0.0,
+            worker_pid_file=self.pid_file(str(head.pid)),
             worker_run={"adapter": "claude", "head": "claude-opus"},
             worker_continuation=WorkerContinuation(
                 stage=WorkerContinuationStage.DELIVERY_CONFIRMED,
@@ -3510,9 +3629,17 @@ class HostLaunchContourTests(unittest.TestCase):
 
     def test_dead_or_missing_retained_worker_refuses_continuation(self) -> None:
         record = DispatcherRecord(
-            worker="w1", workspace=str(self.data_dir / "missing"), handle="term:worker", head="claude-opus",
-            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=0,
-            state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(DEAD_PID)),
+            worker="w1",
+            workspace=str(self.data_dir / "missing"),
+            handle="term:worker",
+            head="claude-opus",
+            review_head="codex-reviewer",
+            attempt_id="a1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="claimed",
+            claimed_at=0.0,
+            worker_pid_file=self.pid_file(str(DEAD_PID)),
             worker_run={"adapter": "claude"},
             worker_continuation=WorkerContinuation(
                 stage=WorkerContinuationStage.DELIVERY_PENDING,
@@ -3529,9 +3656,17 @@ class HostLaunchContourTests(unittest.TestCase):
         head = subprocess.Popen(["sleep", "30"])
         self.addCleanup(head.kill)
         record = DispatcherRecord(
-            worker="w1", workspace=str(self.data_dir / "missing"), handle="term:worker", head="claude-opus",
-            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=0,
-            state="claimed", claimed_at=0.0, worker_pid_file=self.pid_file(str(head.pid)),
+            worker="w1",
+            workspace=str(self.data_dir / "missing"),
+            handle="term:worker",
+            head="claude-opus",
+            review_head="codex-reviewer",
+            attempt_id="a1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="claimed",
+            claimed_at=0.0,
+            worker_pid_file=self.pid_file(str(head.pid)),
             worker_run={"adapter": "claude"},
             worker_continuation=WorkerContinuation(
                 stage=WorkerContinuationStage.DELIVERY_PENDING,
@@ -3549,9 +3684,16 @@ class HostLaunchContourTests(unittest.TestCase):
 
     def test_a_head_nothing_names_cannot_be_reported_as_stopped(self) -> None:
         record = DispatcherRecord(
-            worker="w1", workspace=str(self.data_dir), handle="", head="codex",
-            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=0,
-            state="claimed", claimed_at=0.0,
+            worker="w1",
+            workspace=str(self.data_dir),
+            handle="",
+            head="codex",
+            review_head="codex-reviewer",
+            attempt_id="a1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="claimed",
+            claimed_at=0.0,
         )
 
         with self.assertRaisesRegex(HostError, "neither a pane handle nor a pid heartbeat"):
@@ -3593,8 +3735,7 @@ class WorkerPathReachesOnlyTheSessionHostTests(unittest.TestCase):
         def prepare_head_workspace(self, head: str, workspace: str, *, role: str = "") -> None:
             return None
 
-        def head_launch(self, head, prompt_file, *, workspace, role, launch_prompt=None,
-                        identity=None):
+        def head_launch(self, head, prompt_file, *, workspace, role, launch_prompt=None, identity=None):
             return HeadCommand("run-worker", prompt_after_start=True, adapter="codex")
 
     def setUp(self) -> None:
@@ -3611,18 +3752,23 @@ class WorkerPathReachesOnlyTheSessionHostTests(unittest.TestCase):
         mock.patch.object(self.host, "_run_json", self.runner).start()
         self.addCleanup(mock.patch.object(self.host, "_run", self.runner).stop)
         mock.patch.object(self.host, "_run", self.runner).start()
-        patched = mock.patch.object(
-            CommandHostRuntime, "session", property(lambda _self: self.session)
-        )
+        patched = mock.patch.object(CommandHostRuntime, "session", property(lambda _self: self.session))
         patched.start()
         self.addCleanup(patched.stop)
         (self.data_dir / "TASK.md").write_text("the task", encoding="utf-8")
 
     def record(self, run: dict[str, Any] | None = None) -> DispatcherRecord:
         record = DispatcherRecord(
-            worker="w1", workspace=str(self.data_dir), handle="term:1", head="codex",
-            review_head="codex-reviewer", attempt_id="a1", comment_baseline=0, review_baseline=0,
-            state="claimed", claimed_at=0.0,
+            worker="w1",
+            workspace=str(self.data_dir),
+            handle="term:1",
+            head="codex",
+            review_head="codex-reviewer",
+            attempt_id="a1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="claimed",
+            claimed_at=0.0,
         )
         record.worker_leaf = "leaf:1"
         record.worker_head_run = dict(run or {})
@@ -3630,8 +3776,12 @@ class WorkerPathReachesOnlyTheSessionHostTests(unittest.TestCase):
 
     def spawn_worker(self):
         return self.host._launch(
-            str(self.data_dir), f"{REF} worker", "codex", "TASK.md",
-            role="worker", env_name="SECRETARY_UNSET_COMMAND",
+            str(self.data_dir),
+            f"{REF} worker",
+            "codex",
+            "TASK.md",
+            role="worker",
+            env_name="SECRETARY_UNSET_COMMAND",
             launch_prompt="read TASK.md",
             prompt_document=str(self.data_dir / "TASK.md"),
             task={"ref": REF, "project": "secretary"},
@@ -3774,7 +3924,8 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         # for a decision: these tests drive the rework that decision opens.
         self.sprints = FakeSprints()
         self.sprints.rows["sprint:1031"] = {
-            "ref": "sprint:1031", "status": "open",
+            "ref": "sprint:1031",
+            "status": "open",
             "observer": {"kind": "head", "profile": "claude-observer"},
         }
         self.board.metadata[12]["sprint_ref"] = "sprint:1031"
@@ -3853,20 +4004,29 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         self.leave_a_post_launch_review_intent()
         self.tick()  # the reviewer of the lost tick is adopted
         self.writer.verdict(
-            role="reviewer", actor="reviewer", reference=REF, kind="red",
-            body="needs work", request_id="verdict-red",
+            role="reviewer",
+            actor="reviewer",
+            reference=REF,
+            kind="red",
+            body="needs work",
+            request_id="verdict-red",
         )
         self.tick()  # the verdict parks the card
         self.writer.decide(
-            role="observer", actor="observer", reference=REF, kind="rework",
-            body="observer decision", request_id="decision-rework",
+            role="observer",
+            actor="observer",
+            reference=REF,
+            kind="rework",
+            body="observer decision",
+            request_id="decision-rework",
         )
         with self.state_dies_after("restart_worker"):
             with self.assertRaises(OSError):
                 self.tick()
         intent = self.stored_intent()
-        self.assertEqual((intent["action"], intent["round"], intent["opens_round"]),
-                         ("review-red-rework", 2, True))
+        self.assertEqual(
+            (intent["action"], intent["round"], intent["opens_round"]), ("review-red-rework", 2, True)
+        )
 
     def report_done(self) -> None:
         """Report through the done command the checkout holds: that id names the round the
@@ -4115,9 +4275,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
             ["worker-launch-adopted"],
         )
 
-        paused = self.runtime.pause_pipeline(
-            mode="freeze", actor="operator", reason="maintenance"
-        )
+        paused = self.runtime.pause_pipeline(mode="freeze", actor="operator", reason="maintenance")
 
         self.assertEqual(paused["stopped_worker"], [REF])
         self.assertFalse(self.head_alive("worker"), "a freeze must reach a head with no handle")
@@ -4220,9 +4378,7 @@ class ProductionLaunchIntentTests(unittest.TestCase):
         self.tick()
         self.host.fail_stop_head_reason = "orca terminal close failed"
 
-        paused = self.runtime.pause_pipeline(
-            mode="freeze", actor="operator", reason="maintenance"
-        )
+        paused = self.runtime.pause_pipeline(mode="freeze", actor="operator", reason="maintenance")
 
         self.assertEqual(paused["stopped_worker"], [], "an unconfirmed stop is not a stop")
         self.assertTrue(self.head_alive("worker"))

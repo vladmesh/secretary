@@ -59,7 +59,7 @@ def main(argv: list[str], *, orca_executable: Path | object = _UNSET) -> int:
         return cli_main(argv)
 
 
-REINDEX_SCRIPT = '''
+REINDEX_SCRIPT = """
 import argparse, hashlib, json, sqlite3, sys
 from pathlib import Path
 
@@ -85,7 +85,7 @@ with sqlite3.connect(database) as conn:
             (str(fact["id"]), args.model, digest[: args.dim]),
         )
 print(json.dumps({"ok": True, "parity": {"indexed": len(facts)}}))
-'''
+"""
 
 FACT_BODY = "---\ntags: [restore]\nsource: e2e\ncreated: 2026-07-16\npinned: false\n---\n"
 
@@ -93,8 +93,7 @@ FACT_BODY = "---\ntags: [restore]\nsource: e2e\ncreated: 2026-07-16\npinned: fal
 # Recovery has two inputs, the repo clone and the archive, so the tests seed the
 # facts on both the producer and the restore target.
 CANON_FACTS = {
-    f"global/{slug}.md": FACT_BODY + f"{slug.title()} fact survives restore.\n"
-    for slug in ("alpha", "beta")
+    f"global/{slug}.md": FACT_BODY + f"{slug.title()} fact survives restore.\n" for slug in ("alpha", "beta")
 }
 
 
@@ -104,7 +103,11 @@ def _seed_producer(data_dir: Path, instance_dir: Path) -> tuple[list[dict[str, o
     cards = [
         _restore_card(task_id=12, reference="secretary-1", title="First", column="Ready"),
         _restore_card(
-            task_id=13, reference="secretary-2", title="Second", column="Ready", position=2,
+            task_id=13,
+            reference="secretary-2",
+            title="Second",
+            column="Ready",
+            position=2,
             comments=[{"ts": "2026-07-16T09:00:00Z", "text": "[worker]\nprogress"}],
         ),
         # Core archives exclude Done cards, so this card only survives a full restore.
@@ -112,9 +115,7 @@ def _seed_producer(data_dir: Path, instance_dir: Path) -> tuple[list[dict[str, o
     ]
     board = data_dir / "board"
     (board / "cards.json").write_text(json.dumps({"version": 1, "cards": cards}), encoding="utf-8")
-    (board / "cards.ndjson").write_text(
-        "".join(json.dumps(card) + "\n" for card in cards), encoding="utf-8"
-    )
+    (board / "cards.ndjson").write_text("".join(json.dumps(card) + "\n" for card in cards), encoding="utf-8")
     (board / "export.json").write_text("{}", encoding="utf-8")
     raw = board / "kanboard-raw-e2e"
     (raw / "data").mkdir(parents=True)
@@ -189,7 +190,9 @@ def _create_fixture_backup(root: Path, *, kind: str) -> _Fixture:
 def _target_instance(root: Path, name: str, script: Path) -> tuple[Path, Path]:
     data_dir = root / f"{name}-data"
     instance = _write_instance_to(
-        root / f"{name}-instance", "e2e", data_dir,
+        root / f"{name}-instance",
+        "e2e",
+        data_dir,
         reindex={
             "memory_reindex_python": sys.executable,
             "memory_reindex_script": str(script),
@@ -213,9 +216,7 @@ def _apply_reconcile(instance: Path, data_dir: Path, root: Path) -> int:
     """Run the reconcile handoff against a host that already matches desired state."""
     with legacy_orca_runtime(root) as legacy_orca:
         report = restore_commands.validate_instance(instance)
-        with mock.patch(
-            "secretary.host_apply.find_orca_executable", return_value=None
-        ) as find_executable:
+        with mock.patch("secretary.host_apply.find_orca_executable", return_value=None) as find_executable:
             packaged = resolve_packaged(
                 report.instance,
                 instance_path=report.instance_path.parent,
@@ -262,9 +263,17 @@ class RestoreEndToEndTests(unittest.TestCase):
             instance, data_dir = _target_instance(root, "target", script)
             self.assertFalse(data_dir.exists())
             self.assertFalse((root / "source-data").exists())
-            self.assertEqual(main([
-                "restore", str(fixture.archive), "--instance", str(instance),
-            ]), 0)
+            self.assertEqual(
+                main(
+                    [
+                        "restore",
+                        str(fixture.archive),
+                        "--instance",
+                        str(instance),
+                    ]
+                ),
+                0,
+            )
 
             # A full archive carries the raw dump and every card, done ones included.
             self.assertTrue(list((data_dir / "board").glob("kanboard-raw-*")))
@@ -275,18 +284,19 @@ class RestoreEndToEndTests(unittest.TestCase):
             self.assertEqual(_apply_reconcile(instance, data_dir, root), 0)
 
             self.assertEqual(restore_findings(data_dir), [])
-            self.assertEqual(main(
-                ["doctor", "--offline", "--instance", str(instance)],
-                orca_executable=root / "operator" / ".local" / "bin" / "orca",
-            ), 0)
+            self.assertEqual(
+                main(
+                    ["doctor", "--offline", "--instance", str(instance)],
+                    orca_executable=root / "operator" / ".local" / "bin" / "orca",
+                ),
+                0,
+            )
             state = restore_state(data_dir)
             self.assertEqual(state["board_count"], fixture.manifest["components"]["board"]["count"])
             self.assertEqual(state["memory_index_count"], fixture.facts)
             # The archive carries the derived export, not a journal: canon came
             # back with the private repo and the index was rebuilt off it.
-            self.assertEqual(
-                (data_dir / "memory" / "export.ndjson").read_text(), fixture.export
-            )
+            self.assertEqual((data_dir / "memory" / "export.ndjson").read_text(), fixture.export)
             self.assertFalse((data_dir / "memory" / "facts").exists())
 
     def test_core_archive_restores_normalized_board_without_a_raw_dump(self):
@@ -295,16 +305,26 @@ class RestoreEndToEndTests(unittest.TestCase):
             fixture = _create_fixture_backup(root, kind="core")
             instance, data_dir = _target_instance(root, "target", _reindex_script(root))
 
-            self.assertEqual(main([
-                "restore", str(fixture.archive), "--instance", str(instance),
-            ]), 0)
+            self.assertEqual(
+                main(
+                    [
+                        "restore",
+                        str(fixture.archive),
+                        "--instance",
+                        str(instance),
+                    ]
+                ),
+                0,
+            )
 
             self.assertEqual(list((data_dir / "board").glob("kanboard-raw-*")), [])
             restored = json.loads((data_dir / "board" / "cards.json").read_text())["cards"]
             # Core keeps every non-done card and says so in its export policy.
             expected = [card for card in fixture.cards if card["column"] != "Done"]
             self.assertEqual(len(restored), fixture.manifest["components"]["board"]["count"])
-            self.assertEqual([card["reference"] for card in restored], [card["reference"] for card in expected])
+            self.assertEqual(
+                [card["reference"] for card in restored], [card["reference"] for card in expected]
+            )
             self.assertEqual(
                 json.loads((data_dir / "board" / "export.json").read_text())["policy"]["done_cards"],
                 "excluded",
@@ -329,9 +349,17 @@ class RestoreEndToEndTests(unittest.TestCase):
             fixture.archive.write_bytes(fixture.archive.read_bytes()[:32])
             instance, data_dir = _target_instance(root, "target", _reindex_script(root))
 
-            self.assertEqual(main([
-                "restore", str(fixture.archive), "--instance", str(instance),
-            ]), 2)
+            self.assertEqual(
+                main(
+                    [
+                        "restore",
+                        str(fixture.archive),
+                        "--instance",
+                        str(instance),
+                    ]
+                ),
+                2,
+            )
             self.assertFalse(data_dir.exists())
 
     def test_restore_rejects_a_corrupted_archive_without_creating_the_target(self):
@@ -341,20 +369,24 @@ class RestoreEndToEndTests(unittest.TestCase):
             corrupt_root = root / "corrupt"
             with tarfile.open(fixture.archive) as bundle:
                 bundle.extractall(corrupt_root, filter="data")
-            (
-                corrupt_root
-                / ARCHIVE_ROOT
-                / "secretary-data"
-                / "board"
-                / "cards.json"
-            ).write_text('{"version": 1, "cards": []}\n', encoding="utf-8")
+            (corrupt_root / ARCHIVE_ROOT / "secretary-data" / "board" / "cards.json").write_text(
+                '{"version": 1, "cards": []}\n', encoding="utf-8"
+            )
             with tarfile.open(fixture.archive, "w") as bundle:
                 bundle.add(corrupt_root / ARCHIVE_ROOT, arcname=ARCHIVE_ROOT)
             instance, data_dir = _target_instance(root, "target", _reindex_script(root))
 
-            self.assertEqual(main([
-                "restore", str(fixture.archive), "--instance", str(instance),
-            ]), 2)
+            self.assertEqual(
+                main(
+                    [
+                        "restore",
+                        str(fixture.archive),
+                        "--instance",
+                        str(instance),
+                    ]
+                ),
+                2,
+            )
             self.assertFalse(data_dir.exists())
 
 
@@ -369,7 +401,8 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RestoreError, "unsupported backup version"):
                 restore_backup(
-                    archive, instance,
+                    archive,
+                    instance,
                 )
             self.assertFalse(data_dir.exists())
 
@@ -384,7 +417,8 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
 
             with self.assertRaisesRegex(RestoreError, "target data root already exists"):
                 restore_backup(
-                    archive, instance,
+                    archive,
+                    instance,
                 )
             self.assertEqual(marker.read_text(), '{"version": 1, "cards": []}')
 
@@ -394,14 +428,23 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
             archive = _plain_archive(root)
             instance, data_dir = _target_instance(root, "target", _reindex_script(root))
             restore_backup(
-                archive, instance,
+                archive,
+                instance,
             )
             client = _EmptyWriteKanboard()
-            client.tasks.append({
-                "id": 99, "reference": "secretary-stale", "title": "Stale", "description": "",
-                "column_id": 2, "position": 1, "swimlane_id": 4,
-                "date_creation": "1720000200", "date_modification": "1720000200",
-            })
+            client.tasks.append(
+                {
+                    "id": 99,
+                    "reference": "secretary-stale",
+                    "title": "Stale",
+                    "description": "",
+                    "column_id": 2,
+                    "position": 1,
+                    "swimlane_id": 4,
+                    "date_creation": "1720000200",
+                    "date_modification": "1720000200",
+                }
+            )
             client.metadata[99] = {}
             client.comments[99] = []
 
@@ -417,7 +460,8 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
             archive = _plain_archive(root)
             instance, data_dir = _target_instance(root, "target", _reindex_script(root))
             restore_backup(
-                archive, instance,
+                archive,
+                instance,
             )
             # A core archive carries the two non-done cards.
             self.assertEqual(import_normalized_board(data_dir, client=_EmptyWriteKanboard()), 2)
@@ -438,7 +482,8 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
             instance, data_dir = _target_instance(root, "target", _reindex_script(root))
 
             plan = restore_backup(
-                archive, instance,
+                archive,
+                instance,
             )
 
             actions = {component["name"]: component["action"] for component in plan.components}
@@ -456,10 +501,13 @@ class RestoreEndToEndOfflineTests(unittest.TestCase):
             self.assertFalse([name for name in names if "/generated/" in name])
             # The Orca snapshot travels as debug only, never as restorable data.
             self.assertIn(f"{ARCHIVE_ROOT}/debug/orca-state/inventory.json", names)
-            self.assertFalse([
-                name for name in names
-                if "orca-state" in name and name.startswith(f"{ARCHIVE_ROOT}/secretary-data/")
-            ])
+            self.assertFalse(
+                [
+                    name
+                    for name in names
+                    if "orca-state" in name and name.startswith(f"{ARCHIVE_ROOT}/secretary-data/")
+                ]
+            )
 
 
 def _repacked_archive(root: Path, manifest_changes: dict[str, object], *, kind: str = "core") -> Path:

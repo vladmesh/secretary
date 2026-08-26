@@ -7,6 +7,7 @@ and never renames its terminal tab away from the shell default, so title-based a
 (`_agent_terminals` in runtime/dispatch.py) never recognizes it — it becomes a silent orphan,
 un-reused and un-reaped forever. Used by runtime/dispatch.py, the singleton terminal driver.
 """
+
 from __future__ import annotations
 
 import json

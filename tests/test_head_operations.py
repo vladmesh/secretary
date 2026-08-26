@@ -123,33 +123,36 @@ class HeadOperationTests(unittest.TestCase):
 
     def test_spawn_returns_the_post_delivery_run_without_losing_its_bound_source(self) -> None:
         """A delivery writer, not the stale local launch copy, owns the returned HeadRun."""
+
         class BindingTransport(head_operations.HostTransport):
             def deliver(self, run, pointer, *, host, subject):
                 receipt = super().deliver(run, pointer, host=host, subject=subject)
-                bound = run.with_fanout_policy({
-                    "version": 1,
-                    "state": "unknown",
-                    "terminal_state": "unknown",
-                    "events": [],
-                    "provider_source_required": True,
-                    "provider_source": {
+                bound = run.with_fanout_policy(
+                    {
                         "version": 1,
-                        "kind": "codex_session_event_jsonl",
-                        "state": "bound",
-                        "root": "/sessions",
-                        "path": "/sessions/session.jsonl",
-                        "session_id": "session-1",
-                        "parent_thread_id": "parent-1",
-                        "cursor": {"line": 2, "digest": "a" * 64},
-                        "initial_range": {
-                            "first": {"line": 1, "digest": "b" * 64},
-                            "root": {"line": 2, "digest": "c" * 64},
-                            "last": {"line": 2, "digest": "c" * 64},
-                            "digest": "d" * 64,
+                        "state": "unknown",
+                        "terminal_state": "unknown",
+                        "events": [],
+                        "provider_source_required": True,
+                        "provider_source": {
+                            "version": 1,
+                            "kind": "codex_session_event_jsonl",
+                            "state": "bound",
+                            "root": "/sessions",
+                            "path": "/sessions/session.jsonl",
+                            "session_id": "session-1",
+                            "parent_thread_id": "parent-1",
+                            "cursor": {"line": 2, "digest": "a" * 64},
+                            "initial_range": {
+                                "first": {"line": 1, "digest": "b" * 64},
+                                "root": {"line": 2, "digest": "c" * 64},
+                                "last": {"line": 2, "digest": "c" * 64},
+                                "digest": "d" * 64,
+                            },
+                            "bound_at": "2026-08-13T00:00:00+00:00",
                         },
-                        "bound_at": "2026-08-13T00:00:00+00:00",
-                    },
-                })
+                    }
+                )
                 return HeadDelivery(bound, receipt.outcome)
 
         outcome = self.bring_up(
@@ -204,9 +207,7 @@ class HeadOperationTests(unittest.TestCase):
 
         self.assertIn(("split_pane", anchor.handle), self.host.calls)
         self.assertIn(("open_pane", WORKSPACE, "secretary-1412 worker"), self.host.calls)
-        self.assertNotIn(
-            ("rename_pane", outcome.run.handle, "secretary-1412 worker"), self.host.calls
-        )
+        self.assertNotIn(("rename_pane", outcome.run.handle, "secretary-1412 worker"), self.host.calls)
         self.assertEqual(outcome.run.handle, "term:2")
         self.assertEqual(outcome.fallback_reason, "terminal_split_source_not_found")
 
@@ -219,25 +220,22 @@ class HeadOperationTests(unittest.TestCase):
             self.bring_up(split_from=anchor.handle)
 
         self.assertEqual(
-            self.host.calls.count(("open_pane", WORKSPACE, "secretary-1412 worker")), 1,
+            self.host.calls.count(("open_pane", WORKSPACE, "secretary-1412 worker")),
+            1,
             "the failed split must not open a standalone replacement",
         )
         self.assertEqual(len(self.host.panes(WORKSPACE)), 2)
 
     def test_a_bring_up_whose_pane_closes_cleanly_left_nothing_running(self) -> None:
         with self.assertRaises(HeadSpawnFailed):
-            self.bring_up(
-                pointer=NudgePointer.line("report now"), transport=RefusingTransport()
-            )
+            self.bring_up(pointer=NudgePointer.line("report now"), transport=RefusingTransport())
         self.assertEqual(self.host.closed, ["term:1"])
 
     def test_a_bring_up_whose_pane_will_not_close_is_ambiguous_and_keeps_its_run(self) -> None:
         """The distinction the product has killed live heads by collapsing."""
         self.host.refuse_close = True
         with self.assertRaises(HeadSpawnAborted) as caught:
-            self.bring_up(
-                pointer=NudgePointer.line("report now"), transport=RefusingTransport()
-            )
+            self.bring_up(pointer=NudgePointer.line("report now"), transport=RefusingTransport())
 
         self.assertEqual(caught.exception.run.handle, "term:1")
         self.assertEqual(caught.exception.run.workspace, WORKSPACE)
@@ -272,8 +270,9 @@ class HeadOperationTests(unittest.TestCase):
     def test_stop_closes_the_pane_and_records_who_ended_the_head(self) -> None:
         run = self.bring_up().run
 
-        outcome = stop(run, StopInitiator(actor="reviewer-freeze", reason="review took the tree"),
-                       host=self.host)
+        outcome = stop(
+            run, StopInitiator(actor="reviewer-freeze", reason="review took the tree"), host=self.host
+        )
 
         self.assertEqual(outcome.run.lifecycle, EXITED)
         self.assertEqual(outcome.run.stopped_by.actor, "reviewer-freeze")
@@ -317,8 +316,7 @@ class HeadOperationTests(unittest.TestCase):
 
         self.host.refuse_close = True
         with self.assertRaises(HeadStopFailed):
-            stop(run, StopInitiator(actor="idle-watchdog", reason="no turn"),
-                 host=self.host, commit=commit)
+            stop(run, StopInitiator(actor="idle-watchdog", reason="no turn"), host=self.host, commit=commit)
 
         self.assertEqual(written[0].stopped_by.actor, "idle-watchdog")
         self.assertEqual(written[0].lifecycle, FINISHING)
@@ -359,8 +357,7 @@ class HeadOperationTests(unittest.TestCase):
         run = self.bring_up().run
         self.host.refuse_close = True
         with self.assertRaises(HeadStopFailed) as first:
-            stop(run, StopInitiator(actor="review-freeze", reason="review took the tree"),
-                 host=self.host)
+            stop(run, StopInitiator(actor="review-freeze", reason="review took the tree"), host=self.host)
 
         stored = HeadRun.from_json(first.exception.run.to_json())
         self.assertFalse(stored.settled, "a refused stop is not finished with")
@@ -376,7 +373,10 @@ class HeadOperationTests(unittest.TestCase):
     def test_a_head_with_neither_pane_nor_heartbeat_cannot_be_promised_gone(self) -> None:
         run = self.bring_up().run
         orphan = HeadRun(
-            run_id=run.run_id, spec=CODEX, workspace="", task_ref=self.task,
+            run_id=run.run_id,
+            spec=CODEX,
+            workspace="",
+            task_ref=self.task,
         )
 
         with self.assertRaises(HeadStopFailed):
@@ -461,8 +461,7 @@ class HeadOperationTests(unittest.TestCase):
         )
 
     def test_a_run_survives_being_written_down_and_read_back(self) -> None:
-        run = stop(self.bring_up().run, StopInitiator(actor="watchdog", reason="idle"),
-                   host=self.host).run
+        run = stop(self.bring_up().run, StopInitiator(actor="watchdog", reason="idle"), host=self.host).run
 
         restored = HeadRun.from_json(run.to_json())
 
@@ -480,7 +479,12 @@ class TaskPointerTests(unittest.TestCase):
 
     def spawn_at(self, task_ref: TaskRef) -> HeadRun:
         return spawn(
-            CODEX, WORKSPACE, task_ref, host=self.host, command="run", title="head",
+            CODEX,
+            WORKSPACE,
+            task_ref,
+            host=self.host,
+            command="run",
+            title="head",
             transport=CONFIRMING,
         ).run
 
@@ -529,13 +533,12 @@ class BackendIndependenceTests(unittest.TestCase):
                     names = [alias.name for alias in node.names]
                     names.append(getattr(node, "module", "") or "")
                     for name in names:
-                        self.assertNotIn(
-                            "subprocess", name, f"{source.name} spawns processes of its own"
-                        )
+                        self.assertNotIn("subprocess", name, f"{source.name} spawns processes of its own")
                 if isinstance(node, ast.Constant) and isinstance(node.value, str):
                     if id(node) in docstrings:
                         continue
                     self.assertNotIn(
-                        "orca", node.value.lower(),
+                        "orca",
+                        node.value.lower(),
                         f"{source.name} reaches a session manager by name: {node.value!r}",
                     )

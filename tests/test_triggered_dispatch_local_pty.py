@@ -18,6 +18,7 @@ reaches the session store directly, under `_reap_ghosts` — records and raises.
 is stubbed out, so no helper can stand in front of a call and hide it: a mock of `_reap_ghosts`
 that answers plausibly is exactly what let the last round's tests pass over a breach.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -64,7 +65,7 @@ def _alive(pid: int) -> bool:
     except OSError:
         return False
     close = stat.rfind(")")
-    fields = stat[close + 2:].split()
+    fields = stat[close + 2 :].split()
     return bool(fields) and fields[0] != "Z"
 
 
@@ -189,8 +190,9 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
             {self.AGENT: "head"},
         )
 
-    def _rendered(self, profile, *, prompt=None, workspace="", role="", identity=None,
-                  binding="") -> HeadCommand:
+    def _rendered(
+        self, profile, *, prompt=None, workspace="", role="", identity=None, binding=""
+    ) -> HeadCommand:
         """The command a head is raised with, substituted for the real renderer.
 
         What the renderer produces is a provider CLI this test has no business starting, and how it
@@ -198,8 +200,7 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
         profile and its `runtime` — still comes from the real registry through the real
         `_launch_cmd`; only the program the head runs is this fixture.
         """
-        return HeadCommand(HEAD_COMMAND, prompt_after_start=self.prompt_after_start,
-                           adapter="claude")
+        return HeadCommand(HEAD_COMMAND, prompt_after_start=self.prompt_after_start, adapter="claude")
 
     def _reads(self, registry):
         """What each `load_registry()` of this tick answers, and how many it took.
@@ -246,11 +247,9 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
             enter(mock.patch.object(dispatch, "_pipeline_paused", return_value=False))
             enter(mock.patch.object(dispatch, "CLAUDE_JSON", self.data_dir / "claude.json"))
             enter(mock.patch.object(dispatch, "render_head_command", self._rendered))
-            enter(mock.patch.object(pipeline_heads, "load_registry",
-                                    side_effect=self._reads(registry)))
+            enter(mock.patch.object(pipeline_heads, "load_registry", side_effect=self._reads(registry)))
             enter(mock.patch.object(pipeline_health, "refresh", return_value={}))
-            enter(mock.patch.object(pipeline_health, "resolve_head",
-                                    return_value=self.resolved))
+            enter(mock.patch.object(pipeline_health, "resolve_head", return_value=self.resolved))
             yield host
 
     def run_tick(self, registry, *, host=None) -> int:
@@ -264,8 +263,7 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
         runs = self.state.dir / "runs.jsonl"
         if not runs.is_file():
             return []
-        return [json.loads(line)["action"]
-                for line in runs.read_text(encoding="utf-8").splitlines()]
+        return [json.loads(line)["action"] for line in runs.read_text(encoding="utf-8").splitlines()]
 
     def events(self) -> list[dict]:
         runs = self.state.dir / "runs.jsonl"
@@ -274,8 +272,7 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
         return [json.loads(line) for line in runs.read_text(encoding="utf-8").splitlines()]
 
     def run_dirs(self) -> list[Path]:
-        return sorted(path for path in self.root.glob("*") if path.is_dir()) \
-            if self.root.is_dir() else []
+        return sorted(path for path in self.root.glob("*") if path.is_dir()) if self.root.is_dir() else []
 
     def head_pid(self, run_dir: Path) -> int:
         try:
@@ -334,8 +331,7 @@ class BackendChoiceTests(MechanicalRoleBackendTestCase):
         with mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)):
             self.assertEqual(self.run_tick(self._registry(), host=host), 0)
 
-        self.assertEqual([title for _ws, title, _cmd in host.opened],
-                         [f"triggered-agent:{self.AGENT}"])
+        self.assertEqual([title for _ws, title, _cmd in host.opened], [f"triggered-agent:{self.AGENT}"])
         self.assertEqual(self.run_dirs(), [], "a pane profile raised a supervised head")
         self.assertEqual(self.actions(), ["created"])
 
@@ -343,12 +339,9 @@ class BackendChoiceTests(MechanicalRoleBackendTestCase):
         host = RecordingSessionHost()
 
         with mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)):
-            self.assertEqual(
-                self.run_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0
-            )
+            self.assertEqual(self.run_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
 
-        self.assertEqual([title for _ws, title, _cmd in host.opened],
-                         [f"triggered-agent:{self.AGENT}"])
+        self.assertEqual([title for _ws, title, _cmd in host.opened], [f"triggered-agent:{self.AGENT}"])
         self.assertEqual(self.run_dirs(), [], "a pane profile raised a supervised head")
         self.assertEqual(self.actions(), ["created"])
 
@@ -368,10 +361,18 @@ class BackendChoiceTests(MechanicalRoleBackendTestCase):
         registry = pipeline_heads.Registry(
             {"acct": {"account": "acct", "probe": "true"}},
             {
-                "routed": {"resource": "acct", "adapter": "claude", "fallback": ["supervised"],
-                           "runtime": ORCA_LEGACY_RUNTIME},
-                "supervised": {"resource": "acct", "adapter": "claude", "fallback": [],
-                               "runtime": LOCAL_PTY_RUNTIME},
+                "routed": {
+                    "resource": "acct",
+                    "adapter": "claude",
+                    "fallback": ["supervised"],
+                    "runtime": ORCA_LEGACY_RUNTIME,
+                },
+                "supervised": {
+                    "resource": "acct",
+                    "adapter": "claude",
+                    "fallback": [],
+                    "runtime": LOCAL_PTY_RUNTIME,
+                },
             },
             {self.AGENT: "routed"},
         )
@@ -393,8 +394,12 @@ class BackendChoiceTests(MechanicalRoleBackendTestCase):
         registry = pipeline_heads.Registry(
             {"acct": {"account": "acct", "probe": "true"}},
             {
-                "routed": {"resource": "acct", "adapter": "claude", "fallback": ["pane"],
-                           "runtime": LOCAL_PTY_RUNTIME},
+                "routed": {
+                    "resource": "acct",
+                    "adapter": "claude",
+                    "fallback": ["pane"],
+                    "runtime": LOCAL_PTY_RUNTIME,
+                },
                 "pane": {"resource": "acct", "adapter": "claude", "fallback": []},
             },
             {self.AGENT: "routed"},
@@ -448,8 +453,7 @@ class OneRegistryReadingTests(MechanicalRoleBackendTestCase):
     def test_a_supervised_tick_opens_the_registry_once(self) -> None:
         self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
 
-        self.assertEqual(self.reads, 1,
-                         "the supervised tick opened the head registry more than once")
+        self.assertEqual(self.reads, 1, "the supervised tick opened the head registry more than once")
         self.assertEqual(len(self.run_dirs()), 1)
 
     def test_a_supervised_tick_makes_no_orca_call_at_all(self) -> None:
@@ -491,11 +495,11 @@ class OneRegistryReadingTests(MechanicalRoleBackendTestCase):
         with mock.patch.object(dispatch.orca_rpc, "call", side_effect=reap):
             self.assertEqual(self.run_tick(self._published_between_the_old_readings(), host=host), 0)
 
-        self.assertEqual(self.run_dirs(), [],
-                         "the tick acted on Orca and then handed its head to a supervisor")
+        self.assertEqual(
+            self.run_dirs(), [], "the tick acted on Orca and then handed its head to a supervisor"
+        )
         self.assertEqual(self.reads, 1, "the tick read the registry the publication changed")
-        self.assertEqual([title for _ws, title, _cmd in host.opened],
-                         [f"triggered-agent:{self.AGENT}"])
+        self.assertEqual([title for _ws, title, _cmd in host.opened], [f"triggered-agent:{self.AGENT}"])
         self.assertEqual(self.actions(), ["created"])
         self.assertTrue(reaped, "the pane tick was expected to reap its own ghost tabs")
 
@@ -529,8 +533,12 @@ class DivertedLaunchReportCardTests(MechanicalRoleBackendTestCase):
         return pipeline_heads.Registry(
             {"acct": {"account": "acct", "probe": "true"}},
             {
-                "routed": {"resource": "acct", "adapter": "claude", "fallback": ["pane"],
-                           "runtime": LOCAL_PTY_RUNTIME},
+                "routed": {
+                    "resource": "acct",
+                    "adapter": "claude",
+                    "fallback": ["pane"],
+                    "runtime": LOCAL_PTY_RUNTIME,
+                },
                 "pane": {"resource": "acct", "adapter": "claude", "fallback": []},
             },
             {self.AGENT: "routed"},
@@ -542,14 +550,20 @@ class DivertedLaunchReportCardTests(MechanicalRoleBackendTestCase):
 
         with contextlib.ExitStack() as stack:
             enter = stack.enter_context
-            enter(mock.patch.object(
-                dispatch, "_fresh_steward_report_in_progress",
-                return_value={"reference": "secretary-report"},
-            ))
-            enter(mock.patch.object(
-                dispatch, "_release_steward_report",
-                side_effect=lambda state, event, cmd, note: released.append(cmd),
-            ))
+            enter(
+                mock.patch.object(
+                    dispatch,
+                    "_fresh_steward_report_in_progress",
+                    return_value={"reference": "secretary-report"},
+                )
+            )
+            enter(
+                mock.patch.object(
+                    dispatch,
+                    "_release_steward_report",
+                    side_effect=lambda state, event, cmd, note: released.append(cmd),
+                )
+            )
             self.assertEqual(self.run_tick(self._diverted()), 0)
 
         self.assertEqual(len(released), 1, "the diverted launch's report card was left open")
@@ -564,7 +578,8 @@ class SupervisedDeliveryTests(MechanicalRoleBackendTestCase):
         self.prompt_after_start = True
         forbidden = {
             name: mock.patch.object(
-                dispatch, name,
+                dispatch,
+                name,
                 side_effect=AssertionError(f"the supervised path called {name}"),
             )
             for name in ("_confirm_delivery", "_is_idle", "_agent_terminals", "_reap_ghosts")
@@ -634,13 +649,20 @@ class SupervisedHeadLifetimeTests(MechanicalRoleBackendTestCase):
         self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
 
         self.assertEqual(self.run_dirs(), [run_dir], "a second run was started beside a live head")
-        self.assertEqual((self.head_pid(run_dir), self.supervisor_pid(run_dir)),
-                         (head, supervisor), "the live head was replaced")
-        self.assertEqual(self.head_output(run_dir).count("/retro"), delivered,
-                         "the busy head was sent a second skill")
+        self.assertEqual(
+            (self.head_pid(run_dir), self.supervisor_pid(run_dir)),
+            (head, supervisor),
+            "the live head was replaced",
+        )
+        self.assertEqual(
+            self.head_output(run_dir).count("/retro"), delivered, "the busy head was sent a second skill"
+        )
         self.assertEqual(self.actions(), ["supervised-started", "supervised-busy-skip"])
-        self.assertEqual(self.events()[-1]["error"], "head_already_up",
-                         "the refusal is the launch identity's, made before anything was spawned")
+        self.assertEqual(
+            self.events()[-1]["error"],
+            "head_already_up",
+            "the refusal is the launch identity's, made before anything was spawned",
+        )
 
     def test_a_dead_head_is_an_ordinary_bring_up(self) -> None:
         """Criterion 6: nothing about a finished run fences its role out of the next tick."""
@@ -649,15 +671,18 @@ class SupervisedHeadLifetimeTests(MechanicalRoleBackendTestCase):
         _kill(self.supervisor_pid(run_dir))
         _kill(dead, group=True)
         _kill(dead)
-        self.await_(lambda: head_process_status(
-            str(run_dir / protocol.PID_FILE_NAME)).get("state") == "dead",
-            message="the head never actually died")
+        self.await_(
+            lambda: head_process_status(str(run_dir / protocol.PID_FILE_NAME)).get("state") == "dead",
+            message="the head never actually died",
+        )
 
         self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
 
         self.assertEqual(self.run_dirs(), [run_dir], "the dead run was abandoned rather than reused")
-        self.await_(lambda: _alive(self.head_pid(run_dir)) and self.head_pid(run_dir) != dead,
-                    message="the tick raised no head over the dead one")
+        self.await_(
+            lambda: _alive(self.head_pid(run_dir)) and self.head_pid(run_dir) != dead,
+            message="the tick raised no head over the dead one",
+        )
         self.assertEqual(self.actions(), ["supervised-started", "supervised-started"])
 
     def test_a_record_left_by_a_previous_boot_does_not_fence_the_role_out(self) -> None:
@@ -679,8 +704,10 @@ class SupervisedHeadLifetimeTests(MechanicalRoleBackendTestCase):
 
         self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
 
-        self.await_(lambda: _alive(self.head_pid(run_dir)),
-                    message="a record from another boot became a permanent refusal to go on duty")
+        self.await_(
+            lambda: _alive(self.head_pid(run_dir)),
+            message="a record from another boot became a permanent refusal to go on duty",
+        )
         self.assertEqual(self.actions(), ["supervised-started", "supervised-started"])
 
 
@@ -707,21 +734,24 @@ class BackendHandoverTests(MechanicalRoleBackendTestCase):
         self.assertIsNotNone(self.state.load_terminal_handle())
 
         # The profile of this same role is republished onto the supervisor, between ticks.
-        self.assertEqual(
-            self._pane_tick(self._registry(runtime=LOCAL_PTY_RUNTIME), host=host), 0
-        )
+        self.assertEqual(self._pane_tick(self._registry(runtime=LOCAL_PTY_RUNTIME), host=host), 0)
 
-        self.assertEqual(self.run_dirs(), [],
-                         "the handover tick raised a supervised head beside the live pane")
+        self.assertEqual(
+            self.run_dirs(), [], "the handover tick raised a supervised head beside the live pane"
+        )
         self.assertEqual(len(host.opened), 1, "the handover tick opened a second pane")
-        self.assertEqual(host.stopped, [str(self.workspace)],
-                         "the pane that held this role's head was not closed on the pane's path")
-        self.assertIsNone(self.state.load_terminal_handle(),
-                          "the pane is still recorded as the owner of this role's head")
-        self.assertIsNone(self.state.load_head_run(),
-                          "the handover tick wrote a supervised owner it never raised")
-        self.assertIsNone(self.state.load_active_report(),
-                          "the handover tick left a report card behind")
+        self.assertEqual(
+            host.stopped,
+            [str(self.workspace)],
+            "the pane that held this role's head was not closed on the pane's path",
+        )
+        self.assertIsNone(
+            self.state.load_terminal_handle(), "the pane is still recorded as the owner of this role's head"
+        )
+        self.assertIsNone(
+            self.state.load_head_run(), "the handover tick wrote a supervised owner it never raised"
+        )
+        self.assertIsNone(self.state.load_active_report(), "the handover tick left a report card behind")
         self.assertEqual(self.actions(), ["created", "handover-to-supervised"])
 
         # The next tick, with no live head left anywhere, raises one on the new backend.
@@ -741,32 +771,28 @@ class BackendHandoverTests(MechanicalRoleBackendTestCase):
         self.assertTrue(_alive(head), "the first tick raised no live head")
 
         host = RecordingSessionHost()
-        self.assertEqual(
-            self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0
-        )
+        self.assertEqual(self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
 
-        self.assertEqual(host.opened, [],
-                         "the handover tick opened a pane beside a live supervised head")
-        self.await_(lambda: not _alive(head),
-                    message="the supervised head outlived the tick that handed the role back")
+        self.assertEqual(host.opened, [], "the handover tick opened a pane beside a live supervised head")
+        self.await_(
+            lambda: not _alive(head),
+            message="the supervised head outlived the tick that handed the role back",
+        )
         self.await_(lambda: not _alive(supervisor), soft=True)
-        self.assertIsNone(self.state.load_head_run(),
-                          "the supervised head is still recorded as the owner")
-        self.assertIsNone(self.state.load_terminal_handle(),
-                          "the handover tick recorded a pane it never opened")
-        self.assertIsNone(self.state.load_active_report(),
-                          "the handover tick left a report card behind")
+        self.assertIsNone(self.state.load_head_run(), "the supervised head is still recorded as the owner")
+        self.assertIsNone(
+            self.state.load_terminal_handle(), "the handover tick recorded a pane it never opened"
+        )
+        self.assertIsNone(self.state.load_active_report(), "the handover tick left a report card behind")
         self.assertEqual(self.actions(), ["supervised-started", "handover-to-pane"])
 
         # The next tick, with no live head left anywhere, opens the pane.
-        self.assertEqual(
-            self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0
-        )
+        self.assertEqual(self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
 
-        self.assertEqual([title for _ws, title, _cmd in host.opened],
-                         [f"triggered-agent:{self.AGENT}"])
-        self.assertEqual(self.run_dirs(), [run_dir],
-                         "the tick after the handover raised another supervised head")
+        self.assertEqual([title for _ws, title, _cmd in host.opened], [f"triggered-agent:{self.AGENT}"])
+        self.assertEqual(
+            self.run_dirs(), [run_dir], "the tick after the handover raised another supervised head"
+        )
         self.assertEqual(self.actions()[-1], "created")
 
     def test_a_pane_that_will_not_confirm_it_stopped_raises_nothing(self) -> None:
@@ -775,14 +801,14 @@ class BackendHandoverTests(MechanicalRoleBackendTestCase):
         self.assertEqual(self._pane_tick(self._registry(), host=host), 0)
 
         with mock.patch.object(dispatch, "_stop_and_confirm", return_value=False):
-            self.assertEqual(
-                self._pane_tick(self._registry(runtime=LOCAL_PTY_RUNTIME), host=host), 0
-            )
+            self.assertEqual(self._pane_tick(self._registry(runtime=LOCAL_PTY_RUNTIME), host=host), 0)
 
-        self.assertEqual(self.run_dirs(), [],
-                         "a pane that would not confirm its stop still got a second head")
-        self.assertIsNotNone(self.state.load_terminal_handle(),
-                             "the owner was forgotten without its stop being confirmed")
+        self.assertEqual(
+            self.run_dirs(), [], "a pane that would not confirm its stop still got a second head"
+        )
+        self.assertIsNotNone(
+            self.state.load_terminal_handle(), "the owner was forgotten without its stop being confirmed"
+        )
         self.assertEqual(self.actions(), ["created", "handover-stop-failed"])
 
     def test_a_supervised_head_that_has_already_ended_is_not_a_handover(self) -> None:
@@ -793,19 +819,17 @@ class BackendHandoverTests(MechanicalRoleBackendTestCase):
         _kill(self.supervisor_pid(run_dir))
         _kill(dead, group=True)
         _kill(dead)
-        self.await_(lambda: head_process_status(
-            str(run_dir / protocol.PID_FILE_NAME)).get("state") == "dead",
-            message="the head never actually died")
+        self.await_(
+            lambda: head_process_status(str(run_dir / protocol.PID_FILE_NAME)).get("state") == "dead",
+            message="the head never actually died",
+        )
 
         host = RecordingSessionHost()
-        self.assertEqual(
-            self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0
-        )
+        self.assertEqual(self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
 
         self.assertEqual(len(host.opened), 1, "the pane tick was skipped for a head that had ended")
         self.assertIsNone(self.state.load_head_run())
-        self.assertEqual(self.actions(),
-                         ["supervised-started", "handover-owner-gone", "created"])
+        self.assertEqual(self.actions(), ["supervised-started", "handover-owner-gone", "created"])
 
 
 class StewardBoard:
@@ -873,12 +897,13 @@ class StewardBackendHandoverTests(MechanicalRoleBackendTestCase):
 
     @contextlib.contextmanager
     def _tick(self, registry, *, host):
-        with super()._tick(registry, host=host) as running, \
-                mock.patch.object(dispatch, "_load_spec", return_value={"skill": "/steward"}), \
-                mock.patch.object(pipeline_ops, "create_report_card",
-                                  side_effect=self.board.create_report_card), \
-                mock.patch.object(pipeline_ops, "list_cards", side_effect=self.board.list_cards), \
-                mock.patch.object(pipeline_ops, "move_card", side_effect=self.board.move_card):
+        with (
+            super()._tick(registry, host=host) as running,
+            mock.patch.object(dispatch, "_load_spec", return_value={"skill": "/steward"}),
+            mock.patch.object(pipeline_ops, "create_report_card", side_effect=self.board.create_report_card),
+            mock.patch.object(pipeline_ops, "list_cards", side_effect=self.board.list_cards),
+            mock.patch.object(pipeline_ops, "move_card", side_effect=self.board.move_card),
+        ):
             yield running
 
     def _pane_tick(self, registry, host):
@@ -895,14 +920,18 @@ class StewardBackendHandoverTests(MechanicalRoleBackendTestCase):
 
     def _assert_the_handover_owed_nothing(self, standing: str) -> None:
         """What a handover tick leaves behind, in both directions and for both cards."""
-        self.assertEqual(len(self.board.cards), 1,
-                         "the handover tick created a report card of its own")
-        self.assertEqual(self.board.in_progress(), [],
-                         "the card the stopped head was writing was left In progress")
-        self.assertIn((self.AGENT, standing, "Done"), self.board.moves,
-                      "the card of the head this tick stopped was never closed")
-        self.assertIsNone(self.state.load_active_report(),
-                          "a record of a head that no longer exists was left standing")
+        self.assertEqual(len(self.board.cards), 1, "the handover tick created a report card of its own")
+        self.assertEqual(
+            self.board.in_progress(), [], "the card the stopped head was writing was left In progress"
+        )
+        self.assertIn(
+            (self.AGENT, standing, "Done"),
+            self.board.moves,
+            "the card of the head this tick stopped was never closed",
+        )
+        self.assertIsNone(
+            self.state.load_active_report(), "a record of a head that no longer exists was left standing"
+        )
 
     def test_a_pane_head_hands_its_report_over_with_the_role(self) -> None:
         """`orca-legacy -> local-pty`, the direction the live installation's steward is in."""
@@ -910,9 +939,7 @@ class StewardBackendHandoverTests(MechanicalRoleBackendTestCase):
         self.assertEqual(self._pane_tick(self._registry(), host=host), 0)
         standing = self._standing_report()
 
-        self.assertEqual(
-            self._pane_tick(self._registry(runtime=LOCAL_PTY_RUNTIME), host=host), 0
-        )
+        self.assertEqual(self._pane_tick(self._registry(runtime=LOCAL_PTY_RUNTIME), host=host), 0)
 
         self._assert_the_handover_owed_nothing(standing)
         self.assertEqual(len(host.opened), 1, "the handover tick opened a second pane")
@@ -928,12 +955,15 @@ class StewardBackendHandoverTests(MechanicalRoleBackendTestCase):
         self.assertEqual(made, [], "the bring-up after the handover reached Orca")
         self.assertEqual(len(self.run_dirs()), 1, "the tick after the handover raised no head")
         self.assertTrue(_alive(self.head_pid(self.run_dirs()[0])))
-        self.assertEqual(len(self.board.cards), 2,
-                         "the tick that raised the head filed no card, or filed more than one")
+        self.assertEqual(
+            len(self.board.cards), 2, "the tick that raised the head filed no card, or filed more than one"
+        )
         self.assertEqual(self.board.in_progress(), [self.board.cards[-1]["reference"]])
-        self.assertEqual((self.state.load_active_report() or {}).get("reference"),
-                         self.board.cards[-1]["reference"],
-                         "the head that was raised is not recorded as writing the new card")
+        self.assertEqual(
+            (self.state.load_active_report() or {}).get("reference"),
+            self.board.cards[-1]["reference"],
+            "the head that was raised is not recorded as writing the new card",
+        )
 
     def test_a_supervised_head_hands_its_report_back_with_the_role(self) -> None:
         """`local-pty -> orca-legacy`, closed across the boundary that raised the head."""
@@ -944,33 +974,33 @@ class StewardBackendHandoverTests(MechanicalRoleBackendTestCase):
         standing = self._standing_report()
 
         host = RecordingSessionHost()
-        self.assertEqual(
-            self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0
-        )
+        self.assertEqual(self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
 
         self._assert_the_handover_owed_nothing(standing)
-        self.assertEqual(host.opened, [],
-                         "the handover tick opened a pane beside a live supervised head")
-        self.await_(lambda: not _alive(head),
-                    message="the supervised head outlived the tick that handed the role back")
+        self.assertEqual(host.opened, [], "the handover tick opened a pane beside a live supervised head")
+        self.await_(
+            lambda: not _alive(head),
+            message="the supervised head outlived the tick that handed the role back",
+        )
         self.assertIsNone(self.state.load_head_run())
         self.assertEqual(self.actions()[-2:], ["owner-report-release", "handover-to-pane"])
 
         # The tick after it opens the pane, and files exactly one card for it.
-        self.assertEqual(
-            self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0
-        )
+        self.assertEqual(self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0)
 
-        self.assertEqual([title for _ws, title, _cmd in host.opened],
-                         [f"triggered-agent:{self.AGENT}"])
-        self.assertEqual(self.run_dirs(), [run_dir],
-                         "the tick after the handover raised another supervised head")
-        self.assertEqual(len(self.board.cards), 2,
-                         "the tick that opened the pane filed no card, or filed more than one")
+        self.assertEqual([title for _ws, title, _cmd in host.opened], [f"triggered-agent:{self.AGENT}"])
+        self.assertEqual(
+            self.run_dirs(), [run_dir], "the tick after the handover raised another supervised head"
+        )
+        self.assertEqual(
+            len(self.board.cards), 2, "the tick that opened the pane filed no card, or filed more than one"
+        )
         self.assertEqual(self.board.in_progress(), [self.board.cards[-1]["reference"]])
-        self.assertEqual((self.state.load_active_report() or {}).get("reference"),
-                         self.board.cards[-1]["reference"],
-                         "the head that was opened is not recorded as writing the new card")
+        self.assertEqual(
+            (self.state.load_active_report() or {}).get("reference"),
+            self.board.cards[-1]["reference"],
+            "the head that was opened is not recorded as writing the new card",
+        )
 
     def test_a_pane_that_will_not_confirm_it_stopped_keeps_its_head_and_its_report(self) -> None:
         """Fail-closed is fail-closed for the card too: the writer is still up, so it still owns
@@ -980,13 +1010,12 @@ class StewardBackendHandoverTests(MechanicalRoleBackendTestCase):
         standing = self._standing_report()
 
         with mock.patch.object(dispatch, "_stop_and_confirm", return_value=False):
-            self.assertEqual(
-                self._pane_tick(self._registry(runtime=LOCAL_PTY_RUNTIME), host=host), 0
-            )
+            self.assertEqual(self._pane_tick(self._registry(runtime=LOCAL_PTY_RUNTIME), host=host), 0)
 
         self.assertEqual(len(self.board.cards), 1, "the refused handover created a report card")
-        self.assertEqual(self.board.in_progress(), [standing],
-                         "the card of a head that is still up was closed")
+        self.assertEqual(
+            self.board.in_progress(), [standing], "the card of a head that is still up was closed"
+        )
         self.assertEqual((self.state.load_active_report() or {}).get("reference"), standing)
         self.assertIsNotNone(self.state.load_terminal_handle())
         self.assertEqual(self.run_dirs(), [])
@@ -1002,12 +1031,17 @@ class StewardBackendHandoverTests(MechanicalRoleBackendTestCase):
         self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
 
         self.assertEqual(len(self.board.cards), 2, "the busy tick filed no card of its own")
-        self.assertEqual(self.board.in_progress(), [standing],
-                         "the busy head's own report was closed under it")
+        self.assertEqual(
+            self.board.in_progress(), [standing], "the busy head's own report was closed under it"
+        )
         self.assertIn((self.AGENT, self.board.cards[-1]["reference"], "Done"), self.board.moves)
-        self.assertEqual((self.state.load_active_report() or {}).get("reference"), standing,
-                         "the record stopped naming the card the live head is writing")
+        self.assertEqual(
+            (self.state.load_active_report() or {}).get("reference"),
+            standing,
+            "the record stopped naming the card the live head is writing",
+        )
         self.assertEqual(self.actions()[-1], "supervised-busy-skip")
+
 
 if __name__ == "__main__":
     unittest.main()

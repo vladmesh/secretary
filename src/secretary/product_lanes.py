@@ -10,6 +10,7 @@ Nothing here decides which lane a record belongs in.  The destination name comes
 ``product_lane_name`` and the destination lane from ``product_swimlane_id`` - the same rule, the
 same lane, as the writers.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -73,11 +74,13 @@ def _plan(store: Any, board_id: int) -> dict[str, Any]:
 
     # Rows of the same (column, lane) are already numbered by the board; keeping that order as the
     # order of the moves is what makes the records that travel together arrive in the same order.
-    records.sort(key=lambda item: (
-        _nonnegative_int(item[0].get("swimlane_id")),
-        _nonnegative_int(item[0].get("position")),
-        _nonnegative_int(item[0].get("id")),
-    ))
+    records.sort(
+        key=lambda item: (
+            _nonnegative_int(item[0].get("swimlane_id")),
+            _nonnegative_int(item[0].get("position")),
+            _nonnegative_int(item[0].get("id")),
+        )
+    )
 
     # How many rows each (column, lane) holds - every card of the board, not only the typed
     # records, because a move is placed among all the siblings the board has there.
@@ -99,15 +102,21 @@ def _plan(store: Any, board_id: int) -> dict[str, Any]:
             # record, so a row that is both is counted here and listed as unresolved below.
             closed_count += 1
         if not product or product not in registered:
-            unresolved.append({
-                "ref": reference, "record_type": kind, "product": product,
-                "reason": "product is not stated on the record" if not product
-                          else "product is not a registered Product",
-            })
+            unresolved.append(
+                {
+                    "ref": reference,
+                    "record_type": kind,
+                    "product": product,
+                    "reason": "product is not stated on the record"
+                    if not product
+                    else "product is not a registered Product",
+                }
+            )
             continue
         lane_name = product_lane_name(product)
         entry = summary.setdefault(
-            product, {"product": product, "lane": lane_name, "move": 0, "in_place": 0, "closed": 0},
+            product,
+            {"product": product, "lane": lane_name, "move": 0, "in_place": 0, "closed": 0},
         )
         if closed:
             entry["closed"] += 1
@@ -117,23 +126,30 @@ def _plan(store: Any, board_id: int) -> dict[str, Any]:
             in_place += 1
             entry["in_place"] += 1
             continue
-        moves.append({
-            "ref": reference, "record_type": kind, "product": product,
-            "task_id": _nonnegative_int(card.get("id")),
-            "column_id": _nonnegative_int(card.get("column_id")),
-            "from": {"swimlane_id": current_id, "swimlane": lanes.get(current_id, "")},
-            "to": {"swimlane": lane_name, "swimlane_id": _lane_id(lanes, lane_name)},
-        })
+        moves.append(
+            {
+                "ref": reference,
+                "record_type": kind,
+                "product": product,
+                "task_id": _nonnegative_int(card.get("id")),
+                "column_id": _nonnegative_int(card.get("column_id")),
+                "from": {"swimlane_id": current_id, "swimlane": lanes.get(current_id, "")},
+                "to": {"swimlane": lane_name, "swimlane_id": _lane_id(lanes, lane_name)},
+            }
+        )
         entry["move"] += 1
-    missing = sorted({
-        str(move["to"]["swimlane"]) for move in moves if move["to"]["swimlane_id"] is None
-    })
+    missing = sorted({str(move["to"]["swimlane"]) for move in moves if move["to"]["swimlane_id"] is None})
     return {
-        "moves": moves, "unresolved": unresolved, "occupancy": occupancy,
+        "moves": moves,
+        "unresolved": unresolved,
+        "occupancy": occupancy,
         "summary": [summary[key] for key in sorted(summary)],
         "totals": {
-            "records": len(records), "move": len(moves), "in_place": in_place,
-            "closed": closed_count, "unresolved": len(unresolved),
+            "records": len(records),
+            "move": len(moves),
+            "in_place": in_place,
+            "closed": closed_count,
+            "unresolved": len(unresolved),
         },
         "lanes_to_create": missing,
     }
@@ -180,8 +196,12 @@ def reconcile_product_lanes(store: Any, *, apply: bool = False) -> dict[str, Any
         # their positions.
         position = occupancy.get((column_id, swimlane_id), 0) + 1
         if not store.client.call(
-            "moveTaskPosition", project_id=board_id, task_id=int(move["task_id"]),
-            column_id=column_id, position=position, swimlane_id=swimlane_id,
+            "moveTaskPosition",
+            project_id=board_id,
+            task_id=int(move["task_id"]),
+            column_id=column_id,
+            position=position,
+            swimlane_id=swimlane_id,
         ):
             raise TaskError("backend_error", "Kanboard rejected the Product/Issue lane move", 1)
         occupancy[(column_id, swimlane_id)] = position

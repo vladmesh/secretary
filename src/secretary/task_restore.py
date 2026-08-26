@@ -42,7 +42,13 @@ def restore_card(
         "swimlane": swimlane or None,
     }
     return writer._write(
-        "restored", "steward", "restore", reference, request_id, payload, mutation,
+        "restored",
+        "steward",
+        "restore",
+        reference,
+        request_id,
+        payload,
+        mutation,
         identity=payload,
     )
 
@@ -98,12 +104,17 @@ def restore_comment(
         if owner is not None:
             raise TaskError(
                 "audit_pending",
-                "an earlier identical Card marker occurrence is pending; "
-                f"reconcile request {owner} first",
+                f"an earlier identical Card marker occurrence is pending; reconcile request {owner} first",
                 4,
             )
         return writer._write(
-            "restored_comment", "steward", "restore", reference, request_id, payload, mutation,
+            "restored_comment",
+            "steward",
+            "restore",
+            reference,
+            request_id,
+            payload,
+            mutation,
             identity=identity,
         )
 
@@ -130,10 +141,7 @@ def finish_pending_restore(writer: Any, event: dict[str, Any], payload: dict[str
     if (
         normalized["state"] != target
         or (position is not None and normalized["position"] != position)
-        or (
-            not swimlane
-            and normalized.get("extensions", {}).get("kanboard", {}).get("swimlane") is not None
-        )
+        or (not swimlane and normalized.get("extensions", {}).get("kanboard", {}).get("swimlane") is not None)
         or (swimlane and normalized.get("extensions", {}).get("kanboard", {}).get("swimlane") != swimlane)
     ):
         raise TaskError("backend_error", "pending restore cleanup remains incomplete", 1)
@@ -153,8 +161,7 @@ def finish_pending_restore_comment(writer: Any, event: dict[str, Any], payload: 
         if owner is not None:
             raise TaskError(
                 "audit_pending",
-                "an earlier identical Card marker occurrence is pending; "
-                f"reconcile request {owner} first",
+                f"an earlier identical Card marker occurrence is pending; reconcile request {owner} first",
                 4,
             )
         digest = payload.get("body_sha256")
@@ -163,7 +170,9 @@ def finish_pending_restore_comment(writer: Any, event: dict[str, Any], payload: 
             for comment in writer.reader.show(ref).get("comments", [])
         )
         if matches <= occurrence:
-            writer.client.call("createComment", task_id=_task_number(writer.reader.show(ref)), user_id=0, content=body)
+            writer.client.call(
+                "createComment", task_id=_task_number(writer.reader.show(ref)), user_id=0, content=body
+            )
             matches += 1
         if matches <= occurrence:
             raise TaskError("backend_error", "pending restore comment remains incomplete", 1)
@@ -190,7 +199,9 @@ def _restore_placement(
         if not swimlane_id:
             raise TaskError("backend_error", "restored swimlane is unavailable", 1)
     raw_position = _nonnegative_int(raw.get("position"))
-    if task["state"] != target or (position is not None and raw_position != position) or (
-        _positive_int(raw.get("swimlane_id")) != swimlane_id
+    if (
+        task["state"] != target
+        or (position is not None and raw_position != position)
+        or (_positive_int(raw.get("swimlane_id")) != swimlane_id)
     ):
         writer._move_raw(task, target, position=position or 1, swimlane_id=swimlane_id)

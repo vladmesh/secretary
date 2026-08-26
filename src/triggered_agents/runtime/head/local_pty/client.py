@@ -13,6 +13,7 @@ supervisor is still coming up" from "another supervisor already owns this run"; 
 run was up is `supervisor.error` instead, because a head that ran for an hour and then lost its
 supervisor did not fail to start and must not be described as if it had.
 """
+
 from __future__ import annotations
 
 import json
@@ -127,14 +128,22 @@ def spawn_head(
         "-P",
         "-m",
         SUPERVISOR_MODULE,
-        "--run-dir", str(run_dir),
-        "--run-id", run_id,
-        "--role", role,
-        "--task", task,
-        "--command", command,
-        "--rows", str(rows),
-        "--cols", str(cols),
-        "--term", term,
+        "--run-dir",
+        str(run_dir),
+        "--run-id",
+        run_id,
+        "--role",
+        role,
+        "--task",
+        task,
+        "--command",
+        command,
+        "--rows",
+        str(rows),
+        "--cols",
+        str(cols),
+        "--term",
+        term,
         "--daemonize",
     ]
     if cwd:
@@ -169,12 +178,8 @@ def spawn_head(
                     str(failure.get("detail") or ""),
                 )
         result = read_events(journal_path)
-        started = [
-            event for event in result.events[already:] if event.get("kind") == RUN_STARTED
-        ]
-        if started and socket_path.exists() and _identity_written(run_dir, run_id) and _answers(
-            socket_path
-        ):
+        started = [event for event in result.events[already:] if event.get("kind") == RUN_STARTED]
+        if started and socket_path.exists() and _identity_written(run_dir, run_id) and _answers(socket_path):
             record = started[-1]
             return HeadHandle(
                 run_dir=run_dir,
@@ -252,9 +257,7 @@ class SupervisorClient:
         self.attached = False
 
     @classmethod
-    def connect(
-        cls, socket_path: str | os.PathLike[str], *, timeout: float = 5.0
-    ) -> SupervisorClient:
+    def connect(cls, socket_path: str | os.PathLike[str], *, timeout: float = 5.0) -> SupervisorClient:
         conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         conn.settimeout(timeout)
         try:
@@ -334,9 +337,7 @@ class SupervisorClient:
         self._request_seq += 1
         request_id = self._request_seq
         try:
-            self._conn.sendall(
-                protocol.encode_frame({**payload, protocol.REQUEST_ID: request_id})
-            )
+            self._conn.sendall(protocol.encode_frame({**payload, protocol.REQUEST_ID: request_id}))
         except OSError as exc:
             # The supervisor may have answered this connection *before* anything was asked on it
             # and closed it: that is what happens at the connection bound, where the refusal is
@@ -414,9 +415,7 @@ class SupervisorClient:
         deadline = time.monotonic() + timeout
         while True:
             delivery = self.status().get("delivery")
-            if isinstance(delivery, dict) and (
-                delivery_id is None or delivery.get("id") == delivery_id
-            ):
+            if isinstance(delivery, dict) and (delivery_id is None or delivery.get("id") == delivery_id):
                 if delivery.get("state") != protocol.DELIVERY_IN_FLIGHT:
                     return delivery
             if time.monotonic() >= deadline:

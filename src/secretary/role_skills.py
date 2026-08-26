@@ -11,6 +11,7 @@ about where sources live.
 A skill may also ship one command: an executable ``<skill>.sh`` beside its ``SKILL.md``, linked
 into the operator's ``bin`` directory under the skill's own name.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -311,8 +312,7 @@ def load_registry(
         for role_name in target["roles"]:
             if role_name not in roles:
                 raise RegistryError(
-                    f"{source.path}: targets.{target_name}.roles names the unknown role "
-                    f"{role_name!r}"
+                    f"{source.path}: targets.{target_name}.roles names the unknown role {role_name!r}"
                 )
     return SkillRegistry(sources=tuple(sources), roles=roles, targets=targets)
 
@@ -413,9 +413,7 @@ def command_script(role: str, skill: str, source: ManifestSource) -> Path | None
     return script if script.is_file() else None
 
 
-def iter_expected_commands(
-    registry: SkillRegistry, home: Path | str | None = None
-) -> list[ExpectedCommand]:
+def iter_expected_commands(registry: SkillRegistry, home: Path | str | None = None) -> list[ExpectedCommand]:
     """Every command the registry ships, keyed by the name the operator types.
 
     A command belongs to the skill, not to a shell: however many targets a skill is copied into, the
@@ -556,14 +554,10 @@ def skill_delivery(
             if item.role == role and item.skill == skill and item.shell == shell
         ]
     except (OSError, UnicodeError, ValueError, KeyError, TypeError) as exc:
-        result["reason"] = (
-            f"skill registry {_named_manifests(instance_path)} could not be read: {exc}"
-        )
+        result["reason"] = f"skill registry {_named_manifests(instance_path)} could not be read: {exc}"
         return result
     if not expected:
-        result["reason"] = (
-            f"no {shell} target in {_named_manifests(instance_path)} carries the {role} role"
-        )
+        result["reason"] = f"no {shell} target in {_named_manifests(instance_path)} carries the {role} role"
         return result
     result["paths"] = [str(item.dest / "SKILL.md") for item in expected]
     missing = [path for path in result["paths"] if not Path(path).is_file()]
@@ -631,10 +625,14 @@ def audit(
             by_target[item["target"]][bucket_name] = int(by_target[item["target"]][bucket_name]) + 1
 
     # A filtered audit is about named shell targets; commands do not belong to one.
-    entry_points = [] if target_filter else [
-        _entry_point_state(command, registry.owned_roots)
-        for command in iter_expected_commands(registry, home)
-    ]
+    entry_points = (
+        []
+        if target_filter
+        else [
+            _entry_point_state(command, registry.owned_roots)
+            for command in iter_expected_commands(registry, home)
+        ]
+    )
     entry_point_problems = [item for item in entry_points if item["status"] != "ok"]
 
     ok = not missing and not drift and not source_missing and not config_errors
@@ -664,8 +662,7 @@ def unmaterializable(
     `sync` asks the same question, so the two cannot come to different conclusions.
     """
     problems = [
-        f"overlapping skill target roots: {error}"
-        for error in find_overlapping_target_roots(registry, home)
+        f"overlapping skill target roots: {error}" for error in find_overlapping_target_roots(registry, home)
     ]
     expected = iter_expected(registry, home)
     if target_filter:

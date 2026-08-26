@@ -17,6 +17,7 @@ only after asking the backend whether that exact reference is claimed, and refus
 is. That check, not a guess about how complete an enumeration looked, is what keeps two rows from
 sharing one reference.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -30,6 +31,7 @@ from typing import Any
 # Where an installation keeps its data plane. The role environment propagates it to every agent
 # process, which is what lets writers in different processes name one lock.
 DATA_DIR_ENV = "SECRETARY_DATA_DIR"
+
 
 class BoardRowsUnavailable(RuntimeError):
     """A row enumeration answered with something that is not a list of rows."""
@@ -64,10 +66,7 @@ def board_rows(call: Callable[..., Any], project_id: int) -> list[dict[str, Any]
 def next_reference(rows: Iterable[Mapping[str, Any]], prefix: str) -> str:
     """The first reference of this family above every number the given rows already use."""
     pattern = re.compile(rf"{re.escape(prefix)}(\d+)$")
-    used = (
-        pattern.fullmatch(str(row.get("reference") or ""))
-        for row in rows
-    )
+    used = (pattern.fullmatch(str(row.get("reference") or "")) for row in rows)
     return f"{prefix}{max((int(match.group(1)) for match in used if match), default=0) + 1}"
 
 
@@ -84,8 +83,8 @@ def reference_allocation_lock(data_dir: Path | str | None = None) -> Iterator[No
     The lock lives in the installation's data plane, so callers that know their data directory pass
     it and the rest resolve the same one from the environment.
     """
-    root = Path(data_dir) if data_dir else Path(
-        os.environ.get(DATA_DIR_ENV) or Path.home() / "secretary-data"
+    root = (
+        Path(data_dir) if data_dir else Path(os.environ.get(DATA_DIR_ENV) or Path.home() / "secretary-data")
     )
     board = root / "board"
     board.mkdir(parents=True, exist_ok=True)

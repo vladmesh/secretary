@@ -15,6 +15,7 @@ back. `SeamGrepTests` reads every module of both packages and fails on the calls
 docstring that quotes `orca terminal` or a comment that spells a `claude` invocation is free to say
 so — which matters, because the modules that own those things have to explain them.
 """
+
 from __future__ import annotations
 
 import ast
@@ -102,9 +103,7 @@ class ClaudeShapeTests(unittest.TestCase):
         self.assertEqual(rendered.adapter, "claude")
 
     def test_a_carried_prompt_leaves_nothing_to_deliver(self) -> None:
-        self.assertFalse(
-            render_head_command({"adapter": "claude"}, prompt="skill").prompt_after_start
-        )
+        self.assertFalse(render_head_command({"adapter": "claude"}, prompt="skill").prompt_after_start)
 
 
 class CodexShapeTests(unittest.TestCase):
@@ -130,7 +129,7 @@ class CodexShapeTests(unittest.TestCase):
             "CODEX_HOME=/tmp/codex-home codex --dangerously-bypass-approvals-and-sandbox "
             "--enable multi_agent_v2 -c features.multi_agent_v2.wait_agent_enabled=false "
             "-m gpt-5.5 -c 'model_reasoning_effort=\"xhigh\"' "
-            f"-c 'projects.\"{self.workspace}\".trust_level=\"trusted\"'",
+            f'-c \'projects."{self.workspace}".trust_level="trusted"\'',
         )
 
     def test_the_tui_command_uses_the_validated_low_fanout_candidate(self) -> None:
@@ -200,9 +199,11 @@ class RoleEnvWrapperTests(unittest.TestCase):
         with mock.patch.dict(os.environ, LAUNCH_ENV, clear=True):
             self.assertEqual(
                 render_head_command(
-                    {"adapter": "claude"}, role="worker", binding=SECRETARY_ROLE_ENV,
+                    {"adapter": "claude"},
+                    role="worker",
+                    binding=SECRETARY_ROLE_ENV,
                 ).command,
-                f"{BINDING} PYTHONPATH=/opt/checkout/src\"${{PYTHONPATH:+:$PYTHONPATH}}\" "
+                f'{BINDING} PYTHONPATH=/opt/checkout/src"${{PYTHONPATH:+:$PYTHONPATH}}" '
                 "python3 -P -m secretary.role_env exec --role worker -- /bin/sh -lc "
                 "'claude --dangerously-skip-permissions'",
             )
@@ -211,7 +212,9 @@ class RoleEnvWrapperTests(unittest.TestCase):
         with mock.patch.dict(os.environ, LAUNCH_ENV, clear=True):
             self.assertEqual(
                 render_head_command(
-                    {"adapter": "claude"}, prompt="/steward", role="steward",
+                    {"adapter": "claude"},
+                    prompt="/steward",
+                    role="steward",
                     binding=RUNTIME_ROLE_ENV,
                 ).command,
                 f"{BINDING} PYTHONPATH=/opt/checkout/src python3 -P -m "
@@ -244,7 +247,9 @@ class RoleEnvWrapperTests(unittest.TestCase):
     def test_the_runtime_entry_point_renders_no_identity_and_says_so(self) -> None:
         with self.assertRaisesRegex(HeadCommandError, "renders no identity"):
             wrap_role_command(
-                "observer", "true", binding=RUNTIME_ROLE_ENV,
+                "observer",
+                "true",
+                binding=RUNTIME_ROLE_ENV,
                 identity={"SECRETARY_OBSERVER_SPRINT": "s"},
             )
 
@@ -294,7 +299,10 @@ class EveryCallerRendersThroughThisModuleTests(unittest.TestCase):
             env = {**LAUNCH_ENV, "TA_CLAUDE_JSON": str(Path(tmp) / ".claude.json")}
             with mock.patch.dict(os.environ, env, clear=True):
                 launch = catalog.head_launch(  # type: ignore[attr-defined]
-                    "claude-opus-high", "TASK.md", workspace=tmp, role="worker",
+                    "claude-opus-high",
+                    "TASK.md",
+                    workspace=tmp,
+                    role="worker",
                     launch_prompt="read TASK.md first",
                 )
                 expected = render_head_command(profile, prompt=None, workspace=tmp, role="worker")
@@ -314,9 +322,7 @@ class EveryCallerRendersThroughThisModuleTests(unittest.TestCase):
             with self.subTest(profile=pid):
                 self.assertEqual(
                     session.render_interactive(pid, workspace="/tmp/ws", registry=registry),
-                    render_head_command(
-                        registry.profile(pid), prompt=None, workspace="/tmp/ws"
-                    ).command,
+                    render_head_command(registry.profile(pid), prompt=None, workspace="/tmp/ws").command,
                 )
 
     def test_a_background_agent_with_no_head_still_gets_a_rendered_command(self) -> None:
@@ -325,12 +331,16 @@ class EveryCallerRendersThroughThisModuleTests(unittest.TestCase):
         command is assembled, which is what it used to be."""
         from triggered_agents.runtime import dispatch
 
-        with mock.patch.dict(os.environ, LAUNCH_ENV, clear=True), \
-                mock.patch.object(dispatch, "_load_spec", return_value={"skill": "/curator"}), \
-                mock.patch.object(dispatch, "_preferred_head", return_value=""):
+        with (
+            mock.patch.dict(os.environ, LAUNCH_ENV, clear=True),
+            mock.patch.object(dispatch, "_load_spec", return_value={"skill": "/curator"}),
+            mock.patch.object(dispatch, "_preferred_head", return_value=""),
+        ):
             skill, command, head, after_start, profile = dispatch._launch_cmd("curator")
             expected = render_head_command(
-                {"adapter": "claude"}, prompt="/curator", role="curator",
+                {"adapter": "claude"},
+                prompt="/curator",
+                role="curator",
                 binding=RUNTIME_ROLE_ENV,
             ).command
 
@@ -361,9 +371,7 @@ def _module_paths() -> list[Path]:
 # free to hold in a variable: the scheduler used to keep it in an `ORCA` constant and hand its
 # runner only the `["terminal", ...]` suffix. A check that recognised the literal
 # `["orca", "terminal", ...]` alone would have called that module clean.
-_TERMINAL_SUBCOMMANDS = frozenset(
-    {"create", "close", "list", "read", "send", "stop", "wait"}
-)
+_TERMINAL_SUBCOMMANDS = frozenset({"create", "close", "list", "read", "send", "stop", "wait"})
 
 # Modules excused from the two checks below. Empty, and that is the point: the mechanical-role
 # scheduler was the last entry (`triggered_agents/runtime/dispatch.py`, sprint:927) and it went
@@ -387,14 +395,15 @@ def _terminal_vectors(tree: ast.AST) -> list[tuple[int, str]]:
         if not isinstance(node, (ast.List, ast.Tuple)):
             continue
         words = [
-            element.value
-            if isinstance(element, ast.Constant) and isinstance(element.value, str)
-            else None
+            element.value if isinstance(element, ast.Constant) and isinstance(element.value, str) else None
             for element in node.elts
         ]
         for index in (0, 1):
-            if index + 1 < len(words) and words[index] == "terminal" \
-                    and words[index + 1] in _TERMINAL_SUBCOMMANDS:
+            if (
+                index + 1 < len(words)
+                and words[index] == "terminal"
+                and words[index + 1] in _TERMINAL_SUBCOMMANDS
+            ):
                 found.append((node.lineno, words[index + 1]))
                 break
     return found
@@ -493,12 +502,8 @@ class SeamGrepTests(unittest.TestCase):
         )
         other_cli = "run(['claude', '-p', 'ping', '--model', 'haiku'])"
 
-        self.assertEqual(
-            [sub for _, sub in _terminal_vectors(ast.parse(literal))], ["send"]
-        )
-        self.assertEqual(
-            [sub for _, sub in _terminal_vectors(ast.parse(from_variable))], ["send"]
-        )
+        self.assertEqual([sub for _, sub in _terminal_vectors(ast.parse(literal))], ["send"])
+        self.assertEqual([sub for _, sub in _terminal_vectors(ast.parse(from_variable))], ["send"])
         self.assertEqual(_terminal_vectors(ast.parse(other_cli)), [])
 
     def test_no_module_outside_the_seam_reads_a_pane_screen(self) -> None:
@@ -515,12 +520,8 @@ class SeamGrepTests(unittest.TestCase):
         """Named, so a screen read is caught even when the vector around it is assembled
         elsewhere — and prose about `terminal read` still passes, which the modules that own the
         call depend on."""
-        self.assertEqual(
-            _pane_screen_reads(ast.parse("go(['terminal', 'read', '--terminal', t])")), [1]
-        )
-        self.assertEqual(
-            _pane_screen_reads(ast.parse("cmd = 'orca terminal read --terminal ' + t")), [1]
-        )
+        self.assertEqual(_pane_screen_reads(ast.parse("go(['terminal', 'read', '--terminal', t])")), [1])
+        self.assertEqual(_pane_screen_reads(ast.parse("cmd = 'orca terminal read --terminal ' + t")), [1])
         self.assertEqual(_pane_screen_reads(ast.parse('"""We used to run terminal read."""')), [])
         # The subcommand is a whole word: a message about a terminal readiness probe is prose
         # about a different call, and flagging it would push the dispatcher into rewording errors.
@@ -556,9 +557,7 @@ class SeamGrepTests(unittest.TestCase):
                     continue
                 for literal in _HEAD_COMMAND_LITERALS:
                     if literal in node.value:
-                        offenders.append(
-                            f"{path.relative_to(REPO_ROOT)}:{node.lineno} ({literal})"
-                        )
+                        offenders.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno} ({literal})")
         self.assertEqual(offenders, [], f"head command assembly outside the head package: {offenders}")
 
     def test_the_prompt_redaction_predicate_moved_with_the_argument_vectors(self) -> None:
@@ -602,9 +601,7 @@ class SeamGrepTests(unittest.TestCase):
 
         self.assertIn("stop_workspace", dir(SessionHost))
         source = (REPO_ROOT / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
-        self.assertIn(
-            "self.head_runtime_for(ORCA_LEGACY_RUNTIME).stop_workspace(workspace)", source
-        )
+        self.assertIn("self.head_runtime_for(ORCA_LEGACY_RUNTIME).stop_workspace(workspace)", source)
         self.assertNotIn("head_ops.stop(", source)
         runtime_source = Path(orca_legacy_head.__file__).read_text(encoding="utf-8")
         self.assertIn("self.host.stop_workspace(workspace)", runtime_source)

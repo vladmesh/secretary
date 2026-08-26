@@ -66,7 +66,10 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self.temp.cleanup()
 
     def _attested_run(
-        self, *, run_id: str = "run-1", role: str = "worker",
+        self,
+        *,
+        run_id: str = "run-1",
+        role: str = "worker",
     ) -> tuple[HeadRun, dict[str, object]]:
         run = HeadRun(
             run_id=run_id,
@@ -93,17 +96,19 @@ class CodexProviderEventIngressTests(unittest.TestCase):
 
     def _run(self) -> HeadRun:
         allowed, _attestation = self._attested_run()
-        return allowed.with_fanout_policy({
-            **allowed.fanout_policy,
-            "provider_source": {
-                "version": 1,
-                "kind": "codex_session_event_jsonl",
-                "state": "unbound",
-                **codex_preflight.codex_provider_source_descriptor(allowed),
-                "root": str(self.sessions),
-                "baseline": [],
-            },
-        })
+        return allowed.with_fanout_policy(
+            {
+                **allowed.fanout_policy,
+                "provider_source": {
+                    "version": 1,
+                    "kind": "codex_session_event_jsonl",
+                    "state": "unbound",
+                    **codex_preflight.codex_provider_source_descriptor(allowed),
+                    "root": str(self.sessions),
+                    "baseline": [],
+                },
+            }
+        )
 
     def _preflight_run(self, *, run_id: str = "run-1", role: str = "worker") -> HeadRun:
         """The production preflight path, before the provider creates its new journal."""
@@ -128,9 +133,7 @@ class CodexProviderEventIngressTests(unittest.TestCase):
     def _write_records(self, *records: object, source: Path | None = None) -> None:
         target = source or self.source
         target.write_text(
-            "\n".join(
-                value if isinstance(value, str) else json.dumps(value) for value in records
-            ) + "\n",
+            "\n".join(value if isinstance(value, str) else json.dumps(value) for value in records) + "\n",
             encoding="utf-8",
         )
 
@@ -138,9 +141,9 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         target = source or self.source
         body = target.read_text(encoding="utf-8")
         target.write_text(
-            body + "\n".join(
-                value if isinstance(value, str) else json.dumps(value) for value in records
-            ) + "\n",
+            body
+            + "\n".join(value if isinstance(value, str) else json.dumps(value) for value in records)
+            + "\n",
             encoding="utf-8",
         )
 
@@ -235,9 +238,14 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self.assertTrue(progressed_run.same_run(preflight))
         self.assertNotEqual(progress["cursor"], baseline["cursor"])
         self.assertEqual(progress["state"], "observed")
-        self.assertEqual(liveness.observe_provider(
-            progress, 20.0, head_run=progressed_run.to_json(),
-        ), "progressed")
+        self.assertEqual(
+            liveness.observe_provider(
+                progress,
+                20.0,
+                head_run=progressed_run.to_json(),
+            ),
+            "progressed",
+        )
         self.assertEqual(liveness.busy_attempts, 0)
 
     def test_real_bound_sources_refresh_the_shared_worker_and_reviewer_progress_seam(self) -> None:
@@ -277,9 +285,14 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self.assertEqual(reviewer_progress["admission"], "accepted")
 
         liveness = WorkerContinuationLiveness.begin(record.worker_head_run)
-        self.assertEqual(liveness.observe_provider(
-            worker_baseline, 10.0, head_run=record.worker_head_run,
-        ), "baseline")
+        self.assertEqual(
+            liveness.observe_provider(
+                worker_baseline,
+                10.0,
+                head_run=record.worker_head_run,
+            ),
+            "baseline",
+        )
         self._append_records({"type": "turn.completed", "thread_id": "parent-1"})
         worker_ingress.poll()
         record.worker_head_run = worker_ingress.run.to_json()
@@ -288,9 +301,14 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self.assertTrue(worker_ingress.run.same_run(worker_preflight))
         self.assertNotEqual(worker_progress["cursor"], worker_baseline["cursor"])
         self.assertEqual(worker_progress["admission"], "accepted")
-        self.assertEqual(liveness.observe_provider(
-            worker_progress, 20.0, head_run=record.worker_head_run,
-        ), "progressed")
+        self.assertEqual(
+            liveness.observe_provider(
+                worker_progress,
+                20.0,
+                head_run=record.worker_head_run,
+            ),
+            "progressed",
+        )
 
     def test_incomplete_or_foreign_bound_descriptor_cannot_admit_progress(self) -> None:
         self._write_source()
@@ -300,16 +318,19 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         source = dict(bound.fanout_policy["provider_source"])
         for field, value in (("run_id", ""), ("workspace", "/foreign")):
             with self.subTest(field=field):
-                damaged = bound.with_fanout_policy({
-                    **bound.fanout_policy,
-                    "provider_source": {**source, field: value},
-                })
+                damaged = bound.with_fanout_policy(
+                    {
+                        **bound.fanout_policy,
+                        "provider_source": {**source, field: value},
+                    }
+                )
                 progress = provider_progress_for_run(damaged)
                 self.assertEqual(progress["state"], "identity_mismatch")
                 self.assertNotEqual(progress.get("admission"), "accepted")
 
     def test_launch_intent_handoff_keeps_the_real_bound_source_for_worker_and_reviewer(self) -> None:
         """The later launcher result may add pane/lifecycle facts but cannot restore `unbound`."""
+
         class Runtime:
             def save_records(self, _payload, _records) -> None:
                 return None
@@ -343,8 +364,14 @@ class CodexProviderEventIngressTests(unittest.TestCase):
                 records = {"secretary-1428": record}
 
                 confirm_launch_intent(
-                    Runtime(), {}, records, "secretary-1428", record,
-                    handle=stale.handle, leaf=stale.leaf, head_run=stale.to_json(),
+                    Runtime(),
+                    {},
+                    records,
+                    "secretary-1428",
+                    record,
+                    handle=stale.handle,
+                    leaf=stale.leaf,
+                    head_run=stale.to_json(),
                 )
 
                 stored = record.review_head_run if intent_role == REVIEW_ROLE else record.worker_head_run
@@ -366,15 +393,26 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         ingress.bind_before_delivery()
         bound = ingress.run
         conflicting_source = {
-            **bound.fanout_policy["provider_source"], "session_id": "foreign-session",
+            **bound.fanout_policy["provider_source"],
+            "session_id": "foreign-session",
         }
-        conflicting = bound.with_fanout_policy({
-            **bound.fanout_policy, "provider_source": conflicting_source,
-        })
+        conflicting = bound.with_fanout_policy(
+            {
+                **bound.fanout_policy,
+                "provider_source": conflicting_source,
+            }
+        )
         record = DispatcherRecord(
-            worker="worker-1", workspace=str(self.workspace), handle="", head="codex-extra",
-            review_head="codex-extra", attempt_id="attempt-1", comment_baseline=0,
-            review_baseline=0, state="claimed", claimed_at=0.0,
+            worker="worker-1",
+            workspace=str(self.workspace),
+            handle="",
+            head="codex-extra",
+            review_head="codex-extra",
+            attempt_id="attempt-1",
+            comment_baseline=0,
+            review_baseline=0,
+            state="claimed",
+            claimed_at=0.0,
         )
         record.launch_intent = {"role": WORKER_ROLE, "head_run": bound.to_json()}
         record.worker_head_run = bound.to_json()
@@ -382,7 +420,11 @@ class CodexProviderEventIngressTests(unittest.TestCase):
 
         with self.assertRaisesRegex(HostError, "bound provider sources conflict"):
             confirm_launch_intent(
-                Runtime(), {}, {"secretary-1428": record}, "secretary-1428", record,
+                Runtime(),
+                {},
+                {"secretary-1428": record},
+                "secretary-1428",
+                record,
                 head_run=conflicting.to_json(),
             )
 
@@ -410,7 +452,9 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         bound = ingress.run
         stale = preflight.rebound("term-observer", leaf="leaf-observer")
         record = ObserverRecord(
-            sprint="sprint:1", workspace=str(self.workspace), head="codex-extra",
+            sprint="sprint:1",
+            workspace=str(self.workspace),
+            head="codex-extra",
             head_run=bound.to_json(),
         )
         runtime = Runtime()
@@ -429,10 +473,12 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self._write_source()
         ingress = self._ingress()
         ingress.bind_before_delivery()
-        self._write_source({
-            "type": "item.completed",
-            "item": {"type": "collab_tool_call", "tool": "spawn_agent", "sender_thread_id": "parent-1"},
-        })
+        self._write_source(
+            {
+                "type": "item.completed",
+                "item": {"type": "collab_tool_call", "tool": "spawn_agent", "sender_thread_id": "parent-1"},
+            }
+        )
 
         ingress.poll()
 
@@ -449,19 +495,21 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self._write_source()
         ingress = self._ingress()
         ingress.bind_before_delivery()
-        self._write_source({
-            "type": "event_msg",
-            "payload": {
-                "type": "item_completed",
-                "thread_id": "parent-1",
-                "item": {
-                    "type": "CollabAgentToolCall",
-                    "tool": "wait",
-                    "sender_thread_id": "parent-1",
-                    "receiver_thread_ids": [],
+        self._write_source(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "thread_id": "parent-1",
+                    "item": {
+                        "type": "CollabAgentToolCall",
+                        "tool": "wait",
+                        "sender_thread_id": "parent-1",
+                        "receiver_thread_ids": [],
+                    },
                 },
-            },
-        })
+            }
+        )
 
         ingress.poll()
 
@@ -475,13 +523,21 @@ class CodexProviderEventIngressTests(unittest.TestCase):
     def test_child_edge_unknown_thread_and_malformed_line_are_typed(self) -> None:
         cases = (
             (
-                {"type": "event_msg", "payload": {
-                    "type": "item_completed", "thread_id": "parent-1", "item": {
-                        "type": "CollabAgentToolCall", "tool": "spawn_agent",
-                        "sender_thread_id": "parent-1", "receiver_thread_ids": ["child-1"],
+                {
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "item_completed",
+                        "thread_id": "parent-1",
+                        "item": {
+                            "type": "CollabAgentToolCall",
+                            "tool": "spawn_agent",
+                            "sender_thread_id": "parent-1",
+                            "receiver_thread_ids": ["child-1"],
+                        },
                     },
-                }},
-                "child_thread_edge", "violation",
+                },
+                "child_thread_edge",
+                "violation",
             ),
             ({"type": "thread.started", "thread_id": "foreign-thread"}, "unknown_thread_edge", "unknown"),
             ("{not-json", "unparseable_provider_event", "unknown"),
@@ -510,8 +566,12 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         # The durable parent cursor no longer names the same raw line.  It is not a reason to
         # redirect the record to some later session or regenerate an identity.
         self.source.write_text(
-            json.dumps({"type": "session_meta", "payload": {"session_id": "session-1", "cwd": str(self.workspace)}})
-            + "\n" + json.dumps({"type": "thread.started", "thread_id": "changed-parent"}) + "\n",
+            json.dumps(
+                {"type": "session_meta", "payload": {"session_id": "session-1", "cwd": str(self.workspace)}}
+            )
+            + "\n"
+            + json.dumps({"type": "thread.started", "thread_id": "changed-parent"})
+            + "\n",
             encoding="utf-8",
         )
 
@@ -550,19 +610,21 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self.assertEqual(self.blocks, [])
 
     def test_tui_policy_event_in_post_root_prebind_tail_is_advisory(self) -> None:
-        self._write_source({
-            "type": "event_msg",
-            "payload": {
-                "type": "item_completed",
-                "thread_id": "parent-1",
-                "item": {
-                    "type": "CollabAgentToolCall",
-                    "tool": "spawn_agent",
-                    "sender_thread_id": "parent-1",
-                    "receiver_thread_ids": ["child-1"],
+        self._write_source(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "thread_id": "parent-1",
+                    "item": {
+                        "type": "CollabAgentToolCall",
+                        "tool": "spawn_agent",
+                        "sender_thread_id": "parent-1",
+                        "receiver_thread_ids": ["child-1"],
+                    },
                 },
-            },
-        })
+            }
+        )
         ingress = self._ingress()
 
         ingress.bind_before_delivery()
@@ -575,13 +637,16 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self.assertEqual(self.blocks, [])
 
     def test_unrecognised_collaboration_shape_is_unknown_not_a_clean_cursor_advance(self) -> None:
-        self._write_source({
-            "type": "event_msg",
-            "payload": {
-                "type": "item_completed", "thread_id": "parent-1",
-                "item": {"type": "CollabAgentStatus", "sender_thread_id": "parent-1"},
-            },
-        })
+        self._write_source(
+            {
+                "type": "event_msg",
+                "payload": {
+                    "type": "item_completed",
+                    "thread_id": "parent-1",
+                    "item": {"type": "CollabAgentStatus", "sender_thread_id": "parent-1"},
+                },
+            }
+        )
         ingress = self._ingress()
 
         ingress.bind_before_delivery()
@@ -734,10 +799,12 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self._write_source()
         ingress = self._ingress()
         ingress.bind_before_delivery()
-        self._write_source({
-            "type": "item.completed",
-            "item": {"type": "collab_tool_call", "tool": "spawn_agent", "sender_thread_id": "parent-1"},
-        })
+        self._write_source(
+            {
+                "type": "item.completed",
+                "item": {"type": "collab_tool_call", "tool": "spawn_agent", "sender_thread_id": "parent-1"},
+            }
+        )
 
         def fail(_run: HeadRun) -> None:
             raise OSError("disk full")
@@ -836,15 +903,23 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
             claimed_at=0.0,
         )
         record.launch_intent = {
-            "role": WORKER_ROLE, "head_run": prepared.to_json(), "run_id": prepared.run_id,
+            "role": WORKER_ROLE,
+            "head_run": prepared.to_json(),
+            "run_id": prepared.run_id,
         }
         record.worker_head_run = prepared.to_json()
         return record
 
     def _confirm(self, record: DispatcherRecord, launched: HeadRun) -> dict:
         confirm_launch_intent(
-            self.Runtime(), {}, {"secretary-1445": record}, "secretary-1445", record,
-            handle=launched.handle, leaf=launched.leaf, head_run=launched.to_json(),
+            self.Runtime(),
+            {},
+            {"secretary-1445": record},
+            "secretary-1445",
+            record,
+            handle=launched.handle,
+            leaf=launched.leaf,
+            head_run=launched.to_json(),
         )
         return record.worker_head_run
 
@@ -858,9 +933,14 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
         record = self._record(prepared)
         self._open_another_session()
 
-        launched = self.host._preflight_launch_run(  # noqa: SLF001 — the launch path under test
-            "codex-extra", **self._launch_identity,  # type: ignore[arg-type]
-        ).rebound("pane-1", leaf="leaf-1").working()
+        launched = (
+            self.host._preflight_launch_run(  # noqa: SLF001 — the launch path under test
+                "codex-extra",
+                **self._launch_identity,  # type: ignore[arg-type]
+            )
+            .rebound("pane-1", leaf="leaf-1")
+            .working()
+        )
         stored = self._confirm(record, launched)
 
         source = self._source(stored)
@@ -876,7 +956,9 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
         reference = "secretary-1445"
         pid_file = dispatcher_launch.launch_pid_file(WORKER_ROLE, reference)
         identity = {
-            **self._launch_identity, "pid_file": pid_file, "run_id": "rework-run-2",
+            **self._launch_identity,
+            "pid_file": pid_file,
+            "run_id": "rework-run-2",
         }
         prepared = self.host.preflight_codex_run("codex-extra", **identity)  # type: ignore[arg-type]
         self._install_ingress(prepared)
@@ -912,7 +994,10 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
         opened = self._open_another_session()
 
         launched = self.host.prepare_observer(
-            {"ref": sprint}, "codex-extra", prompt="observe", heartbeat_run_id="observer-run-1",
+            {"ref": sprint},
+            "codex-extra",
+            prompt="observe",
+            heartbeat_run_id="observer-run-1",
         )
 
         source = self._source(launched["head_run"])
@@ -928,7 +1013,8 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
 
         unprepared = self.host.preflight_codex_run("codex-extra", **self._launch_identity)  # type: ignore[arg-type]
         self.assertNotEqual(
-            self._source(unprepared)["baseline"], self._source(prepared)["baseline"],
+            self._source(unprepared)["baseline"],
+            self._source(prepared)["baseline"],
         )
 
         with self.assertRaisesRegex(HostError, "preflight provider source conflicts"):
@@ -941,12 +1027,16 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
         journal = self.sessions / "worker.jsonl"
         journal.write_text(
             "\n".join(
-                json.dumps(value) for value in (
-                    {"type": "session_meta",
-                     "payload": {"session_id": "session-1", "cwd": str(self.workspace)}},
+                json.dumps(value)
+                for value in (
+                    {
+                        "type": "session_meta",
+                        "payload": {"session_id": "session-1", "cwd": str(self.workspace)},
+                    },
                     {"type": "thread.started", "thread_id": "parent-1"},
                 )
-            ) + "\n",
+            )
+            + "\n",
             encoding="utf-8",
         )
         ingress = self.host._codex_provider_ingresses[prepared.run_id]  # noqa: SLF001
@@ -961,9 +1051,14 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
         record.launch_intent["head_run"] = bound_run.to_json()
         self._open_another_session()
 
-        launched = self.host._preflight_launch_run(  # noqa: SLF001
-            "codex-extra", **self._launch_identity,  # type: ignore[arg-type]
-        ).rebound("pane-1", leaf="leaf-1").working()
+        launched = (
+            self.host._preflight_launch_run(  # noqa: SLF001
+                "codex-extra",
+                **self._launch_identity,  # type: ignore[arg-type]
+            )
+            .rebound("pane-1", leaf="leaf-1")
+            .working()
+        )
 
         self.assertEqual(self._source(launched), self._source(bound_run))
         stored = self._confirm(record, launched)
@@ -977,16 +1072,19 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
         prepared = self._prepare_intent_run()
         foreign_root = self.root / "other-home" / "sessions"
         foreign_root.mkdir(parents=True)
-        foreign = prepared.with_fanout_policy({
-            **prepared.fanout_policy,
-            "provider_source": {**self._source(prepared), "root": str(foreign_root)},
-        })
+        foreign = prepared.with_fanout_policy(
+            {
+                **prepared.fanout_policy,
+                "provider_source": {**self._source(prepared), "root": str(foreign_root)},
+            }
+        )
         self._install_ingress(foreign)
         record = self._record(foreign)
         self._open_another_session()
 
         launched = self.host._preflight_launch_run(  # noqa: SLF001
-            "codex-extra", **self._launch_identity,  # type: ignore[arg-type]
+            "codex-extra",
+            **self._launch_identity,  # type: ignore[arg-type]
         )
 
         self.assertEqual(self._source(launched)["root"], str(self.root / "sessions"))
@@ -1006,16 +1104,29 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
             ("spec", HeadSpec(profile_id="codex-other", adapter="codex", model="gpt-5.6-terra")),
         ):
             with self.subTest(field=field):
-                self._install_ingress(prepared.__class__(**{
-                    **{name: getattr(prepared, name) for name in (
-                        "run_id", "spec", "workspace", "task_ref", "role", "pid_file",
-                        "fanout_policy",
-                    )},
-                    field: value,
-                }))
+                self._install_ingress(
+                    prepared.__class__(
+                        **{
+                            **{
+                                name: getattr(prepared, name)
+                                for name in (
+                                    "run_id",
+                                    "spec",
+                                    "workspace",
+                                    "task_ref",
+                                    "role",
+                                    "pid_file",
+                                    "fanout_policy",
+                                )
+                            },
+                            field: value,
+                        }
+                    )
+                )
 
                 launched = self.host._preflight_launch_run(  # noqa: SLF001
-                    "codex-extra", **self._launch_identity,  # type: ignore[arg-type]
+                    "codex-extra",
+                    **self._launch_identity,  # type: ignore[arg-type]
                 )
 
                 self.assertNotEqual(self._source(launched)["baseline"], baseline)
@@ -1024,15 +1135,17 @@ class PreparedProviderSourceLaunchHandoffTests(unittest.TestCase):
         prepared = self._prepare_intent_run()
         bound_run, _journal = self._bind_this_runs_session(prepared)
         source = self._source(bound_run)
-        conflicting = bound_run.with_fanout_policy({
-            **bound_run.fanout_policy,
-            "provider_source": {
-                **source,
-                # A well-formed digest for the same line: the fence is the disagreement itself,
-                # not a malformed record.
-                "cursor": {"line": source["cursor"]["line"], "digest": "f" * 64},
-            },
-        })
+        conflicting = bound_run.with_fanout_policy(
+            {
+                **bound_run.fanout_policy,
+                "provider_source": {
+                    **source,
+                    # A well-formed digest for the same line: the fence is the disagreement itself,
+                    # not a malformed record.
+                    "cursor": {"line": source["cursor"]["line"], "digest": "f" * 64},
+                },
+            }
+        )
 
         with self.assertRaisesRegex(HostError, "cursor conflicts"):
             dispatcher_launch.merge_launch_head_run(bound_run.to_json(), conflicting.to_json())
@@ -1187,36 +1300,38 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
     @staticmethod
     def _fail_recorder(recorder: codex_preflight.CodexProviderEventRecorder, *_args, **_kwargs):
         raise codex_preflight.CodexFanoutRecordingError(
-            "recorder storage unavailable", run=recorder.run, event={},
+            "recorder storage unavailable",
+            run=recorder.run,
+            event={},
         )
 
     def _add_recording_failure_event(self) -> None:
-        self.source_events = [{
-            "type": "event_msg",
-            "payload": {
-                "type": "collab_tool_call",
-                "item": {
+        self.source_events = [
+            {
+                "type": "event_msg",
+                "payload": {
                     "type": "collab_tool_call",
-                    "tool": "spawn_agent",
-                    "sender_thread_id": "parent-1",
-                    "receiver_thread_ids": [],
+                    "item": {
+                        "type": "collab_tool_call",
+                        "tool": "spawn_agent",
+                        "sender_thread_id": "parent-1",
+                        "receiver_thread_ids": [],
+                    },
                 },
-            },
-        }]
+            }
+        ]
 
     def _write_records(self, *records: object) -> None:
         self.source.write_text(
-            "\n".join(
-                value if isinstance(value, str) else json.dumps(value) for value in records
-            ) + "\n",
+            "\n".join(value if isinstance(value, str) else json.dumps(value) for value in records) + "\n",
             encoding="utf-8",
         )
 
     def _append_records(self, *records: object) -> None:
         self.source.write_text(
-            self.source.read_text(encoding="utf-8") + "\n".join(
-                value if isinstance(value, str) else json.dumps(value) for value in records
-            ) + "\n",
+            self.source.read_text(encoding="utf-8")
+            + "\n".join(value if isinstance(value, str) else json.dumps(value) for value in records)
+            + "\n",
             encoding="utf-8",
         )
 
@@ -1279,16 +1394,33 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         self._arm_source(record.workspace)
         self._add_recording_failure_event()
 
-        self.assertIsNone(write_launch_intent(
-            runtime, payload, records, task["ref"], record,
-            role=WORKER_ROLE, action="rework", head=record.head, workspace=record.workspace,
-        ))
+        self.assertIsNone(
+            write_launch_intent(
+                runtime,
+                payload,
+                records,
+                task["ref"],
+                record,
+                role=WORKER_ROLE,
+                action="rework",
+                head=record.head,
+                workspace=record.workspace,
+            )
+        )
         with mock.patch.object(
-            codex_preflight.CodexProviderEventRecorder, "record", new=self._fail_recorder,
+            codex_preflight.CodexProviderEventRecorder,
+            "record",
+            new=self._fail_recorder,
         ):
             launched, failure = runtime._bring_up_worker_head(
-                task, record, records, payload, record.attempt_id,
-                step="advance", stage="rework", blocked_reason="contract",
+                task,
+                record,
+                records,
+                payload,
+                record.attempt_id,
+                step="advance",
+                stage="rework",
+                blocked_reason="contract",
                 blocked_action="contract-worker-blocked",
             )
 
@@ -1300,7 +1432,11 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         callback_snapshot = next(
             snapshot[task["ref"]]
             for snapshot in self.snapshots
-            if snapshot[task["ref"]]["worker_head_run"].get("fanout_policy", {}).get("provider_source", {}).get("state") == "bound"
+            if snapshot[task["ref"]]["worker_head_run"]
+            .get("fanout_policy", {})
+            .get("provider_source", {})
+            .get("state")
+            == "bound"
             and not snapshot[task["ref"]]["launch_intent"].get("launched")
         )
         self.assertEqual(callback_snapshot["launch_intent"]["head_run"], callback_snapshot["worker_head_run"])
@@ -1311,16 +1447,21 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         assert ingress is not None
         before = copy.deepcopy(record.worker_head_run)
         source = dict(before["fanout_policy"]["provider_source"])
-        foreign = HeadRun.from_json(before).with_fanout_policy({
-            **before["fanout_policy"], "provider_source": {**source, "session_id": "foreign-session"},
-        })
+        foreign = HeadRun.from_json(before).with_fanout_policy(
+            {
+                **before["fanout_policy"],
+                "provider_source": {**source, "session_id": "foreign-session"},
+            }
+        )
         with self.assertRaisesRegex(HostError, "bound provider sources conflict"):
             ingress.commit_run(foreign)
         self.assertEqual(record.worker_head_run, before)
-        incomplete = HeadRun.from_json(before).with_fanout_policy({
-            **before["fanout_policy"],
-            "provider_source": {key: value for key, value in source.items() if key != "session_id"},
-        })
+        incomplete = HeadRun.from_json(before).with_fanout_policy(
+            {
+                **before["fanout_policy"],
+                "provider_source": {key: value for key, value in source.items() if key != "session_id"},
+            }
+        )
         ingress.commit_run(incomplete)
         self.assertEqual(record.worker_head_run, before, "an incomplete writer cannot clobber a binding")
         record.worker_head_run = incomplete.to_json()
@@ -1332,14 +1473,20 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
 
         baseline = self.host.provider_progress(task, record, "worker")
         self._append_records({"type": "turn.completed", "thread_id": "parent-1"})
-        self.assertIsNone(runtime.poll_codex_provider_ingress(
-            record, records, payload, reference=task["ref"],
-        ))
+        self.assertIsNone(
+            runtime.poll_codex_provider_ingress(
+                record,
+                records,
+                payload,
+                reference=task["ref"],
+            )
+        )
         progress = self.host.provider_progress(task, record, "worker")
         self.assertEqual(progress["admission"], "accepted")
         self.assertNotEqual(progress["cursor"], baseline["cursor"])
         with mock.patch.object(
-            dispatcher_review, "_head_run_process_status",
+            dispatcher_review,
+            "_head_run_process_status",
             return_value={"known": True, "match": True, "state": "live-match", "stopped": False},
         ):
             status = dispatcher_review.command_terminal_status(self.host, task, record, kind="worker")
@@ -1351,7 +1498,9 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         # This is the crash boundary after confirmation: adoption reads the exact source already
         # committed to the launch intent rather than reconstructing an unbound local copy.
         with mock.patch.object(
-            dispatcher_launch, "head_process_status", return_value={"known": True, "match": True},
+            dispatcher_launch,
+            "head_process_status",
+            return_value={"known": True, "match": True},
         ):
             adopted = resolve_launch_intent(runtime, task, records, payload)
         self.assertEqual(adopted["action"], "worker-launch-adopted")
@@ -1375,12 +1524,19 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
 
         runtime.record_review_routing = crash_after_confirm
         with mock.patch.object(
-            codex_preflight.CodexProviderEventRecorder, "record", new=self._fail_recorder,
+            codex_preflight.CodexProviderEventRecorder,
+            "record",
+            new=self._fail_recorder,
         ):
             with self.assertRaisesRegex(OSError, "crashed after reviewer confirmation"):
                 dispatcher_review.start_review(
-                    runtime, task, records, record, record.attempt_id,
-                    action="review-started", payload=payload,
+                    runtime,
+                    task,
+                    records,
+                    record,
+                    record.attempt_id,
+                    action="review-started",
+                    payload=payload,
                 )
 
         self._assert_bound(record.review_head_run, role="reviewer")
@@ -1391,7 +1547,9 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
             str(self.host._prompt_document_path(REVIEW_ROLE, task["ref"], record.review_baseline)),
         )
         with mock.patch.object(
-            dispatcher_launch, "head_process_status", return_value={"known": True, "match": True},
+            dispatcher_launch,
+            "head_process_status",
+            return_value={"known": True, "match": True},
         ):
             adopted = resolve_launch_intent(runtime, task, records, payload)
         self.assertEqual(adopted["action"], "review-launch-adopted")
@@ -1406,17 +1564,29 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         payload: dict = {}
         record = ObserverRecord(sprint="sprint:contract")
 
-        self.assertIsNone(write_observer_launch_intent(
-            runtime, payload, observers, record.sprint, record, "codex-contract", 1,
-        ))
+        self.assertIsNone(
+            write_observer_launch_intent(
+                runtime,
+                payload,
+                observers,
+                record.sprint,
+                record,
+                "codex-contract",
+                1,
+            )
+        )
         self._arm_source(record.workspace)
         self._add_recording_failure_event()
         _bind_codex_provider_ingress(runtime, payload, observers, record.sprint, record)
         with mock.patch.object(
-            codex_preflight.CodexProviderEventRecorder, "record", new=self._fail_recorder,
+            codex_preflight.CodexProviderEventRecorder,
+            "record",
+            new=self._fail_recorder,
         ):
             launched = self.host.prepare_observer(
-                {"ref": record.sprint}, "codex-contract", prompt="# Sprint\n",
+                {"ref": record.sprint},
+                "codex-contract",
+                prompt="# Sprint\n",
                 heartbeat_run_id=str(record.head_run["run_id"]),
             )
 
@@ -1428,15 +1598,22 @@ class ProductionPostDeliveryHandoffContractTests(unittest.TestCase):
         # secretary-1461, so what adoption must not do is measured from where the launch left it.
         sent_by_the_launch = len(self.session.sent)
         with mock.patch.object(
-            dispatcher_observer, "observer_alive", return_value={"alive": True, "pid_known": True},
+            dispatcher_observer,
+            "observer_alive",
+            return_value={"alive": True, "pid_known": True},
         ):
             adopted = adopt_observer_launch_intent(
-                runtime, payload, observers, record.sprint, record,
+                runtime,
+                payload,
+                observers,
+                record.sprint,
+                record,
             )
         self.assertEqual(adopted["action"], "observer-adopted")
         self._assert_bound(observers[record.sprint].head_run, role=OBSERVER_ROLE)
         self.assertEqual(
-            len(self.session.sent), sent_by_the_launch,
+            len(self.session.sent),
+            sent_by_the_launch,
             "watchdog adoption did not redeliver or replace",
         )
 

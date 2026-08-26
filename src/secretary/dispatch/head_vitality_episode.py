@@ -203,15 +203,22 @@ class VitalityEpisode:
             raise HeadVitalityError("a vitality episode is bound to a HeadRun.run_id")
         if not isinstance(self.verdict, VitalityVerdict):
             raise HeadVitalityError("a vitality episode carries a VitalityVerdict")
-        for name in ("started_at", "suspected_since", "confirmed_since", "last_progress_at",
-                     "updated_at", "stall_frozen_since"):
+        for name in (
+            "started_at",
+            "suspected_since",
+            "confirmed_since",
+            "last_progress_at",
+            "updated_at",
+            "stall_frozen_since",
+        ):
             object.__setattr__(self, name, _finite_timestamp(getattr(self, name), name))
         if isinstance(self.recovery_rung, bool) or not isinstance(self.recovery_rung, int):
             raise HeadVitalityError("a vitality episode recovery rung is an int")
         if self.recovery_rung < 0:
             raise HeadVitalityError("a vitality episode recovery rung is not negative")
         object.__setattr__(
-            self, "recovery_span_started_at",
+            self,
+            "recovery_span_started_at",
             _finite_timestamp(
                 getattr(self, "recovery_span_started_at", 0.0),
                 "recovery_span_started_at",
@@ -223,20 +230,21 @@ class VitalityEpisode:
         if self.activity_epoch < 0:
             raise HeadVitalityError("a vitality episode activity epoch is not negative")
         object.__setattr__(
-            self, "evidence_cursors",
-            {
-                str(name)[:80]: str(cursor)[:CURSOR_LIMIT]
-                for name, cursor in self.evidence_cursors.items()
-            },
+            self,
+            "evidence_cursors",
+            {str(name)[:80]: str(cursor)[:CURSOR_LIMIT] for name, cursor in self.evidence_cursors.items()},
         )
         object.__setattr__(
-            self, "unavailable_since",
+            self,
+            "unavailable_since",
             {
                 str(name)[:80]: _finite_timestamp(since, "unavailable_since")
                 for name, since in self.unavailable_since.items()
             },
         )
-        object.__setattr__(self, "basis", tuple(str(token)[:BASIS_TOKEN_LIMIT] for token in self.basis)[:BASIS_ENTRY_LIMIT])
+        object.__setattr__(
+            self, "basis", tuple(str(token)[:BASIS_TOKEN_LIMIT] for token in self.basis)[:BASIS_ENTRY_LIMIT]
+        )
         object.__setattr__(self, "reason", str(self.reason or "")[:REASON_LIMIT])
 
     def to_json(self) -> dict[str, Any]:
@@ -320,9 +328,7 @@ class VitalityEpisode:
             deterministic_refusals=refusals,
             activity_epoch=epoch,
             updated_at=_finite_timestamp(payload.get("updated_at"), "updated_at"),
-            stall_frozen_since=_finite_timestamp(
-                payload.get("stall_frozen_since"), "stall_frozen_since"
-            ),
+            stall_frozen_since=_finite_timestamp(payload.get("stall_frozen_since"), "stall_frozen_since"),
         )
 
 
@@ -357,27 +363,31 @@ def reduce_vitality(
         return previous
 
     target_run_id, foreign = _resolve_run_id(previous, snapshots)
-    owned = _latest_per_source(
-        [snapshot for snapshot in snapshots if snapshot.run_id == target_run_id]
-    )
+    owned = _latest_per_source([snapshot for snapshot in snapshots if snapshot.run_id == target_run_id])
     # ``basis`` is durable provenance that tests and humans compare; it is built from sorted
     # sources so batch order cannot change the words a deterministic reduction writes.
     basis = [f"dropped-foreign-run:{name}" for name in sorted(foreign)]
     if previous is not None and previous.run_id != target_run_id:
         basis.append(f"identity-changed-from:{previous.run_id}")
 
-    episode = previous if previous is not None and previous.run_id == target_run_id else VitalityEpisode(
-        run_id=target_run_id, started_at=now, updated_at=now,
+    episode = (
+        previous
+        if previous is not None and previous.run_id == target_run_id
+        else VitalityEpisode(
+            run_id=target_run_id,
+            started_at=now,
+            updated_at=now,
+        )
     )
     episode = _unfreeze_if_resumed(episode, owned, now)
 
     strong = [
-        snapshot for snapshot in owned.values()
+        snapshot
+        for snapshot in owned.values()
         if snapshot.availability is SourceAvailability.AVAILABLE and not snapshot.advisory
     ]
     progress_evidence = [
-        snapshot for snapshot in strong
-        if snapshot.progress in (ProgressState.ADVANCING, ProgressState.QUIET)
+        snapshot for snapshot in strong if snapshot.progress in (ProgressState.ADVANCING, ProgressState.QUIET)
     ]
     # ``owned`` is a dict keyed by source, so iterating it directly would let the batch's answer
     # order decide the words a deterministic reduction writes. Every ``basis`` token emitted in
@@ -400,7 +410,8 @@ def reduce_vitality(
                 episode = replace(
                     episode,
                     unavailable_since={
-                        name: stamp for name, stamp in episode.unavailable_since.items()
+                        name: stamp
+                        for name, stamp in episode.unavailable_since.items()
                         if name != snapshot.source.value
                     },
                 )
@@ -414,22 +425,28 @@ def reduce_vitality(
     if any(snapshot.process is ProcessState.DEAD for snapshot in strong):
         # Death outranks everything: a gone process cannot also be quietly working.
         verdict = VitalityVerdict.DEAD
-        basis.append("dead@" + ",".join(sorted(
-            snapshot.source.value for snapshot in strong
-            if snapshot.process is ProcessState.DEAD
-        )))
+        basis.append(
+            "dead@"
+            + ",".join(
+                sorted(snapshot.source.value for snapshot in strong if snapshot.process is ProcessState.DEAD)
+            )
+        )
     elif any(snapshot.process is ProcessState.SUSPENDED for snapshot in strong):
         verdict = VitalityVerdict.SUSPENDED
-        basis.append("suspended@pid_heartbeat" if any(
-            snapshot.source is SnapshotSource.PID_HEARTBEAT for snapshot in strong
-            if snapshot.process is ProcessState.SUSPENDED
-        ) else "suspended")
+        basis.append(
+            "suspended@pid_heartbeat"
+            if any(
+                snapshot.source is SnapshotSource.PID_HEARTBEAT
+                for snapshot in strong
+                if snapshot.process is ProcessState.SUSPENDED
+            )
+            else "suspended"
+        )
         episode = _freeze_stall_clocks(episode, now)
     elif any(snapshot.progress is ProgressState.ADVANCING for snapshot in progress_evidence):
         verdict = VitalityVerdict.HEALTHY_ACTIVE
         advancing = max(
-            (snapshot for snapshot in progress_evidence
-             if snapshot.progress is ProgressState.ADVANCING),
+            (snapshot for snapshot in progress_evidence if snapshot.progress is ProgressState.ADVANCING),
             key=lambda snapshot: (snapshot.observed_at, snapshot.source.value),
         )
         basis.append(f"advancing@{advancing.source.value}")
@@ -454,19 +471,17 @@ def reduce_vitality(
         basis.append(f"quiet:{int(quiet_seconds)}s@{quietest.source.value}")
         episode = replace(episode, stall_frozen_since=0.0)
         if episode.verdict is VitalityVerdict.CONFIRMED_STALL and not episode.confirmed_since:
-            episode = replace(episode, confirmed_since=reference + thresholds.suspect_after + thresholds.confirm_after)
+            episode = replace(
+                episode, confirmed_since=reference + thresholds.suspect_after + thresholds.confirm_after
+            )
         if quiet_seconds >= thresholds.suspect_after + thresholds.confirm_after:
             verdict = VitalityVerdict.CONFIRMED_STALL
             episode = replace(
                 episode,
                 confirmed_since=(
-                    episode.confirmed_since
-                    or reference + thresholds.suspect_after + thresholds.confirm_after
+                    episode.confirmed_since or reference + thresholds.suspect_after + thresholds.confirm_after
                 ),
-                suspected_since=(
-                    episode.suspected_since
-                    or reference + thresholds.suspect_after
-                ),
+                suspected_since=(episode.suspected_since or reference + thresholds.suspect_after),
                 reason=f"strong quiet for {int(quiet_seconds)}s with no advancement",
             )
             basis.append("confirmed-stall")
@@ -474,9 +489,7 @@ def reduce_vitality(
             verdict = VitalityVerdict.SUSPECTED_STALL
             episode = replace(
                 episode,
-                suspected_since=(
-                    episode.suspected_since or reference + thresholds.suspect_after
-                ),
+                suspected_since=(episode.suspected_since or reference + thresholds.suspect_after),
                 reason=f"strong quiet for {int(quiet_seconds)}s with no advancement",
             )
             basis.append("suspected-stall")
@@ -508,9 +521,9 @@ def reduce_vitality(
         # silence.
         reference = episode.last_progress_at or episode.started_at
         quiet_seconds = max(0.0, now - reference)
-        basis.append("alive-no-progress-source@" + ",".join(sorted(
-            snapshot.source.value for snapshot in strong
-        )))
+        basis.append(
+            "alive-no-progress-source@" + ",".join(sorted(snapshot.source.value for snapshot in strong))
+        )
         episode = replace(episode, stall_frozen_since=0.0)
         progress_witnessed = bool(
             episode.unavailable_since.keys() & _PROGRESS_SOURCES
@@ -545,9 +558,7 @@ def reduce_vitality(
                 verdict = VitalityVerdict.SUSPECTED_STALL
                 episode = replace(
                     episode,
-                    suspected_since=(
-                        episode.suspected_since or reference + thresholds.suspect_after
-                    ),
+                    suspected_since=(episode.suspected_since or reference + thresholds.suspect_after),
                     reason="progress source known but not answering; suspicion stands",
                 )
                 basis.append("preserved-suspicion:provider-dark-pid-alive")
@@ -561,9 +572,12 @@ def reduce_vitality(
                         # launch refusal is more useful to the operator (and to the
                         # policy's deterministic allowlist) than the generic frozen words.
                         next(
-                            (snapshot.reason for name in sorted(owned)
-                             if (snapshot := owned[name]).availability
-                             is SourceAvailability.UNAVAILABLE and snapshot.reason),
+                            (
+                                snapshot.reason
+                                for name in sorted(owned)
+                                if (snapshot := owned[name]).availability is SourceAvailability.UNAVAILABLE
+                                and snapshot.reason
+                            ),
                             "progress source known to this episode but not answering; frozen",
                         )
                     ),
@@ -576,13 +590,9 @@ def reduce_vitality(
             episode = replace(
                 episode,
                 confirmed_since=(
-                    episode.confirmed_since
-                    or reference + thresholds.suspect_after + thresholds.confirm_after
+                    episode.confirmed_since or reference + thresholds.suspect_after + thresholds.confirm_after
                 ),
-                suspected_since=(
-                    episode.suspected_since
-                    or reference + thresholds.suspect_after
-                ),
+                suspected_since=(episode.suspected_since or reference + thresholds.suspect_after),
                 reason=f"running with no progress evidence for {int(quiet_seconds)}s",
             )
             basis.append("confirmed-stall")
@@ -590,10 +600,7 @@ def reduce_vitality(
             verdict = VitalityVerdict.SUSPECTED_STALL
             episode = replace(
                 episode,
-                suspected_since=(
-                    episode.suspected_since
-                    or reference + thresholds.suspect_after
-                ),
+                suspected_since=(episode.suspected_since or reference + thresholds.suspect_after),
                 reason=f"running with no progress evidence for {int(quiet_seconds)}s",
             )
             basis.append("suspected-stall")
@@ -637,10 +644,15 @@ def reduce_vitality(
         # ``terminal_split_source_not_found`` must survive reduction, not be flattened into
         # an anonymous "nothing answered". Verdicts that DO write a reason (stalls,
         # suspension) keep theirs -- those conclusions outrank quoting a channel.
-        reason=episode.reason if episode.reason else next(
-            (snapshot.reason for name in sorted(owned)
-             if (snapshot := owned[name]).availability is SourceAvailability.UNAVAILABLE
-             and snapshot.reason),
+        reason=episode.reason
+        if episode.reason
+        else next(
+            (
+                snapshot.reason
+                for name in sorted(owned)
+                if (snapshot := owned[name]).availability is SourceAvailability.UNAVAILABLE
+                and snapshot.reason
+            ),
             "",
         ),
         basis=tuple(basis[:BASIS_ENTRY_LIMIT]),

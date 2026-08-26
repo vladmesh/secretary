@@ -6,8 +6,11 @@ from pathlib import Path
 
 def git(repo: Path, *args: str) -> str:
     result = subprocess.run(
-        ["git", "-C", str(repo), *args], check=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        ["git", "-C", str(repo), *args],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
     return result.stdout.strip()
 

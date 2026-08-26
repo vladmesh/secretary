@@ -76,14 +76,16 @@ class GuardRefusal(StrEnum):
 #: fails here loudly instead of silently falling through to allowed.
 _REFUSED_VERDICTS: dict[VitalityVerdict, tuple[GuardRefusal, str]] = {
     VitalityVerdict.HEALTHY_ACTIVE: (
-        GuardRefusal.HEALTHY_ACTIVE, "the head is advancing right now",
+        GuardRefusal.HEALTHY_ACTIVE,
+        "the head is advancing right now",
     ),
     VitalityVerdict.HEALTHY_QUIET: (
         GuardRefusal.HEALTHY_QUIET,
         "the head is alive and quiet below every stall threshold",
     ),
     VitalityVerdict.UNVERIFIABLE: (
-        GuardRefusal.UNVERIFIABLE, "no strong channel answered; nothing is concluded",
+        GuardRefusal.UNVERIFIABLE,
+        "no strong channel answered; nothing is concluded",
     ),
     VitalityVerdict.SUSPENDED: (
         GuardRefusal.SUSPENDED,
@@ -130,18 +132,20 @@ def _progress_source_witnessed(episode: VitalityEpisode) -> bool:
     episodes can reach ``ConfirmedStall`` and why the outer-ceiling rule below exists
     for them.
     """
-    return bool(
-        set(episode.evidence_cursors) & _PROGRESS_SOURCE_NAMES
-    ) or episode.last_progress_at > 0.0
+    return bool(set(episode.evidence_cursors) & _PROGRESS_SOURCE_NAMES) or episode.last_progress_at > 0.0
 
 
 def _refused(
-    action: str, refusal: GuardRefusal, reason: str,
+    action: str,
+    refusal: GuardRefusal,
+    reason: str,
     episode: VitalityEpisode | None = None,
 ) -> GuardDecision:
     verdict = getattr(getattr(episode, "verdict", None), "value", "")
     return GuardDecision(
-        action=action, allowed=False, refusal=refusal,
+        action=action,
+        allowed=False,
+        refusal=refusal,
         reason=reason,
         verdict=verdict,
         episode_run_id="" if episode is None else episode.run_id,
@@ -170,22 +174,24 @@ def assert_destructive_allowed(
     and a malformed ``now`` would make every comparison meaningless, so it refuses like
     any other unknown.
     """
-    if isinstance(now, bool) or not isinstance(now, (int, float)) \
-            or not math.isfinite(float(now)):
+    if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(float(now)):
         return _refused(
-            action, GuardRefusal.MISSING_EPISODE,
+            action,
+            GuardRefusal.MISSING_EPISODE,
             "the guard was handed a clock it cannot read; waiting is the safe side",
         )
     now = float(now)
     if not isinstance(episode, VitalityEpisode):
         return _refused(
-            action, GuardRefusal.MISSING_EPISODE,
+            action,
+            GuardRefusal.MISSING_EPISODE,
             "no vitality episode is on file; a destructive step nobody observed "
             "would act on nobody's evidence",
         )
     if current_run_id and episode.run_id != str(current_run_id):
         return _refused(
-            action, GuardRefusal.FOREIGN_RUN,
+            action,
+            GuardRefusal.FOREIGN_RUN,
             f"the persisted episode names run {episode.run_id}, not the current run "
             f"{current_run_id}: one run's stall verdict must never execute against "
             "its replacement",
@@ -195,36 +201,41 @@ def assert_destructive_allowed(
     if episode.verdict in _REFUSED_VERDICTS:
         refusal, why = _REFUSED_VERDICTS[episode.verdict]
         return _refused(
-            action, refusal, f"{why} (basis: {basis})", episode,
+            action,
+            refusal,
+            f"{why} (basis: {basis})",
+            episode,
         )
-    if episode.verdict is not VitalityVerdict.CONFIRMED_STALL \
-            and episode.verdict is not VitalityVerdict.DEAD:
+    if episode.verdict is not VitalityVerdict.CONFIRMED_STALL and episode.verdict is not VitalityVerdict.DEAD:
         # A ladder rung this card does not know -- or a malformed verdict that never was
         # one: refuse on principle. New verdicts must be added to the map above
         # explicitly before they can destroy anything.
         raw = getattr(episode.verdict, "value", episode.verdict)
         return _refused(
-            action, GuardRefusal.UNVERIFIABLE,
-            f"verdict {raw} is not one the guard knows as "
-            "destructive-authorising; refusing on principle",
+            action,
+            GuardRefusal.UNVERIFIABLE,
+            f"verdict {raw} is not one the guard knows as destructive-authorising; refusing on principle",
             episode,
         )
-    if episode.verdict is VitalityVerdict.CONFIRMED_STALL \
-            and not _progress_source_witnessed(episode) \
-            and pid_only_outer_ceiling_seconds > 0:
+    if (
+        episode.verdict is VitalityVerdict.CONFIRMED_STALL
+        and not _progress_source_witnessed(episode)
+        and pid_only_outer_ceiling_seconds > 0
+    ):
         elapsed = max(0.0, now - episode.started_at)
         if elapsed < pid_only_outer_ceiling_seconds:
             return _refused(
-                action, GuardRefusal.PID_ONLY_CEILING_UNELAPSED,
+                action,
+                GuardRefusal.PID_ONLY_CEILING_UNELAPSED,
                 "confirmation was earned on the pid alone (issue 656 arm), so the "
                 f"outer ceiling of {int(pid_only_outer_ceiling_seconds)}s must also "
                 f"have elapsed ({int(elapsed)}s have)",
                 episode,
             )
     return GuardDecision(
-        action=action, allowed=True, verdict=episode.verdict.value,
+        action=action,
+        allowed=True,
+        verdict=episode.verdict.value,
         episode_run_id=episode.run_id,
-        reason=(
-            f"{episode.verdict.value} stands (basis: {basis})"
-        ),
+        reason=(f"{episode.verdict.value} stands (basis: {basis})"),
     )

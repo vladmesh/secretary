@@ -105,7 +105,8 @@ def _runtime_trees() -> list[ast.AST]:
         tree = ast.parse(Path(inspect.getsourcefile(module)).read_text(encoding="utf-8"))
         if module is dispatcher_module:
             trees.extend(
-                node for node in tree.body
+                node
+                for node in tree.body
                 if isinstance(node, ast.ClassDef) and node.name == "DispatcherRuntime"
             )
             continue
@@ -212,8 +213,7 @@ class HostSurfaceContractTests(unittest.TestCase):
         that path (the launcher tests use the real classes), but a rename must still fail here."""
         tree = ast.parse(Path(inspect.getsourcefile(dispatcher_module)).read_text(encoding="utf-8"))
         host_class = next(
-            node for node in tree.body
-            if isinstance(node, ast.ClassDef) and node.name == "CommandHostRuntime"
+            node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "CommandHostRuntime"
         )
         used = {
             node.attr
@@ -406,9 +406,7 @@ def _handled_rpc_methods(func) -> set[str]:
     return {
         comparator.value
         for node in ast.walk(tree)
-        if isinstance(node, ast.Compare)
-        and isinstance(node.left, ast.Name)
-        and node.left.id == "method"
+        if isinstance(node, ast.Compare) and isinstance(node.left, ast.Name) and node.left.id == "method"
         for comparator in node.comparators
         if isinstance(comparator, ast.Constant) and isinstance(comparator.value, str)
     }
@@ -449,7 +447,8 @@ class HeadRegistrySourceContractTests(unittest.TestCase):
 
     def instance(self, root: Path, snapshot: str) -> Path:
         (root / "instance.yaml").write_text(
-            "version: 1\nname: contract\ndata_dir: " + str(root / "data")
+            "version: 1\nname: contract\ndata_dir: "
+            + str(root / "data")
             + "\noffsite:\n  instance_remote: git@example.invalid:x/y.git\n"
             + "host:\n  unit_prefix: secretary-\n",
             encoding="utf-8",
@@ -516,14 +515,14 @@ class RoleRoutingGenerationTests(unittest.TestCase):
     """
 
     CANON = (
-        "[resources.owned-sub]\naccount = \"owned\"\nprobe = \"true\"\n"
-        "[profiles.owned-worker]\nresource = \"owned-sub\"\nadapter = \"claude\"\nfallback = []\n"
-        "[profiles.owned-reviewer]\nresource = \"owned-sub\"\nadapter = \"claude\"\nfallback = []\n"
-        "[profiles.owned-observer]\nresource = \"owned-sub\"\nadapter = \"claude\"\nfallback = []\n"
-        "[profiles.owned-watcher]\nresource = \"owned-sub\"\nadapter = \"claude\"\nfallback = []\n"
-        "[role_defaults]\nnew_card = \"owned-worker\"\nreviewer = \"owned-reviewer\"\n"
-        "observer = \"owned-observer\"\ncurator = \"owned-watcher\"\nretro = \"owned-watcher\"\n"
-        "steward = \"owned-watcher\"\n"
+        '[resources.owned-sub]\naccount = "owned"\nprobe = "true"\n'
+        '[profiles.owned-worker]\nresource = "owned-sub"\nadapter = "claude"\nfallback = []\n'
+        '[profiles.owned-reviewer]\nresource = "owned-sub"\nadapter = "claude"\nfallback = []\n'
+        '[profiles.owned-observer]\nresource = "owned-sub"\nadapter = "claude"\nfallback = []\n'
+        '[profiles.owned-watcher]\nresource = "owned-sub"\nadapter = "claude"\nfallback = []\n'
+        '[role_defaults]\nnew_card = "owned-worker"\nreviewer = "owned-reviewer"\n'
+        'observer = "owned-observer"\ncurator = "owned-watcher"\nretro = "owned-watcher"\n'
+        'steward = "owned-watcher"\n'
     )
 
     def setUp(self) -> None:
@@ -531,7 +530,8 @@ class RoleRoutingGenerationTests(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.instance = Path(tmp.name)
         (self.instance / "instance.yaml").write_text(
-            "version: 1\nname: routing\ndata_dir: " + str(self.instance / "data")
+            "version: 1\nname: routing\ndata_dir: "
+            + str(self.instance / "data")
             + "\noffsite:\n  instance_remote: git@example.invalid:x/y.git\n"
             + "host:\n  unit_prefix: secretary-\n",
             encoding="utf-8",
@@ -583,15 +583,20 @@ class RoleRoutingGenerationTests(unittest.TestCase):
         resources = {"claude-sub": {"account": "subscription"}}
         profiles = {
             "opus-medium": {
-                "resource": "claude-sub", "adapter": "claude", "model": "opus",
-                "effort": "medium", "fallback": [],
+                "resource": "claude-sub",
+                "adapter": "claude",
+                "model": "opus",
+                "effort": "medium",
+                "fallback": [],
             }
         }
         heads.validate_registry(resources, profiles)
         registry = heads.Registry(resources, profiles)
 
         rendered = render_head_command(
-            registry.profile("opus-medium"), role="reviewer", prompt="review",
+            registry.profile("opus-medium"),
+            role="reviewer",
+            prompt="review",
             binding=RUNTIME_ROLE_ENV,
         )
 
@@ -683,13 +688,11 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         self.addCleanup(heads._load_registry.cache_clear)
 
     def unit_env(self, name: str) -> dict[str, str]:
-        rendered = render_systemd_unit(
-            (SHIPPED_PACKAGING_ROOT / name).read_bytes(), self.layout
-        ).decode()
+        rendered = render_systemd_unit((SHIPPED_PACKAGING_ROOT / name).read_bytes(), self.layout).decode()
         env = {}
         for line in rendered.splitlines():
             if line.startswith("Environment="):
-                key, value = line[len("Environment="):].split("=", 1)
+                key, value = line[len("Environment=") :].split("=", 1)
                 env[key] = value
         return env
 
@@ -714,28 +717,27 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         self.assertLessEqual(set(self.UNITS), set(compiled))
         for name in self.UNITS:
             with self.subTest(unit=name):
-                self.assertIn(
-                    f"Environment=SECRETARY_INSTANCE={self.instance}".encode(), compiled[name]
-                )
+                self.assertIn(f"Environment=SECRETARY_INSTANCE={self.instance}".encode(), compiled[name])
 
     def test_the_role_process_resolves_that_instances_registry(self) -> None:
         """Through role_env, the way the unit actually starts the process."""
-        for name, role in (("secretary-curator.service", "curator"),
-                           ("secretary-retro.service", "retro"),
-                           ("secretary-steward.service", "steward"),
-                           ("secretary-steward-deep-sweep.service", "steward"),
-                           ("secretary-dispatcher-production.service", "pipeline")):
+        for name, role in (
+            ("secretary-curator.service", "curator"),
+            ("secretary-retro.service", "retro"),
+            ("secretary-steward.service", "steward"),
+            ("secretary-steward-deep-sweep.service", "steward"),
+            ("secretary-dispatcher-production.service", "pipeline"),
+        ):
             with self.subTest(unit=name):
                 env = role_env.runtime_env(
-                    role, base_env=self.unit_env(name),
+                    role,
+                    base_env=self.unit_env(name),
                     env_file=self.instance / "runtime.env",
                 )
 
                 with mock.patch.dict(os.environ, env, clear=True):
                     heads._load_registry.cache_clear()
-                    self.assertEqual(
-                        heads.registry_path(), self.instance / "heads" / "heads.yaml"
-                    )
+                    self.assertEqual(heads.registry_path(), self.instance / "heads" / "heads.yaml")
                     self.assertEqual(heads.default_head(), "owned-worker")
                     self.assertEqual(heads.reviewer_head(), "owned-reviewer")
 
@@ -760,9 +762,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         for module, role in ((head_role_env, "worker"), (role_env, "steward")):
             with self.subTest(module.__name__):
                 base = self.unit_env("secretary-dispatcher-production.service")
-                env = module.runtime_env(
-                    role, base_env=base, env_file=self.instance / "runtime.env"
-                )
+                env = module.runtime_env(role, base_env=base, env_file=self.instance / "runtime.env")
 
                 self.assertEqual(env["SECRETARY_INSTANCE"], str(self.instance))
 
@@ -823,7 +823,7 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
             layout,
         ).decode()
         unit_env = dict(
-            line[len("Environment="):].split("=", 1)
+            line[len("Environment=") :].split("=", 1)
             for line in rendered.splitlines()
             if line.startswith("Environment=")
         )
@@ -834,7 +834,9 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
 
         result = subprocess.run(
             ["/bin/sh", "-c", command],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True,
+            text=True,
+            timeout=120,
             env={
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                 "HOME": str(self.root / "home"),
@@ -866,7 +868,9 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
 
         result = subprocess.run(
             ["/bin/sh", "-c", command],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True,
+            text=True,
+            timeout=120,
             cwd=self.root,
             env={
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -913,7 +917,9 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
 
         result = subprocess.run(
             ["/bin/sh", "-c", command],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True,
+            text=True,
+            timeout=120,
             env={
                 "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
                 "HOME": str(self.root),
@@ -928,7 +934,9 @@ class PackagedRoleUnitInstanceTests(unittest.TestCase):
         """The binding is one role's, and a launcher asking for it elsewhere is a defect."""
         with self.assertRaisesRegex(HeadCommandError, "SECRETARY_OBSERVER_SPRINT"):
             wrap_role_command(
-                "worker", "true", identity=observer_binding("sprint:1126", "abc123def456"),
+                "worker",
+                "true",
+                identity=observer_binding("sprint:1126", "abc123def456"),
             )
 
 
@@ -943,8 +951,7 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
         canon = canonical_heads(upgrade.running_product_root())
 
         codex = {
-            pid: profile for pid, profile in canon["profiles"].items()
-            if profile.get("adapter") == "codex"
+            pid: profile for pid, profile in canon["profiles"].items() if profile.get("adapter") == "codex"
         }
         self.assertTrue(codex, "the portable registry is expected to ship Codex heads")
         for pid, profile in codex.items():
@@ -966,7 +973,8 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
         installed = installed_heads(instance)
 
         codex = {
-            pid: profile for pid, profile in installed["profiles"].items()
+            pid: profile
+            for pid, profile in installed["profiles"].items()
             if profile.get("adapter") == "codex"
         }
         self.assertTrue(codex)
@@ -994,7 +1002,10 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
         registry = heads.Registry(self.RESOURCES, profiles)
 
         rendered = render_head_command(
-            registry.profile("bare"), role="worker", prompt="do the card", workspace="/tmp/ws",
+            registry.profile("bare"),
+            role="worker",
+            prompt="do the card",
+            workspace="/tmp/ws",
             binding=RUNTIME_ROLE_ENV,
         )
 
@@ -1009,10 +1020,14 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
         with self.assertRaisesRegex(heads.HeadRegistryError, "unknown codex launch mode 'exec'"):
             heads.validate_registry(
                 self.RESOURCES,
-                {"old": {
-                    "resource": "openai-sub", "adapter": "codex",
-                    "codex_mode": "exec", "fallback": [],
-                }},
+                {
+                    "old": {
+                        "resource": "openai-sub",
+                        "adapter": "codex",
+                        "codex_mode": "exec",
+                        "fallback": [],
+                    }
+                },
             )
 
     def test_no_role_can_be_rendered_a_codex_exec_command(self) -> None:
@@ -1024,8 +1039,11 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
             for role in ("worker", "reviewer", "observer", "curator", "retro", "steward"):
                 with self.subTest(profile=pid, role=role):
                     rendered = render_head_command(
-                        registry.profile(registry.resolve(pid)), role=role, prompt="skill",
-                        workspace="/tmp/ws", binding=RUNTIME_ROLE_ENV,
+                        registry.profile(registry.resolve(pid)),
+                        role=role,
+                        prompt="skill",
+                        workspace="/tmp/ws",
+                        binding=RUNTIME_ROLE_ENV,
                     )
                     self.assertNotIn("codex exec", rendered.command)
 
@@ -1068,10 +1086,10 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
         from triggered_agents.runtime import codex_preflight
         from triggered_agents.runtime import dispatch as ta_dispatch
 
-        self.assertIs(dispatcher_launcher._preflight_codex_workspace,
-                      codex_preflight.ensure_codex_workspace_trusted)
-        self.assertIs(ta_dispatch.preflight_codex_launch,
-                      codex_preflight.preflight_codex_launch)
+        self.assertIs(
+            dispatcher_launcher._preflight_codex_workspace, codex_preflight.ensure_codex_workspace_trusted
+        )
+        self.assertIs(ta_dispatch.preflight_codex_launch, codex_preflight.preflight_codex_launch)
         source = Path(codex_preflight.__file__).read_text(encoding="utf-8")
         self.assertNotIn("import secretary", source)
         self.assertNotIn("from secretary", source)
@@ -1086,19 +1104,35 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
         profiles = {
             "codex": {"resource": "openai-sub", "adapter": "codex", "fallback": []},
             "codex-high": {
-                "resource": "openai-sub", "adapter": "codex", "effort": "high", "fallback": [],
+                "resource": "openai-sub",
+                "adapter": "codex",
+                "effort": "high",
+                "fallback": [],
             },
             "codex-extra": {
-                "resource": "openai-sub", "adapter": "codex", "effort": "extra", "fallback": [],
+                "resource": "openai-sub",
+                "adapter": "codex",
+                "effort": "extra",
+                "fallback": [],
             },
         }
         heads.validate_registry(self.RESOURCES, profiles)
         registry = heads.Registry(self.RESOURCES, profiles)
 
         for old in (
-            "codex", "codex-sol", "codex-terra", "codex-luna", "codex-5-4", "codex-mini",
-            "codex-spark", "codex-high", "codex-extra", "codex-reviewer", "codex-curator",
-            "codex-steward", "codex-retro",
+            "codex",
+            "codex-sol",
+            "codex-terra",
+            "codex-luna",
+            "codex-5-4",
+            "codex-mini",
+            "codex-spark",
+            "codex-high",
+            "codex-extra",
+            "codex-reviewer",
+            "codex-curator",
+            "codex-steward",
+            "codex-retro",
         ):
             with self.subTest(head=old):
                 resolved = registry.resolve(old)
@@ -1168,7 +1202,10 @@ class CodexIsInteractiveOnlyTests(unittest.TestCase):
         """Family alone is not enough: the stand-in has to be a head the product can launch."""
         profiles = {
             "codex": {
-                "resource": "openai-sub", "adapter": "codex", "codex_mode": "exec", "fallback": [],
+                "resource": "openai-sub",
+                "adapter": "codex",
+                "codex_mode": "exec",
+                "fallback": [],
             },
         }
         registry = heads.Registry(self.RESOURCES, profiles)
@@ -1295,8 +1332,7 @@ class PerProfileRuntimeTests(unittest.TestCase):
         def run_on(runtime: str) -> HeadRun:
             return HeadRun(
                 run_id="run-1",
-                spec=HeadSpec(profile_id="head", adapter="codex", codex_mode="tui",
-                              runtime=runtime),
+                spec=HeadSpec(profile_id="head", adapter="codex", codex_mode="tui", runtime=runtime),
                 workspace="/tmp/ws",
                 task_ref=TaskRef.card("card-1"),
                 role="worker",
@@ -1314,10 +1350,15 @@ class PerProfileRuntimeTests(unittest.TestCase):
     def test_a_record_written_before_this_key_existed_is_a_legacy_head(self) -> None:
         payload = {"profile_id": "head", "adapter": "codex"}
 
-        recovered = HeadRun.from_json({
-            "run_id": "run-1", "spec": payload, "workspace": "/tmp/ws",
-            "task_ref": {"kind": "card", "ref": "card-1"}, "role": "worker",
-        })
+        recovered = HeadRun.from_json(
+            {
+                "run_id": "run-1",
+                "spec": payload,
+                "workspace": "/tmp/ws",
+                "task_ref": {"kind": "card", "ref": "card-1"},
+                "role": "worker",
+            }
+        )
 
         self.assertEqual(recovered.spec.runtime, ORCA_LEGACY_RUNTIME)
 
@@ -1356,11 +1397,11 @@ class PerProfileRuntimeTests(unittest.TestCase):
         canon = product / "src" / "triggered_agents" / "agents" / "pipeline"
         canon.mkdir(parents=True)
         (canon / "heads.toml").write_text(
-            "[resources.acct]\naccount = \"acct\"\n\n"
-            "[profiles.supervised]\nresource = \"acct\"\nadapter = \"claude\"\n"
-            "runtime = \"local-pty\"\n\n"
-            "[profiles.legacy]\nresource = \"acct\"\nadapter = \"claude\"\n\n"
-            "[role_defaults]\nnew_card = \"supervised\"\n",
+            '[resources.acct]\naccount = "acct"\n\n'
+            '[profiles.supervised]\nresource = "acct"\nadapter = "claude"\n'
+            'runtime = "local-pty"\n\n'
+            '[profiles.legacy]\nresource = "acct"\nadapter = "claude"\n\n'
+            '[role_defaults]\nnew_card = "supervised"\n',
             encoding="utf-8",
         )
         instance = Path(tmp.name) / "instance"
@@ -1388,9 +1429,7 @@ class PerProfileRuntimeTests(unittest.TestCase):
 
         for pid, profile in canon["profiles"].items():
             with self.subTest(profile=pid):
-                self.assertEqual(
-                    profile.get("runtime", DEFAULT_HEAD_RUNTIME), ORCA_LEGACY_RUNTIME
-                )
+                self.assertEqual(profile.get("runtime", DEFAULT_HEAD_RUNTIME), ORCA_LEGACY_RUNTIME)
 
 
 class _RecordingBackend:
@@ -1405,9 +1444,7 @@ class _RecordingBackend:
         del ignored
         self.calls.append(("stop", run.run_id))
         if self.refuses:
-            return StopReceipt(
-                status=HEAD_ALIVE, run=run, reason="the head's process outlived the stop"
-            )
+            return StopReceipt(status=HEAD_ALIVE, run=run, reason="the head's process outlived the stop")
         return StopReceipt(status=HEAD_OK, run=run.finishing(initiator).exited())
 
     def stop_workspace(self, workspace: str) -> None:
