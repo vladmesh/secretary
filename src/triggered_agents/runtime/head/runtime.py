@@ -165,6 +165,21 @@ class HeadActivity:
         self._epochs[run_id] = epoch
         return epoch
 
+    def noted(self, run_id: str = "") -> int:
+        """Count one thing this runtime did, and move no head's epoch by doing it.
+
+        The half of `acted` that a backend with a durable witness still wants (secretary-1479).
+        On such a backend the epoch a caller is handed is the head's own journal sequence, so a
+        process-local increment beside it is not a smaller version of the same number — it is a
+        different scale, and the tick that reads it next cannot compare it to anything. `ticks`
+        is a diagnostic and stays one; this is how it goes on being kept without the epoch being
+        synthesised. The head's id is taken so that a reader of this call sees which head the
+        runtime was working on, and is deliberately not used for anything else.
+        """
+        del run_id
+        self._ticks += 1
+        return self._ticks
+
     def observed(self, run_id: str, *, output_at: float = 0.0) -> int:
         """Record what a pane read said about this head, and return the epoch that follows.
 

@@ -22,6 +22,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from secretary.dispatcher_watchdog import (
     HEARTBEAT_DEAD,
@@ -29,6 +30,7 @@ from secretary.dispatcher_watchdog import (
     head_process_status,
 )
 from triggered_agents.runtime.head.local_pty import protocol
+from triggered_agents.runtime.head.local_pty import journal as journal_module
 from triggered_agents.runtime.head.local_pty import supervisor as supervisor_module
 from triggered_agents.runtime.head.local_pty.client import (
     HeadHandle,
@@ -1063,6 +1065,78 @@ class LocalPtySubstrateTests(unittest.TestCase):
         )
         with self.assertRaises(JournalError):
             read_tail(path, max_bytes=0)
+
+    def test_a_bounded_read_stays_bounded_while_the_journal_is_being_appended_to(self) -> None:
+        """secretary-1479: the bound is on the bytes read, and a live writer cannot lift it.
+
+        The reader this bound exists for reads a journal its supervisor is still writing, so the
+        end of the file it measured is not the end of the file it reads from: a read issued for
+        "everything from here" reads through whatever landed in between, and a writer that keeps
+        going makes that arbitrarily larger than the number the bound is named for. Counting the
+        records that survived the parse cannot see this — they are the same records either way —
+        so what is counted here is what `read` actually handed back.
+
+        The append is made from inside the reader's own `seek`, which is the moment the race
+        happens at: the size has been taken and the read has not been issued.
+        """
+        path = self.root / "appended.jsonl"
+        with JournalWriter(path, "appended") as journal:
+            journal.append(RUN_STARTED, head_pid=1)
+            while path.stat().st_size <= JOURNAL_TAIL_BYTES * 2:
+                journal.append(PROVIDER_PROGRESSED, turn=1, output_bytes=64)
+            appended_from = int(path.stat().st_size)
+            while path.stat().st_size <= appended_from + JOURNAL_TAIL_BYTES * 3:
+                journal.append(PROVIDER_PROGRESSED, turn=2, output_bytes=64)
+            latecomers = path.read_bytes()[appended_from:]
+        truncate_to = appended_from
+        with open(path, "r+b") as handle:
+            handle.truncate(truncate_to)
+
+        real_open = open
+        read_bytes: list[int] = []
+
+        class _AppendingHandle:
+            """A file that grows by `latecomers` between the size probe and the read."""
+
+            def __init__(self, inner) -> None:
+                self._inner = inner
+                self._appended = False
+
+            def seek(self, *args: int) -> int:
+                position = self._inner.seek(*args)
+                if not self._appended and args[:2] != (0, os.SEEK_END):
+                    self._appended = True
+                    with real_open(path, "ab") as sink:
+                        sink.write(latecomers)
+                return position
+
+            def read(self, *args: int) -> bytes:
+                data = self._inner.read(*args)
+                read_bytes.append(len(data))
+                return data
+
+            def __enter__(self) -> _AppendingHandle:
+                return self
+
+            def __exit__(self, *exc_info: object) -> None:
+                self._inner.close()
+
+        def opening(*args: object, **kwargs: object) -> _AppendingHandle:
+            return _AppendingHandle(real_open(*args, **kwargs))
+
+        with mock.patch.object(journal_module, "open", opening, create=True):
+            result = read_tail(path)
+
+        self.assertGreater(len(latecomers), JOURNAL_TAIL_BYTES, "the append is too small to show it")
+        self.assertGreater(path.stat().st_size, truncate_to, "the append never happened")
+        self.assertTrue(read_bytes, "the read was never made")
+        self.assertLessEqual(
+            sum(read_bytes),
+            JOURNAL_TAIL_BYTES,
+            "a writer appending during the read lifted the bound the read is named for",
+        )
+        self.assertTrue(result.partial_head, "this is still a bounded read of a long journal")
+        self.assertTrue(result.ordered)
 
     # -- identity --------------------------------------------------------------------------
 

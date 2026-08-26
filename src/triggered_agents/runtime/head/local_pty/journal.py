@@ -225,13 +225,21 @@ def read_events(path: str | os.PathLike[str]) -> JournalReadResult:
 def read_tail(
     path: str | os.PathLike[str], *, max_bytes: int = JOURNAL_TAIL_BYTES
 ) -> JournalReadResult:
-    """Read at most the last `max_bytes` of a journal, and say that the read was bounded.
+    """Read at most `max_bytes` bytes off the end of a journal, and say that the read was bounded.
 
     The read a caller that asks "what is this head doing now" makes. The first line of the window
     is dropped whenever the window did not start at the beginning of the file — it is a record cut
     in half by the bound, not by a dead writer, and admitting it would put a malformed record into
     a result whose `malformed` count means something else. `partial_head` then says what was done,
     so a reader can tell "this journal contains no drain" from "the window I read contains none".
+
+    **The bound is on the bytes this reads, not on the records it keeps** (secretary-1479). A
+    journal is read while its supervisor is appending to it, so the size this seeks against is
+    already old by the time the read runs: asking for everything to the end would read through
+    whatever landed in between, and a writer that keeps going can make that arbitrarily larger
+    than the number this function is named for. The window is therefore closed at both ends — it
+    is the last `min(max_bytes, size)` bytes of the file *as it was measured* — and a record
+    appended after the measurement belongs to the next read rather than to this one.
 
     A missing file reads as an empty journal, exactly as it does for `read_events`.
     """
@@ -242,7 +250,7 @@ def read_tail(
             size = handle.seek(0, os.SEEK_END)
             start = max(0, size - max_bytes)
             handle.seek(start)
-            raw = handle.read()
+            raw = handle.read(min(max_bytes, max(0, size - start)))
     except FileNotFoundError:
         return JournalReadResult()
     if start <= 0:
