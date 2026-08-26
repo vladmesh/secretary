@@ -260,6 +260,14 @@ UNDECLARED_DELIVERY_BOUND = protocol.INPUT_DELIVERY_SECONDS
 STOP_TURN_IN_FLIGHT = "turn_in_flight"
 STOP_ACTIVITY_SINCE = "activity_since_expected_epoch"
 
+#: Why a bring-up was refused before anything was spawned. Two refusals, two tokens, because they
+#: are made by two different witnesses and a caller must not have to tell them apart by reading a
+#: sentence: `START_TURN_IN_FLIGHT` is this runtime's own outstanding turn — in-process, and true
+#: only for a head *this* object handed a turn to — while `START_HEAD_ALREADY_UP` is the head's own
+#: launch identity on disk, which is what a runtime constructed a tick later has instead of a memory.
+START_TURN_IN_FLIGHT = "turn_in_flight"
+START_HEAD_ALREADY_UP = "head_already_up"
+
 #: How long `stop` waits for a signalled head to actually be gone before it says it could not be
 #: confirmed. Above the supervisor's own escalation grace, so a head that only dies to `SIGKILL`
 #: is still seen to die rather than reported as a stop that failed.
@@ -530,6 +538,13 @@ class LocalPtyHeadRuntime:
         A bring-up that names a run this runtime is already holding a turn for is refused before
         anything is started, exactly as on the legacy backend: the invariant belongs to the
         boundary, not to a convention its callers keep.
+
+        That refusal is made twice, by two witnesses, and both are made before anything is spawned.
+        The turn lease is this runtime's own memory, and it can only ever answer for the heads this
+        object started; the production dispatcher is a systemd timer, so every tick is a *new*
+        process whose activity is empty by construction and for which a head brought up a tick ago
+        never existed. `_already_up` is the second witness, and it is the head's own launch identity
+        on disk — the one fact about a head that outlives the process that started it.
         """
         del title, ignored
         with self._lock:
@@ -545,9 +560,20 @@ class LocalPtyHeadRuntime:
                             f"{held.subject or 'a caller'} on run {claimed}: a bring-up over it "
                             "would claim a head that is already up"
                         ),
+                        evidence={"refusal": START_TURN_IN_FLIGHT, "run_id": claimed},
                         epoch=self.activity.epoch(claimed),
                         lease=held,
                     )
+                already_up = self._already_up(
+                    claimed,
+                    run,
+                    spec=spec,
+                    workspace=workspace,
+                    task_ref=task_ref,
+                    role=role,
+                )
+                if already_up is not None:
+                    return already_up
             identity = claimed or new_run_id()
             try:
                 handle = self._spawn(
@@ -1036,6 +1062,80 @@ class LocalPtyHeadRuntime:
             self._fatal.pop(run_id, None)
 
     # -- the substrate ------------------------------------------------------------------------
+
+    def _already_up(
+        self,
+        claimed: str,
+        run: HeadRun | None,
+        *,
+        spec: HeadSpec,
+        workspace: str,
+        task_ref: TaskRef,
+        role: str,
+    ) -> StartReceipt | None:
+        """The refusal of a bring-up over a head whose own launch identity says it is running.
+
+        `None` when there is nothing to refuse, and a receipt when there is: the caller returns it
+        unchanged, so this decision is made in one place and is made *before* `_spawn`. Which is
+        the whole point — a second supervisor started over a live head is not a state this backend
+        recovers from by noticing afterwards.
+
+        The evidence is the head's own launch-identity record and nothing else. Not the run
+        directory, not the socket file, not the journal: all three are debris a dead head leaves
+        behind, and a bring-up fenced out by debris is a card that never runs again. The record
+        answers because it carries `boot_id` and `proc_starttime_ticks` beside the pid, so a
+        record written before this host rebooted — or a pid the kernel has since handed to
+        something else — is read as the dead head it describes rather than as a live one.
+
+        **Only a positive live match refuses.** A record that is missing, half-written, malformed
+        or unreadable is not evidence that a head is up, and this returns `None` for every one of
+        them: the bring-up goes ahead. That direction is chosen deliberately and it is the
+        asymmetry the two failures deserve. Refusing on unreadable evidence turns a corrupt file
+        into a permanent fence around a run that nothing can lift, because nothing ever rewrites
+        that file except the head this refusal is preventing. Proceeding on unreadable evidence
+        risks a second supervisor — and that one is caught again downstream, by the run directory
+        lock the supervisor takes and by its own `_refuse_a_second_head`, which reads the same
+        record from inside the process that would be the second owner.
+
+        The record read here is the **canonical** one, `root/run_id/head.pid`, and never the
+        `pid_file` the caller handed in. A live head writes its launch identity where this backend
+        told it to write it, which is that path and only that path; the `pid_file` on the run a
+        bring-up arrives with is the dispatcher's own watchdog heartbeat, at a workspace path the
+        tick has just *cleared* (`DispatcherHost._launch` drops it before every launch so a
+        previous launch's pid cannot answer for this one). Asking that file whether a head is up
+        gets the answer the clearing put there — nothing — no matter how alive the head is. So the
+        subject is stripped of it before `_address` derives the address, which is exactly what
+        `_address` does with a run that carries no `pid_file`: the derivation is the point, since
+        the head this refuses over was started by a process that is gone. Only the admission reads
+        the canonical path this way; `observe`, `stop`, `stop_if_quiescent` and `deliver` keep
+        honouring the caller's `pid_file`, because for those verbs it is the dispatcher's own
+        identity contract about a head it is already tracking, not a question about whether one
+        exists.
+        """
+        subject = _with_pid_file(
+            run if run is not None else HeadRun(
+                run_id=claimed, spec=spec, workspace=workspace, task_ref=task_ref, role=role,
+            ),
+            "",
+        )
+        address = self._address(subject)
+        if address is None or not self._process_alive(address, subject):
+            return None
+        return StartReceipt(
+            status=HEAD_BUSY,
+            run=run,
+            reason=(
+                f"run {claimed} already has a head up: its launch identity at "
+                f"{address.pid_file} is a live match, so a bring-up here would put a second "
+                "supervisor over a head that is already running"
+            ),
+            evidence={
+                "refusal": START_HEAD_ALREADY_UP,
+                "run_id": claimed,
+                "pid_file": str(address.pid_file),
+            },
+            epoch=self.activity.epoch(claimed),
+        )
 
     def _address(self, run: HeadRun) -> _Address | None:
         """Where this head is addressed, derived from the run id rather than remembered.
