@@ -785,9 +785,11 @@ class LocalPtyHeadRuntime:
             # head that this object was constructed without. Reading them anywhere else — outside
             # the lock, or after `admits` has already answered — would be reading them at a
             # different moment from the decision they are made for.
-            # One status frame for the whole of this section (obligation 3): the same answer
-            # rehydrates this object, decides whether a lease it adopts is still running, and is
-            # the pre-offer frame `_put` would otherwise ask the supervisor for a second time.
+            # One successful status frame for the whole of this section (obligation 3): the same
+            # answer rehydrates this object, decides whether a lease it adopts is still running,
+            # and is the pre-offer frame `_put` would otherwise ask the supervisor for a second
+            # time. If this first attempt itself fails, `_Probe` carries exactly one consumable
+            # recovery attempt; there is no third request in the section.
             _, probe = self._section_probe(run)
             self._rehydrate(run, probe)
             if not self.activity.admits(run.run_id):
@@ -1375,12 +1377,13 @@ class LocalPtyHeadRuntime:
         )
 
     def _section_probe(self, run: HeadRun) -> tuple[_Address | None, _Probe | None]:
-        """The one status request a critical section is allowed, taken at the top of it.
+        """The successful-path status request, taken once at the top of a critical section.
 
-        Obligation 3 bounds the cost of a verb at a single status frame, and this is where a verb
-        spends it: the address it will need anyway, and the answer that then serves the
-        rehydration, the turn question and the substrate call alike. `None` where there is no
-        socket to ask — the journal answers those, and it costs no request.
+        Its answer serves the rehydration, the turn question and the substrate call alike. A
+        failed attempt carries one consumable recovery request into `_put`; `_Probe.spend_retry`
+        makes a third request impossible even if another consumer later tries to recover too.
+        `None` where there is no socket to ask — the journal answers those, and it costs no
+        request.
         """
         address = self._address(run)
         if address is None or not address.socket_path.exists():
@@ -1390,15 +1393,17 @@ class LocalPtyHeadRuntime:
     def _probe(self, address: _Address) -> _Probe:
         """Ask the supervisor once what this head is doing, and keep whatever came of asking.
 
-        The single status request obligation 3 bounds a critical section at. It is a method rather
-        than an inline `try` so that the three endings a socket has — an answer, a frame that is
-        not one, and nothing at all — are separated in one place and read by name everywhere else.
+        On success this is the only status request in the section. Nothing answering gives the
+        section one bounded recovery attempt, consumed by `_Probe.spend_retry` before it is made.
+        It is a method rather than an inline `try` so that the three endings a socket has — an
+        answer, a frame that is not one, and nothing at all — are separated in one place and read
+        by name everywhere else.
         """
         try:
             with self._connect(address) as client:
                 answer = client.status()
         except _UNREACHABLE as exc:
-            return _Probe(error=exc)
+            return _Probe(error=exc, retry_available=True)
         if isinstance(answer, dict) and answer.get("ok"):
             return _Probe(status=answer)
         return _Probe(answer=answer)
@@ -1584,11 +1589,12 @@ class LocalPtyHeadRuntime:
         every ending is a `DeliveryReport`, and the worst one of those can say is that what
         became of the payload could not be established.
 
-        `probe` is the status frame the calling section already took, and when there is one this
-        does **not** ask for a second (obligation 3). It is the same frame in both roles it had
-        when this asked for it itself: the refusal the supervisor stated to a question put before
-        anything was offered, and — when it is an answer rather than a refusal — the journal
-        sequence that floors the search for this delivery's own `input.accepted`.
+        `probe` is what came of the status request the calling section already took. A successful
+        frame is reused and no second request is made. If that attempt failed before producing a
+        frame, the probe permits exactly one recovery request before the offer; its retry bit is
+        consumed first, so no later consumer can make a third. The resulting frame has the same
+        two roles: a stated refusal before anything was offered, or the journal sequence that
+        floors the search for this delivery's own `input.accepted`.
         """
         address = self._address(run)
         if address is None or not address.socket_path.exists():
@@ -1623,6 +1629,9 @@ class LocalPtyHeadRuntime:
             if probe is not None and probe.status is not None:
                 status: Mapping[str, Any] = probe.status
             else:
+                if probe is not None and not probe.spend_retry():
+                    assert probe.error is not None
+                    return None, self._unreachable_refusal(address, run, probe.error)
                 try:
                     status = client.status()
                 except _UNREACHABLE as exc:
@@ -2232,15 +2241,15 @@ def _supervisor_state(status: Mapping[str, Any]) -> _DurableHead:
     )
 
 
-@dataclass(frozen=True)
+@dataclass
 class _Probe:
-    """The one question this critical section asked the supervisor, and everything it answered.
+    """A section's bounded question to the supervisor, and everything it answered.
 
     A value rather than three call sites, because "the supervisor said this", "the socket did not
     answer" and "the socket answered something that is not a status" are three different facts and
-    every one of them decides something different — and because the bound of obligation 3 is *one
-    status request per critical section*: a verb that needs the supervisor's answer twice passes
-    this around instead of dialling twice.
+    every one of them decides something different. A successful path gets one request. A request
+    that failed before returning a frame gets one recovery attempt, whose bit is consumed before
+    the request is made; a third request is therefore unavailable by construction.
     """
 
     #: The frame the supervisor answered, when it answered one this runtime can read.
@@ -2249,6 +2258,15 @@ class _Probe:
     answer: Any = None
     #: What went wrong on the socket, when nothing came back at all.
     error: BaseException | None = None
+    #: The one recovery request a failed initial attempt may still spend.
+    retry_available: bool = False
+
+    def spend_retry(self) -> bool:
+        """Consume the failed attempt's sole retry before anybody can make the request."""
+        if not self.retry_available:
+            return False
+        self.retry_available = False
+        return True
 
     @property
     def transient(self) -> bool:

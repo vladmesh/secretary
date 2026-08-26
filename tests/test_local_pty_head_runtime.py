@@ -2094,6 +2094,9 @@ class OneStatusFramePerCriticalSectionTests(LocalPtyRuntimeTestCase):
         def status(client: SupervisorClient) -> dict:
             if not counter.offered:
                 counter.asked += 1
+            if counter.status_failures:
+                counter.status_failures -= 1
+                raise OSError("one transient status failure")
             return real_status(client)
 
         def send_input(client: SupervisorClient, data, *, subject: str = "") -> dict:
@@ -2102,6 +2105,7 @@ class OneStatusFramePerCriticalSectionTests(LocalPtyRuntimeTestCase):
 
         self.asked = 0
         self.offered = False
+        self.status_failures = 0
         self.addCleanup(setattr, SupervisorClient, "send_input", real_input)
         self.addCleanup(setattr, SupervisorClient, "status", real_status)
         SupervisorClient.status = status
@@ -2121,6 +2125,17 @@ class OneStatusFramePerCriticalSectionTests(LocalPtyRuntimeTestCase):
 
         self.assertEqual(receipt.status, HEAD_OK, receipt.reason)
         self.assertEqual(self.asked, 1, "the frame that rehydrated is the frame that floored")
+
+    def test_a_delivery_may_retry_one_failed_status_once_and_then_succeeds(self) -> None:
+        run = self.live_run()
+
+        tick = self.next_tick()
+        self.counting()
+        self.status_failures = 1
+        receipt = tick.deliver(run, NudgePointer.line("work"), subject="worker-nudge")
+
+        self.assertEqual(receipt.status, HEAD_OK, receipt.reason)
+        self.assertEqual(self.asked, 2, "one failed attempt earns one retry, never a third")
 
     def test_a_delivery_refused_for_a_turn_decides_on_one_status_frame(self) -> None:
         run = self.live_run()
