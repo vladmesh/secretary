@@ -120,6 +120,15 @@ class HeadActivity:
     Nothing here is durable, and nothing here locks: a runtime that has just been constructed knows
     nothing and says so by holding no lease, an epoch of zero and an open admission. Serialising
     access is the job of the runtime that owns this object.
+
+    **A runtime whose backend has a durable witness puts what it knows back here rather than
+    keeping a second copy of it** (secretary-1479). Knowing nothing is the right *initial* state
+    and the wrong *final* one for a control plane whose every tick is a new process: `advance_to`
+    and `adopt` are how a backend that can still ask the head — a supervisor on a socket, a
+    journal on disk — restores the epoch and the turn that its own predecessor granted. They only
+    ever move this object in the direction the head itself already went, which is why neither of
+    them is a setter: an epoch cannot be lowered, and a turn cannot be adopted over one that is
+    already held.
     """
 
     def __init__(self) -> None:
@@ -174,6 +183,40 @@ class HeadActivity:
             return self.epoch(run_id)
         self._output_marks[run_id] = output_at
         return self.acted(run_id)
+
+    def advance_to(self, run_id: str, epoch: int) -> int:
+        """Raise this head's epoch to what a durable witness says it is, and never lower it.
+
+        The epoch is monotone per head, and monotone has to mean *across the process boundary*
+        too: the runtime that reads it in one tick is not the object that moved it in the last
+        one. A witness that could move this number down would make "nothing has happened since I
+        last looked" true of a head that had been working, which is the one thing the epoch
+        exists to make impossible; so a smaller number, a zero and an unknown are all no-ops, and
+        the answer is always the epoch this head ends up with.
+        """
+        if not run_id or epoch <= 0:
+            return self.epoch(run_id)
+        current = self._epochs.get(run_id, 0)
+        if epoch <= current:
+            return current
+        self._epochs[run_id] = epoch
+        return epoch
+
+    def adopt(self, run_id: str, lease: TurnLease) -> TurnLease:
+        """Take over a turn this runtime did not grant, and hand back the turn that is now held.
+
+        The counterpart of `grant` for a turn that was handed out by a process that has since
+        gone: it is not a second grant, so it does not raise over an outstanding lease — the
+        outstanding one *is* the answer, and a caller rehydrating a head it already knows about
+        must not be told that its own knowledge is a conflict.
+        """
+        if not run_id or lease.run_id != run_id:
+            raise TurnLeaseError("an adopted lease names the head it was adopted for")
+        held = self._leases.get(run_id)
+        if held is not None:
+            return held
+        self._leases[run_id] = lease
+        return lease
 
     def lease(self, run_id: str) -> TurnLease | None:
         """The turn this head is running, when it is running one this runtime granted."""

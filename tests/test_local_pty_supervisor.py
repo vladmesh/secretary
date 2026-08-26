@@ -41,6 +41,7 @@ from triggered_agents.runtime.head.local_pty.journal import (
     EVENT_KINDS,
     INPUT_ACCEPTED,
     JOURNAL_SCHEMA_VERSION,
+    JOURNAL_TAIL_BYTES,
     PROVIDER_PROGRESSED,
     RUN_EXITED,
     RUN_STARTED,
@@ -50,6 +51,7 @@ from triggered_agents.runtime.head.local_pty.journal import (
     JournalError,
     JournalWriter,
     read_events,
+    read_tail,
 )
 
 REPO = Path(__file__).resolve().parents[1]
@@ -1016,6 +1018,51 @@ class LocalPtySubstrateTests(unittest.TestCase):
             with self.assertRaises(JournalError):
                 journal.append(RUN_STARTED, seq=4)
         self.assertEqual(read_events(path).kinds, (RUN_STARTED,))
+
+    def test_a_bounded_read_of_a_journal_reads_its_end_and_says_that_it_did(self) -> None:
+        """secretary-1479: the cost of asking a journal what a head is doing is a named number.
+
+        A supervised role's run directory is reused and its journal is append-only across every
+        incarnation, so a reader that opens the whole file pays a cost that grows with the head's
+        history. `read_tail` is bounded by `JOURNAL_TAIL_BYTES`, drops the record the bound cut in
+        half rather than counting it as malformed, and says `partial_head` so that a reader knows
+        the difference between "this journal has no drain in it" and "the window I read has none".
+        """
+        path = self.root / "long.jsonl"
+        with JournalWriter(path, "long") as journal:
+            journal.append(RUN_STARTED, head_pid=1)
+            journal.append(DRAIN_REQUESTED, initiator="an incarnation that is over")
+            while path.stat().st_size <= JOURNAL_TAIL_BYTES * 2:
+                journal.append(PROVIDER_PROGRESSED, turn=1, output_bytes=64)
+            journal.append(TURN_FINISHED, turn=1, reason="quiet", output_bytes=64)
+
+        whole = read_events(path)
+        tail = read_tail(path)
+
+        self.assertGreater(path.stat().st_size, JOURNAL_TAIL_BYTES)
+        self.assertFalse(whole.partial_head, "the unbounded read is the whole file")
+        self.assertEqual(whole.kinds[0], RUN_STARTED)
+        self.assertTrue(tail.partial_head, "a bounded read that began inside the file says so")
+        self.assertEqual(tail.malformed, 0, "the record the bound cut is dropped, not counted")
+        self.assertTrue(tail.ordered)
+        self.assertEqual(tail.kinds[-1], TURN_FINISHED, "the end of the journal is what it reads")
+        self.assertNotIn(RUN_STARTED, tail.kinds, "a bounded read is bounded")
+        self.assertLess(len(tail.events), len(whole.events))
+        self.assertLessEqual(
+            sum(
+                len(json.dumps(event, sort_keys=True, separators=(",", ":"))) + 1
+                for event in tail.events
+            ),
+            JOURNAL_TAIL_BYTES,
+            "the bound is the number it is declared to be",
+        )
+        self.assertEqual(
+            [event["seq"] for event in whole.events][-len(tail.events):],
+            [event["seq"] for event in tail.events],
+            "the window is the end of the same sequence, not a re-numbering of it",
+        )
+        with self.assertRaises(JournalError):
+            read_tail(path, max_bytes=0)
 
     # -- identity --------------------------------------------------------------------------
 

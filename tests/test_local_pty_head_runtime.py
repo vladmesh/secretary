@@ -59,9 +59,20 @@ from triggered_agents.runtime.head.local_pty.client import SupervisorClient
 from triggered_agents.runtime.head.local_pty.journal import (
     DRAIN_REQUESTED,
     INPUT_ACCEPTED,
+    JOURNAL_TAIL_BYTES,
+    PROVIDER_PROGRESSED,
+    RUN_EXITED,
+    RUN_STARTED,
+    TURN_FINISHED,
+    TURN_STARTED,
+    JournalWriter,
     read_events,
+    read_tail,
 )
 from triggered_agents.runtime.local_pty_head import (
+    ADOPTED_TURN_SUBJECT,
+    DELIVER_DRAINED_BEFORE_THIS_RUNTIME,
+    DELIVER_STATE_UNKNOWN,
     DELIVERY_ARRIVED,
     DELIVERY_LANDED_NOTHING,
     DELIVERY_LEFT_A_PREFIX,
@@ -294,6 +305,16 @@ class LocalPtyRuntimeTestCase(unittest.TestCase):
             message="the orphan head never said it was up",
         )
         return run
+
+    def next_tick(self) -> LocalPtyHeadRuntime:
+        """The runtime the next dispatcher process would build: same run root, no memory.
+
+        The production dispatcher is a systemd timer, so this — a fresh object over the same root,
+        holding nothing about the heads the previous one started — is what a tick actually is.
+        """
+        return LocalPtyHeadRuntime(
+            self.root, head_process_status=head_process_status, delivery_grace=TEST_GRACE_SECONDS
+        )
 
     def adrift_run(self) -> HeadRun:
         return HeadRun(
@@ -574,6 +595,275 @@ class LocalPtyRestartTests(LocalPtyRuntimeTestCase):
         self._await(
             lambda: head_process_status(receipt.run.pid_file).get("state") == "live-match",
             message="the run this refusal let through never got a head of its own",
+        )
+
+
+class LocalPtyDurableTurnTests(LocalPtyRuntimeTestCase):
+    """secretary-1479: the turn, the epoch and the admission across the boundary of a tick.
+
+    `HeadActivity` is a field of the runtime object and the production dispatcher builds a new one
+    every tick, so a promise kept only in that object is a promise that holds for one tick. These
+    tests are all the same shape as the bring-up tests of secretary-1468 and for the same reason:
+    one instance does something, and the instance that has to answer for it is a *different* one,
+    built the way a timer builds it and knowing nothing.
+
+    Nothing new is stored to make that work. What answers is the head's own supervisor over its
+    socket, and — when that supervisor is gone — a bounded tail of the journal it left behind.
+    """
+
+    def _debris_run(self, run_id: str, journal: bytes) -> HeadRun:
+        """A run directory with a journal nobody can read anything out of, and no socket.
+
+        The unknown of obligation 2: this head left something behind, so it is not the absence of
+        a head, and no witness can say whether it is draining, mid-turn, or dead.
+        """
+        run_dir = self.root / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / protocol.JOURNAL_NAME).write_bytes(journal)
+        return HeadRun(
+            run_id=run_id,
+            spec=CODEX,
+            workspace=str(self.workspace),
+            task_ref=self.task,
+            role="worker",
+        )
+
+    # -- criterion 1: a drain outlives the tick that requested it -------------------------------
+
+    def test_a_drain_requested_in_one_tick_refuses_the_next_tick_s_delivery_by_name(self) -> None:
+        run = self.live_run()
+        self.runtime.request_drain(run, StopInitiator(actor="operator", reason="rotation"))
+        delivered = self.payloads_delivered()
+
+        restarted = self.next_tick()
+        self.assertTrue(
+            restarted.activity.admits(run.run_id),
+            "the fixture is meant to start from an object that remembers nothing",
+        )
+        refused = restarted.deliver(run, NudgePointer.line("more work"), subject="worker-nudge")
+
+        self.assertEqual(refused.status, HEAD_DRAINING, refused.reason)
+        self.assertEqual(refused.reason, DELIVER_DRAINED_BEFORE_THIS_RUNTIME)
+        self.assertTrue(refused.deferred, "a drained head is refused, never queued behind a turn")
+        self.assertEqual(self.payloads_delivered(), delivered, "the refusal delivered it anyway")
+        self.assertFalse(restarted.activity.admits(run.run_id), "admission stayed open")
+
+    def test_a_drain_outlives_the_supervisor_that_recorded_it(self) -> None:
+        """And this is the half the substrate cannot answer for.
+
+        While the supervisor is alive it refuses a payload after a drain by itself, so the status a
+        caller sees is right even when this runtime has forgotten why. Kill the supervisor and that
+        second gate goes with it: the drain is then only in the journal it left behind, and a
+        runtime that does not read it hands the head's own orphaned process a payload's worth of
+        attempt instead of the refusal the drain earned.
+        """
+        run = self.orphan_head()
+        self.runtime.request_drain(run, StopInitiator(actor="operator", reason="rotation"))
+        supervisor = self._supervisor_pid(self.root / run.run_id)
+        _kill(supervisor, signal.SIGKILL)
+        self._await(lambda: not _alive(supervisor), message="the supervisor survived")
+        self.assertIn(DRAIN_REQUESTED, self.events(run).kinds, "the drain is in the journal")
+        delivered = self.payloads_delivered()
+
+        refused = self.next_tick().deliver(run, NudgePointer.line("more work"))
+
+        self.assertEqual(refused.status, HEAD_DRAINING, refused.reason)
+        self.assertEqual(refused.reason, DELIVER_DRAINED_BEFORE_THIS_RUNTIME)
+        self.assertEqual(self.payloads_delivered(), delivered)
+
+    # -- criterion 2: an open turn outlives the tick that opened it -----------------------------
+
+    def test_a_turn_open_in_one_tick_is_seen_open_in_the_next_and_is_not_interrupted(self) -> None:
+        run = self.live_run()
+        lease = self.begin_turn(run, subject="worker-nudge")
+        delivered = self.payloads_delivered()
+        head = self.head_pid_of(run)
+
+        restarted = self.next_tick()
+        second = restarted.deliver(run, NudgePointer.line("and this too"))
+
+        self.assertEqual(second.status, HEAD_BUSY, second.reason)
+        self.assertEqual(self.payloads_delivered(), delivered, "the running turn was written over")
+        self.assertIsNotNone(second.lease, "the turn a previous tick granted is the one held now")
+        self.assertNotEqual(second.lease.lease_id, lease.lease_id, "the lease is adopted, not re-granted")
+        self.assertEqual(second.lease.subject, ADOPTED_TURN_SUBJECT)
+        self.assertTrue(_alive(head), "the turn that was running was interrupted")
+        self._await(
+            lambda: b"DONE" in self.output_of(run), message="the turn never finished on its own"
+        )
+
+    # -- criterion 3: the rotation happens where the lease closes -------------------------------
+
+    def test_a_turn_granted_in_one_tick_closes_in_another_and_that_one_says_rotatable(self) -> None:
+        run = self.live_run()
+        self.begin_turn(run)
+        self.runtime.request_drain(run, StopInitiator(actor="dispatcher", reason="rotation"))
+
+        restarted = self.next_tick()
+        mid_turn = restarted.observe(run)
+        self.assertEqual(mid_turn.status, HEAD_OK, mid_turn.reason)
+        self.assertIsNotNone(mid_turn.lease, "the turn the previous tick granted is still running")
+        self.assertFalse(mid_turn.rotation_ready, "a head still mid-turn is not ready to rotate")
+
+        self.end_turn(run)
+        rotated = restarted.observe(run)
+
+        self.assertIsNone(rotated.lease, "the last turn closed")
+        self.assertTrue(
+            rotated.rotation_ready,
+            "the lease was granted by one instance and closed by another, and this is the one "
+            "that has to answer whether the head is done",
+        )
+
+    # -- criterion 4: the epoch is comparable between ticks -------------------------------------
+
+    def test_the_epoch_one_tick_reads_is_the_epoch_the_next_tick_compares(self) -> None:
+        run = self.live_run()
+        self.begin_turn(run)
+        self.end_turn(run)
+        address = self.runtime._address(run)  # noqa: SLF001 - the test is the backend's own
+        journal_seq = int(self._admitted_status(address.socket_path)["journal_seq"])
+
+        reading = self.next_tick().activity_epoch(run)
+        stopping = self.next_tick()
+        receipt = stopping.stop_if_quiescent(
+            run,
+            StopInitiator(actor="dispatcher", reason="rotation"),
+            expected_activity_epoch=reading,
+            head_process_alive=True,
+        )
+
+        self.assertEqual(reading, journal_seq, "the epoch of a head here is its journal sequence")
+        self.assertEqual(receipt.status, HEAD_OK, receipt.reason)
+        self.assertEqual(receipt.run.lifecycle, EXITED)
+
+    def test_an_epoch_from_a_tick_the_head_has_worked_since_refuses_the_stop(self) -> None:
+        run = self.live_run()
+        self.end_turn(run)
+        stale = self.next_tick().activity_epoch(run)
+
+        working = self.next_tick()
+        self.assertEqual(working.deliver(run, NudgePointer.line("hello")).status, HEAD_OK)
+        stopping = self.next_tick()
+        receipt = stopping.stop_if_quiescent(
+            run,
+            StopInitiator(actor="dispatcher", reason="rotation"),
+            expected_activity_epoch=stale,
+            head_process_alive=True,
+        )
+
+        self.assertEqual(receipt.status, HEAD_ALIVE)
+        self.assertEqual(receipt.reason, STOP_ACTIVITY_SINCE)
+        self.assertGreater(receipt.epoch, stale, "the head's own sequence moved and says so")
+        self.assertTrue(_alive(self.head_pid_of(run)), "a head that had worked since was stopped")
+
+    # -- criterion 5: unknown is not freedom, and it is not a lease either ----------------------
+
+    def test_a_head_nothing_can_state_the_state_of_is_refused_a_new_turn(self) -> None:
+        """Fail-closed: debris that answers nothing does not get to admit work by default."""
+        run = self._debris_run("debris-nothing-can-read", b"this is not a journal record\n")
+        delivered = self.payloads_delivered()
+
+        runtime = self.next_tick()
+        refused = runtime.deliver(run, NudgePointer.line("work"), subject="worker-nudge")
+
+        self.assertEqual(refused.status, HEAD_DRAINING, refused.reason)
+        self.assertEqual(refused.reason, DELIVER_STATE_UNKNOWN)
+        self.assertEqual(self.payloads_delivered(), delivered)
+        self.assertIsNone(
+            runtime.activity.lease(run.run_id),
+            "an unknown must not invent a lease: nothing could ever release it",
+        )
+
+    def test_a_head_that_is_positively_dead_is_rotatable_and_its_run_is_not_fenced(self) -> None:
+        """The other direction of the same principle, and the one a fabricated lease would break.
+
+        The supervisor is killed mid-turn, so the last thing its journal says about the turn is
+        that it started: there is no `turn.finished` and no `run.exited` to close it. What closes
+        it is the head's own launch identity, which says the process is dead — the same order
+        `stop_if_quiescent` uses, where liveness outranks anything a terminal has to say.
+        """
+        run = self.live_run()
+        self.begin_turn(run)
+        self.runtime.request_drain(run, StopInitiator(actor="dispatcher", reason="rotation"))
+        supervisor = self._supervisor_pid(self.root / run.run_id)
+        head = self.head_pid_of(run)
+        _kill(supervisor, signal.SIGKILL)
+        self._await(lambda: not _alive(supervisor), message="the supervisor survived")
+        _kill(head, signal.SIGKILL, group=True)
+        self._await(lambda: not _alive(head), message="the head survived")
+        kinds = self.events(run).kinds
+        self.assertIn(TURN_STARTED, kinds)
+        self.assertIn(DRAIN_REQUESTED, kinds)
+        self.assertNotIn(TURN_FINISHED, kinds, "the fixture needs a turn nobody closed")
+        self.assertNotIn(RUN_EXITED, kinds, "the fixture needs a head nobody reaped")
+
+        restarted = self.next_tick()
+        receipt = restarted.observe(run)
+
+        self.assertEqual(receipt.status, HEAD_GONE, receipt.reason)
+        self.assertIsNone(restarted.activity.lease(run.run_id), "a dead head runs no turn")
+        self.assertTrue(receipt.rotation_ready, "a drained, dead head is exactly what rotates")
+        brought_up = restarted.start(
+            CODEX,
+            str(self.workspace),
+            self.task,
+            command=CHILD_COMMAND,
+            title="secretary-1479 worker",
+            run_id=run.run_id,
+            role="worker",
+            quiet_seconds=0.4,
+        )
+        self.assertEqual(brought_up.status, HEAD_OK, brought_up.reason)
+
+    # -- criterion 6: the cost of the fallback is bounded ---------------------------------------
+
+    def test_the_journal_a_dead_supervisor_left_is_read_as_a_bounded_tail(self) -> None:
+        """The window is the end of the file, and what it reads is what this runtime believes.
+
+        The journal of a supervised role is reused across incarnations and grows, so the read that
+        answers "what is this head doing" is bounded at `JOURNAL_TAIL_BYTES`. The file here is
+        larger than that bound and its beginning contradicts its end: an incarnation that was
+        drained and exited, followed by one that started and is mid-turn. The runtime answers out
+        of the end, which is the incarnation that exists.
+        """
+        run_id = "a-reused-run-directory"
+        run_dir = self.root / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
+        path = run_dir / protocol.JOURNAL_NAME
+        with JournalWriter(path, run_id) as journal:
+            journal.append(RUN_STARTED, head_pid=1)
+            journal.append(DRAIN_REQUESTED, initiator="an incarnation that is over")
+            journal.append(RUN_EXITED, code=0)
+            while path.stat().st_size <= JOURNAL_TAIL_BYTES:
+                journal.append(PROVIDER_PROGRESSED, turn=1, output_bytes=64)
+            journal.append(RUN_STARTED, head_pid=2)
+            journal.append(TURN_STARTED, turn=1, subject="worker-nudge")
+        run = HeadRun(
+            run_id=run_id,
+            spec=CODEX,
+            workspace=str(self.workspace),
+            task_ref=self.task,
+            role="worker",
+        )
+
+        runtime = self.next_tick()
+        runtime._rehydrate(run)  # noqa: SLF001 - the bound is this backend's own
+
+        self.assertTrue(read_tail(path).partial_head, "the read was not bounded at all")
+        self.assertGreater(path.stat().st_size, JOURNAL_TAIL_BYTES)
+        self.assertTrue(
+            runtime.activity.busy(run_id),
+            "the turn at the end of the journal is the one this head is running",
+        )
+        self.assertTrue(
+            runtime.activity.admits(run_id),
+            "a drain from an incarnation that has exited is not this head's drain",
+        )
+        self.assertEqual(
+            runtime.activity.epoch(run_id),
+            read_events(path).events[-1]["seq"],
+            "the epoch is the journal's own sequence, which the bounded read does not renumber",
         )
 
 

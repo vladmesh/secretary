@@ -98,6 +98,7 @@ from .journal import (
     EVENT_KINDS,
     INPUT_ACCEPTED,
     JOURNAL_SCHEMA_VERSION,
+    JOURNAL_TAIL_BYTES,
     PROVIDER_PROGRESSED,
     RUN_EXITED,
     RUN_STARTED,
@@ -108,6 +109,7 @@ from .journal import (
     JournalReadResult,
     JournalWriter,
     read_events,
+    read_tail,
 )
 from .protocol import (
     ATTACH_MAX_CLIENTS,
@@ -133,6 +135,7 @@ __all__ = [
     "INPUT_DELIVERY_SECONDS",
     "INPUT_MAX_BYTES",
     "JOURNAL_SCHEMA_VERSION",
+    "JOURNAL_TAIL_BYTES",
     "JournalError",
     "JournalReadResult",
     "JournalWriter",
@@ -148,6 +151,7 @@ __all__ = [
     "TURN_FINISHED",
     "TURN_STARTED",
     "read_events",
+    "read_tail",
     "socket_path_for",
     "spawn_head",
 ]

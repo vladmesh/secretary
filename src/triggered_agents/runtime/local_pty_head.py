@@ -105,6 +105,37 @@ payload it was still carrying. That ordering is given up knowingly — closing a
 payload whose fate cannot be established outranks the order of two records — and it is the honest
 remainder of observation 2 of the substrate card's review rather than a claim that it cannot happen.
 
+**The turn, the epoch and the admission outlive the process that granted them** (secretary-1479).
+The production dispatcher is a systemd timer: every tick is a new process, so a runtime built at
+the start of one holds an empty `HeadActivity` and used to say, about a head another tick had
+drained, that it admitted work. Three promises died at that boundary — a drain that refuses the
+next turn, a running turn that is not interrupted, and a rotation that happens when the last lease
+closes — and all three are now recovered rather than remembered, from the two witnesses this
+backend already owns and with nothing new stored:
+
+  * **the supervisor**, in one request. `status` already carries `alive`, `draining`, `stopping`,
+    `turn_open`, `turn` and `journal_seq`; it is the head's present tense and it is asked first;
+  * **its journal**, when the supervisor is gone, read as a bounded tail of
+    `local_pty.JOURNAL_TAIL_BYTES` and replayed in sequence order. A supervised role's run
+    directory is reused and the journal is append-only across incarnations, so a full read per tick
+    is a cost that grows with the head's history; `run.started` inside the window is what keeps a
+    previous incarnation's drain or turn from answering for this one.
+
+`_rehydrate` does it once per head per process, inside the same lock and the same critical section
+as the verb it serves, and only ever in the direction the head has already gone: the epoch is
+raised and never lowered, a turn is adopted and never granted over one that is held, admission is
+closed and never re-opened. **The activity epoch of a head on this backend is its journal
+sequence** — strictly increasing, recovered from the file when the journal is opened, and therefore
+a number one tick can hand out and another can compare. `ticks` stays what it was: a diagnostic,
+and never a quiescence decision.
+
+**And unknown is neither freedom nor a lease.** A head whose run directory holds debris that
+neither witness can read has its admission closed, so no new turn is admitted on an unknown; it is
+given no lease, because a fabricated one would be a fence only the head itself could ever lift and
+a positively dead head has to stay rotatable. A head whose launch identity says it is dead is not
+fenced at all. It is the same asymmetry secretary-1468 and secretary-1478 drew: only positive
+evidence acts.
+
 **Liveness is the launch identity, and there is no second scheme.** `head.identity.
 head_process_status` — the reader the watchdog already applies, unchanged, and re-exported to the
 control plane under its old name — is passed in by whoever builds this runtime, exactly as
@@ -149,6 +180,7 @@ from .head.runtime import (
     ObserveReceipt,
     StartReceipt,
     StopReceipt,
+    TurnLease,
 )
 from .head.spec import HeadSpec
 from .head.task_ref import TaskRef
@@ -275,6 +307,39 @@ START_HEAD_ALREADY_UP = "head_already_up"
 STOP_CONFIRM_SECONDS = 10.0
 _CONFIRM_POLL_SECONDS = 0.05
 
+#: Where the durable answer about one head came from, when this runtime asked for it (secretary-1479).
+#: Four values, because a caller — and every branch below — has to be able to tell "the head says it
+#: is idle" from "nobody could say anything about it", and those two must never be one token.
+#: The supervisor answered on its socket: the live, authoritative source, and one request.
+REHYDRATED_FROM_SUPERVISOR = "supervisor"
+#: The supervisor is gone or unreachable and its journal answered instead, from a bounded tail.
+REHYDRATED_FROM_JOURNAL = "journal"
+#: There is no head to say anything about: the run directory holds neither socket nor journal. Not
+#: an unknown — the absence of everything a head leaves behind is a positive answer, exactly as it
+#: is for the launch identity, and a bring-up or a delivery against it is refused by the verb
+#: itself rather than fenced out here.
+REHYDRATED_ABSENT = "absent"
+#: A head's debris exists and neither witness could say what state it is in. Fail-closed: this is
+#: the one that closes admission (obligation 2 of secretary-1479).
+REHYDRATED_UNKNOWN = "unknown"
+
+#: Why admission is closed for a head this runtime never handed anything to. Both travel as the
+#: reason on the `HEAD_DRAINING` receipt a later `deliver` gets, so the caller learns which of the
+#: two it met rather than only that it was refused.
+DELIVER_DRAINED_BEFORE_THIS_RUNTIME = (
+    "a drain was requested for this head before this runtime existed, and the head's own "
+    "supervisor or journal still says so: it takes no more work"
+)
+DELIVER_STATE_UNKNOWN = (
+    "this head left a run directory behind and neither its supervisor nor its journal could say "
+    "what state it is in: a new turn is refused rather than admitted on an unknown"
+)
+
+#: The subject a turn adopted across a tick boundary carries. The turn was granted by a process
+#: that is gone, so the caller it was granted for cannot be named — and inventing one would put a
+#: false name into the refusal every later delivery reads.
+ADOPTED_TURN_SUBJECT = "a caller from a previous tick"
+
 
 class LocalPtyRuntimeError(RuntimeError):
     """This runtime was built in a shape that could not describe a head truthfully."""
@@ -330,6 +395,10 @@ class DeliveryReport:
     journalled: bool = False
     floor: int = 0
     detail: str = ""
+    #: The highest journal sequence this delivery's watch actually saw, which is what the head's
+    #: activity epoch is raised to afterwards. Never below `floor`: that one was read from the
+    #: supervisor before the payload was offered.
+    seq: int = 0
 
     @property
     def fatal(self) -> bool:
@@ -347,6 +416,7 @@ def _delivery_report(
     journalled: bool = False,
     floor: int = 0,
     detail: str = "",
+    seq: int = 0,
 ) -> DeliveryReport:
     """Decide what became of one delivery. The only place in this backend that decides it.
 
@@ -374,6 +444,7 @@ def _delivery_report(
             journalled=journalled,
             floor=floor,
             detail=detail,
+            seq=max(seq, floor),
         )
     if state == protocol.DELIVERY_COMPLETE and written >= offered:
         outcome = DELIVERY_ARRIVED
@@ -390,6 +461,7 @@ def _delivery_report(
         journalled=journalled,
         floor=floor,
         detail=detail,
+        seq=max(seq, floor),
     )
 
 
@@ -497,6 +569,14 @@ class LocalPtyHeadRuntime:
         # rather than inside it because it is this backend's fact, not the boundary's: no other
         # backend can leave a head in this state, and a caller reads it as the reason on a receipt.
         self._fatal: dict[str, str] = {}
+        # Heads this runtime has already asked the substrate about. Membership is what makes
+        # rehydration happen once per head per process rather than at every verb: after the first
+        # question, this object's own activity is the newer of the two — it granted the turns it
+        # is holding — and asking again would be a second resolver of the same fact.
+        self._known: set[str] = set()
+        # Why a rehydrated admission is closed, for the refusal a later `deliver` hands back. Kept
+        # beside `_fatal` and read after it: a terminal holding a prefix is the more specific fact.
+        self._admission_notes: dict[str, str] = {}
 
     def delivery_wait_for(self, substrate_bound: float) -> float:
         """How long this runtime watches a delivery the substrate bounded at `substrate_bound`.
@@ -605,6 +685,9 @@ class LocalPtyHeadRuntime:
                 run_id=identity, spec=spec, workspace=workspace, task_ref=task_ref, role=role,
             )).rebound(str(handle.socket_path), leaf=identity)
             live = _with_pid_file(live, str(handle.pid_file))
+            # This runtime is the process that started this head, so it has nothing to recover
+            # about it and asking the substrate would only be asking about its own bring-up.
+            self._known.add(identity)
             epoch = self.activity.acted(identity)
             if pointer is None:
                 return StartReceipt(
@@ -630,6 +713,7 @@ class LocalPtyHeadRuntime:
                 self.activity.release(identity)
                 return self._abandon_bring_up(live, report, refusal, epoch)
             self.activity.acted(identity)
+            self.activity.advance_to(identity, report.seq)
             return StartReceipt(
                 status=HEAD_OK,
                 run=live.working(),
@@ -660,6 +744,12 @@ class LocalPtyHeadRuntime:
         """
         del ignored
         with self._lock:
+            # Inside the lock and before the first of the two refusals is decided: what a previous
+            # tick's drain closed, and what turn a previous tick handed out, are facts about this
+            # head that this object was constructed without. Reading them anywhere else — outside
+            # the lock, or after `admits` has already answered — would be reading them at a
+            # different moment from the decision they are made for.
+            self._rehydrate(run)
             if not self.activity.admits(run.run_id):
                 # First, and before the turn is looked at: a head this runtime hands no more work
                 # is `HEAD_DRAINING` whatever else is true of it — a drain was requested, or an
@@ -669,7 +759,11 @@ class LocalPtyHeadRuntime:
                 return DeliverReceipt(
                     status=HEAD_DRAINING,
                     run=run,
-                    reason=self._fatal.get(run.run_id) or DELIVER_NOT_ADMITTED,
+                    reason=(
+                        self._fatal.get(run.run_id)
+                        or self._admission_notes.get(run.run_id)
+                        or DELIVER_NOT_ADMITTED
+                    ),
                     epoch=self.activity.epoch(run.run_id),
                     lease=self.activity.lease(run.run_id),
                     rotation_ready=self.activity.rotatable(run.run_id),
@@ -711,7 +805,13 @@ class LocalPtyHeadRuntime:
                     rotation_ready=self.activity.rotatable(run.run_id),
                 )
             assert report is not None
-            epoch = self.activity.acted(run.run_id)
+            self.activity.acted(run.run_id)
+            # The epoch this delivery hands back is the head's journal sequence as the delivery's
+            # own watch last read it, so that the number a caller keeps is on the scale the next
+            # tick will rehydrate onto. `acted` above still runs: it moves the runtime-wide `ticks`
+            # diagnostic, and it is the floor under the epoch for a delivery whose watch could not
+            # read a sequence at all.
+            epoch = self.activity.advance_to(run.run_id, report.seq)
             if report.outcome == DELIVERY_ARRIVED:
                 return DeliverReceipt(
                     status=HEAD_OK,
@@ -737,6 +837,9 @@ class LocalPtyHeadRuntime:
         for progress needs to be able to read.
         """
         with self._lock:
+            # First, so that the epoch, the turn and the admission this observation reports are
+            # the head's own and not this object's ignorance of a head it did not start.
+            self._rehydrate(run)
             epoch = self.activity.epoch(run.run_id)
             lease = self.activity.lease(run.run_id)
             rotatable = self.activity.rotatable(run.run_id)
@@ -778,6 +881,13 @@ class LocalPtyHeadRuntime:
             epoch = self.activity.observed(
                 run.run_id, output_at=float(int(status.get("output_bytes") or 0))
             )
+            # And then to the head's own journal sequence, which is what makes this number mean
+            # the same thing to the next tick as it means here. It moves only when the substrate
+            # wrote a record — a turn opening or closing, a payload landing — so looking twice at
+            # a quiet head still reads the same epoch twice.
+            epoch = self.activity.advance_to(
+                run.run_id, int(status.get("journal_seq") or 0)
+            )
             turn_open = bool(status.get("turn_open"))
             delivering = _in_flight(status)
             if lease is not None and not turn_open and not delivering:
@@ -818,6 +928,9 @@ class LocalPtyHeadRuntime:
         if not isinstance(initiator, StopInitiator):
             raise TypeError("a drain names who requested it")
         with self._lock:
+            # Before admission is touched: a drain must not lose the turn a previous tick granted,
+            # and `rotation_ready` on this receipt is a statement about that turn.
+            self._rehydrate(run)
             self.activity.close_admission(run.run_id)
             signalled, evidence = self._close_substrate_admission(run, initiator)
             return DrainReceipt(
@@ -886,6 +999,8 @@ class LocalPtyHeadRuntime:
             epoch = self.activity.acted(run.run_id)
             self.activity.forget(run.run_id)
             self._fatal.pop(run.run_id, None)
+            self._known.discard(run.run_id)
+            self._admission_notes.pop(run.run_id, None)
             return StopReceipt(
                 status=HEAD_OK, run=finishing.exited(), evidence=asked, epoch=epoch
             )
@@ -902,6 +1017,7 @@ class LocalPtyHeadRuntime:
         head's output goes on being buffered for whoever attaches next.
         """
         with self._lock:
+            self._rehydrate(run)
             epoch = self.activity.epoch(run.run_id)
             lease = self.activity.lease(run.run_id)
             rotatable = self.activity.rotatable(run.run_id)
@@ -1018,6 +1134,12 @@ class LocalPtyHeadRuntime:
         if not isinstance(initiator, StopInitiator):
             raise TypeError("a stop names who ended the head")
         with self._lock:
+            # Inside the same lock and the same critical section as the comparison it serves. It
+            # is not a fifth step of the order above and it is not a probe of the head's
+            # readiness: it is how this object comes to hold the epoch and the turn that the
+            # process which granted them would have held, so that step 1 compares two numbers on
+            # one scale instead of comparing a caller's number against an empty memory.
+            self._rehydrate(run)
             epoch = self.activity.epoch(run.run_id)
             if epoch != expected_activity_epoch:
                 return StopReceipt(
@@ -1063,6 +1185,131 @@ class LocalPtyHeadRuntime:
         with self._lock:
             self.activity.forget(run_id)
             self._fatal.pop(run_id, None)
+            self._known.discard(run_id)
+            self._admission_notes.pop(run_id, None)
+
+    def activity_epoch(self, run: HeadRun) -> int:
+        """This head's activity epoch, asked of the head rather than of this object's memory.
+
+        The reader a caller uses when it is about to hand the epoch back to `stop_if_quiescent`
+        and is not the process that granted it. `self.activity.epoch` answers out of memory, and
+        memory is empty in a tick that has just started; this rehydrates first, under the same
+        lock the conditional stop takes, so the number a tick reads and the number that tick's
+        stop compares it against are on the same scale and describe the same head.
+        """
+        with self._lock:
+            self._rehydrate(run)
+            return self.activity.epoch(run.run_id)
+
+    # -- what outlived the process that knew it -------------------------------------------------
+
+    def _rehydrate(self, run: HeadRun) -> None:
+        """Recover this head's turn, epoch and admission from the substrate that outlived them.
+
+        The whole of secretary-1479, and it stores nothing new: the durable truth already exists
+        in two places this backend owns, and until now nobody asked them.
+
+          * **the supervisor**, over its socket, in one request — `alive`, `draining`, `stopping`,
+            `turn_open`, `turn` and `journal_seq` are all on the answer `status` already gives;
+          * **its journal**, when the supervisor is gone, read as a bounded tail
+            (`local_pty.JOURNAL_TAIL_BYTES`). A supervised role's run directory is reused and its
+            journal is append-only across incarnations, so reading the whole file every tick is a
+            cost that grows with the head's history; the shape of the head *now* is in its last
+            records, and `run.started` inside the window resets the derivation so that a previous
+            incarnation's drain or turn cannot answer for this one.
+
+        **Once per head per process.** The first question is the only one that can tell this object
+        something it does not know; after it, this runtime is the newer witness — it granted the
+        turns it holds — and asking again would be a second resolver racing the first.
+
+        **Only in the direction the head already went.** The epoch is raised, never set; the turn
+        is adopted, never granted over one that is held; admission is closed, never re-opened.
+        Rehydration cannot invent activity, cannot evict a running turn and cannot put a head that
+        somebody drained back into service.
+
+        **Unknown is not freedom, and it is not a lease either** (obligation 2). A head whose
+        debris exists but whose state neither witness can state has its admission closed, so no
+        new turn is admitted on an unknown; it is given no turn lease, because a fabricated lease
+        would be a fence nothing could lift — it would make a head that is positively dead
+        un-rotatable forever, and only the head itself ever writes the evidence that would clear
+        it. A head whose launch identity positively says the process is dead is not fenced at all:
+        the dead are rotatable, which is the same asymmetry secretary-1468 and secretary-1478 drew
+        between positive evidence and the absence of it.
+
+        **Liveness is not asked here** (obligation 1). Whether a head's process is alive is
+        `head_process_status` and stays `head_process_status`; the launch identity is consulted
+        only for the one negative above, and this adds no second answer to that question.
+        """
+        run_id = run.run_id
+        if not run_id or run_id in self._known:
+            return
+        self._known.add(run_id)
+        address = self._address(run)
+        if address is None:
+            return
+        state = self._durable_state(address, run_id)
+        if state.source == REHYDRATED_ABSENT:
+            return
+        if state.source == REHYDRATED_UNKNOWN:
+            if self._identity_says_dead(address):
+                # Positively dead: nothing is running, nothing will be admitted anyway, and a gate
+                # here would only stand between this run and its replacement.
+                return
+            self.activity.close_admission(run_id)
+            self._admission_notes[run_id] = DELIVER_STATE_UNKNOWN
+            return
+        self.activity.advance_to(run_id, state.seq)
+        if state.draining:
+            self.activity.close_admission(run_id)
+            self._admission_notes[run_id] = DELIVER_DRAINED_BEFORE_THIS_RUNTIME
+        if state.turn_open and not state.exited and not self._identity_says_dead(address):
+            # A turn is adopted only over a head that is not positively dead. The journal's last
+            # word about a supervisor that was killed mid-turn is `turn.started`, and believing it
+            # against a launch identity that says the process ended would hold a lease over a head
+            # nobody is working on — the one lease that can never be released, because only the
+            # head could write the record that would release it. Liveness outranks the terminal
+            # here for the same reason it does in `stop_if_quiescent`.
+            self.activity.adopt(
+                run_id,
+                TurnLease(
+                    lease_id=f"{run_id}:turn-{state.turn}",
+                    run_id=run_id,
+                    subject=ADOPTED_TURN_SUBJECT,
+                    granted_at_epoch=self.activity.epoch(run_id),
+                ),
+            )
+
+    def _durable_state(self, address: _Address, run_id: str) -> _DurableHead:
+        """What the head itself still says about its turn, its admission and its epoch.
+
+        The supervisor first and the journal second, in that order and never the other way round:
+        a live supervisor is the head's present tense, while the journal is what it wrote down.
+        The journal is not a fallback that can open a door the socket closed — every verb that
+        would hand this head work has to reach that socket to do it — so a bounded tail that
+        cannot see the whole history is safe here in a way it would not be if it were the only
+        witness a delivery had.
+        """
+        if not address.socket_path.exists() and not address.journal_path.exists():
+            return _DurableHead(source=REHYDRATED_ABSENT)
+        if address.socket_path.exists():
+            try:
+                with self._connect(address) as client:
+                    status = client.status()
+            except _UNREACHABLE:
+                status = {}
+            if isinstance(status, dict) and status.get("ok"):
+                return _DurableHead(
+                    source=REHYDRATED_FROM_SUPERVISOR,
+                    seq=int(status.get("journal_seq") or 0),
+                    # A supervisor that is stopping this head is one that has already closed its
+                    # admission — it writes `drain.requested` before `run.stopping` — and reading
+                    # only `draining` would miss the half-second between the two.
+                    draining=bool(status.get("draining")) or bool(status.get("stopping")),
+                    turn_open=bool(status.get("turn_open")),
+                    turn=int(status.get("turn") or 0),
+                    exited=not bool(status.get("alive")),
+                )
+        return _journal_state(address, run_id)
 
     # -- the substrate ------------------------------------------------------------------------
 
@@ -1308,6 +1555,10 @@ class LocalPtyHeadRuntime:
         """
         delivery_id = int(admitted.get("id") or 0)
         last: Mapping[str, Any] = admitted
+        # The highest journal sequence this watch has seen, starting at the one read before the
+        # payload was offered. It is carried out on the report so that the epoch this delivery
+        # moves is the head's own sequence rather than a count kept only in this process.
+        seq = floor
         deadline = time.monotonic() + self.delivery_wait_for(
             _declared_bound(admitted)
         )
@@ -1319,7 +1570,7 @@ class LocalPtyHeadRuntime:
                 # is on this host's disk, so it is read before anything is concluded; only if it
                 # has nothing about this delivery either is the fate reported as unestablished.
                 return self._report_of(
-                    address, last, offered, floor, established=False, detail=str(exc)
+                    address, last, offered, floor, established=False, detail=str(exc), seq=seq
                 )
             if not status.get("ok"):
                 if _is_transient_bound(status) and time.monotonic() < deadline:
@@ -1336,13 +1587,16 @@ class LocalPtyHeadRuntime:
                 # silent socket does, and for the same reason: the journal is the witness left.
                 return self._report_of(
                     address, last, offered, floor,
-                    established=False, detail=_refusal_detail(status),
+                    established=False, detail=_refusal_detail(status), seq=seq,
                 )
+            seq = max(seq, int(status.get("journal_seq") or 0))
             delivery = status.get("delivery")
             if isinstance(delivery, dict) and int(delivery.get("id") or 0) == delivery_id:
                 last = delivery
                 if delivery.get("state") != protocol.DELIVERY_IN_FLIGHT:
-                    return self._report_of(address, last, offered, floor, established=True)
+                    return self._report_of(
+                        address, last, offered, floor, established=True, seq=seq
+                    )
             if time.monotonic() >= deadline:
                 # Past the substrate's own bound, plus the grace, and the delivery it declared
                 # that bound for has still not ended. That is not a delivery going well and it is
@@ -1354,6 +1608,7 @@ class LocalPtyHeadRuntime:
                 return self._report_of(
                     address, last, offered, floor,
                     established=False,
+                    seq=seq,
                     detail=(
                         f"the substrate bounded this delivery at "
                         f"{_declared_bound(admitted):g}s and had not ended it "
@@ -1371,6 +1626,7 @@ class LocalPtyHeadRuntime:
         *,
         established: bool,
         detail: str = "",
+        seq: int = 0,
     ) -> DeliveryReport:
         """What reached the head's terminal, from `status` and corroborated by the journal.
 
@@ -1388,6 +1644,7 @@ class LocalPtyHeadRuntime:
             if int(event.get("delivery") or 0) != delivery_id:
                 continue
             journalled = True
+            seq = max(seq, int(event.get("seq") or 0))
             # The journal counts what the kernel took, which is the same number `status` reports.
             # Where they can differ is time: the record is written when the delivery ends, so a
             # journal that has it is a journal that saw the end of it.
@@ -1402,6 +1659,7 @@ class LocalPtyHeadRuntime:
             journalled=journalled,
             floor=floor,
             detail=str(delivery.get("detail") or "") or detail,
+            seq=seq,
         )
 
     def _accepted_records(self, address: _Address, floor: int) -> tuple[dict[str, Any], ...]:
@@ -1414,7 +1672,7 @@ class LocalPtyHeadRuntime:
         by being empty.
         """
         try:
-            events = local_pty.read_events(address.journal_path).of_kind(local_pty.INPUT_ACCEPTED)
+            events = local_pty.read_tail(address.journal_path).of_kind(local_pty.INPUT_ACCEPTED)
         except OSError:
             return ()
         return tuple(event for event in events if int(event.get("seq") or 0) > floor)
@@ -1710,6 +1968,77 @@ class LocalPtyHeadRuntime:
 
 
 @dataclass(frozen=True)
+class _DurableHead:
+    """What outlived the process that granted this head's turn, as one value.
+
+    `source` is what said it, and it is on the value rather than derived from which fields are
+    filled in, because "the head is not draining" and "nobody could tell me whether it is" are two
+    answers and this backend is not allowed to spell them the same way.
+
+    `seq` is the head's journal sequence — strictly increasing, recovered from the file when the
+    journal is opened, and therefore the same scale in every tick. It is what the activity epoch is
+    raised to, which is the whole of obligation 5: a number a process hands out and another process
+    can compare.
+    """
+
+    source: str
+    seq: int = 0
+    draining: bool = False
+    turn_open: bool = False
+    turn: int = 0
+    exited: bool = False
+
+
+def _journal_state(address: _Address, run_id: str) -> _DurableHead:
+    """This head's shape, derived from a bounded tail of the journal its supervisor left behind.
+
+    The derivation is a replay in sequence order rather than a search for the newest record of
+    each kind, because the two disagree exactly where it matters: a `turn.started` with no
+    `turn.finished` after it is an open turn, and the same record followed by `run.exited` is not —
+    it is a turn that ended with the process, and a head whose turn ended that way is rotatable.
+    `run.started` resets everything, so a run directory that was reused cannot have a previous
+    incarnation's drain or turn answer for this one.
+
+    A window with nothing in it for this run is `REHYDRATED_UNKNOWN`, and the caller fails closed
+    on it. A window that begins mid-history is *not* unknown: what it contains is true, and the
+    only thing it cannot rule out is a drain that scrolled out of it — which cannot open a door,
+    because the head it belongs to has no reachable socket to be delivered through.
+    """
+    try:
+        result = local_pty.read_tail(address.journal_path)
+    except OSError:
+        return _DurableHead(source=REHYDRATED_UNKNOWN)
+    events = [event for event in result.events if str(event.get("run_id") or "") == run_id]
+    if not events:
+        return _DurableHead(source=REHYDRATED_UNKNOWN)
+    draining = turn_open = exited = False
+    turn = 0
+    for event in events:
+        kind = str(event.get("kind") or "")
+        if kind == local_pty.RUN_STARTED:
+            draining = turn_open = exited = False
+            turn = 0
+        elif kind == local_pty.TURN_STARTED:
+            turn_open = True
+            turn = int(event.get("turn") or turn)
+        elif kind == local_pty.TURN_FINISHED:
+            turn_open = False
+        elif kind in (local_pty.DRAIN_REQUESTED, local_pty.RUN_STOPPING):
+            draining = True
+        elif kind == local_pty.RUN_EXITED:
+            exited = True
+            turn_open = False
+    return _DurableHead(
+        source=REHYDRATED_FROM_JOURNAL,
+        seq=int(events[-1].get("seq") or 0),
+        draining=draining,
+        turn_open=turn_open,
+        turn=turn,
+        exited=exited,
+    )
+
+
+@dataclass(frozen=True)
 class _Address:
     """Everything about one head that is derived from its run directory."""
 
@@ -1907,13 +2236,19 @@ def _in_flight(status: Mapping[str, Any]) -> bool:
 
 
 def _has_exited(address: _Address) -> bool:
-    """Whether the journal says the head's process ended."""
-    return bool(local_pty.read_events(address.journal_path).of_kind(local_pty.RUN_EXITED))
+    """Whether the journal says the head's process ended.
+
+    A bounded tail, like every journal read this backend makes: `run.exited` is the last thing
+    written about an incarnation, so a window at the end of the file is where it is if it is
+    anywhere. A window that has scrolled past an older incarnation's exit answers `False`, which is
+    the safe direction — this is only ever asked to *confirm* that a head is gone.
+    """
+    return bool(local_pty.read_tail(address.journal_path).of_kind(local_pty.RUN_EXITED))
 
 
 def _last_event_at(address: _Address) -> float:
     """The head's own clock, as the newest thing its journal has to say about it."""
-    events = local_pty.read_events(address.journal_path).events
+    events = local_pty.read_tail(address.journal_path).events
     return float(events[-1].get("at") or 0.0) if events else 0.0
 
 
