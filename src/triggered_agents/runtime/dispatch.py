@@ -82,6 +82,17 @@ raised it; `AgentState.save_head_run` is what a later tick reaches it through, a
 record back to `start` is what makes a bring-up over a head that is still working a refusal
 rather than a second head.
 
+One role, one owner of its head, and the owner is written down here rather than looked for in
+either backend's inventory: a pane is named by `terminal_handle.json` and a supervised head by
+`head_run.json`, and at most one of the two ever stands. A tick whose resolved backend is not the
+one the standing record names is a *handover* tick and not a bring-up: it closes the recorded owner
+on that owner's own path — a pane by the pane teardown, a supervised head by `stop` across the
+`HeadRuntime` boundary — forgets the record and dispatches nothing at all, neither a skill nor a
+report card. The head on the new backend is raised by the next tick, when this role provably has no
+live head left, so two live heads for one role is not a state any ordering of these ticks can
+reach. Both directions are fail-closed: an owner that cannot be confirmed stopped leaves its record
+standing and this tick raises nothing.
+
 A pane that answers `tui-idle` within `IDLE_PROBE_MS` is idle here and a probe that times out is
 busy — two states, not the three the interactive delivery path classifies, because this scheduler
 acts on "may I send into it" and not on why it may not. The calls whose outcome this module has
@@ -110,11 +121,15 @@ from .codex_preflight import (
     preflight_codex_launch,
 )
 from .head import (
+    HEAD_ALIVE,
     HEAD_BUSY,
+    HEAD_GONE,
     RUNTIME_ROLE_ENV,
     HeadRun,
+    HeadRunError,
     HeadSpec,
     NudgePointer,
+    StopInitiator,
     TaskRef,
     new_run_id,
     render_head_command,
@@ -800,7 +815,7 @@ def _spawn_fresh_terminal(agent: str, variant: str | None, ws: str, state: Agent
     protects rather than inferred from the caller that got here.
     """
     cmd = _dispatch_command(agent, variant, snapshot) if cmd is None else cmd
-    supervised = _supervised_bring_up(agent, ws, state, event, cmd)
+    supervised = _supervised_bring_up(agent, ws, state, event, cmd, host=host)
     if supervised is not None:
         return supervised
     try:
@@ -1132,8 +1147,129 @@ def _local_pty_runtime() -> Any:
     )
 
 
+#: Who ended a head this driver was holding when the role's profile started naming another
+#: backend. A stop names its initiator, and this is the one this driver makes.
+HANDOVER_INITIATOR = "triggered-agent-dispatch"
+HANDOVER_REASON = "this role's resolved profile now names another backend"
+
+
+def _hand_over_from_pane(agent: str, ws: str, state: AgentState, event: str,
+                         cmd: DispatchCommand, *, host: SessionHost) -> int:
+    """The handover tick of a role whose head is a pane and whose profile now names a supervisor.
+
+    Not a supervised tick, and the distinction is the whole point of having a separate name for it:
+    nothing is raised through `HeadRuntime` here and nothing is dispatched. The tick closes the
+    owner this driver wrote down — `terminal_handle.json` — on that owner's own path, which is the
+    pane teardown and the pane confirmation this driver has always used, and then stops. The
+    bring-up on the new backend is the next tick's, when this role provably has no live head left.
+    A missed tick is the ordinary answer for a mechanical role: it has a watermark and a precheck.
+
+    Nothing here inventories the other backend, in either direction. Which backend owns this role's
+    head is read from this driver's own state, and a pane is asked about only because this driver
+    wrote down that a pane is what it has.
+
+    Fail-closed: a teardown this driver cannot confirm leaves the record standing and raises
+    nothing, so the next tick is the handover again rather than a second head beside the first.
+    """
+    if not _stop_and_confirm(ws, state, host=host):
+        _release_steward_report(
+            state, event, cmd,
+            "this role's head is being handed to another backend and the pane holding it could "
+            "not be confirmed stopped, so this tick dispatched nothing.",
+        )
+        state.log_run(event, action="handover-stop-failed", result="error",
+                      error="the pane holding this role's head could not be confirmed stopped")
+        print(f"dispatch[{agent}]: the pane holding this head would not confirm it stopped — "
+              "not handing this role to a supervisor this tick")
+        return 0
+    reaped, reap_ok = _reap_ghosts(ws)
+    state.save_terminal_handle(None)
+    _release_steward_report(
+        state, event, cmd,
+        "this role's head has been handed from a pane to a supervisor of this product's own, "
+        "so this tick dispatched nothing; the next tick raises the head.",
+    )
+    state.log_run(event, action="handover-to-supervised",
+                  result="done" if reap_ok else "partial",
+                  error="" if reap_ok else "a ghost tab of the stopped pane would not close")
+    tail = f"; reaped {reaped} ghost(s)" if reaped else ""
+    print(f"dispatch[{agent}]: this role's profile now names a supervisor — stopped the pane that "
+          f"held its head and dispatched nothing{tail}")
+    return 0
+
+
+def _hand_back_supervised_head(agent: str, ws: str, state: AgentState, event: str, *,
+                               cmd: DispatchCommand | None = None) -> int | None:
+    """The handover tick of a role whose head is supervised and whose profile now names a pane.
+
+    `None` when there is nothing to hand back — no supervised head was ever written down for this
+    role, or the one that was has provably ended — and the caller runs its ordinary pane tick. An
+    integer means this tick was the handover and is over.
+
+    The mirror of `_hand_over_from_pane`, and closed the same way: the owner is read from this
+    driver's own `head_run.json`, and it is stopped across the same `HeadRuntime` boundary that
+    raised it. No pane is opened, no skill is delivered, no report card is left open. The pane
+    lifecycle below this point never runs beside a supervised head that is still alive, which is
+    the singleton invariant this driver has always held, stated across both backends.
+
+    Fail-closed in both of its uncertain answers, per this card's contract: a record that will not
+    make a run, and a backend that cannot say what became of the head it names, both leave the
+    record standing and raise nothing.
+    """
+    record = state.load_head_run()
+    if record is None:
+        return None
+    try:
+        run = HeadRun.from_json(record)
+    except (HeadRunError, ValueError, TypeError) as exc:
+        state.log_run(event, action="handover-owner-unreadable", result="error", error=str(exc))
+        print(f"dispatch[{agent}]: the record of this role's supervised head does not name a run "
+              f"({exc}) — raising nothing this tick")
+        return 0
+    runtime = _local_pty_runtime()
+    seen = runtime.observe(run)
+    if seen.status == HEAD_GONE:
+        # The head this role owned has ended on its own. There is no live owner to close, so this
+        # is not a handover at all: the record is forgotten and the ordinary pane tick runs.
+        state.save_head_run(None)
+        state.log_run(event, action="handover-owner-gone", reference=run.run_id)
+        return None
+    if not seen.ok and seen.status != HEAD_ALIVE:
+        state.log_run(event, action="handover-owner-unreadable", result="error",
+                      reference=run.run_id, error=seen.reason or seen.status)
+        print(f"dispatch[{agent}]: the backend holding this role's head cannot say whether it is "
+              f"up ({seen.reason or seen.status}) — raising nothing this tick")
+        return 0
+    receipt = runtime.stop(
+        run, StopInitiator(actor=HANDOVER_INITIATOR, reason=HANDOVER_REASON),
+    )
+    if not receipt.ok:
+        if cmd is not None:
+            _release_steward_report(
+                state, event, cmd,
+                "this role's head is being handed back to a pane and the supervised head holding "
+                "it could not be confirmed stopped, so this tick dispatched nothing.",
+            )
+        state.log_run(event, action="handover-stop-failed", result="error",
+                      reference=run.run_id, error=receipt.reason or receipt.status)
+        print(f"dispatch[{agent}]: the supervised head {run.run_id} would not confirm it stopped "
+              "— not handing this role back to a pane this tick")
+        return 0
+    state.save_head_run(None)
+    if cmd is not None:
+        _release_steward_report(
+            state, event, cmd,
+            "this role's head has been handed from a supervisor of this product's own back to a "
+            "pane, so this tick dispatched nothing; the next tick raises the head.",
+        )
+    state.log_run(event, action="handover-to-pane", reference=run.run_id)
+    print(f"dispatch[{agent}]: this role's profile now names a pane — stopped the supervised head "
+          f"{run.run_id} and dispatched nothing")
+    return 0
+
+
 def _supervised_bring_up(agent: str, ws: str, state: AgentState, event: str,
-                         cmd: DispatchCommand) -> int | None:
+                         cmd: DispatchCommand, *, host: SessionHost) -> int | None:
     """This tick under a supervisor of this product's own, or `None` if `cmd` is not held by one.
 
     The single place the backend is decided, and it is decided from the single resolution: the
@@ -1143,12 +1279,19 @@ def _supervised_bring_up(agent: str, ws: str, state: AgentState, event: str,
     registry said. `None` back is "the pane backend holds this one", and the caller carries on
     with the command it already has.
 
+    One owner at a time. A role whose head is a pane — and this driver's own `terminal_handle.json`
+    is what says one is — gets the handover tick instead: `_hand_over_from_pane` closes that owner
+    on the pane's own path and raises nothing, and the bring-up below is the next tick's. That tick
+    is not a supervised tick and must not be read as one; it makes no call of the boundary below.
+
     Ephemeral by construction, and none of the Orca lifecycle is ported here. Warm reuse, `/clear`,
     ghost tabs, the `tui-idle` probe, the finalize trailer and the stray sweep all exist because
     Orca keeps a dead pty as a tab in its session store; a supervisor leaves no ghost behind, so a
     tick is one head raised with its own skill and the run ends when that head exits. Every outcome
     below is read from the backend's own typed receipt: no pane is created, listed, probed or read
-    on this path, and no ghost is reaped.
+    on this path, and no ghost is reaped. That claim is about the bring-up, which is everything
+    below the handover above it — a tick that reaches the boundary is a tick this role's pane
+    record was empty for.
 
     The head outlives the tick. What the next tick needs to reach it — its run id, workspace and
     spec — is written to this agent's state directory as the receipt recorded it, and handing that
@@ -1157,6 +1300,11 @@ def _supervised_bring_up(agent: str, ws: str, state: AgentState, event: str,
     """
     if _profile_runtime(cmd.profile, cmd.head_profile) != LOCAL_PTY_RUNTIME:
         return None
+    if state.load_terminal_handle() is not None:
+        # This role's head is a pane, and this driver's own record is what says so. A role has one
+        # owner of its head at a time, so this tick is the handover rather than the bring-up: the
+        # pane is closed on the pane's own path and nothing is raised through the boundary below.
+        return _hand_over_from_pane(agent, ws, state, event, cmd, host=host)
     try:
         _ensure_head_ready(ws, cmd, role=agent)
     except CodexPreflightError as exc:
@@ -1216,7 +1364,7 @@ def _supervised_bring_up(agent: str, ws: str, state: AgentState, event: str,
 
 
 def _run_local_pty(agent: str, variant: str | None, ws: str, state: AgentState, event: str, *,
-                   cleanup_only: bool,
+                   cleanup_only: bool, host: SessionHost,
                    snapshot: RegistrySnapshot | None = None) -> int | DispatchCommand:
     """The tick a mechanical role gets when a supervised head was reachable for it at all.
 
@@ -1231,7 +1379,7 @@ def _run_local_pty(agent: str, variant: str | None, ws: str, state: AgentState, 
         state.log_run(event, action="supervised-cleanup-noop")
         return 0
     cmd = _dispatch_command(agent, variant, snapshot)
-    outcome = _supervised_bring_up(agent, ws, state, event, cmd)
+    outcome = _supervised_bring_up(agent, ws, state, event, cmd, host=host)
     if outcome is None:
         # A supervised head was reachable for this agent, but this tick's resolution landed on a
         # profile the pane backend holds — a red resource, or a registry read that declined.
@@ -1297,10 +1445,17 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
         pending: DispatchCommand | None = None
         if _may_be_supervised(agent, registry):
             outcome = _run_local_pty(agent, variant, ws, state, event, cleanup_only=cleanup_only,
-                                     snapshot=registry)
+                                     snapshot=registry, host=host)
             if isinstance(outcome, int):
                 return outcome
             pending = outcome
+        # A pane holds this tick's head: either no supervised profile was reachable for this agent
+        # at all, or this tick's own resolution diverted onto a pane profile. If the head this role
+        # owns is a supervised one, this tick is the handover and not the pane lifecycle — the
+        # pane lifecycle below must never run beside a supervised head that is still alive.
+        handed = _hand_back_supervised_head(agent, ws, state, event, cmd=pending)
+        if handed is not None:
+            return handed
         active_report = _fresh_steward_report_in_progress(agent, time.time(), ws, state, host=host)
         if active_report:
             if pending is not None:
@@ -1513,7 +1668,7 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
         # handed down rather than resolved inside the delivery, which keeps the tick to the one
         # resolution and the one report card it always had.
         pending = _dispatch_command(agent, variant, registry) if pending is None else pending
-        supervised = _supervised_bring_up(agent, ws, state, event, pending)
+        supervised = _supervised_bring_up(agent, ws, state, event, pending, host=host)
         if supervised is not None:
             return supervised
         state.save_terminal_handle(survivor.handle)

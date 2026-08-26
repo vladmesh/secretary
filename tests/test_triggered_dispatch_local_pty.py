@@ -119,6 +119,7 @@ class RecordingSessionHost:
 
     def __init__(self) -> None:
         self.opened: list[tuple[str, str, str]] = []
+        self.stopped: list[str] = []
 
     def send(self, handle: str, text: str, *, enter: bool) -> dict:
         return {"send": {"accepted": True}}
@@ -146,6 +147,7 @@ class RecordingSessionHost:
         return []
 
     def stop_workspace(self, workspace: str) -> None:
+        self.stopped.append(workspace)
         return None
 
 
@@ -679,6 +681,130 @@ class SupervisedHeadLifetimeTests(MechanicalRoleBackendTestCase):
         self.await_(lambda: _alive(self.head_pid(run_dir)),
                     message="a record from another boot became a permanent refusal to go on duty")
         self.assertEqual(self.actions(), ["supervised-started", "supervised-started"])
+
+
+class BackendHandoverTests(MechanicalRoleBackendTestCase):
+    """One role, one owner of its head, and a change of backend is a tick of its own.
+
+    Publishing a `runtime` for a role whose head is already up is an ordinary `secretary upgrade`
+    against a scheduled tick, and it used to leave the old head running while a second one was
+    raised on the new backend — a pane beside a supervised head one way, a supervised head beside a
+    pane the other. Both directions are here, and each of them asserts the same three things: no
+    intermediate state of the role has two live heads, the handover tick dispatches nothing and
+    leaves no report card, and the head on the new backend is raised by the tick after it.
+    """
+
+    def _pane_tick(self, registry, host):
+        with mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)):
+            return self.run_tick(registry, host=host)
+
+    def test_a_pane_head_is_handed_to_a_supervisor_before_one_is_raised(self) -> None:
+        """`orca-legacy -> local-pty`, the direction the live installation's steward is in."""
+        host = RecordingSessionHost()
+        self.assertEqual(self._pane_tick(self._registry(), host=host), 0)
+        self.assertEqual(len(host.opened), 1, "the first tick raised no pane")
+        self.assertIsNotNone(self.state.load_terminal_handle())
+
+        # The profile of this same role is republished onto the supervisor, between ticks.
+        self.assertEqual(
+            self._pane_tick(self._registry(runtime=LOCAL_PTY_RUNTIME), host=host), 0
+        )
+
+        self.assertEqual(self.run_dirs(), [],
+                         "the handover tick raised a supervised head beside the live pane")
+        self.assertEqual(len(host.opened), 1, "the handover tick opened a second pane")
+        self.assertEqual(host.stopped, [str(self.workspace)],
+                         "the pane that held this role's head was not closed on the pane's path")
+        self.assertIsNone(self.state.load_terminal_handle(),
+                          "the pane is still recorded as the owner of this role's head")
+        self.assertIsNone(self.state.load_head_run(),
+                          "the handover tick wrote a supervised owner it never raised")
+        self.assertIsNone(self.state.load_active_report(),
+                          "the handover tick left a report card behind")
+        self.assertEqual(self.actions(), ["created", "handover-to-supervised"])
+
+        # The next tick, with no live head left anywhere, raises one on the new backend.
+        with self._orca_banned() as made:
+            self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
+
+        self.assertEqual(made, [], "the bring-up after the handover reached Orca")
+        self.assertEqual(len(self.run_dirs()), 1, "the tick after the handover raised no head")
+        self.assertTrue(_alive(self.head_pid(self.run_dirs()[0])))
+        self.assertEqual(self.actions()[-1], "supervised-started")
+
+    def test_a_supervised_head_is_handed_back_to_a_pane_before_one_is_opened(self) -> None:
+        """`local-pty -> orca-legacy`, closed across the boundary that raised the head."""
+        self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
+        run_dir = self.run_dirs()[0]
+        head, supervisor = self.head_pid(run_dir), self.supervisor_pid(run_dir)
+        self.assertTrue(_alive(head), "the first tick raised no live head")
+
+        host = RecordingSessionHost()
+        self.assertEqual(
+            self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0
+        )
+
+        self.assertEqual(host.opened, [],
+                         "the handover tick opened a pane beside a live supervised head")
+        self.await_(lambda: not _alive(head),
+                    message="the supervised head outlived the tick that handed the role back")
+        self.await_(lambda: not _alive(supervisor), soft=True)
+        self.assertIsNone(self.state.load_head_run(),
+                          "the supervised head is still recorded as the owner")
+        self.assertIsNone(self.state.load_terminal_handle(),
+                          "the handover tick recorded a pane it never opened")
+        self.assertIsNone(self.state.load_active_report(),
+                          "the handover tick left a report card behind")
+        self.assertEqual(self.actions(), ["supervised-started", "handover-to-pane"])
+
+        # The next tick, with no live head left anywhere, opens the pane.
+        self.assertEqual(
+            self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0
+        )
+
+        self.assertEqual([title for _ws, title, _cmd in host.opened],
+                         [f"triggered-agent:{self.AGENT}"])
+        self.assertEqual(self.run_dirs(), [run_dir],
+                         "the tick after the handover raised another supervised head")
+        self.assertEqual(self.actions()[-1], "created")
+
+    def test_a_pane_that_will_not_confirm_it_stopped_raises_nothing(self) -> None:
+        """Criterion 5 of the contract, on the side this driver cannot ask the boundary about."""
+        host = RecordingSessionHost()
+        self.assertEqual(self._pane_tick(self._registry(), host=host), 0)
+
+        with mock.patch.object(dispatch, "_stop_and_confirm", return_value=False):
+            self.assertEqual(
+                self._pane_tick(self._registry(runtime=LOCAL_PTY_RUNTIME), host=host), 0
+            )
+
+        self.assertEqual(self.run_dirs(), [],
+                         "a pane that would not confirm its stop still got a second head")
+        self.assertIsNotNone(self.state.load_terminal_handle(),
+                             "the owner was forgotten without its stop being confirmed")
+        self.assertEqual(self.actions(), ["created", "handover-stop-failed"])
+
+    def test_a_supervised_head_that_has_already_ended_is_not_a_handover(self) -> None:
+        """A record whose head is provably gone names no owner, so the pane tick runs at once."""
+        self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
+        run_dir = self.run_dirs()[0]
+        dead = self.head_pid(run_dir)
+        _kill(self.supervisor_pid(run_dir))
+        _kill(dead, group=True)
+        _kill(dead)
+        self.await_(lambda: head_process_status(
+            str(run_dir / protocol.PID_FILE_NAME)).get("state") == "dead",
+            message="the head never actually died")
+
+        host = RecordingSessionHost()
+        self.assertEqual(
+            self._pane_tick(self._registry(runtime=ORCA_LEGACY_RUNTIME), host=host), 0
+        )
+
+        self.assertEqual(len(host.opened), 1, "the pane tick was skipped for a head that had ended")
+        self.assertIsNone(self.state.load_head_run())
+        self.assertEqual(self.actions(),
+                         ["supervised-started", "handover-owner-gone", "created"])
 
 
 if __name__ == "__main__":
