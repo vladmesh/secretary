@@ -194,8 +194,23 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
         return HeadCommand(HEAD_COMMAND, prompt_after_start=self.prompt_after_start,
                            adapter="claude")
 
+    def _reads(self, registry):
+        """What each `load_registry()` of this tick answers.
+
+        A registry is one answer for every read. A list is the readings in order, the last one
+        standing for any further read: that is how a tick that reads the registry more than once
+        gets a different answer the second time, which is what an ordinary profile publication
+        landing between two reads does to it.
+        """
+        answers = list(registry) if isinstance(registry, list) else [registry]
+
+        def read() -> pipeline_heads.Registry:
+            return answers.pop(0) if len(answers) > 1 else answers[0]
+
+        return read
+
     @contextlib.contextmanager
-    def _tick(self, registry: pipeline_heads.Registry, *, host):
+    def _tick(self, registry, *, host):
         with contextlib.ExitStack() as stack:
             enter = stack.enter_context
             enter(mock.patch.dict(os.environ, {"SECRETARY_DATA_DIR": str(self.data_dir)}))
@@ -205,13 +220,14 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
             enter(mock.patch.object(dispatch, "_pipeline_paused", return_value=False))
             enter(mock.patch.object(dispatch, "CLAUDE_JSON", self.data_dir / "claude.json"))
             enter(mock.patch.object(dispatch, "render_head_command", self._rendered))
-            enter(mock.patch.object(pipeline_heads, "load_registry", return_value=registry))
+            enter(mock.patch.object(pipeline_heads, "load_registry",
+                                    side_effect=self._reads(registry)))
             enter(mock.patch.object(pipeline_health, "refresh", return_value={}))
             enter(mock.patch.object(pipeline_health, "resolve_head",
                                     return_value=self.resolved))
             yield host
 
-    def run_tick(self, registry: pipeline_heads.Registry, *, host=None) -> int:
+    def run_tick(self, registry, *, host=None) -> int:
         host = ForbiddenSessionHost() if host is None else host
         with self._tick(registry, host=host):
             return dispatch.run(self.AGENT, host=host)
@@ -367,6 +383,76 @@ class BackendChoiceTests(MechanicalRoleBackendTestCase):
         self.assertEqual(self.run_dirs(), [])
         self.assertEqual(self.state.load_head_profile(), "pane")
         self.assertEqual(self.actions(), ["created"])
+
+
+class SplitRegistryReadTests(MechanicalRoleBackendTestCase):
+    """Criteria 1 and 3 against the reading that is not the decision.
+
+    Before a tick puts a head anywhere it asks the cheap question first: could this agent land on a
+    supervised head at all? That question reads the registry, and the resolution the command is
+    rendered from reads it again later. An ordinary profile publication fits between the two, so
+    the cheap answer can be "no supervisor" while the resolution names one. What must not follow
+    from that is a pane: the backend is the resolution's answer, and every path that is about to
+    put a head somewhere is made to ask it again from the command it is holding.
+    """
+
+    def _published_between_the_reads(self) -> list[pipeline_heads.Registry]:
+        """The registry a tick reads, with a profile publication landing halfway through.
+
+        The driver opens the registry four times: the cheap "could this be supervised at all"
+        question reads it to route the agent and again to read the routed profile, and the
+        resolution the command is rendered from does the same later. The publication lands between
+        the pair and the pair, which is the ordinary `secretary upgrade` against a scheduled tick:
+        the first two readings answer `orca-legacy` for this agent's profile, the last two answer
+        `local-pty` for the very same one.
+        """
+        before = self._registry(runtime=ORCA_LEGACY_RUNTIME)
+        after = self._registry(runtime=LOCAL_PTY_RUNTIME)
+        return [before, before, after, after]
+
+    def test_a_profile_published_between_the_two_reads_still_gets_its_supervisor(self) -> None:
+        """The pre-scan says pane, the resolution says supervisor, and no pane is opened."""
+        host = RecordingSessionHost()
+
+        with mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)):
+            self.assertEqual(
+                self.run_tick(self._published_between_the_reads(), host=host), 0
+            )
+
+        self.assertEqual(host.opened, [], "a launch a supervisor holds was opened as a pane")
+        run_dirs = self.run_dirs()
+        self.assertEqual(len(run_dirs), 1, "the tick raised no supervised head")
+        self.assertTrue(_alive(self.head_pid(run_dirs[0])))
+        self.assertEqual(self.actions(), ["supervised-started"])
+        self.assertEqual(self.state.load_head_profile(), "head")
+
+    def test_a_warm_pane_is_not_typed_into_for_a_launch_a_supervisor_holds(self) -> None:
+        """The same split reading, on the branch that would reuse a pane already up.
+
+        The pane is idle and live, so this tick would have `/clear`ed it and sent the skill into
+        it. The session manager here refuses every verb, which is the assertion: the resolution is
+        made before the first of them.
+        """
+        self.prompt_after_start = True
+        warm = Pane(handle="term-1", leaf="leaf-1", title=f"triggered-agent:{self.AGENT}",
+                    last_output_at=time.time())
+
+        with contextlib.ExitStack() as stack:
+            enter = stack.enter_context
+            enter(mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)))
+            enter(mock.patch.object(dispatch, "_agent_terminals", return_value=[warm]))
+            enter(mock.patch.object(dispatch, "_is_idle", return_value=True))
+            enter(mock.patch.object(dispatch, "_agent_repl_visible", return_value=True))
+            enter(mock.patch.object(dispatch, "_reuse_head_is_red", return_value=False))
+            self.assertEqual(self.run_tick(self._published_between_the_reads()), 0)
+
+        run_dirs = self.run_dirs()
+        self.assertEqual(len(run_dirs), 1, "the tick raised no supervised head")
+        self.await_(
+            lambda: "/retro" in self.head_output(run_dirs[0]),
+            message="the skill went to the warm pane instead of the head across the boundary",
+        )
+        self.assertEqual(self.actions(), ["supervised-started"])
 
 
 class SupervisedDeliveryTests(MechanicalRoleBackendTestCase):

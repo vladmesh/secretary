@@ -60,15 +60,20 @@ runs the argument vectors the host hands it rather than building any.
 A pane is not the only way a head is held. Which backend holds this agent's head is its resolved
 profile's own answer (`runtime`, secretary-1467), read here off the profile `_launch_cmd` rendered
 the command from and turned into a backend through the product's one name-to-backend mapping
-(`head_runtime_backends`). A profile with no key, and one naming `orca-legacy`, is the whole
-lifecycle above and nothing about it changes. A profile naming `local-pty` takes `_run_local_pty`
-instead, and that path is deliberately none of the above: it raises one head per tick under a
-supervisor of this product's own, hands it its skill across that same boundary, and reads success
-and refusal from typed receipts. It never lists, probes, reads or reaps a pane, because there is
-none — every one of those verbs exists to cope with the ghost tab Orca leaves behind, and a
-supervisor leaves none. The head outlives the tick that raised it; `AgentState.save_head_run` is
-what a later tick reaches it through, and handing that record back to `start` is what makes a
-bring-up over a head that is still working a refusal rather than a second head.
+(`head_runtime_backends`). One resolution decides it, and `_supervised_bring_up` is where it is
+decided: whichever branch of the tick built the command, it asks there before a pane could be
+opened for it. The cheap pre-scan `run()` opens with is an answer to "can this tick skip the pane
+lifecycle entirely" and never the last word, because an ordinary profile publication fits between
+that reading of the registry and the resolution's. A profile with no key, and one naming
+`orca-legacy`, is the whole lifecycle above and nothing about it changes. A profile naming
+`local-pty` takes the supervised tick instead, and that path is deliberately none of the above:
+it raises one head per tick under a supervisor of this product's own, hands it its skill across
+that same boundary, and reads success and refusal from typed receipts. It never lists, probes,
+reads or reaps a pane, because there is none — every one of those verbs exists to cope with the
+ghost tab Orca leaves behind, and a supervisor leaves none. The head outlives the tick that
+raised it; `AgentState.save_head_run` is what a later tick reaches it through, and handing that
+record back to `start` is what makes a bring-up over a head that is still working a refusal
+rather than a second head.
 
 A pane that answers `tui-idle` within `IDLE_PROBE_MS` is idle here and a probe that times out is
 busy — two states, not the three the interactive delivery path classifies, because this scheduler
@@ -717,7 +722,7 @@ def _deliver_interactive_skill(handle: str, workspace: str, skill: str, *,
 
 def _spawn_fresh_terminal(agent: str, variant: str | None, ws: str, state: AgentState,
                           event: str, *, host: SessionHost,
-                          cmd: DispatchCommand | None = None) -> DispatchCommand:
+                          cmd: DispatchCommand | None = None) -> DispatchCommand | int:
     """Bring a fresh head up in `ws`: prepare the workspace, create the pane, deliver the skill.
 
     The preparation is deliberately outside the recovery below: once a pane exists the head may
@@ -726,8 +731,17 @@ def _spawn_fresh_terminal(agent: str, variant: str | None, ws: str, state: Agent
 
     `cmd` is the dispatch this tick has already built — the diverted-launch case in `run()`, and
     nothing else. Reusing it is what keeps that tick to one resolution and one report card.
+
+    Returns this tick's exit status instead of a command when the resolution it is holding names a
+    supervisor. The pre-scan in `run()` reads the registry before the resolution does, and an
+    ordinary publication fits between the two readings, so a tick can arrive here on the pane path
+    holding a command a supervisor holds. The bring-up is asked before `_create_terminal`, which
+    is where `open_pane` is: on that answer the pane is never opened at all.
     """
     cmd = _dispatch_command(agent, variant) if cmd is None else cmd
+    supervised = _supervised_bring_up(agent, ws, state, event, cmd)
+    if supervised is not None:
+        return supervised
     try:
         _ensure_head_ready(ws, cmd, role=agent)
     except CodexPreflightError as exc:
@@ -1052,9 +1066,16 @@ def _local_pty_runtime() -> Any:
     )
 
 
-def _run_local_pty(agent: str, variant: str | None, ws: str, state: AgentState, event: str, *,
-                   cleanup_only: bool) -> int | DispatchCommand:
-    """One tick of a mechanical role whose head this product holds under a supervisor of its own.
+def _supervised_bring_up(agent: str, ws: str, state: AgentState, event: str,
+                         cmd: DispatchCommand) -> int | None:
+    """This tick under a supervisor of this product's own, or `None` if `cmd` is not held by one.
+
+    The single place the backend is decided, and it is decided from the single resolution: the
+    profile dictionary `_launch_cmd` handed back with this very command. Every path that is about
+    to put a head somewhere asks here first, so no pane is ever opened for a command a supervisor
+    holds — whichever branch of the tick built it, and whatever an earlier, cheaper reading of the
+    registry said. `None` back is "the pane backend holds this one", and the caller carries on
+    with the command it already has.
 
     Ephemeral by construction, and none of the Orca lifecycle is ported here. Warm reuse, `/clear`,
     ghost tabs, the `tui-idle` probe, the finalize trailer and the stray sweep all exist because
@@ -1067,25 +1088,9 @@ def _run_local_pty(agent: str, variant: str | None, ws: str, state: AgentState, 
     spec — is written to this agent's state directory as the receipt recorded it, and handing that
     record back to `start` is what makes a second bring-up over a working head a refusal
     (`HEAD_BUSY`, `head_already_up`, made before anything is spawned) rather than a second head.
-
-    Returns the dispatch command, and nothing else does, when health diverted this launch onto a
-    profile the pane backend holds: the caller then runs its ordinary tick with that very command,
-    so the divert costs neither a second resolution nor a second report card.
     """
-    if cleanup_only:
-        # `--cleanup-only` is the gate's call on a precheck skip, and its whole subject is a pane a
-        # finished run left behind. There is none here: this head's supervisor reaps its own
-        # process, and the durable record is what the next tick reads.
-        state.log_run(event, action="supervised-cleanup-noop")
-        return 0
-    cmd = _dispatch_command(agent, variant)
     if _profile_runtime(cmd.profile, cmd.head_profile) != LOCAL_PTY_RUNTIME:
-        # A supervised head was reachable for this agent, but this tick's resolution landed on a
-        # profile the pane backend holds — a red resource, or a registry read that declined.
-        # The command is already built and already carries its report card, so it is handed back
-        # rather than rebuilt: resolving again could answer differently, and a second card would be
-        # a report nobody writes.
-        return cmd
+        return None
     try:
         _ensure_head_ready(ws, cmd, role=agent)
     except CodexPreflightError as exc:
@@ -1142,6 +1147,32 @@ def _run_local_pty(agent: str, variant: str | None, ws: str, state: AgentState, 
     state.log_run(event, action="supervised-started", reference=cmd.card_ref)
     print(f"dispatch[{agent}]: raised a supervised head {live.run_id} -> {cmd.skill}")
     return 0
+
+
+def _run_local_pty(agent: str, variant: str | None, ws: str, state: AgentState, event: str, *,
+                   cleanup_only: bool) -> int | DispatchCommand:
+    """The tick a mechanical role gets when a supervised head was reachable for it at all.
+
+    Returns the dispatch command, and nothing else does, when health diverted this launch onto a
+    profile the pane backend holds: the caller then runs its ordinary tick with that very command,
+    so the divert costs neither a second resolution nor a second report card.
+    """
+    if cleanup_only:
+        # `--cleanup-only` is the gate's call on a precheck skip, and its whole subject is a pane a
+        # finished run left behind. There is none here: this head's supervisor reaps its own
+        # process, and the durable record is what the next tick reads.
+        state.log_run(event, action="supervised-cleanup-noop")
+        return 0
+    cmd = _dispatch_command(agent, variant)
+    outcome = _supervised_bring_up(agent, ws, state, event, cmd)
+    if outcome is None:
+        # A supervised head was reachable for this agent, but this tick's resolution landed on a
+        # profile the pane backend holds — a red resource, or a registry read that declined.
+        # The command is already built and already carries its report card, so it is handed back
+        # rather than rebuilt: resolving again could answer differently, and a second card would be
+        # a report nobody writes.
+        return cmd
+    return outcome
 
 
 def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
@@ -1266,8 +1297,11 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
                         print(f"dispatch[{agent}]: swept stray terminal but a ghost tab would not "
                               "close; not creating this tick, next tick re-reaps")
                         return 0
-            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
-                                        cmd=pending)
+            spawned = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
+                                            cmd=pending)
+            if isinstance(spawned, int):
+                return spawned
+            cmd = spawned
             state.log_run(event, action="created")
             print(f"dispatch[{agent}]: no terminal — created fresh -> {cmd.skill}")
             return 0
@@ -1296,8 +1330,11 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
                 print(f"dispatch[{agent}]: watchdog stopped the stuck terminal but a ghost tab "
                       "would not close; not restarting this tick, next tick re-reaps")
                 return 0
-            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
-                                        cmd=pending)
+            spawned = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
+                                            cmd=pending)
+            if isinstance(spawned, int):
+                return spawned
+            cmd = spawned
             state.log_run(event, action="watchdog-restart")
             print(f"dispatch[{agent}]: busy but stuck ({int(quiet)}s silent) — watchdog restart -> {cmd.skill}")
             return 0
@@ -1323,8 +1360,11 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
                 print(f"dispatch[{agent}]: ephemeral teardown stopped the finished terminal but a "
                       "ghost tab would not close; not restarting this tick, next tick re-reaps")
                 return 0
-            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
-                                        cmd=pending)
+            spawned = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
+                                            cmd=pending)
+            if isinstance(spawned, int):
+                return spawned
+            cmd = spawned
             state.log_run(event, action="ephemeral-restart")
             tail = f"; reaped {reaped} ghost(s)" if reaped else ""
             print(f"dispatch[{agent}]: ephemeral — torn down finished terminal, fresh session -> {cmd.skill}{tail}")
@@ -1342,8 +1382,11 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
                 print(f"dispatch[{agent}]: red-fallback stop could not confirm the idle terminal "
                       "stopped — leaving it for the next tick")
                 return 0
-            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
-                                        cmd=pending)
+            spawned = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
+                                            cmd=pending)
+            if isinstance(spawned, int):
+                return spawned
+            cmd = spawned
             state.log_run(event, action="reused-red-fallback")
             print(f"dispatch[{agent}]: idle terminal's head is red — stopped, fresh fallback terminal -> {cmd.skill}")
             return 0
@@ -1364,14 +1407,26 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
                 print(f"dispatch[{agent}]: idle terminal had no live agent REPL; stopped it but "
                       "a ghost tab would not close, not restarting this tick")
                 return 0
-            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
-                                        cmd=pending)
+            spawned = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
+                                            cmd=pending)
+            if isinstance(spawned, int):
+                return spawned
+            cmd = spawned
             state.log_run(event, action="warm-repl-restart")
             print(f"dispatch[{agent}]: idle terminal had no live agent REPL: fresh terminal -> "
                   f"{cmd.skill}")
             return 0
 
         # idle: warm reuse, killing nothing -> no ghost. Close only legacy duplicates (one-time).
+        # The resolution comes first, before a single verb reaches this warm pane: the pre-scan
+        # that let the tick get here read the registry earlier than the resolution does, so the
+        # command this reuse would deliver can be one a supervisor holds. It is built here and
+        # handed down rather than resolved inside the delivery, which keeps the tick to the one
+        # resolution and the one report card it always had.
+        pending = _dispatch_command(agent, variant) if pending is None else pending
+        supervised = _supervised_bring_up(agent, ws, state, event, pending)
+        if supervised is not None:
+            return supervised
         state.save_terminal_handle(survivor.handle)
         extras = [pane for pane in terms if pane.handle != survivor.handle]
         for pane in extras:
