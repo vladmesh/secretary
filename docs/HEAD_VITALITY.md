@@ -6,9 +6,10 @@ The head-vitality model splits that question into three independent axes, observ
 fused later with hysteresis. This page describes the observation vocabulary introduced in
 `src/secretary/dispatch/head_vitality.py`, the episode reducer
 (`head_vitality_episode.py`), and — since S1-5 — the recovery policy (`head_vitality_policy.py`)
-that turns a persisted verdict into an intent the dispatcher executes under the guard. The runtime
-boundary that would own delivery atomically remains future work (see the plan "Head vitality,
-собственный runtime и постепенный уход от Orca").
+that turns a persisted verdict into an intent the dispatcher executes under the guard. `HeadRuntime`
+now supplies the lifecycle boundary: the local-pty backend owns delivery, turn lease, drain and
+stop atomically, while the Orca legacy backend retains the explicitly weaker conditional-stop
+contract during migration.
 
 ## The central invariant
 
@@ -16,11 +17,13 @@ Every external observation has a TOCTOU window: between the last reading and any
 may start a new turn. Two agreeing channels narrow the noise but never close the window.
 Consequently:
 
-> An observation reports facts. Fusion forms suspicion. Policy chooses intent. Only a runtime that
-> atomically owns delivery can make an intervention safe.
+> An observation reports facts. Fusion forms suspicion. Policy chooses intent. A runtime that
+> atomically owns delivery decides whether an intervention is safe.
 
-Orca readiness, terminal output and filesystem fingerprints can never by themselves grant a kill
-capability.
+Local-pty performs that final admission/lease/epoch check inside its own lock and against durable
+supervisor evidence. Orca readiness, terminal output and filesystem fingerprints still can never by
+themselves grant a kill capability; `OrcaLegacyHeadRuntime.stop_if_quiescent` remains a best-effort
+legacy fence around the unavoidable external observation window.
 
 ## Three independent axes
 
@@ -334,7 +337,8 @@ heartbeat signalled by nobody) in `tests/test_head_vitality_policy_execution.py`
 gate-phase ticks in `tests/test_head_vitality_wait_decisions.py` and
 `tests/test_head_vitality_legacy_path.py`.
 
-**What remains for Sprint 2+** (vocabulary exists, nothing wired): `request_drain`, safe
-replacement on a quiescent boundary, same-profile respawn as a policy rung, runtime failover, and
-`block` with evidence — all waiting on the HeadRuntime admission/drain/stop boundary. The
-`ConfirmedStall` recovery path is unchanged in this sprint: respawn once, then escalate.
+**What remains after the runtime boundary:** the recovery policy does not yet route its rungs
+through `request_drain`, safe replacement on a quiescent boundary, same-profile respawn, runtime
+failover and `block` with evidence. The local-pty backend can express those operations safely, but
+the policy wiring and migration of observer/reviewer/worker are later work. The current
+`ConfirmedStall` recovery path remains respawn once, then escalate.
