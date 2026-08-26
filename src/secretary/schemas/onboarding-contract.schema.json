@@ -418,6 +418,18 @@
           "properties": {
             "write_project_files": {"type": "boolean"}
           }
+        },
+        "broad_check": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["interpreter", "import_package"],
+          "properties": {
+            "interpreter": {"type": "string", "minLength": 1},
+            "import_package": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$"
+            }
+          }
         }
       }
     },
