@@ -306,7 +306,7 @@ class CodexFanoutPolicyTests(unittest.TestCase):
                     title=f"{role} head",
                     run=run,
                     role=role,
-                    preflight=lambda candidate: codex_preflight.preflight_codex_launch(
+                    preflight=lambda candidate, role=role: codex_preflight.preflight_codex_launch(
                         {},
                         candidate.workspace,
                         candidate,

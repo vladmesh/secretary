@@ -300,7 +300,7 @@ class RestoreArchiveTests(unittest.TestCase):
                     bundle.add(
                         payload,
                         arcname=ARCHIVE_ROOT,
-                        filter=lambda info: None if top in Path(info.name).parts else info,
+                        filter=lambda info, top=top: None if top in Path(info.name).parts else info,
                     )
                     bundle.add(
                         entry,

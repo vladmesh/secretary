@@ -902,7 +902,7 @@ class SprintOwnershipTests(SprintFixture):
             ("create", lambda: self._create(goal="second", reference="sprint:second")),
         ):
             done = threading.Event()
-            worker = threading.Thread(target=lambda: (call(), done.set()))
+            worker = threading.Thread(target=lambda call=call, done=done: (call(), done.set()))
             with sprint_admission_lock(self.tmp.name):
                 worker.start()
                 self.assertFalse(done.wait(timeout=0.3), name)
@@ -1995,7 +1995,7 @@ class TwoOpenSprintIsolationTests(TwoOpenSprintFixture):
                 self.assertEqual(active_sprint_projects(self.tmp.name), {held: [remaining]})
                 # The released project is free for a new sprint; the held one is still refused.
                 self._assert_refusal_left_nothing(
-                    lambda: self._third(projects=[held]),
+                    lambda held=held: self._third(projects=[held]),
                     "resource_conflict",
                     f"{held} held by {remaining}",
                 )
@@ -5426,10 +5426,10 @@ class SprintCloseDecisionTests(SprintFixture):
                 audit = TaskAudit(self.tmp.name)
                 real_append = TaskAudit.append
 
-                def failing_append(self_audit, request_id, event, _id=step_id):
+                def failing_append(self_audit, request_id, event, _id=step_id, _real=real_append):
                     if request_id == _id:
                         raise OSError("disk full")
-                    return real_append(self_audit, request_id, event)
+                    return _real(self_audit, request_id, event)
 
                 with mock.patch.object(TaskAudit, "append", failing_append):
                     with self.assertRaisesRegex(TaskError, "pending repair"):

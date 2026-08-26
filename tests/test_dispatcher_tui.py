@@ -1464,7 +1464,7 @@ class TuiDeliveryStageTests(unittest.TestCase):
         for refusal, state, reason in cases:
             with self.subTest(state=state, refusal=str(refusal)):
 
-                def run_json(_command: list[str]) -> dict:
+                def run_json(_command: list[str], refusal: BaseException = refusal) -> dict:
                     raise refusal
 
                 with self.assertRaises(TuiDeliveryError) as raised:

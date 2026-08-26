@@ -565,100 +565,105 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
                     self.subTest(entity_kind=entity_kind, failure=failure),
                     tempfile.TemporaryDirectory() as tmpdir,
                 ):
-                    root = Path(tmpdir)
-                    (root / "projects").mkdir()
-                    (root / "projects" / "secretary.yaml").write_text("id: secretary\n", encoding="utf-8")
-                    client = ProductBoard()
-                    store = ProductIssueStore(client, data_dir=root / "data", instance=root)
-                    if entity_kind == "issue":
-                        store.create_product(
-                            product_id="secretary",
-                            projects=["secretary"],
-                            title="Secretary",
-                            description="",
-                            actor="po",
-                            request_id=f"seed-{failure}",
-                        )
-                    original_call = client.call
-                    created = False
-                    fault_active = True
-                    duplicate_id: int | None = None
+                    self._nonpositive_create_proof_case(entity_kind, failure, Path(tmpdir))
 
-                    def fail_proof(method: str, **params: object) -> object:
-                        nonlocal created, duplicate_id
-                        if created and fault_active:
-                            if failure == "transport" and method == "getProjectByName":
-                                raise TaskError("backend_unavailable", "proof transport lost", 1)
-                            if failure == "json_rpc" and method == "getProjectByName":
-                                raise TaskError("backend_error", "proof RPC failed", 1)
-                            if failure == "malformed_list" and method == "getAllTasks":
-                                return {"not": "a task list"}
-                        result = original_call(method, **params)
-                        if method == "createTask" and not created:
-                            created = True
-                            row = client.tasks[-1]
-                            row["reference"] = ""
-                            if failure == "ambiguous_marker":
-                                duplicate_id = max(int(task["id"]) for task in client.tasks) + 1
-                                duplicate = dict(row, id=duplicate_id)
-                                client.tasks.append(duplicate)
-                                client.metadata[duplicate_id] = {}
-                                client.comments[duplicate_id] = []
-                            return None
-                        return result
+    def _nonpositive_create_proof_case(self, entity_kind: str, failure: str, root: Path) -> None:
+        """One entity kind and one proof failure, as its own call rather than a loop body.
 
-                    client.call = fail_proof  # type: ignore[method-assign]
-                    request_id = f"proof-{entity_kind}-{failure}"
-                    reference = (
-                        "product:secretary"
-                        if entity_kind == "product"
-                        else "issue:" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:20]
-                    )
-                    before = len([call for call in client.calls if call[0] == "createTask"])
-                    with self.assertRaises(TaskError) as raised:
-                        if entity_kind == "product":
-                            store.create_product(
-                                product_id="secretary",
-                                projects=["secretary"],
-                                title="Secretary",
-                                description="",
-                                actor="po",
-                                request_id=request_id,
-                            )
-                        else:
-                            store.create_issue(
-                                product="secretary",
-                                issue_kind="bug",
-                                priority="P2",
-                                title="Crash",
-                                description="",
-                                actor="po",
-                                request_id=request_id,
-                            )
-                    self.assertEqual(raised.exception.code, "audit_pending")
-                    self.assertEqual(
-                        store.list_transactions(),
-                        [
-                            {
-                                "request_id": request_id,
-                                "kind": "entity.created",
-                                "ref": reference,
-                                "progress": ["typed_event"],
-                            }
-                        ],
-                    )
+        The fault injector closes over this call's arguments instead of the loop variables, so a
+        case cannot be armed with the next case's failure mode or board client.
+        """
+        (root / "projects").mkdir()
+        (root / "projects" / "secretary.yaml").write_text("id: secretary\n", encoding="utf-8")
+        client = ProductBoard()
+        store = ProductIssueStore(client, data_dir=root / "data", instance=root)
+        if entity_kind == "issue":
+            store.create_product(
+                product_id="secretary",
+                projects=["secretary"],
+                title="Secretary",
+                description="",
+                actor="po",
+                request_id=f"seed-{failure}",
+            )
+        original_call = client.call
+        created = False
+        fault_active = True
+        duplicate_id: int | None = None
 
-                    fault_active = False
-                    if duplicate_id is not None:
-                        client.tasks[:] = [task for task in client.tasks if task["id"] != duplicate_id]
-                        client.metadata.pop(duplicate_id, None)
-                        client.comments.pop(duplicate_id, None)
-                    repaired = store.retry_transaction(request_id)
-                    self.assertEqual(repaired["ref"], reference)
-                    self.assertEqual(
-                        len([call for call in client.calls if call[0] == "createTask"]), before + 1
-                    )
-                    self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
+        def fail_proof(method: str, **params: object) -> object:
+            nonlocal created, duplicate_id
+            if created and fault_active:
+                if failure == "transport" and method == "getProjectByName":
+                    raise TaskError("backend_unavailable", "proof transport lost", 1)
+                if failure == "json_rpc" and method == "getProjectByName":
+                    raise TaskError("backend_error", "proof RPC failed", 1)
+                if failure == "malformed_list" and method == "getAllTasks":
+                    return {"not": "a task list"}
+            result = original_call(method, **params)
+            if method == "createTask" and not created:
+                created = True
+                row = client.tasks[-1]
+                row["reference"] = ""
+                if failure == "ambiguous_marker":
+                    duplicate_id = max(int(task["id"]) for task in client.tasks) + 1
+                    duplicate = dict(row, id=duplicate_id)
+                    client.tasks.append(duplicate)
+                    client.metadata[duplicate_id] = {}
+                    client.comments[duplicate_id] = []
+                return None
+            return result
+
+        client.call = fail_proof  # type: ignore[method-assign]
+        request_id = f"proof-{entity_kind}-{failure}"
+        reference = (
+            "product:secretary"
+            if entity_kind == "product"
+            else "issue:" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:20]
+        )
+        before = len([call for call in client.calls if call[0] == "createTask"])
+        with self.assertRaises(TaskError) as raised:
+            if entity_kind == "product":
+                store.create_product(
+                    product_id="secretary",
+                    projects=["secretary"],
+                    title="Secretary",
+                    description="",
+                    actor="po",
+                    request_id=request_id,
+                )
+            else:
+                store.create_issue(
+                    product="secretary",
+                    issue_kind="bug",
+                    priority="P2",
+                    title="Crash",
+                    description="",
+                    actor="po",
+                    request_id=request_id,
+                )
+        self.assertEqual(raised.exception.code, "audit_pending")
+        self.assertEqual(
+            store.list_transactions(),
+            [
+                {
+                    "request_id": request_id,
+                    "kind": "entity.created",
+                    "ref": reference,
+                    "progress": ["typed_event"],
+                }
+            ],
+        )
+
+        fault_active = False
+        if duplicate_id is not None:
+            client.tasks[:] = [task for task in client.tasks if task["id"] != duplicate_id]
+            client.metadata.pop(duplicate_id, None)
+            client.comments.pop(duplicate_id, None)
+        repaired = store.retry_transaction(request_id)
+        self.assertEqual(repaired["ref"], reference)
+        self.assertEqual(len([call for call in client.calls if call[0] == "createTask"]), before + 1)
+        self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
 
     def test_failing_swimlane_lookup_discards_product_and_issue_create(self) -> None:
         """A pre-create lane lookup failure has no uncertain backend write to retain."""
@@ -668,84 +673,89 @@ class ProductIssueSwimlaneTests(unittest.TestCase):
                     self.subTest(entity_kind=entity_kind, failure=failure),
                     tempfile.TemporaryDirectory() as tmpdir,
                 ):
-                    root = Path(tmpdir)
-                    (root / "projects").mkdir()
-                    (root / "projects" / "secretary.yaml").write_text("id: secretary\n", encoding="utf-8")
-                    client = ProductBoard()
-                    store = ProductIssueStore(client, data_dir=root / "data", instance=root)
-                    if entity_kind == "issue":
-                        store.create_product(
-                            product_id="secretary",
-                            projects=["secretary"],
-                            title="Secretary",
-                            description="",
-                            actor="po",
-                            request_id=f"seed-lane-{failure}",
-                        )
-                    original_call = client.call
-                    fault_active = True
+                    self._failing_swimlane_lookup_case(entity_kind, failure, Path(tmpdir))
 
-                    def fail_swimlane(method: str, **params: object) -> object:
-                        if fault_active and method == "getActiveSwimlanes":
-                            if failure == "transport":
-                                raise TaskError("backend_unavailable", "swimlane transport lost", 1)
-                            if failure == "json_rpc":
-                                raise TaskError("backend_error", "swimlane RPC failed", 1)
-                            if failure == "malformed_list":
-                                return {"not": "a swimlane list"}
-                        return original_call(method, **params)
+    def _failing_swimlane_lookup_case(self, entity_kind: str, failure: str, root: Path) -> None:
+        """One entity kind and one lane-lookup failure, as its own call rather than a loop body.
 
-                    client.call = fail_swimlane  # type: ignore[method-assign]
-                    request_id = f"swimlane-{entity_kind}-{failure}"
-                    reference = (
-                        "product:secretary"
-                        if entity_kind == "product"
-                        else "issue:" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:20]
-                    )
+        The injector and the `create` helper close over this call's arguments, not the loop
+        variables, so the retry after `fault_active` clears cannot read a later case's state.
+        """
+        (root / "projects").mkdir()
+        (root / "projects" / "secretary.yaml").write_text("id: secretary\n", encoding="utf-8")
+        client = ProductBoard()
+        store = ProductIssueStore(client, data_dir=root / "data", instance=root)
+        if entity_kind == "issue":
+            store.create_product(
+                product_id="secretary",
+                projects=["secretary"],
+                title="Secretary",
+                description="",
+                actor="po",
+                request_id=f"seed-lane-{failure}",
+            )
+        original_call = client.call
+        fault_active = True
 
-                    def create() -> dict:
-                        if entity_kind == "product":
-                            return store.create_product(
-                                product_id="secretary",
-                                projects=["secretary"],
-                                title="Secretary",
-                                description="",
-                                actor="po",
-                                request_id=request_id,
-                            )
-                        return store.create_issue(
-                            product="secretary",
-                            issue_kind="bug",
-                            priority="P2",
-                            title="Crash",
-                            description="",
-                            actor="po",
-                            request_id=request_id,
-                        )
+        def fail_swimlane(method: str, **params: object) -> object:
+            if fault_active and method == "getActiveSwimlanes":
+                if failure == "transport":
+                    raise TaskError("backend_unavailable", "swimlane transport lost", 1)
+                if failure == "json_rpc":
+                    raise TaskError("backend_error", "swimlane RPC failed", 1)
+                if failure == "malformed_list":
+                    return {"not": "a swimlane list"}
+            return original_call(method, **params)
 
-                    semantic_failure = (
-                        mock.patch.object(
-                            KanboardBoardHost,
-                            "_issues_swimlane",
-                            side_effect=BoardProtocolError("Pipeline swimlane lookup is invalid"),
-                        )
-                        if failure == "semantic"
-                        else contextlib.nullcontext()
-                    )
-                    before = len([call for call in client.calls if call[0] == "createTask"])
-                    with semantic_failure, self.assertRaises(TaskError):
-                        create()
-                    self.assertEqual(len([call for call in client.calls if call[0] == "createTask"]), before)
-                    self.assertEqual(store.list_transactions(), [])
-                    self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
+        client.call = fail_swimlane  # type: ignore[method-assign]
+        request_id = f"swimlane-{entity_kind}-{failure}"
+        reference = (
+            "product:secretary"
+            if entity_kind == "product"
+            else "issue:" + hashlib.sha256(request_id.encode("utf-8")).hexdigest()[:20]
+        )
 
-                    fault_active = False
-                    created = create()
-                    self.assertEqual(created["ref"], reference)
-                    self.assertEqual(
-                        len([call for call in client.calls if call[0] == "createTask"]), before + 1
-                    )
-                    self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
+        def create() -> dict:
+            if entity_kind == "product":
+                return store.create_product(
+                    product_id="secretary",
+                    projects=["secretary"],
+                    title="Secretary",
+                    description="",
+                    actor="po",
+                    request_id=request_id,
+                )
+            return store.create_issue(
+                product="secretary",
+                issue_kind="bug",
+                priority="P2",
+                title="Crash",
+                description="",
+                actor="po",
+                request_id=request_id,
+            )
+
+        semantic_failure = (
+            mock.patch.object(
+                KanboardBoardHost,
+                "_issues_swimlane",
+                side_effect=BoardProtocolError("Pipeline swimlane lookup is invalid"),
+            )
+            if failure == "semantic"
+            else contextlib.nullcontext()
+        )
+        before = len([call for call in client.calls if call[0] == "createTask"])
+        with semantic_failure, self.assertRaises(TaskError):
+            create()
+        self.assertEqual(len([call for call in client.calls if call[0] == "createTask"]), before)
+        self.assertEqual(store.list_transactions(), [])
+        self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
+
+        fault_active = False
+        created = create()
+        self.assertEqual(created["ref"], reference)
+        self.assertEqual(len([call for call in client.calls if call[0] == "createTask"]), before + 1)
+        self.assertEqual(store.audit.status(), {"ok": True, "pending": 0})
 
     def test_staged_transaction_without_a_backend_row_is_discarded_by_the_operator(self) -> None:
         client = LiveSwimlaneBoard()

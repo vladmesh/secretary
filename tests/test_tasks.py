@@ -1748,7 +1748,7 @@ class TaskWriterTests(unittest.TestCase):
                 mock.patch.object(
                     self.client,
                     "call",
-                    side_effect=lambda method, **params: (
+                    side_effect=lambda method, reply=reply, **params: (
                         reply if method == "getAllTasks" else original_call(method, **params)
                     ),
                 ),
@@ -4597,7 +4597,9 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
                 request_id = f"pending-{family}"
                 real_append = self.writer.audit.append
 
-                def fail_marker_append(request: str, event: dict) -> str:
+                def fail_marker_append(
+                    request: str, event: dict, request_id: str = request_id, real_append=real_append
+                ) -> str:
                     if request == request_id and event.get("record_type") == "board.protocol_event":
                         raise OSError("audit disk full")
                     return real_append(request, event)
@@ -4652,7 +4654,9 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
                 body = f"{family} same marker across recovery"
                 real_append = self.writer.audit.append
 
-                def lose_event_commit(request_id: str, event: dict) -> str:
+                def lose_event_commit(
+                    request_id: str, event: dict, first: str = first, real_append=real_append
+                ) -> str:
                     if request_id == first and event.get("record_type") == "board.protocol_event":
                         raise OSError("lost marker event commit")
                     return real_append(request_id, event)
@@ -4687,7 +4691,9 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
                 original_call = self.client.call
                 writes = len(self.client.comments[12])
 
-                def unavailable_before_delivery(method: str, **params: object) -> object:
+                def unavailable_before_delivery(
+                    method: str, original_call=original_call, **params: object
+                ) -> object:
                     if method == "createComment":
                         raise TaskError("backend_unavailable", "transport unavailable", 1)
                     return original_call(method, **params)
@@ -4723,7 +4729,9 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
                 request_id = f"{family}-restore-pending"
                 original_call = self.client.call
 
-                def unavailable_before_delivery(method: str, **params: object) -> object:
+                def unavailable_before_delivery(
+                    method: str, original_call=original_call, **params: object
+                ) -> object:
                     if method == "createComment":
                         raise TaskError("backend_unavailable", "transport unavailable", 1)
                     return original_call(method, **params)
@@ -4777,7 +4785,9 @@ class TypedMarkerRecoveryTests(RequestIdOwnershipTests):
                 original_call = self.client.call
                 writes = len(self.client.comments[12])
 
-                def unavailable_before_delivery(method: str, **params: object) -> object:
+                def unavailable_before_delivery(
+                    method: str, original_call=original_call, **params: object
+                ) -> object:
                     if method == "createComment":
                         raise TaskError("backend_unavailable", "transport unavailable", 1)
                     return original_call(method, **params)

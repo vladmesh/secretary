@@ -408,7 +408,10 @@ def _refuse_shared_resources(candidate: dict[str, Any], others: list[dict[str, A
             )
         held_roots = _scanned_roots(
             sprint.get("repositories") or [],
-            refusal=lambda text, why: TaskError(
+            # `reference` is bound here rather than closed over: the callee calls this back
+            # inside the same iteration, but a refusal that named the wrong sprint would be a
+            # silent lie, and the binding costs nothing.
+            refusal=lambda text, why, reference=reference: TaskError(
                 "resource_conflict",
                 f"open sprint {reference} declares repository root {text!r}, which {why}, "
                 "so a second open sprint cannot be proven disjoint from it",

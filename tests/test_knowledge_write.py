@@ -247,40 +247,49 @@ class KnowledgeCheckpointRaceTests(KnowledgeRepoCase):
 
     def test_repeated_interleavings_never_drop_a_side(self):
         for round_index in range(5):
-            document = f"brainstorms/round-{round_index}.md"
-            self.seed_board([{**CARD, "id": round_index + 1, "title": f"round {round_index}"}])
-            errors: list[BaseException] = []
-            start = threading.Barrier(2)
+            self._one_interleaving(round_index)
 
-            def run_knowledge() -> None:
-                try:
-                    start.wait(timeout=10)
-                    self.write(document=document, text=f"# round {round_index}\n")
-                except BaseException as exc:  # noqa: BLE001 - reported to the test body
-                    errors.append(exc)
+    def _one_interleaving(self, round_index: int) -> None:
+        """One round of the interleaving, as its own call rather than a loop body.
 
-            def run_checkpoint() -> None:
-                try:
-                    start.wait(timeout=10)
-                    self.checkpoint()
-                except BaseException as exc:  # noqa: BLE001 - reported to the test body
-                    errors.append(exc)
+        The two threads close over this call's locals instead of a loop variable, so a round
+        cannot observe the next round's document, barrier or error list even if a thread outlives
+        its join.
+        """
+        document = f"brainstorms/round-{round_index}.md"
+        self.seed_board([{**CARD, "id": round_index + 1, "title": f"round {round_index}"}])
+        errors: list[BaseException] = []
+        start = threading.Barrier(2)
 
-            threads = [
-                threading.Thread(target=run_knowledge),
-                threading.Thread(target=run_checkpoint),
-            ]
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join(timeout=60)
+        def run_knowledge() -> None:
+            try:
+                start.wait(timeout=10)
+                self.write(document=document, text=f"# round {round_index}\n")
+            except BaseException as exc:  # noqa: BLE001 - reported to the test body
+                errors.append(exc)
 
-            with self.subTest(round=round_index):
-                self.assertEqual(errors, [])
-                self.assertIn(f"state/knowledge/{document}", self.head_files())
-                self.assertEqual(git(self.instance_dir, "status", "--porcelain").strip(), "")
-                board = (self.instance_dir / "state" / "board" / "cards.ndjson").read_text(encoding="utf-8")
-                self.assertIn(f"round {round_index}", board)
+        def run_checkpoint() -> None:
+            try:
+                start.wait(timeout=10)
+                self.checkpoint()
+            except BaseException as exc:  # noqa: BLE001 - reported to the test body
+                errors.append(exc)
+
+        threads = [
+            threading.Thread(target=run_knowledge),
+            threading.Thread(target=run_checkpoint),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=60)
+
+        with self.subTest(round=round_index):
+            self.assertEqual(errors, [])
+            self.assertIn(f"state/knowledge/{document}", self.head_files())
+            self.assertEqual(git(self.instance_dir, "status", "--porcelain").strip(), "")
+            board = (self.instance_dir / "state" / "board" / "cards.ndjson").read_text(encoding="utf-8")
+            self.assertIn(f"round {round_index}", board)
 
 
 if __name__ == "__main__":
