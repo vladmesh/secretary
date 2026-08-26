@@ -11,7 +11,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-HEARTBEAT_VERSION = 1
+# One definition, beside the writer and the reader of the record it versions.
+from triggered_agents.runtime.head.identity import HEARTBEAT_VERSION as HEARTBEAT_VERSION
 
 
 def heartbeat_role(role: str) -> str:

@@ -458,15 +458,13 @@ from triggered_agents.runtime.head import (
 from triggered_agents.runtime.head import (
     OBSERVE_READINESS_UNKNOWN as _OBSERVE_READINESS_UNKNOWN,
 )
-from triggered_agents.runtime.head_runtimes import (
-    DEFAULT_HEAD_RUNTIME,
-    HEAD_RUNTIMES,
-    LOCAL_PTY_RUNTIME,
-    ORCA_LEGACY_RUNTIME,
+from triggered_agents.runtime.head_runtime_backends import (
+    UnknownHeadRuntimeError,
+    build_head_runtime,
+    head_runtime_name,
 )
+from triggered_agents.runtime.head_runtimes import ORCA_LEGACY_RUNTIME
 from triggered_agents.runtime.launch_prefix import pythonpath_prefix
-from triggered_agents.runtime.local_pty_head import LocalPtyHeadRuntime
-from triggered_agents.runtime.orca_legacy_head import OrcaLegacyHeadRuntime
 from triggered_agents.runtime.pane_host import (
     OrcaSessionHost,
     Pane,
@@ -912,22 +910,9 @@ class DispatcherHeadTransport:
         )
 
 
-def _head_runtime_name(subject: Any) -> str:
-    """Which backend the thing a lifecycle call was given is held by, as a name.
-
-    The one reader of `HeadSpec.runtime` outside the spec itself. Every lifecycle site already
-    holds one of three things — the run it is acting on, the spec that run was launched from, or
-    nothing at all — so this takes all three rather than making each caller reach for the same
-    attribute. `None` (an operation that names no head, such as an Orca workspace teardown) is the
-    product default, and so is anything that carries no runtime of its own: absence has meant
-    `orca-legacy` since before the key existed and goes on meaning it here.
-    """
-    if subject is None:
-        return DEFAULT_HEAD_RUNTIME
-    if isinstance(subject, str):
-        return subject or DEFAULT_HEAD_RUNTIME
-    spec = getattr(subject, "spec", subject)
-    return str(getattr(spec, "runtime", "") or DEFAULT_HEAD_RUNTIME)
+#: Which backend a run, a spec or a name is held by. Shared with the mechanical-role driver rather
+#: than kept here: one reader of the key, as there is one mapping from its value to a backend.
+_head_runtime_name = head_runtime_name
 
 
 def _durable_head_run(subject: Any) -> head_ops.HeadRun | None:
@@ -3044,16 +3029,15 @@ class CommandHostRuntime:
         held = self._head_runtimes.get(name)
         if held is not None:
             return held
-        if name == ORCA_LEGACY_RUNTIME:
-            built: Any = OrcaLegacyHeadRuntime(lambda: self.session)
-        elif name == LOCAL_PTY_RUNTIME:
-            built = LocalPtyHeadRuntime(
-                self._local_pty_root(), head_process_status=_head_process_status
+        try:
+            built = build_head_runtime(
+                name,
+                session=lambda: self.session,
+                local_pty_root=self._local_pty_root,
+                head_process_status=_head_process_status,
             )
-        else:
-            raise HostError(
-                f"unknown head runtime {name!r} (known: {', '.join(HEAD_RUNTIMES)})"
-            )
+        except UnknownHeadRuntimeError as exc:
+            raise HostError(str(exc)) from exc
         self._head_runtimes[name] = built
         return built
 

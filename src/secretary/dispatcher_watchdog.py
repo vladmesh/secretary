@@ -24,9 +24,42 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from secretary.dispatcher_heartbeat import HEARTBEAT_VERSION, run_heartbeat_identity
+from secretary.dispatcher_heartbeat import run_heartbeat_identity
 from secretary.dispatcher_state import request_token
 from secretary.infra.env import positive_int
+# The launch-identity record is written by the head's own shell (`head.command.with_pid_heartbeat`)
+# and classified beside that writer, so this module names the one reader rather than keeping a
+# second one. Re-exported here because every caller in the control plane reaches it by this name.
+from triggered_agents.runtime.head.identity import (
+    HEARTBEAT_DEAD as HEARTBEAT_DEAD,
+)
+from triggered_agents.runtime.head.identity import (
+    HEARTBEAT_IDENTITY_MISMATCH as HEARTBEAT_IDENTITY_MISMATCH,
+)
+from triggered_agents.runtime.head.identity import (
+    HEARTBEAT_LIVE_MATCH as HEARTBEAT_LIVE_MATCH,
+)
+from triggered_agents.runtime.head.identity import (
+    HEARTBEAT_NOT_YET_WRITTEN as HEARTBEAT_NOT_YET_WRITTEN,
+)
+from triggered_agents.runtime.head.identity import (
+    HEARTBEAT_UNREADABLE as HEARTBEAT_UNREADABLE,
+)
+from triggered_agents.runtime.head.identity import (
+    HEARTBEAT_VERSION as HEARTBEAT_VERSION,
+)
+from triggered_agents.runtime.head.identity import (
+    head_process_status as head_process_status,
+)
+from triggered_agents.runtime.head.identity import (
+    heartbeat_is_dead as heartbeat_is_dead,
+)
+from triggered_agents.runtime.head.identity import (
+    heartbeat_is_live_match as heartbeat_is_live_match,
+)
+from triggered_agents.runtime.head.identity import (
+    heartbeat_is_mismatch as heartbeat_is_mismatch,
+)
 
 # A missing pane is handled immediately. These ceilings remain deliberately generous for a head
 # that has made progress and then goes quiet, and are the fallback for old Orca runtimes without
@@ -132,13 +165,6 @@ def pid_file_path(kind: str, reference: str) -> str:
     return f"{root}/secretary-{kind}-pid-{request_token(reference)}.pid"
 
 
-HEARTBEAT_LIVE_MATCH = "live-match"
-HEARTBEAT_DEAD = "dead"
-HEARTBEAT_IDENTITY_MISMATCH = "identity-mismatch"
-HEARTBEAT_NOT_YET_WRITTEN = "not-yet-written"
-HEARTBEAT_UNREADABLE = "unreadable"
-
-
 class HeadRunIdentityMismatch(RuntimeError):
     """A readable heartbeat names a live process other than the expected HeadRun."""
 
@@ -188,162 +214,6 @@ def guard_head_run_identity(
     if heartbeat_is_mismatch(status):
         raise HeadRunIdentityMismatch(pid_file)
     return status
-
-
-def _proc_starttime_ticks(pid: int) -> str:
-    """Linux's process-creation discriminator for a live PID.
-
-    ``comm`` may contain spaces and parentheses, so splitting the complete ``stat`` line on
-    whitespace is not safe. The final closing parenthesis ends it; field 22 is then token 19 of the
-    remaining fields (which begin at field 3).
-    """
-    stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-    close = stat.rfind(")")
-    fields = stat[close + 2:].split()
-    if close < 0 or len(fields) <= 19:
-        raise ValueError("/proc stat has no process start time")
-    return fields[19]
-
-
-def _boot_id() -> str:
-    return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="utf-8").strip()
-
-
-def _is_zombie(pid: int) -> bool:
-    """A process the kernel has not reaped yet still answers `kill(pid, 0)`, so a check right at
-    exit can read one tick stale as still alive. Reading its own `/proc` status closes that gap."""
-    try:
-        status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
-    except OSError:
-        return False
-    for line in status.splitlines():
-        if line.startswith("State:"):
-            return "Z" in line
-    return False
-
-
-def _is_stopped(pid: int) -> bool:
-    """Whether a live process is suspended with SIGSTOP/SIGTSTP."""
-    try:
-        status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
-    except OSError:
-        return False
-    for line in status.splitlines():
-        if line.startswith("State:"):
-            return "T" in line
-    return False
-
-
-def _unreadable(reason: str) -> dict[str, Any]:
-    return {"known": False, "alive": False, "match": False, "state": HEARTBEAT_UNREADABLE,
-            "reason": reason}
-
-
-def _record_matches_expected(record: Mapping[str, Any], expected: Mapping[str, Any] | None) -> bool:
-    if expected is None:
-        return True
-    # An empty expected run is deliberately not a wildcard.  A caller that has no durable HeadRun
-    # cannot prove a process belongs to it, even when its pid file happens to be well formed.
-    for name in ("run_id", "role", "task"):
-        value = str(expected.get(name) or "")
-        if not value or str(record.get(name) or "") != value:
-            return False
-    leaf = str(expected.get("leaf") or "")
-    return not leaf or str(record.get("leaf") or "") == leaf
-
-
-def _read_record(pid_file: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    try:
-        raw = Path(pid_file).read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None, {"known": False, "alive": False, "match": False,
-                      "state": HEARTBEAT_NOT_YET_WRITTEN}
-    except OSError as exc:
-        return None, _unreadable(type(exc).__name__)
-    try:
-        record = json.loads(raw)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return None, _unreadable("malformed-json")
-    if not isinstance(record, dict):
-        return None, _unreadable("record-is-not-an-object")
-    if record.get("version") != HEARTBEAT_VERSION:
-        return None, _unreadable("unknown-version")
-    try:
-        pid = int(record.get("pid"))
-    except (TypeError, ValueError):
-        return None, _unreadable("invalid-pid")
-    required = ("boot_id", "proc_starttime_ticks", "run_id", "role", "task")
-    if pid <= 0 or any(not str(record.get(name) or "") for name in required):
-        return None, _unreadable("missing-identity")
-    record["pid"] = pid
-    record["leaf"] = str(record.get("leaf") or "")
-    return record, None
-
-
-def head_process_status(
-    pid_file: str, *, expected: Mapping[str, Any] | None = None
-) -> dict[str, Any]:
-    """Classify a launch-identity heartbeat without trusting PID reuse.
-
-    A readable record has one of ``live-match``, ``dead`` or ``identity-mismatch``. Missing,
-    partially written, malformed and legacy PID-only files retain their distinct inconclusive states.
-    """
-    record, failure = _read_record(pid_file)
-    if failure is not None:
-        return failure
-    assert record is not None
-    pid = int(record["pid"])
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return {"known": True, "alive": False, "match": False, "state": HEARTBEAT_DEAD,
-                "pid": pid, "record": record}
-    except PermissionError:
-        # A normal dispatcher head is owned by us.  Treat an uninspectable process as inconclusive:
-        # a weak permission answer cannot authorize a signal or a replacement.
-        return _unreadable("process-not-inspectable")
-    except OSError as exc:
-        return _unreadable(type(exc).__name__)
-    try:
-        boot_matches = str(record["boot_id"]) == _boot_id()
-        start_matches = str(record["proc_starttime_ticks"]) == _proc_starttime_ticks(pid)
-    except (OSError, ValueError) as exc:
-        return _unreadable(type(exc).__name__)
-    alive = not _is_zombie(pid)
-    if not alive:
-        return {"known": True, "alive": False, "match": False, "state": HEARTBEAT_DEAD,
-                "pid": pid, "record": record}
-    if not boot_matches or not start_matches or not _record_matches_expected(record, expected):
-        return {
-            "known": True,
-            "alive": True,
-            "match": False,
-            "state": HEARTBEAT_IDENTITY_MISMATCH,
-            "pid": pid,
-            "record": record,
-            "stopped": _is_stopped(pid),
-        }
-    return {
-        "known": True,
-        "alive": True,
-        "match": True,
-        "state": HEARTBEAT_LIVE_MATCH,
-        "pid": pid,
-        "record": record,
-        "stopped": _is_stopped(pid),
-    }
-
-
-def heartbeat_is_live_match(status: Mapping[str, Any]) -> bool:
-    return str(status.get("state") or "") == HEARTBEAT_LIVE_MATCH
-
-
-def heartbeat_is_dead(status: Mapping[str, Any]) -> bool:
-    return str(status.get("state") or "") == HEARTBEAT_DEAD
-
-
-def heartbeat_is_mismatch(status: Mapping[str, Any]) -> bool:
-    return str(status.get("state") or "") == HEARTBEAT_IDENTITY_MISMATCH
 
 
 def _heartbeat_handoff_path(pid_file: str) -> Path:

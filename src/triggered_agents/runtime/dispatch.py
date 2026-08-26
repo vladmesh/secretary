@@ -52,10 +52,23 @@ Invariants this module holds:
     `_stop_and_confirm_workspace_empty` verifies through the same unfiltered count, since the
     filtered view would "confirm" success on a stray it could never recognize either way.
 
-Every terminal this scheduler drives it drives through `SessionHost`. The pane verbs live in
+Every *pane* this scheduler drives it drives through `SessionHost`. The pane verbs live in
 `pane_host`; this module holds only which pane is the survivor, when idle means reuse and when it
 means teardown, what a stuck terminal is, and how many kinds of failure a stop has. `_run_json`
 runs the argument vectors the host hands it rather than building any.
+
+A pane is not the only way a head is held. Which backend holds this agent's head is its resolved
+profile's own answer (`runtime`, secretary-1467), read here off the profile `_launch_cmd` rendered
+the command from and turned into a backend through the product's one name-to-backend mapping
+(`head_runtime_backends`). A profile with no key, and one naming `orca-legacy`, is the whole
+lifecycle above and nothing about it changes. A profile naming `local-pty` takes `_run_local_pty`
+instead, and that path is deliberately none of the above: it raises one head per tick under a
+supervisor of this product's own, hands it its skill across that same boundary, and reads success
+and refusal from typed receipts. It never lists, probes, reads or reaps a pane, because there is
+none — every one of those verbs exists to cope with the ghost tab Orca leaves behind, and a
+supervisor leaves none. The head outlives the tick that raised it; `AgentState.save_head_run` is
+what a later tick reaches it through, and handing that record back to `start` is what makes a
+bring-up over a head that is still working a refusal rather than a second head.
 
 A pane that answers `tui-idle` within `IDLE_PROBE_MS` is idle here and a probe that times out is
 busy — two states, not the three the interactive delivery path classifies, because this scheduler
@@ -85,14 +98,20 @@ from .codex_preflight import (
     preflight_codex_launch,
 )
 from .head import (
+    HEAD_BUSY,
     RUNTIME_ROLE_ENV,
     HeadRun,
     HeadSpec,
+    NudgePointer,
     TaskRef,
     new_run_id,
     render_head_command,
 )
+from .head.identity import head_process_status
+from .head_runtime_backends import build_head_runtime, head_runtime_name
+from .head_runtimes import DEFAULT_HEAD_RUNTIME, LOCAL_PTY_RUNTIME
 from .pane_host import Pane, SessionHost, safe_command_label, session_host
+from .production_telemetry import data_dir as _installation_data_dir
 from .state import AgentState
 from .tui_delivery import (
     TuiDeliveryError,
@@ -631,6 +650,26 @@ def _recover_steward_dispatch_failure(state: AgentState, event: str, cmd: Dispat
                       reference=cmd.card_ref, error=str(recovery_error))
 
 
+def _release_steward_report(state: AgentState, event: str, cmd: DispatchCommand,
+                            note: str) -> None:
+    """Close a steward report card whose tick turned out to dispatch nothing after all.
+
+    The card is created by the same call that renders the skill naming it, so a tick cannot know
+    it will refuse until it holds one. Leaving it open would park a report in progress that no head
+    is ever going to write, so it is closed with the reason it went unused.
+    """
+    if not cmd.card_ref:
+        return
+    state.clear_active_report(cmd.card_ref)
+    try:
+        from ..agents.pipeline import ops as pipeline_ops
+        pipeline_ops.move_card("steward", cmd.card_ref, "Done", reason=note)
+        state.log_run(event, action="dispatch-release", result="done", reference=cmd.card_ref)
+    except Exception as error:
+        state.log_run(event, action="dispatch-release", result="failed", reference=cmd.card_ref,
+                      error=str(error))
+
+
 def _escalate_steward_preflight_failure(state: AgentState, event: str, cmd: DispatchCommand,
                                         failure: BaseException) -> None:
     """Put a steward report card in front of a human when its workspace could not be prepared.
@@ -677,14 +716,18 @@ def _deliver_interactive_skill(handle: str, workspace: str, skill: str, *,
 
 
 def _spawn_fresh_terminal(agent: str, variant: str | None, ws: str, state: AgentState,
-                          event: str, *, host: SessionHost) -> DispatchCommand:
+                          event: str, *, host: SessionHost,
+                          cmd: DispatchCommand | None = None) -> DispatchCommand:
     """Bring a fresh head up in `ws`: prepare the workspace, create the pane, deliver the skill.
 
     The preparation is deliberately outside the recovery below: once a pane exists the head may
     have started work, so a failure after that point is a run that has to be closed out, while a
     failure before it started nothing at all.
+
+    `cmd` is the dispatch this tick has already built — the diverted-launch case in `run()`, and
+    nothing else. Reusing it is what keeps that tick to one resolution and one report card.
     """
-    cmd = _dispatch_command(agent, variant)
+    cmd = _dispatch_command(agent, variant) if cmd is None else cmd
     try:
         _ensure_head_ready(ws, cmd, role=agent)
     except CodexPreflightError as exc:
@@ -702,8 +745,9 @@ def _spawn_fresh_terminal(agent: str, variant: str | None, ws: str, state: Agent
 
 
 def _send_reuse_dispatch(agent: str, variant: str | None, terminal_handle: str, workspace: str,
-                         state: AgentState, event: str, *, host: SessionHost) -> DispatchCommand:
-    cmd = _dispatch_command(agent, variant)
+                         state: AgentState, event: str, *, host: SessionHost,
+                         cmd: DispatchCommand | None = None) -> DispatchCommand:
+    cmd = _dispatch_command(agent, variant) if cmd is None else cmd
     try:
         if cmd.prompt_after_start:
             # An interactive head is prompted the one way the product prompts one, whether this
@@ -916,6 +960,190 @@ def _cleanup_only(agent: str, ws: str, state: AgentState, event: str, terms: lis
     return 0
 
 
+class LocalPtyDispatchError(RuntimeError):
+    """A head this driver holds itself could not be brought up, as its own receipt said so."""
+
+
+def _profile_runtime(profile_id: str | None, profile: dict | None) -> str:
+    """Which backend a profile says its head is held by, read the one way the product reads it.
+
+    Through `HeadSpec.from_profile`, which is where a `runtime` value is validated against the
+    closed vocabulary, and then through the shared name reader the dispatcher's own lifecycle
+    sites go through — so there is no second reading of the key here and no second list of names.
+    A profile that will not make a spec, and the bare fallback invocation that has no profile at
+    all, are heads this driver holds the way it has always held one: absence has meant
+    `orca-legacy` since before the key existed, and an unusable profile is not a promotion.
+    """
+    if not profile:
+        return DEFAULT_HEAD_RUNTIME
+    try:
+        return head_runtime_name(HeadSpec.from_profile(str(profile_id or "head"), dict(profile)))
+    except Exception:
+        return DEFAULT_HEAD_RUNTIME
+
+
+def _may_be_supervised(agent: str) -> bool:
+    """Whether this tick could possibly end up on a head this product supervises itself.
+
+    Not the decision. The decision is the resolved profile's own `runtime`, read off the very
+    dictionary `_launch_cmd` rendered the command from — but that resolution probes every resource
+    the registry names, and the tick has a question to answer strictly before it: its first acts
+    are Orca's. Reaping ghost tabs and listing panes are questions about a session store a
+    supervised head has no entry in, and a tick must not ask them about one.
+
+    So this is the cheap half: the routed profile and everything reachable from it through the
+    fallback chain — the same set `health.resolve_head` chooses from — read straight out of the
+    registry with no resource probed. False means no resolution of this agent's head can name a
+    supervisor, so the tick is left exactly as it always was, down to the probes it does not make.
+    True means one might, and the tick resolves once and then decides on what it got.
+
+    Fail-safe: an unreadable spec, an agent no registry routes and a registry that will not load
+    are all the pane backend, which is the one this driver has always used.
+    """
+    try:
+        from ..agents.pipeline import heads as pipeline_heads
+        routed = _preferred_head(agent, _load_spec(agent))
+        if not routed:
+            return False
+        registry = pipeline_heads.load_registry()
+        seen: set[str] = set()
+        queue = [routed]
+        while queue:
+            profile_id = queue.pop(0)
+            if profile_id in seen:
+                continue
+            seen.add(profile_id)
+            try:
+                profile = registry.profile(profile_id)
+            except Exception:
+                continue
+            if _profile_runtime(profile_id, profile) == LOCAL_PTY_RUNTIME:
+                return True
+            queue.extend(profile.get("fallback") or [])
+        return False
+    except Exception:
+        return False
+
+
+def _no_session() -> Any:
+    """The session manager a supervised head never has.
+
+    `build_head_runtime` is handed both dependencies because it is the one mapping for both
+    backends. This driver only ever names the supervised one, and this is what says so out loud
+    instead of opening a route to Orca that nothing on that path is allowed to use.
+    """
+    raise LocalPtyDispatchError("a supervised head is not held by a session manager")
+
+
+def _local_pty_runtime() -> Any:
+    """This driver's supervised backend, built through the product's one name-to-backend mapping.
+
+    The run root is the installation's own `heads/` directory — the same one the Secretary
+    dispatcher supervises its heads under — so a host keeps one place where a supervised head
+    lives and one place an operator looks for it. The launch-identity reader is the product's
+    single one, which is what lets a later tick ask whether the head an earlier tick started is
+    still running.
+    """
+    return build_head_runtime(
+        LOCAL_PTY_RUNTIME,
+        session=_no_session,
+        local_pty_root=lambda: _installation_data_dir() / "heads",
+        head_process_status=head_process_status,
+    )
+
+
+def _run_local_pty(agent: str, variant: str | None, ws: str, state: AgentState, event: str, *,
+                   cleanup_only: bool) -> int | DispatchCommand:
+    """One tick of a mechanical role whose head this product holds under a supervisor of its own.
+
+    Ephemeral by construction, and none of the Orca lifecycle is ported here. Warm reuse, `/clear`,
+    ghost tabs, the `tui-idle` probe, the finalize trailer and the stray sweep all exist because
+    Orca keeps a dead pty as a tab in its session store; a supervisor leaves no ghost behind, so a
+    tick is one head raised with its own skill and the run ends when that head exits. Every outcome
+    below is read from the backend's own typed receipt: no pane is created, listed, probed or read
+    on this path, and no ghost is reaped.
+
+    The head outlives the tick. What the next tick needs to reach it — its run id, workspace and
+    spec — is written to this agent's state directory as the receipt recorded it, and handing that
+    record back to `start` is what makes a second bring-up over a working head a refusal
+    (`HEAD_BUSY`, `head_already_up`, made before anything is spawned) rather than a second head.
+
+    Returns the dispatch command, and nothing else does, when health diverted this launch onto a
+    profile the pane backend holds: the caller then runs its ordinary tick with that very command,
+    so the divert costs neither a second resolution nor a second report card.
+    """
+    if cleanup_only:
+        # `--cleanup-only` is the gate's call on a precheck skip, and its whole subject is a pane a
+        # finished run left behind. There is none here: this head's supervisor reaps its own
+        # process, and the durable record is what the next tick reads.
+        state.log_run(event, action="supervised-cleanup-noop")
+        return 0
+    cmd = _dispatch_command(agent, variant)
+    if _profile_runtime(cmd.profile, cmd.head_profile) != LOCAL_PTY_RUNTIME:
+        # A supervised head was reachable for this agent, but this tick's resolution landed on a
+        # profile the pane backend holds — a red resource, or a registry read that declined.
+        # The command is already built and already carries its report card, so it is handed back
+        # rather than rebuilt: resolving again could answer differently, and a second card would be
+        # a report nobody writes.
+        return cmd
+    try:
+        _ensure_head_ready(ws, cmd, role=agent)
+    except CodexPreflightError as exc:
+        _escalate_steward_preflight_failure(state, event, cmd, exc)
+        raise
+    runtime = _local_pty_runtime()
+    prior = state.load_head_run()
+    spec = HeadSpec.from_profile(str(cmd.profile or agent), dict(cmd.head_profile or {}))
+    # A standing duty, not a card. The run id and the task binding have to be the same facts every
+    # tick, because they are what the head's own launch-identity record is compared against when a
+    # later tick asks whether it is still up. The steward's report card is an argument of the
+    # skill and travels in the prompt, exactly as it does on a pane.
+    task_ref = TaskRef.standing(agent)
+    run_id = str((prior or {}).get("run_id") or "") or new_run_id()
+    run = HeadRun(run_id=run_id, spec=spec, workspace=ws, task_ref=task_ref, role=agent)
+    # An adapter that takes its prompt on its command line is launched with it, as it is on a pane;
+    # one that starts with an empty composer is pointed at its skill across the same boundary that
+    # raised it. Neither shape touches a terminal API.
+    pointer = NudgePointer.line(cmd.skill) if cmd.prompt_after_start else None
+    receipt = runtime.start(
+        spec,
+        ws,
+        task_ref,
+        command=cmd.launch,
+        title=f"triggered-agent:{agent}",
+        pointer=pointer,
+        run_id=run_id,
+        role=agent,
+        run=run,
+        subject=f"{agent}-dispatch",
+    )
+    if receipt.status == HEAD_BUSY:
+        # A head this role already has is still working. For a mechanical role a missed tick is the
+        # normal answer to that — it has a watermark and a precheck — and the refusal is made
+        # before anything is spawned, so no second head exists and no second skill was sent. The
+        # report card this tick made is closed, because no head will ever write it.
+        refusal = str((receipt.evidence or {}).get("refusal") or "busy")
+        _release_steward_report(
+            state, event, cmd,
+            "the head of this role is still working, so this tick raised none and delivered "
+            f"nothing.\n\nrefusal: {refusal}\n{receipt.reason}",
+        )
+        state.log_run(event, action="supervised-busy-skip", reference=cmd.card_ref, error=refusal)
+        print(f"dispatch[{agent}]: head {run_id} is still up ({refusal}) — no dispatch")
+        return 0
+    if not receipt.ok:
+        failure = LocalPtyDispatchError(receipt.reason or receipt.status)
+        _recover_steward_dispatch_failure(state, event, cmd, failure)
+        raise failure
+    live = receipt.run
+    state.save_head_run(live.to_json())
+    state.save_head_profile(cmd.profile)
+    state.save_active_report(cmd.card_ref, live.handle)
+    state.log_run(event, action="supervised-started", reference=cmd.card_ref)
+    print(f"dispatch[{agent}]: raised a supervised head {live.run_id} -> {cmd.skill}")
+    return 0
+
+
 def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
         host: SessionHost | None = None) -> int:
     """`variant` selects a differently-scheduled mode of the same agent: a different prompt from
@@ -951,6 +1179,18 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
             state.log_run(event, action="paused")
             print(f"dispatch[{agent}]: pipeline paused — no dispatch")
             return 0
+        # Which backend holds this agent's head, asked before a single Orca call is made. Every
+        # question below this point — the ghost reap, the pane inventory, the idle probe — is about
+        # a session store a supervised head has no entry in, so a tick must not ask them about one.
+        # A `DispatchCommand` back means this agent could have landed on a supervised head but
+        # this tick's own resolution landed on a pane profile: the ordinary tick runs from here,
+        # with the command that resolution already produced.
+        pending: DispatchCommand | None = None
+        if _may_be_supervised(agent):
+            outcome = _run_local_pty(agent, variant, ws, state, event, cleanup_only=cleanup_only)
+            if isinstance(outcome, int):
+                return outcome
+            pending = outcome
         active_report = _fresh_steward_report_in_progress(agent, time.time(), ws, state, host=host)
         if active_report:
             state.log_run(event, action="active-report-skip", reference=active_report["reference"])
@@ -1026,7 +1266,8 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
                         print(f"dispatch[{agent}]: swept stray terminal but a ghost tab would not "
                               "close; not creating this tick, next tick re-reaps")
                         return 0
-            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host)
+            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
+                                        cmd=pending)
             state.log_run(event, action="created")
             print(f"dispatch[{agent}]: no terminal — created fresh -> {cmd.skill}")
             return 0
@@ -1055,7 +1296,8 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
                 print(f"dispatch[{agent}]: watchdog stopped the stuck terminal but a ghost tab "
                       "would not close; not restarting this tick, next tick re-reaps")
                 return 0
-            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host)
+            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
+                                        cmd=pending)
             state.log_run(event, action="watchdog-restart")
             print(f"dispatch[{agent}]: busy but stuck ({int(quiet)}s silent) — watchdog restart -> {cmd.skill}")
             return 0
@@ -1081,7 +1323,8 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
                 print(f"dispatch[{agent}]: ephemeral teardown stopped the finished terminal but a "
                       "ghost tab would not close; not restarting this tick, next tick re-reaps")
                 return 0
-            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host)
+            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
+                                        cmd=pending)
             state.log_run(event, action="ephemeral-restart")
             tail = f"; reaped {reaped} ghost(s)" if reaped else ""
             print(f"dispatch[{agent}]: ephemeral — torn down finished terminal, fresh session -> {cmd.skill}{tail}")
@@ -1099,7 +1342,8 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
                 print(f"dispatch[{agent}]: red-fallback stop could not confirm the idle terminal "
                       "stopped — leaving it for the next tick")
                 return 0
-            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host)
+            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
+                                        cmd=pending)
             state.log_run(event, action="reused-red-fallback")
             print(f"dispatch[{agent}]: idle terminal's head is red — stopped, fresh fallback terminal -> {cmd.skill}")
             return 0
@@ -1120,7 +1364,8 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
                 print(f"dispatch[{agent}]: idle terminal had no live agent REPL; stopped it but "
                       "a ghost tab would not close, not restarting this tick")
                 return 0
-            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host)
+            cmd = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
+                                        cmd=pending)
             state.log_run(event, action="warm-repl-restart")
             print(f"dispatch[{agent}]: idle terminal had no live agent REPL: fresh terminal -> "
                   f"{cmd.skill}")
@@ -1134,7 +1379,8 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
         _unchecked(lambda: host.send(survivor.handle, "/clear", enter=True))
         time.sleep(1.0)  # let /clear settle before the skill lands
         try:
-            cmd = _send_reuse_dispatch(agent, variant, survivor.handle, ws, state, event, host=host)
+            cmd = _send_reuse_dispatch(agent, variant, survivor.handle, ws, state, event,
+                                       host=host, cmd=pending)
         except TuiDeliveryError as exc:
             # Both shapes of unconfirmed delivery — a seeded head's own record never appearing and
             # the interactive path never proving the prompt landed — are the same warm-reuse

@@ -105,12 +105,13 @@ payload it was still carrying. That ordering is given up knowingly — closing a
 payload whose fate cannot be established outranks the order of two records — and it is the honest
 remainder of observation 2 of the substrate card's review rather than a claim that it cannot happen.
 
-**Liveness is the launch identity, and there is no second scheme.** `head_process_status` from
-`secretary.dispatcher_watchdog` — the reader the watchdog already applies, unchanged — is passed
-in by whoever builds this runtime, exactly as `stop_if_quiescent` takes `head_process_alive` from
-its caller on the legacy backend. It is a constructor argument rather than an import because
-`triggered_agents` does not depend on `secretary`, and because inventing a second pid-file reader
-here to avoid that dependency is the failure this argument exists to prevent.
+**Liveness is the launch identity, and there is no second scheme.** `head.identity.
+head_process_status` — the reader the watchdog already applies, unchanged, and re-exported to the
+control plane under its old name — is passed in by whoever builds this runtime, exactly as
+`stop_if_quiescent` takes `head_process_alive` from its caller on the legacy backend. It is a
+constructor argument rather than an import so that every builder of this runtime is on the same
+reader, and because inventing a second pid-file reader here is the failure this argument exists to
+prevent.
 """
 from __future__ import annotations
 
@@ -402,8 +403,10 @@ class LocalPtyHeadRuntime:
     `head_process_status` is the launch-identity reader, and it is required. There is no reading of
     a head's process this runtime invents for itself: the product has exactly one scheme for that —
     `pid`, `boot_id`, `proc_starttime_ticks` written by the head's own shell — and exactly one
-    reader of it, in `secretary.dispatcher_watchdog`. Passing it in is what keeps the two from
-    drifting apart while `triggered_agents` stays free of a dependency on `secretary`.
+    reader of it, `head.identity.head_process_status`, which `secretary.dispatcher_watchdog`
+    re-exports for the control plane. Passing it in rather than importing it keeps every builder of
+    this runtime — the dispatcher, and the mechanical-role driver in `runtime/dispatch.py` — on
+    that one reader instead of on a scheme of its own.
 
     `connect_timeout` is what it says and nothing more: how long a supervisor that has not spoken
     on this connection yet may take to speak. It bounds reaching a head — the connect, and the
