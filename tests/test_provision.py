@@ -139,6 +139,25 @@ class ProvisionTests(unittest.TestCase):
         self.assertFalse(draft["provision"]["binding"]["enabled"])
         self.assertFalse(binding["enabled"])
 
+    def test_apply_publishes_adapter_owned_broad_check_contract(self):
+        task = self.start()["task"]
+        provision = self.drafted_result(task)
+        provision["adapter"]["broad_check"] = {
+            "interpreter": ".venv/bin/python",
+            "import_package": "sample_project",
+        }
+        result_path = self.write_result(provision)
+
+        code, result = apply_provision_result(str(self.instance), "sample-project", str(result_path))
+
+        self.assertEqual(code, 0, result)
+        adapter = load_config(self.adapter_path)
+        draft = load_config(self.draft_path)
+        self.assertEqual(adapter["broad_check"], provision["adapter"]["broad_check"])
+        self.assertEqual(draft["provision"]["adapter"]["broad_check"], adapter["broad_check"])
+        self.assertEqual(validate(adapter, "adapter", self.adapter_path.name), [])
+        self.assertEqual(validate(draft, "onboarding-contract", self.draft_path.name), [])
+
     def test_apply_is_idempotent_for_same_result_and_revision(self):
         task = self.start()["task"]
         result_path = self.write_result(self.drafted_result(task))
