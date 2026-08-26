@@ -12,9 +12,11 @@ nothing out — are facts about processes on this host, and a fake backend would
 So every supervised tick here starts a real supervisor over a real pty, and every test gives back
 what it started.
 
-The pane half is asserted the other way round: on the supervised path the session manager is a host
-that raises on contact, and the four pane readings the tick used to make are replaced by mocks that
-fail the test if they are called at all.
+The pane half is asserted the other way round, and at the bottom: on the supervised path the
+session manager is a host that raises on contact AND `orca_rpc.call` — the one place this driver
+reaches the session store directly, under `_reap_ghosts` — records and raises. Nothing in between
+is stubbed out, so no helper can stand in front of a call and hide it: a mock of `_reap_ghosts`
+that answers plausibly is exactly what let the last round's tests pass over a breach.
 """
 from __future__ import annotations
 
@@ -172,6 +174,8 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
         #: Which profile this tick's health resolution lands on. Named per test because a launch
         #: diverted onto another profile is one of the cases the choice has to survive.
         self.resolved = "head"
+        #: How many times this tick opened the head registry. One is the contract.
+        self.reads = 0
 
     # -- the registry this tick reads ----------------------------------------------------------
 
@@ -195,19 +199,38 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
                            adapter="claude")
 
     def _reads(self, registry):
-        """What each `load_registry()` of this tick answers.
+        """What each `load_registry()` of this tick answers, and how many it took.
 
         A registry is one answer for every read. A list is the readings in order, the last one
-        standing for any further read: that is how a tick that reads the registry more than once
-        gets a different answer the second time, which is what an ordinary profile publication
-        landing between two reads does to it.
+        standing for any further read: a second reading gets the second answer, which is what an
+        ordinary profile publication landing mid-tick used to do to a tick that read twice. A tick
+        that takes one reading never sees past the first entry, and `self.reads` is what says so.
         """
         answers = list(registry) if isinstance(registry, list) else [registry]
 
         def read() -> pipeline_heads.Registry:
+            self.reads += 1
             return answers.pop(0) if len(answers) > 1 else answers[0]
 
         return read
+
+    @contextlib.contextmanager
+    def _orca_banned(self):
+        """Every direct call into Orca's session store, recorded and refused.
+
+        `orca_rpc.call` is the bottom of the one route this driver has to the session store that
+        `SessionHost` does not carry (`_reap_ghosts` uses it). Recording as well as raising is
+        deliberate: `_reap_ghosts` swallows its own failures, so a test that only raised would
+        prove nothing about a call that was in fact made.
+        """
+        made: list[str] = []
+
+        def banned(method, *args, **kwargs):
+            made.append(method)
+            raise AssertionError(f"the supervised path reached Orca: {method}")
+
+        with mock.patch.object(dispatch.orca_rpc, "call", side_effect=banned):
+            yield made
 
     @contextlib.contextmanager
     def _tick(self, registry, *, host):
@@ -385,74 +408,150 @@ class BackendChoiceTests(MechanicalRoleBackendTestCase):
         self.assertEqual(self.actions(), ["created"])
 
 
-class SplitRegistryReadTests(MechanicalRoleBackendTestCase):
-    """Criteria 1 and 3 against the reading that is not the decision.
+class OneRegistryReadingTests(MechanicalRoleBackendTestCase):
+    """Criteria 1, 2 and 3 against the reading itself: a tick opens the registry once.
 
-    Before a tick puts a head anywhere it asks the cheap question first: could this agent land on a
-    supervised head at all? That question reads the registry, and the resolution the command is
-    rendered from reads it again later. An ordinary profile publication fits between the two, so
-    the cheap answer can be "no supervisor" while the resolution names one. What must not follow
-    from that is a pane: the backend is the resolution's answer, and every path that is about to
-    put a head somewhere is made to ask it again from the command it is holding.
+    A tick asks the registry two things — could this agent land on a supervised head at all, and
+    which profile did this launch resolve to — and it used to open the registry four times to do
+    it. An ordinary profile publication fits between those readings, so the cheap answer could say
+    `orca-legacy` while the resolution said `local-pty`, and the tick then reaped ghost tabs and
+    listed panes on the first answer before handing its head to a supervisor on the second. The
+    repair is not another guard in front of another verb: it is the one reading. Both answers come
+    out of it, so the tick belongs to one backend from its first verb to its last.
     """
 
-    def _published_between_the_reads(self) -> list[pipeline_heads.Registry]:
-        """The registry a tick reads, with a profile publication landing halfway through.
+    def _published_between_the_old_readings(self) -> list[pipeline_heads.Registry]:
+        """The registry a publication lands in the middle of, as the old four readings saw it.
 
-        The driver opens the registry four times: the cheap "could this be supervised at all"
-        question reads it to route the agent and again to read the routed profile, and the
-        resolution the command is rendered from does the same later. The publication lands between
-        the pair and the pair, which is the ordinary `secretary upgrade` against a scheduled tick:
-        the first two readings answer `orca-legacy` for this agent's profile, the last two answer
-        `local-pty` for the very same one.
+        The first two readings answer `orca-legacy` for this agent's profile and the last two
+        answer `local-pty` for the very same one — the ordinary `secretary upgrade` against a
+        scheduled tick. A tick that reads once never reaches the third entry at all; a tick that
+        read four times acted on both.
         """
         before = self._registry(runtime=ORCA_LEGACY_RUNTIME)
         after = self._registry(runtime=LOCAL_PTY_RUNTIME)
         return [before, before, after, after]
 
-    def test_a_profile_published_between_the_two_reads_still_gets_its_supervisor(self) -> None:
-        """The pre-scan says pane, the resolution says supervisor, and no pane is opened."""
+    def test_a_pane_tick_opens_the_registry_once(self) -> None:
+        """Criterion 2, at the cost the pre-scan used to add: a pane tick pays for one reading."""
         host = RecordingSessionHost()
 
         with mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)):
-            self.assertEqual(
-                self.run_tick(self._published_between_the_reads(), host=host), 0
-            )
+            self.assertEqual(self.run_tick(self._registry(), host=host), 0)
 
-        self.assertEqual(host.opened, [], "a launch a supervisor holds was opened as a pane")
-        run_dirs = self.run_dirs()
-        self.assertEqual(len(run_dirs), 1, "the tick raised no supervised head")
-        self.assertTrue(_alive(self.head_pid(run_dirs[0])))
-        self.assertEqual(self.actions(), ["supervised-started"])
-        self.assertEqual(self.state.load_head_profile(), "head")
+        self.assertEqual(self.reads, 1, "the pane tick opened the head registry more than once")
+        self.assertEqual(len(host.opened), 1)
 
-    def test_a_warm_pane_is_not_typed_into_for_a_launch_a_supervisor_holds(self) -> None:
-        """The same split reading, on the branch that would reuse a pane already up.
+    def test_a_supervised_tick_opens_the_registry_once(self) -> None:
+        self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
 
-        The pane is idle and live, so this tick would have `/clear`ed it and sent the skill into
-        it. The session manager here refuses every verb, which is the assertion: the resolution is
-        made before the first of them.
+        self.assertEqual(self.reads, 1,
+                         "the supervised tick opened the head registry more than once")
+        self.assertEqual(len(self.run_dirs()), 1)
+
+    def test_a_supervised_tick_makes_no_orca_call_at_all(self) -> None:
+        """Criterion 3 with nothing stubbed in between.
+
+        `_reap_ghosts`, `_agent_terminals` and the rest are left exactly as the driver has them;
+        what fails the test is the session manager and `orca_rpc.call` themselves, so any route to
+        Orca this tick took would be recorded whether or not its caller swallowed the failure.
         """
         self.prompt_after_start = True
-        warm = Pane(handle="term-1", leaf="leaf-1", title=f"triggered-agent:{self.AGENT}",
-                    last_output_at=time.time())
+
+        with self._orca_banned() as made:
+            self.assertEqual(self.run_tick(self._registry(runtime=LOCAL_PTY_RUNTIME)), 0)
+
+        self.assertEqual(made, [], "the supervised tick reached Orca's session store")
+        run_dir = self.run_dirs()[0]
+        self.await_(
+            lambda: "/retro" in self.head_output(run_dir),
+            message="the head never reported the skill its own terminal handed it",
+        )
+
+    def test_a_publication_mid_tick_is_not_read_by_the_tick_it_lands_in(self) -> None:
+        """The one reading is the tick's whole answer, and the tick is a pane tick end to end.
+
+        This is the reviewer's scenario for the previous submission: those same four readings, and
+        `_reap_ghosts` left alone. With four readings the tick reaped ghost tabs and listed panes
+        on the first answer and then raised a supervised head on the last one — Orca's session
+        lifecycle touched for a head a supervisor ends up holding. With one reading there is no
+        second answer to act on: this tick is the pane tick its reading described, and the
+        publication is the next tick's business.
+        """
+        host = RecordingSessionHost()
+        reaped: list[str] = []
+
+        def reap(method, *args, **kwargs):
+            reaped.append(method)
+            return {"result": {"snapshots": []}}
+
+        with mock.patch.object(dispatch.orca_rpc, "call", side_effect=reap):
+            self.assertEqual(self.run_tick(self._published_between_the_old_readings(), host=host), 0)
+
+        self.assertEqual(self.run_dirs(), [],
+                         "the tick acted on Orca and then handed its head to a supervisor")
+        self.assertEqual(self.reads, 1, "the tick read the registry the publication changed")
+        self.assertEqual([title for _ws, title, _cmd in host.opened],
+                         [f"triggered-agent:{self.AGENT}"])
+        self.assertEqual(self.actions(), ["created"])
+        self.assertTrue(reaped, "the pane tick was expected to reap its own ghost tabs")
+
+    def test_a_publication_before_the_tick_is_the_whole_tick(self) -> None:
+        """The mirror: the reading the tick takes is the supervised one, so the tick is supervised
+        from its first verb, and the readings a four-reading tick would have taken afterwards are
+        never taken at all."""
+        after = self._registry(runtime=LOCAL_PTY_RUNTIME)
+        stale = self._registry(runtime=ORCA_LEGACY_RUNTIME)
+
+        with self._orca_banned() as made:
+            self.assertEqual(self.run_tick([after, stale, stale, stale]), 0)
+
+        self.assertEqual(made, [], "the supervised tick reached Orca's session store")
+        self.assertEqual(self.reads, 1)
+        self.assertEqual(len(self.run_dirs()), 1, "the tick raised no supervised head")
+        self.assertEqual(self.actions(), ["supervised-started"])
+
+
+class DivertedLaunchReportCardTests(MechanicalRoleBackendTestCase):
+    """Criterion 2's other half: a tick that dispatches nothing leaves no report card.
+
+    One branch can reach an early exit already holding a command, and so already holding the
+    report card the command carries: a launch this tick resolved onto a pane profile after the
+    registry routed the agent to a supervised one. Every other skip is reached before any command
+    exists, which is what "a busy-skip never creates a card" has always meant; this one closes the
+    card it is holding instead, so the two say the same thing.
+    """
+
+    def _diverted(self) -> pipeline_heads.Registry:
+        return pipeline_heads.Registry(
+            {"acct": {"account": "acct", "probe": "true"}},
+            {
+                "routed": {"resource": "acct", "adapter": "claude", "fallback": ["pane"],
+                           "runtime": LOCAL_PTY_RUNTIME},
+                "pane": {"resource": "acct", "adapter": "claude", "fallback": []},
+            },
+            {self.AGENT: "routed"},
+        )
+
+    def test_an_active_report_skip_releases_the_card_the_diverted_launch_built(self) -> None:
+        self.resolved = "pane"
+        released: list[object] = []
 
         with contextlib.ExitStack() as stack:
             enter = stack.enter_context
-            enter(mock.patch.object(dispatch, "_reap_ghosts", return_value=(0, True)))
-            enter(mock.patch.object(dispatch, "_agent_terminals", return_value=[warm]))
-            enter(mock.patch.object(dispatch, "_is_idle", return_value=True))
-            enter(mock.patch.object(dispatch, "_agent_repl_visible", return_value=True))
-            enter(mock.patch.object(dispatch, "_reuse_head_is_red", return_value=False))
-            self.assertEqual(self.run_tick(self._published_between_the_reads()), 0)
+            enter(mock.patch.object(
+                dispatch, "_fresh_steward_report_in_progress",
+                return_value={"reference": "secretary-report"},
+            ))
+            enter(mock.patch.object(
+                dispatch, "_release_steward_report",
+                side_effect=lambda state, event, cmd, note: released.append(cmd),
+            ))
+            self.assertEqual(self.run_tick(self._diverted()), 0)
 
-        run_dirs = self.run_dirs()
-        self.assertEqual(len(run_dirs), 1, "the tick raised no supervised head")
-        self.await_(
-            lambda: "/retro" in self.head_output(run_dirs[0]),
-            message="the skill went to the warm pane instead of the head across the boundary",
-        )
-        self.assertEqual(self.actions(), ["supervised-started"])
+        self.assertEqual(len(released), 1, "the diverted launch's report card was left open")
+        self.assertEqual(self.actions(), ["active-report-skip"])
+        self.assertEqual(self.run_dirs(), [], "a skipped tick raised a supervised head")
 
 
 class SupervisedDeliveryTests(MechanicalRoleBackendTestCase):

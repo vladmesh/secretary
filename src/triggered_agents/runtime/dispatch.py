@@ -62,9 +62,16 @@ profile's own answer (`runtime`, secretary-1467), read here off the profile `_la
 the command from and turned into a backend through the product's one name-to-backend mapping
 (`head_runtime_backends`). One resolution decides it, and `_supervised_bring_up` is where it is
 decided: whichever branch of the tick built the command, it asks there before a pane could be
-opened for it. The cheap pre-scan `run()` opens with is an answer to "can this tick skip the pane
-lifecycle entirely" and never the last word, because an ordinary profile publication fits between
-that reading of the registry and the resolution's. A profile with no key, and one naming
+opened for it.
+
+One reading of the registry answers both of a tick's questions about it. `run()` takes a
+`RegistrySnapshot` before either backend is touched and hands it down; the cheap "could this agent
+be supervised at all" walk and the resolution the command is rendered from read that one snapshot,
+so they cannot land on either side of an ordinary profile publication and disagree. That is what
+makes the cheap answer safe to act on: `False` is over the same registry and the same fallback
+closure the resolution picks from, so nothing this tick resolves afterwards can name a supervisor,
+and the pane lifecycle below it — the ghost reap, the pane inventory, the idle probe — is only ever
+reached by a tick a pane really does hold. A profile with no key, and one naming
 `orca-legacy`, is the whole lifecycle above and nothing about it changes. A profile naming
 `local-pty` takes the supervised tick instead, and that path is deliberately none of the above:
 it raises one head per tick under a supervisor of this product's own, hands it its skill across
@@ -339,18 +346,53 @@ def _pipeline_paused() -> bool:
         return True
 
 
-def _preferred_head(agent: str, spec: dict) -> str | None:
+@dataclass(frozen=True)
+class RegistrySnapshot:
+    """The head registry as one tick read it, once.
+
+    A tick asks the registry two questions — "could this agent land on a head this product
+    supervises" and, later, "which profile did this launch resolve to and what runtime does it
+    name" — and an ordinary profile publication is atomic but not instantaneous relative to a
+    scheduled tick. Asking twice let the two answers disagree, and the tick then acted on the
+    first while the command it built came from the second. So the reading is taken once, before
+    the first verb of either backend, and every question of this tick is answered from it.
+
+    `registry` is `None` when the registry could not be read at all. That is the pane backend and
+    a launch on the bare default-model `claude`, which is the fail-safe this driver has always
+    had for an unreadable registry — reached here without a second attempt to open it.
+    """
+
+    registry: Any | None
+
+
+def _registry_snapshot() -> RegistrySnapshot:
+    """This tick's one reading of the head registry.
+
+    Cheap by construction: parsing the registry file probes no resource, so a tick that will exit
+    early on the pane path pays exactly what its first of the former readings already cost. A
+    caller outside a tick (a test, a one-shot helper) passes no snapshot and gets one of its own.
+    """
+    try:
+        from ..agents.pipeline import heads as pipeline_heads
+        return RegistrySnapshot(pipeline_heads.load_registry())
+    except Exception:
+        return RegistrySnapshot(None)
+
+
+def _preferred_head(agent: str, spec: dict,
+                    snapshot: RegistrySnapshot | None = None) -> str | None:
     """The head this agent launches on: the selected registry's role default for it.
 
     The spec's own `head` is the last resort for a registry that routes this role nowhere, and it
     goes through the registry's own resolution. A resolution refusal reaches the caller rather than
     becoming a bare `claude` invocation: a Codex-pinned service agent whose registry has no
     interactive Codex head left for that name is a dispatch that must not happen.
+
+    `snapshot` is the tick's one reading of the registry (`RegistrySnapshot`), so this answer and
+    the resolution's cannot come from two different registries.
     """
-    try:
-        from ..agents.pipeline import heads as pipeline_heads
-        registry = pipeline_heads.load_registry()
-    except Exception:
+    registry = (_registry_snapshot() if snapshot is None else snapshot).registry
+    if registry is None:
         return spec.get("head")
     routed = registry.role_default(agent)
     if routed:
@@ -359,27 +401,37 @@ def _preferred_head(agent: str, spec: dict) -> str | None:
     return registry.resolve(fallback) if fallback else fallback
 
 
-def _reuse_head_is_red(agent: str, state: AgentState) -> bool:
+def _reuse_head_is_red(agent: str, state: AgentState,
+                       snapshot: RegistrySnapshot | None = None) -> bool:
     """Whether the profile the idle terminal was ACTUALLY launched with is currently sitting on a
     red resource — the check idle-reuse needs before sending into an already-warm terminal, since
     that terminal keeps whatever profile it was spawned with and never re-resolves on its own
     (only a fresh spawn does, via `_launch_cmd`).
+
+    Answered from this tick's one reading of the registry. A reading that failed is not retried
+    here: an unreadable registry has always left the warm terminal alone (the probe below raises
+    on it and the answer is `False`), and asking again would be the second reading this tick is
+    built to do without.
     """
+    snapshot = _registry_snapshot() if snapshot is None else snapshot
+    if snapshot.registry is None:
+        return False
     try:
-        head = _preferred_head(agent, _load_spec(agent))
+        head = _preferred_head(agent, _load_spec(agent), snapshot)
         if not head:
             return False
         profile = state.load_head_profile() or head
         from ..agents.pipeline import health as pipeline_health
-        statuses = pipeline_health.refresh()
-        resource = pipeline_health.resource_of(profile)
+        statuses = pipeline_health.refresh(snapshot.registry)
+        resource = pipeline_health.resource_of(profile, snapshot.registry)
         return resource is not None and statuses.get(resource, pipeline_health.GREEN) == pipeline_health.RED
     except Exception:
         return False
 
 
 def _launch_cmd(agent: str, variant: str | None = None,
-                card_ref: str | None = None) -> tuple[str, str, str | None, bool, dict | None]:
+                card_ref: str | None = None, snapshot: RegistrySnapshot | None = None,
+                ) -> tuple[str, str, str | None, bool, dict | None]:
     """(skill, full launch command, resolved head profile, prompt-after-start, profile data) from the
     agent's automation.toml.
 
@@ -394,16 +446,21 @@ def _launch_cmd(agent: str, variant: str | None = None,
     `card_ref` appends `--card <ref>` to the skill text BEFORE it is handed to the head, so the
     augmented text is what actually gets sent rather than landing outside the quoted prompt.
 
+    `snapshot` is the tick's one reading of the registry: the profile this resolution lands on,
+    and the runtime that profile names, come out of the same registry the tick's earlier question
+    about a supervisor was answered from.
+
     The fifth element is the resolved profile's own data: an interactive head has its workspace
     prepared before its pane exists, and the preflight reads CODEX_HOME from the profile the
     command was rendered from. Resolving it a second time at the call site could answer differently
     and write trust into a home the head never reads.
     """
+    snapshot = _registry_snapshot() if snapshot is None else snapshot
     spec = _load_spec(agent)
     skill = spec["variants"][variant]["skill"] if variant else spec["skill"]
     if card_ref:
         skill = f"{skill} --card {card_ref}"
-    head = _preferred_head(agent, spec)
+    head = _preferred_head(agent, spec, snapshot)
     # The head a registry routes this agent to is the ordinary case; a bare default-model `claude`
     # is what an agent routed nowhere, or a registry that will not load, still gets dispatched
     # with. Both are rendered by the same renderer from a profile — the fallback's profile is just
@@ -412,14 +469,13 @@ def _launch_cmd(agent: str, variant: str | None = None,
     bare_claude = render_head_command(
         {"adapter": "claude"}, prompt=skill, role=agent, binding=RUNTIME_ROLE_ENV,
     ).command
-    if not head:
+    registry = snapshot.registry
+    if not head or registry is None:
         return skill, bare_claude, None, False, None
     try:
-        from ..agents.pipeline import heads as pipeline_heads
         from ..agents.pipeline import health as pipeline_health
-        statuses = pipeline_health.refresh()
-        resolved = pipeline_health.resolve_head(head, statuses) or head
-        registry = pipeline_heads.load_registry()
+        statuses = pipeline_health.refresh(registry)
+        resolved = pipeline_health.resolve_head(head, statuses, registry) or head
         profile = registry.profile(resolved)
         rendered = render_head_command(
             profile, prompt=skill, role=agent, workspace=_workspace(agent),
@@ -468,14 +524,18 @@ def _is_ephemeral(agent: str) -> bool:
         return True
 
 
-def _dispatch_command(agent: str, variant: str | None) -> DispatchCommand:
+def _dispatch_command(agent: str, variant: str | None,
+                      snapshot: RegistrySnapshot | None = None) -> DispatchCommand:
     """(skill, launch, resolved head profile) for a dispatch about to actually reach the head —
     the one spot that also creates the steward's report card, so every real dispatch (fresh
     create, watchdog restart, idle reuse) carries one and a busy-skip tick never does (no card,
-    nobody to close it)."""
+    nobody to close it).
+
+    `snapshot` is the tick's one reading of the registry, carried through to the resolution."""
     card_ref = _steward_report_card(agent, variant)
     skill, launch, profile, after_start, profile_data = (
-        _launch_cmd(agent, variant, card_ref=card_ref) if card_ref else _launch_cmd(agent, variant)
+        _launch_cmd(agent, variant, card_ref=card_ref, snapshot=snapshot) if card_ref
+        else _launch_cmd(agent, variant, snapshot=snapshot)
     )
     return DispatchCommand(skill, launch, profile, card_ref, prompt_after_start=after_start,
                            head_profile=profile_data)
@@ -722,7 +782,8 @@ def _deliver_interactive_skill(handle: str, workspace: str, skill: str, *,
 
 def _spawn_fresh_terminal(agent: str, variant: str | None, ws: str, state: AgentState,
                           event: str, *, host: SessionHost,
-                          cmd: DispatchCommand | None = None) -> DispatchCommand | int:
+                          cmd: DispatchCommand | None = None,
+                          snapshot: RegistrySnapshot | None = None) -> DispatchCommand | int:
     """Bring a fresh head up in `ws`: prepare the workspace, create the pane, deliver the skill.
 
     The preparation is deliberately outside the recovery below: once a pane exists the head may
@@ -733,12 +794,12 @@ def _spawn_fresh_terminal(agent: str, variant: str | None, ws: str, state: Agent
     nothing else. Reusing it is what keeps that tick to one resolution and one report card.
 
     Returns this tick's exit status instead of a command when the resolution it is holding names a
-    supervisor. The pre-scan in `run()` reads the registry before the resolution does, and an
-    ordinary publication fits between the two readings, so a tick can arrive here on the pane path
-    holding a command a supervisor holds. The bring-up is asked before `_create_terminal`, which
-    is where `open_pane` is: on that answer the pane is never opened at all.
+    supervisor. A tick answers both its registry questions from one snapshot, so a pane tick that
+    reaches here cannot be holding a supervised command; the bring-up is still asked before
+    `_create_terminal`, which is where `open_pane` is, so the invariant is stated at the verb it
+    protects rather than inferred from the caller that got here.
     """
-    cmd = _dispatch_command(agent, variant) if cmd is None else cmd
+    cmd = _dispatch_command(agent, variant, snapshot) if cmd is None else cmd
     supervised = _supervised_bring_up(agent, ws, state, event, cmd)
     if supervised is not None:
         return supervised
@@ -760,8 +821,9 @@ def _spawn_fresh_terminal(agent: str, variant: str | None, ws: str, state: Agent
 
 def _send_reuse_dispatch(agent: str, variant: str | None, terminal_handle: str, workspace: str,
                          state: AgentState, event: str, *, host: SessionHost,
-                         cmd: DispatchCommand | None = None) -> DispatchCommand:
-    cmd = _dispatch_command(agent, variant) if cmd is None else cmd
+                         cmd: DispatchCommand | None = None,
+                         snapshot: RegistrySnapshot | None = None) -> DispatchCommand:
+    cmd = _dispatch_command(agent, variant, snapshot) if cmd is None else cmd
     try:
         if cmd.prompt_after_start:
             # An interactive head is prompted the one way the product prompts one, whether this
@@ -996,7 +1058,7 @@ def _profile_runtime(profile_id: str | None, profile: dict | None) -> str:
         return DEFAULT_HEAD_RUNTIME
 
 
-def _may_be_supervised(agent: str) -> bool:
+def _may_be_supervised(agent: str, snapshot: RegistrySnapshot | None = None) -> bool:
     """Whether this tick could possibly end up on a head this product supervises itself.
 
     Not the decision. The decision is the resolved profile's own `runtime`, read off the very
@@ -1005,21 +1067,25 @@ def _may_be_supervised(agent: str) -> bool:
     are Orca's. Reaping ghost tabs and listing panes are questions about a session store a
     supervised head has no entry in, and a tick must not ask them about one.
 
-    So this is the cheap half: the routed profile and everything reachable from it through the
-    fallback chain — the same set `health.resolve_head` chooses from — read straight out of the
-    registry with no resource probed. False means no resolution of this agent's head can name a
-    supervisor, so the tick is left exactly as it always was, down to the probes it does not make.
-    True means one might, and the tick resolves once and then decides on what it got.
+    So this is the cheap half of the same snapshot: the routed profile and everything reachable
+    from it through the fallback chain — the same set `health.resolve_head` chooses from, over the
+    same registry the resolution will use — with no resource probed. That is what makes `False`
+    a safe answer to act on: a resolution over this snapshot picks from this closure and nothing
+    else, so no resolution of this tick can name a supervisor after it. The tick is then left
+    exactly as it always was, down to the probes it does not make. `True` means one might, and the
+    tick resolves once and decides on what it got.
 
-    Fail-safe: an unreadable spec, an agent no registry routes and a registry that will not load
+    Fail-safe: an unreadable spec, an agent no registry routes and a registry that would not load
     are all the pane backend, which is the one this driver has always used.
     """
+    snapshot = _registry_snapshot() if snapshot is None else snapshot
+    registry = snapshot.registry
+    if registry is None:
+        return False
     try:
-        from ..agents.pipeline import heads as pipeline_heads
-        routed = _preferred_head(agent, _load_spec(agent))
+        routed = _preferred_head(agent, _load_spec(agent), snapshot)
         if not routed:
             return False
-        registry = pipeline_heads.load_registry()
         seen: set[str] = set()
         queue = [routed]
         while queue:
@@ -1150,7 +1216,8 @@ def _supervised_bring_up(agent: str, ws: str, state: AgentState, event: str,
 
 
 def _run_local_pty(agent: str, variant: str | None, ws: str, state: AgentState, event: str, *,
-                   cleanup_only: bool) -> int | DispatchCommand:
+                   cleanup_only: bool,
+                   snapshot: RegistrySnapshot | None = None) -> int | DispatchCommand:
     """The tick a mechanical role gets when a supervised head was reachable for it at all.
 
     Returns the dispatch command, and nothing else does, when health diverted this launch onto a
@@ -1163,7 +1230,7 @@ def _run_local_pty(agent: str, variant: str | None, ws: str, state: AgentState, 
         # process, and the durable record is what the next tick reads.
         state.log_run(event, action="supervised-cleanup-noop")
         return 0
-    cmd = _dispatch_command(agent, variant)
+    cmd = _dispatch_command(agent, variant, snapshot)
     outcome = _supervised_bring_up(agent, ws, state, event, cmd)
     if outcome is None:
         # A supervised head was reachable for this agent, but this tick's resolution landed on a
@@ -1210,20 +1277,42 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
             state.log_run(event, action="paused")
             print(f"dispatch[{agent}]: pipeline paused — no dispatch")
             return 0
+        # One reading of the head registry for the whole tick, taken here: before it, the tick
+        # has made no call of either backend, and after it every question about which head this
+        # agent runs and which backend holds it is answered from this one reading. Two readings
+        # are what let the cheap question and the resolution disagree across an ordinary profile
+        # publication, and a tick that acted on the first while dispatching the second is the
+        # defect this ordering removes rather than guards. Parsing the registry probes nothing,
+        # so an early exit below pays no more than it did for the first of the readings this
+        # replaces.
+        registry = _registry_snapshot()
         # Which backend holds this agent's head, asked before a single Orca call is made. Every
         # question below this point — the ghost reap, the pane inventory, the idle probe — is about
         # a session store a supervised head has no entry in, so a tick must not ask them about one.
+        # `False` here is final for this tick, because the resolution below reads the same
+        # registry and picks from the same fallback closure this question walked.
         # A `DispatchCommand` back means this agent could have landed on a supervised head but
         # this tick's own resolution landed on a pane profile: the ordinary tick runs from here,
         # with the command that resolution already produced.
         pending: DispatchCommand | None = None
-        if _may_be_supervised(agent):
-            outcome = _run_local_pty(agent, variant, ws, state, event, cleanup_only=cleanup_only)
+        if _may_be_supervised(agent, registry):
+            outcome = _run_local_pty(agent, variant, ws, state, event, cleanup_only=cleanup_only,
+                                     snapshot=registry)
             if isinstance(outcome, int):
                 return outcome
             pending = outcome
         active_report = _fresh_steward_report_in_progress(agent, time.time(), ws, state, host=host)
         if active_report:
+            if pending is not None:
+                # A launch diverted onto a pane profile builds its command, and the steward's
+                # command carries a report card. This tick dispatches nothing, so that card is
+                # closed here rather than left for nobody to write — the same contract a busy-skip
+                # has always held, reached from the one branch that can arrive holding a card.
+                _release_steward_report(
+                    state, event, pending,
+                    "an earlier steward report of this role is still fresh, so this tick "
+                    "dispatched nothing.",
+                )
             state.log_run(event, action="active-report-skip", reference=active_report["reference"])
             print(
                 f"dispatch[{agent}]: active steward report {active_report['reference']} "
@@ -1298,7 +1387,7 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
                               "close; not creating this tick, next tick re-reaps")
                         return 0
             spawned = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
-                                            cmd=pending)
+                                            cmd=pending, snapshot=registry)
             if isinstance(spawned, int):
                 return spawned
             cmd = spawned
@@ -1331,7 +1420,7 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
                       "would not close; not restarting this tick, next tick re-reaps")
                 return 0
             spawned = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
-                                            cmd=pending)
+                                            cmd=pending, snapshot=registry)
             if isinstance(spawned, int):
                 return spawned
             cmd = spawned
@@ -1361,7 +1450,7 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
                       "ghost tab would not close; not restarting this tick, next tick re-reaps")
                 return 0
             spawned = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
-                                            cmd=pending)
+                                            cmd=pending, snapshot=registry)
             if isinstance(spawned, int):
                 return spawned
             cmd = spawned
@@ -1376,14 +1465,14 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
         # the watchdog restart above — rather than leaving the red terminal running alongside a
         # new one, which would pile up one extra terminal per red tick (triggered-agents-274,
         # triggered-agents-275).
-        if _reuse_head_is_red(agent, state):
+        if _reuse_head_is_red(agent, state, registry):
             if not _stop_and_confirm(ws, state, host=host):
                 state.log_run(event, action="red-fallback-stop-failed")
                 print(f"dispatch[{agent}]: red-fallback stop could not confirm the idle terminal "
                       "stopped — leaving it for the next tick")
                 return 0
             spawned = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
-                                            cmd=pending)
+                                            cmd=pending, snapshot=registry)
             if isinstance(spawned, int):
                 return spawned
             cmd = spawned
@@ -1408,7 +1497,7 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
                       "a ghost tab would not close, not restarting this tick")
                 return 0
             spawned = _spawn_fresh_terminal(agent, variant, ws, state, event, host=host,
-                                            cmd=pending)
+                                            cmd=pending, snapshot=registry)
             if isinstance(spawned, int):
                 return spawned
             cmd = spawned
@@ -1423,7 +1512,7 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
         # command this reuse would deliver can be one a supervisor holds. It is built here and
         # handed down rather than resolved inside the delivery, which keeps the tick to the one
         # resolution and the one report card it always had.
-        pending = _dispatch_command(agent, variant) if pending is None else pending
+        pending = _dispatch_command(agent, variant, registry) if pending is None else pending
         supervised = _supervised_bring_up(agent, ws, state, event, pending)
         if supervised is not None:
             return supervised
@@ -1435,7 +1524,7 @@ def run(agent: str, variant: str | None = None, cleanup_only: bool = False, *,
         time.sleep(1.0)  # let /clear settle before the skill lands
         try:
             cmd = _send_reuse_dispatch(agent, variant, survivor.handle, ws, state, event,
-                                       host=host, cmd=pending)
+                                       host=host, cmd=pending, snapshot=registry)
         except TuiDeliveryError as exc:
             # Both shapes of unconfirmed delivery — a seeded head's own record never appearing and
             # the interactive path never proving the prompt landed — are the same warm-reuse
