@@ -35,6 +35,7 @@ from secretary.dispatcher_observer import (
     _observer_event_state,
     load_observers,
     observer_alive,
+    reconcile_observers,
     observer_launch_prompt,
     observer_pid_file,
     observer_request_id,
@@ -603,10 +604,85 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.host.observers, ["sprint:1"])
         self.assertEqual(self.observers()["sprint:1"].to_json(), before.to_json())
 
-    def test_dead_pid_without_pending_card_work_is_not_relaunched(self) -> None:
+    def test_a_dead_pid_without_pending_card_work_is_brought_up_again(self) -> None:
+        """secretary-1478: the bring-up is conditional on the head, not on the queue.
+
+        The heartbeat this leaves behind is the one a rebooted host leaves: another boot's
+        `boot_id` and a pid nothing is running under. Before this card the empty queue returned
+        `observer-idle` and the tick stopped there, while the fence over this sprint's cards asked
+        the same heartbeat and held on `observer_head_dead` — the fence waiting for a head, the
+        reconciliation waiting for a card event nobody was left to generate
+        (issue:5733409d4a74ad3ce8a8, 25 minutes on 2026-08-12, unwedged by hand).
+        """
         self.open_sprint()
         self.runtime.production_tick()
         self.kill_observer()
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(
+            [action["action"] for action in self.actions(result)], ["observer-relaunched"]
+        )
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.launches, 2)
+        self.assertEqual(record.state, "running")
+        # The replacement carries no batch: nothing was owed to the head it replaced.
+        self.assertEqual(record.delivery.stage, DeliveryStage.IDLE)
+        self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
+        kinds = [event["kind"] for event in self.audit.events("sprint:1")]
+        self.assertEqual(kinds, [EVENT_FENCED, EVENT_LAUNCHED, EVENT_FENCED, EVENT_RELAUNCHED])
+
+    def test_the_fence_over_a_dead_head_clears_once_the_replacement_is_adopted(self) -> None:
+        """secretary-1478: the scenario is only unwedged when this sprint's cards move again."""
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.kill_observer()
+
+        self.runtime.production_tick()
+        cleared = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(cleared)], ["observer-live"])
+        self.assertEqual(
+            [action["action"] for action in cleared["actions"]
+             if action.get("step") == "observer-fence"],
+            ["observer-fence-cleared"],
+            "the fence this sprint sat behind is lifted by the adopted replacement",
+        )
+        kinds = [event["kind"] for event in self.audit.events("sprint:1")]
+        self.assertEqual(
+            kinds,
+            [EVENT_FENCED, EVENT_LAUNCHED, EVENT_FENCED, EVENT_RELAUNCHED, EVENT_CLEARED],
+        )
+
+    def test_a_live_head_with_a_quiet_queue_is_still_left_alone(self) -> None:
+        """secretary-1478 keeps the other half of the rule: a quiet queue never wakes a live head.
+
+        An empty queue is a reason not to disturb a head that is there. It stopped being a reason
+        to leave a sprint without one, and nothing else about it moved.
+        """
+        self.open_sprint()
+        self.runtime.production_tick()
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-live"])
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.launches, 1)
+        self.assertEqual(self.host.observers, ["sprint:1"])
+        self.assertEqual(self.host.stopped_observers, [])
+        self.assertEqual(self.host.observer_nudges, [])
+
+    def test_an_unwritten_launch_identity_is_not_evidence_of_a_dead_head(self) -> None:
+        """secretary-1478: only positive death brings a head up.
+
+        A pid file nobody can read is not a head that died — it is a reader that cannot answer,
+        and a bring-up on it is how a second head ends up beside a live one. The same asymmetry
+        `LocalPtyHeadRuntime.start` keeps at the other end of this decision (secretary-1468).
+        """
+        self.open_sprint()
+        self.runtime.production_tick()
+        Path(self.observers()["sprint:1"].pid_file).unlink()
+        self.expire_launch_grace()
 
         result = self.runtime.production_tick()
 
@@ -614,8 +690,111 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         record = self.observers()["sprint:1"]
         self.assertEqual(record.launches, 1)
         self.assertEqual(self.host.stopped_observers, [])
-        kinds = [event["kind"] for event in self.audit.events("sprint:1")]
-        self.assertEqual(kinds, [EVENT_FENCED, EVENT_LAUNCHED, EVENT_FENCED])
+
+    def test_an_unreadable_launch_identity_is_not_evidence_of_a_dead_head(self) -> None:
+        """secretary-1478: a half-written or corrupt record answers nothing, so nothing is done."""
+        self.open_sprint()
+        self.runtime.production_tick()
+        Path(self.observers()["sprint:1"].pid_file).write_text("{not json", encoding="utf-8")
+        self.expire_launch_grace()
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-idle"])
+        self.assertEqual(self.observers()["sprint:1"].launches, 1)
+        self.assertEqual(self.host.stopped_observers, [])
+
+    def test_a_head_that_dies_at_every_bring_up_does_not_try_on_every_tick(self) -> None:
+        """secretary-1478: the bring-up is bounded by the same backoff a failed launch persists.
+
+        A successful launch clears the deferral counter, which is right for every other caller and
+        wrong for this one: without a cooldown, a head that dies the moment it comes up would be
+        replaced once per tick forever.
+        """
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.kill_observer()
+        self.runtime.production_tick()
+        self.kill_observer()
+
+        held = self.runtime.production_tick()
+
+        self.assertEqual(
+            [action["action"] for action in self.actions(held)], ["observer-launch-deferred"]
+        )
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.launches, 2, "the second bring-up waits out its backoff")
+        self.assertGreater(record.launch_next_at, time.time())
+
+        self.expire_launch_retry()
+        retried = self.runtime.production_tick()
+
+        self.assertEqual(
+            [action["action"] for action in self.actions(retried)], ["observer-relaunched"]
+        )
+        after = self.observers()["sprint:1"]
+        self.assertEqual(after.launches, 3)
+        self.assertEqual(after.launch_attempts, 2)
+        self.assertGreater(
+            after.launch_next_at - time.time(),
+            30,
+            "the second cooldown is longer than the first: the backoff is exponential",
+        )
+
+    def test_a_replacement_that_stuck_clears_the_cooldown_it_left(self) -> None:
+        """secretary-1478: the bound is on heads that keep dying, not on the sprint's whole life."""
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.kill_observer()
+        self.runtime.production_tick()
+
+        self.runtime.production_tick()
+
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.launch_attempts, 0)
+        self.assertEqual(record.launch_next_at, 0.0)
+        self.assertEqual(record.deferred_reason, "")
+
+    def test_a_dead_head_is_not_brought_up_while_the_pipeline_drains(self) -> None:
+        """secretary-1478: a drain claims nothing new, and a bring-up is new work."""
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.kill_observer()
+        self.runtime.pause_pipeline(mode="drain", actor="operator", reason="host maintenance")
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual(
+            [action["action"] for action in self.actions(result)], ["observer-launch-skipped"]
+        )
+        record = self.observers()["sprint:1"]
+        self.assertEqual(record.launches, 1)
+        self.assertEqual(record.deferred_reason, "pipeline is draining")
+        self.assertEqual(self.host.observers, ["sprint:1"])
+
+    def test_a_head_stopped_by_a_pause_is_not_brought_up_by_its_dead_pid(self) -> None:
+        """secretary-1478: the pause marks keep their meaning under the new bring-up rule.
+
+        A record stopped by a freeze keeps its pane facts here so the recovery branch would see a
+        head it could replace; the pause check in front of that branch, and the drain below it,
+        are what leave it alone.
+        """
+        self.open_sprint()
+        self.runtime.production_tick()
+        self.kill_observer()
+        payload = self.runtime.production_state.load()
+        record = load_observers(payload)["sprint:1"]
+        record.state = "stopped-by-pause"
+        record.stopped_reason = "host maintenance"
+        record.paused_at = time.time()
+        put_observers(payload, {"sprint:1": record})
+        self.runtime.production_state.save(payload)
+
+        outcomes = reconcile_observers(self.runtime, payload, pause_mode="drain")
+
+        self.assertEqual([row["action"] for row in outcomes], ["observer-launch-skipped"])
+        self.assertEqual(load_observers(payload)["sprint:1"].launches, 1)
+        self.assertEqual(self.host.observers, ["sprint:1"])
 
     def test_finished_observer_queue_is_quiet_without_a_new_card_event(self) -> None:
         self.open_sprint()
@@ -2847,7 +3026,14 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(self.host.observers, ["sprint:1"])
         self.assertEqual(self.observers()["sprint:1"].state, "running")
 
-    def test_a_dead_observer_without_pending_work_does_not_need_a_teardown(self) -> None:
+    def test_a_dead_observer_whose_pane_will_not_close_parks_its_bring_up(self) -> None:
+        """secretary-1478 rewrote this scenario's verdict, not its shape.
+
+        It used to assert that a dead head with no pending work needed no teardown at all, because
+        no replacement was brought up for it. The replacement is now brought up whatever the queue
+        holds, so this is the ordinary refused-teardown path: the pane is left on the record for
+        the next tick to close, and no second head is opened beside it.
+        """
         self.open_sprint()
         self.runtime.production_tick()
         self.kill_observer()
@@ -2855,7 +3041,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         result = self.runtime.production_tick()
 
-        self.assertEqual([action["action"] for action in self.actions(result)], ["observer-idle"])
+        self.assertEqual(
+            [action["action"] for action in self.actions(result)], ["observer-launch-deferred"]
+        )
         self.assertEqual(self.host.observers, ["sprint:1"])
         record = self.observers()["sprint:1"]
         self.assertEqual(record.launches, 1)
@@ -4174,11 +4362,14 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         )
         self.assertEqual(self.reader.show("fourth-1")["state"], "ready")
         self.assertEqual(self.reader.show("third-1")["state"], "in_progress")
-        # The surviving head is untouched. With no semantic observer work pending, a dead head is
-        # not relaunched merely because a worker card is in flight.
+        # The surviving head is untouched: the outage and its bring-up belong to the first sprint
+        # alone. The dead head's own pane is the only one taken down (secretary-1478 — before it,
+        # a dead head with no semantic work pending was left where it was, and its sprint stayed
+        # fenced).
         self.assertTrue(observer_alive(self.observers()[self.SECOND])["alive"])
-        self.assertEqual(self.host.stopped_observers, [])
+        self.assertEqual(self.host.stopped_observers, ["observer:" + self.FIRST])
         self.assertEqual(self.observers()[self.SECOND].launches, 1)
+        self.assertEqual(self.observers()[self.FIRST].launches, 2)
 
     def test_a_head_that_will_not_take_its_wake_does_not_hold_the_other_sprint(self) -> None:
         """The hang, not the crash: the pane is alive and never takes the prompt.
