@@ -267,6 +267,12 @@ class UnitSpecTests(unittest.TestCase):
     """What the shipped units must keep for the gate's own waiting to work."""
 
     BOARD_DEPENDENT = ("secretary-retro.service", "secretary-steward.service")
+    MECHANICAL_ROLE_UNITS = (
+        "secretary-curator.service",
+        "secretary-retro.service",
+        "secretary-steward.service",
+        "secretary-steward-deep-sweep.service",
+    )
 
     def test_the_board_dependent_units_stay_oneshot_with_no_start_timeout(self):
         """A start timeout would kill the gate mid-wait; a non-oneshot Type would change what
@@ -281,6 +287,21 @@ class UnitSpecTests(unittest.TestCase):
     def test_the_daily_unit_still_catches_its_missed_run_up(self):
         timer = (UNITS / "secretary-retro.timer").read_text(encoding="utf-8")
         self.assertIn("Persistent=true", timer)
+
+    def test_a_tick_ending_does_not_kill_the_local_pty_head_it_started(self):
+        """The local-pty supervisor is the durable owner after the oneshot exits.
+
+        systemd's default ``KillMode=control-group`` sends SIGTERM to every process the service
+        left behind when its main process exits. That made the production steward canary record
+        ``run.started`` and ``signal:15`` almost back-to-back. Mechanical roles can all select the
+        local-pty backend, so every unit that launches one must leave its supervisor to the
+        runtime's explicit drain/stop protocol.
+        """
+        for name in self.MECHANICAL_ROLE_UNITS:
+            with self.subTest(name):
+                body = (UNITS / name).read_text(encoding="utf-8")
+                self.assertIn("Type=oneshot\n", body)
+                self.assertIn("KillMode=process\n", body)
 
 
 if __name__ == "__main__":
