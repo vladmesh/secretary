@@ -105,7 +105,7 @@ operator / automation
   secretary task and sprint protocol ────────> board backend
           │                            ▲
           ▼                            │
- production dispatcher ──> head adapter ──> session ──> native agent CLI
+ production dispatcher ──> HeadRuntime ──> runtime backend ──> native agent CLI
           │
           └──── run/audit state ──────┘
 
@@ -119,6 +119,34 @@ store stays operational rather than being the only place a sprint contract exist
 write goes through `secretary task` or `secretary sprint`, which apply role guards, transitions and
 append-only audit. The dispatcher resolves routing, drives the worker and reviewer lifecycle, and
 checks board, workspace, report and review state before each transition.
+
+### Head runtime ownership
+
+`HeadRuntime` is the lifecycle boundary used by the dispatcher and the mechanical-role driver. Its
+six verbs — start, deliver, observe, request drain, stop and conditional stop — return typed
+receipts; callers do not infer success from a pane, a socket write or process existence. Runtime
+selection is part of a head profile. An absent value means `orca-legacy`; the closed supported set
+is `orca-legacy | local-pty`, and changing one profile is the rollback boundary.
+
+`OrcaLegacyHeadRuntime` preserves the existing session-manager behaviour. Its readiness probe and
+conditional stop narrow races but cannot make pane observation and a later stop atomic, and its
+activity epoch is process-local by definition.
+
+`LocalPtyHeadRuntime` owns the head's session/process group, PTY master, Unix socket and versioned
+append-only journal through a per-run supervisor. Delivery, drain and stop share one runtime lock.
+The supervisor's status frame is the present-tense source for turn, admission and journal sequence;
+a bounded 64 KiB journal tail is the fallback after the supervisor is gone. A fresh tick rehydrates
+the turn lease, closed admission and monotonic epoch from those sources. Typed transient refusals
+such as the connection limit do not become durable drain, while genuine uncertainty fails closed
+for new input and positive process death never invents a permanent lease.
+
+The mechanical scheduler units are short `Type=oneshot` ticks, but a supervised head is not their
+child lifecycle. They use `KillMode=process`: when the tick's main process exits, systemd leaves the
+daemonized supervisor alone, reparented to init, and subsequent control goes through the runtime's
+identity-fenced drain/stop protocol. The role's `AgentState` persists the `HeadRun` needed by the
+next tick; starting over a matching live run is refused before spawn, while a positively dead run
+is replaceable. This arrangement is the current deployment boundary, not a general licence for
+untracked daemons: every supervised process must have a run directory, identity record and socket.
 
 A substantive reviewer verdict is not itself an effect. It parks the card in Assessment with the
 reviewer stopped and the worker of the round held, and the merge or the next round runs only on the
@@ -135,7 +163,7 @@ one without touching cards that are already claimed. The resume entry lives in s
 structured record, and its freshness is derived by comparing it against card audit, not against
 terminal history. `secretary status --json` reads the same entities and the live board.
 
-Orca is the current session manager and live terminal UI. One card occupies one worktree: the worker
+Orca remains the session manager and live terminal UI for the legacy backend. One card occupies one worktree: the worker
 gets its own terminal, the reviewer starts as a separate split pane in the same worktree, and both
 handles are kept apart in dispatcher state. A split rather than a second terminal, because on a
 headless server a freshly created terminal arrives as a background surface and does not materialise

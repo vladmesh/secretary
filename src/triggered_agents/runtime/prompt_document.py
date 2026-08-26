@@ -25,14 +25,16 @@ import stat
 import tempfile
 from pathlib import Path
 
-# A ceiling in bytes, because bytes are what the terminal receives. 256 is far below any length
-# that has ever been mishandled and far above any path this product produces, so a nudge that does
-# not fit is a caller with a pathological path rather than a limit worth tuning.
+# A ceiling in bytes, because bytes are what the terminal receives. The legacy pane transport's
+# reliability evidence is for short lines, so the pointer stays below 256 rather than inheriting
+# the local-pty substrate's much larger input bound. Real workspace paths are allowed the room:
+# the instruction around the absolute path is deliberately terse and the discriminating note owns
+# the remaining bytes.
 NUDGE_MAX_BYTES = 256
 # What the delivery evidence calls this mode. Telemetry records the mode, the nudge's size and the
 # document's path; the document's text is not delivery telemetry and is never in it.
 NUDGE_FILE_MODE = "nudge-file"
-_NUDGE_TEMPLATE = "Read the file {path} and carry out the task written there."
+_NUDGE_TEMPLATE = "Read {path} and do its task."
 _DOCUMENT_MODE = 0o600
 _DOCUMENT_DIR_MODE = 0o700
 

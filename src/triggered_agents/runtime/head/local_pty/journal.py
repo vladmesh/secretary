@@ -27,6 +27,15 @@ from typing import Any
 
 JOURNAL_SCHEMA_VERSION = 1
 
+#: How much of a journal's end a reader that only wants the head's current shape reads, in bytes.
+#: The bound is a number rather than a policy because the cost of reading a journal has to be
+#: statable: a supervised role's run directory is reused across incarnations and its journal is
+#: append-only across all of them, so "read the file" grows without limit while the question a
+#: reader asks — what state is this head in *now* — is answered by its last few records. Every
+#: record this substrate writes is a single line well under 256 bytes, so 64 KiB is several
+#: hundred of them: far more than one incarnation's shape needs, and a fixed cost per read.
+JOURNAL_TAIL_BYTES = 64 * 1024
+
 #: The head's process is up and the supervisor owns it.
 RUN_STARTED = "run.started"
 #: A delivery ended, and this is what of it reached the head's pty: `bytes` counts what the kernel
@@ -74,12 +83,18 @@ class JournalReadResult:
     mid-write. It is reported rather than raised, because the records before it are intact.
     `malformed` counts complete lines that were not usable records at all — a different failure
     from a torn tail, and one a reader should not be able to confuse with it.
+
+    `partial_head` says the read began inside the file rather than at its start, which is what a
+    bounded read of the end does. It is a separate field from the two failures above because it is
+    not one: the records are intact and ordered, and the only thing a reader may not conclude from
+    them is that what they do not contain never happened.
     """
 
     events: tuple[dict[str, Any], ...] = ()
     truncated_tail: bool = False
     malformed: int = 0
     ordered: bool = True
+    partial_head: bool = False
 
     @property
     def kinds(self) -> tuple[str, ...]:
@@ -194,6 +209,9 @@ def _usable(record: Any) -> dict[str, Any] | None:
 def read_events(path: str | os.PathLike[str]) -> JournalReadResult:
     """Read a journal a live or dead supervisor wrote, without trusting its last line.
 
+    The whole file, for a reader that needs the run's whole history. A reader that only needs the
+    head's current shape asks `read_tail` instead, which is bounded.
+
     A missing file reads as an empty journal, because "the supervisor has not written yet" and "the
     supervisor wrote nothing" are the same fact to a reader that has just been pointed at a run.
     """
@@ -201,8 +219,50 @@ def read_events(path: str | os.PathLike[str]) -> JournalReadResult:
         raw = Path(path).read_bytes()
     except FileNotFoundError:
         return JournalReadResult()
-    if not raw:
+    return _parsed(raw, partial_head=False)
+
+
+def read_tail(
+    path: str | os.PathLike[str], *, max_bytes: int = JOURNAL_TAIL_BYTES
+) -> JournalReadResult:
+    """Read at most `max_bytes` bytes off the end of a journal, and say that the read was bounded.
+
+    The read a caller that asks "what is this head doing now" makes. The first line of the window
+    is dropped whenever the window did not start at the beginning of the file — it is a record cut
+    in half by the bound, not by a dead writer, and admitting it would put a malformed record into
+    a result whose `malformed` count means something else. `partial_head` then says what was done,
+    so a reader can tell "this journal contains no drain" from "the window I read contains none".
+
+    **The bound is on the bytes this reads, not on the records it keeps** (secretary-1479). A
+    journal is read while its supervisor is appending to it, so the size this seeks against is
+    already old by the time the read runs: asking for everything to the end would read through
+    whatever landed in between, and a writer that keeps going can make that arbitrarily larger
+    than the number this function is named for. The window is therefore closed at both ends — it
+    is the last `min(max_bytes, size)` bytes of the file *as it was measured* — and a record
+    appended after the measurement belongs to the next read rather than to this one.
+
+    A missing file reads as an empty journal, exactly as it does for `read_events`.
+    """
+    if max_bytes <= 0:
+        raise JournalError("a bounded journal read is bounded by a positive number of bytes")
+    try:
+        with open(path, "rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            start = max(0, size - max_bytes)
+            handle.seek(start)
+            raw = handle.read(min(max_bytes, max(0, size - start)))
+    except FileNotFoundError:
         return JournalReadResult()
+    if start <= 0:
+        return _parsed(raw, partial_head=False)
+    cut = raw.find(b"\n")
+    return _parsed(b"" if cut < 0 else raw[cut + 1:], partial_head=True)
+
+
+def _parsed(raw: bytes, *, partial_head: bool) -> JournalReadResult:
+    """Turn journal bytes into the records a reader may believe, and say what was wrong with them."""
+    if not raw:
+        return JournalReadResult(partial_head=partial_head)
     truncated = not raw.endswith(b"\n")
     lines = raw.split(b"\n")
     if truncated:
@@ -227,7 +287,11 @@ def read_events(path: str | os.PathLike[str]) -> JournalReadResult:
         for earlier, later in zip(events, events[1:], strict=False)
     )
     return JournalReadResult(
-        events=tuple(events), truncated_tail=truncated, malformed=malformed, ordered=ordered
+        events=tuple(events),
+        truncated_tail=truncated,
+        malformed=malformed,
+        ordered=ordered,
+        partial_head=partial_head,
     )
 
 

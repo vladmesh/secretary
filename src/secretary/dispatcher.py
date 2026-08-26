@@ -1532,11 +1532,22 @@ class CommandHostRuntime:
 
         Per head, never the runtime's own counter: another sprint's observer doing something must
         not make this one look busy.
+
+        Asked of the backend rather than of its memory where the backend can answer that way. A
+        runtime object lives for one tick, so `activity.epoch` alone reads an epoch of zero for
+        every head this process did not start; a backend whose head has a durable witness offers
+        `activity_epoch`, which recovers the real one before answering (secretary-1479). The
+        legacy backend has no such witness and no such method, and there it is `activity.epoch`
+        exactly as before — the fallback is the whole of what a backend without one can say.
         """
         if self.mode == "noop":
             return 0
         observer_run = self._observer_lifecycle_run(record)
-        return self.head_runtime_for(observer_run).activity.epoch(observer_run.run_id)
+        runtime = self.head_runtime_for(observer_run)
+        durable = getattr(runtime, "activity_epoch", None)
+        if callable(durable):
+            return int(durable(observer_run))
+        return runtime.activity.epoch(observer_run.run_id)
 
     def stop_observer_if_quiescent(
         self, record: Any, expected_activity_epoch: int, head_process_alive: bool

@@ -9811,6 +9811,10 @@ class ContinuationPointerTests(unittest.TestCase):
     """
 
     document = "/srv/agents/workspaces/secretary/secretary-1413-rework/TASK.md"
+    longest_observed_document = (
+        "/home/dev/orca/workspaces/service-template/"
+        "service-template-890-template-typecheck/TASK.md"
+    )
 
     def pointer(
         self, generation: int = 4, decision: str = "", document: str = ""
@@ -9887,6 +9891,20 @@ class ContinuationPointerTests(unittest.TestCase):
             self.assertLessEqual(
                 len(pointer.text.encode("utf-8")), NUDGE_MAX_BYTES, pointer.text
             )
+
+    def test_the_workspace_path_that_broke_continuation_now_fits_whole(self) -> None:
+        """issue:d9d049: the old prose made this real pointer 257 bytes and forced replacement."""
+        pointer = self.pointer(
+            generation=4,
+            decision="observer decision",
+            document=self.longest_observed_document,
+        )
+
+        self.assertEqual(pointer.document, self.longest_observed_document)
+        self.assertIn(self.longest_observed_document, pointer.text)
+        self.assertIn("Generation 4", pointer.text)
+        self.assertIn("observer decision outranks the findings", pointer.text)
+        self.assertLessEqual(len(pointer.text.encode("utf-8")), NUDGE_MAX_BYTES)
 
 
 class WaitWatchdogTests(unittest.TestCase):

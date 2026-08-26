@@ -22,6 +22,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from secretary.dispatcher_watchdog import (
     HEARTBEAT_DEAD,
@@ -29,6 +30,7 @@ from secretary.dispatcher_watchdog import (
     head_process_status,
 )
 from triggered_agents.runtime.head.local_pty import protocol
+from triggered_agents.runtime.head.local_pty import journal as journal_module
 from triggered_agents.runtime.head.local_pty import supervisor as supervisor_module
 from triggered_agents.runtime.head.local_pty.client import (
     HeadHandle,
@@ -41,6 +43,7 @@ from triggered_agents.runtime.head.local_pty.journal import (
     EVENT_KINDS,
     INPUT_ACCEPTED,
     JOURNAL_SCHEMA_VERSION,
+    JOURNAL_TAIL_BYTES,
     PROVIDER_PROGRESSED,
     RUN_EXITED,
     RUN_STARTED,
@@ -50,6 +53,7 @@ from triggered_agents.runtime.head.local_pty.journal import (
     JournalError,
     JournalWriter,
     read_events,
+    read_tail,
 )
 
 REPO = Path(__file__).resolve().parents[1]
@@ -1016,6 +1020,123 @@ class LocalPtySubstrateTests(unittest.TestCase):
             with self.assertRaises(JournalError):
                 journal.append(RUN_STARTED, seq=4)
         self.assertEqual(read_events(path).kinds, (RUN_STARTED,))
+
+    def test_a_bounded_read_of_a_journal_reads_its_end_and_says_that_it_did(self) -> None:
+        """secretary-1479: the cost of asking a journal what a head is doing is a named number.
+
+        A supervised role's run directory is reused and its journal is append-only across every
+        incarnation, so a reader that opens the whole file pays a cost that grows with the head's
+        history. `read_tail` is bounded by `JOURNAL_TAIL_BYTES`, drops the record the bound cut in
+        half rather than counting it as malformed, and says `partial_head` so that a reader knows
+        the difference between "this journal has no drain in it" and "the window I read has none".
+        """
+        path = self.root / "long.jsonl"
+        with JournalWriter(path, "long") as journal:
+            journal.append(RUN_STARTED, head_pid=1)
+            journal.append(DRAIN_REQUESTED, initiator="an incarnation that is over")
+            while path.stat().st_size <= JOURNAL_TAIL_BYTES * 2:
+                journal.append(PROVIDER_PROGRESSED, turn=1, output_bytes=64)
+            journal.append(TURN_FINISHED, turn=1, reason="quiet", output_bytes=64)
+
+        whole = read_events(path)
+        tail = read_tail(path)
+
+        self.assertGreater(path.stat().st_size, JOURNAL_TAIL_BYTES)
+        self.assertFalse(whole.partial_head, "the unbounded read is the whole file")
+        self.assertEqual(whole.kinds[0], RUN_STARTED)
+        self.assertTrue(tail.partial_head, "a bounded read that began inside the file says so")
+        self.assertEqual(tail.malformed, 0, "the record the bound cut is dropped, not counted")
+        self.assertTrue(tail.ordered)
+        self.assertEqual(tail.kinds[-1], TURN_FINISHED, "the end of the journal is what it reads")
+        self.assertNotIn(RUN_STARTED, tail.kinds, "a bounded read is bounded")
+        self.assertLess(len(tail.events), len(whole.events))
+        self.assertLessEqual(
+            sum(
+                len(json.dumps(event, sort_keys=True, separators=(",", ":"))) + 1
+                for event in tail.events
+            ),
+            JOURNAL_TAIL_BYTES,
+            "the bound is the number it is declared to be",
+        )
+        self.assertEqual(
+            [event["seq"] for event in whole.events][-len(tail.events):],
+            [event["seq"] for event in tail.events],
+            "the window is the end of the same sequence, not a re-numbering of it",
+        )
+        with self.assertRaises(JournalError):
+            read_tail(path, max_bytes=0)
+
+    def test_a_bounded_read_stays_bounded_while_the_journal_is_being_appended_to(self) -> None:
+        """secretary-1479: the bound is on the bytes read, and a live writer cannot lift it.
+
+        The reader this bound exists for reads a journal its supervisor is still writing, so the
+        end of the file it measured is not the end of the file it reads from: a read issued for
+        "everything from here" reads through whatever landed in between, and a writer that keeps
+        going makes that arbitrarily larger than the number the bound is named for. Counting the
+        records that survived the parse cannot see this — they are the same records either way —
+        so what is counted here is what `read` actually handed back.
+
+        The append is made from inside the reader's own `seek`, which is the moment the race
+        happens at: the size has been taken and the read has not been issued.
+        """
+        path = self.root / "appended.jsonl"
+        with JournalWriter(path, "appended") as journal:
+            journal.append(RUN_STARTED, head_pid=1)
+            while path.stat().st_size <= JOURNAL_TAIL_BYTES * 2:
+                journal.append(PROVIDER_PROGRESSED, turn=1, output_bytes=64)
+            appended_from = int(path.stat().st_size)
+            while path.stat().st_size <= appended_from + JOURNAL_TAIL_BYTES * 3:
+                journal.append(PROVIDER_PROGRESSED, turn=2, output_bytes=64)
+            latecomers = path.read_bytes()[appended_from:]
+        truncate_to = appended_from
+        with open(path, "r+b") as handle:
+            handle.truncate(truncate_to)
+
+        real_open = open
+        read_bytes: list[int] = []
+
+        class _AppendingHandle:
+            """A file that grows by `latecomers` between the size probe and the read."""
+
+            def __init__(self, inner) -> None:
+                self._inner = inner
+                self._appended = False
+
+            def seek(self, *args: int) -> int:
+                position = self._inner.seek(*args)
+                if not self._appended and args[:2] != (0, os.SEEK_END):
+                    self._appended = True
+                    with real_open(path, "ab") as sink:
+                        sink.write(latecomers)
+                return position
+
+            def read(self, *args: int) -> bytes:
+                data = self._inner.read(*args)
+                read_bytes.append(len(data))
+                return data
+
+            def __enter__(self) -> _AppendingHandle:
+                return self
+
+            def __exit__(self, *exc_info: object) -> None:
+                self._inner.close()
+
+        def opening(*args: object, **kwargs: object) -> _AppendingHandle:
+            return _AppendingHandle(real_open(*args, **kwargs))
+
+        with mock.patch.object(journal_module, "open", opening, create=True):
+            result = read_tail(path)
+
+        self.assertGreater(len(latecomers), JOURNAL_TAIL_BYTES, "the append is too small to show it")
+        self.assertGreater(path.stat().st_size, truncate_to, "the append never happened")
+        self.assertTrue(read_bytes, "the read was never made")
+        self.assertLessEqual(
+            sum(read_bytes),
+            JOURNAL_TAIL_BYTES,
+            "a writer appending during the read lifted the bound the read is named for",
+        )
+        self.assertTrue(result.partial_head, "this is still a bounded read of a long journal")
+        self.assertTrue(result.ordered)
 
     # -- identity --------------------------------------------------------------------------
 
