@@ -1510,25 +1510,33 @@ class OnlyTheResolverWiresThisBackendIn(unittest.TestCase):
                     offenders.append(str(path.relative_to(REPO)))
         self.assertEqual(offenders, [], "the substrate is reached from outside its one backend")
 
-    def test_the_dispatcher_builds_its_backends_in_exactly_one_place(self) -> None:
-        """Criterion 4 of secretary-1467: one resolver, not an `if` in each caller."""
-        source = (REPO / "src" / "secretary" / "dispatcher.py").read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        sites = {}
-        for holder in ast.walk(tree):
-            if not isinstance(holder, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for node in ast.walk(holder):
-                if (
-                    isinstance(node, ast.Call)
-                    and isinstance(node.func, ast.Name)
-                    and node.func.id.endswith("HeadRuntime")
-                ):
-                    sites.setdefault(holder.name, set()).add(node.func.id)
+    def test_the_product_builds_its_backends_in_exactly_one_place(self) -> None:
+        """Criterion 4 of secretary-1467, criterion 1 of secretary-1474: one build site.
 
-        self.assertEqual(sorted(sites), ["_head_runtime_named"], "a second place builds a backend")
+        It moved out of the dispatcher when a second reader appeared — the mechanical-role driver
+        in `triggered_agents.runtime.dispatch`, which cannot import the control plane — so the
+        assertion is now over the whole product rather than over one module of it: whoever names a
+        backend, exactly one function anywhere turns that name into an object.
+        """
+        sites = {}
+        for path in sorted((REPO / "src").rglob("*.py")):
+            if path == REPO / "src" / "triggered_agents" / "runtime" / "local_pty_head.py":
+                continue  # the class's own module, where it is defined rather than built
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for holder in ast.walk(tree):
+                if not isinstance(holder, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for node in ast.walk(holder):
+                    if (
+                        isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Name)
+                        and node.func.id.endswith("HeadRuntime")
+                    ):
+                        sites.setdefault(holder.name, set()).add(node.func.id)
+
+        self.assertEqual(sorted(sites), ["build_head_runtime"], "a second place builds a backend")
         self.assertEqual(
-            sites["_head_runtime_named"], {"OrcaLegacyHeadRuntime", "LocalPtyHeadRuntime"}
+            sites["build_head_runtime"], {"OrcaLegacyHeadRuntime", "LocalPtyHeadRuntime"}
         )
 
     def test_no_profile_and_no_registry_names_this_backend(self) -> None:

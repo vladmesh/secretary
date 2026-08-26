@@ -53,6 +53,7 @@ class AgentState:
         self.head_profile_file = self.dir / "head_profile.json"
         self.terminal_handle_file = self.dir / "terminal_handle.json"
         self.terminal_generation_file = self.dir / "terminal_generation.json"
+        self.head_run_file = self.dir / "head_run.json"
         self.active_report_file = self.dir / "active_report.json"
 
     def ensure_dir(self) -> None:
@@ -188,6 +189,45 @@ class AgentState:
         tmp = self.terminal_handle_file.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         tmp.replace(self.terminal_handle_file)
+
+    def load_head_run(self) -> dict | None:
+        """The `HeadRun` of the head this agent's last tick raised on a backend of this product's
+        own, as that backend's receipt recorded it, or None when no tick has raised one.
+
+        A pane is Orca's to remember and this is not: a `local-pty` head outlives the tick that
+        started it under a supervisor with no session store behind it, so the run id, workspace and
+        spec that reach it again have to be written down here. It is what the next tick hands
+        `LocalPtyHeadRuntime.start`, which is what makes that bring-up a refusal over a head that
+        is still working rather than a second head beside it.
+
+        A record that will not parse is read as no record: a bring-up fenced out by a corrupt file
+        is a role that never goes on duty again, and nothing rewrites this file except the tick
+        that the refusal would be preventing.
+        """
+        if not self.head_run_file.is_file():
+            return None
+        try:
+            record = json.loads(self.head_run_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return None
+        return record if isinstance(record, dict) else None
+
+    def save_head_run(self, run: dict | None) -> None:
+        """Record the head this tick raised, or forget the one it tore down (`run=None`).
+
+        Two-phase like every neighbour in this directory: a tick that dies mid-write leaves the
+        previous run readable rather than a half-written record the next tick would discard.
+        """
+        self.ensure_dir()
+        if run is None:
+            try:
+                self.head_run_file.unlink()
+            except FileNotFoundError:
+                pass
+            return
+        tmp = self.head_run_file.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(run, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(self.head_run_file)
 
     def load_active_report(self) -> dict | None:
         if not self.active_report_file.is_file():
