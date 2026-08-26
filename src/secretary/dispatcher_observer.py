@@ -1356,9 +1356,25 @@ def _observer_provider_source(record: ObserverRecord) -> tuple[head_ops.HeadRun 
 
 
 def _observer_has_provider_liveness_contract(record: ObserverRecord) -> bool:
-    """Whether this record must use run-bound provider progress for its event wake."""
-    _, source = _observer_provider_source(record)
-    return bool(source) or record.wake_liveness.bound
+    """Whether this record must use run-bound provider progress for its event wake.
+
+    A bound episode alone is not the contract. An episode is opened at every delivery boundary,
+    for any adapter, while the only launch that takes a pre-pane baseline is the Codex preflight
+    in `prepare_observer`. A head whose run carries no provider source binding at all therefore
+    answers `unavailable` to every probe, and the unavailable branch of the wake has no ladder
+    that could end it: the batch is never delivered, the head is never judged dead, and the tick
+    reports degraded forever (sprint:1406, 2026-08-26, 69 ticks and counting).
+
+    The binding itself is still what fails closed: a run that carries a source keeps the contract
+    through `wake_liveness.bound` even after that source is damaged, so a lost journal can never
+    downgrade the wake to screen liveness.
+    """
+    run, source = _observer_provider_source(record)
+    if source:
+        return True
+    if not record.wake_liveness.bound or run is None:
+        return False
+    return isinstance(run.fanout_policy.get("provider_source"), dict)
 
 
 def _precontract_unbound_observer_source(record: ObserverRecord) -> bool:
