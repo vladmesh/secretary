@@ -334,7 +334,13 @@ def step_head_registry(context: UpgradeContext) -> StepResult:
             context.product_root,
             dry_run=context.dry_run,
         )
-    except HeadRegistryConfigError as exc:
+        if not context.dry_run:
+            # Upgrade normally runs as root because later steps install system units. Keep the
+            # generated recovery pair writable by the installation account before the state-repo
+            # writer deliberately crosses to that account for `git add` and commit.
+            _set_runtime_owner(target, context.runtime_user)
+            _set_runtime_owner(source_path(context.instance_path), context.runtime_user)
+    except (HeadRegistryConfigError, GitError) as exc:
         return StepResult("head-registry", "failed", str(exc))
     if not changed and not repinned:
         return StepResult("head-registry", "unchanged", f"{target} matches {canonical}")

@@ -720,6 +720,27 @@ class UpgradeStepTests(unittest.TestCase):
             self.assertEqual(pin["product_root"], str(context.product_root.resolve()))
             self.assertEqual(pin["revision"], product_revision(context.product_root))
 
+    def test_root_materialization_hands_the_recovery_pair_to_the_runtime_user(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            instance = Path(tmpdir)
+            (instance / "instance.yaml").write_text("version: 1\n", encoding="utf-8")
+            context = self.context(
+                FakeUnitInstaller(), instance_path=instance, runtime_user="operator"
+            )
+            account = SimpleNamespace(pw_uid=123, pw_gid=456)
+
+            with (
+                mock.patch("secretary.upgrade.os.geteuid", return_value=0),
+                mock.patch("secretary.upgrade.pwd.getpwnam", return_value=account),
+                mock.patch("secretary.upgrade.os.chown") as chown,
+            ):
+                result = upgrade.step_head_registry(context)
+
+            owned = {Path(call.args[0]) for call in chown.call_args_list}
+            self.assertEqual(result.status, "changed")
+            self.assertIn(instance / "heads" / "heads.yaml", owned)
+            self.assertIn(instance / "heads" / "source.yaml", owned)
+
     def test_head_registry_step_repins_a_moved_checkout_without_snapshot_drift(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             instance = Path(tmpdir)
