@@ -172,6 +172,19 @@ class OrcaLegacyHeadRuntime:
         bring-up does — would otherwise reach the grant below with a lease outstanding and get a
         `TurnLeaseError` where every other refusal on this boundary is a receipt. The invariant is
         the boundary's, not a convention its callers keep.
+
+        That lease is the only witness this backend has, and saying so is the answer rather than a
+        gap. The local-pty backend refuses a second bring-up over a head that survived the process
+        which started it by reading that head's own launch identity — `pid`, `boot_id`,
+        `proc_starttime_ticks` — because it owns the record and is handed the product's reader for
+        it. Orca answers about a pane, not about a process: this runtime is given a `SessionHost`
+        and no launch-identity reader at all, which is exactly why `observe` leaves head liveness
+        `None` and why `stop_if_quiescent` takes the caller's pid-heartbeat evidence as a required
+        argument instead of guessing it from an inventory. A durable refusal invented here would
+        have to be derived from pane presence, and a pane outlives the head that ran in it, so it
+        would fence live cards out on debris. The question is therefore answered *above* this
+        backend, by the dispatcher record that decides a run has a head, and nothing here pretends
+        otherwise.
         """
         with self._lock:
             claimed = run.run_id if run is not None else run_id

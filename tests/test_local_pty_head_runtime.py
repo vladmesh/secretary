@@ -73,6 +73,8 @@ from triggered_agents.runtime.local_pty_head import (
     OBSERVE_NO_RUN_DIRECTORY,
     OBSERVE_STATUS_UNREADABLE,
     OBSERVE_SUPERVISOR_UNREACHABLE,
+    START_HEAD_ALREADY_UP,
+    START_TURN_IN_FLIGHT,
     STOP_ACTIVITY_SINCE,
     STOP_TURN_IN_FLIGHT,
     UNDECLARED_DELIVERY_BOUND,
@@ -310,17 +312,52 @@ class LocalPtyStartTests(LocalPtyRuntimeTestCase):
             head_process_status(run.pid_file)["state"], "live-match", "the head is not running"
         )
 
-    def test_a_bring_up_that_cannot_be_made_is_a_receipt_and_not_an_exception(self) -> None:
-        """A supervisor refusing to start a second head for a run that already has one."""
+    def test_a_bring_up_over_a_run_whose_head_is_up_is_refused_on_its_launch_identity(self) -> None:
+        """secretary-1468: the refusal that used to be the supervisor's is made before the spawn.
+
+        This is the same scenario the supervisor's own `_refuse_a_second_head` covers — a run that
+        already has a head, brought up again by a runtime holding no lease for it — asked one layer
+        higher. It used to reach `_spawn` and come back as the supervisor's `already_running`
+        refusal; it is now refused by the head's own launch identity, before anything is started,
+        because a refusal that needs a second supervisor process to be forked first is not a
+        precondition. The supervisor's check stays where it is and is exercised below, for the case
+        this one deliberately declines to answer.
+        """
         run = self.live_run()
         self.runtime.activity.forget(run.run_id)
 
         receipt = self.bring_up(run_id=run.run_id, timeout=5.0)
 
         self.assertFalse(receipt.ok)
+        self.assertEqual(receipt.status, HEAD_BUSY, "a head that is already up is a busy refusal")
+        self.assertEqual(receipt.evidence["refusal"], START_HEAD_ALREADY_UP)
+        self.assertIn(run.run_id, receipt.reason)
+        self.assertIsNone(receipt.lease, "no turn was outstanding; the record is what refused")
+        self.assertTrue(_alive(self.head_pid_of(run)), "the refused bring-up took the head with it")
+
+    def test_a_bring_up_that_cannot_be_made_is_a_receipt_and_not_an_exception(self) -> None:
+        """A supervisor refusing to start a second head for a run that already has one.
+
+        Reached by removing the launch-identity record: with no record to read, the precondition
+        above declines to answer and the bring-up goes ahead, exactly as intended — and runs into
+        the run directory lock the live supervisor is holding. Both halves are the point. An
+        unreadable record does not fence a run out, and the refusal it lets through is still a
+        receipt carrying the operation's own type rather than an exception.
+        """
+        run = self.live_run()
+        self.runtime.activity.forget(run.run_id)
+        # The record is what the teardown reads to find this head, so it is given the pid first.
+        self.addCleanup(_kill, self.head_pid_of(run))
+        Path(run.pid_file).unlink()
+        self.assertFalse(
+            head_process_status(run.pid_file).get("known"), "the record is meant to be unreadable"
+        )
+
+        receipt = self.bring_up(run_id=run.run_id, timeout=5.0)
+
+        self.assertFalse(receipt.ok)
         self.assertEqual(receipt.status, HEAD_ALIVE, "something is still running under that run id")
         self.assertIsNotNone(receipt.failure, "the refusal travels as the operation's own type")
-        self.assertTrue(_alive(self.head_pid_of(run)), "the refused bring-up took the head with it")
 
     def test_this_runtime_is_not_built_without_the_products_own_liveness_reader(self) -> None:
         """A second pid-file reader invented here is the failure this argument exists to prevent."""
@@ -335,6 +372,111 @@ class LocalPtyStartTests(LocalPtyRuntimeTestCase):
 
         self.assertEqual(second.status, HEAD_BUSY)
         self.assertIsNotNone(second.lease)
+        self.assertEqual(second.evidence["refusal"], START_TURN_IN_FLIGHT)
+
+
+class LocalPtyRestartTests(LocalPtyRuntimeTestCase):
+    """secretary-1468: one durable head, one run, across the restart of the thing that started it.
+
+    The production dispatcher is a systemd timer: every tick is a new process, so `HeadActivity` —
+    which is a field of the runtime object — is empty at the start of every one of them. An
+    invariant kept only in that object therefore holds for exactly one tick, which is not what
+    "a bring-up over a head that is already up is refused" is supposed to mean. These tests
+    construct the second runtime the way the timer constructs it: a fresh object over the same run
+    root, holding no memory of the head the first one started.
+    """
+
+    def _next_tick(self) -> LocalPtyHeadRuntime:
+        """The runtime the next dispatcher process would build: same root, no memory."""
+        return LocalPtyHeadRuntime(
+            self.root, head_process_status=head_process_status, delivery_grace=TEST_GRACE_SECONDS
+        )
+
+    def _supervisors(self) -> int:
+        return len([pid for _head, pid in self._pids() if pid])
+
+    def test_a_restarted_control_plane_does_not_bring_a_second_head_up_over_a_live_run(self) -> None:
+        run = self.live_run()
+        self.assertEqual(self._supervisors(), 1, "the fixture is meant to start exactly one")
+        supervisor = self._supervisor_pid(self.root / run.run_id)
+        head = self.head_pid_of(run)
+
+        restarted = self._next_tick()
+        self.assertIsNone(restarted.activity.lease(run.run_id), "a new tick remembers nothing")
+        receipt = restarted.start(
+            CODEX,
+            str(self.workspace),
+            self.task,
+            command=CHILD_COMMAND,
+            title="secretary-1468 worker",
+            run=run,
+            role="worker",
+        )
+
+        self.assertEqual(receipt.status, HEAD_BUSY, receipt.reason)
+        self.assertEqual(receipt.evidence["refusal"], START_HEAD_ALREADY_UP)
+        self.assertIn(run.run_id, receipt.reason)
+        self.assertEqual(
+            [d.name for d in sorted(self.root.glob("*")) if d.is_dir()],
+            [run.run_id],
+            "the refused bring-up left a second run behind",
+        )
+        self.assertEqual(self._supervisors(), 1, "a second supervisor was started over a live head")
+        self.assertEqual(self._supervisor_pid(self.root / run.run_id), supervisor)
+        self.assertEqual(self.head_pid_of(run), head, "the head was replaced under the same run")
+
+    def test_the_refusal_reads_the_record_rather_than_the_run_directory(self) -> None:
+        """A run directory and a socket that outlived their host's boot are not a live head.
+
+        The record is rewritten with a `boot_id` from another boot — which is exactly the state a
+        reboot leaves behind, a run directory full of files and a pid that means nothing — and the
+        bring-up has to go ahead. Refusing here would fence every card that was running when the
+        host went down out of every tick that follows.
+        """
+        run = self.live_run()
+        self.runtime.stop(run, StopInitiator(actor="test", reason="make the record historical"))
+        record = json.loads(Path(run.pid_file).read_text(encoding="utf-8"))
+        record["boot_id"] = "00000000-0000-0000-0000-000000000000"
+        Path(run.pid_file).write_text(json.dumps(record), encoding="utf-8")
+        self.assertTrue(
+            self.root.joinpath(run.run_id).is_dir(), "the run directory is meant to survive"
+        )
+
+        receipt = self._next_tick().start(
+            CODEX,
+            str(self.workspace),
+            self.task,
+            command=CHILD_COMMAND,
+            title="secretary-1468 worker",
+            role="worker",
+        )
+
+        self.assertEqual(receipt.status, HEAD_OK, receipt.reason)
+        self.assertNotEqual(receipt.run.run_id, run.run_id)
+
+    def test_a_dead_run_is_brought_up_again_under_its_own_run_id(self) -> None:
+        """The negative side, on the run id itself: a dead head does not fence its own run out."""
+        run = self.live_run()
+        self.runtime.stop(run, StopInitiator(actor="test", reason="the head is gone"))
+        self.assertEqual(head_process_status(run.pid_file)["state"], "dead")
+
+        restarted = self._next_tick()
+        receipt = restarted.start(
+            CODEX,
+            str(self.workspace),
+            self.task,
+            command=CHILD_COMMAND,
+            title="secretary-1468 worker",
+            run_id=run.run_id,
+            role="worker",
+        )
+
+        self.assertEqual(receipt.status, HEAD_OK, receipt.reason)
+        self.assertEqual(receipt.run.run_id, run.run_id)
+        self._await(
+            lambda: head_process_status(receipt.run.pid_file).get("state") == "live-match",
+            message="the run this refusal let through never got a head of its own",
+        )
 
 
 class LocalPtyDeliveryTests(LocalPtyRuntimeTestCase):
