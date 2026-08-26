@@ -21,9 +21,6 @@ from triggered_agents.runtime.paths import default_instance_path
 # The installation of a host that configured none. One spelling of the fallback, shared with the
 # runtime, so the CLI and a launched role cannot disagree about which installation they mean.
 DEFAULT_INSTANCE = str(default_instance_path())
-# Binding-owned fields. They live in the binding, never in the contract's ``identity``, and a
-# rewrite of the binding carries the values the operator set instead of resetting them.
-MUTABLE_BINDING_FIELDS = ("plane", "policy", "remote")
 IDENTITY_FIELDS = ("id", "repo", "adapter", "default_branch")
 REQUIRED_DECISIONS = [
     "setup.commands",
@@ -142,11 +139,12 @@ def _project_add_locked(
         _reset_scanner_derived_state(artifact)
         artifact["onboarding_cycle"] = onboarding_cycle(artifact) + 1
 
-    binding = dict(identity)
-    if existing_binding:
-        for field in MUTABLE_BINDING_FIELDS:
-            if field in existing_binding:
-                binding[field] = existing_binding[field]
+    # Updating a binding is a merge over what is already there, not a rebuild from a list of
+    # fields we happen to remember. Identity is recomputed and overwrites; everything else the
+    # operator or an earlier card put into the binding survives, including schema fields this
+    # code does not name.
+    binding = dict(existing_binding) if existing_binding else {}
+    binding.update(identity)
     existing_orca_binding = existing_binding.get("orca_binding") if existing_binding else None
     binding["orca_binding"] = existing_orca_binding if isinstance(existing_orca_binding, str) else repo.name
     binding["enabled"] = False

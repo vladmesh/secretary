@@ -12,9 +12,29 @@ from unittest import mock
 import yaml
 
 from secretary.cli import main
-from secretary.config import load_config, validate, validate_instance
-from secretary.onboarding import ScannerError, project_add
+from secretary.config import load_config, load_schema, validate, validate_instance
+from secretary.onboarding import IDENTITY_FIELDS, ScannerError, project_add
 from tests.support.git import git, make_repo
+
+
+def _schema_sample(spec: dict) -> object:
+    """One schema-valid value for a binding property, from the schema alone."""
+    if "enum" in spec:
+        return spec["enum"][0]
+    kind = spec.get("type")
+    if kind == "string":
+        return "carried-over-value"
+    if kind == "integer":
+        return spec.get("minimum", 0) + 1
+    if kind == "boolean":
+        return True
+    if kind == "object":
+        return {
+            name: _schema_sample(child) for name, child in spec.get("properties", {}).items()
+        }
+    if kind == "array":
+        return [_schema_sample(spec["items"])] if "items" in spec else []
+    raise AssertionError(f"no sample for schema {spec!r}")
 
 
 class OnboardingTests(unittest.TestCase):
@@ -286,6 +306,51 @@ class OnboardingTests(unittest.TestCase):
         adapter.write_text("version: 1\nid: sample-project\n", encoding="utf-8")
         return adapter
 
+    def test_update_keeps_every_optional_binding_field_the_schema_allows(self):
+        """The carry-over is a merge, so a field nobody named here still survives an update."""
+        project_add(str(self.repo), str(self.instance), dry_run=False)
+        schema = load_schema("project-binding")
+        identity_and_reset = set(IDENTITY_FIELDS) | {"enabled"}
+        optional = {
+            name: spec
+            for name, spec in schema["properties"].items()
+            if name not in identity_and_reset
+        }
+        self.assertTrue(optional)
+        binding = load_config(self.binding)
+        for name, spec in optional.items():
+            binding[name] = _schema_sample(spec)
+        self.assertEqual(validate(binding, "project-binding", self.binding.name), [])
+        self.binding.write_text(yaml.safe_dump(binding), encoding="utf-8")
+
+        code, _ = project_add(str(self.repo), str(self.instance), dry_run=False)
+
+        self.assertEqual(code, 0)
+        updated = load_config(self.binding)
+        for name in optional:
+            self.assertEqual(updated[name], binding[name], name)
+        self.assertFalse(updated["enabled"])
+        for field in IDENTITY_FIELDS:
+            self.assertEqual(updated[field], load_config(self.draft)["identity"][field])
+
+    def test_update_keeps_a_binding_field_this_code_never_names(self):
+        """The regression guard for a field added to the schema after this code was written."""
+        project_add(str(self.repo), str(self.instance), dry_run=False)
+        extended = load_schema("project-binding")
+        extended["properties"]["future_field"] = {"type": "string", "minLength": 1}
+        binding = load_config(self.binding)
+        binding["future_field"] = "set-by-the-operator"
+        self.binding.write_text(yaml.safe_dump(binding), encoding="utf-8")
+
+        with mock.patch(
+            "secretary.config.load_schema",
+            side_effect=lambda name: extended if name == "project-binding" else load_schema(name),
+        ):
+            code, _ = project_add(str(self.repo), str(self.instance), dry_run=False)
+
+        self.assertEqual(code, 0)
+        self.assertEqual(load_config(self.binding)["future_field"], "set-by-the-operator")
+
     def test_re_onboard_disables_legacy_binding_and_drops_its_adapter(self):
         adapter = self.legacy_enabled_project()
 
@@ -425,9 +490,11 @@ class OnboardingTests(unittest.TestCase):
                 raise KeyboardInterrupt("host crash")
             return result
 
-        with mock.patch("secretary._fsutil.os.replace", side_effect=crash_after_first):
-            with self.assertRaises(KeyboardInterrupt):
-                project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
+        with (
+            mock.patch("secretary._fsutil.os.replace", side_effect=crash_after_first),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
 
         self.assertTrue(load_config(self.binding)["enabled"])
         self.assertTrue(adapter.exists())
@@ -453,9 +520,11 @@ class OnboardingTests(unittest.TestCase):
                 raise KeyboardInterrupt("host crash")
             return real_unlink(self_path, *args, **kwargs)
 
-        with mock.patch.object(Path, "unlink", crash_on_adapter):
-            with self.assertRaises(KeyboardInterrupt):
-                project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
+        with (
+            mock.patch.object(Path, "unlink", crash_on_adapter),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            project_add(str(self.repo), str(self.instance), dry_run=False, re_onboard=True)
 
         self.assertFalse(load_config(self.binding)["enabled"])
         self.assertTrue(adapter.exists())
