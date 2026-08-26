@@ -1096,9 +1096,27 @@ class LocalPtyHeadRuntime:
         risks a second supervisor — and that one is caught again downstream, by the run directory
         lock the supervisor takes and by its own `_refuse_a_second_head`, which reads the same
         record from inside the process that would be the second owner.
+
+        The record read here is the **canonical** one, `root/run_id/head.pid`, and never the
+        `pid_file` the caller handed in. A live head writes its launch identity where this backend
+        told it to write it, which is that path and only that path; the `pid_file` on the run a
+        bring-up arrives with is the dispatcher's own watchdog heartbeat, at a workspace path the
+        tick has just *cleared* (`DispatcherHost._launch` drops it before every launch so a
+        previous launch's pid cannot answer for this one). Asking that file whether a head is up
+        gets the answer the clearing put there — nothing — no matter how alive the head is. So the
+        subject is stripped of it before `_address` derives the address, which is exactly what
+        `_address` does with a run that carries no `pid_file`: the derivation is the point, since
+        the head this refuses over was started by a process that is gone. Only the admission reads
+        the canonical path this way; `observe`, `stop`, `stop_if_quiescent` and `deliver` keep
+        honouring the caller's `pid_file`, because for those verbs it is the dispatcher's own
+        identity contract about a head it is already tracking, not a question about whether one
+        exists.
         """
-        subject = run if run is not None else HeadRun(
-            run_id=claimed, spec=spec, workspace=workspace, task_ref=task_ref, role=role,
+        subject = _with_pid_file(
+            run if run is not None else HeadRun(
+                run_id=claimed, spec=spec, workspace=workspace, task_ref=task_ref, role=role,
+            ),
+            "",
         )
         address = self._address(subject)
         if address is None or not self._process_alive(address, subject):

@@ -37,7 +37,7 @@ import time
 import unittest
 from pathlib import Path
 
-from secretary.dispatcher_watchdog import head_process_status
+from secretary.dispatcher_watchdog import clear_head_heartbeat, head_process_status
 from tests.support.head_runtime_contract import HeadRuntimeContract
 from triggered_agents.runtime.head import (
     EXITED,
@@ -424,6 +424,86 @@ class LocalPtyRestartTests(LocalPtyRuntimeTestCase):
         self.assertEqual(self._supervisors(), 1, "a second supervisor was started over a live head")
         self.assertEqual(self._supervisor_pid(self.root / run.run_id), supervisor)
         self.assertEqual(self.head_pid_of(run), head, "the head was replaced under the same run")
+
+    def _dispatcher_shaped(self, run: HeadRun) -> HeadRun:
+        """The `HeadRun` a dispatcher tick really hands `start`, for a head that is already up.
+
+        Not the one the previous bring-up returned. `DispatcherHost._launch` builds its preflight
+        run from the launch intent every time — same `run_id`, `role` and task, but with the
+        *watchdog* `pid_file` in the workspace rather than the run directory — and the same tick
+        clears that path first (`_clear_head_heartbeat`), so it names nothing at the moment `start`
+        is called. `_open_head_pane` passes an observer run of the same shape. A precondition that
+        asked this file whether a head is up would always be told no.
+        """
+        heartbeat = self.workspace / "state" / "heads" / f"{run.role}-{run.run_id}.json"
+        heartbeat.parent.mkdir(parents=True, exist_ok=True)
+        heartbeat.write_text(json.dumps({"pid": 4321}), encoding="utf-8")
+        clear_head_heartbeat(str(heartbeat))
+        self.assertFalse(heartbeat.exists(), "the tick clears this path before every launch")
+        payload = run.to_json()
+        payload["pid_file"] = str(heartbeat)
+        payload["handle"] = ""
+        payload["leaf"] = ""
+        return HeadRun.from_json(payload)
+
+    def test_the_refusal_holds_for_the_head_run_the_dispatcher_actually_passes(self) -> None:
+        """The production shape: an external watchdog `pid_file` the tick has just emptied.
+
+        The head's own launch identity is at `root/run_id/head.pid` and nowhere else, so this is
+        the case that decides whether the precondition reads the head or reads the caller.
+        """
+        run = self.live_run()
+        supervisor = self._supervisor_pid(self.root / run.run_id)
+        head = self.head_pid_of(run)
+        preflight = self._dispatcher_shaped(run)
+
+        receipt = self._next_tick().start(
+            CODEX,
+            str(self.workspace),
+            self.task,
+            command=CHILD_COMMAND,
+            title="secretary-1468 worker",
+            pid_file=preflight.pid_file,
+            run_id=preflight.run_id,
+            run=preflight,
+            role="worker",
+        )
+
+        self.assertEqual(receipt.status, HEAD_BUSY, receipt.reason)
+        self.assertEqual(receipt.evidence["refusal"], START_HEAD_ALREADY_UP)
+        self.assertEqual(
+            receipt.evidence["pid_file"],
+            str(self.root / run.run_id / protocol.PID_FILE_NAME),
+            "the refusal has to name the head's own record, not the caller's heartbeat",
+        )
+        self.assertEqual(self._supervisors(), 1, "a second supervisor was started over a live head")
+        self.assertEqual(self._supervisor_pid(self.root / run.run_id), supervisor)
+        self.assertEqual(self.head_pid_of(run), head, "the head was replaced under the same run")
+
+    def test_a_dispatcher_shaped_bring_up_over_a_dead_run_still_goes_ahead(self) -> None:
+        """The negative side of the same shape: an emptied heartbeat is not a fence either.
+
+        The precondition now ignores the caller's `pid_file` entirely, so the run that answers is
+        the head's own — and when that one says the head is dead, the bring-up proceeds.
+        """
+        run = self.live_run()
+        self.runtime.stop(run, StopInitiator(actor="test", reason="the head is gone"))
+        preflight = self._dispatcher_shaped(run)
+
+        receipt = self._next_tick().start(
+            CODEX,
+            str(self.workspace),
+            self.task,
+            command=CHILD_COMMAND,
+            title="secretary-1468 worker",
+            pid_file=preflight.pid_file,
+            run_id=preflight.run_id,
+            run=preflight,
+            role="worker",
+        )
+
+        self.assertEqual(receipt.status, HEAD_OK, receipt.reason)
+        self.assertEqual(receipt.run.run_id, run.run_id)
 
     def test_the_refusal_reads_the_record_rather_than_the_run_directory(self) -> None:
         """A run directory and a socket that outlived their host's boot are not a live head.
