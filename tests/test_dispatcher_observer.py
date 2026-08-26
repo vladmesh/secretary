@@ -23,6 +23,7 @@ from secretary.dispatcher_heartbeat import heartbeat_identity
 from secretary.dispatcher_launch import infrastructure_action
 from secretary.dispatcher_observer import (
     EVENT_DEFERRED,
+    ObserverWakeLiveness,
     EVENT_LAUNCHED,
     EVENT_RELAUNCHED,
     EVENT_STOPPED,
@@ -1382,6 +1383,39 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         delivery = self.observers()["sprint:1"].delivery
         self.assertEqual(delivery.stage, DeliveryStage.RETRY_DEFERRED)
         self.assertEqual(delivery.attempts, 1)
+
+    def test_a_head_with_no_provider_source_is_woken_rather_than_held_by_an_episode(self) -> None:
+        """A bound episode on a run that carries no source cannot hold the batch forever.
+
+        Only the Codex preflight takes a pre-pane baseline, but a delivery boundary opens an
+        episode for any adapter. Honouring that episode made every probe answer `unavailable`
+        with no ladder to end it: production sprint:1406 held one batch for 69 straight degraded
+        ticks while its live Claude observer sat idle.
+        """
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        payload = self.runtime.production_state.load()
+        record = load_observers(payload)["sprint:1"]
+        self.assertNotIn("provider_source", HeadRun.from_json(record.head_run).fanout_policy)
+        record.wake_liveness = ObserverWakeLiveness.begin(record.head_run)
+        self.assertTrue(record.wake_liveness.bound)
+        put_observers(payload, {"sprint:1": record})
+        self.runtime.production_state.save(payload)
+        self.host.observer_provider_progress = lambda _record: {  # type: ignore[method-assign]
+            "state": "unavailable", "reason": "Claude provider source has no bound v1 baseline",
+        }
+        self.host.observer_status_result = {"last_activity": time.time() - 2, "idle": True}
+        self.writer.comment(
+            role="dispatcher", actor="dispatcher", reference="secretary-510-pilot",
+            body="card changed", request_id="observer-no-source-event",
+        )
+
+        result = self.runtime.production_tick()
+
+        self.assertEqual([row["action"] for row in self.actions(result)], ["observer-nudged"])
+        self.assertEqual(self.host.observer_nudges, ["sprint:1"])
+        self.assertEqual(self.observers()["sprint:1"].delivery.stage, DeliveryStage.AWAITING_ACK)
 
     def test_finished_observer_queue_is_nudged_once_for_a_linked_card_event(self) -> None:
         self.open_sprint()
