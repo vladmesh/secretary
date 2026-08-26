@@ -143,7 +143,8 @@ class RecordingUnits(FakeUnitInstaller):
 class FakeAutomations:
     """The Orca automation client, with nothing registered and nothing reachable."""
 
-    def __init__(self) -> None:
+    def __init__(self, user: str | None = None) -> None:
+        self.user = user
         self.calls: list[str] = []
 
     def list(self) -> list[dict[str, object]]:

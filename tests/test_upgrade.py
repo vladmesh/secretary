@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -1236,6 +1238,61 @@ class CommandSurfaceTests(unittest.TestCase):
         code, output = self.run_cli(["role-skills", "audit"])
         self.assertIn(code, (0, 1))
         self.assertIn("role skills:", output)
+
+
+class RunUpgradeClientOwnerTests(unittest.TestCase):
+    """`run_upgrade` builds the Orca clients for the account that owns the installation."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.instance = self.root / "instance"
+        self.instance.mkdir()
+
+    def build_context(self, *, euid: int):
+        report = SimpleNamespace(
+            ok=True, errors=[], instance_path=self.instance / "instance.yaml"
+        )
+        args = SimpleNamespace(
+            instance=str(self.instance), product_root=str(self.root / "product"),
+            base_branch="main", dry_run=True, host_fixture=None, no_pull=True,
+            json=False, runtime_user="operator",
+        )
+        captured = {}
+
+        def remember(name):
+            def build(user=None):
+                captured[name] = user
+                return mock.Mock()
+            return build
+
+        with (
+            mock.patch.object(upgrade, "validate_instance", return_value=report),
+            mock.patch.object(
+                upgrade, "resolve_runtime_owner", return_value=("operator", Path("/home/operator"))
+            ),
+            mock.patch.object(upgrade.os, "geteuid", return_value=euid),
+            mock.patch.object(upgrade, "LiveOrcaRegistrar", remember("orca")),
+            mock.patch.object(upgrade, "OrcaAutomationClient", remember("automations")),
+            mock.patch.object(upgrade, "SystemdUnitInstaller", mock.Mock()),
+            mock.patch.object(
+                upgrade, "run_steps", return_value=upgrade.UpgradeResult()
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            upgrade.run_upgrade(args)
+        return captured
+
+    def test_root_run_reaches_orca_through_the_runtime_user(self):
+        """Root has no Orca runtime of its own; the automations step must not call the CLI as root."""
+        self.assertEqual(
+            self.build_context(euid=0), {"orca": "operator", "automations": "operator"}
+        )
+
+    def test_unprivileged_run_calls_orca_directly(self):
+        """`runuser` is root's tool: an owner running the upgrade is already the right account."""
+        self.assertEqual(self.build_context(euid=1000), {"orca": None, "automations": None})
 
 
 class HealthUnitNameTests(unittest.TestCase):

@@ -44,7 +44,8 @@ class FakeUnitInstaller:
 
 
 class FakeRegistrar:
-    def __init__(self) -> None:
+    def __init__(self, user: str | None = None) -> None:
+        self.user = user
         self.added: list[tuple[str, str]] = []
 
     def add(self, name: str, repo: str) -> None:

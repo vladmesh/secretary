@@ -775,14 +775,19 @@ def run_upgrade(args) -> int:
     except ValueError as exc:
         print(f"secretary upgrade: {exc}")
         return 2
+    # Both Orca clients run as the runtime user, the way install and recover build them: root
+    # has no Orca runtime of its own, so a root-run upgrade that called the CLI directly failed
+    # its automations step. An unprivileged run is already that account, and `runuser` is root's
+    # tool, so it stays unwrapped.
+    orca_user = runtime_user if os.geteuid() == 0 else None
     context = UpgradeContext(
         instance_path=instance_path,
         product_root=product_root,
         base_branch=args.base_branch,
         dry_run=args.dry_run,
         units=SystemdUnitInstaller(),
-        orca=LiveOrcaRegistrar(),
-        automations=OrcaAutomationClient(),
+        orca=LiveOrcaRegistrar(orca_user),
+        automations=OrcaAutomationClient(orca_user),
         host_fixture=Path(args.host_fixture) if args.host_fixture else None,
         pull=not args.no_pull,
         report=report,
