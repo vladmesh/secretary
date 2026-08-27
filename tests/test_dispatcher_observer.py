@@ -51,7 +51,13 @@ from secretary.dispatcher_production import (
     _production_claim_ready,
     _reconcile_sprint_budget,
 )
-from secretary.dispatcher_tui import DeliveryEvidence, TuiDeliveryError, provider_progress_for_run
+from secretary.dispatcher_tui import (
+    DeliveryEvidence,
+    TuiDeliveryError,
+    claude_project_dir_name,
+    prepare_claude_provider_progress_source,
+    provider_progress_for_run,
+)
 from secretary.dispatcher_types import HostError
 from secretary.dispatcher_watchdog import initial_output_stall_seconds
 from secretary.dispatcher_worker_lifecycle import head_run_binding
@@ -95,7 +101,7 @@ from triggered_agents.runtime.agent_prompt_transport import (
     BRACKETED_PASTE_START,
 )
 from triggered_agents.runtime.codex_preflight import ensure_codex_workspace_trusted
-from triggered_agents.runtime.head import HeadCommand, HeadRun
+from triggered_agents.runtime.head import HeadCommand, HeadRun, HeadSpec, TaskRef
 
 
 class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
@@ -286,6 +292,24 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         ).to_json()
         put_observers(payload, {"sprint:1": record})
         self.runtime.production_state.save(payload)
+
+    def install_observer_claude_provider_source(self) -> Path:
+        """Give the retained observer a current Claude pre-pane source descriptor."""
+        payload = self.runtime.production_state.load()
+        record = load_observers(payload)["sprint:1"]
+        current = HeadRun.from_json(record.head_run)
+        claude_run = HeadRun(
+            run_id=current.run_id,
+            spec=HeadSpec(profile_id="claude-observer", adapter="claude", model="opus"),
+            workspace=record.workspace,
+            task_ref=TaskRef.sprint("sprint:1"),
+            role="observer",
+            pid_file=record.pid_file,
+        )
+        record.head_run = prepare_claude_provider_progress_source(claude_run).to_json()
+        put_observers(payload, {"sprint:1": record})
+        self.runtime.production_state.save(payload)
+        return Path(str(record.head_run["fanout_policy"]["provider_progress_source"]["root"]))
 
     @staticmethod
     def observer_progress(record: ObserverRecord, cursor: str) -> dict[str, str]:
@@ -2719,6 +2743,50 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         # delivery rather than being dropped with the head that never answered for it.
         self.assertEqual(self.observers()["sprint:1"].delivery.stage, DeliveryStage.DELIVERY_INTENT)
 
+    def test_an_ambiguous_claude_observer_source_ends_at_the_unproven_ceiling(self) -> None:
+        """A current Claude descriptor cannot fall back to a workspace-wide transcript scan."""
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(Path(tmp) / "claude-projects")}
+        ):
+            self.open_sprint()
+            self.board.metadata[12]["sprint_ref"] = "sprint:1"
+            self.runtime.production_tick()
+            root = self.install_observer_claude_provider_source()
+            project = root / claude_project_dir_name(self.observers()["sprint:1"].workspace)
+            project.mkdir(parents=True)
+            (project / "first.jsonl").write_text('{"type":"assistant"}\n', encoding="utf-8")
+            (project / "second.jsonl").write_text('{"type":"assistant"}\n', encoding="utf-8")
+            real_host = CommandHostRuntime(self.catalog, self.data_dir, mode="noop")
+            self.host.observer_provider_progress = real_host.observer_provider_progress  # type: ignore[method-assign]
+            self.host.observer_status_result = {"last_activity": time.time(), "idle": False}
+            self.writer.comment(
+                role="dispatcher",
+                actor="dispatcher",
+                reference="secretary-510-pilot",
+                body="two Claude transcripts appeared after observer launch",
+                request_id="ambiguous-claude-source-event",
+            )
+
+            waiting = self.actions(self.runtime.production_tick())
+
+            self.assertEqual([row["action"] for row in waiting], ["observer-wake-waiting"])
+            self.assertEqual(waiting[0]["admission"], "unavailable")
+            source = self.observers()["sprint:1"].head_run["fanout_policy"]["provider_progress_source"]
+            self.assertEqual(source["state"], "unavailable")
+            self.assertIn("ambiguous", source["reason"])
+
+            self.age_delivery(20 * 60, deadline=True)
+            deferred = self.actions(self.runtime.production_tick())
+
+            self.assertEqual([row["action"] for row in deferred], ["observer-wake-deferred"])
+            self.assertIn("turn ceiling", deferred[0]["reason"])
+            for _ in range(2):
+                self.expire_wake_retry()
+                replaced = self.actions(self.runtime.production_tick())
+
+        self.assertEqual([row["action"] for row in replaced], ["observer-relaunched"])
+        self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
+
     def test_an_admitted_observer_cursor_is_never_judged_by_the_unproven_ceiling(self) -> None:
         """The negative case: a head with provable progress is judged on progress, not the clock."""
         self.open_sprint()
@@ -4960,6 +5028,68 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
             sorted(action["pilot_ref"] for action in result["actions"] if action["step"] == "advance"),
             ["secretary-510-neighbor", "secretary-510-pilot"],
         )
+
+
+class ClaudeObserverProviderContractTests(unittest.TestCase):
+    def test_current_launch_retains_its_pre_pane_baseline_and_records_progress(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ, {"SECRETARY_CLAUDE_PROJECTS": str(Path(tmp) / "claude-projects")}
+        ):
+            root = Path(tmp)
+            catalog = FakeCatalog()
+            catalog.profiles["claude-observer"] = {
+                "adapter": "claude",
+                "model": "opus",
+                "resource": "claude-sub",
+            }
+            host = CommandHostRuntime(catalog, root / "data", mode="noop")
+            workspace = host.observer_workspace("sprint:1")
+            run_id = "claude-observer-run"
+            prepared = host.preflight_codex_run(
+                "claude-observer",
+                role="observer",
+                workspace=workspace,
+                task_ref=TaskRef.sprint("sprint:1"),
+                pid_file=host.observer_pid_file("sprint:1"),
+                run_id=run_id,
+            )
+            before = prepared.fanout_policy["provider_progress_source"]
+            launched = host.prepare_observer(
+                {"ref": "sprint:1"},
+                "claude-observer",
+                prompt="# Sprint sprint:1\n",
+                heartbeat_run_id=run_id,
+            )
+            run = HeadRun.from_json(launched["head_run"])
+            self.assertEqual(run.spec.adapter, "claude")
+            self.assertEqual(run.fanout_policy["provider_progress_source"], before)
+
+            transcript = (
+                Path(before["root"])
+                / claude_project_dir_name(workspace)
+                / "observer-session.jsonl"
+            )
+            transcript.parent.mkdir(parents=True)
+            transcript.write_text('{"type":"assistant"}\n', encoding="utf-8")
+            record = ObserverRecord(
+                sprint="sprint:1",
+                workspace=workspace,
+                head_run=run.to_json(),
+            )
+
+            baseline = host.observer_provider_progress(record)
+
+            self.assertEqual(baseline["state"], "observed")
+            bound = record.head_run["fanout_policy"]["provider_progress_source"]
+            self.assertEqual(bound["state"], "bound")
+            self.assertEqual(bound["path"], str(transcript.resolve()))
+            transcript.write_text('{"type":"assistant"}\n{"type":"assistant"}\n', encoding="utf-8")
+
+            progressed = host.observer_provider_progress(record)
+
+        self.assertEqual(progressed["state"], "observed")
+        self.assertNotEqual(progressed["cursor"], baseline["cursor"])
+        self.assertEqual(progressed["head_run_id"], run_id)
 
 
 class ObserverConfigurationTests(unittest.TestCase):

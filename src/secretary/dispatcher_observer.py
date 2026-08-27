@@ -1476,25 +1476,34 @@ def _redelivery_reason(status: dict[str, Any], delivery: ObserverDelivery, *, no
     )
 
 
-def _observer_provider_source(record: ObserverRecord) -> tuple[head_ops.HeadRun | None, dict[str, Any]]:
-    """Return the persisted Codex source, never a source found from the workspace."""
+def _observer_provider_source(
+    record: ObserverRecord,
+) -> tuple[head_ops.HeadRun | None, dict[str, Any], bool]:
+    """Return this run's persisted provider source, never one found from the workspace."""
     stored = record.head_run if isinstance(record.head_run, dict) else {}
     try:
         run = head_ops.HeadRun.from_json(stored)
     except (head_ops.HeadRunError, head_ops.TaskRefError, TypeError, ValueError):
-        return None, {}
-    source = run.fanout_policy.get("provider_source")
-    if run.spec.adapter != "codex" or not isinstance(source, dict):
-        return run, {}
-    return run, dict(source)
+        return None, {}, False
+    source_key = (
+        "provider_source"
+        if run.spec.adapter == "codex"
+        else "provider_progress_source"
+        if run.spec.adapter == "claude"
+        else ""
+    )
+    if not source_key:
+        return run, {}, False
+    raw_source = run.fanout_policy.get(source_key)
+    return run, dict(raw_source) if isinstance(raw_source, dict) else {}, source_key in run.fanout_policy
 
 
 def _observer_has_provider_liveness_contract(record: ObserverRecord) -> bool:
     """Whether this record must use run-bound provider progress for its event wake.
 
     A bound episode alone is not the contract. An episode is opened at every delivery boundary,
-    for any adapter, while the only launch that takes a pre-pane baseline is the Codex preflight
-    in `prepare_observer`. A head whose run carries no provider source binding at all therefore
+    for any adapter, while a current Codex or Claude observer launch takes a pre-pane baseline.
+    A historical head whose run carries no provider source binding at all therefore
     answers `unavailable` to every probe, and the unavailable branch of the wake has no ladder
     that could end it: the batch is never delivered, the head is never judged dead, and the tick
     reports degraded forever (sprint:1406, 2026-08-26, 69 ticks and counting).
@@ -1503,12 +1512,10 @@ def _observer_has_provider_liveness_contract(record: ObserverRecord) -> bool:
     through `wake_liveness.bound` even after that source is damaged, so a lost journal can never
     downgrade the wake to screen liveness.
     """
-    run, source = _observer_provider_source(record)
-    if source:
+    _run, _source, source_present = _observer_provider_source(record)
+    if source_present:
         return True
-    if not record.wake_liveness.bound or run is None:
-        return False
-    return isinstance(run.fanout_policy.get("provider_source"), dict)
+    return False
 
 
 def _precontract_unbound_observer_source(record: ObserverRecord) -> bool:
@@ -1518,7 +1525,7 @@ def _precontract_unbound_observer_source(record: ObserverRecord) -> bool:
     later binding safe. Accepting a journal from the workspace now would be a retroactive identity
     claim.
     """
-    run, source = _observer_provider_source(record)
+    run, source, _source_present = _observer_provider_source(record)
     if run is None or not source or source.get("state") != "unbound":
         return False
     run_id, fingerprint = head_run_binding(record.head_run)
