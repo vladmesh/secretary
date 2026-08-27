@@ -171,10 +171,14 @@ def run_restore_reconcile(args: argparse.Namespace) -> int:
         _print_json({"ok": False, "action": "restore-reconcile", "error": str(exc)})
         return 2
     prefix = report.host.get("unit_prefix", "") if isinstance(report.host, dict) else ""
+    managed, error = load_managed_manifest(data_dir / "host-managed.json")
+    if error:
+        _print_json({"ok": False, "action": "restore-reconcile", "error": error})
+        return 2
     changes = plan_changes(
         build_plan(report.instance, report.bindings, packaged=packaged),
         collected.inventory,
-        load_managed_manifest(data_dir / "host-managed.json"),
+        managed,
         prefix,
         foreign_units(report.host),
     )

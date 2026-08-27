@@ -11,6 +11,10 @@ data layout, then installs those bytes and records ownership in `host-managed.js
 upgrade` does the same on every release. The rendered bytes and their digest are the desired state,
 so editing a template or changing the installation layout makes the next apply update the unit.
 
+The manifest is private state for the installation account. A root-run reconcile publishes it as that
+account with mode `0600`, using the instance checkout owner as the source of the installation user;
+an unreadable manifest is reported as a host-state error, not treated as an empty managed set.
+
 Every unit name here must fall under the instance's `host.unit_prefix`, and its component name (the
 file name minus that prefix and the suffix) is what `host.components` opts out of. Paths in
 committed templates contain placeholders for that layout. Orca itself is a host-owned runtime:

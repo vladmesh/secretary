@@ -543,6 +543,16 @@ class InstallationOwnerTests(PortableFixture):
         self.assertEqual(seen[0].runtime_home, self.home)
         self.assertNotEqual(seen[0].runtime_home, self.invoker_home)
 
+    def test_nonroot_dry_run_reports_an_unreadable_managed_manifest(self) -> None:
+        with (
+            mock.patch.object(upgrade.os, "geteuid", return_value=1000),
+            mock.patch.object(upgrade, "strict_manifest", return_value=([], "managed manifest is unreadable")),
+        ):
+            code, output = self.capture(lambda: self.run_upgrade_command(dry_run=True))
+
+        self.assertEqual(code, 1)
+        self.assertIn("failed    host: managed manifest is unreadable", output)
+
     def test_an_explicit_runtime_user_wins_over_the_directory_owner(self) -> None:
         seen: list[upgrade.UpgradeContext] = []
 

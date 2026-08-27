@@ -981,7 +981,9 @@ def _production_host_findings(report, data_dir: Path, collected_host: CollectRes
         data_dir=report.data_dir,
     )
     desired = build_plan(report.instance, report.bindings, packaged=packaged)
-    managed = load_managed_manifest(data_dir / "host-managed.json")
+    managed, error = load_managed_manifest(data_dir / "host-managed.json")
+    if error:
+        return ["production dispatcher managed manifest unavailable: " + error]
     changes = plan_changes(desired, collected_host.inventory, managed, prefix)
     findings = []
     for change in changes:
