@@ -1578,8 +1578,12 @@ and the card eventually blocks with the report visible on the card, which reads 
 python3 -P -m triggered_agents health
 ```
 
-One line per role: whether its timer is active and how fresh its last healthy tick is. A non-zero exit means at
-least one role is red.
+One line per role: whether its timer is active and how fresh its last healthy tick is. Expected state comes from the
+`host.components` section of the `instance.yaml` bound to the process, using the same component names and
+`dispatcher-production` mapping as host reconciliation. An omitted component is enabled; an explicit `enabled: false`
+prints `DISABLED` and is neutral, so it neither requires a timer nor makes the command non-zero. An unreadable or
+invalid installation configuration prints an explicit error rather than falling back to the checkout that imported the
+command. A non-zero exit means at least one enabled role is red or the installation configuration is unavailable.
 
 The sources are the live data plane, not a checkout:
 

@@ -26,7 +26,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from secretary.config import DataDirError
+from secretary.config import ConfigError, DataDirError, load_config, validate
 from secretary.config import instance_data_dir as _configured_data_dir
 from triggered_agents.runtime.paths import default_instance_path
 
@@ -48,6 +48,29 @@ def instance_file() -> Path:
     configured = os.environ.get("SECRETARY_INSTANCE")
     path = Path(configured).expanduser() if configured else (_instance_from_runtime_env() or DEFAULT_INSTANCE)
     return path / "instance.yaml" if path.is_dir() else path
+
+
+def instance_host_configuration() -> tuple[dict | None, str | None]:
+    """The validated host section of this process's instance, or a safe diagnostic.
+
+    The only permitted ``triggered_agents`` back edge to Secretary is this runtime boundary.  The
+    dispatcher-state reader and health command both need the same installation identity, so keep
+    configuration parsing here rather than letting a role reach into the importing checkout.
+    """
+    path = instance_file()
+    try:
+        instance = load_config(path)
+    except ConfigError as exc:
+        return None, f"cannot read {path}: {exc}"
+    errors = validate(instance, "instance", path.name)
+    if errors:
+        return None, f"invalid {path}: {'; '.join(str(error) for error in errors)}"
+    if not isinstance(instance, dict):  # The schema currently guarantees this; do not fail open if it changes.
+        return None, f"invalid {path}: instance root is not an object"
+    host = instance.get("host", {})
+    if not isinstance(host, dict):
+        return None, f"invalid {path}: host is not an object"
+    return host, None
 
 
 def instance_data_dir() -> Path | None:
