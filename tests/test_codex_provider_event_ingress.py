@@ -173,6 +173,59 @@ class CodexProviderEventIngressTests(unittest.TestCase):
         self.assertEqual(source["cursor"]["line"], 2)
         self.assertEqual(self.stops, [])
 
+    def test_a_journal_written_after_the_launch_attempt_binds_on_the_next_poll(self) -> None:
+        """sprint:1407: a pane whose session appeared late left the source unbound for its life."""
+        ingress = self._ingress()
+
+        # The launch attempt runs before the pane has written anything, so it selects nothing.
+        ingress.bind_before_delivery()
+        self.assertEqual(ingress.source["state"], "unbound")
+        self.assertEqual(ingress.run.fanout_policy["state"], "unknown")
+
+        self._write_source()
+        ingress.poll()
+
+        source = ingress.source
+        self.assertEqual(source["state"], "bound")
+        self.assertEqual(source["session_id"], "session-1")
+        self.assertEqual(source["parent_thread_id"], "parent-1")
+        # The late binding still scans the whole selected journal rather than skipping the tail
+        # the pane wrote while the source was unbound.
+        self.assertEqual(source["initial_range"]["first"]["line"], 1)
+        self.assertEqual(source["cursor"]["line"], 2)
+        self.assertEqual(self.stops, [])
+        self.assertEqual(self.blocks, [])
+
+    def test_a_late_poll_still_refuses_an_ambiguous_or_foreign_journal(self) -> None:
+        """Retrying the binding does not relax any axis a journal is claimed by."""
+        second = self.sessions / "2026" / "08" / "13" / "other.jsonl"
+        self._write_source()
+        self._write_records(
+            {"type": "session_meta", "payload": {"session_id": "session-2", "cwd": str(self.workspace)}},
+            {"type": "thread.started", "thread_id": "parent-2"},
+            source=second,
+        )
+        ingress = self._ingress()
+
+        ingress.poll()
+
+        self.assertEqual(ingress.source["state"], "unbound")
+        self.assertEqual(ingress.run.fanout_policy["state"], "unknown")
+
+        # A journal from another workspace is not the missing single candidate either.
+        second.unlink()
+        foreign = self.sessions / "2026" / "08" / "13" / "foreign.jsonl"
+        self._write_records(
+            {"type": "session_meta", "payload": {"session_id": "session-3", "cwd": str(self.root)}},
+            {"type": "thread.started", "thread_id": "parent-3"},
+            source=foreign,
+        )
+        ingress.poll()
+
+        self.assertEqual(ingress.source["state"], "bound")
+        self.assertEqual(ingress.source["session_id"], "session-1")
+        self.assertEqual(self.stops, [])
+
     def test_binds_codex_0147_session_meta_without_thread_started(self) -> None:
         """The live TUI journal uses session_meta as its root identity anchor."""
         for identifier in ("id", "session_id"):

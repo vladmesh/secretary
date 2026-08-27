@@ -767,15 +767,17 @@ The tick's decision per sprint is visible in its actions under an `observer-reco
 - `observer-nudged` — a committed linked-card event woke one idle observer turn;
 - `observer-wake-pending` — a delivery batch was already sent and awaits its own acknowledgement;
 - `observer-wake-waiting` — an event arrived while the observer was working; the next tick after its
-  pane is ready again delivers one nudge, unless exact provider progress says the same run is still advancing;
+  pane is ready again delivers one nudge, unless exact provider progress says the same run is still advancing.
+  The row carries the wait's `admission`: what the provider source answered for it, so a head held by
+  telemetry which was never admitted — an unbound, foreign or unreadable source — is not read back as an
+  ordinary busy observer. Such an observation is typed durable evidence, not busy or screen liveness: it
+  survives a dispatcher reload and can never rebaseline the episode, but it no longer ends the tick either.
+  A head nothing can prove is working is bounded by the unproven turn ceiling below;
 - `observer-wake-progressing` — an admitted opaque cursor from this record's exact HeadRun advanced. The
   observer, event batch and causal acknowledgement marker remain unchanged; no nudge, stop, replacement,
   cleanup or block occurs;
 - `observer-wake-no-progress` — the exact admitted provider cursor is unchanged while the pane remains busy.
   The durable three-observation ladder advances without sending raw input;
-- `observer-wake-liveness-unavailable` — the source or its run identity was unavailable, incomplete or
-  foreign. This is typed evidence, not busy or screen liveness; its exact binding and observation survive
-  dispatcher reload, and it cannot reset or rebaseline the episode;
 - `observer-redelivered` — a batch already on the head was sent again, with the reason on the row: the
   observer was seen ready for input without having acknowledged it, or its acknowledgement deadline
   (`SECRETARY_OBSERVER_ACK_DEADLINE_SECONDS`, 30 minutes by default) ran out. The redelivery keeps the
@@ -822,8 +824,23 @@ admitted cursor is a baseline; a later cursor outranks `tui-idle` and resets onl
 an unchanged cursor advances the persisted three-observation ladder to an identity-fenced replacement and
 relaunch. `payload-left-in-composer` is bounded evidence of a completed/quiescent turn only when it accompanies
 unchanged admitted progress. It never authorizes Ctrl-C, Escape, a generic key chord or a raw terminal input.
-The old `SECRETARY_OBSERVER_TURN_CEILING_SECONDS` applies only to observer records with no attested
-provider-progress source, retained for compatibility with non-Codex and historical records.
+A head is judged on the clock exactly when it cannot be judged on provider progress. The old
+`SECRETARY_OBSERVER_TURN_CEILING_SECONDS` (3 hours) applies to observer records with no attested
+provider-progress source, retained for compatibility with non-Codex and historical records. A record
+which does carry a source but never got it admitted — it stayed unbound, was rejected as foreign, or
+could not be read — is held to `SECRETARY_OBSERVER_UNPROVEN_TURN_CEILING_SECONDS` (15 minutes)
+instead: the compatibility ceiling was written for heads nobody can watch, and applying it to
+telemetry that is never coming parked a live sprint for hours (sprint:1407, 2026-08-26). Past that
+ceiling the delivery fails onto the ordinary bounded wake retries and then replacement, and the batch
+is carried into the replacement's own launch delivery. A head whose exact cursor is admitted has no
+ceiling at all: its no-progress ladder decides.
+
+A Codex source which was still unbound when its pane was launched is not written off. Every lifecycle
+poll retries the binding under exactly the launch-time rules — the immutable run descriptor, the
+pre-pane baseline, the workspace the session names, and exactly one remaining candidate — so a journal
+the pane wrote a moment after launch is picked up by the next tick. Nothing about a retry is looser
+than the first attempt: an ambiguous or foreign journal leaves the source unbound and the head on the
+unproven ceiling.
 Replacement retains the terminal old-run episode as audit-only state and durably opens a new
 episode for the replacement HeadRun before its first provider probe; neither source baseline nor
 recovery rung crosses that identity boundary.

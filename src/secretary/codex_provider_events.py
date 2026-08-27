@@ -90,31 +90,36 @@ class CodexProviderEventIngress:
         source and every later lifecycle poll.  Source selection and event classification are
         advisory telemetry, so an unavailable or ambiguous recorder cannot prevent delivery.
         """
-        source = self.source
-        if str(source.get("state") or "") == "bound":
-            self.poll()
-            return self.run
-        if str(source.get("state") or "") != "unbound":
-            self._unknown("Codex provider source binding is missing or malformed")
-            return self.run
+        self.poll()
+        return self.run
+
+    def _bind_new_session(self, source: dict[str, Any]) -> bool:
+        """Select the one new journal this run created, or leave the source unbound.
+
+        Selection is fail-closed on every axis a journal can be claimed by: the immutable
+        preflight descriptor, the pre-pane baseline, the exact workspace the session names, and
+        the requirement that exactly one candidate remains.  A pane which has not written its
+        session yet therefore leaves the source unbound for a later attempt rather than
+        borrowing a journal from another head.
+        """
         if not _source_descriptor_matches_run(source, self.run):
             self._unknown("Codex provider source descriptor does not match this HeadRun")
-            return self.run
+            return False
         root = Path(str(source.get("root") or ""))
         if not root.is_dir():
             self._unknown("Codex provider session source root is unavailable")
-            return self.run
+            return False
         baseline = source.get("baseline")
         if not isinstance(baseline, list) or not all(isinstance(path, str) for path in baseline):
             self._unknown("Codex provider source baseline is malformed")
-            return self.run
+            return False
         candidates: list[tuple[Path, dict[str, Any], list[SourceLine]]] = []
         try:
             paths = list(root.rglob("*.jsonl"))
             root_resolved = root.resolve(strict=True)
         except OSError:
             self._unknown("Codex provider session source cannot be enumerated")
-            return self.run
+            return False
         baseline_paths = set(baseline)
         for path in paths:
             try:
@@ -141,7 +146,7 @@ class CodexProviderEventIngress:
             self._unknown(
                 "Codex provider source is unbound: expected exactly one new session with a parent thread"
             )
-            return self.run
+            return False
         path, identity, lines = candidates[0]
         parent_line = next(
             line
@@ -176,14 +181,25 @@ class CodexProviderEventIngress:
             "bound_at": _now(),
         }
         self._replace_source(bound)
-        # Selection by session/root identity does not exempt the source preamble.  The shared
-        # scanner starts at its first raw line, crosses the root, and consumes the pre-existing
-        # tail before the caller can type a prompt.
-        self.poll()
-        return self.run
+        # A binding which could not be written down never happened: the caller keeps the unbound
+        # source it already had rather than consuming events under an in-memory-only identity.
+        return str(self.source.get("state") or "") == "bound"
 
     def poll(self) -> None:
-        """Consume all new provider events, verifying binding and cursor before each action."""
+        """Bind a still-unbound source, then consume every new provider event.
+
+        Binding is the first step of a poll rather than a launch-only act.  A pane whose journal
+        appeared after the launch attempt is picked up by the next lifecycle poll, which is what
+        keeps a source from staying unbound for the whole life of a head that is working
+        normally.  Selection by session/root identity does not exempt the source preamble: the
+        shared scanner starts at the first raw line of a freshly bound journal, crosses the root
+        and consumes the pre-existing tail before the caller can type a prompt.
+        """
+        source = self.source
+        if str(source.get("state") or "") == "unbound" and not self._bind_new_session(source):
+            # ``_bind_new_session`` has already recorded why this attempt could not select a
+            # journal.  Do not overwrite that typed reason with the generic recovery diagnostic.
+            return
         source = self.source
         if str(source.get("state") or "") != "bound":
             self._unknown("Codex provider source is not bound during lifecycle recovery")
