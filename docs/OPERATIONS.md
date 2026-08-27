@@ -819,14 +819,16 @@ from provider-progress liveness. It is armed when the batch is sent and says how
 stay unacknowledged before it is sent again. It is never compared against the age of the card event: an event
 that sat on the board for a day, delivered a minute ago, is a delivery a minute old.
 
-For a current Codex observer source, `wake_liveness` is the authority while a pane is non-idle. Its first
-admitted cursor is a baseline; a later cursor outranks `tui-idle` and resets only the no-progress ladder;
-an unchanged cursor advances the persisted three-observation ladder to an identity-fenced replacement and
-relaunch. `payload-left-in-composer` is bounded evidence of a completed/quiescent turn only when it accompanies
-unchanged admitted progress. It never authorizes Ctrl-C, Escape, a generic key chord or a raw terminal input.
+For a current observer source, `wake_liveness` is the authority while a pane is non-idle. Codex stores its
+descriptor in `provider_source`; Claude stores its descriptor in `provider_progress_source`. Both are prepared
+before the pane opens, bind only their exact run's one post-launch session, and use the same first admitted
+cursor as a baseline. A later cursor outranks `tui-idle` and resets only the no-progress ladder; an unchanged
+cursor advances the persisted three-observation ladder to an identity-fenced replacement and relaunch.
+`payload-left-in-composer` is bounded evidence of a completed/quiescent turn only when it accompanies unchanged
+admitted progress. It never authorizes Ctrl-C, Escape, a generic key chord or a raw terminal input.
 A head is judged on the clock exactly when it cannot be judged on provider progress. The old
 `SECRETARY_OBSERVER_TURN_CEILING_SECONDS` (3 hours) applies to observer records with no attested
-provider-progress source, retained for compatibility with non-Codex and historical records. A record
+provider-progress source, retained for compatibility with historical records. A record
 which does carry a source but never got it admitted — it stayed unbound, was rejected as foreign, or
 could not be read — is held to `SECRETARY_OBSERVER_UNPROVEN_TURN_CEILING_SECONDS` (15 minutes)
 instead: the compatibility ceiling was written for heads nobody can watch, and applying it to
@@ -917,12 +919,12 @@ ladder. A later provider reply cannot re-admit that episode. The shared worker a
 reads also verify the response's run id and HeadRun fingerprint before its opaque timestamp may
 renew the watchdog clock.
 
-For Codex, inspect the bound source after a real preflight-to-bind handoff. It must retain the
-preflight run descriptor exactly: run id, HeadRun fingerprint, resolved workspace, role and task
-reference. Journal selection may add its verified identity, range, cursor and bind time, but may not
-replace those facts. The worker and reviewer provider reads must both reject a source whose
-descriptor is incomplete or foreign. The same check applies to an observer launch and its recovered
-watchdog record. Before the final Terra canary, verify that the post-delivery HeadRun returned by the
+For Codex and Claude, inspect the bound source after a real preflight-to-bind handoff. It must retain the
+preflight run descriptor exactly: run id, HeadRun fingerprint, resolved workspace, role and task reference.
+Journal or transcript selection may add only its verified identity and opaque cursor facts, never replace those
+facts. The worker and reviewer provider reads must both reject a source whose descriptor is incomplete or
+foreign. The same check applies to an observer launch and its recovered watchdog record. Before the final Terra
+canary, verify that the post-delivery HeadRun returned by the
 worker, reviewer and observer launch paths is the one in the durable intent/record, with the same
 bound source and cursor. A stale local launch copy, conflicting source or mismatched run is a canary
 failure: do not nudge, stop, replace, clean up or attribute that head.
@@ -1067,10 +1069,10 @@ that write gives an adopt-deferred outcome (degraded): the head stays adopted, t
 next tick appends the journal entry.
 
 The launch result is the authoritative post-delivery `HeadRun`, not the pre-pane/pre-send value. Pane creation
-may add its verified handle and leaf, and the delivery boundary may bind the Codex source. Intent confirmation,
-routing and role records merge those facts only after their identities agree. A later write cannot turn a bound
-source back into `unbound`, rewind its cursor or substitute its session/range; it may add only its own verified
-pane or forward lifecycle evidence. A mismatch leaves the intent and prior run in place and permits no adoption,
+may add its verified handle and leaf, and the delivery boundary may bind the Codex or Claude source. Intent
+confirmation, routing and role records merge those facts only after their identities agree. A later write cannot
+turn a bound source back into `unbound`, rewind its cursor or substitute its session/range; it may add only its
+own verified pane or forward lifecycle evidence. A mismatch leaves the intent and prior run in place and permits no adoption,
 signal, stop, resume or replacement. This ordering applies equally to worker, reviewer and observer launch and
 recovery, while the generic non-Codex launch path keeps its existing behavior.
 

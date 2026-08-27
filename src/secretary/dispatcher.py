@@ -969,6 +969,12 @@ class CommandHostRuntime:
         # save. Its durable-state owner installs this only while it holds the record's file: this
         # host has a record, not that file. Unset, a run reaches disk with the tick's records.
         self.commit_state: Callable[[], None] | None = None
+        # The first preflight fixes a provider source's baseline before its pane exists. A launch
+        # may attest the same run again immediately before opening that pane, but that second
+        # read must not replace the durable baseline with a listing taken later in bring-up.
+        # Codex also has a live ingress below; Claude has no ingress because its source is bound
+        # by the retained HeadRun's read-only progress probe.
+        self._prepared_provider_runs: dict[str, head_ops.HeadRun] = {}
         # The owner installs one entry before it asks this host to open a Codex pane, keyed by the
         # HeadRun id in that intent so a same-workspace respawn cannot inherit a predecessor's source.
         self._codex_provider_ingresses: dict[str, CodexProviderEventIngress] = {}
@@ -1046,7 +1052,9 @@ class CommandHostRuntime:
             pid_file=pid_file,
         )
         if spec.adapter == "claude":
-            return _prepare_claude_provider_progress_source(run)
+            prepared = _prepare_claude_provider_progress_source(run)
+            self._prepared_provider_runs.setdefault(run_id, prepared)
+            return prepared
         if spec.adapter != "codex":
             return run
         return preflight_codex_launch(profile, workspace, run)
@@ -1096,9 +1104,9 @@ class CommandHostRuntime:
         replaced by a new unbound one.
         """
         ingress = self._codex_provider_ingresses.get(attested.run_id)
-        if ingress is None:
+        prepared = ingress.run if ingress is not None else self._prepared_provider_runs.get(attested.run_id)
+        if prepared is None:
             return attested
-        prepared = ingress.run
         if (
             not prepared.same_run(attested)
             or prepared.spec != attested.spec
@@ -1108,8 +1116,9 @@ class CommandHostRuntime:
             or prepared.pid_file != attested.pid_file
         ):
             return attested
-        prepared_source = prepared.fanout_policy.get("provider_source")
-        fresh_source = attested.fanout_policy.get("provider_source")
+        source_key = "provider_source" if attested.spec.adapter == "codex" else "provider_progress_source"
+        prepared_source = prepared.fanout_policy.get(source_key)
+        fresh_source = attested.fanout_policy.get(source_key)
         if not isinstance(prepared_source, dict) or not isinstance(fresh_source, dict):
             # A fresh attestation that established no source of its own has nothing to hand over,
             # and never erases the durable one; the handoff merge keeps what is already on disk.
@@ -1117,7 +1126,7 @@ class CommandHostRuntime:
         if any(prepared_source.get(key) != fresh_source.get(key) for key in _PREPARED_SOURCE_IDENTITY_KEYS):
             return attested
         policy = dict(attested.fanout_policy)
-        policy["provider_source"] = dict(prepared_source)
+        policy[source_key] = dict(prepared_source)
         return attested.with_fanout_policy(policy)
 
     def _prompt_adapter(self, run: Any, head: str) -> str:
@@ -1361,18 +1370,22 @@ class CommandHostRuntime:
             role=OBSERVER_ROLE,
             pid_file=pid_file,
         )
-        if lifecycle_run.spec.adapter == "codex":
+        if lifecycle_run.spec.adapter in {"codex", "claude"}:
             try:
-                # Deliberately the plain attestation, not the worker/reviewer launch helper: the
-                # observer's own delivery contour is out of this repair's scope, so its bring-up
-                # keeps handing its handoff the descriptor this call enumerated.
-                lifecycle_run = self.preflight_codex_run(
+                attested = self.preflight_codex_run(
                     head,
                     role=OBSERVER_ROLE,
                     workspace=str(workspace),
                     task_ref=lifecycle_run.task_ref,
                     pid_file=pid_file,
                     run_id=lifecycle_run.run_id,
+                )
+                # Codex keeps its existing fan-out ingress handoff. Claude has no ingress: its
+                # pre-pane descriptor is retained here, then bound by the exact-run cursor probe.
+                lifecycle_run = (
+                    self._retain_prepared_provider_source(attested)
+                    if lifecycle_run.spec.adapter == "claude"
+                    else attested
                 )
             except CodexFanoutPolicyError as exc:
                 raise HostError(str(exc)) from None
@@ -1685,6 +1698,16 @@ class CommandHostRuntime:
                 "state": "identity_mismatch",
                 "reason": "persisted observer HeadRun binding mismatches observer record",
             }
+        # Claude journals appear asynchronously after the pane starts. Bind only the one source
+        # selected from this exact run's persisted pre-pane baseline, then retain that result on
+        # the observer record before its wake reducer evaluates the cursor.
+        if run.spec.adapter == "claude":
+            updated = _bind_claude_provider_progress_source(run)
+            if updated != run:
+                record.head_run = updated.to_json()
+                if self.commit_state is not None:
+                    self.commit_state()
+                run = updated
         return _provider_progress_for_run(run)
 
     def nudge_observer(self, record: Any) -> str:
