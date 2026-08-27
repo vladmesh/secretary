@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 PRODUCT_ENV = "TA_SECRETARY_REPO"
 INSTANCE_DIRNAME = "secretary-instance"
@@ -53,3 +54,14 @@ def instance_dir(path: Path | str) -> Path:
     """
     resolved = Path(path).expanduser()
     return resolved.parent if resolved.name == INSTANCE_CONFIG_NAME else resolved
+
+
+def component_enabled(host: dict[str, Any], component: str) -> bool:
+    """Whether an installation wants a packaged component. An omitted entry means yes."""
+    components = host.get("components") if isinstance(host, dict) else None
+    if not isinstance(components, dict):
+        return True
+    entry = components.get(component)
+    if not isinstance(entry, dict):
+        return True
+    return entry.get("enabled") is not False

@@ -25,7 +25,7 @@ from typing import Any
 
 from secretary import _proc
 from secretary.observer_root import observer_root_repo
-from triggered_agents.runtime.paths import configured_product_root
+from triggered_agents.runtime.paths import component_enabled, configured_product_root
 
 KINDS = ("projects", "units", "orca repos")
 UNIT_SUFFIXES = (".service", ".timer")
@@ -170,17 +170,6 @@ def load_packaged_units(root: Path, prefix: str, layout: SystemdLayout | None = 
             )
         )
     return units
-
-
-def component_enabled(host: dict[str, Any], component: str) -> bool:
-    """Whether this installation runs a shipped component. Absent means yes."""
-    components = host.get("components") if isinstance(host, dict) else None
-    if not isinstance(components, dict):
-        return True
-    entry = components.get(component)
-    if not isinstance(entry, dict):
-        return True
-    return entry.get("enabled") is not False
 
 
 def foreign_units(host: dict[str, Any]) -> set[str]:

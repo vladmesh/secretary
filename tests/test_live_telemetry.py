@@ -1159,6 +1159,126 @@ class HealthAgentStateTests(unittest.TestCase):
         self.assertIn("last healthy tick", problems[0])
 
 
+class HealthExpectedStateTests(unittest.TestCase):
+    """Scheduled-role intent comes from the process's installation, not this checkout."""
+
+    ROLES = (
+        ("curator", "curator"),
+        ("retro", "retro"),
+        ("steward", "steward"),
+        ("pipeline", "dispatcher-production"),
+    )
+
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmpdir.cleanup)
+        self.root = Path(self.tmpdir.name)
+        self.instance = self.root / "instance"
+        self.product_root = Path(__file__).resolve().parents[1]
+        instance = mock.patch.object(
+            production_telemetry, "instance_file", return_value=self.instance / "instance.yaml"
+        )
+        instance.start()
+        self.addCleanup(instance.stop)
+        product = mock.patch.dict(os.environ, {"TA_SECRETARY_REPO": str(self.product_root)})
+        product.start()
+        self.addCleanup(product.stop)
+
+    def write_instance(self, components: dict[str, bool] | None = None) -> None:
+        rows = [
+            "version: 1",
+            "name: health-state-test",
+            f"data_dir: {self.root / 'data'}",
+            "offsite:",
+            "  instance_remote: https://example.invalid/instance.git",
+            "host:",
+            "  unit_prefix: installed-",
+        ]
+        if components:
+            rows.append("  components:")
+            for component, enabled in components.items():
+                rows.extend((f"    {component}:", f"      enabled: {'true' if enabled else 'false'}"))
+        self.instance.mkdir(parents=True, exist_ok=True)
+        (self.instance / "instance.yaml").write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    def check_output(self, agents: tuple[str, ...]) -> tuple[int, str]:
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = health.check(agents)
+        return code, output.getvalue()
+
+    def test_shipped_defaults_enable_each_scheduled_role(self) -> None:
+        self.write_instance()
+
+        expectations, error = health._role_expectations(tuple(role for role, _ in self.ROLES))
+
+        self.assertIsNone(error)
+        assert expectations is not None
+        for role, component in self.ROLES:
+            with self.subTest(role=role):
+                expectation = expectations[role]
+                self.assertTrue(expectation.enabled)
+                self.assertEqual(expectation.component, component)
+                self.assertEqual(expectation.unit_prefix, "installed-")
+        self.assertEqual(expectations["retro"].max_age_s, 26 * 3600)
+        self.assertEqual(expectations["pipeline"].max_age_s, 900)
+
+    def test_component_overrides_win_over_shipped_defaults(self) -> None:
+        for role, component in self.ROLES:
+            with self.subTest(role=role):
+                self.write_instance({component: False})
+
+                expectations, error = health._role_expectations((role,))
+
+                self.assertIsNone(error)
+                assert expectations is not None
+                self.assertFalse(expectations[role].enabled)
+
+    def test_enabled_role_with_an_inactive_timer_is_red(self) -> None:
+        self.write_instance()
+        for role, _ in self.ROLES:
+            with self.subTest(role=role), mock.patch.object(health, "_timer_active", return_value=False), mock.patch.object(
+                health, "_runs_status", return_value=([], "fresh")
+            ), mock.patch.object(health, "_pipeline_status", return_value=([], "fresh")):
+                code, output = self.check_output((role,))
+
+                self.assertEqual(code, 1)
+                self.assertIn(f"RED {role}: installed-", output)
+                self.assertIn("not active", output)
+
+    def test_disabled_role_is_neutral_without_timer_or_telemetry_reads(self) -> None:
+        for role, component in self.ROLES:
+            with self.subTest(role=role):
+                self.write_instance({component: False})
+                with mock.patch.object(health, "_timer_active", side_effect=AssertionError), mock.patch.object(
+                    health, "_runs_status", side_effect=AssertionError
+                ), mock.patch.object(health, "_pipeline_status", side_effect=AssertionError):
+                    code, output = self.check_output((role,))
+
+                self.assertEqual(code, 0)
+                self.assertEqual(
+                    output,
+                    f"DISABLED {role}: {component} disabled by installation configuration\n",
+                )
+
+    def test_disabling_steward_deep_sweep_does_not_disable_steward_schedule(self) -> None:
+        self.write_instance({"steward-deep-sweep": False})
+        with mock.patch.object(health, "_timer_active", return_value=False), mock.patch.object(
+            health, "_runs_status", return_value=([], "fresh")
+        ):
+            code, output = self.check_output(("steward",))
+
+        self.assertEqual(code, 1)
+        self.assertIn("RED steward: installed-steward.timer not active", output)
+        self.assertNotIn("DISABLED", output)
+
+    def test_unreadable_installation_configuration_is_an_error(self) -> None:
+        code, output = self.check_output(("curator",))
+
+        self.assertEqual(code, 1)
+        self.assertIn("ERROR curator: effective installation configuration unavailable", output)
+
+
 class HealthPipelineLineTests(unittest.TestCase):
     """The pipeline line comes from production dispatcher telemetry, and never flatters it."""
 
