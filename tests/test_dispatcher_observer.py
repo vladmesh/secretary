@@ -51,7 +51,7 @@ from secretary.dispatcher_production import (
     _production_claim_ready,
     _reconcile_sprint_budget,
 )
-from secretary.dispatcher_tui import DeliveryEvidence, TuiDeliveryError
+from secretary.dispatcher_tui import DeliveryEvidence, TuiDeliveryError, provider_progress_for_run
 from secretary.dispatcher_types import HostError
 from secretary.dispatcher_watchdog import initial_output_stall_seconds
 from secretary.dispatcher_worker_lifecycle import head_run_binding
@@ -2524,10 +2524,9 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
         self.assertEqual(restored.wake_liveness.head_run_id, restored.head_run["run_id"])
         self.assertEqual(restored.retired_wake_liveness["terminal_outcome"], "replacement")
         waiting = self.runtime.production_tick()
-        self.assertNotEqual(
-            [row["action"] for row in self.actions(waiting)],
-            ["observer-wake-liveness-unavailable"],
-        )
+        # The replacement is a live head holding its batch, not an episode still reporting that
+        # nothing about it can be proved.
+        self.assertEqual([row["action"] for row in self.actions(waiting)], ["observer-wake-pending"])
         restored = self.observers()["sprint:1"]
         self.assertEqual(restored.wake_liveness.head_run_id, restored.head_run["run_id"])
         entry = {
@@ -2607,9 +2606,11 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         outcome = self.runtime.production_tick()
 
-        self.assertEqual(
-            [row["action"] for row in self.actions(outcome)], ["observer-wake-liveness-unavailable"]
-        )
+        # A rejected source keeps waiting on its own clock rather than refusing the batch with
+        # nothing left to end the wait, and it says which admission it is waiting on.
+        rows = self.actions(outcome)
+        self.assertEqual([row["action"] for row in rows], ["observer-wake-waiting"])
+        self.assertEqual(rows[0]["admission"], "unknown")
         liveness = self.observers()["sprint:1"].wake_liveness
         self.assertEqual(liveness.state.value, "unknown")
         self.assertTrue(liveness.source_rejected)
@@ -2638,7 +2639,7 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         self.assertEqual(
             [row["action"] for row in self.actions(unavailable)],
-            ["observer-wake-liveness-unavailable"],
+            ["observer-wake-waiting"],
         )
         before_reload = self.observers()["sprint:1"].wake_liveness
         self.assertEqual(before_reload.state.value, "unavailable")
@@ -2664,13 +2665,87 @@ class ObserverLifecycleTests(TwoOpenSprintAdmission, unittest.TestCase):
 
         self.assertEqual(
             [row["action"] for row in self.actions(rejected)],
-            ["observer-wake-liveness-unavailable"],
+            ["observer-wake-waiting"],
         )
         liveness = self.observers()["sprint:1"].wake_liveness
         self.assertEqual(liveness.state.value, "unknown")
         self.assertTrue(liveness.source_rejected)
         self.assertEqual(liveness.head_run_id, before_reload.head_run_id)
         self.assertEqual(self.host.observer_nudges, [])
+        self.assertEqual(self.host.stopped_observers, [])
+
+    def test_a_launch_unbound_codex_source_ends_at_the_unproven_ceiling(self) -> None:
+        """sprint:1407: an unbound source and a falsely busy pane held a live sprint for hours."""
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.install_observer_provider_source()
+        # The real read of a complete preflight descriptor which never bound, against a pane which
+        # keeps answering busy while the head stands at a visible prompt.
+        self.host.observer_provider_progress = lambda record: provider_progress_for_run(  # type: ignore[method-assign]
+            HeadRun.from_json(record.head_run)
+        )
+        self.host.observer_status_result = {"last_activity": time.time(), "idle": False}
+        self.writer.comment(
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed while the observer looked busy",
+            request_id="unbound-source-ceiling-event",
+        )
+
+        waiting = self.actions(self.runtime.production_tick())
+
+        self.assertEqual([row["action"] for row in waiting], ["observer-wake-waiting"])
+        self.assertEqual(waiting[0]["admission"], "legacy_unbound_v1")
+        self.assertEqual(self.host.observer_nudges, [])
+
+        # Twenty minutes of that wait. The legacy three-hour ceiling would still be running, and
+        # this is exactly where the incident sat: a free observer, a blocked sprint, no ladder.
+        self.age_delivery(20 * 60, deadline=True)
+        deferred = self.actions(self.runtime.production_tick())
+
+        self.assertEqual([row["action"] for row in deferred], ["observer-wake-deferred"])
+        self.assertIn("turn ceiling", deferred[0]["reason"])
+        self.assertEqual(self.observers()["sprint:1"].delivery.attempts, 1)
+
+        for _ in range(2):
+            self.expire_wake_retry()
+            replaced = self.actions(self.runtime.production_tick())
+
+        self.assertEqual([row["action"] for row in replaced], ["observer-relaunched"])
+        self.assertEqual(self.host.stopped_observers, ["observer:sprint:1"])
+        # The batch the stuck head was holding is carried into the replacement's own launch
+        # delivery rather than being dropped with the head that never answered for it.
+        self.assertEqual(self.observers()["sprint:1"].delivery.stage, DeliveryStage.DELIVERY_INTENT)
+
+    def test_an_admitted_observer_cursor_is_never_judged_by_the_unproven_ceiling(self) -> None:
+        """The negative case: a head with provable progress is judged on progress, not the clock."""
+        self.open_sprint()
+        self.board.metadata[12]["sprint_ref"] = "sprint:1"
+        self.runtime.production_tick()
+        self.install_observer_provider_source()
+        cursor = iter(f"cursor:{index}" for index in range(1, 9))
+        self.host.observer_provider_progress = lambda record: self.observer_progress(  # type: ignore[method-assign]
+            record,
+            next(cursor),
+        )
+        self.host.observer_status_result = {"last_activity": time.time(), "idle": False}
+        self.writer.comment(
+            role="dispatcher",
+            actor="dispatcher",
+            reference="secretary-510-pilot",
+            body="card changed while the observer was really working",
+            request_id="admitted-cursor-ceiling-event",
+        )
+        self.runtime.production_tick()
+
+        # Well past the unproven ceiling, and past the legacy one too: an advancing exact cursor
+        # is the authority, so neither clock may tear this head down.
+        self.age_delivery(4 * 60 * 60, deadline=True)
+        result = self.actions(self.runtime.production_tick())
+
+        self.assertEqual([row["action"] for row in result], ["observer-wake-progressing"])
         self.assertEqual(self.host.stopped_observers, [])
 
     def test_a_long_card_mid_turn_is_not_torn_down_by_the_turn_ceiling(self) -> None:

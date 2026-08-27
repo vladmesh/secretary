@@ -107,10 +107,17 @@ OBSERVER_SKILL = "observe-sprint"
 # How long one delivery may stay unacknowledged before it is sent again. Armed by the delivery, so
 # it measures the silence of this head on this batch and nothing else.
 OBSERVER_ACK_DEADLINE_DEFAULT_SECONDS = 30 * 60
-# Compatibility ceiling for observers without an attested provider-progress source.  A current
-# Codex HeadRun never consults it: its exact provider cursor drives the durable no-progress ladder.
-# Keep this for historical non-Codex/no-source records until they leave the fleet.
+# Compatibility ceiling for observers without an attested provider-progress source.  A HeadRun
+# whose exact provider cursor is admitted never consults it: that cursor drives the durable
+# no-progress ladder.  Keep this for historical non-Codex/no-source records until they leave the
+# fleet.
 OBSERVER_TURN_CEILING_DEFAULT_SECONDS = 3 * 60 * 60
+# The ceiling for a head which does carry a provider source but never got it admitted — unbound,
+# rejected or unreadable.  Nothing about that head is provable, so the compatibility ceiling is the
+# wrong bound: it was chosen to sit below the longest legitimate turn of a head nobody can watch,
+# and applying it here parks a live sprint for hours behind telemetry that is never coming
+# (sprint:1407, 2026-08-26).  Well above a normal observer turn, far below the legacy ceiling.
+OBSERVER_UNPROVEN_TURN_CEILING_DEFAULT_SECONDS = 15 * 60
 OBSERVER_WAKE_RETRY_INITIAL_SECONDS = 30
 OBSERVER_WAKE_RETRY_MAX_SECONDS = 5 * 60
 # How many refused deliveries of one batch are retried on the live head before the sprint pays for
@@ -599,6 +606,14 @@ def observer_ack_deadline_seconds() -> int:
 def observer_turn_ceiling_seconds() -> int:
     """How long one head may hold a batch while never being seen ready for input."""
     return positive_int("SECRETARY_OBSERVER_TURN_CEILING_SECONDS", OBSERVER_TURN_CEILING_DEFAULT_SECONDS)
+
+
+def observer_unproven_turn_ceiling_seconds() -> int:
+    """How long a head whose provider source was never admitted may hold a batch."""
+    return positive_int(
+        "SECRETARY_OBSERVER_UNPROVEN_TURN_CEILING_SECONDS",
+        OBSERVER_UNPROVEN_TURN_CEILING_DEFAULT_SECONDS,
+    )
 
 
 def observer_wake_max_attempts() -> int:
@@ -1666,7 +1681,22 @@ def _adopt_precontract_unbound_observer(
     )
 
 
-def _turn_ceiling_overrun(delivery: ObserverDelivery, *, now: float) -> str:
+def _observer_wake_ceiling_seconds(record: ObserverRecord) -> int:
+    """How long this head may hold a batch while never being seen ready for input.
+
+    Zero for a head whose exact provider cursor is admitted: it is judged on provider progress by
+    the bounded no-progress ladder, not on the clock. Every other head is on a clock, because
+    nothing else can end its wait — and which clock is the difference between a head nobody was
+    ever able to watch and a head whose own telemetry failed to bind.
+    """
+    if record.wake_liveness.admitted:
+        return 0
+    if _observer_has_provider_liveness_contract(record):
+        return observer_unproven_turn_ceiling_seconds()
+    return observer_turn_ceiling_seconds()
+
+
+def _turn_ceiling_overrun(delivery: ObserverDelivery, ceiling: int, *, now: float) -> str:
     """Why a head that is never ready for input has held this batch too long, or an empty string.
 
     Not the acknowledgement deadline under another name: that one ends a silence on a head standing
@@ -1681,7 +1711,6 @@ def _turn_ceiling_overrun(delivery: ObserverDelivery, *, now: float) -> str:
         delivery.held_since = now
         return ""
     held = now - delivery.held_since
-    ceiling = observer_turn_ceiling_seconds()
     if held < ceiling:
         return ""
     return (
@@ -1737,16 +1766,10 @@ def _wake_for_event(
                 "event_id": delivery.through_event or event_id,
                 "reason": "an admitted exact-HeadRun provider cursor advanced",
             }
-        if provider_observation in {"unknown", "unavailable"}:
-            return {
-                "status": "degraded",
-                "step": "observer-reconcile",
-                "sprint": ref,
-                "action": "observer-wake-liveness-unavailable",
-                "head": record.head,
-                "event_id": delivery.through_event or event_id,
-                "reason": record.wake_liveness.reason or "observer provider progress was not admitted",
-            }
+        # Every other observation — a baseline, a stall, an unbound, rejected or unreadable
+        # source — carries on to the pane read.  An observation which cannot prove progress is
+        # not a verdict about the head: it decides which of the two bounded no-progress ladders
+        # below ends the wait, never whether the wait ends at all.
     if delivery.stage == DeliveryStage.RETRY_DEFERRED and now < delivery.next_at:
         return {
             "status": "degraded",
@@ -1820,8 +1843,9 @@ def _wake_for_event(
                 "attempts": attempts,
                 "reason": delivery.reason,
             }
-        if not _observer_has_provider_liveness_contract(record):
-            overrun = _turn_ceiling_overrun(delivery, now=now)
+        ceiling = _observer_wake_ceiling_seconds(record)
+        if ceiling:
+            overrun = _turn_ceiling_overrun(delivery, ceiling, now=now)
             if overrun:
                 return _fail_delivery(runtime, payload, observers, ref, record, event, overrun)
         if active and now < delivery.deadline:
@@ -1843,6 +1867,9 @@ def _wake_for_event(
             "action": "observer-wake-waiting",
             "head": record.head,
             "event_id": delivery.through_event or event_id,
+            # What the provider source answered for this wait, so a head held by unprovable
+            # telemetry is not read back as an ordinary busy observer.
+            "admission": provider_observation,
             "reason": delivery.reason,
         }
     redelivery = _redelivery_reason(status, delivery, now=now) if active else ""
