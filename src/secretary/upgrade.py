@@ -582,6 +582,7 @@ def step_host(context: UpgradeContext) -> StepResult:
             managed=managed,
             manifest_path=manifest,
             packaged=packaged,
+            runtime_user=context.runtime_user,
         ),
         units=context.units,
         orca=context.orca,

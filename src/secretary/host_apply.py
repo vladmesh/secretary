@@ -22,7 +22,9 @@ resource that failed to install is never recorded as managed.
 from __future__ import annotations
 
 import json
+import os
 import pwd
+import stat
 import subprocess
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
@@ -48,6 +50,7 @@ from secretary.host import (
     packaging_root,
     plan_changes,
     plan_input_errors,
+    strict_manifest,
 )
 
 SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
@@ -230,6 +233,7 @@ class ApplyInputs:
     managed: list[PlannedResource]
     manifest_path: Path
     packaged: list[PackagedUnit]
+    runtime_user: str | None = None
 
 
 def resolve_packaged(
@@ -377,6 +381,10 @@ def apply_host(
     errors = plan_input_errors(inputs.instance, inputs.bindings, packaged=inputs.packaged)
     if errors:
         return ApplyResult(errors=list(errors), dry_run=dry_run)
+    if not dry_run:
+        _, error = strict_manifest(inputs.manifest_path)
+        if error:
+            return ApplyResult(errors=[error], dry_run=dry_run)
 
     desired = build_plan(inputs.instance, inputs.bindings, packaged=inputs.packaged)
     changes = plan_changes(
@@ -430,7 +438,21 @@ def apply_host(
         else:
             managed_by_id[change.logical_id] = desired_by_id[change.logical_id]
         result.applied.append(f"{change.action} {change.logical_id} {change.kind} {change.name}")
-        _write_manifest(inputs.manifest_path, managed_by_id.values())
+        try:
+            _write_manifest(
+                inputs.manifest_path,
+                managed_by_id.values(),
+                runtime_user=inputs.runtime_user,
+            )
+        except (HostCommandError, RuntimeError) as exc:
+            result.errors.append(str(exc))
+            break
+
+    if not result.applied and not result.errors:
+        try:
+            _repair_manifest_access(inputs.manifest_path, inputs.runtime_user)
+        except HostCommandError as exc:
+            result.errors.append(str(exc))
 
     if reload_needed:
         try:
@@ -512,12 +534,51 @@ def _repo_of(resource: PlannedResource) -> str:
     return repo
 
 
-def _write_manifest(path: Path, resources: Iterable[PlannedResource]) -> None:
-    if path.is_symlink():
-        raise HostCommandError("managed manifest must not be a symlink")
+def _write_manifest(
+    path: Path,
+    resources: Iterable[PlannedResource],
+    *,
+    runtime_user: str | None = None,
+) -> None:
+    """Publish trusted state and hand a root-created file to its reader."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with directory_lock(path.parent):
+        _, error = strict_manifest(path)
+        if error:
+            raise HostCommandError(error)
         write_text_atomic(path, manifest_text(resources))
+        _set_manifest_access(path, runtime_user)
+
+
+def _set_manifest_access(path: Path, runtime_user: str | None) -> None:
+    """Make a root-published manifest private to the installation account."""
+    if not runtime_user or os.geteuid() != 0:
+        return
+    try:
+        account = pwd.getpwnam(runtime_user)
+    except KeyError:
+        raise HostCommandError(f"installation user {runtime_user!r} does not exist") from None
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink > 1:
+            raise HostCommandError("managed manifest is not a private regular file")
+        os.chown(path, account.pw_uid, account.pw_gid, follow_symlinks=False)
+        os.chmod(path, 0o600, follow_symlinks=False)
+    except OSError as exc:
+        raise HostCommandError(f"could not assign managed manifest to {runtime_user}: {exc}") from None
+
+
+def _repair_manifest_access(path: Path, runtime_user: str | None) -> None:
+    """Repair a valid root-created manifest even when reconciliation is unchanged."""
+    if not runtime_user or os.geteuid() != 0:
+        return
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise HostCommandError(f"could not inspect managed manifest for {runtime_user}: {exc}") from None
+    _set_manifest_access(path, runtime_user)
 
 
 __all__ = [

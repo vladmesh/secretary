@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -42,7 +43,9 @@ from secretary.host import (
     SystemdLayout,
     build_plan,
     component_enabled,
+    load_managed_manifest,
     load_packaged_units,
+    manifest_text,
     plan_changes,
     strict_manifest,
 )
@@ -228,7 +231,14 @@ class ApplyHostTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def inputs(self, inventory: HostInventory, managed=(), instance=None, bindings=()) -> ApplyInputs:
+    def inputs(
+        self,
+        inventory: HostInventory,
+        managed=(),
+        instance=None,
+        bindings=(),
+        runtime_user: str | None = None,
+    ) -> ApplyInputs:
         return ApplyInputs(
             instance=instance or instance_config(self.data),
             bindings=list(bindings),
@@ -236,6 +246,7 @@ class ApplyHostTests(unittest.TestCase):
             managed=list(managed),
             manifest_path=self.manifest,
             packaged=self.packaged,
+            runtime_user=runtime_user,
         )
 
     def test_empty_host_is_installed_enabled_and_recorded(self):
@@ -251,6 +262,74 @@ class ApplyHostTests(unittest.TestCase):
         self.assertIn(("daemon-reload", ""), units.calls)
         recorded = {r.name for r in strict_manifest(self.manifest)[0]}
         self.assertIn("secretary-example.timer", recorded)
+
+    def test_root_published_manifest_is_private_to_the_installation_user(self):
+        account = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())
+        with (
+            mock.patch("secretary.host_apply.os.geteuid", return_value=0),
+            mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account),
+        ):
+            result = apply_host(
+                self.inputs(HostInventory(), runtime_user="operator"),
+                units=FakeUnitInstaller(),
+                orca=FakeRegistrar(),
+            )
+
+        self.assertTrue(result.ok, result.errors)
+        self.assertTrue(load_managed_manifest(self.manifest)[0], "installation user can read the published manifest")
+        info = self.manifest.stat()
+        self.assertEqual((info.st_uid, info.st_gid), (account.pw_uid, account.pw_gid))
+        self.assertEqual(stat.S_IMODE(info.st_mode), 0o600)
+
+    def test_unprivileged_reconcile_never_attempts_manifest_ownership_repair(self):
+        with (
+            mock.patch("secretary.host_apply.os.geteuid", return_value=1000),
+            mock.patch("secretary.host_apply.pwd.getpwnam") as account,
+            mock.patch("secretary.host_apply.os.chown") as chown,
+            mock.patch("secretary.host_apply.os.chmod") as chmod,
+        ):
+            result = apply_host(
+                self.inputs(HostInventory(), runtime_user="operator"),
+                units=FakeUnitInstaller(),
+                orca=FakeRegistrar(),
+            )
+
+        self.assertTrue(result.ok, result.errors)
+        account.assert_not_called()
+        chown.assert_not_called()
+        chmod.assert_not_called()
+
+    def test_root_repair_hands_an_unchanged_manifest_to_the_installation_user(self):
+        desired = build_plan(instance_config(self.data), [], packaged=self.packaged)
+        self.manifest.write_text(manifest_text(desired), encoding="utf-8")
+        account = SimpleNamespace(pw_uid=1234, pw_gid=5678)
+        inventory = HostInventory(units={resource.name for resource in desired if resource.kind == "unit"})
+        with (
+            mock.patch("secretary.host_apply.os.geteuid", return_value=0),
+            mock.patch("secretary.host_apply.pwd.getpwnam", return_value=account),
+            mock.patch("secretary.host_apply.os.chown") as chown,
+            mock.patch("secretary.host_apply.os.chmod") as chmod,
+        ):
+            result = apply_host(
+                self.inputs(inventory, managed=desired, runtime_user="operator"),
+                units=FakeUnitInstaller(),
+                orca=FakeRegistrar(),
+            )
+
+        self.assertTrue(result.ok, result.errors)
+        self.assertFalse(result.applied)
+        chown.assert_called_once_with(self.manifest, 1234, 5678, follow_symlinks=False)
+        chmod.assert_called_once_with(self.manifest, 0o600, follow_symlinks=False)
+
+    def test_manifest_write_refuses_untrusted_existing_state(self):
+        self.manifest.write_text("not json", encoding="utf-8")
+        before = self.manifest.read_bytes()
+
+        result = apply_host(self.inputs(HostInventory()), units=FakeUnitInstaller(), orca=FakeRegistrar())
+
+        self.assertFalse(result.ok)
+        self.assertIn("managed manifest is not valid JSON", result.errors)
+        self.assertEqual(self.manifest.read_bytes(), before)
 
     def test_second_run_against_the_reconciled_host_changes_nothing(self):
         units, orca = FakeUnitInstaller(), FakeRegistrar()

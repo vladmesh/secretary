@@ -335,12 +335,23 @@ def plan_input_errors(
     return errors
 
 
-def load_managed_manifest(path: Path) -> list[PlannedResource]:
-    """Load the applied state. Invalid or missing state proves no ownership."""
+def load_managed_manifest(path: Path) -> tuple[list[PlannedResource], str]:
+    """Load applied state for a read-only view.
+
+    Missing or semantically invalid state proves no ownership. A manifest that
+    could not be read is different: callers must report that condition rather
+    than derive a plan from an empty ownership record.
+    """
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
+    except FileNotFoundError:
+        return [], ""
+    except UnicodeError:
+        return [], "managed manifest is not valid UTF-8"
+    except OSError:
+        return [], "managed manifest is unreadable"
+    except ValueError:
+        return [], ""
     values = raw.get("resources", []) if isinstance(raw, dict) else []
     resources: list[PlannedResource] = []
     for value in values:
@@ -354,7 +365,7 @@ def load_managed_manifest(path: Path) -> list[PlannedResource]:
                     fields[0], fields[1], fields[2], spec if isinstance(spec, str) else "", fields[3]
                 )
             )
-    return resources
+    return resources, ""
 
 
 def strict_manifest(path: Path) -> tuple[list[PlannedResource], str]:
@@ -363,10 +374,16 @@ def strict_manifest(path: Path) -> tuple[list[PlannedResource], str]:
     Returns ``(resources, reason)``; a non-empty reason means the manifest could not be trusted, and
     the caller must refuse to write rather than treat the unreadable state as "we own nothing".
     """
-    if path.is_symlink():
-        return [], "managed manifest must not be a symlink"
-    if not path.exists():
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
         return [], ""
+    except OSError:
+        return [], "managed manifest is unreadable"
+    if stat.S_ISLNK(info.st_mode):
+        return [], "managed manifest must not be a symlink"
+    if not stat.S_ISREG(info.st_mode):
+        return [], "managed manifest is not a regular file"
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except UnicodeError:
@@ -381,7 +398,9 @@ def strict_manifest(path: Path) -> tuple[list[PlannedResource], str]:
         or not isinstance(payload.get("resources"), list)
     ):
         return [], "managed manifest has an unsupported shape"
-    resources = load_managed_manifest(path)
+    resources, error = load_managed_manifest(path)
+    if error:
+        return [], error
     if len(resources) != len(payload["resources"]):
         return [], "managed manifest contains invalid resource records"
     logical_ids: set[str] = set()

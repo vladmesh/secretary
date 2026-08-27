@@ -25,6 +25,7 @@ from secretary.host import (
     build_expectations,
     build_plan,
     inventory,
+    load_managed_manifest,
     load_packaged_units,
     manifest_text,
     plan_changes,
@@ -320,6 +321,18 @@ class FixtureSourceTests(unittest.TestCase):
         self.assertEqual(result.errors, {"units": "fixture host file is not valid UTF-8"})
 
 
+class ManagedManifestReadTests(unittest.TestCase):
+    def test_missing_manifest_is_distinct_from_a_permission_denied_read(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = Path(tmp) / "host-managed.json"
+            self.assertEqual(load_managed_manifest(missing), ([], ""))
+
+            with unittest.mock.patch.object(Path, "read_text", side_effect=PermissionError("denied")):
+                self.assertEqual(load_managed_manifest(missing), ([], "managed manifest is unreadable"))
+
+
 class ReconcilePlanTests(unittest.TestCase):
     def test_resolve_packaged_never_yields_an_orca_component(self):
         """Orca runs external to Secretary (secretary-739/755): the product ships no
@@ -533,6 +546,43 @@ class ReconcilePlanTests(unittest.TestCase):
         self.assertEqual(code, 2, output)
         self.assertIn("units: unavailable: systemctl not found", output)
         self.assertIn("orca repos: unavailable: orca not found", output)
+
+    def test_cli_plan_reports_an_unreadable_managed_manifest(self):
+        class FakeLiveHost:
+            def collect(self, expected):
+                return CollectResult(HostInventory(), {})
+
+        with (
+            unittest.mock.patch.object(host_commands, "LiveHostSource", return_value=FakeLiveHost()),
+            unittest.mock.patch.object(
+                host_commands,
+                "load_managed_manifest",
+                return_value=([], "managed manifest is unreadable"),
+            ),
+        ):
+            code, output = run_cli(["reconcile", "plan", "--instance", str(EXAMPLE_INSTANCE)])
+        self.assertEqual(code, 2, output)
+        self.assertIn("managed manifest is unreadable", output)
+
+    def test_production_host_drift_reports_an_unreadable_managed_manifest(self):
+        report = SimpleNamespace(
+            host={"unit_prefix": "secretary-"},
+            instance={},
+            bindings=[],
+            instance_path=Path("/tmp/secretary-instance.yaml"),
+            data_dir=Path("/tmp/secretary-data"),
+        )
+        collected = CollectResult(HostInventory(), {})
+        with (
+            unittest.mock.patch.object(cli, "resolve_installed_packaged", return_value=[]),
+            unittest.mock.patch.object(
+                cli,
+                "load_managed_manifest",
+                return_value=([], "managed manifest is unreadable"),
+            ),
+        ):
+            findings = cli._production_host_findings(report, report.data_dir, collected)
+        self.assertEqual(findings, ["production dispatcher managed manifest unavailable: managed manifest is unreadable"])
 
     def test_live_plan_does_not_write_instance_or_managed_manifest(self):
         import tempfile

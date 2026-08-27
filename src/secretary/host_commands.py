@@ -25,7 +25,7 @@ from secretary.host import (
 from secretary.host import (
     strict_manifest as _strict_manifest,
 )
-from secretary.host_apply import resolve_installed_packaged
+from secretary.host_apply import resolve_installed_packaged, resolve_runtime_owner
 
 
 def run_reconcile_plan(args) -> int:
@@ -57,10 +57,14 @@ def run_reconcile_plan(args) -> int:
         return 2
     manifest = _manifest_path(args, report)
     prefix = report.host.get("unit_prefix", "")
+    managed, error = load_managed_manifest(manifest)
+    if error:
+        print("secretary reconcile plan: " + error)
+        return 2
     changes = plan_changes(
         build_plan(report.instance, report.bindings, packaged=packaged),
         collected.inventory,
-        load_managed_manifest(manifest),
+        managed,
         prefix if isinstance(prefix, str) else "",
         foreign_units(report.host),
     )
@@ -251,6 +255,11 @@ def run_reconcile_apply(args) -> int:
     if error:
         print("secretary reconcile apply: " + error)
         return 2
+    try:
+        runtime_user, _ = resolve_runtime_owner(report.instance_path.parent)
+    except ValueError as exc:
+        print("secretary reconcile apply: " + str(exc))
+        return 2
     result = apply_host(
         ApplyInputs(
             instance=report.instance,
@@ -259,6 +268,7 @@ def run_reconcile_apply(args) -> int:
             managed=managed,
             manifest_path=manifest,
             packaged=packaged,
+            runtime_user=runtime_user,
         ),
         units=SystemdUnitInstaller(),
         orca=LiveOrcaRegistrar(),
