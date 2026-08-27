@@ -1630,6 +1630,13 @@ its watermark takes the current values as a baseline rather than replaying what 
 saved by that same run, so a quiet hour that never reaches the advance does not leave the counters empty and the next
 failed tick is not read as a first scan and silenced.
 
+An unhealthy hit also carries `retained_window`: `degradations` is a deterministic list grouped by `step` and
+`action`, and `errors` is one grouped by `code`. Each item has its retained diagnostic occurrence `count` and sorted,
+unique affected `refs`. This complements, rather than replaces, the newest incident's opening tick, `cause`, and
+`incidents` count. The telemetry keeps only a bounded diagnostic list per tick, so the summary groups every readable
+item in the retained unhealthy ring but never invents a class or ref for a diagnostic that its original tick count says
+was not retained.
+
 Counters only mean something inside one telemetry history, so the dispatcher keeps a `generation` next to them: an
 identifier issued once and never changed afterwards. The steward's watermark stores it with the counters, and as soon
 as the generation differs (a restore from a backup, a rebuilt installation, a manual edit) the steward gets a

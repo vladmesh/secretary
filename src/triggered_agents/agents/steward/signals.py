@@ -18,6 +18,7 @@ import json
 import os
 import re
 import time
+from collections import defaultdict
 from datetime import UTC, datetime
 
 from ...runtime import production_telemetry, shared_state
@@ -160,13 +161,72 @@ def _pipeline_tick_signals(mark: dict) -> tuple[list[dict], dict]:
         # so the steward never hears that something recovered without hearing what broke.
         incident = telemetry.incident or telemetry.recovery
         if incident:
-            hits.append(_incident_hit(incident, new_incidents))
+            hits.append(_incident_hit(incident, new_incidents, telemetry.unhealthy))
     if new_recoveries > 0 and telemetry.recovery:
         hits.append(_recovery_hit(telemetry.recovery, new_recoveries))
     return hits, pending
 
 
-def _incident_hit(incident: dict, incidents: int) -> dict:
+def _retained_unhealthy_summary(unhealthy: tuple[dict, ...]) -> dict:
+    """Classify the diagnostics that are still readable in the unhealthy ring.
+
+    The writer bounds each tick's diagnostics, so this deliberately counts only retained
+    diagnostic items. The per-tick ``*_count`` fields can prove that more items existed, but
+    cannot safely assign an unseen item to a class or ref. A malformed item is ignored without
+    preventing the remaining items from contributing to their classes.
+    """
+    degradation_counts: defaultdict[tuple[str, str], int] = defaultdict(int)
+    degradation_refs: defaultdict[tuple[str, str], set[str]] = defaultdict(set)
+    error_counts: defaultdict[str, int] = defaultdict(int)
+    error_refs: defaultdict[str, set[str]] = defaultdict(set)
+    for tick in unhealthy:
+        if not isinstance(tick, dict):
+            continue
+        items = tick.get("degradations")
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                step = item.get("step")
+                action = item.get("action")
+                if not isinstance(step, str) or not step or not isinstance(action, str) or not action:
+                    continue
+                group = (step, action)
+                degradation_counts[group] += 1
+                ref = item.get("ref")
+                if isinstance(ref, str) and ref:
+                    degradation_refs[group].add(ref)
+        items = tick.get("errors")
+        if isinstance(items, list):
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                code = item.get("code")
+                if not isinstance(code, str) or not code:
+                    continue
+                error_counts[code] += 1
+                ref = item.get("ref")
+                if isinstance(ref, str) and ref:
+                    error_refs[code].add(ref)
+
+    return {
+        "degradations": [
+            {
+                "step": step,
+                "action": action,
+                "count": degradation_counts[(step, action)],
+                "refs": sorted(degradation_refs[(step, action)]),
+            }
+            for step, action in sorted(degradation_counts)
+        ],
+        "errors": [
+            {"code": code, "count": error_counts[code], "refs": sorted(error_refs[code])}
+            for code in sorted(error_counts)
+        ],
+    }
+
+
+def _incident_hit(incident: dict, incidents: int, unhealthy: tuple[dict, ...]) -> dict:
     opened = incident.get("opened")
     return {
         # The tick that opened the incident, spread whole: status, step, reason, errors and
@@ -182,6 +242,9 @@ def _incident_hit(incident: dict, incidents: int) -> dict:
         # More than one incident opened between two scans: the newest one is described here, and
         # the count says the steward is not looking at all of them.
         "incidents": incidents,
+        # Unlike the opening tick above, this preserves the full currently retained picture:
+        # distinct failures later in the ring cannot be hidden by a newer incident's cause.
+        "retained_window": _retained_unhealthy_summary(unhealthy),
     }
 
 

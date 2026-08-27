@@ -34,6 +34,7 @@ from secretary.dispatcher_observer import (
 )
 from secretary.dispatcher_production import (
     TICK_TELEMETRY_DEGRADATIONS_KEPT,
+    TICK_TELEMETRY_ERRORS_KEPT,
     TICK_TELEMETRY_UNHEALTHY_KEPT,
     record_tick_telemetry,
 )
@@ -1531,6 +1532,83 @@ class StewardPipelineSignalTests(unittest.TestCase):
         # ...and once the steward has actually looked, the same incident is silent.
         self.assertEqual(steward_signals._pipeline_tick_signals(dict(mark, **pending))[0], [])
 
+    def test_unhealthy_hit_summarizes_every_readable_retained_diagnostic_class(self) -> None:
+        """The newest tick must not obscure older retained failures of the same incident.
+
+        Diagnostics are bounded per tick. The sixth error below existed (``error_count`` says so)
+        but was not retained, so the reader may neither invent its class nor attach its ref to a
+        visible class.
+        """
+        payload: dict = {}
+        record_tick_telemetry(
+            payload,
+            {
+                "status": "degraded",
+                "step": "production-tick",
+                "actions": [
+                    {"ref": "secretary-1", "step": "claim", "action": "start", "status": "failed"},
+                    {"ref": "secretary-2", "step": "claim", "action": "start", "status": "failed"},
+                    {"ref": "secretary-1", "step": "claim", "action": "start", "status": "degraded"},
+                ],
+                "errors": [
+                    {"ref": "secretary-1", "code": "backend_unavailable"},
+                    {"ref": "secretary-2", "code": "backend_unavailable"},
+                    {"ref": "secretary-1", "code": "access_denied"},
+                    {},
+                    {"ref": "secretary-4", "code": "read_timeout"},
+                    {"ref": "secretary-unseen", "code": "unretained_error"},
+                ],
+            },
+        )
+        record_tick_telemetry(
+            payload,
+            {
+                "status": "degraded",
+                "step": "production-tick",
+                "actions": [
+                    {"ref": "sprint-9", "step": "observer", "action": "stop", "status": "failed"},
+                ],
+                "errors": [{"ref": "sprint-9", "code": "later_error"}],
+            },
+        )
+        telemetry = payload["tick_telemetry"]
+        telemetry["generation"] = "gen-a"
+        self.assertEqual(telemetry["unhealthy"][-1]["errors"][0]["code"], "later_error")
+        self.assertEqual(telemetry["unhealthy"][0]["error_count"], TICK_TELEMETRY_ERRORS_KEPT + 1)
+        self.assertEqual(len(telemetry["unhealthy"][0]["errors"]), TICK_TELEMETRY_ERRORS_KEPT)
+        # A reader has to tolerate hand-edited/old optional diagnostic items alongside valid ones.
+        telemetry["unhealthy"][0]["degradations"].extend([None, {"step": "claim", "action": 7}])
+        telemetry["unhealthy"][0]["errors"].extend([None, {"code": 7, "ref": "ignored"}])
+        _telemetry_state(self.path, telemetry)
+
+        hits, _ = steward_signals._pipeline_tick_signals(self.baseline())
+
+        self.assertEqual([hit["event"] for hit in hits], ["pipeline-tick-unhealthy"])
+        self.assertEqual(
+            hits[0]["retained_window"],
+            {
+                "degradations": [
+                    {
+                        "step": "claim",
+                        "action": "start",
+                        "count": 3,
+                        "refs": ["secretary-1", "secretary-2"],
+                    },
+                    {"step": "observer", "action": "stop", "count": 1, "refs": ["sprint-9"]},
+                ],
+                "errors": [
+                    {"code": "access_denied", "count": 1, "refs": ["secretary-1"]},
+                    {
+                        "code": "backend_unavailable",
+                        "count": 2,
+                        "refs": ["secretary-1", "secretary-2"],
+                    },
+                    {"code": "later_error", "count": 1, "refs": ["sprint-9"]},
+                    {"code": "read_timeout", "count": 1, "refs": ["secretary-4"]},
+                ],
+            },
+        )
+
     def test_the_first_healthy_tick_reports_one_recovery_and_no_more(self) -> None:
         mark = self.baseline()
         payload = self.write("xx")
@@ -1741,7 +1819,13 @@ class StewardPipelineSignalTests(unittest.TestCase):
     def test_a_hit_is_a_signal_and_renders(self) -> None:
         batch = {
             "signals": {
-                "pipeline_ticks": [{"event": "pipeline-tick-unhealthy", "ts": _ts(1)}],
+                "pipeline_ticks": [
+                    {
+                        "event": "pipeline-tick-unhealthy",
+                        "ts": _ts(1),
+                        "retained_window": {"degradations": [], "errors": []},
+                    }
+                ],
                 "new_blocked": [],
                 "stale": [],
                 "resource_flip": {},
@@ -1750,7 +1834,9 @@ class StewardPipelineSignalTests(unittest.TestCase):
         }
 
         self.assertTrue(steward_signals.has_signal(batch))
-        self.assertIn("production dispatcher", steward_signals.render_markdown(batch))
+        rendered = steward_signals.render_markdown(batch)
+        self.assertIn("production dispatcher", rendered)
+        self.assertIn("retained_window", rendered)
 
 
 _LONG_AGO = 1_600_000_000  # a Kanboard date_moved far beyond any stale threshold
