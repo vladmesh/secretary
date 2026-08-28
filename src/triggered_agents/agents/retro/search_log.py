@@ -1,7 +1,7 @@
 """Second source for retro: the memory-mcp search log.
 
-Each line is `{"ts": ISO, "query": str, "k": int, "hits": [...]}`, appended by memory-mcp on
-every `memory_search`. Retro pairs it with the transcript batch so the judge can tell whether a
+The audit stream contains several memory actions. This reader accepts only records whose
+`action` is `memory_search`, and pairs them with the transcript batch so the judge can tell whether a
 search actually fired near an answer (the "answered from memory without memory_search" failure).
 
 Path is overridable via TA_SEARCH_LOG (default ~/secretary-data/memory/search-log.jsonl). The file
@@ -55,6 +55,8 @@ def tail(since=None, until=None, slack_s: int = 120) -> list[dict]:
         try:
             rec = json.loads(line)
         except json.JSONDecodeError:
+            continue
+        if rec.get("action") != "memory_search":
             continue
         t = _parse(rec.get("ts"))
         if lo and (t is None or t < lo):

@@ -322,6 +322,35 @@ class InstallationTests(unittest.TestCase):
                 self.assertEqual(provision_codex_home(product, "dev"), 0)
             self.assertEqual((target / "config.toml").read_text(encoding="utf-8"), "operator state\n")
 
+    def test_codex_home_upgrade_repairs_only_the_managed_memory_bearer_setting(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            product = root / "product"
+            source = product / "packaging" / "codex-home"
+            source.mkdir(parents=True)
+            (source / "AGENTS.md").write_text("agents\n", encoding="utf-8")
+            (source / "config.toml").write_text(
+                'model = "test"\n\n[mcp_servers.memory]\nurl = "http://127.0.0.1:8077/mcp"\n'
+                'bearer_token_env_var = "SECRETARY_MEMORY_ACCESS_TOKEN"\n',
+                encoding="utf-8",
+            )
+            target = root / "home" / ".config" / "orca" / "codex-runtime-home" / "home"
+            target.mkdir(parents=True)
+            (target / "config.toml").write_text(
+                'model = "operator-choice"\n\n[mcp_servers.memory]\nurl = "http://127.0.0.1:8077/mcp"\n',
+                encoding="utf-8",
+            )
+            account = SimpleNamespace(pw_dir=str(root / "home"), pw_uid=os.getuid(), pw_gid=os.getgid())
+            with (
+                mock.patch("secretary.installation.pwd.getpwnam", return_value=account),
+                mock.patch("secretary.installation._set_installation_owner"),
+            ):
+                self.assertEqual(provision_codex_home(product, "dev"), 2)
+
+            rendered = (target / "config.toml").read_text(encoding="utf-8")
+            self.assertIn('model = "operator-choice"', rendered)
+            self.assertIn('bearer_token_env_var = "SECRETARY_MEMORY_ACCESS_TOKEN"', rendered)
+
     def test_root_checks_orca_as_installation_user(self):
         with (
             mock.patch("secretary.installation.os.geteuid", return_value=0),

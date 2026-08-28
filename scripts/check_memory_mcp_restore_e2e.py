@@ -204,13 +204,15 @@ def main() -> int:
         server.embed_doc = fake_embed
         server.embed_query = fake_embed
         server.mark_search_ready()
-        rows = server.memory_list(limit=10)
+        # This verifies the rebuilt index in-process. MCP tool functions are intentionally
+        # guarded transport endpoints and must not be treated as an authenticated request.
+        rows = server.list_memory_entries(limit=10)
         if len(rows) != 2:
             raise AssertionError(f"memory_list returned {len(rows)} facts, expected 2")
         alpha = next(row for row in rows if "Alpha" in row["text"])
-        if server.memory_get(alpha["id"])["text"] != alpha["text"]:
+        if server.get_memory_entry(alpha["id"])["text"] != alpha["text"]:
             raise AssertionError("memory_get did not read the rebuilt index")
-        hits = server.memory_search("alpha restore", k=1, caller="worker")
+        hits = server.search_memory("alpha restore", k=1)
         if not isinstance(hits, list) or not hits or hits[0]["id"] != alpha["id"]:
             raise AssertionError("memory_search did not read the rebuilt index")
         if "memory index has not been rebuilt" in restore_findings(data_dir):

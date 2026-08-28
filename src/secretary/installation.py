@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -696,6 +697,8 @@ def provision_codex_home(product_root: Path, installation_user: str | None) -> i
     for name in ("AGENTS.md", "config.toml"):
         destination = target / name
         if destination.exists():
+            if name == "config.toml" and _reconcile_managed_memory_mcp(destination, source / name):
+                changed += 1
             continue
         try:
             contents = (source / name).read_text(encoding="utf-8")
@@ -706,6 +709,45 @@ def provision_codex_home(product_root: Path, installation_user: str | None) -> i
         changed += 1
     _set_installation_owner(target, installation_user)
     return changed
+
+
+def _reconcile_managed_memory_mcp(destination: Path, source: Path) -> bool:
+    """Add the bearer setting to the one Memory endpoint Secretary owns.
+
+    CODEX_HOME also holds user login and preferences, so provisioning remains copy-once.  The
+    exception is the managed loopback Memory entry: its URL must still exactly match the packaged
+    endpoint and only its missing bearer key is inserted.  Any malformed or user-repointed config
+    is left untouched.
+    """
+    try:
+        current_text = destination.read_text(encoding="utf-8")
+        source_payload = tomllib.loads(source.read_text(encoding="utf-8"))
+        current_payload = tomllib.loads(current_text)
+        managed = source_payload["mcp_servers"]["memory"]
+        current = current_payload["mcp_servers"]["memory"]
+        managed_url = managed["url"]
+    except (OSError, UnicodeError, KeyError, TypeError, tomllib.TOMLDecodeError):
+        return False
+    if not isinstance(managed, dict) or not isinstance(current, dict):
+        return False
+    if not isinstance(managed_url, str) or current.get("url") != managed_url:
+        return False
+    bearer_name = managed.get("bearer_token_env_var")
+    if not isinstance(bearer_name, str) or current.get("bearer_token_env_var"):
+        return False
+    lines = current_text.splitlines(keepends=True)
+    section = "[mcp_servers.memory]"
+    start = next((index for index, line in enumerate(lines) if line.strip() == section), None)
+    if start is None:
+        return False
+    end = next((index for index in range(start + 1, len(lines)) if lines[index].lstrip().startswith("[")), len(lines))
+    newline = "\r\n" if "\r\n" in current_text else "\n"
+    lines.insert(end, f'bearer_token_env_var = "{bearer_name}"{newline}')
+    try:
+        write_text_atomic(destination, "".join(lines))
+    except RuntimeError:
+        return False
+    return True
 
 
 def _validated_instance(instance_dir: Path):

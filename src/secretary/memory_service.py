@@ -204,6 +204,11 @@ def log_read(
             "ts": datetime.datetime.now(datetime.UTC).isoformat(),
             "action": action,
             "outcome": outcome,
+            # Keep the schema useful for every denial.  An unresolved identity has no
+            # attributable role or subject, but it is visibly distinct from an omitted field.
+            "role": None,
+            "subject": None,
+            "scopes": [],
         }
         if identity is not None:
             entry.update(identity.audit_json())
@@ -247,6 +252,52 @@ def read_guard(requested_scope: str | None = None) -> memory_access.MemoryReadId
     if isinstance(resolved, memory_access.MemoryAccessDenial):
         return resolved
     return memory_access.narrow(resolved, requested_scope)
+
+
+def list_memory_entries(limit: int = 50, *, allowed_scopes: frozenset[str] | None = None) -> list[dict[str, Any]]:
+    """Read index entries without MCP authorization, for local index maintenance checks only."""
+    conn = db()
+    try:
+        if allowed_scopes is None:
+            rows = conn.execute(
+                "SELECT id, text, scope, tags, source, created_at FROM memories ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        else:
+            placeholders = ",".join("?" for _ in allowed_scopes)
+            rows = conn.execute(
+                f"SELECT id, text, scope, tags, source, created_at FROM memories WHERE scope IN ({placeholders}) "
+                "ORDER BY id DESC LIMIT ?",
+                (*sorted(allowed_scopes), limit),
+            ).fetchall()
+    finally:
+        conn.close()
+    return [
+        {"id": r[0], "text": r[1], "scope": r[2], "tags": r[3], "source": r[4], "created_at": r[5]}
+        for r in rows
+    ]
+
+
+def get_memory_entry(id: int, *, allowed_scopes: frozenset[str] | None = None) -> dict[str, Any] | None:
+    """Read one index entry without MCP authorization, for local index maintenance checks only."""
+    conn = db()
+    try:
+        if allowed_scopes is None:
+            row = conn.execute(
+                "SELECT id, text, scope, tags, source, created_at FROM memories WHERE id = ?", (id,)
+            ).fetchone()
+        else:
+            placeholders = ",".join("?" for _ in allowed_scopes)
+            row = conn.execute(
+                f"SELECT id, text, scope, tags, source, created_at FROM memories "
+                f"WHERE id = ? AND scope IN ({placeholders})",
+                (id, *sorted(allowed_scopes)),
+            ).fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return None
+    return {"id": row[0], "text": row[1], "scope": row[2], "tags": row[3], "source": row[4], "created_at": row[5]}
 
 
 # ── Canon → index (daemon-owned reindex) ──────────────────────────────────────
@@ -809,7 +860,7 @@ def memory_search(query: str, k: int = 5, scope: str = "", caller: str = "") -> 
     retained for old clients and ignored as authorization input."""
     authorization = read_guard(scope or None)
     if isinstance(authorization, memory_access.MemoryAccessDenial):
-        log_read("memory_search", None, authorization.code)
+        log_read("memory_search", authorization.identity, authorization.code)
         return authorization.response()
     # Result cap: the ranker's scores sit in a narrow band (~0.80-0.84 in telemetry), so a long
     # tail is indistinguishable from the top and just clutters the context.
@@ -837,28 +888,17 @@ def memory_get(id: int) -> dict:
     """Fetch one authorized memory entry by id."""
     authorization = read_guard()
     if isinstance(authorization, memory_access.MemoryAccessDenial):
-        log_read("memory_get", None, authorization.code)
+        log_read("memory_get", authorization.identity, authorization.code)
         return authorization.response()
     if not index_exists():
         log_read("memory_get", authorization, "index_missing")
         return not_ready_response("index_missing", f"index does not exist: {DB_PATH}")
-    conn = db()
-    if authorization.scopes is None:
-        r = conn.execute(
-            "SELECT id, text, scope, tags, source, created_at FROM memories WHERE id = ?", (id,)
-        ).fetchone()
-    else:
-        placeholders = ",".join("?" for _ in authorization.scopes)
-        r = conn.execute(
-            f"SELECT id, text, scope, tags, source, created_at FROM memories WHERE id = ? AND scope IN ({placeholders})",
-            (id, *sorted(authorization.scopes)),
-        ).fetchone()
-    conn.close()
-    if not r:
+    entry = get_memory_entry(id, allowed_scopes=authorization.scopes)
+    if entry is None:
         log_read("memory_get", authorization, "not_found_or_not_permitted")
         return {"error": "not found", "id": id}
-    log_read("memory_get", authorization, "allowed", results=[{"id": r[0], "score": 0.0}])
-    return {"id": r[0], "text": r[1], "scope": r[2], "tags": r[3], "source": r[4], "created_at": r[5]}
+    log_read("memory_get", authorization, "allowed", results=[{"id": entry["id"], "score": 0.0}])
+    return entry
 
 
 @mcp.tool()
@@ -866,30 +906,14 @@ def memory_list(limit: int = 50) -> list:
     """List recent memory entries in the launch-bound allowed scopes."""
     authorization = read_guard()
     if isinstance(authorization, memory_access.MemoryAccessDenial):
-        log_read("memory_list", None, authorization.code)
+        log_read("memory_list", authorization.identity, authorization.code)
         return [authorization.response()]
     if not index_exists():
         log_read("memory_list", authorization, "index_missing")
         return [not_ready_response("index_missing", f"index does not exist: {DB_PATH}")]
-    conn = db()
-    if authorization.scopes is None:
-        rows = conn.execute(
-            "SELECT id, text, scope, tags, source, created_at FROM memories ORDER BY id DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
-    else:
-        placeholders = ",".join("?" for _ in authorization.scopes)
-        rows = conn.execute(
-            f"SELECT id, text, scope, tags, source, created_at FROM memories WHERE scope IN ({placeholders}) "
-            "ORDER BY id DESC LIMIT ?",
-            (*sorted(authorization.scopes), limit),
-        ).fetchall()
-    conn.close()
-    log_read("memory_list", authorization, "allowed", results=[{"id": r[0], "score": 0.0} for r in rows])
-    return [
-        {"id": r[0], "text": r[1], "scope": r[2], "tags": r[3], "source": r[4], "created_at": r[5]}
-        for r in rows
-    ]
+    rows = list_memory_entries(limit, allowed_scopes=authorization.scopes)
+    log_read("memory_list", authorization, "allowed", results=[{"id": row["id"], "score": 0.0} for row in rows])
+    return rows
 
 
 def main() -> None:

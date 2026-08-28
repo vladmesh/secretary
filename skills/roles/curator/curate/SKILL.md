@@ -89,8 +89,9 @@ anything doubtful is still skipped. Conversion rules:
 
 ### 3. Deduplicate and resolve conflicts
 
-Before writing EACH candidate, run `memory_search` over the canon (the `memory` MCP server is available
-to you):
+Before writing EACH candidate, run `memory_search` over the canon. The curator's launch-bound standing
+identity has the installation-wide read needed for this safety check; do not pass `caller` or invent a
+scope to obtain access:
 
 - **near-duplicate** (the same fact in other words) → skip it, do not write a second one.
 - **addition** (the same subject, new detail) → rewrite the existing file more fully.

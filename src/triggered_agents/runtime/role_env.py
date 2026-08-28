@@ -93,9 +93,9 @@ ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "worker": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),
     "reviewer": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),
     "observer": (*NONSECRET_ENV, OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV, MEMORY_ACCESS_TOKEN_ENV),
-    "steward": NONSECRET_ENV,
-    "retro": NONSECRET_ENV,
-    "curator": NONSECRET_ENV,
+    "steward": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),
+    "retro": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),
+    "curator": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),
 }
 
 # This gates the synthetic BOARD_ROLE value. po and dispatcher have no allowlist entry, so they

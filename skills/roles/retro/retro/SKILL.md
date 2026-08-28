@@ -29,6 +29,8 @@ only collect the redacted batch and the tail of the search log.
   exact date instead of the current state, or is too small and specific to be useful in a month. You look for
   this pattern in the canon itself rather than in the batch of turns: walk the cards on the topics the
   current batch touched (or wider, if it has been a while) through `memory_search` and `memory_list`. The
+  retro standing head has installation-wide launch-bound read for this canon-hygiene check. Do not pass
+  `caller` or retry a denied search without a scope. The
   signs: several neighbouring cards about one subsystem that could be merged into one, or a card whose fact
   rests on a pull request number or an exact merge time rather than on how the system works now.
 

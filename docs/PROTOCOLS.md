@@ -1712,12 +1712,20 @@ data-free denial. `caller`, `scope`, and a tool's other arguments are never auth
 
 The resolved policy is deliberately small: an interactive PO has installation-wide read; a worker or
 reviewer has its card project plus `product:secretary` (and `project:secretary` when that card is the
-Secretary project); an observer has its sprint reservations plus `product:secretary`. Other runtime
-roles have no memory-read grant. A requested scope only narrows that set. Search does not retry at a
-wider scope, and `memory_get` and `memory_list` use the same guard as search.
+Secretary project); an observer has its sprint reservations plus `product:secretary`. The curator and
+retro standing duties have installation-wide read because canonical deduplication and retro's canon-hygiene
+review compare facts across projects. Steward has only `project:secretary` and `product:secretary` for its
+system watch. Other runtime roles have no memory-read grant. A requested scope only narrows that set.
+Search does not retry at a wider scope, and `memory_get` and `memory_list` use the same guard as search.
 
-The memory search log is an authorization audit, not a fact transcript: it records the resolved role,
-subject, scopes and outcome with result ids/scores, never fact text, queries or bearer material.
+The memory search log is an authorization audit, not a fact transcript: every record identifies its action
+and records the resolved role, subject, scopes and outcome with result ids/scores, never fact text, queries
+or bearer material. Consumers that need evidence of a search filter for `action == "memory_search"`.
+
+Bearer delivery assumes processes running as the same host user are mutually trusted: that user can inspect
+another same-user process's environment or command line and could reuse its live bearer. The protocol limits
+cross-user and stale-head access, keeps the capability out of durable output and redacts it from launch and
+audit output; it is not a generic same-user credential isolation scheme.
 
 Write authority is split in two, because asking for a fact and publishing one are different acts.
 `propose` stages a fact in the curator inbox (`<data_dir>/memory/.staging/<propose-id>`) and touches no

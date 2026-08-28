@@ -69,6 +69,7 @@ class MemoryAccessGrant:
 @dataclass(frozen=True)
 class MemoryAccessDenial:
     code: str
+    identity: MemoryReadIdentity | None = None
 
     def response(self) -> dict[str, str]:
         # Do not disclose grant paths, facts, requested scopes, or bearer material.
@@ -99,6 +100,12 @@ def sprint_subject(reference: str, reservations: list[str] | tuple[str, ...]) ->
 
 def interactive_po_subject(subject: str = "interactive") -> dict[str, str]:
     return {"kind": "interactive", "ref": _reference(subject, "interactive subject")}
+
+
+def standing_subject(role: str) -> dict[str, str]:
+    """The durable standing duty used by the scheduled maintenance heads."""
+    name = _name(role, "role")
+    return {"kind": "standing", "ref": name}
 
 
 def _name(value: object, label: str) -> str:
@@ -143,6 +150,16 @@ def _scopes(role: str, subject: Mapping[str, Any], run: HeadRun) -> frozenset[st
         if not isinstance(reservations, list):
             raise MemoryAccessError("observer memory access has malformed sprint reservations")
         return frozenset({PRODUCT_SECRETARY_SCOPE, *(f"project:{_name(project, 'reservation')}" for project in reservations)})
+    if role in {"curator", "retro", "steward"}:
+        if kind != "standing" or run.task_ref.kind != "standing":
+            raise MemoryAccessError("scheduled memory access requires a standing HeadRun")
+        if reference != role:
+            raise MemoryAccessError("scheduled memory access subject does not match role")
+        # The curator and retro compare canon facts across projects.  Steward's system watch
+        # only needs the Secretary product and its implementation project.
+        if role in {"curator", "retro"}:
+            return None
+        return frozenset({PRODUCT_SECRETARY_SCOPE, PROJECT_SECRETARY_SCOPE})
     raise MemoryAccessError(f"memory read role {role!r} is not permitted")
 
 
@@ -204,13 +221,16 @@ def resolve_grant_id(grant_id: object, *, data_dir: str | Path | None = None, no
 
 
 def narrow(identity: MemoryReadIdentity, requested_scope: str | None) -> MemoryReadIdentity | MemoryAccessDenial:
-    scope = normalize_scope(requested_scope)
+    try:
+        scope = normalize_scope(requested_scope)
+    except MemoryAccessError:
+        return MemoryAccessDenial("scope_malformed", identity)
     if scope is None:
         return identity
     if identity.scopes is None:
         return MemoryReadIdentity(identity.role, identity.subject, frozenset({scope}), identity.grant_id)
     if scope not in identity.scopes:
-        return MemoryAccessDenial("scope_not_permitted")
+        return MemoryAccessDenial("scope_not_permitted", identity)
     return MemoryReadIdentity(identity.role, identity.subject, frozenset({scope}), identity.grant_id)
 
 
