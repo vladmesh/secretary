@@ -5232,6 +5232,7 @@ class DispatcherRuntime:
                     "reason": "worker result is not durable",
                 }
             current_sha = self.host.head_commit(record)
+            retry_stale_no_diff_gate = False
             reuse_report_only_gate = False
             if current_sha and current_sha == record.rejected_sha:
                 if record.rejected_failure_class == "infrastructure":
@@ -5243,15 +5244,13 @@ class DispatcherRuntime:
                         attempt_id,
                         current_sha,
                     )
-                recovered, recovery_outcome = self._recover_stale_no_diff_research_gate(
-                    task, record, records, payload, attempt_id, current_sha
-                )
-                if recovery_outcome is not None:
-                    return recovery_outcome
-                reuse_report_only_gate = recovered or self._can_reuse_report_only_rework_gate(
+                retry_stale_no_diff_gate = self._can_retry_stale_no_diff_research_gate(
                     task, record, current_sha
                 )
-                if not reuse_report_only_gate:
+                reuse_report_only_gate = self._can_reuse_report_only_rework_gate(
+                    task, record, current_sha
+                )
+                if not (retry_stale_no_diff_gate or reuse_report_only_gate):
                     return self._reject_stale_done(task, record, records, payload, attempt_id, current_sha)
             record.rejected_done_reports = 0
             record.review_baseline = len(task.get("comments") or [])
@@ -5358,24 +5357,21 @@ class DispatcherRuntime:
             and bool(_gate_attestation_for_prompt(record, current_sha))
         )
 
-    def _recover_stale_no_diff_research_gate(
+    def _can_retry_stale_no_diff_research_gate(
         self,
         task: dict[str, Any],
         record: DispatcherRecord,
-        records: dict[str, DispatcherRecord],
-        payload: dict[str, Any],
-        attempt_id: str,
         current_sha: str,
-    ) -> tuple[bool, dict[str, Any] | None]:
-        """Accept only a fresh exact-SHA dispatch receipt after its stale-run rejection.
+    ) -> bool:
+        """Whether a stale no-diff gate may retry after the worker is frozen.
 
         The initial no-diff poll can see another branch's workflow-dispatch run before this card's
-        own dispatch becomes visible.  A new report in the red-gate continuation is not evidence
-        by itself, so it may merely cause one fresh poll of the dispatcher-owned request.  Every
-        other answer, including an old persisted receipt, takes the ordinary stale-done path.
+        own dispatch becomes visible. A fresh report is not evidence by itself: this narrow
+        persisted-dispatch match only lets the ordinary, post-retention gate poll that request.
+        Every other answer, including an old persisted receipt, takes the stale-done path.
         """
         dispatch = record.gate_workflow_dispatch
-        if not (
+        return bool(
             task.get("type") == "research"
             and _validation_ci(self.host, task) == "github"
             and record.rejected_failure_class == "substantive"
@@ -5383,27 +5379,7 @@ class DispatcherRuntime:
             and isinstance(dispatch, dict)
             and dispatch.get("sha") == current_sha
             and dispatch.get("workflow") == "ci.yml"
-        ):
-            return False, None
-        try:
-            result = self.host.gate_check(task, record)
-        except (GateTransportError, HostError):
-            # This report did not acquire gate evidence.  Keep the pre-existing stale-result
-            # safeguard rather than turning an unavailable or malformed poll into a retry route.
-            return False, None
-        self._gate_answered(task["ref"], record, records, payload)
-        if result.status != "green":
-            return False, None
-        accepted = AcceptedGreenGate.accept(
-            result.attestation,
-            current_sha=current_sha,
-            gate_mode=_validation_ci(self.host, task),
-            noop=getattr(self.host, "mode", "real") == "noop",
         )
-        if not accepted.valid:
-            return False, None
-        outcome = self._accept_green_gate(task, record, records, payload, attempt_id, result, stage="initial")
-        return outcome is None, outcome
 
     def _accept_stale_infrastructure_done(
         self,

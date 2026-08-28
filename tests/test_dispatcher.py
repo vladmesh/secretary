@@ -5207,8 +5207,8 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(record["rejected_sha"], self.host.commit)
         self.assertEqual(record["rejected_done_reports"], 1)
 
-    def test_no_diff_research_recovers_a_stale_dispatch_gate_with_a_fresh_exact_sha_receipt(self) -> None:
-        """A second report may reach review only after the dispatcher's own fresh gate poll."""
+    def test_no_diff_research_retries_a_stale_dispatch_gate_only_after_freezing_the_worker(self) -> None:
+        """A moved base cannot make the recovery gate touch a live rework checkout."""
         self.board.metadata[12]["task_type"] = "research"
         self.catalog._adapter = {"validation": {"ci": "github"}}
         self.host.commit = "a" * 40
@@ -5239,17 +5239,32 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
             "run_id": "12",
         }
         self.runtime.production_state.save(payload)
+        self.host.calls.clear()
+        gate_check = self.host.gate_check
+
+        def moved_base_before_freeze(task, record) -> GateResult:
+            if "retain_worker" not in self.host.calls:
+                # This models the real gate's base merge. A pre-freeze call would change the
+                # candidate before its own receipt can be accepted.
+                self.host.commit = "b" * 40
+            return gate_check(task, record)
+
+        self.host.gate_check = moved_base_before_freeze  # type: ignore[method-assign]
         self._report_done("the now-visible dispatcher workflow receipt is green")
 
         advanced = self.tick()
 
         self.assertEqual(advanced["to"], "validate")
         record = self._pilot_record()
+        self.assertEqual(record["gate_state"], "")
+        self.assertEqual(self.host.gate_calls, [CARD_REF])
+        self.assertEqual(self.host.commit, "a" * 40)
+        self.assertEqual(self.tick()["action"], "review-started")
+        record = self._pilot_record()
         self.assertEqual(record["gate_state"], "green")
         self.assertEqual(record["gate_attestation"], receipt)
         self.assertEqual(self.host.gate_calls, [CARD_REF, CARD_REF])
-        self.assertEqual(self.tick()["action"], "review-started")
-        self.assertEqual(self.host.gate_calls, [CARD_REF, CARD_REF], "the accepted receipt is reused")
+        self.assertLess(self.host.calls.index("retain_worker"), self.host.calls.index("gate_check"))
 
     def test_stale_no_diff_dispatch_recovery_refuses_a_green_result_without_an_exact_sha_receipt(self) -> None:
         self.board.metadata[12]["task_type"] = "research"
@@ -5285,8 +5300,11 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.runtime.production_state.save(payload)
         self._report_done("a receiptless retry is not evidence")
 
-        self.assertEqual(self.tick()["action"], "stale-done-rework")
-        self.assertEqual(self.reader.show(CARD_REF)["state"], "in_progress")
+        self.assertEqual(self.tick()["to"], "validate")
+        blocked = self.tick()
+
+        self.assertEqual(blocked["reason"], "gate receipt unavailable")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
         self.assertEqual(self.host.gate_calls, [CARD_REF, CARD_REF])
 
     def test_code_card_cannot_use_the_stale_no_diff_dispatch_recovery(self) -> None:
