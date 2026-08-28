@@ -85,8 +85,9 @@ class DispatcherRecord:
     report_decision: str = ""
     # Mechanical validation gate (secretary-633): "" until the gate is green for the current code
     # state, then "green". Reset to "" on every fresh entry to validate so a reworked card re-runs
-    # the gate instead of coasting on a stale pass. gate_pending_since stamps when a github CI
-    # rollup first went non-terminal, driving the pending watchdog.
+    # the gate instead of coasting on a stale pass, except for an observer-directed report-only
+    # research continuation whose accepted receipt still names its unchanged candidate. gate_pending_since
+    # stamps when a github CI rollup first went non-terminal, driving the pending watchdog.
     gate_state: str = ""
     gate_pending_since: float = 0.0
     # SHA-bound result of the last green mechanical gate.  It is an evidence receipt, not a
