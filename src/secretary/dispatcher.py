@@ -5098,7 +5098,7 @@ class DispatcherRuntime:
         if record.worker_continuation.red_transition_pending:
             # An open red transition outranks everything else. The board move may or may not have
             # committed before its tick died, so it is finished against the board as it is now.
-            return self._complete_red_transition(record, records, payload, attempt_id, ref=ref)
+            return self._complete_red_transition(task, record, records, payload, attempt_id, ref=ref)
         if record.state == "claim_verified":
             return self._launch_worker_after_claim(task, record, records, payload)
         # The round the dispatcher is holding, not merely the card's last report marker: a marker is
@@ -5232,6 +5232,7 @@ class DispatcherRuntime:
                     "reason": "worker result is not durable",
                 }
             current_sha = self.host.head_commit(record)
+            reuse_report_only_gate = False
             if current_sha and current_sha == record.rejected_sha:
                 if record.rejected_failure_class == "infrastructure":
                     return self._accept_stale_infrastructure_done(
@@ -5242,7 +5243,9 @@ class DispatcherRuntime:
                         attempt_id,
                         current_sha,
                     )
-                return self._reject_stale_done(task, record, records, payload, attempt_id, current_sha)
+                reuse_report_only_gate = self._can_reuse_report_only_rework_gate(task, record, current_sha)
+                if not reuse_report_only_gate:
+                    return self._reject_stale_done(task, record, records, payload, attempt_id, current_sha)
             record.rejected_done_reports = 0
             record.review_baseline = len(task.get("comments") or [])
             # Freeze before moving the board. A later tick may finish the idempotent move, but it
@@ -5255,12 +5258,13 @@ class DispatcherRuntime:
                 unconfirmed = self._stop_worker_confirmed(record, ref, step="advance", attempt_id=attempt_id)
                 if unconfirmed is not None:
                     return unconfirmed
-            # Fresh code state: the mechanical gate must re-run before this report reaches review.
-            record.gate_state = ""
-            record.gate_pending_since = 0.0
-            record.gate_transport_failures = 0
-            record.gate_transport_error = ""
-            self._reset_infrastructure_reruns(record)
+            if not reuse_report_only_gate:
+                # Fresh code state: the mechanical gate must re-run before this report reaches review.
+                record.gate_state = ""
+                record.gate_pending_since = 0.0
+                record.gate_transport_failures = 0
+                record.gate_transport_error = ""
+                self._reset_infrastructure_reruns(record)
             _reset_wait(record, "worker")
             _reset_wait(record, "review")
             records[ref] = record
@@ -5318,6 +5322,34 @@ class DispatcherRuntime:
             "attempt_id": attempt_id,
             "action": "waiting-worker-report",
         }
+
+    def _can_reuse_report_only_rework_gate(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        current_sha: str,
+        *,
+        observer_rework: bool | None = None,
+    ) -> bool:
+        """Whether an observer-directed research report correction may keep its green gate.
+
+        A red review normally invalidates the gate for the next worker report. The one exception is
+        a research round that the observer reopened to correct the report alone: its non-empty
+        frozen decision proves that this is that round, and the receipt remains usable only when it
+        still validates the exact rejected candidate. No marker body or worker-local check can stand
+        in for the persisted dispatcher receipt here.
+        """
+        if observer_rework is None:
+            observer_rework = bool(record.report_decision.strip())
+        return (
+            task.get("type") == "research"
+            and observer_rework
+            and record.rejected_failure_reason == "red-review"
+            and bool(current_sha)
+            and current_sha == record.rejected_sha
+            and record.gate_state == "green"
+            and bool(_gate_attestation_for_prompt(record, current_sha))
+        )
 
     def _accept_stale_infrastructure_done(
         self,
@@ -5591,7 +5623,7 @@ class DispatcherRuntime:
             # A red transition whose move did not commit is finished before the gate is read again,
             # before any review marker and before a reviewer starts: a rollup that has turned green
             # since cannot retract a red round this card is already owed.
-            return self._complete_red_transition(record, records, payload, attempt_id, ref=ref)
+            return self._complete_red_transition(task, record, records, payload, attempt_id, ref=ref)
         marker = _last_marker(task, record.review_baseline, {"review:green", "review:red"})
         if marker == "review:green":
             return self._park_green_verdict(task, record, records, payload, attempt_id)
@@ -7443,10 +7475,11 @@ class DispatcherRuntime:
         )
         records[ref] = record
         self.save_records(payload, records)
-        return self._complete_red_transition(record, records, payload, attempt_id, ref=ref)
+        return self._complete_red_transition(task, record, records, payload, attempt_id, ref=ref)
 
     def _complete_red_transition(
         self,
+        task: dict[str, Any],
         record: DispatcherRecord,
         records: dict[str, DispatcherRecord],
         payload: dict[str, Any],
@@ -7493,12 +7526,17 @@ class DispatcherRuntime:
         # never merged: a red gate has no decision, and inheriting the prior round's would hand a
         # worker an adjudication of review findings its code has already answered.
         record.report_decision = continuation.decision_body
-        record.gate_state = ""
-        record.gate_pending_since = 0.0
-        record.gate_attestation = {}
-        record.gate_transport_failures = 0
-        record.gate_transport_error = ""
-        self._reset_infrastructure_reruns(record)
+        current_sha = self.host.head_commit(record)
+        reuse_report_only_gate = self._can_reuse_report_only_rework_gate(
+            task, record, current_sha, observer_rework=continuation.decision == "rework"
+        )
+        if not reuse_report_only_gate:
+            record.gate_state = ""
+            record.gate_pending_since = 0.0
+            record.gate_attestation = {}
+            record.gate_transport_failures = 0
+            record.gate_transport_error = ""
+            self._reset_infrastructure_reruns(record)
         # The judged round ends here: a stale review pin would refuse the rework's merge.
         record.review_commit = ""
         _reset_wait(record, "review")
@@ -8716,7 +8754,7 @@ class DispatcherRuntime:
         continuation = record.worker_continuation
         if continuation.red_transition_pending:
             # A rework decision whose move did not commit: finish it before any decision is read.
-            return self._complete_red_transition(record, records, payload, attempt_id, ref=ref)
+            return self._complete_red_transition(task, record, records, payload, attempt_id, ref=ref)
         if continuation.assessment_pending:
             # The move landed but the checkpoint did not; re-issuing is a no-op by request id.
             return self._complete_park(record, records, payload, attempt_id, ref=ref)

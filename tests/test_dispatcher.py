@@ -5182,6 +5182,9 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertNotIn("Repeat return", self.reader.show("secretary-510-pilot")["comments"][-1]["body"])
 
     def test_done_at_a_gate_rejected_sha_is_returned_for_rework(self) -> None:
+        # Research does not get the report-only exemption until an observer has reopened a red
+        # review and the dispatcher still holds an accepted exact-SHA receipt.
+        self.board.metadata[12]["task_type"] = "research"
         self.start_dispatcher()
         self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
         self._run_worker_to_validate()
@@ -8505,6 +8508,61 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(self._pilot_record()["report_decision"], "")
         self.assertEqual(self._document_decision(), "")
         self.assertNotIn("Observer rework decision", self._task_document())
+
+    def test_report_only_research_rework_reuses_the_accepted_exact_sha_gate(self) -> None:
+        """A corrected report is new work for review, not new code for the mechanical gate."""
+        self.board.metadata[12]["task_type"] = "research"
+        self.catalog._adapter = {"validation": {"ci": "github"}}
+        self.host.commit = "a" * 40
+        self.host.fail_resume_worker_reason = ""
+        receipt = {
+            "validated_sha": self.host.commit,
+            "base_sha": self.host.commit,
+            "gate_mode": "github",
+            "required_checks": [{"name": "ci", "conclusion": "SUCCESS", "url": "https://ci.invalid/1"}],
+            "completed_at": "2026-08-28T01:31:00+00:00",
+            "command_or_check_set_digest": "d" * 64,
+        }
+        self.host.gate_results = [GateResult("green", "workflow dispatch passed", attestation=receipt)]
+        self.start_dispatcher()
+        self.assertEqual(self.reader.show(CARD_REF)["type"], "research")
+        self.tick()
+        self._report_done("initial research report")
+        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self.tick()["action"], "review-started")
+        self.assertEqual(self._pilot_record()["gate_state"], "green")
+        self.assertEqual(self._pilot_record()["gate_attestation"], receipt)
+        self._review_red(body="BLOCKER-report: add the required report structure")
+        self.assertEqual(
+            self._park_and_decide("rework", reason="correct the report only")["action"],
+            "review-red-reused-worker",
+        )
+
+        reopened = self._pilot_record()
+        self.assertEqual(reopened["gate_state"], "green")
+        self.assertEqual(reopened["gate_attestation"], receipt)
+        self.assertEqual(reopened["rejected_sha"], self.host.commit)
+        self.assertEqual(reopened["report_decision"], "correct the report only")
+
+        self._report_done("corrected report with the required structure")
+        advanced = self.tick()
+
+        self.assertEqual(advanced["to"], "validate")
+        continued = self._pilot_record()
+        self.assertEqual(continued["gate_state"], "green")
+        self.assertEqual(continued["gate_attestation"], receipt)
+        self.assertEqual(continued["previous_reviewed_sha"], self.host.commit)
+        self.assertIn(
+            "corrected report with the required structure",
+            next(
+                comment["body"]
+                for comment in self.reader.show(CARD_REF)["comments"]
+                if comment["marker"] == "report:done" and "corrected report" in comment["body"]
+            ),
+        )
+
+        self.assertEqual(self.tick()["action"], "review-started")
+        self.assertEqual(self.host.gate_calls, [CARD_REF], "the accepted gate was reused, not rerun")
 
     def test_the_report_marker_baseline_is_not_the_report_generation(self) -> None:
         """`comment_baseline` keeps scanning for new markers on its own count. A generation that
