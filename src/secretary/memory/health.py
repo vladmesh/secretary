@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import pwd
 import time
 from pathlib import Path
 from collections.abc import Callable
@@ -122,12 +123,112 @@ def _authenticated_list(token: str, *, port: int, timeout_seconds: float) -> lis
     finally:
         connection.close()
     value = _tool_value(result)
-    if isinstance(value, dict) and value.get("status") == "denied":
-        code = str(value.get("error") or "unknown")
+    if isinstance(value, dict):
+        denial = value
+    elif isinstance(value, list):
+        denial = next((row for row in value if isinstance(row, dict) and row.get("status") == "denied"), None)
+    else:
+        denial = None
+    if isinstance(denial, dict):
+        code = str(denial.get("error") or "unknown")
         raise MemoryProbeError(f"Memory MCP denied the authenticated probe: {code}")
     if not isinstance(value, list) or not value or not isinstance(value[0], dict):
         raise MemoryProbeError("Memory MCP returned no expected authorized entry")
     return value
+
+
+def _probe_read(
+    run: HeadRun,
+    token: str,
+    *,
+    port: int,
+    timeout_seconds: float,
+    retry_seconds: float,
+) -> None:
+    """Publish the caller-owned heartbeat, then perform one bounded MCP read."""
+    publish_heartbeat(
+        run.pid_file,
+        {"run_id": run.run_id, "role": run.role, "task": "standing:steward"},
+    )
+    deadline = time.monotonic() + timeout_seconds
+    last_error: MemoryProbeError | None = None
+    while time.monotonic() < deadline:
+        try:
+            rows = _authenticated_list(token, port=port, timeout_seconds=min(5, timeout_seconds))
+            if any(row.get("scope") in {"project:secretary", "product:secretary"} for row in rows):
+                return
+            raise MemoryProbeError("Memory MCP returned no expected steward-scoped entry")
+        except MemoryProbeError as exc:
+            # A service may still be binding or rebuilding its derived index after
+            # systemd restarts it. A response from Memory that denies this identity,
+            # however, is decisive: retrying a denial turns a typed authorization
+            # failure into an opaque timeout and does not make a stale identity live.
+            if str(exc) not in {
+                "Memory MCP is unavailable",
+                "Memory MCP returned no expected steward-scoped entry",
+            }:
+                raise
+            last_error = exc
+            if time.monotonic() + retry_seconds >= deadline:
+                break
+            time.sleep(retry_seconds)
+    raise last_error or MemoryProbeError("Memory MCP probe timed out")
+
+
+def _drop_to_runtime_user(runtime_user: str) -> None:
+    try:
+        account = pwd.getpwnam(runtime_user)
+    except KeyError:
+        raise MemoryProbeError(f"runtime user {runtime_user!r} does not exist") from None
+    try:
+        os.initgroups(account.pw_name, account.pw_gid)
+        os.setgid(account.pw_gid)
+        os.setuid(account.pw_uid)
+    except OSError as exc:
+        raise MemoryProbeError(f"could not enter runtime user {runtime_user!r}: {exc}") from None
+
+
+def _run_from_runtime_user(runtime_user: str | None, callback: Callable[[], None]) -> None:
+    """Run the heartbeat and read as the account that owns the Memory daemon.
+
+    Root upgrade is permitted to create and hand off the short-lived grant, but it
+    must not lend its process identity to an unprivileged server.  The forked
+    helper publishes its own heartbeat after dropping privileges, so the ordinary
+    server-side reader can inspect the exact process that made the MCP request.
+    """
+    if not runtime_user or os.geteuid() != 0:
+        callback()
+        return
+    read_fd, write_fd = os.pipe()
+    child = os.fork()
+    if child == 0:
+        os.close(read_fd)
+        try:
+            _drop_to_runtime_user(runtime_user)
+            callback()
+            result = {"ok": True}
+        except Exception as exc:
+            # This pipe crosses only the result boundary.  It never carries the
+            # bearer, grant body, request payload, or a Memory fact.
+            result = {"ok": False, "error": str(exc)}
+        try:
+            os.write(write_fd, json.dumps(result).encode("utf-8"))
+        finally:
+            os.close(write_fd)
+        os._exit(0)
+    os.close(write_fd)
+    try:
+        raw = os.read(read_fd, 16_384)
+    finally:
+        os.close(read_fd)
+        _, status = os.waitpid(child, 0)
+    try:
+        result = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        result = None
+    if status != 0 or not isinstance(result, dict) or not result.get("ok"):
+        detail = str(result.get("error") if isinstance(result, dict) else "runtime-user helper failed")
+        raise MemoryProbeError(f"runtime-user authenticated probe failed: {detail}")
 
 
 def probe_memory(
@@ -137,15 +238,19 @@ def probe_memory(
     timeout_seconds: float = 30,
     retry_seconds: float = 1,
     runtime_handoff: Callable[[Path], None] | None = None,
+    runtime_user: str | None = None,
 ) -> None:
     """Prove one real MCP read with a temporary steward launch identity.
 
-    The process itself owns the heartbeat for its short lifetime.  The service
-    therefore verifies both the opaque bearer and the existing HeadRun reader;
-    no caller, requested scope, ambient PO authority, or health bypass exists.
+    The process making the request owns the heartbeat for its short lifetime.
+    During a root upgrade that process is a narrowly dropped-privilege child of
+    the configured runtime user, not root.  The service therefore verifies both
+    the opaque bearer and the existing HeadRun reader; no caller, requested
+    scope, ambient PO authority, or health bypass exists.
     """
     run_id = new_run_id()
-    pid_file = access.bindings_dir(data_dir) / "health-probes" / f"{run_id}.pid"
+    bindings = access.bindings_dir(data_dir)
+    pid_file = bindings / "health-probes" / f"{run_id}.pid"
     run = HeadRun(
         run_id=run_id,
         spec=HeadSpec(profile_id="memory-health", adapter="probe"),
@@ -155,30 +260,23 @@ def probe_memory(
         pid_file=str(pid_file),
     )
     grant = access.issue_grant(run, access.standing_subject("steward"), data_dir=data_dir, ttl_seconds=120)
-    grant_path = access.bindings_dir(data_dir) / f"{grant.grant_id}.json"
+    grant_path = bindings / f"{grant.grant_id}.json"
     try:
         if runtime_handoff is not None:
-            runtime_handoff(grant_path)
-        publish_heartbeat(
-            run.pid_file,
-            {"run_id": run.run_id, "role": run.role, "task": "standing:steward"},
+            # The grant directory itself can be root-created during recovery.
+            # Handoff the whole tree before the daemon resolves it, not merely
+            # the leaf files a root process happened to write.
+            runtime_handoff(bindings)
+        _run_from_runtime_user(
+            runtime_user,
+            lambda: _probe_read(
+                run,
+                grant.token,
+                port=port,
+                timeout_seconds=timeout_seconds,
+                retry_seconds=retry_seconds,
+            ),
         )
-        if runtime_handoff is not None:
-            runtime_handoff(pid_file)
-        deadline = time.monotonic() + timeout_seconds
-        last_error: MemoryProbeError | None = None
-        while time.monotonic() < deadline:
-            try:
-                rows = _authenticated_list(grant.token, port=port, timeout_seconds=min(5, timeout_seconds))
-                if any(row.get("scope") in {"project:secretary", "product:secretary"} for row in rows):
-                    return
-                raise MemoryProbeError("Memory MCP returned no expected steward-scoped entry")
-            except MemoryProbeError as exc:
-                last_error = exc
-                if time.monotonic() + retry_seconds >= deadline:
-                    break
-                time.sleep(retry_seconds)
-        raise last_error or MemoryProbeError("Memory MCP probe timed out")
     finally:
         for path in (grant_path, pid_file):
             try:

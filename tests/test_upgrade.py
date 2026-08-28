@@ -540,12 +540,13 @@ class UpgradeStepTests(unittest.TestCase):
     def test_memory_restarts_when_only_the_code_moved(self):
         units = FakeUnitInstaller(active={"secretary-memory.service"})
 
-        result = upgrade.step_memory(self.context(units, code_changed=True))
+        result = upgrade.step_memory(self.context(units, code_changed=True, runtime_user="memory-runtime"))
 
         self.assertEqual(result.status, "changed")
         self.assertIn("code or dependencies changed", result.detail)
         self.assertIn(("restart", "secretary-memory.service"), units.calls)
         self.memory_probe.assert_called_once()
+        self.assertEqual(self.memory_probe.call_args.kwargs["runtime_user"], "memory-runtime")
 
     def test_host_step_reports_a_configured_data_dir_resolution_error(self):
         report = SimpleNamespace(

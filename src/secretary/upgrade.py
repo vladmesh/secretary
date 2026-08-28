@@ -717,6 +717,7 @@ def step_memory(context: UpgradeContext) -> StepResult:
         probe_memory(
             data_dir,
             runtime_handoff=lambda path: _set_runtime_owner(path, context.runtime_user),
+            runtime_user=context.runtime_user,
         )
     except (MemoryProbeError, GitError) as exc:
         return StepResult("memory", "failed", f"authenticated probe failed: {exc}")

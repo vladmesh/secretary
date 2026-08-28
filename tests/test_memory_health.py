@@ -1,13 +1,24 @@
 from __future__ import annotations
 
 import json
+import os
+import pwd
+import socket
+import subprocess
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from secretary.memory import access
 from secretary.memory import health
+
+try:
+    from secretary import memory_service
+except ImportError:
+    memory_service = None
 
 
 class _Response:
@@ -79,6 +90,29 @@ class MemoryHealthWireTests(unittest.TestCase):
         self.assertEqual(call["params"], {"name": "memory_list", "arguments": {"limit": 1}})
         self.assertEqual(connection.calls[-1][3]["Authorization"], "Bearer launch-bound-token")
 
+    def test_returned_memory_denial_is_immediate_and_typed(self) -> None:
+        connection = _Connection(
+            [
+                _Response(200, '{"jsonrpc":"2.0","id":1,"result":{}}', session="session-1"),
+                _Response(202, ""),
+                _Response(
+                    200,
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 2,
+                            "result": {
+                                "structuredContent": [{"status": "denied", "error": "runtime_identity_stale"}]
+                            },
+                        }
+                    ),
+                ),
+            ]
+        )
+        with mock.patch("secretary.memory.health.http.client.HTTPConnection", return_value=connection):
+            with self.assertRaisesRegex(health.MemoryProbeError, "denied.*runtime_identity_stale"):
+                health._authenticated_list("launch-bound-token", port=8077, timeout_seconds=5)
+
 
 class MemoryHealthIdentityTests(unittest.TestCase):
     def test_probe_uses_a_live_steward_grant_and_removes_its_temporary_identity(self) -> None:
@@ -99,6 +133,23 @@ class MemoryHealthIdentityTests(unittest.TestCase):
             self.assertFalse(list(access.bindings_dir(data_dir).glob("*.json")))
             self.assertFalse(list((access.bindings_dir(data_dir) / "health-probes").glob("*.pid")))
 
+    def test_probe_hands_the_complete_bindings_tree_to_the_runtime_user_before_reading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            handed_off: list[Path] = []
+            with (
+                mock.patch("secretary.memory.health._authenticated_list", return_value=[{"scope": "product:secretary"}]),
+                mock.patch("secretary.memory.health.os.geteuid", return_value=1000),
+            ):
+                health.probe_memory(
+                    data_dir,
+                    timeout_seconds=1,
+                    retry_seconds=0,
+                    runtime_handoff=handed_off.append,
+                    runtime_user="memory-runtime",
+                )
+            self.assertEqual(handed_off, [access.bindings_dir(data_dir)])
+
     def test_missing_expected_steward_entry_is_a_visible_probe_failure(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch(
@@ -106,6 +157,131 @@ class MemoryHealthIdentityTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(health.MemoryProbeError, "expected steward-scoped"):
                     health.probe_memory(Path(tmp), timeout_seconds=0.01, retry_seconds=0)
+
+    @unittest.skipUnless(os.geteuid() == 0, "requires a root upgrade parent")
+    def test_root_probe_uses_a_runtime_user_heartbeat_resolved_by_a_separate_daemon_process(self) -> None:
+        """Exercise the production cross-user shape without an installed instance.
+
+        The root parent creates the grant, the helper drops to ``nobody`` before
+        publishing its heartbeat and making the request, and a second unprivileged
+        process performs the server-side grant/heartbeat resolution.  A root-owned
+        heartbeat or a non-traversable access-grants tree would make this resolve
+        to ``runtime_identity_stale`` instead of the allowed steward identity.
+        """
+        runtime = pwd.getpwnam("nobody")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            root.chmod(0o755)
+            data_dir = root / "data"
+            data_dir.mkdir()
+
+            def handoff(path: Path) -> None:
+                for candidate in (path, *path.rglob("*")):
+                    os.chown(candidate, runtime.pw_uid, runtime.pw_gid)
+
+            def resolve_from_daemon(token: str, **_kwargs) -> list[dict]:
+                pid_files = list((access.bindings_dir(data_dir) / "health-probes").glob("*.pid"))
+                self.assertEqual(len(pid_files), 1)
+                self.assertEqual(pid_files[0].stat().st_uid, runtime.pw_uid)
+                read_fd, write_fd = os.pipe()
+                child = os.fork()
+                if child == 0:
+                    os.close(read_fd)
+                    resolved = access.resolve_token(token, data_dir=data_dir)
+                    os.write(
+                        write_fd,
+                        json.dumps(
+                            {
+                                "allowed": isinstance(resolved, access.MemoryReadIdentity),
+                                "code": resolved.code if isinstance(resolved, access.MemoryAccessDenial) else None,
+                            }
+                        ).encode(),
+                    )
+                    os.close(write_fd)
+                    os._exit(0)
+                os.close(write_fd)
+                try:
+                    outcome = json.loads(os.read(read_fd, 4096))
+                finally:
+                    os.close(read_fd)
+                    os.waitpid(child, 0)
+                self.assertTrue(outcome["allowed"], outcome["code"])
+                return [{"scope": "product:secretary"}]
+
+            with mock.patch("secretary.memory.health._authenticated_list", side_effect=resolve_from_daemon):
+                health.probe_memory(
+                    data_dir,
+                    timeout_seconds=3,
+                    retry_seconds=0,
+                    runtime_handoff=handoff,
+                    runtime_user=runtime.pw_name,
+                )
+
+
+@unittest.skipIf(memory_service is None, "secretary[memory] is not installed")
+class MemoryHealthDaemonIntegrationTests(unittest.TestCase):
+    """The pinned streamable-HTTP server, not a hand-written HTTP substitute."""
+
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.data_dir = self.root / "data"
+        self.data_dir.mkdir()
+        self.db = self.root / "index.sqlite"
+        self.audit = self.root / "search-log.jsonl"
+        assert memory_service is not None
+        connection = memory_service.db(self.db)
+        try:
+            memory_service.create_schema(connection, 4)
+            connection.execute(
+                "INSERT INTO memories(text, scope, tags, source, created_at) VALUES (?,?,?,?,?)",
+                ("portable health sentinel", "product:secretary", None, "fixture", None),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            self.port = int(listener.getsockname()[1])
+        source_root = Path(health.__file__).resolve().parents[3]
+        environment = {
+            **os.environ,
+            "PYTHONPATH": str(source_root / "src"),
+            "MEMORY_PORT": str(self.port),
+            "MEMORY_DB": str(self.db),
+            "MEMORY_SEARCH_LOG": str(self.audit),
+            access.MEMORY_ACCESS_BINDINGS_ENV: str(access.bindings_dir(self.data_dir)),
+        }
+        self.daemon = subprocess.Popen(
+            [sys.executable, "-c", "from secretary.memory_service import mcp; mcp.run(transport='streamable-http')"],
+            cwd=source_root,
+            env=environment,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        self.addCleanup(self._stop_daemon)
+
+    def _stop_daemon(self) -> None:
+        if self.daemon.poll() is None:
+            self.daemon.terminate()
+            try:
+                self.daemon.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.daemon.kill()
+                self.daemon.wait(timeout=5)
+
+    def test_probe_uses_the_real_streamable_http_session_and_read_guard(self) -> None:
+        health.probe_memory(self.data_dir, port=self.port, timeout_seconds=10, retry_seconds=0.05)
+        deadline = time.monotonic() + 2
+        while not self.audit.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        entries = [json.loads(line) for line in self.audit.read_text(encoding="utf-8").splitlines()]
+        allowed = [entry for entry in entries if entry["action"] == "memory_list" and entry["outcome"] == "allowed"]
+        self.assertEqual(len(allowed), 1)
+        self.assertEqual(allowed[0]["role"], "steward")
+        self.assertEqual(allowed[0]["scopes"], ["product:secretary", "project:secretary"])
+        self.assertFalse({"text", "query", "token", "capability", "grant", "token_digest"} & set(allowed[0]))
 
 
 if __name__ == "__main__":
