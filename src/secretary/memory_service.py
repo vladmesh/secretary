@@ -20,7 +20,12 @@ import numpy as np
 import sqlite_vec
 import yaml
 from fastembed import TextEmbedding
+from mcp.server.auth.middleware.auth_context import get_access_token
+from mcp.server.auth.provider import AccessToken
+from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
+
+from secretary.memory import access as memory_access
 
 DEFAULT_MEMORY_DIR = Path.home() / "secretary-data" / "memory"
 # Canon lives in the private instance repo (docs/RECOVERY.md, "Layout"); the
@@ -139,22 +144,25 @@ def mark_search_not_ready(error: Exception | None = None) -> None:
 
 
 def normalize_scope(scope: str | None) -> str | None:
-    """Accept "global", "project:<dir>" or a bare project dir name ("orca" → "project:orca")."""
-    if not scope:
-        return None
-    scope = scope.strip()
-    if scope in ("", "global") or scope.startswith("project:"):
-        return scope or None
-    return f"project:{scope}"
+    """Accept the canonical memory scope spellings without granting one."""
+    return memory_access.normalize_scope(scope)
 
 
-def search_memory(query: str, k: int = 5, scope: str | None = None) -> list:
+def search_memory(
+    query: str,
+    k: int = 5,
+    scope: str | None = None,
+    *,
+    allowed_scopes: frozenset[str] | None = None,
+) -> list:
     if not index_exists():
         raise NotReadyError("index_missing", f"index does not exist: {DB_PATH}")
     scope = normalize_scope(scope)
+    if scope is not None:
+        allowed_scopes = frozenset({scope})
     # sqlite-vec KNN can't push a join filter into MATCH, so with a scope we over-fetch
     # and trim post-hoc. Fine at canon size (hundreds of facts).
-    fetch = max(k * 5, 25) if scope else k
+    fetch = max(k * 5, 25) if allowed_scopes is not None else k
     qvec = sqlite_vec.serialize_float32(embed_query(query).tolist())
     with _reindex_lock:  # don't read while a rebuild is swapping tables
         conn = db()
@@ -165,8 +173,8 @@ def search_memory(query: str, k: int = 5, scope: str | None = None) -> list:
             (qvec, fetch),
         ).fetchall()
         conn.close()
-    if scope:
-        rows = [r for r in rows if r[3] == scope][:k]
+    if allowed_scopes is not None:
+        rows = [r for r in rows if r[3] in allowed_scopes][:k]
     # unit vectors → L2 distance d relates to cosine: cos = 1 - d^2/2
     return [
         {
@@ -182,30 +190,63 @@ def search_memory(query: str, k: int = 5, scope: str | None = None) -> list:
     ]
 
 
-def log_search(
-    query: str, k: int, results: list, scope: str | None = None, caller: str | None = None
+def log_read(
+    action: str,
+    identity: memory_access.MemoryReadIdentity | None,
+    outcome: str,
+    *,
+    results: list | None = None,
+    requested_k: int | None = None,
 ) -> None:
-    """Append one jsonl line per memory_search call. Best-effort telemetry:
-    any failure here is swallowed. Logging must never break the search.
-    caller is self-reported by the agent (role name), attribution, not auth."""
+    """Append data-free authorization telemetry. It never logs facts or bearer material."""
     try:
         entry = {
-            "ts": datetime.datetime.utcnow().isoformat(),
-            "query": query,
-            "k": k,
-            "hits": [{"id": r["id"], "score": r["score"]} for r in results],
+            "ts": datetime.datetime.now(datetime.UTC).isoformat(),
+            "action": action,
+            "outcome": outcome,
         }
-        if scope:
-            entry["scope"] = scope
-        if caller:
-            entry["caller"] = caller
+        if identity is not None:
+            entry.update(identity.audit_json())
+        if results is not None:
+            entry["hits"] = [{"id": r["id"], "score": r["score"]} for r in results]
+        if requested_k is not None:
+            entry["k"] = requested_k
         line = json.dumps(entry, ensure_ascii=False)
-        with _search_log_lock:  # one write per line so concurrent calls don't interleave
-            with open(SEARCH_LOG, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
-                f.flush()
+        with _search_log_lock, open(SEARCH_LOG, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+            f.flush()
     except Exception:
         pass
+
+
+class MemoryTokenVerifier:
+    """FastMCP's standard Bearer-token verifier for launch-bound memory grants."""
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        resolved = memory_access.resolve_token(token)
+        if isinstance(resolved, memory_access.MemoryAccessDenial):
+            log_read("authenticate", None, resolved.code)
+            return None
+        log_read("authenticate", resolved, "allowed")
+        scopes = sorted(resolved.scopes) if resolved.scopes is not None else ["installation-wide"]
+        return AccessToken(
+            token=token,
+            client_id=f"memory:{resolved.grant_id}",
+            subject=resolved.role,
+            scopes=scopes,
+            claims={"memory_grant_id": resolved.grant_id},
+        )
+
+
+def read_guard(requested_scope: str | None = None) -> memory_access.MemoryReadIdentity | memory_access.MemoryAccessDenial:
+    """The one server-side authorization guard for every memory read endpoint."""
+    access_token = get_access_token()
+    claims = access_token.claims if access_token is not None and isinstance(access_token.claims, dict) else {}
+    grant_id = claims.get("memory_grant_id")
+    resolved = memory_access.resolve_grant_id(grant_id)
+    if isinstance(resolved, memory_access.MemoryAccessDenial):
+        return resolved
+    return memory_access.narrow(resolved, requested_scope)
 
 
 # ── Canon → index (daemon-owned reindex) ──────────────────────────────────────
@@ -744,7 +785,17 @@ def start_canon_watcher() -> None:
     threading.Thread(target=loop, name="canon-watcher", daemon=True).start()
 
 
-mcp = FastMCP("memory", host="127.0.0.1", port=PORT)
+mcp = FastMCP(
+    "memory",
+    host="127.0.0.1",
+    port=PORT,
+    token_verifier=MemoryTokenVerifier(),
+    auth=AuthSettings(
+        issuer_url=f"http://127.0.0.1:{PORT}",
+        resource_server_url=f"http://127.0.0.1:{PORT}/mcp",
+        required_scopes=[],
+    ),
+)
 
 # Memory is read-only for agents: only the curator writes (the markdown canon, then a reindex).
 # Nothing here writes the index directly; the index is derived from the canon by a reindex.
@@ -752,12 +803,14 @@ mcp = FastMCP("memory", host="127.0.0.1", port=PORT)
 
 @mcp.tool()
 def memory_search(query: str, k: int = 5, scope: str = "", caller: str = "") -> Any:
-    """Semantic search over shared memory. Returns up to k closest entries with scores.
+    """Search facts allowed by the launch-bound Bearer identity.
 
-    scope: optional filter, "global", "project:<dir>" or bare project dir name
-    (e.g. "orca", "secretary"). Search your own project's scope first,
-    then retry without scope. k is clamped to 10. caller: your role (worker/reviewer/
-    steward/secretary/curator), telemetry only, always pass it."""
+    ``scope`` can only narrow the server-resolved scope set. ``caller`` is
+    retained for old clients and ignored as authorization input."""
+    authorization = read_guard(scope or None)
+    if isinstance(authorization, memory_access.MemoryAccessDenial):
+        log_read("memory_search", None, authorization.code)
+        return authorization.response()
     # Result cap: the ranker's scores sit in a narrow band (~0.80-0.84 in telemetry), so a long
     # tail is indistinguishable from the top and just clutters the context.
     # The original k is written to the log: telemetry must see what was actually asked for.
@@ -768,42 +821,71 @@ def memory_search(query: str, k: int = 5, scope: str = "", caller: str = "") -> 
         detail = "embedding model/index are still loading"
         if _ready_error is not None:
             detail = str(_ready_error)
+        log_read("memory_search", authorization, reason)
         return not_ready_response(reason, detail)
     try:
-        results = search_memory(query, k, scope=scope or None)
+        results = search_memory(query, k, allowed_scopes=authorization.scopes)
     except NotReadyError as e:
+        log_read("memory_search", authorization, e.reason)
         return not_ready_response(e.reason, e.detail)
-    # tool-level: capture real agent queries, not internal calls
-    log_search(query, requested_k, results, scope=normalize_scope(scope), caller=caller or None)
+    log_read("memory_search", authorization, "allowed", results=results, requested_k=requested_k)
     return results
 
 
 @mcp.tool()
 def memory_get(id: int) -> dict:
-    """Fetch one memory entry by id."""
+    """Fetch one authorized memory entry by id."""
+    authorization = read_guard()
+    if isinstance(authorization, memory_access.MemoryAccessDenial):
+        log_read("memory_get", None, authorization.code)
+        return authorization.response()
     if not index_exists():
+        log_read("memory_get", authorization, "index_missing")
         return not_ready_response("index_missing", f"index does not exist: {DB_PATH}")
     conn = db()
-    r = conn.execute(
-        "SELECT id, text, scope, tags, source, created_at FROM memories WHERE id = ?", (id,)
-    ).fetchone()
+    if authorization.scopes is None:
+        r = conn.execute(
+            "SELECT id, text, scope, tags, source, created_at FROM memories WHERE id = ?", (id,)
+        ).fetchone()
+    else:
+        placeholders = ",".join("?" for _ in authorization.scopes)
+        r = conn.execute(
+            f"SELECT id, text, scope, tags, source, created_at FROM memories WHERE id = ? AND scope IN ({placeholders})",
+            (id, *sorted(authorization.scopes)),
+        ).fetchone()
     conn.close()
     if not r:
+        log_read("memory_get", authorization, "not_found_or_not_permitted")
         return {"error": "not found", "id": id}
+    log_read("memory_get", authorization, "allowed", results=[{"id": r[0], "score": 0.0}])
     return {"id": r[0], "text": r[1], "scope": r[2], "tags": r[3], "source": r[4], "created_at": r[5]}
 
 
 @mcp.tool()
 def memory_list(limit: int = 50) -> list:
-    """List recent memory entries (newest first)."""
+    """List recent memory entries in the launch-bound allowed scopes."""
+    authorization = read_guard()
+    if isinstance(authorization, memory_access.MemoryAccessDenial):
+        log_read("memory_list", None, authorization.code)
+        return [authorization.response()]
     if not index_exists():
+        log_read("memory_list", authorization, "index_missing")
         return [not_ready_response("index_missing", f"index does not exist: {DB_PATH}")]
     conn = db()
-    rows = conn.execute(
-        "SELECT id, text, scope, tags, source, created_at FROM memories ORDER BY id DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
+    if authorization.scopes is None:
+        rows = conn.execute(
+            "SELECT id, text, scope, tags, source, created_at FROM memories ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    else:
+        placeholders = ",".join("?" for _ in authorization.scopes)
+        rows = conn.execute(
+            f"SELECT id, text, scope, tags, source, created_at FROM memories WHERE scope IN ({placeholders}) "
+            "ORDER BY id DESC LIMIT ?",
+            (*sorted(authorization.scopes), limit),
+        ).fetchall()
     conn.close()
+    log_read("memory_list", authorization, "allowed", results=[{"id": r[0], "score": 0.0} for r in rows])
     return [
         {"id": r[0], "text": r[1], "scope": r[2], "tags": r[3], "source": r[4], "created_at": r[5]}
         for r in rows

@@ -54,6 +54,20 @@ class RuntimeEnvRoleTests(unittest.TestCase):
         self.assertNotIn(role_env.OBSERVER_SPRINT_ENV, env)
         self.assertNotIn(role_env.OBSERVER_GENERATION_ENV, env)
 
+    def test_memory_bearer_capability_can_only_come_from_the_launch_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env_file = Path(tmp) / "runtime.env"
+            env_file.write_text("SECRETARY_MEMORY_ACCESS_TOKEN=forged\n", encoding="utf-8")
+            env = role_env.runtime_env("worker", base_env={"PATH": "/usr/bin"}, env_file=env_file)
+            launched = role_env.runtime_env(
+                "worker",
+                base_env={"PATH": "/usr/bin", role_env.MEMORY_ACCESS_TOKEN_ENV: "launch-bound"},
+                env_file=env_file,
+            )
+
+        self.assertNotIn(role_env.MEMORY_ACCESS_TOKEN_ENV, env)
+        self.assertEqual(launched[role_env.MEMORY_ACCESS_TOKEN_ENV], "launch-bound")
+
     def test_every_merged_role_builds_an_environment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             instance = Path(tmp)

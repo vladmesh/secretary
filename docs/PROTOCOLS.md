@@ -1702,6 +1702,23 @@ Facts are stored flat as `memory/facts/global/<slug>.md` or `memory/facts/<proje
 fact is one distilled markdown record. The curator is the writer role; every other agent reads through
 `memory_search`, `memory_get` and `memory_list`.
 
+### Memory read identity
+
+The Memory MCP endpoint requires FastMCP Bearer authentication. Before a head is opened, its launcher
+writes a digest-only access grant bound to that exact `HeadRun` and puts the opaque bearer capability in
+the launched process, not in `runtime.env`. The service resolves the grant itself and rechecks the
+HeadRun heartbeat on every read. Missing, expired, malformed, foreign or stopped bindings return a typed
+data-free denial. `caller`, `scope`, and a tool's other arguments are never authority.
+
+The resolved policy is deliberately small: an interactive PO has installation-wide read; a worker or
+reviewer has its card project plus `product:secretary` (and `project:secretary` when that card is the
+Secretary project); an observer has its sprint reservations plus `product:secretary`. Other runtime
+roles have no memory-read grant. A requested scope only narrows that set. Search does not retry at a
+wider scope, and `memory_get` and `memory_list` use the same guard as search.
+
+The memory search log is an authorization audit, not a fact transcript: it records the resolved role,
+subject, scopes and outcome with result ids/scores, never fact text, queries or bearer material.
+
 Write authority is split in two, because asking for a fact and publishing one are different acts.
 `propose` stages a fact in the curator inbox (`<data_dir>/memory/.staging/<propose-id>`) and touches no
 canon; `commit` and `supersede` write `state/memory` in the instance repository. The **proposer** roles

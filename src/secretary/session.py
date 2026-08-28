@@ -14,14 +14,24 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 from secretary.board_transport import (
     BoardTransportError,
     resolve_for_environ,
 )
+from secretary.memory import access as memory_access
 from secretary.role_env import load_env_file
 from triggered_agents.agents.pipeline import heads as head_registry
-from triggered_agents.runtime.head import HeadCommandError, render_head_command
+from triggered_agents.runtime.head import (
+    HeadCommandError,
+    HeadRun,
+    HeadSpec,
+    TaskRef,
+    new_run_id,
+    render_head_command,
+    with_pid_heartbeat,
+)
 
 # The operator names a head the way a human thinks about it ("claude", "codex", "hermes"). Map a
 # bare adapter name to a concrete default profile. Any real heads.toml profile id is also accepted
@@ -107,6 +117,30 @@ def run_shell(args: argparse.Namespace) -> int:
     if args.print_command:
         print(command)
         return 0
+    try:
+        registry = head_registry.load_registry()
+        run_id = new_run_id()
+        data_dir = _memory_data_dir(args.env_file, env)
+        pid_dir = memory_access.bindings_dir(data_dir) / "heads"
+        pid_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        run = HeadRun(
+            run_id=run_id,
+            spec=HeadSpec.from_profile(profile_id, registry.profile(profile_id)),
+            workspace=args.workspace or os.getcwd(),
+            task_ref=TaskRef.standing("interactive"),
+            role="po",
+            pid_file=str(pid_dir / f"{run_id}.pid"),
+        )
+        grant = memory_access.issue_grant(run, memory_access.interactive_po_subject(), data_dir=data_dir)
+        env[memory_access.MEMORY_ACCESS_TOKEN_ENV] = grant.token
+        command = with_pid_heartbeat(
+            command,
+            run.pid_file,
+            identity={"run_id": run.run_id, "role": run.role, "task": "standing:interactive"},
+        )
+    except (MemoryError, OSError, ValueError, memory_access.MemoryAccessError) as exc:
+        print(f"secretary shell: memory access binding could not be issued: {exc}", file=sys.stderr)
+        return 2
     argv = ["/bin/sh", "-c", command]
     try:
         os.execvpe(argv[0], argv, env)
@@ -114,3 +148,20 @@ def run_shell(args: argparse.Namespace) -> int:
         print(f"secretary shell: exec {command!r} failed: {exc}", file=sys.stderr)
         return 126
     return 0  # unreachable after a successful execvpe
+
+
+def _memory_data_dir(env_file: str | os.PathLike[str] | None, env: dict[str, str]) -> Path | None:
+    """Use the selected installation's data plane without making runtime.env authority."""
+    configured = env.get("SECRETARY_DATA_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    instance = env.get("SECRETARY_INSTANCE")
+    if instance:
+        from secretary.config import instance_data_dir
+
+        return instance_data_dir(Path(instance))
+    if env_file:
+        from secretary.config import instance_data_dir
+
+        return instance_data_dir(Path(env_file).expanduser().parent)
+    return None
