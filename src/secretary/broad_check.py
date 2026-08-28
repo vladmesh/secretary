@@ -103,13 +103,14 @@ class ContentIdentity:
 
 #: The bootstrap runs *inside* the process that then runs the check, so the provenance it records
 #: is the import that check actually performed, not a guess made by a separate probe beforehand.
-#: `python -c` puts the working directory first on `sys.path`, exactly as `python -m unittest`
-#: does, so the module runs with the import path it would have had without this wrapper.
+#: `python -c` normally puts the working directory first on `sys.path`, exactly as
+#: `python -m unittest` does.  Safe-path mode removes it, so the bootstrap restores the workspace
+#: after recording provenance, preserving any explicitly ordered external import entries.
 _PROVENANCE_BOOTSTRAP = """\
 import importlib, json, os, runpy, sys
 
-_record, _module, _package = sys.argv[1:4]
-sys.argv = [_module, *sys.argv[4:]]
+_record, _module, _package, _workspace = sys.argv[1:5]
+sys.argv = [_module, *sys.argv[5:]]
 try:
     _project = importlib.import_module(_package)
     _imported = getattr(_project, "__file__", "") or ""
@@ -126,6 +127,8 @@ with open(_record, "w", encoding="utf-8") as _handle:
         },
         _handle,
     )
+if _workspace not in sys.path:
+    sys.path.append(_workspace)
 runpy.run_module(_module, run_name="__main__", alter_sys=True)
 """
 
@@ -229,7 +232,7 @@ class CheckSpec:
     def attests_provenance(self) -> bool:
         return self.shape == _SHAPE_MODULE
 
-    def argv(self, record: Path | None) -> list[str]:
+    def argv(self, record: Path | None, root: Path) -> list[str]:
         if self.shape == _SHAPE_MODULE:
             return [
                 self.interpreter,
@@ -238,6 +241,7 @@ class CheckSpec:
                 str(record),
                 self.module,
                 self.import_package,
+                str(root.resolve()),
                 *self.module_args,
             ]
         return ["bash", "-lc", self.command]
@@ -251,6 +255,7 @@ class CheckSpec:
                 "<provenance record>",
                 self.module,
                 self.import_package,
+                "<workspace>",
                 *self.module_args,
             ]
         return ["bash", "-lc", self.command]
@@ -519,6 +524,8 @@ def run_broad_check(
     target = receipt_path(root, spec)
     _assert_ignored(root, target)
     environment = dict(os.environ if env is None else env)
+    if spec.attests_provenance:
+        environment = _normalize_pythonpath_for_child(environment)
     sink = sys.stderr if stream is None else stream
 
     with tempfile.TemporaryDirectory(prefix="secretary-broad-check-") as scratch:
@@ -534,6 +541,30 @@ def run_broad_check(
             sink=sink,
             timeout_seconds=timeout_seconds,
         )
+
+
+def _normalize_pythonpath_for_child(environment: dict[str, str]) -> dict[str, str]:
+    """Preserve a launcher's relative ``PYTHONPATH`` when a module check changes directory.
+
+    A supported source-checkout invocation commonly has ``PYTHONPATH=src``.  Python resolves that
+    relative entry only when the child starts.  A broad-check test can then change its child cwd to
+    a fixture candidate with its own ``src/`` directory, turning the launcher's Secretary source
+    entry into an unintended candidate entry for a configured virtualenv.  Make relative entries
+    absolute in the wrapper's current directory before ``Popen`` changes cwd.  Absolute entries
+    retain their ordering and are never hidden from provenance.
+
+    An empty entry is Python's spelling for the startup cwd, so it needs the same treatment.
+    """
+    pythonpath = environment.get("PYTHONPATH")
+    if pythonpath is None:
+        return environment
+    launch_cwd = Path.cwd()
+    normalized: list[str] = []
+    for entry in pythonpath.split(os.pathsep):
+        path = Path(entry) if entry else launch_cwd
+        normalized.append(str(path if path.is_absolute() else launch_cwd / path))
+    environment["PYTHONPATH"] = os.pathsep.join(normalized)
+    return environment
 
 
 def _run_and_record(
@@ -556,7 +587,7 @@ def _run_and_record(
     # traceback against the dots that located it, and the tail is exactly where that matters.
     try:
         process = subprocess.Popen(
-            spec.argv(record),
+            spec.argv(record, root),
             cwd=str(root),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,

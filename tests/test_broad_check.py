@@ -1214,11 +1214,15 @@ class RegisteredProjectContractTests(BroadCheckTestCase):
             "installed_suite", interpreter=str(interpreter), import_package="codegen_orchestrator"
         )
 
-        _, receipt = self._run(spec)
+        # This is how the supported source-checkout invocation reaches the wrapper.  Without an
+        # environment boundary, the child reinterprets its inherited relative `src` entry from
+        # this fixture's cwd and imports the candidate instead of the configured installed copy.
+        _, receipt = self._run(spec, env={**os.environ, "PYTHONPATH": "src"})
 
         provenance = receipt["project_provenance"]
         self.assertEqual(provenance["environment_prefix"], str(venv))
         self.assertTrue(provenance["imported_project"].startswith(str(site_packages)))
+        self.assertEqual(receipt["tail"], "installed")
         lookup = usable_receipt(self.root, spec)
         self.assertFalse(lookup.usable)
         self.assertIn("interpreter environment", lookup.reason)
