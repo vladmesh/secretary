@@ -2148,6 +2148,8 @@ class CommandHostRuntime:
         branch = _legacy_worker_branch(task["ref"])
         base = self.catalog.default_branch(task["project"], task.get("workspace", {}).get("base_branch"))
         if _validation_ci(self, task) == "github":
+            if self._no_diff_research_delivery_is_complete(task, record):
+                return
             self._merge_github_pr(task, record, branch, base)
             return
         repo = Path(str(self.catalog.binding(task["project"])["repo"])).expanduser()
@@ -2159,6 +2161,38 @@ class CommandHostRuntime:
         self._run(["git", "-C", record.workspace, "push", "origin", f"{branch}:main"], "merge push")
         self._run(["git", "-C", str(repo), "fetch", "origin", "main"], "post-merge fetch")
         self._run(["git", "-C", str(repo), "merge", "--ff-only", "origin/main"], "post-merge fast-forward")
+
+    def _no_diff_research_delivery_is_complete(self, task: dict[str, Any], record: DispatcherRecord) -> bool:
+        """Whether a dispatcher-dispatched research candidate has no delivery effect left.
+
+        A workflow-dispatch entry is written only by the no-diff research gate, and the release
+        gate has just accepted its exact-SHA receipt.  When that receipt names the same base and
+        candidate commit, GitHub has no PR to merge because there is literally nothing to land.
+        A different candidate SHA still matters even if its tree is identical: its own commit
+        cannot be delivered through a no-PR path, so make that unsupported case explicit instead
+        of pretending a GitHub PR merge can land it.
+        """
+        if task.get("type") != "research":
+            return False
+        dispatch = getattr(record, "gate_workflow_dispatch", {})
+        receipt = getattr(record, "gate_attestation", {})
+        if not isinstance(dispatch, dict) or not isinstance(receipt, dict):
+            return False
+        dispatched_sha = str(dispatch.get("sha") or "")
+        candidate_sha = str(receipt.get("validated_sha") or "")
+        base_sha = str(receipt.get("base_sha") or "")
+        if (
+            not _is_exact_sha(dispatched_sha)
+            or not _is_exact_sha(candidate_sha)
+            or not _is_exact_sha(base_sha)
+            or dispatched_sha != candidate_sha
+        ):
+            return False
+        if candidate_sha == base_sha:
+            return True
+        raise HostError(
+            "base-identical research candidate owns commits and cannot complete without a pull request"
+        )
 
     def _complete_green_instance_repo(
         self,
@@ -2432,6 +2466,12 @@ class CommandHostRuntime:
     def commit_gate_pr_authorship(self, record: DispatcherRecord, entry: dict[str, Any]) -> None:
         """Write down that the github gate wrote a known text on a known pull request."""
         record.gate_pr_authorship = dict(entry)
+        if self.commit_state is not None:
+            self.commit_state()
+
+    def commit_gate_workflow_dispatch(self, record: DispatcherRecord, entry: dict[str, Any]) -> None:
+        """Persist a no-diff research workflow request before a later tick can repeat it."""
+        record.gate_workflow_dispatch = dict(entry)
         if self.commit_state is not None:
             self.commit_state()
 

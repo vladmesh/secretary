@@ -78,6 +78,8 @@ _PR_BODY_FOOTER = (
 
 _FAIL_CONCLUSIONS = {"FAILURE", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE"}
 _RUN_URL_RE = re.compile(r"github\.com/([\w.-]+/[\w.-]+)/actions/runs/(\d+)")
+_NO_DIFF_WORKFLOW = "ci.yml"
+_WORKFLOW_RUN_FIELDS = "databaseId,headSha,status,conclusion,url"
 # `gh run view --log[-failed]` emits one line per log entry as `<job>\t<step>\t<content>`.
 _ERROR_MARK_RE = re.compile(r"##\[error\]")
 # The runner's own generic completion echo — posted with the same `##[error]` marker as a real
@@ -445,13 +447,17 @@ def _github_gate(
     host, task: dict, record, workspace: str, base: str, required: list[str] | None = None
 ) -> GateResult:
     branch = _legacy_worker_branch(task["ref"])
+    no_diff_research = _is_no_diff_research_candidate(host, task, workspace, base)
     push = _backend_call(
         host, ["git", "-C", workspace, "push", "origin", f"{branch}:{branch}"], "gate publish branch"
     )
     if push.returncode != 0:
         raise HostError(f"gate publish branch failed: {_tail((push.stderr or push.stdout or '').strip())}")
-    _ensure_pr(host, workspace, task, record, branch, base)
     sha = host._run(["git", "-C", workspace, "rev-parse", "HEAD"], "gate head sha").stdout.strip()
+    if no_diff_research:
+        repo = _name_with_owner(host, workspace)
+        return _no_diff_research_gate(host, record, workspace, branch, base, repo, sha, required or [])
+    _ensure_pr(host, workspace, task, record, branch, base)
     repo = _name_with_owner(host, workspace)
     rerun_run_id = str(getattr(record, "gate_infrastructure_rerun_run_id", "") or "")
     rerun_sha = str(getattr(record, "gate_infrastructure_reruns_sha", "") or "")
@@ -508,6 +514,207 @@ def _github_gate(
     return GateResult(
         "pending",
         f"CI {rollup.lower()} for `{branch}` @ `{short}` — no terminal result yet",
+        attestation=receipt,
+    )
+
+
+def _is_no_diff_research_candidate(host, task: dict, workspace: str, base: str) -> bool:
+    """The one card kind allowed to validate a base-identical tree by workflow dispatch.
+
+    `origin/<base>` is freshly fetched by `_recover_base` for this gate call.  Code cards never
+    take this path, even if their tree happens to have no file diff.
+    """
+    if task.get("type") != "research":
+        return False
+    compared = host.run_capture(
+        ["git", "-C", workspace, "diff", "--quiet", f"origin/{base}", "HEAD"],
+        "gate no-diff research candidate",
+    )
+    if compared.returncode == 0:
+        return True
+    if compared.returncode == 1:
+        return False
+    raise HostError(
+        "gate could not compare the research candidate with fetched base: "
+        f"{_tail((compared.stderr or compared.stdout or '').strip())}"
+    )
+
+
+def _workflow_dispatch_entry(record) -> dict:
+    entry = getattr(record, "gate_workflow_dispatch", None)
+    return entry if isinstance(entry, dict) else {}
+
+
+def _remember_workflow_dispatch(host, record, entry: dict) -> None:
+    """Persist the dispatcher-owned request before another tick could dispatch it again."""
+    commit = getattr(host, "commit_gate_workflow_dispatch", None)
+    if callable(commit):
+        commit(record, entry)
+    else:
+        # Focused gate hosts do not own a dispatcher state file, but still need the same tick-to-
+        # tick identity behaviour.
+        record.gate_workflow_dispatch = dict(entry)
+
+
+def _dispatch_workflow(host, workspace: str, repo: str, branch: str) -> None:
+    dispatched = _backend_call(
+        host,
+        ["gh", "workflow", "run", _NO_DIFF_WORKFLOW, "--ref", branch, "-R", repo],
+        "gate workflow dispatch",
+        cwd=Path(workspace),
+    )
+    if dispatched.returncode != 0:
+        raise HostError(
+            f"gate workflow dispatch failed: {_tail((dispatched.stderr or dispatched.stdout or '').strip())}"
+        )
+
+
+def _workflow_run_list(host, repo: str, branch: str) -> dict | None:
+    completed = _backend_call(
+        host,
+        [
+            "gh",
+            "run",
+            "list",
+            "--workflow",
+            _NO_DIFF_WORKFLOW,
+            "--branch",
+            branch,
+            "--event",
+            "workflow_dispatch",
+            "--limit",
+            "1",
+            "-R",
+            repo,
+            "--json",
+            _WORKFLOW_RUN_FIELDS,
+        ],
+        "gate workflow run list",
+    )
+    if completed.returncode != 0:
+        raise HostError(
+            f"gate workflow run list failed: {_tail((completed.stderr or completed.stdout or '').strip())}"
+        )
+    try:
+        runs = json.loads((completed.stdout or "").strip() or "[]")
+    except ValueError as exc:
+        raise HostError("gate workflow run list returned invalid JSON") from exc
+    if not isinstance(runs, list) or not runs:
+        return None
+    return runs[0] if isinstance(runs[0], dict) else None
+
+
+def _workflow_run_view(host, repo: str, run_id: str) -> dict:
+    completed = _backend_call(
+        host,
+        ["gh", "run", "view", run_id, "-R", repo, "--json", _WORKFLOW_RUN_FIELDS],
+        "gate workflow run view",
+    )
+    if completed.returncode != 0:
+        raise HostError(
+            f"gate workflow run view failed: {_tail((completed.stderr or completed.stdout or '').strip())}"
+        )
+    try:
+        run = json.loads((completed.stdout or "").strip())
+    except ValueError as exc:
+        raise HostError("gate workflow run view returned invalid JSON") from exc
+    if not isinstance(run, dict):
+        raise HostError("gate workflow run view returned no run")
+    return run
+
+
+def _no_diff_research_gate(
+    host, record, workspace: str, branch: str, base: str, repo: str, sha: str, required: list[str]
+) -> GateResult:
+    """Execute the repository workflow, then bind its terminal check result to `sha`.
+
+    Actions does not return the run id from a workflow-dispatch request.  We therefore record the
+    successful request, discover one workflow-dispatch run on the worker branch, and pin future
+    polls to it.  Its `headSha` and the existing commit-SHA check reader both have to agree before
+    the normal GitHub receipt can become green.
+    """
+    entry = _workflow_dispatch_entry(record)
+    if entry.get("sha") != sha or entry.get("workflow") != _NO_DIFF_WORKFLOW:
+        _dispatch_workflow(host, workspace, repo, branch)
+        entry = {"sha": sha, "workflow": _NO_DIFF_WORKFLOW, "run_id": ""}
+        _remember_workflow_dispatch(host, record, entry)
+
+    run_id = str(entry.get("run_id") or "")
+    run = _workflow_run_view(host, repo, run_id) if run_id else _workflow_run_list(host, repo, branch)
+    if run is None:
+        return GateResult(
+            "pending",
+            f"CI workflow dispatch for `{branch}` @ `{sha[:12]}` has no Actions run yet",
+        )
+    found_id = str(run.get("databaseId") or "")
+    found_sha = str(run.get("headSha") or "")
+    if not found_id:
+        raise HostError("gate workflow dispatch run has no database id")
+    if found_sha != sha:
+        return GateResult(
+            "red",
+            f"CI workflow dispatch run {found_id} is for `{found_sha[:12] or 'unavailable'}`, not candidate `{sha[:12]}`",
+            fingerprint=_fingerprint("github-workflow-dispatch-sha", found_id, found_sha, sha),
+        )
+    if found_id != run_id:
+        entry = {"sha": sha, "workflow": _NO_DIFF_WORKFLOW, "run_id": found_id}
+        _remember_workflow_dispatch(host, record, entry)
+    status = str(run.get("status") or "").upper()
+    conclusion = str(run.get("conclusion") or "").upper()
+    if status != "COMPLETED":
+        return GateResult(
+            "pending",
+            f"CI workflow dispatch run {found_id} is {status.lower() or 'pending'} for `{branch}` @ `{sha[:12]}`",
+        )
+
+    rollup, failed, checked = _poll_ci(host, repo, sha, required)
+    receipt = mint_gate_receipt(
+        validated_sha=sha,
+        base_sha=_base_sha(host, workspace, base),
+        gate_mode="github",
+        required_checks=[_terminal_check(item) for item in checked],
+        check_set_identity=json.dumps(
+            {"required": sorted(required or [_check_name(item) for item in checked])},
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    )
+    short = sha[:12] or sha
+    if rollup == "SUCCESS" and conclusion == "SUCCESS":
+        return GateResult(
+            "green",
+            f"CI workflow dispatch run {found_id} green for `{branch}` @ `{short}`",
+            attestation=receipt,
+        )
+    if rollup == "FAILURE":
+        job = safe_one_line((failed or {}).get("name") or (failed or {}).get("context") or "?") or "?"
+        fragment = _failed_log(host, repo, failed or {})
+        where = f"job «{job}»"
+        if fragment.step:
+            where += f', step "{safe_one_line(fragment.step)}"'
+        log = fragment.text if fragment.available else f"log unavailable: {fragment.reason}"
+        cause = fragment.text if fragment.available else f"unavailable:{fragment.reason}"
+        return GateResult(
+            "red",
+            f"CI workflow dispatch run {found_id} red: {where} failed on `{branch}` @ `{short}`",
+            log,
+            fingerprint=_fingerprint("github", job, fragment.step, cause),
+            failure_class=fragment.failure_class,
+            failure_reason=fragment.failure_reason,
+            failed_run_id=found_id,
+            failed_run_repo=repo,
+            attestation=receipt,
+        )
+    if conclusion != "SUCCESS":
+        return GateResult(
+            "red",
+            f"CI workflow dispatch run {found_id} concluded {conclusion.lower() or 'without a result'} for `{branch}` @ `{short}`",
+            fingerprint=_fingerprint("github-workflow-dispatch-conclusion", found_id, conclusion),
+            attestation=receipt,
+        )
+    return GateResult(
+        "pending",
+        f"CI workflow dispatch run {found_id} completed but checks are {rollup.lower()} for `{branch}` @ `{short}`",
         attestation=receipt,
     )
 
