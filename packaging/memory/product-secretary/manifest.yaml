@@ -1,7 +1,7 @@
 schema: 1
 product: secretary
 namespace: product:secretary
-status: inactive
+status: active
 ownership: shipped
 fact_format: markdown-frontmatter-v1
 reconciliation:
@@ -14,8 +14,8 @@ overlay_policy:
   local_overlay_allowed: true
   shipped_id_collision: reject
 description: >-
-  Distributable user-contract facts for Secretary. This pack is inert until a
-  future installer materializes it into a product memory scope.
+  Distributable Secretary product facts materialized by install and upgrade into
+  the private instance memory canon under the product:secretary namespace.
 facts:
   - id: task-board
     path: task-board.md

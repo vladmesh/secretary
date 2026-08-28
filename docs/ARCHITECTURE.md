@@ -454,6 +454,19 @@ it may stage a fact for the curator inbox with `secretary memory propose`, and c
 NDJSON export and the SQLite/vector index in the data directory are rebuilt from the canon. Only one
 index writer may publish derived state at a time.
 
+The shipped `packaging/memory/product-secretary` pack is a second input to that same canon, not a second
+database. Its facts live at `state/memory/facts/product-secretary` and resolve as `product:secretary`.
+Before materialization the selected product checkout's complete manifest, safe paths, regular files and
+SHA-256 digests are verified. `state/memory/packs/product-secretary.json` records the installed digest and
+the facts the pack owns: local facts may share its scope under different ids, but a local collision with a
+shipped id is refused. Added and changed facts publish through the normal export; the warm service's
+incremental reconciliation reuses embeddings whose id and content digest are unchanged and removes absent
+shipped facts without touching local or project facts.
+
+The ledger is `pending` while a changed canon awaits export publication and becomes `ready` only after the
+export files have been handed to the memory daemon's runtime user. That makes a failed root-run handoff
+visible and makes the next `--no-pull` upgrade retry it rather than treating a stale index as current.
+
 The embedding model is loaded locally and is the appliance's main memory consumer; see
 [Operations](OPERATIONS.md#system-requirements) for what has and has not been established about the
 supported minimum.

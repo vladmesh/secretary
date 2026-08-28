@@ -308,6 +308,8 @@ def get_memory_entry(id: int, *, allowed_scopes: frozenset[str] | None = None) -
 
 def scope_for_relative(path: Path) -> str:
     top = path.parts[0]
+    if top == "product-secretary":
+        return "product:secretary"
     return "global" if top == "global" else f"project:{top}"
 
 

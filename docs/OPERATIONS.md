@@ -220,6 +220,17 @@ The memory writer commits `state/memory` independently on `propose`/`commit`/`su
 does not overlap the tick writer's, and the shared instance-repository lock serialises both writers along
 with the publishing of reviewed instance-repo changes.
 
+The active shipped Secretary pack at `packaging/memory/product-secretary` is also materialized into this
+same canon during install and upgrade. Its authoritative source is the selected product checkout, while
+the installed ownership and digest record is `INSTANCE/state/memory/packs/product-secretary.json`. It
+publishes facts under `product:secretary`; local overlay facts are allowed at other ids, and an existing
+local fact at a shipped id stops the upgrade. A complete new manifest deletes only ids named by its prior
+ledger. `secretary upgrade --no-pull` still compares the selected checkout's pack digest to that ledger,
+then publishes the normal export and restarts the memory service when reconciliation changed it. The
+service reports the actual incremental add/update/delete/reuse result in its own reconciliation path.
+The ledger is not `ready` until the export has been published and made readable by that service user;
+an interrupted or failed handoff remains `pending` and is retried by the next upgrade.
+
 ### Read-only checkpoint and quiet-tick check
 
 Use an ordinary, already-authorized semantic board transition as the observation point; do not create a

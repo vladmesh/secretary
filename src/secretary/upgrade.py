@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from secretary import _proc, role_skills, state_repo
+from secretary.memory.pack import MemoryPackError, load_product_pack, materialize_product_pack
 from secretary.automations import (
     AutomationError,
     OrcaAutomationClient,
@@ -105,6 +106,10 @@ class UpgradeContext:
     changed_paths: tuple[str, ...] = ()
     code_changed: bool = False
     unit_changed: bool = False
+    # A product-pack reconciliation changed the canonical export, so the warm
+    # memory service must run its existing incremental reconciliation path.
+    memory_pack_changed: bool = False
+    memory_pack: Any = None
     # The account that owns the selected installation and the home its paths hang off. Everything
     # home-relative an upgrade materializes — skills, command entry points, role worktrees, the
     # workspaces an automation is registered with — resolves against this home rather than the
@@ -279,8 +284,46 @@ def step_registries(context: UpgradeContext) -> StepResult:
         canonical_heads(context.product_root, context.instance_path)
     except HeadRegistryConfigError as exc:
         return StepResult("registries", "failed", str(exc))
+    try:
+        context.memory_pack = load_product_pack(context.product_root)
+    except MemoryPackError as exc:
+        return StepResult("registries", "failed", f"memory pack: {exc}")
     sources = ", ".join(str(source.path) for source in registry.sources)
-    return StepResult("registries", "unchanged", f"{sources} and {canonical} are readable")
+    return StepResult(
+        "registries", "unchanged", f"{sources}, {canonical}, and memory pack are readable"
+    )
+
+
+def step_memory_pack(context: UpgradeContext) -> StepResult:
+    """Materialize the shipped pack only after `registries` validated its source."""
+    pack = context.memory_pack
+    try:
+        if pack is None:
+            pack = load_product_pack(context.product_root)
+        data_dir = context.report.data_dir
+        if data_dir is None:
+            return StepResult("memory-pack", "failed", "instance has no resolved data directory")
+        result = materialize_product_pack(
+            pack,
+            instance_dir=context.instance_path,
+            data_dir=data_dir,
+            dry_run=context.dry_run,
+            runtime_handoff=lambda path: _set_runtime_owner(path, context.runtime_user),
+            runtime_export_check=lambda memory_dir: _assert_memory_export_readable(
+                memory_dir, context.runtime_user
+            ),
+        )
+    except MemoryPackError as exc:
+        return StepResult("memory-pack", "failed", str(exc))
+    context.memory_pack_changed = result.changed
+    if not result.changed:
+        return StepResult("memory-pack", "unchanged", "installed digest matches product pack")
+    verb = "would reconcile" if context.dry_run else "reconciled"
+    return StepResult(
+        "memory-pack",
+        "changed",
+        f"{verb} {result.added} added, {result.updated} updated, {result.deleted} deleted, {result.retained} retained",
+    )
 
 
 def step_role_skills(context: UpgradeContext) -> StepResult:
@@ -427,6 +470,29 @@ def _set_runtime_owner(path: Path, runtime_user: str | None) -> None:
         assign(path)
     except OSError as exc:
         raise GitError(f"could not assign {path} to runtime user {runtime_user}: {exc}") from None
+
+
+def _assert_memory_export_readable(memory_dir: Path, runtime_user: str | None) -> None:
+    """Require the daemon account to own readable export files before activation."""
+    # An unprivileged invocation already writes as its runtime account. The
+    # ownership proof is needed for the root path, where publication otherwise
+    # preserves root's temporary-file mode and ownership.
+    if not runtime_user or os.geteuid() != 0:
+        return
+    try:
+        account = pwd.getpwnam(runtime_user)
+    except KeyError:
+        raise GitError(f"runtime user {runtime_user!r} does not exist") from None
+    for name in ("export.ndjson", "export.json", "manifest.json"):
+        path = memory_dir / name
+        try:
+            info = path.lstat()
+        except OSError as exc:
+            raise GitError(f"could not inspect memory export {path}: {exc}") from None
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise GitError(f"memory export is not a regular file: {path}")
+        if info.st_uid != account.pw_uid or not info.st_mode & stat.S_IRUSR:
+            raise GitError(f"memory export is not readable by runtime user {runtime_user}: {path}")
 
 
 def _set_runtime_directory_owner(path: Path, runtime_user: str | None) -> None:
@@ -633,6 +699,8 @@ def step_memory(context: UpgradeContext) -> StepResult:
         reason = "unit file changed"
     elif context.code_changed:
         reason = "product code or dependencies changed"
+    elif context.memory_pack_changed:
+        reason = "memory pack export changed"
     else:
         return StepResult("memory", "unchanged", "serving the current code")
     if context.dry_run:
@@ -717,6 +785,7 @@ def step_board_transport(context: UpgradeContext) -> StepResult:
 STEPS: tuple[Callable[[UpgradeContext], StepResult], ...] = (
     step_pull,
     step_registries,
+    step_memory_pack,
     step_board_transport,
     step_dependencies,
     step_head_registry,
