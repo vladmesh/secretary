@@ -120,6 +120,10 @@ class DispatcherRecord:
     # it existed, a record re-adopted from the board — means the gate stops refreshing that pull
     # request, never that it assumes the text is its own.
     gate_pr_authorship: dict[str, Any] = field(default_factory=dict)
+    # Dispatcher-owned CI invocation for a base-identical research candidate.  The SHA and
+    # discovered Actions run id survive a restart, so a later tick polls this invocation instead
+    # of creating another run or accepting an unrelated base check.
+    gate_workflow_dispatch: dict[str, Any] = field(default_factory=dict)
     # Last checkout rejected by a mechanical gate or red review in this attempt.  The class and
     # reason come from the gate's structured result, before any card comment is made.  A same-SHA
     # report after an infrastructure red may retry that gate; every other same-SHA report is still
@@ -302,6 +306,7 @@ class DispatcherRecord:
             "gate_infrastructure_rerun_run_id": self.gate_infrastructure_rerun_run_id,
             "gate_infrastructure_rerun_reason": self.gate_infrastructure_rerun_reason,
             "gate_pr_authorship": dict(self.gate_pr_authorship),
+            "gate_workflow_dispatch": dict(self.gate_workflow_dispatch),
             "handle": self.handle,
             "head": self.head,
             "preferred_head": self.preferred_head,
@@ -429,6 +434,7 @@ class DispatcherRecord:
             gate_infrastructure_rerun_run_id=str(payload.get("gate_infrastructure_rerun_run_id") or ""),
             gate_infrastructure_rerun_reason=str(payload.get("gate_infrastructure_rerun_reason") or ""),
             gate_pr_authorship=_run_snapshot(payload.get("gate_pr_authorship")),
+            gate_workflow_dispatch=_run_snapshot(payload.get("gate_workflow_dispatch")),
             rejected_sha=str(payload.get("rejected_sha") or ""),
             rejected_failure_class=str(payload.get("rejected_failure_class") or "substantive"),
             rejected_failure_reason=str(payload.get("rejected_failure_reason") or ""),

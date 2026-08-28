@@ -2435,6 +2435,12 @@ class CommandHostRuntime:
         if self.commit_state is not None:
             self.commit_state()
 
+    def commit_gate_workflow_dispatch(self, record: DispatcherRecord, entry: dict[str, Any]) -> None:
+        """Persist a no-diff research workflow request before a later tick can repeat it."""
+        record.gate_workflow_dispatch = dict(entry)
+        if self.commit_state is not None:
+            self.commit_state()
+
     def worker_lifecycle_run(self, record: DispatcherRecord) -> head_ops.HeadRun:
         """This card's worker as the head operations see it."""
         stored = record.worker_head_run if isinstance(record.worker_head_run, dict) else {}
