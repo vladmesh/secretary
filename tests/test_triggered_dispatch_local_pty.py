@@ -240,7 +240,18 @@ class MechanicalRoleBackendTestCase(unittest.TestCase):
     def _tick(self, registry, *, host):
         with contextlib.ExitStack() as stack:
             enter = stack.enter_context
-            enter(mock.patch.dict(os.environ, {"SECRETARY_DATA_DIR": str(self.data_dir)}))
+            enter(
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "SECRETARY_DATA_DIR": str(self.data_dir),
+                        # The grant helper is a Secretary-owned launch boundary.  Keep this
+                        # subprocess on the product tree this fixture is testing instead of an
+                        # ambient installation's selected checkout.
+                        "TA_SECRETARY_REPO": str(Path(__file__).resolve().parents[1]),
+                    },
+                )
+            )
             enter(mock.patch.object(runtime_state, "STATE_ROOT", self.state_root))
             enter(mock.patch.object(dispatch, "_workspace", return_value=str(self.workspace)))
             enter(mock.patch.object(dispatch, "_load_spec", return_value={"skill": "/retro"}))

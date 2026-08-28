@@ -119,6 +119,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import time
@@ -148,6 +149,7 @@ from .head import (
     TaskRef,
     new_run_id,
     render_head_command,
+    with_pid_heartbeat,
 )
 from .head.identity import head_process_status
 from .head_runtime_backends import build_head_runtime, head_runtime_name
@@ -801,6 +803,43 @@ def _create_terminal(
     return pane.handle
 
 
+def _standing_memory_run(agent: str, spec: HeadSpec, workspace: str, run_id: str) -> HeadRun:
+    """The heartbeat path shared by pane and supervised scheduled heads."""
+    return HeadRun(
+        run_id=run_id,
+        spec=spec,
+        workspace=workspace,
+        task_ref=TaskRef.standing(agent),
+        role=agent,
+        pid_file=str(_installation_data_dir() / "memory" / "access-grants" / "heads" / f"{run_id}.pid"),
+    )
+
+
+def _memory_bound_launch(agent: str, run: HeadRun, command: str) -> str:
+    """Attach a scheduled role's launch-bound Memory grant to its head command."""
+    if agent not in {"curator", "retro", "steward"}:
+        return command
+    product_root = Path(os.environ.get("TA_SECRETARY_REPO") or _REPO_ROOT)
+    grant = " ".join(
+        (
+            f"PYTHONPATH={shlex.quote(str(product_root / 'src'))}",
+            "python3 -m secretary.memory.grant_env",
+            f"--head-run {shlex.quote(json.dumps(run.to_json(), separators=(',', ':')))}",
+            f"--subject {shlex.quote(json.dumps({'kind': 'standing', 'ref': agent}, separators=(',', ':')))}",
+            f"--data-dir {shlex.quote(str(_installation_data_dir()))}",
+        )
+    )
+    return f"env $({grant}) {command}"
+
+
+def _memory_heartbeat(run: HeadRun, command: str) -> str:
+    return with_pid_heartbeat(
+        command,
+        run.pid_file,
+        identity={"run_id": run.run_id, "role": run.role, "task": f"{run.task_ref.kind}:{run.task_ref.ref}"},
+    )
+
+
 def _recover_steward_dispatch_failure(
     state: AgentState, event: str, cmd: DispatchCommand, failure: BaseException
 ) -> None:
@@ -1082,7 +1121,15 @@ def _spawn_fresh_terminal(
         reports.preflight_failed(cmd, exc)
         raise
     try:
-        handle = _create_terminal(agent, ws, cmd.launch, state, cmd.profile, host=host)
+        launch = cmd.launch
+        if agent in {"curator", "retro", "steward"}:
+            profile = dict(cmd.head_profile or {})
+            spec = HeadSpec(
+                profile_id=str(cmd.profile or agent), adapter=str(profile.get("adapter") or "unknown")
+            )
+            run = _standing_memory_run(agent, spec, ws, new_run_id())
+            launch = _memory_heartbeat(run, _memory_bound_launch(agent, run, launch))
+        handle = _create_terminal(agent, ws, launch, state, cmd.profile, host=host)
         if cmd.prompt_after_start:
             _deliver_interactive_skill(handle, ws, cmd.skill, host=host)
     except Exception as exc:
@@ -1689,7 +1736,7 @@ def _supervised_bring_up(
     # skill and travels in the prompt, exactly as it does on a pane.
     task_ref = TaskRef.standing(agent)
     run_id = str((prior or {}).get("run_id") or "") or new_run_id()
-    run = HeadRun(run_id=run_id, spec=spec, workspace=ws, task_ref=task_ref, role=agent)
+    run = _standing_memory_run(agent, spec, ws, run_id)
     # An adapter that takes its prompt on its command line is launched with it, as it is on a pane;
     # one that starts with an empty composer is pointed at its skill across the same boundary that
     # raised it. Neither shape touches a terminal API.
@@ -1698,7 +1745,7 @@ def _supervised_bring_up(
         spec,
         ws,
         task_ref,
-        command=cmd.launch,
+        command=f"/bin/sh -c {shlex.quote(_memory_heartbeat(run, _memory_bound_launch(agent, run, cmd.launch)))}",
         title=f"triggered-agent:{agent}",
         pointer=pointer,
         run_id=run_id,

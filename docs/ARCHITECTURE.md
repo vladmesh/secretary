@@ -109,7 +109,7 @@ operator / automation
           │
           └──── run/audit state ──────┘
 
-agent heads ── memory_search ──> MCP/index <── facts journal <── curator
+agent heads ── Bearer grant + HeadRun heartbeat ──> memory MCP/index <── facts journal <── curator
 ```
 
 Kanboard is the current live store for cards and sprints. Cards live on the `Pipeline` board; each

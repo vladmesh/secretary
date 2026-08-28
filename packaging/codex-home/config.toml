@@ -3,3 +3,4 @@ model_reasoning_effort = "medium"
 
 [mcp_servers.memory]
 url = "http://127.0.0.1:8077/mcp"
+bearer_token_env_var = "SECRETARY_MEMORY_ACCESS_TOKEN"

@@ -5113,7 +5113,14 @@ class ObserverConfigurationTests(unittest.TestCase):
         # The worker's environment plus the two names that say which sprint this head observes.
         self.assertEqual(
             ROLE_ALLOWLIST["observer"],
-            (*ROLE_ALLOWLIST["worker"], OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV),
+            (
+                "SECRETARY_INSTANCE",
+                "SECRETARY_DATA_DIR",
+                "TA_SECRETARY_REPO",
+                OBSERVER_SPRINT_ENV,
+                OBSERVER_GENERATION_ENV,
+                "SECRETARY_MEMORY_ACCESS_TOKEN",
+            ),
         )
 
         env_file = Path(tempfile.mkdtemp()) / "runtime.env"

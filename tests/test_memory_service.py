@@ -213,5 +213,101 @@ class IncrementalMemoryIndexTests(unittest.TestCase):
         )
 
 
+@unittest.skipIf(memory_service is None, "secretary[memory] is not installed")
+class MemoryReadAuthorizationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.db = Path(self.temp.name) / "index.sqlite"
+        self.log = Path(self.temp.name) / "search-log.jsonl"
+        conn = memory_service.db(self.db)
+        try:
+            memory_service.create_schema(conn, 4)
+            conn.executemany(
+                "INSERT INTO memories(text, scope, tags, source, created_at) VALUES (?,?,?,?,?)",
+                [
+                    ("allowed project fact", "project:alpha", None, None, None),
+                    ("foreign project fact", "project:foreign", None, None, None),
+                    ("Secretary development fact", "project:secretary", None, None, None),
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        self.paths = mock.patch.multiple(memory_service, DB_PATH=str(self.db), SEARCH_LOG=str(self.log))
+        self.paths.start()
+
+    def tearDown(self):
+        self.paths.stop()
+        self.temp.cleanup()
+
+    def identity(self, scopes):
+        return memory_service.memory_access.MemoryReadIdentity(
+            "worker", {"kind": "card", "ref": "card-1", "project": "alpha"}, frozenset(scopes), "grant"
+        )
+
+    def test_get_and_list_cannot_bypass_the_shared_scope_guard(self):
+        with mock.patch.object(memory_service, "read_guard", return_value=self.identity({"project:alpha"})):
+            self.assertEqual(memory_service.memory_get(1)["text"], "allowed project fact")
+            self.assertEqual(memory_service.memory_get(2), {"error": "not found", "id": 2})
+            self.assertEqual([entry["text"] for entry in memory_service.memory_list()], ["allowed project fact"])
+
+    def test_missing_runtime_identity_returns_a_data_free_denial_for_every_read(self):
+        denial = memory_service.memory_access.MemoryAccessDenial("runtime_identity_missing")
+        with mock.patch.object(memory_service, "read_guard", return_value=denial):
+            self.assertEqual(memory_service.memory_search("ignored", caller="po"), denial.response())
+            self.assertEqual(memory_service.memory_get(1), denial.response())
+            self.assertEqual(memory_service.memory_list(), [denial.response()])
+
+    def test_search_uses_the_resolved_scope_once_and_ignores_spoofed_caller(self):
+        identity = self.identity({"project:alpha", "product:secretary"})
+        with (
+            mock.patch.object(memory_service, "read_guard", return_value=identity) as guard,
+            mock.patch.object(memory_service, "search_ready", return_value=True),
+            mock.patch.object(memory_service, "search_memory", return_value=[]) as search,
+        ):
+            self.assertEqual(memory_service.memory_search("query", scope="project:alpha", caller="po"), [])
+
+        guard.assert_called_once_with("project:alpha")
+        search.assert_called_once_with("query", 5, allowed_scopes=identity.scopes)
+
+    def test_audit_log_has_resolved_identity_not_fact_text_or_capability(self):
+        identity = self.identity({"project:alpha"})
+        memory_service.log_read("memory_get", identity, "allowed", results=[{"id": 1, "score": 0.9}])
+
+        entry = json.loads(self.log.read_text(encoding="utf-8"))
+        self.assertEqual(entry["role"], "worker")
+        self.assertEqual(entry["scopes"], ["project:alpha"])
+        self.assertNotIn("allowed project fact", json.dumps(entry))
+        self.assertNotIn("grant", json.dumps(entry))
+
+    def test_scope_denial_audit_keeps_resolved_identity_and_malformed_scope_is_typed(self):
+        identity = self.identity({"project:alpha"})
+        with mock.patch.object(
+            memory_service,
+            "read_guard",
+            return_value=memory_service.memory_access.MemoryAccessDenial("scope_malformed", identity),
+        ):
+            denial = memory_service.memory_search("not logged", scope="pro ject")
+
+        self.assertEqual(denial, {"status": "denied", "error": "scope_malformed"})
+        entry = json.loads(self.log.read_text(encoding="utf-8"))
+        self.assertEqual(entry["outcome"], "scope_malformed")
+        self.assertEqual(entry["role"], "worker")
+        self.assertEqual(entry["subject"], identity.subject)
+        self.assertEqual(entry["scopes"], ["project:alpha"])
+        self.assertNotIn("not logged", json.dumps(entry))
+
+    def test_restore_uses_index_primitives_because_direct_mcp_calls_are_denied(self):
+        denial = memory_service.memory_access.MemoryAccessDenial("runtime_identity_missing")
+        with mock.patch.object(memory_service, "read_guard", return_value=denial):
+            self.assertEqual(memory_service.memory_list(), [denial.response()])
+        self.assertEqual([entry["text"] for entry in memory_service.list_memory_entries()], [
+            "Secretary development fact",
+            "foreign project fact",
+            "allowed project fact",
+        ])
+        self.assertEqual(memory_service.get_memory_entry(1)["text"], "allowed project fact")
+
+
 if __name__ == "__main__":
     unittest.main()

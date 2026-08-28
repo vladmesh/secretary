@@ -14,6 +14,7 @@ from unittest import mock
 
 from triggered_agents.runtime import codex_preflight, dispatch, tui_delivery
 from triggered_agents.runtime import state as runtime_state
+from triggered_agents.runtime.head import HeadSpec
 from triggered_agents.runtime.agent_prompt_transport import (
     BRACKETED_PASTE_END,
     BRACKETED_PASTE_START,
@@ -116,6 +117,17 @@ class TriggeredDispatchReuseTests(unittest.TestCase):
         self.term = Pane(
             handle="term-live", leaf="leaf-live", title="triggered-agent:retro", last_output_at=1.0
         )
+
+    def test_scheduled_memory_launch_binds_the_bearer_to_its_heartbeat(self):
+        data_dir = Path(self.tmp.name) / "data"
+        spec = HeadSpec(profile_id="test", adapter="codex")
+        with mock.patch.object(dispatch, "_installation_data_dir", return_value=data_dir):
+            run = dispatch._standing_memory_run("curator", spec, self.workspace, "curator-run")
+            command = dispatch._memory_heartbeat(run, dispatch._memory_bound_launch("curator", run, "codex"))
+
+        self.assertIn("secretary.memory.grant_env", command)
+        self.assertIn(str(Path(run.pid_file)), command)
+        self.assertNotIn("SECRETARY_MEMORY_ACCESS_TOKEN=", command)
 
     def _common_run_patches(self):
         """Everything a warm-reuse tick decides that is not about terminals.

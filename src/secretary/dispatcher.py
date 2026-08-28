@@ -387,6 +387,7 @@ from secretary.head_health import (
     resolve_head_chain,
 )
 from secretary.head_registry import HeadRegistryConfigError, installed_heads
+from secretary.memory import access as memory_access
 from secretary.observer_root import OBSERVER_REPO_NAME, observer_root_repo
 from secretary.projects.contract import (
     CONTRACT_FIT,
@@ -1404,13 +1405,22 @@ class CommandHostRuntime:
             }
         # Drop a predecessor's pid before the new head can be read as this launch's liveness.
         _clear_head_heartbeat(pid_file)
+        try:
+            grant = memory_access.issue_grant(
+                lifecycle_run,
+                memory_access.sprint_subject(reference, list(sprint.get("reservations") or [])),
+                data_dir=self.data_dir,
+            )
+        except memory_access.MemoryAccessError as exc:
+            raise HostError(f"memory access binding could not be issued: {exc}") from None
+        launch_identity = {**(identity or {}), **grant.launch_identity}
         launch = self.catalog.head_launch(
             head,
             OBSERVER_PROMPT_FILE,
             workspace=str(workspace),
             role=OBSERVER_ROLE,
             launch_prompt=_observer_launch_prompt(),
-            identity=identity,
+            identity=launch_identity,
         )
         lifecycle_run = self._open_head_pane(
             lifecycle_run,
@@ -2904,6 +2914,29 @@ class CommandHostRuntime:
             role=role,
             task_ref=task_ref.to_json(),
         )
+        try:
+            preflight_run = self._preflight_launch_run(
+                head,
+                role=role,
+                workspace=workspace,
+                task_ref=task_ref,
+                pid_file=pid_file,
+                run_id=run_id,
+            )
+        except CodexFanoutPolicyError as exc:
+            raise HostError(str(exc)) from None
+        memory_identity: dict[str, str] | None = None
+        project = str((task or {}).get("project") or "")
+        if task is not None and role in {"worker", "reviewer"} and project:
+            try:
+                grant = memory_access.issue_grant(
+                    preflight_run,
+                    memory_access.card_subject(str(task.get("ref") or ""), project),
+                    data_dir=self.data_dir,
+                )
+            except memory_access.MemoryAccessError as exc:
+                raise HostError(f"memory access binding could not be issued: {exc}") from None
+            memory_identity = grant.launch_identity
         if pid_file:
             # Drop any pid a previous launch in this workspace left behind, so a respawn cannot read
             # a dead predecessor's pid as this launch's liveness before the new head overwrites it.
@@ -2921,22 +2954,12 @@ class CommandHostRuntime:
                 workspace=workspace,
                 role=role,
                 launch_prompt=launch_prompt,
+                identity=memory_identity,
             )
             command = launch.command
             if pid_file:
                 command = _with_pid_heartbeat(command, pid_file, identity=heartbeat)
         adapter = (getattr(launch, "adapter", "") or "codex") if launch else "codex"
-        try:
-            preflight_run = self._preflight_launch_run(
-                head,
-                role=role,
-                workspace=workspace,
-                task_ref=task_ref,
-                pid_file=pid_file,
-                run_id=run_id,
-            )
-        except CodexFanoutPolicyError as exc:
-            raise HostError(str(exc)) from None
         ingress = self._codex_provider_ingress(preflight_run)
         subject = f"{role or 'head'}-launch"
         pointer = None

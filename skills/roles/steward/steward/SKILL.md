@@ -81,10 +81,11 @@ nothing on the board during the run.
 
 ## Memory
 
-Before working out how the system is built from scratch, search shared memory: the `memory` MCP server,
-tool `memory_search(query, k, scope, caller)`. Order: the product project scope first, and without a
-scope if that is empty. Always pass `caller="steward"`. When shared memory conflicts with personal
-memory, shared memory wins.
+Before working out how the system is built from scratch, search shared memory through `memory_search`.
+This standing head is granted only `project:secretary` and `product:secretary`; pass one of those scopes
+when narrowing is useful. Do not pass `caller`, and never retry an empty or denied search without a scope:
+the server resolves authority from the launch identity and a requested scope can only narrow it. When shared
+memory conflicts with personal memory, shared memory wins.
 
 ## What woke you
 

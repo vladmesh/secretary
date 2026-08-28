@@ -74,26 +74,28 @@ NONSECRET_ENV = ("SECRETARY_INSTANCE", "SECRETARY_DATA_DIR", "TA_SECRETARY_REPO"
 # file, which is itself a file inside one installation.
 OBSERVER_SPRINT_ENV = "SECRETARY_OBSERVER_SPRINT"
 OBSERVER_GENERATION_ENV = "SECRETARY_OBSERVER_GENERATION"
+MEMORY_ACCESS_TOKEN_ENV = "SECRETARY_MEMORY_ACCESS_TOKEN"
 UNIT_BOUND_ENV = (
     "SECRETARY_INSTANCE",
     "TA_SECRETARY_REPO",
     OBSERVER_SPRINT_ENV,
     OBSERVER_GENERATION_ENV,
+    MEMORY_ACCESS_TOKEN_ENV,
 )
 # An observer's identity is supplied only by its launcher. A runtime.env entry must never let a
 # head claim another sprint.
-LAUNCHER_ONLY_ENV = (OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV)
+LAUNCHER_ONLY_ENV = (OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV, MEMORY_ACCESS_TOKEN_ENV)
 # What a launched process has to be told about the installation it belongs to.
 LAUNCH_BOUND_ENV = (*RUNTIME_ENV_FILE_ENVS, "SECRETARY_INSTANCE", "TA_SECRETARY_REPO")
 
 ROLE_ALLOWLIST: dict[str, tuple[str, ...]] = {
     "pipeline": NONSECRET_ENV,
-    "worker": NONSECRET_ENV,
-    "reviewer": NONSECRET_ENV,
-    "observer": (*NONSECRET_ENV, OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV),
-    "steward": NONSECRET_ENV,
-    "retro": NONSECRET_ENV,
-    "curator": NONSECRET_ENV,
+    "worker": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),
+    "reviewer": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),
+    "observer": (*NONSECRET_ENV, OBSERVER_SPRINT_ENV, OBSERVER_GENERATION_ENV, MEMORY_ACCESS_TOKEN_ENV),
+    "steward": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),
+    "retro": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),
+    "curator": (*NONSECRET_ENV, MEMORY_ACCESS_TOKEN_ENV),
 }
 
 # This gates the synthetic BOARD_ROLE value. po and dispatcher have no allowlist entry, so they

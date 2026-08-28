@@ -272,6 +272,7 @@ def bind_leaf(record):
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         pass
 directory = os.path.dirname(path) or '.'
+os.makedirs(directory, mode=0o700, exist_ok=True)
 def publish(payload):
     fd, temporary = tempfile.mkstemp(prefix='.secretary-heartbeat-', dir=directory)
     with os.fdopen(fd, 'w', encoding='utf-8') as handle:
