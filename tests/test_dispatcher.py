@@ -5263,8 +5263,45 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         record = self._pilot_record()
         self.assertEqual(record["gate_state"], "green")
         self.assertEqual(record["gate_attestation"], receipt)
+        self.assertEqual(record["rejected_done_reports"], 1)
         self.assertEqual(self.host.gate_calls, [CARD_REF, CARD_REF])
         self.assertLess(self.host.calls.index("retain_worker"), self.host.calls.index("gate_check"))
+
+    def test_persistent_stale_dispatch_mismatch_blocks_after_one_post_freeze_retry(self) -> None:
+        self.board.metadata[12]["task_type"] = "research"
+        self.catalog._adapter = {"validation": {"ci": "github"}}
+        self.host.commit = "a" * 40
+        mismatch = GateResult(
+            "red",
+            "workflow dispatch run 11 is for another SHA",
+            failure_reason="workflow-dispatch-head-sha-mismatch",
+        )
+        self.host.gate_results = [mismatch, mismatch]
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "gate-red-rework")
+
+        payload = self.runtime.production_state.load()
+        payload["records"][CARD_REF]["gate_workflow_dispatch"] = {
+            "sha": self.host.commit,
+            "workflow": "ci.yml",
+            "run_id": "12",
+        }
+        self.runtime.production_state.save(payload)
+        self._report_done("the dispatcher-owned workflow dispatch may now be visible")
+
+        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self._pilot_record()["rejected_done_reports"], 1)
+        self.assertEqual(self.tick()["action"], "gate-red-rework")
+        self.assertEqual(self._pilot_record()["rejected_done_reports"], 1)
+
+        self._report_done("the same wrong-SHA result is still all that exists")
+        blocked = self.tick()
+
+        self.assertEqual(blocked["reason"], "worker repeatedly reported rejected SHA")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
+        self.assertNotIn(CARD_REF, self.runtime.production_state.load()["records"])
+        self.assertEqual(self.host.gate_calls, [CARD_REF, CARD_REF])
 
     def test_stale_no_diff_dispatch_recovery_refuses_a_green_result_without_an_exact_sha_receipt(self) -> None:
         self.board.metadata[12]["task_type"] = "research"
