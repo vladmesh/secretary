@@ -1722,6 +1722,23 @@ The memory search log is an authorization audit, not a fact transcript: every re
 and records the resolved role, subject, scopes and outcome with result ids/scores, never fact text, queries
 or bearer material. Consumers that need evidence of a search filter for `action == "memory_search"`.
 
+### Restart health contract
+
+A Memory restart requested by an upgrade, unit change, product-code/dependency change, or shipped-pack
+reconciliation is not healthy merely because systemd says the service is active. Upgrade creates a
+short-lived steward `HeadRun`, publishes its ordinary versioned heartbeat, issues the ordinary
+launch-bound grant, and performs `initialize` then `tools/call(memory_list)` over the MCP endpoint with
+that bearer. The service therefore verifies the bearer and the same live heartbeat/read guard used by
+heads. The probe supplies neither `caller` nor `scope`, expects a Secretary/product-scoped row, and removes
+its temporary grant and heartbeat afterwards. An unavailable service, stale or denied identity, malformed
+MCP reply, or absent expected row fails the `memory` upgrade step visibly.
+
+The portable acceptance fixture in `tests/test_memory_acceptance.py` makes only temporary sentinel rows. It
+uses the production token verifier and read tools to prove the interactive PO, foreign worker, Secretary
+worker, and explicitly reserved observer matrix, including that spoofed `caller`, wider `scope`,
+`memory_get`, and `memory_list` cannot widen it. It inspects only the audit schema and does not put fact
+text or bearer material into the audit assertion.
+
 Bearer delivery assumes processes running as the same host user are mutually trusted: that user can inspect
 another same-user process's environment or command line and could reuse its live bearer. The protocol limits
 cross-user and stale-head access, keeps the capability out of durable output and redacts it from launch and

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -125,6 +126,49 @@ def _read_record(pid_file: str) -> tuple[dict[str, Any] | None, dict[str, Any] |
     record["pid"] = pid
     record["leaf"] = str(record.get("leaf") or "")
     return record, None
+
+
+def publish_heartbeat(pid_file: str, identity: Mapping[str, str], *, pid: int | None = None) -> None:
+    """Publish the versioned launch identity for the current process atomically.
+
+    Head shells use an equivalent tiny stdlib writer before ``exec``.  Short-lived
+    launch-bound helpers use this function so the reader sees the exact same
+    heartbeat contract, rather than a probe-only liveness convention.
+    """
+    current_pid = os.getpid() if pid is None else pid
+    record = {
+        "version": HEARTBEAT_VERSION,
+        "pid": current_pid,
+        "boot_id": _boot_id(),
+        "proc_starttime_ticks": _proc_starttime_ticks(current_pid),
+        "run_id": str(identity.get("run_id") or ""),
+        "role": str(identity.get("role") or ""),
+        "task": str(identity.get("task") or ""),
+    }
+    if not all(record[name] for name in ("run_id", "role", "task")):
+        raise ValueError("heartbeat identity is incomplete")
+    leaf = str(identity.get("leaf") or "")
+    if leaf:
+        record["leaf"] = leaf
+    path = Path(pid_file)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".secretary-heartbeat-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(record, handle, sort_keys=True, separators=(",", ":"))
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            Path(temporary).unlink()
+        except OSError:
+            pass
+        raise
 
 
 def head_process_status(pid_file: str, *, expected: Mapping[str, Any] | None = None) -> dict[str, Any]:
