@@ -1,0 +1,37 @@
+schema: 1
+product: secretary
+namespace: product:secretary
+status: inactive
+ownership: shipped
+fact_format: markdown-frontmatter-v1
+reconciliation:
+  identity: id
+  digest: sha256
+  manifest_is_complete: true
+  absent_id: delete
+  unchanged_digest: retain_embedding
+overlay_policy:
+  local_overlay_allowed: true
+  shipped_id_collision: reject
+description: >-
+  Distributable user-contract facts for Secretary. This pack is inert until a
+  future installer materializes it into a product memory scope.
+facts:
+  - id: task-board
+    path: task-board.md
+    sha256: 13cc755235ec1a7733194a04913adbb62a43048c4353d5d06b64bce767ab5b23
+  - id: sprints-and-reservations
+    path: sprints-and-reservations.md
+    sha256: 0fa86ddbf1e0ce32d4c10168caace703bc971768e8cbdb8cd5f2997a3b8c1e7a
+  - id: worker-reporting
+    path: worker-reporting.md
+    sha256: 9adde5d3c7c9a3f3321cb069c5f236d1b67c9924aaf770496510bf5f3ecb9fbf
+  - id: validation-review-assessment
+    path: validation-review-assessment.md
+    sha256: b0c07fba514fbcbd6c4b1daf2bfc08039d03429eeb1b143ad8e895ab8f2119eb
+  - id: roles-and-authority
+    path: roles-and-authority.md
+    sha256: bf73ca6e2778c0e4f0598ac86bded61796c2ca3f07b833310e4829b8954d1538
+  - id: operational-boundaries
+    path: operational-boundaries.md
+    sha256: e2e91ad9e083b81e07d6c18c01b13abfafbc6d815b1534b858ee1e8c72b69cb2
