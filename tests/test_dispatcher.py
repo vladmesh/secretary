@@ -11433,6 +11433,63 @@ class DispatcherLauncherTests(unittest.TestCase):
         self.assertFalse(any("push origin pipeline/secretary-510-pilot:main" in c for c in cmds), cmds)
         self.assertTrue(any(c.endswith("merge --ff-only origin/main") for c in cmds), cmds)
 
+    def test_complete_green_completes_base_identical_dispatched_research_without_a_pr(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            host = _RecordingMergeHost(Path(tmp), {"validation": {"ci": "github"}})
+            sha = "a" * 40
+            record = SimpleNamespace(
+                workspace=str(Path(tmp) / "ws"),
+                gate_workflow_dispatch={"sha": sha, "workflow": "ci.yml", "run_id": "77"},
+                gate_attestation={"validated_sha": sha, "base_sha": sha},
+            )
+
+            host.complete_green(
+                {"ref": "secretary-510-pilot", "project": "secretary", "type": "research"}, record
+            )
+
+        self.assertEqual(host.runs, [], "a base-identical candidate has no GitHub delivery to perform")
+
+    def test_complete_green_rejects_base_identical_research_with_its_own_commit(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            host = _RecordingMergeHost(Path(tmp), {"validation": {"ci": "github"}})
+            base_sha = "a" * 40
+            candidate_sha = "b" * 40
+            record = SimpleNamespace(
+                workspace=str(Path(tmp) / "ws"),
+                gate_workflow_dispatch={"sha": candidate_sha, "workflow": "ci.yml", "run_id": "77"},
+                gate_attestation={"validated_sha": candidate_sha, "base_sha": base_sha},
+            )
+
+            with self.assertRaisesRegex(HostError, "owns commits and cannot complete without a pull request"):
+                host.complete_green(
+                    {"ref": "secretary-510-pilot", "project": "secretary", "type": "research"}, record
+                )
+
+        self.assertEqual(host.runs, [])
+
+    def test_complete_green_keeps_the_pr_merge_for_a_code_card_with_dispatch_metadata(self) -> None:
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as tmp:
+            host = _RecordingMergeHost(Path(tmp), {"validation": {"ci": "github"}})
+            sha = "a" * 40
+            record = SimpleNamespace(
+                workspace=str(Path(tmp) / "ws"),
+                gate_workflow_dispatch={"sha": sha, "workflow": "ci.yml", "run_id": "77"},
+                gate_attestation={"validated_sha": sha, "base_sha": sha},
+            )
+
+            host.complete_green(
+                {"ref": "secretary-510-pilot", "project": "secretary", "type": "code"}, record
+            )
+
+        cmds = [" ".join(run) for run in host.runs]
+        self.assertTrue(any("gh pr merge pipeline/secretary-510-pilot --merge" in command for command in cmds), cmds)
+
     def test_complete_green_survives_default_checkout_refresh_failure_after_pr_merge(self) -> None:
         """The remote merge is complete even when a preserved local branch cannot fast-forward."""
         from types import SimpleNamespace
