@@ -655,6 +655,7 @@ def _no_diff_research_gate(
             "red",
             f"CI workflow dispatch run {found_id} is for `{found_sha[:12] or 'unavailable'}`, not candidate `{sha[:12]}`",
             fingerprint=_fingerprint("github-workflow-dispatch-sha", found_id, found_sha, sha),
+            failure_reason="workflow-dispatch-head-sha-mismatch",
         )
     if found_id != run_id:
         entry = {"sha": sha, "workflow": _NO_DIFF_WORKFLOW, "run_id": found_id}

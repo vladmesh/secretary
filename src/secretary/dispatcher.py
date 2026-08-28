@@ -5232,6 +5232,7 @@ class DispatcherRuntime:
                     "reason": "worker result is not durable",
                 }
             current_sha = self.host.head_commit(record)
+            retry_stale_no_diff_gate = False
             reuse_report_only_gate = False
             if current_sha and current_sha == record.rejected_sha:
                 if record.rejected_failure_class == "infrastructure":
@@ -5243,10 +5244,19 @@ class DispatcherRuntime:
                         attempt_id,
                         current_sha,
                     )
-                reuse_report_only_gate = self._can_reuse_report_only_rework_gate(task, record, current_sha)
-                if not reuse_report_only_gate:
+                retry_stale_no_diff_gate = self._can_retry_stale_no_diff_research_gate(
+                    task, record, current_sha
+                )
+                reuse_report_only_gate = self._can_reuse_report_only_rework_gate(
+                    task, record, current_sha
+                )
+                if not (retry_stale_no_diff_gate or reuse_report_only_gate):
                     return self._reject_stale_done(task, record, records, payload, attempt_id, current_sha)
-            record.rejected_done_reports = 0
+            # A no-diff research card gets one post-freeze chance to observe the dispatch it
+            # already owns.  Count that report before Validate so a persistent wrong-SHA result
+            # cannot reopen this exception forever: the next unchanged done report must still
+            # reach _reject_stale_done's human-escalation bound.
+            record.rejected_done_reports = 1 if retry_stale_no_diff_gate else 0
             record.review_baseline = len(task.get("comments") or [])
             # Freeze before moving the board. A later tick may finish the idempotent move, but it
             # never leaves a completed worker writing while CI or a reviewer owns this checkout.
@@ -5349,6 +5359,44 @@ class DispatcherRuntime:
             and current_sha == record.rejected_sha
             and record.gate_state == "green"
             and bool(_gate_attestation_for_prompt(record, current_sha))
+        )
+
+    def _can_retry_stale_no_diff_research_gate(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        current_sha: str,
+    ) -> bool:
+        """Whether a stale no-diff gate may retry after the worker is frozen.
+
+        The initial no-diff poll can see another branch's workflow-dispatch run before this card's
+        own dispatch becomes visible. A fresh report is not evidence by itself: this narrow
+        persisted-dispatch match only lets the ordinary, post-retention gate poll that request.
+        Every other answer, including an old persisted receipt, takes the stale-done path.
+        """
+        return bool(
+            not record.rejected_done_reports
+            and self._is_stale_no_diff_research_gate_recovery(task, record, current_sha)
+        )
+
+    def _is_stale_no_diff_research_gate_recovery(
+        self,
+        task: dict[str, Any],
+        record: DispatcherRecord,
+        current_sha: str,
+    ) -> bool:
+        """Whether this record identifies the narrow stale workflow-dispatch recovery."""
+        dispatch = record.gate_workflow_dispatch
+        return bool(
+            task.get("type") == "research"
+            and _validation_ci(self.host, task) == "github"
+            and record.rejected_failure_class == "substantive"
+            and record.rejected_failure_reason == "workflow-dispatch-head-sha-mismatch"
+            and bool(current_sha)
+            and current_sha == record.rejected_sha
+            and isinstance(dispatch, dict)
+            and dispatch.get("sha") == current_sha
+            and dispatch.get("workflow") == "ci.yml"
         )
 
     def _accept_stale_infrastructure_done(
@@ -7179,10 +7227,16 @@ class DispatcherRuntime:
                 result,
                 phase=phase,
             )
-        record.rejected_sha = self.host.head_commit(record)
+        current_sha = self.host.head_commit(record)
+        preserve_stale_no_diff_retry = bool(
+            result.failure_reason == "workflow-dispatch-head-sha-mismatch"
+            and self._is_stale_no_diff_research_gate_recovery(task, record, current_sha)
+        )
+        record.rejected_sha = current_sha
         record.rejected_failure_class = "substantive"
         record.rejected_failure_reason = result.failure_reason
-        record.rejected_done_reports = 0
+        if not preserve_stale_no_diff_retry:
+            record.rejected_done_reports = 0
         detail = scrub_host_output(result.summary)
         log = scrub_host_output(result.log).strip()
         # A GateResult built without `fingerprint` (the review-freeze drift check) still gets a

@@ -5207,6 +5207,177 @@ class DispatcherRuntimeTests(DispatcherRuntimeFixture, unittest.TestCase):
         self.assertEqual(record["rejected_sha"], self.host.commit)
         self.assertEqual(record["rejected_done_reports"], 1)
 
+    def test_no_diff_research_retries_a_stale_dispatch_gate_only_after_freezing_the_worker(self) -> None:
+        """A moved base cannot make the recovery gate touch a live rework checkout."""
+        self.board.metadata[12]["task_type"] = "research"
+        self.catalog._adapter = {"validation": {"ci": "github"}}
+        self.host.commit = "a" * 40
+        receipt = {
+            "validated_sha": self.host.commit,
+            "base_sha": self.host.commit,
+            "gate_mode": "github",
+            "required_checks": [{"name": "test", "conclusion": "SUCCESS", "url": "https://ci.invalid/1"}],
+            "completed_at": "2026-08-28T03:32:00+00:00",
+            "command_or_check_set_digest": "d" * 64,
+        }
+        self.host.gate_results = [
+            GateResult(
+                "red",
+                "workflow dispatch run 11 is for another SHA",
+                failure_reason="workflow-dispatch-head-sha-mismatch",
+            ),
+            GateResult("green", "workflow dispatch run 12 green", attestation=receipt),
+        ]
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "gate-red-rework")
+
+        payload = self.runtime.production_state.load()
+        payload["records"][CARD_REF]["gate_workflow_dispatch"] = {
+            "sha": self.host.commit,
+            "workflow": "ci.yml",
+            "run_id": "12",
+        }
+        self.runtime.production_state.save(payload)
+        self.host.calls.clear()
+        gate_check = self.host.gate_check
+
+        def moved_base_before_freeze(task, record) -> GateResult:
+            if "retain_worker" not in self.host.calls:
+                # This models the real gate's base merge. A pre-freeze call would change the
+                # candidate before its own receipt can be accepted.
+                self.host.commit = "b" * 40
+            return gate_check(task, record)
+
+        self.host.gate_check = moved_base_before_freeze  # type: ignore[method-assign]
+        self._report_done("the now-visible dispatcher workflow receipt is green")
+
+        advanced = self.tick()
+
+        self.assertEqual(advanced["to"], "validate")
+        record = self._pilot_record()
+        self.assertEqual(record["gate_state"], "")
+        self.assertEqual(self.host.gate_calls, [CARD_REF])
+        self.assertEqual(self.host.commit, "a" * 40)
+        self.assertEqual(self.tick()["action"], "review-started")
+        record = self._pilot_record()
+        self.assertEqual(record["gate_state"], "green")
+        self.assertEqual(record["gate_attestation"], receipt)
+        self.assertEqual(record["rejected_done_reports"], 1)
+        self.assertEqual(self.host.gate_calls, [CARD_REF, CARD_REF])
+        self.assertLess(self.host.calls.index("retain_worker"), self.host.calls.index("gate_check"))
+
+    def test_persistent_stale_dispatch_mismatch_blocks_after_one_post_freeze_retry(self) -> None:
+        self.board.metadata[12]["task_type"] = "research"
+        self.catalog._adapter = {"validation": {"ci": "github"}}
+        self.host.commit = "a" * 40
+        mismatch = GateResult(
+            "red",
+            "workflow dispatch run 11 is for another SHA",
+            failure_reason="workflow-dispatch-head-sha-mismatch",
+        )
+        self.host.gate_results = [mismatch, mismatch]
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "gate-red-rework")
+
+        payload = self.runtime.production_state.load()
+        payload["records"][CARD_REF]["gate_workflow_dispatch"] = {
+            "sha": self.host.commit,
+            "workflow": "ci.yml",
+            "run_id": "12",
+        }
+        self.runtime.production_state.save(payload)
+        self._report_done("the dispatcher-owned workflow dispatch may now be visible")
+
+        self.assertEqual(self.tick()["to"], "validate")
+        self.assertEqual(self._pilot_record()["rejected_done_reports"], 1)
+        self.assertEqual(self.tick()["action"], "gate-red-rework")
+        self.assertEqual(self._pilot_record()["rejected_done_reports"], 1)
+
+        self._report_done("the same wrong-SHA result is still all that exists")
+        blocked = self.tick()
+
+        self.assertEqual(blocked["reason"], "worker repeatedly reported rejected SHA")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
+        self.assertNotIn(CARD_REF, self.runtime.production_state.load()["records"])
+        self.assertEqual(self.host.gate_calls, [CARD_REF, CARD_REF])
+
+    def test_stale_no_diff_dispatch_recovery_refuses_a_green_result_without_an_exact_sha_receipt(self) -> None:
+        self.board.metadata[12]["task_type"] = "research"
+        self.catalog._adapter = {"validation": {"ci": "github"}}
+        self.host.commit = "a" * 40
+        old_receipt = {
+            "validated_sha": self.host.commit,
+            "base_sha": self.host.commit,
+            "gate_mode": "github",
+            "required_checks": [{"name": "test", "conclusion": "SUCCESS"}],
+            "completed_at": "2026-08-28T03:31:00+00:00",
+            "command_or_check_set_digest": "e" * 64,
+        }
+        self.host.gate_results = [
+            GateResult(
+                "red",
+                "workflow dispatch run 11 is for another SHA",
+                failure_reason="workflow-dispatch-head-sha-mismatch",
+            ),
+            GateResult("green", "workflow dispatch said green without a receipt"),
+        ]
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "gate-red-rework")
+        payload = self.runtime.production_state.load()
+        payload["records"][CARD_REF]["gate_workflow_dispatch"] = {
+            "sha": self.host.commit,
+            "workflow": "ci.yml",
+            "run_id": "12",
+        }
+        payload["records"][CARD_REF]["gate_state"] = "green"
+        payload["records"][CARD_REF]["gate_attestation"] = old_receipt
+        self.runtime.production_state.save(payload)
+        self._report_done("a receiptless retry is not evidence")
+
+        self.assertEqual(self.tick()["to"], "validate")
+        blocked = self.tick()
+
+        self.assertEqual(blocked["reason"], "gate receipt unavailable")
+        self.assertEqual(self.reader.show(CARD_REF)["state"], "blocked")
+        self.assertEqual(self.host.gate_calls, [CARD_REF, CARD_REF])
+
+    def test_code_card_cannot_use_the_stale_no_diff_dispatch_recovery(self) -> None:
+        self.catalog._adapter = {"validation": {"ci": "github"}}
+        self.host.commit = "a" * 40
+        receipt = {
+            "validated_sha": self.host.commit,
+            "base_sha": self.host.commit,
+            "gate_mode": "github",
+            "required_checks": [{"name": "test", "conclusion": "SUCCESS"}],
+            "completed_at": "2026-08-28T03:32:00+00:00",
+            "command_or_check_set_digest": "d" * 64,
+        }
+        self.host.gate_results = [
+            GateResult(
+                "red",
+                "workflow dispatch run 11 is for another SHA",
+                failure_reason="workflow-dispatch-head-sha-mismatch",
+            ),
+            GateResult("green", "workflow dispatch run 12 green", attestation=receipt),
+        ]
+        self.start_dispatcher()
+        self._run_worker_to_validate()
+        self.assertEqual(self.tick()["action"], "gate-red-rework")
+        payload = self.runtime.production_state.load()
+        payload["records"][CARD_REF]["gate_workflow_dispatch"] = {
+            "sha": self.host.commit,
+            "workflow": "ci.yml",
+            "run_id": "12",
+        }
+        self.runtime.production_state.save(payload)
+        self._report_done("code has no report-only recovery")
+
+        self.assertEqual(self.tick()["action"], "stale-done-rework")
+        self.assertEqual(self.host.gate_calls, [CARD_REF])
+
     def test_done_after_a_new_commit_is_accepted_after_stale_done_rework(self) -> None:
         self.start_dispatcher()
         self.host.gate_results = [GateResult("red", "local validation failed", "assert False")]
@@ -12918,6 +13089,7 @@ class DispatcherGateTests(unittest.TestCase):
 
         self.assertEqual(result.status, "red")
         self.assertIn("not candidate", result.summary)
+        self.assertEqual(result.failure_reason, "workflow-dispatch-head-sha-mismatch")
         self.assertEqual(self._pr_calls(host, "create"), [])
 
     def test_no_diff_research_waits_when_the_dispatch_run_is_not_visible(self) -> None:
