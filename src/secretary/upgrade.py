@@ -308,6 +308,10 @@ def step_memory_pack(context: UpgradeContext) -> StepResult:
             instance_dir=context.instance_path,
             data_dir=data_dir,
             dry_run=context.dry_run,
+            runtime_handoff=lambda path: _set_runtime_owner(path, context.runtime_user),
+            runtime_export_check=lambda memory_dir: _assert_memory_export_readable(
+                memory_dir, context.runtime_user
+            ),
         )
     except MemoryPackError as exc:
         return StepResult("memory-pack", "failed", str(exc))
@@ -466,6 +470,29 @@ def _set_runtime_owner(path: Path, runtime_user: str | None) -> None:
         assign(path)
     except OSError as exc:
         raise GitError(f"could not assign {path} to runtime user {runtime_user}: {exc}") from None
+
+
+def _assert_memory_export_readable(memory_dir: Path, runtime_user: str | None) -> None:
+    """Require the daemon account to own readable export files before activation."""
+    # An unprivileged invocation already writes as its runtime account. The
+    # ownership proof is needed for the root path, where publication otherwise
+    # preserves root's temporary-file mode and ownership.
+    if not runtime_user or os.geteuid() != 0:
+        return
+    try:
+        account = pwd.getpwnam(runtime_user)
+    except KeyError:
+        raise GitError(f"runtime user {runtime_user!r} does not exist") from None
+    for name in ("export.ndjson", "export.json", "manifest.json"):
+        path = memory_dir / name
+        try:
+            info = path.lstat()
+        except OSError as exc:
+            raise GitError(f"could not inspect memory export {path}: {exc}") from None
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise GitError(f"memory export is not a regular file: {path}")
+        if info.st_uid != account.pw_uid or not info.st_mode & stat.S_IRUSR:
+            raise GitError(f"memory export is not readable by runtime user {runtime_user}: {path}")
 
 
 def _set_runtime_directory_owner(path: Path, runtime_user: str | None) -> None:

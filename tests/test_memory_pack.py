@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 import yaml
 
 from secretary import upgrade
 from secretary.memory.pack import (
+    MemoryPackDegradedError,
     MemoryPackError,
     load_product_pack,
     materialize_product_pack,
@@ -141,6 +144,106 @@ class ProductMemoryPackTests(unittest.TestCase):
             load_product_pack(self.product)
 
         self.assertFalse((self.instance / "state").exists())
+
+    def test_malformed_missing_escaping_and_symlinked_sources_fail_before_instance_mutation(self):
+        pack = self.product / "packaging/memory/product-secretary"
+        cases = {
+            "malformed": lambda: (pack / "manifest.yaml").write_text("facts: [\n", encoding="utf-8"),
+            "missing": lambda: self._rewrite_manifest_path("one", "missing.md"),
+            "escaping": lambda: self._rewrite_manifest_path("one", "../outside.md"),
+            "symlinked": self._symlink_pack_fact,
+        }
+        for name, corrupt in cases.items():
+            with self.subTest(name=name):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    root = Path(tmpdir)
+                    product = write_pack(root / "product", {"one": "one"})
+                    instance = instance_repo(root / "instance")
+                    self.product = product
+                    self.instance = instance
+                    pack = product / "packaging/memory/product-secretary"
+                    corrupt()
+                    with self.assertRaises(MemoryPackError):
+                        load_product_pack(product)
+                    self.assertFalse((instance / "state").exists())
+        self.product = write_pack(self.root / "product", {"one": "one", "two": "two"})
+        self.instance = instance_repo(self.root / "instance-replacement")
+
+    def test_state_repo_failure_is_a_typed_pack_error_and_recovers_the_worktree(self):
+        with mock.patch(
+            "secretary.memory.pack.state_repo.commit",
+            side_effect=upgrade.state_repo.StateRepoError("state lock unavailable"),
+        ):
+            with self.assertRaisesRegex(MemoryPackError, "state lock unavailable"):
+                self.materialize()
+        self.assertFalse(git(self.instance, "status", "--porcelain", "--", "state/memory"))
+
+    def test_failed_export_leaves_pending_ledger_and_no_pull_retry_converges(self):
+        with mock.patch(
+            "secretary.memory.pack._publish_memory_export", side_effect=RuntimeError("data directory read-only")
+        ):
+            with self.assertRaisesRegex(MemoryPackDegradedError, "data directory read-only"):
+                self.materialize()
+
+        ledger_path = self.instance / "state/memory/packs/product-secretary.json"
+        self.assertEqual(json.loads(ledger_path.read_text(encoding="utf-8"))["state"], "pending")
+        retried = self.materialize()
+        self.assertTrue(retried.changed)
+        self.assertEqual(json.loads(ledger_path.read_text(encoding="utf-8"))["state"], "ready")
+        self.assertTrue((self.data / "memory/export.ndjson").is_file())
+
+    def test_root_handoff_precedes_state_commit_and_makes_export_runtime_owned(self):
+        report = SimpleNamespace(data_dir=self.data, host={"unit_prefix": "secretary-"})
+        context = upgrade.UpgradeContext(
+            instance_path=self.instance,
+            product_root=self.product,
+            base_branch="main",
+            dry_run=False,
+            units=FakeUnitInstaller(active={"secretary-memory.service"}),
+            orca=None,
+            automations=None,
+            report=report,
+            runtime_user="operator",
+        )
+        account = SimpleNamespace(pw_uid=os.getuid(), pw_gid=os.getgid())
+        owned: set[Path] = set()
+        actual_commit = upgrade.state_repo.commit
+
+        def chown(path, *_args, **_kwargs):
+            owned.add(Path(path))
+
+        def commit(*args, **kwargs):
+            self.assertIn(self.instance / "state/memory/facts/product-secretary/one.md", owned)
+            self.assertIn(self.instance / "state/memory/packs/product-secretary.json", owned)
+            return actual_commit(*args, **kwargs)
+
+        with (
+            mock.patch("secretary.upgrade.os.geteuid", return_value=0),
+            mock.patch("secretary.upgrade.pwd.getpwnam", return_value=account),
+            mock.patch("secretary.upgrade.os.chown", side_effect=chown),
+            mock.patch("secretary.memory.pack.state_repo.commit", side_effect=commit),
+        ):
+            result = upgrade.step_memory_pack(context)
+
+        self.assertEqual(result.status, "changed")
+        self.assertTrue(
+            {self.data / "memory" / name for name in ("export.ndjson", "export.json", "manifest.json")}
+            <= owned
+        )
+
+    def _rewrite_manifest_path(self, fact_id: str, path: str) -> None:
+        manifest_path = self.product / "packaging/memory/product-secretary/manifest.yaml"
+        manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+        next(entry for entry in manifest["facts"] if entry["id"] == fact_id)["path"] = path
+        manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
+
+    def _symlink_pack_fact(self) -> None:
+        pack = self.product / "packaging/memory/product-secretary"
+        fact = pack / "one.md"
+        outside = self.root / "outside.md"
+        outside.write_text("outside\n", encoding="utf-8")
+        fact.unlink()
+        fact.symlink_to(outside)
 
     def test_no_pull_memory_pack_step_detects_ledger_drift_and_requests_restart(self):
         report = SimpleNamespace(data_dir=self.data, host={"unit_prefix": "secretary-"})

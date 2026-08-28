@@ -11,6 +11,7 @@ import hashlib
 import json
 import re
 import stat
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -148,6 +149,8 @@ def materialize_product_pack(
     instance_dir: Path,
     data_dir: Path,
     dry_run: bool = False,
+    runtime_handoff: Callable[[Path], None] | None = None,
+    runtime_export_check: Callable[[Path], None] | None = None,
 ) -> MaterializedPack:
     """Reconcile one validated pack, its ledger, and the derived export.
 
@@ -167,8 +170,10 @@ def materialize_product_pack(
         _check_collisions(facts_dir, desired, prior)
         write_ids = [fact_id for fact_id, fact in desired.items() if _fact_text(facts_dir, fact_id) != fact.text]
         delete_ids = sorted(set(prior["facts"]) - set(desired))
-        ledger = _ledger_payload(pack)
-        ledger_changed = _read_json(ledger_path) != ledger
+        ready_ledger = _ledger_payload(pack, state="ready")
+        pending_ledger = _ledger_payload(pack, state="pending")
+        ledger_on_disk = _read_json(ledger_path)
+        ledger_changed = ledger_on_disk != ready_ledger
         changed = bool(write_ids or delete_ids or ledger_changed)
         if not changed:
             return MaterializedPack(False, None, 0, 0, 0, len(desired))
@@ -182,19 +187,29 @@ def materialize_product_pack(
                 target = _fact_path(facts_dir, fact_id)
                 if target.exists() or target.is_symlink():
                     remove_path(target)
-            write_json(ledger_path, ledger)
-            commit = state_repo.commit(
-                instance_dir,
-                state_repo.MEMORY_PATHSPEC,
-                f"memory pack: reconcile {PACK_NAMESPACE}",
-            )
-            if commit is None:
-                raise MemoryPackError("memory pack reconciliation produced no journal changes")
-            if _git_status(instance_dir):
-                raise MemoryPackError("state/memory dirty after pack reconciliation")
-        except Exception:
-            _recover_journal_worktree(instance_dir)
-            raise
+            # A pending ledger is durable recovery state, not an installed-digest
+            # claim.  It lets the next --no-pull run recognise the facts as ours
+            # and retry publication if the handoff below fails.
+            pending_changed = ledger_on_disk != pending_ledger
+            if pending_changed:
+                write_json(ledger_path, pending_ledger)
+            _handoff_runtime_path(instance_dir / "state" / "memory", runtime_handoff)
+            if write_ids or delete_ids or pending_changed:
+                pending_commit = state_repo.commit(
+                    instance_dir,
+                    state_repo.MEMORY_PATHSPEC,
+                    f"memory pack: reconcile {PACK_NAMESPACE}",
+                )
+                if pending_commit is None:
+                    raise MemoryPackError("memory pack reconciliation produced no journal changes")
+                if _git_status(instance_dir):
+                    raise MemoryPackError("state/memory dirty after pack reconciliation")
+            else:
+                pending_commit = state_repo.head(instance_dir)
+                if pending_commit is None:
+                    raise MemoryPackError("memory pack pending reconciliation has no journal commit")
+        except Exception as exc:
+            _raise_reconciled_failure(instance_dir, exc)
         try:
             facts = _read_memory_facts(facts_dir)
             _publish_memory_export(
@@ -202,15 +217,32 @@ def materialize_product_pack(
                 facts=facts,
                 source_memory=facts_dir,
                 source_root=facts_dir,
-                source_head=commit,
-                commit=commit,
+                source_head=pending_commit,
+                commit=pending_commit,
                 changed=True,
                 record_import=False,
             )
+            _handoff_runtime_path(memory_dir, runtime_handoff)
+            _check_runtime_export(memory_dir, runtime_export_check)
         except Exception as exc:
             raise MemoryPackDegradedError(
-                f"memory pack export publish failed after journal commit {commit}: {exc}", commit=commit
+                f"memory pack export publish failed after pending journal commit {pending_commit}: {exc}",
+                commit=pending_commit,
             ) from None
+        try:
+            write_json(ledger_path, ready_ledger)
+            _handoff_runtime_path(instance_dir / "state" / "memory", runtime_handoff)
+            commit = state_repo.commit(
+                instance_dir,
+                state_repo.MEMORY_PATHSPEC,
+                f"memory pack: activate {PACK_NAMESPACE}",
+            )
+            if commit is None:
+                raise MemoryPackError("memory pack activation produced no journal changes")
+            if _git_status(instance_dir):
+                raise MemoryPackError("state/memory dirty after pack activation")
+        except Exception as exc:
+            _raise_reconciled_failure(instance_dir, exc)
         # Targets now exist, so derive this from the old ownership rather than the filesystem.
         added = sum(fact_id not in prior["facts"] for fact_id in write_ids)
         updated = len(write_ids) - added
@@ -292,11 +324,42 @@ def _regular_file_under(root: Path, path: Path, label: str) -> bytes:
         raise MemoryPackError(f"could not read {label}: {relative}: {exc}") from None
 
 
+def _handoff_runtime_path(path: Path, runtime_handoff: Callable[[Path], None] | None) -> None:
+    if runtime_handoff is None:
+        return
+    try:
+        runtime_handoff(path)
+    except Exception as exc:
+        raise MemoryPackError(f"memory pack runtime ownership handoff failed: {exc}") from None
+
+
+def _check_runtime_export(memory_dir: Path, runtime_export_check: Callable[[Path], None] | None) -> None:
+    if runtime_export_check is None:
+        return
+    try:
+        runtime_export_check(memory_dir)
+    except Exception as exc:
+        raise MemoryPackError(f"memory pack export is not usable by the runtime user: {exc}") from None
+
+
+def _raise_reconciled_failure(instance_dir: Path, exc: Exception) -> None:
+    """Make state-writer failures visible while leaving its owner able to retry."""
+    try:
+        _recover_journal_worktree(instance_dir)
+    except Exception as recovery:
+        raise MemoryPackError(f"memory pack state reconciliation failed: {exc}; recovery failed: {recovery}") from None
+    if isinstance(exc, MemoryPackError):
+        raise exc
+    if isinstance(exc, state_repo.StateRepoError):
+        raise MemoryPackError(f"memory pack state reconciliation failed: {exc}") from None
+    raise MemoryPackError(f"memory pack reconciliation failed: {exc}") from None
+
+
 def _read_ledger(path: Path) -> dict[str, Any]:
     payload = _read_json(path)
     if not payload:
         return {"digest": None, "facts": {}}
-    if payload.get("version") != 1 or payload.get("namespace") != PACK_NAMESPACE:
+    if payload.get("version") not in {1, 2} or payload.get("namespace") != PACK_NAMESPACE:
         raise MemoryPackError(f"invalid installed pack ledger: {path}")
     digest = payload.get("digest")
     facts = payload.get("facts")
@@ -314,7 +377,10 @@ def _read_ledger(path: Path) -> dict[str, Any]:
         if not isinstance(fact_digest, str) or not _SHA256.fullmatch(fact_digest):
             raise MemoryPackError(f"invalid installed pack ledger: {path}")
         normalized[fact_id] = fact_digest
-    return {"digest": digest, "facts": normalized}
+    state = payload.get("state", "ready")
+    if state not in {"pending", "ready"}:
+        raise MemoryPackError(f"invalid installed pack ledger: {path}")
+    return {"digest": digest, "facts": normalized, "state": state}
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -329,10 +395,11 @@ def _read_json(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _ledger_payload(pack: MemoryPack) -> dict[str, Any]:
+def _ledger_payload(pack: MemoryPack, *, state: str) -> dict[str, Any]:
     return {
-        "version": 1,
+        "version": 2,
         "namespace": PACK_NAMESPACE,
+        "state": state,
         "digest": pack.digest,
         "facts": {fact.canon_id: fact.digest for fact in pack.facts},
     }

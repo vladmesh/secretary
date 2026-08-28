@@ -463,6 +463,10 @@ shipped id is refused. Added and changed facts publish through the normal export
 incremental reconciliation reuses embeddings whose id and content digest are unchanged and removes absent
 shipped facts without touching local or project facts.
 
+The ledger is `pending` while a changed canon awaits export publication and becomes `ready` only after the
+export files have been handed to the memory daemon's runtime user. That makes a failed root-run handoff
+visible and makes the next `--no-pull` upgrade retry it rather than treating a stale index as current.
+
 The embedding model is loaded locally and is the appliance's main memory consumer; see
 [Operations](OPERATIONS.md#system-requirements) for what has and has not been established about the
 supported minimum.

@@ -228,6 +228,8 @@ local fact at a shipped id stops the upgrade. A complete new manifest deletes on
 ledger. `secretary upgrade --no-pull` still compares the selected checkout's pack digest to that ledger,
 then publishes the normal export and restarts the memory service when reconciliation changed it. The
 service reports the actual incremental add/update/delete/reuse result in its own reconciliation path.
+The ledger is not `ready` until the export has been published and made readable by that service user;
+an interrupted or failed handoff remains `pending` and is retried by the next upgrade.
 
 ### Read-only checkpoint and quiet-tick check
 
