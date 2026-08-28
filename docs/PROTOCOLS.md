@@ -1722,6 +1722,34 @@ The memory search log is an authorization audit, not a fact transcript: every re
 and records the resolved role, subject, scopes and outcome with result ids/scores, never fact text, queries
 or bearer material. Consumers that need evidence of a search filter for `action == "memory_search"`.
 
+### Restart health contract
+
+Memory restart requested by an upgrade, unit change, product-code/dependency change, or shipped-pack
+reconciliation is not healthy merely because systemd says the service is active. Upgrade creates a
+short-lived steward `HeadRun` and its ordinary launch-bound grant, hands the complete temporary bindings
+tree to the configured runtime account, then uses a narrowly dropped-privilege child of that account to
+publish the versioned heartbeat and perform `initialize` then `tools/call(memory_list)` over the MCP
+endpoint. The service therefore verifies the bearer and the same live heartbeat/read guard used by heads;
+it never has to inspect a root-owned upgrade process. The probe supplies neither `caller` nor `scope`,
+expects a Secretary/product-scoped row, and removes its temporary grant and heartbeat afterwards. An
+unavailable service, stale or denied identity, malformed MCP reply, or absent expected row fails the
+`memory` upgrade step visibly. A returned denial is typed and final, rather than being retried into a
+missing-row timeout. The pinned list tool may serialize one JSON text block per row or use structured
+content; the probe normalizes every supported form to rows, so an ordinary single allowed row is not
+mistaken for a denial.
+
+The portable acceptance fixture in `tests/test_memory_acceptance.py` makes only temporary sentinel rows. It
+uses the production token verifier and read tools to prove the interactive PO, foreign worker, Secretary
+worker, and explicitly reserved observer matrix, including that spoofed `caller`, wider `scope`,
+`memory_get`, and `memory_list` cannot widen it. It inspects only the audit schema and does not put fact
+text or bearer material into the audit assertion. `tests/test_memory_health.py` also starts a local Memory
+MCP daemon with the pinned streamable-HTTP protocol and drives the same initialize/session/list exchange;
+its root-only portability regression additionally verifies the root-parent/runtime-user/daemon-reader
+ownership crossing without touching an installation. CI installs the declared `memory` extra, so the
+streamable-HTTP daemon tests exercise initialize/session handling and both allowed and denied list rows;
+the wire tests cover every supported result form, and the privileged cross-user regression remains an
+explicit root-only check.
+
 Bearer delivery assumes processes running as the same host user are mutually trusted: that user can inspect
 another same-user process's environment or command line and could reuse its live bearer. The protocol limits
 cross-user and stale-head access, keeps the capability out of durable output and redacts it from launch and

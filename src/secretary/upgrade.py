@@ -24,6 +24,7 @@ from typing import Any
 
 from secretary import _proc, role_skills, state_repo
 from secretary.memory.pack import MemoryPackError, load_product_pack, materialize_product_pack
+from secretary.memory.health import MemoryProbeError, probe_memory
 from secretary.automations import (
     AutomationError,
     OrcaAutomationClient,
@@ -709,7 +710,18 @@ def step_memory(context: UpgradeContext) -> StepResult:
         context.units.restart(unit)
     except HostCommandError as exc:
         return StepResult("memory", "failed", str(exc))
-    return StepResult("memory", "changed", f"restarted {unit}: {reason}")
+    try:
+        data_dir = report.data_dir
+        if data_dir is None:
+            return StepResult("memory", "failed", "authenticated probe: instance has no resolved data directory")
+        probe_memory(
+            data_dir,
+            runtime_handoff=lambda path: _set_runtime_owner(path, context.runtime_user),
+            runtime_user=context.runtime_user,
+        )
+    except (MemoryProbeError, GitError) as exc:
+        return StepResult("memory", "failed", f"authenticated probe failed: {exc}")
+    return StepResult("memory", "changed", f"restarted and authenticated {unit}: {reason}")
 
 
 def step_verify(context: UpgradeContext) -> StepResult:

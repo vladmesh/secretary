@@ -518,6 +518,12 @@ class AutomationSpecTests(unittest.TestCase):
 
 
 class UpgradeStepTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.memory_probe = mock.patch("secretary.upgrade.probe_memory").start()
+
+    def tearDown(self) -> None:
+        self.memory_probe.stop()
+
     def context(self, units: FakeUnitInstaller, **overrides) -> upgrade.UpgradeContext:
         base = upgrade.UpgradeContext(
             instance_path=Path("/tmp/instance"),
@@ -534,11 +540,13 @@ class UpgradeStepTests(unittest.TestCase):
     def test_memory_restarts_when_only_the_code_moved(self):
         units = FakeUnitInstaller(active={"secretary-memory.service"})
 
-        result = upgrade.step_memory(self.context(units, code_changed=True))
+        result = upgrade.step_memory(self.context(units, code_changed=True, runtime_user="memory-runtime"))
 
         self.assertEqual(result.status, "changed")
         self.assertIn("code or dependencies changed", result.detail)
         self.assertIn(("restart", "secretary-memory.service"), units.calls)
+        self.memory_probe.assert_called_once()
+        self.assertEqual(self.memory_probe.call_args.kwargs["runtime_user"], "memory-runtime")
 
     def test_host_step_reports_a_configured_data_dir_resolution_error(self):
         report = SimpleNamespace(
@@ -668,6 +676,7 @@ class UpgradeStepTests(unittest.TestCase):
 
         self.assertEqual(result.status, "changed")
         self.assertIn(("restart", "secretary-memory.service"), units.calls)
+        self.memory_probe.assert_called_once()
 
     def test_memory_is_left_alone_when_nothing_moved(self):
         units = FakeUnitInstaller(active={"secretary-memory.service"})
@@ -684,6 +693,17 @@ class UpgradeStepTests(unittest.TestCase):
 
         self.assertEqual(result.status, "changed")
         self.assertIn("not active", result.detail)
+        self.memory_probe.assert_called_once()
+
+    def test_memory_restart_is_failed_when_the_authenticated_probe_fails(self):
+        units = FakeUnitInstaller(active={"secretary-memory.service"})
+        self.memory_probe.side_effect = upgrade.MemoryProbeError("MCP did not return an allowed read")
+
+        result = upgrade.step_memory(self.context(units, code_changed=True))
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("authenticated probe failed", result.detail)
+        self.assertIn(("restart", "secretary-memory.service"), units.calls)
 
     def test_dry_run_decides_the_restart_without_performing_it(self):
         units = FakeUnitInstaller(active={"secretary-memory.service"})
@@ -1674,6 +1694,7 @@ class _Report:
 
     host = {"unit_prefix": UNIT_PREFIX}
     instance = {"host": {"unit_prefix": UNIT_PREFIX}, "data_dir": "/tmp/does-not-matter"}
+    data_dir = Path("/tmp/does-not-matter")
     bindings: list = []
 
 

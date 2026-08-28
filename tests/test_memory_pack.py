@@ -258,11 +258,15 @@ class ProductMemoryPackTests(unittest.TestCase):
             pull=False,
             report=report,
         )
-        first = upgrade.step_memory_pack(context)
-        restarted = upgrade.step_memory(context)
-        second = upgrade.step_memory_pack(context)
+        with mock.patch("secretary.upgrade.probe_memory") as probe:
+            first = upgrade.step_memory_pack(context)
+            restarted = upgrade.step_memory(context)
+            second = upgrade.step_memory_pack(context)
+            no_op = upgrade.step_memory(context)
 
         self.assertEqual(first.status, "changed")
         self.assertEqual(restarted.status, "changed")
         self.assertIn(("restart", "secretary-memory.service"), context.units.calls)
+        probe.assert_called_once()
         self.assertEqual(second.status, "unchanged")
+        self.assertEqual(no_op.status, "unchanged")

@@ -330,7 +330,10 @@ class PortableFixture(unittest.TestCase):
         return base if not overrides else upgrade.replace(base, **overrides)
 
     def run_upgrade(self, **overrides) -> upgrade.UpgradeResult:
-        return upgrade.run_steps(self.context(**overrides))
+        # This fixture replaces systemd and the host inventory; it intentionally has no MCP daemon.
+        # The dedicated memory health tests cover the authenticated service boundary.
+        with mock.patch.object(upgrade, "probe_memory"):
+            return upgrade.run_steps(self.context(**overrides))
 
     def run_upgrade_command(self, **overrides) -> int:
         """The public entry point, with only the host-touching clients replaced by doubles.
@@ -354,6 +357,7 @@ class PortableFixture(unittest.TestCase):
             mock.patch.object(upgrade, "SystemdUnitInstaller", return_value=self.units),
             mock.patch.object(upgrade, "LiveOrcaRegistrar", FakeRegistrar),
             mock.patch.object(upgrade, "OrcaAutomationClient", FakeAutomations),
+            mock.patch.object(upgrade, "probe_memory"),
         ):
             return upgrade.run_upgrade(args)
 
@@ -422,7 +426,8 @@ class PortableInstallationTests(PortableFixture):
     def test_the_units_are_rendered_from_the_named_checkout_and_the_installation_user(self) -> None:
         context = self.context()
 
-        result = upgrade.run_steps(context)
+        with mock.patch.object(upgrade, "probe_memory"):
+            result = upgrade.run_steps(context)
         rendered = b"\n".join(
             unit.content
             for unit in upgrade.resolve_packaged(

@@ -1694,7 +1694,7 @@ The steps, in order; each prints `changed`, `unchanged`, `skipped` or `failed`, 
 | `role-worktrees` | fast-forward the role worktrees onto the base branch |
 | `host` | `reconcile apply`: units from `packaging/systemd` plus session-manager registrations |
 | `automations` | create or repoint session-manager automations from `automation.toml` |
-| `memory` | restart the memory service if its code, dependencies or unit changed |
+| `memory` | restart the memory service if its code, dependencies, unit or shipped pack changed, then complete a bounded launch-authenticated MCP `memory_list` read |
 | `verify` | a repeat dry run: the second rollout must be a no-op |
 
 Flags: `--no-pull` (re-materialise only), `--base-branch`, `--product-root`, `--runtime-user`,

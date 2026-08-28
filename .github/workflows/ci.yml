@@ -15,5 +15,5 @@ jobs:
         with:
           python-version: "3.12"
       - run: python3 -m pip install --upgrade pip
-      - run: python3 -m pip install -e .
+      - run: python3 -m pip install -e '.[memory]'
       - run: python3 -m unittest -v
