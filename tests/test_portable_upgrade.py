@@ -10,6 +10,7 @@ install a host without the running one having a say.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -222,6 +223,40 @@ class PortableFixture(unittest.TestCase):
             )
         (packaging / "secretary-dispatcher-production.timer").write_text(
             TIMER.format(component="dispatcher-production"), encoding="utf-8"
+        )
+        # A portable product checkout is now also the strict source of the
+        # active product memory pack. Keep this fixture self-contained rather
+        # than letting an upgrade read the checkout running the test.
+        memory_pack = self.product / "packaging" / "memory" / "product-secretary"
+        memory_pack.mkdir(parents=True)
+        pack_fact = b"---\nsource: product:secretary\n---\nportable product fact\n"
+        (memory_pack / "portable.md").write_bytes(pack_fact)
+        (memory_pack / "manifest.yaml").write_text(
+            "\n".join(
+                (
+                    "schema: 1",
+                    "product: secretary",
+                    "namespace: product:secretary",
+                    "status: active",
+                    "ownership: shipped",
+                    "fact_format: markdown-frontmatter-v1",
+                    "reconciliation:",
+                    "  identity: id",
+                    "  digest: sha256",
+                    "  manifest_is_complete: true",
+                    "  absent_id: delete",
+                    "  unchanged_digest: retain_embedding",
+                    "overlay_policy:",
+                    "  local_overlay_allowed: true",
+                    "  shipped_id_collision: reject",
+                    "facts:",
+                    "  - id: portable",
+                    "    path: portable.md",
+                    f"    sha256: {hashlib.sha256(pack_fact).hexdigest()}",
+                    "",
+                )
+            ),
+            encoding="utf-8",
         )
         # The non-secret codex runtime files an install seeds into the owner's managed CODEX_HOME.
         # A checkout without them is not one an install can materialize, so the fixture ships them.
