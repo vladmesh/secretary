@@ -62,23 +62,44 @@ def _request(
     return _response_json(connection.getresponse())
 
 
-def _tool_value(result: dict[str, Any]) -> Any:
+def _rows(value: Any) -> list[dict[str, Any]] | None:
+    """Normalize the pinned MCP list-tool result shapes to rows."""
+    if isinstance(value, list):
+        return value if all(isinstance(row, dict) for row in value) else None
+    if isinstance(value, dict):
+        wrapped = value.get("result")
+        if isinstance(wrapped, list):
+            return _rows(wrapped)
+        return [value]
+    return None
+
+
+def _tool_value(result: dict[str, Any]) -> list[dict[str, Any]]:
     payload = result.get("result")
     if not isinstance(payload, dict) or payload.get("isError"):
         raise MemoryProbeError("MCP did not return an allowed read")
     structured = payload.get("structuredContent")
-    if isinstance(structured, list):
-        return structured
+    if structured is not None:
+        rows = _rows(structured)
+        if rows is not None:
+            return rows
     content = payload.get("content")
     if not isinstance(content, list):
         raise MemoryProbeError("MCP returned no read result")
+    rows: list[dict[str, Any]] = []
+    parsed_row_block = False
     for item in content:
         if not isinstance(item, dict) or item.get("type") != "text":
             continue
         try:
-            return json.loads(str(item.get("text") or ""))
+            parsed = _rows(json.loads(str(item.get("text") or "")))
         except (TypeError, ValueError, json.JSONDecodeError):
             continue
+        if parsed is not None:
+            parsed_row_block = True
+            rows.extend(parsed)
+    if parsed_row_block:
+        return rows
     raise MemoryProbeError("MCP returned an unreadable read result")
 
 
@@ -123,16 +144,11 @@ def _authenticated_list(token: str, *, port: int, timeout_seconds: float) -> lis
     finally:
         connection.close()
     value = _tool_value(result)
-    if isinstance(value, dict):
-        denial = value
-    elif isinstance(value, list):
-        denial = next((row for row in value if isinstance(row, dict) and row.get("status") == "denied"), None)
-    else:
-        denial = None
+    denial = next((row for row in value if row.get("status") == "denied"), None)
     if isinstance(denial, dict):
         code = str(denial.get("error") or "unknown")
         raise MemoryProbeError(f"Memory MCP denied the authenticated probe: {code}")
-    if not isinstance(value, list) or not value or not isinstance(value[0], dict):
+    if not value:
         raise MemoryProbeError("Memory MCP returned no expected authorized entry")
     return value
 

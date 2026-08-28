@@ -14,6 +14,8 @@ from unittest import mock
 
 from secretary.memory import access
 from secretary.memory import health
+from triggered_agents.runtime.head import HeadRun, HeadSpec, TaskRef
+from triggered_agents.runtime.head.identity import publish_heartbeat
 
 try:
     from secretary import memory_service
@@ -55,6 +57,29 @@ class _Connection:
 
 
 class MemoryHealthWireTests(unittest.TestCase):
+    def test_list_result_normalizes_each_text_block_and_structured_forms(self) -> None:
+        text_rows = health._tool_value(
+            {
+                "result": {
+                    "content": [
+                        {"type": "text", "text": '{"id": 7, "scope": "product:secretary"}'},
+                        {"type": "text", "text": '[{"id": 8, "scope": "project:secretary"}]'},
+                    ]
+                }
+            }
+        )
+        self.assertEqual(
+            text_rows,
+            [{"id": 7, "scope": "product:secretary"}, {"id": 8, "scope": "project:secretary"}],
+        )
+        for structured in (
+            [{"id": 9, "scope": "product:secretary"}],
+            {"result": [{"id": 10, "scope": "project:secretary"}]},
+        ):
+            with self.subTest(structured=structured):
+                expected = structured["result"] if isinstance(structured, dict) else structured
+                self.assertEqual(health._tool_value({"result": {"structuredContent": structured}}), expected)
+
     def test_mcp_probe_authenticates_then_calls_memory_list_without_caller_or_scope(self) -> None:
         connection = _Connection(
             [
@@ -271,8 +296,11 @@ class MemoryHealthDaemonIntegrationTests(unittest.TestCase):
                 self.daemon.kill()
                 self.daemon.wait(timeout=5)
 
-    def test_probe_uses_the_real_streamable_http_session_and_read_guard(self) -> None:
-        health.probe_memory(self.data_dir, port=self.port, timeout_seconds=10, retry_seconds=0.05)
+    def test_unprivileged_probe_uses_the_real_streamable_http_session_and_read_guard(self) -> None:
+        # This is the ordinary runner path exercised in CI.  The root-only test
+        # above covers the distinct privilege-drop handoff.
+        with mock.patch("secretary.memory.health.os.geteuid", return_value=1000):
+            health.probe_memory(self.data_dir, port=self.port, timeout_seconds=10, retry_seconds=0.05)
         deadline = time.monotonic() + 2
         while not self.audit.exists() and time.monotonic() < deadline:
             time.sleep(0.02)
@@ -283,6 +311,61 @@ class MemoryHealthDaemonIntegrationTests(unittest.TestCase):
         self.assertEqual(allowed[0]["scopes"], ["product:secretary", "project:secretary"])
         self.assertFalse({"text", "query", "token", "capability", "grant", "token_digest"} & set(allowed[0]))
 
+    def test_real_daemon_serializes_a_denied_list_row(self) -> None:
+        """Exercise the actual list tool's denied response on the MCP wire.
+
+        The fixture verifier only establishes an MCP session with a deliberately
+        unknown grant id. The daemon's unchanged ``read_guard`` then produces
+        the ordinary typed denial that the health client must parse.
+        """
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            denied_port = int(listener.getsockname()[1])
+        source_root = Path(health.__file__).resolve().parents[3]
+        daemon = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "\n".join(
+                    (
+                        "import types",
+                        "from mcp.server.auth.provider import AccessToken",
+                        "from secretary import memory_service",
+                        "async def verify_token(token):",
+                        "    return AccessToken(token=token, client_id='fixture', subject='fixture', scopes=[], claims={'memory_grant_id': '0' * 32})",
+                        "memory_service.mcp._token_verifier = types.SimpleNamespace(verify_token=verify_token)",
+                        "memory_service.mcp.run(transport='streamable-http')",
+                    )
+                ),
+            ],
+            cwd=source_root,
+            env={**os.environ, "MEMORY_PORT": str(denied_port), "MEMORY_DB": str(self.db)},
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        def stop_denied_daemon() -> None:
+            if daemon.poll() is None:
+                daemon.terminate()
+                try:
+                    daemon.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    daemon.kill()
+                    daemon.wait(timeout=5)
+
+        self.addCleanup(stop_denied_daemon)
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                health._authenticated_list("fixture", port=denied_port, timeout_seconds=1)
+            except health.MemoryProbeError as exc:
+                if str(exc) == "Memory MCP is unavailable" and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                    continue
+                self.assertRegex(str(exc), "denied.*runtime_identity_unknown")
+                break
+            else:
+                self.fail("Memory MCP accepted a list read with an unknown grant")
 
 if __name__ == "__main__":
     unittest.main()

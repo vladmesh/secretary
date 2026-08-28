@@ -1734,7 +1734,9 @@ it never has to inspect a root-owned upgrade process. The probe supplies neither
 expects a Secretary/product-scoped row, and removes its temporary grant and heartbeat afterwards. An
 unavailable service, stale or denied identity, malformed MCP reply, or absent expected row fails the
 `memory` upgrade step visibly. A returned denial is typed and final, rather than being retried into a
-missing-row timeout.
+missing-row timeout. The pinned list tool may serialize one JSON text block per row or use structured
+content; the probe normalizes every supported form to rows, so an ordinary single allowed row is not
+mistaken for a denial.
 
 The portable acceptance fixture in `tests/test_memory_acceptance.py` makes only temporary sentinel rows. It
 uses the production token verifier and read tools to prove the interactive PO, foreign worker, Secretary
@@ -1743,7 +1745,10 @@ worker, and explicitly reserved observer matrix, including that spoofed `caller`
 text or bearer material into the audit assertion. `tests/test_memory_health.py` also starts a local Memory
 MCP daemon with the pinned streamable-HTTP protocol and drives the same initialize/session/list exchange;
 its root-only portability regression additionally verifies the root-parent/runtime-user/daemon-reader
-ownership crossing without touching an installation.
+ownership crossing without touching an installation. CI installs the declared `memory` extra, so the
+streamable-HTTP daemon tests exercise initialize/session handling and both allowed and denied list rows;
+the wire tests cover every supported result form, and the privileged cross-user regression remains an
+explicit root-only check.
 
 Bearer delivery assumes processes running as the same host user are mutually trusted: that user can inspect
 another same-user process's environment or command line and could reuse its live bearer. The protocol limits
