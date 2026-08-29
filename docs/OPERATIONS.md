@@ -1612,7 +1612,9 @@ the batch identity and starting cursors before moving only the listed cursors. A
 watermark.json from the disabled installation remains a supported read input and converts a source to its
 byte cursor only after that source is selected and advanced. An unversioned pending file is deliberately
 refused and left untouched. Discovery excludes only the current curator workspace/session, not the Secretary
-checkout or sibling worker, reviewer and observer workspaces.
+checkout or sibling worker, reviewer and observer workspaces. Complete non-emitting or oversized rows are
+included in a scan cursor, including a batch with no turns, while an incomplete trailing JSONL row is left
+for the next harvest.
 - the `pipeline` line is built from the production dispatcher's tick telemetry in its production state file. The
   dispatcher writes it at the end of every terminal tick: time, healthy or degraded, and diagnostics (step, reason,
   error codes). A tick that ended degraded colours the line by itself; the previous healthy tick does not vouch for

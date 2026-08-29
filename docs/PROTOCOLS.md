@@ -1708,7 +1708,9 @@ bound the read as well as the prompt. The selected batch and its partial cursors
 pending record bound to the current curator workspace/run/session identity. A retry replays that pending
 batch exactly. Advance verifies that identity and each source's starting cursor, then moves only the listed
 cursors. Legacy line-based watermarks remain readable until a selected source advances to a byte cursor;
-unversioned pending data is not guessed, rewritten or advanced.
+unversioned pending data is not guessed, rewritten or advanced. A row-limited scan also records complete
+non-emitting or oversized records it has classified, so noise prefixes cannot stall a source; it never
+advances over an incomplete trailing JSONL record.
 
 ### Memory read identity
 

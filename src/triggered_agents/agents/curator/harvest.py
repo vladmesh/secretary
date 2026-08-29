@@ -183,9 +183,12 @@ def _read_record(fh, limits):
     if not data:
         return fh.tell(), None, False
     if not data.endswith(b"\n"):
+        # Discard a complete oversized record without materializing it.  An EOF
+        # before its newline is a live incomplete record, which must remain for
+        # the next harvest rather than becoming part of the cursor.
         while data and not data.endswith(b"\n"):
             data = fh.readline(limits.max_record_bytes + 1)
-        return fh.tell(), None, True
+        return fh.tell(), None, bool(data)
     return fh.tell(), data, False
 
 
@@ -202,13 +205,19 @@ def _jsonl_source(sess, mark, parser: Callable[[list[str]], list[dict]], budget)
     with path.open("rb") as fh:
         fh.seek(start)
         for _ in range(budget.limits.max_rows_per_source):
-            end, data, large = _read_record(fh, budget.limits)
+            end, data, oversized = _read_record(fh, budget.limits)
             if data is None:
-                if not large:
+                if not oversized:
                     break
+                # This complete record is deliberately rejected for size, so it
+                # is safe to scan through even when no turn is emitted.
+                last = end
                 continue
             parsed = parser([data.decode("utf-8", errors="replace")])
             if not parsed:
+                # Parsed noise has no curator signal.  Persist the scan cursor
+                # so a row-limited run cannot stall before a later real turn.
+                last = end
                 continue
             size = len(data)
             if not budget.accepts(len(parsed), size, not turns):
@@ -219,9 +228,8 @@ def _jsonl_source(sess, mark, parser: Callable[[list[str]], list[dict]], budget)
             budget.add(len(parsed), size, not turns)
             turns.extend(parsed)
             last = end
-    if not turns:
-        return None, None, False
-    return {**sess, "turns": turns}, {"offset": last, "mtime": stat.st_mtime, "size": stat.st_size}, False
+    cursor = {"offset": last, "mtime": stat.st_mtime, "size": stat.st_size} if last is not None else None
+    return ({**sess, "turns": turns} if turns else None), cursor, False
 
 
 def _jsonl_sessions(mark, sessions, parser, budget):
@@ -230,6 +238,7 @@ def _jsonl_sessions(mark, sessions, parser, budget):
         entry, cursor, stopped = _jsonl_source(sess, mark, parser, budget)
         if entry:
             output.append(entry)
+        if cursor:
             pending[sess["path"]] = cursor
         if stopped:
             return output, pending, True
@@ -248,6 +257,9 @@ def _hermes_sessions(mark, budget):
         for row in rows:
             parsed = parse_hermes_rows([row])
             if not parsed:
+                # Tool, empty, and byte-capped rows are complete database rows
+                # with no signal, so scanning through them cannot drop a turn.
+                last = row["id"]
                 continue
             size = row.get("content_bytes", len((row.get("content") or "").encode()))
             if not budget.accepts(len(parsed), size, not turns):
@@ -262,6 +274,7 @@ def _hermes_sessions(mark, budget):
             last = row["id"]
         if turns:
             output.append({**sess, "turns": turns})
+        if last is not None:
             pending[key] = {"last_id": last}
     return output, pending, False
 
