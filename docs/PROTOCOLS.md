@@ -1739,12 +1739,15 @@ moves only the source targets proved at or before the normalized cutoff and appe
 cursors. Audit entries contain operator and cursor metadata, never transcript or memory text. A retry of the same
 request recovers its prepared record or returns the settled identity without advancing twice. A different request,
 changed base cursor, fact-bearing pending batch, unreadable source, or unresolved prepared baseline fails closed;
-ordinary harvest and advance also refuse to cross a prepared baseline. For append-ordered JSONL sources, complete
-unparseable, timestamp-less, and oversized rows are barriers: a following timestamp at or before the cutoff brackets
-and crosses them, while EOF, an incomplete tail, or a following post-cutoff timestamp settles only the preceding
-proved prefix and records a `*-barrier-tail-retained` audit reason. A source with no such prefix is unselected with
-that reason. The command is only a mechanism: a production invocation still requires an authorised per-project
-operational decision.
+ordinary harvest and advance also refuse to cross a prepared baseline. JSONL append order is never cutoff evidence:
+every complete crossed row needs its own timestamp at or before the cutoff, or an exact Claude non-content control
+grammar. The supported timestamp-less controls are `mode`, `permission-mode`, `ai-title`, `atis-latch`,
+`bridge-session`, `cost-state`, `agent-name`, and `custom-title`, each with its known complete top-level key set and
+no message field. Unparseable, content-shaped or otherwise timestamp-less rows, and complete oversized rows that
+cannot be inspected within the record bound, remain at the preceding cursor with a `*-tail-retained` audit reason;
+a later row never crosses them. An incomplete tail also settles only the preceding proved prefix. A source with no
+such prefix is unselected with the explicit reason. The command is only a mechanism: a production invocation still
+requires an authorised per-project operational decision.
 
 ### Memory read identity
 

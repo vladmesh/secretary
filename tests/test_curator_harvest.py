@@ -435,113 +435,87 @@ class CuratorBaselineTests(unittest.TestCase):
             self.baseline()
         self.assertFalse(self.state.baseline_audit_file.exists())
 
-    def test_middle_claude_control_is_bracketed_only_by_a_later_safe_timestamp(self) -> None:
-        path = self.root / "claude-control-middle.jsonl"
+    def test_known_claude_control_has_its_own_noncontent_proof(self) -> None:
+        path = self.root / "claude-control.jsonl"
         before = timestamped_claude("before control", "2024-01-01T00:00:00Z")
-        control = json.dumps({"type": "mode", "mode": "default"}) + "\n"
-        after_control = timestamped_claude("after control", "2024-01-01T00:01:00Z")
+        control_row = {"type": "mode", "sessionId": "a", "mode": "default"}
+        control = json.dumps(control_row) + "\n"
         post_cutoff = timestamped_claude("after cutoff", "2026-01-01T00:00:00Z")
-        path.write_text(before + control + after_control + post_cutoff, encoding="utf-8")
-        source = {"head": "claude", "path": str(path), "session_id": "a", "cwd": "/alpha", "route": "alpha"}
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[source]):
-            result = self.baseline()
-        self.assertEqual(result["affected_source_count"], 1)
-        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(before + control + after_control))
-        audit = [json.loads(line) for line in self.state.baseline_audit_file.read_text(encoding="utf-8").splitlines()][-1]
-        affected = audit["affected_sources"][0]
-        self.assertEqual(affected["record_count"], 2)
-        self.assertEqual(affected["reason"], "complete-prefix-at-or-before-cutoff; missing-or-invalid-timestamp-barrier-bracketed")
-        self.assertEqual(path.read_bytes()[affected["target"]["offset"]:], post_cutoff.encode())
-
-    def test_leading_claude_control_is_bracketed_by_the_first_safe_timestamp(self) -> None:
-        path = self.root / "claude-control-leading.jsonl"
-        control = json.dumps({"type": "last-prompt", "content": "resume"}) + "\n"
-        safe = timestamped_claude("reached", "2024-01-01T00:00:00Z")
-        path.write_text(control + safe, encoding="utf-8")
-        source = {"head": "claude", "path": str(path), "session_id": "a", "cwd": "/alpha", "route": "alpha"}
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[source]):
-            result = self.baseline()
-        self.assertEqual(result["affected_source_count"], 1)
-        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(control + safe))
-        audit = [json.loads(line) for line in self.state.baseline_audit_file.read_text(encoding="utf-8").splitlines()][-1]
-        self.assertEqual(
-            audit["affected_sources"][0]["reason"],
-            "complete-prefix-at-or-before-cutoff; missing-or-invalid-timestamp-barrier-bracketed",
-        )
-
-    def test_trailing_control_retains_the_proved_prefix(self) -> None:
-        path = self.root / "claude-control-trailing.jsonl"
-        before = timestamped_claude("before control", "2024-01-01T00:00:00Z")
-        control = json.dumps({"type": "mode", "mode": "default"}) + "\n"
-        path.write_text(before + control, encoding="utf-8")
-        source = {"head": "claude", "path": str(path), "session_id": "a", "cwd": "/alpha", "route": "alpha"}
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[source]):
-            self.baseline()
-        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(before))
-        audit = [json.loads(line) for line in self.state.baseline_audit_file.read_text(encoding="utf-8").splitlines()][-1]
-        self.assertEqual(
-            audit["affected_sources"][0]["reason"],
-            "complete-prefix-at-or-before-cutoff; missing-or-invalid-timestamp-barrier-tail-retained",
-        )
-        self.assertEqual(path.read_bytes()[len(before):], control.encode())
-
-    def test_post_cutoff_timestamp_does_not_bracket_a_control_row(self) -> None:
-        path = self.root / "control-before-post-cutoff.jsonl"
-        before = timestamped_claude("before control", "2024-01-01T00:00:00Z")
-        control = json.dumps({"type": "mode", "mode": "default"}) + "\n"
-        post_cutoff = timestamped_claude("after cutoff", "2026-01-01T00:00:00Z")
+        self.assertTrue(harvest._claude_noncontent_control(control_row))
+        self.assertEqual(harvest.parse_claude_lines([control]), [])
         path.write_text(before + control + post_cutoff, encoding="utf-8")
         source = {"head": "claude", "path": str(path), "session_id": "a", "cwd": "/alpha", "route": "alpha"}
         with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[source]):
             self.baseline()
-        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(before))
-        self.assertEqual(path.read_bytes()[len(before):], (control + post_cutoff).encode())
+        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(before + control))
+        audit = [json.loads(line) for line in self.state.baseline_audit_file.read_text(encoding="utf-8").splitlines()][-1]
+        self.assertEqual(
+            audit["affected_sources"][0]["reason"],
+            "complete-prefix-per-record-timestamp-or-noncontent-control; post-cutoff-tail-retained",
+        )
 
-    def test_unparseable_record_is_bracketed_by_a_later_safe_timestamp(self) -> None:
+    def test_content_shaped_timestamp_less_row_is_retained_and_retry_starts_at_it(self) -> None:
+        path = self.root / "content-shaped-control.jsonl"
+        before = timestamped_claude("proved prefix", "2024-01-01T00:00:00Z")
+        content_shaped = json.dumps(
+            {"type": "mode", "sessionId": "a", "mode": "default", "message": {"content": "do not cross"}}
+        ) + "\n"
+        later = timestamped_claude("later safe timestamp cannot prove it", "2024-01-01T00:01:00Z")
+        path.write_text(before + content_shaped + later, encoding="utf-8")
+        source = {"head": "claude", "path": str(path), "session_id": "a", "cwd": "/alpha", "route": "alpha"}
+        self.assertFalse(harvest._claude_noncontent_control(json.loads(content_shaped)))
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[source]):
+            self.baseline()
+            retry = self.baseline(reason="retry retained cursor")
+        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(before))
+        self.assertEqual(retry["affected_source_count"], 0)
+        audit = [json.loads(line) for line in self.state.baseline_audit_file.read_text(encoding="utf-8").splitlines()][-1]
+        self.assertEqual(audit["unselected_sources"][0]["base"]["offset"], len(before))
+        self.assertEqual(audit["unselected_sources"][0]["reason"], "unapproved-timestamp-less-record")
+
+    def test_timestamp_inversion_stops_before_its_post_cutoff_record(self) -> None:
+        path = self.root / "timestamp-inversion.jsonl"
+        before = timestamped_codex("proved", "2024-01-01T00:00:00Z")
+        post_cutoff = timestamped_codex("post cutoff", "2024-01-01T00:01:00Z")
+        later_inverted = timestamped_codex("later but earlier timestamp", "2024-01-01T00:00:00Z")
+        path.write_text(before + post_cutoff + later_inverted, encoding="utf-8")
+        source = {"head": "codex", "path": str(path), "session_id": "a", "cwd": "/alpha", "route": "alpha"}
+        with mock.patch("triggered_agents.agents.curator.discover.codex_sessions", return_value=[source]):
+            self.baseline(cutoff="2024-01-01T00:00:30Z")
+        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(before))
+        self.assertEqual(path.read_bytes()[len(before):], (post_cutoff + later_inverted).encode())
+
+    def test_unparseable_record_and_later_safe_timestamp_do_not_cross_each_other(self) -> None:
         path = self.root / "unparseable-middle.jsonl"
         before = timestamped_codex("before malformed row", "2024-01-01T00:00:00Z")
         malformed = '{"timestamp":\n'
-        after = timestamped_codex("after malformed row", "2024-01-01T00:01:00Z")
+        after = timestamped_codex("later safe timestamp", "2024-01-01T00:01:00Z")
         path.write_text(before + malformed + after, encoding="utf-8")
         source = {"head": "codex", "path": str(path), "session_id": "a", "cwd": "/alpha", "route": "alpha"}
         with mock.patch("triggered_agents.agents.curator.discover.codex_sessions", return_value=[source]):
             self.baseline()
-        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(before + malformed + after))
+        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(before))
         audit = [json.loads(line) for line in self.state.baseline_audit_file.read_text(encoding="utf-8").splitlines()][-1]
         self.assertEqual(
             audit["affected_sources"][0]["reason"],
-            "complete-prefix-at-or-before-cutoff; unparseable-record-barrier-bracketed",
+            "complete-prefix-at-or-before-cutoff; unparseable-record-tail-retained",
         )
 
-    def test_oversized_record_uses_the_same_bracketing_rule(self) -> None:
-        path = self.root / "oversized-middle.jsonl"
-        before = timestamped_codex("before oversized row", "2024-01-01T00:00:00Z")
-        oversized = ("x" * (self.limits.max_record_bytes + 1)) + "\n"
-        after = timestamped_codex("after oversized row", "2024-01-01T00:01:00Z")
-        post_cutoff = timestamped_codex("after cutoff", "2026-01-01T00:00:00Z")
-        path.write_text(before + oversized + after + post_cutoff, encoding="utf-8")
+    def test_parseable_oversized_post_cutoff_row_never_crosses_on_a_later_inversion(self) -> None:
+        path = self.root / "oversized-inversion.jsonl"
+        before = timestamped_codex("proved", "2024-01-01T00:00:00Z")
+        oversized_row = json.loads(timestamped_codex("x" * (self.limits.max_record_bytes + 128), "2024-01-01T00:01:00Z"))
+        oversized = json.dumps(oversized_row) + "\n"
+        later_inverted = timestamped_codex("later but earlier timestamp", "2024-01-01T00:00:00Z")
+        self.assertGreater(len(oversized.encode()), self.limits.max_record_bytes)
+        self.assertEqual(json.loads(oversized)["timestamp"], "2024-01-01T00:01:00Z")
+        path.write_text(before + oversized + later_inverted, encoding="utf-8")
         source = {"head": "codex", "path": str(path), "session_id": "a", "cwd": "/alpha", "route": "alpha"}
         with mock.patch("triggered_agents.agents.curator.discover.codex_sessions", return_value=[source]):
-            self.baseline()
-        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(before + oversized + after))
-        audit = [json.loads(line) for line in self.state.baseline_audit_file.read_text(encoding="utf-8").splitlines()][-1]
-        self.assertEqual(
-            audit["affected_sources"][0]["reason"],
-            "complete-prefix-at-or-before-cutoff; oversized-record-barrier-bracketed",
-        )
-
-    def test_retry_from_the_prefix_before_a_barrier_can_settle_its_proved_bracket(self) -> None:
-        path = self.root / "retry-before-barrier.jsonl"
-        before = timestamped_claude("already retired", "2024-01-01T00:00:00Z")
-        control = json.dumps({"type": "mode", "mode": "default"}) + "\n"
-        after = timestamped_claude("brackets control", "2024-01-01T00:01:00Z")
-        path.write_text(before + control + after, encoding="utf-8")
-        stat = path.stat()
-        self.state.save_watermark({str(path): {"offset": len(before), "mtime": stat.st_mtime, "size": stat.st_size}})
-        source = {"head": "claude", "path": str(path), "session_id": "a", "cwd": "/alpha", "route": "alpha"}
-        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[source]):
-            self.baseline()
-        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(before + control + after))
+            self.baseline(cutoff="2024-01-01T00:00:30Z")
+            self.baseline(cutoff="2024-01-01T00:02:00Z", reason="later cutoff still needs direct proof")
+        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(before))
+        self.assertEqual(path.read_bytes()[len(before):], (oversized + later_inverted).encode())
 
     def test_baseline_legacy_lines_watermark_advances_to_exact_safe_offset(self) -> None:
         path = self.root / "legacy-lines.jsonl"
