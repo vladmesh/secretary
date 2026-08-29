@@ -1703,12 +1703,14 @@ fact is one distilled markdown record. The curator is the writer role; every oth
 `memory_search`, `memory_get` and `memory_list`.
 
 Curator input is a bounded, two-phase batch protocol. Before selection, each source receives a route from the
-selected instance's project registry: a normalized descendant of one registered `repo` or that binding's Orca
-workspace tree (`<workspaces root>/<orca_binding>/...`) is its canonical `id`. Exact directory boundaries and an
-unambiguous route are required. Empty, missing, unreadable, malformed, unregistered or ambiguous paths are
+selected instance's project registry: a normalized descendant of one registered `repo` is its canonical `id`; a
+safe optional `orca_binding` additionally supplies that binding's Orca workspace tree
+(`<workspaces root>/<orca_binding>/...`). Exact directory boundaries and an unambiguous route are required. Empty,
+missing, unreadable, malformed, unregistered or ambiguous paths are
 `unknown`; installation-wide sources are `global`. An observer workspace named
-`workspaces/observers/sprint-<ref>` has no inferred owner: it is project-routed only when its readable sprint
-record has exactly one structured reservation. Harvest, precheck and advance enter the same cursor-settlement
+`workspaces/observers/sprint-<token>` restores the `sprint:` prefix removed by the dispatcher's token before it
+consults the board. It has no inferred owner: it is project-routed only when its readable sprint record has exactly
+one structured reservation. Harvest, precheck and advance enter the same cursor-settlement
 transaction: a curator-local advisory flock serializes watermark.json and pending.json without owning the dispatcher
 lifecycle. `harvest --project <canonical-id>` filters routes before taking the deterministic bounded prefix; omitted
 `--project` explicitly means all backlog. A pending batch records and signs this selector, so a retry or advance

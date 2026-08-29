@@ -19,7 +19,7 @@ import sqlite3
 from pathlib import Path
 
 from secretary.config import ConfigError, load_config
-from secretary.sprints import SprintReader
+from secretary.sprints import SPRINT_REFERENCE_PREFIX, SprintReader
 from secretary.tasks import KanboardClient
 from triggered_agents.runtime.paths import default_instance_path, instance_dir
 
@@ -69,8 +69,9 @@ def _normalized_directory(value: str | Path, *, strict: bool) -> Path | None:
 def project_bindings(instance: Path | None = None) -> list[dict]:
     """Read usable canonical bindings from the selected instance registry.
 
-    A malformed or unreadable entry is deliberately not a partial route.  `id`, `repo`, and
-    `orca_binding` are all needed to distinguish a checkout from its Orca workspace tree.
+    A malformed or unreadable entry is deliberately not a partial route.  A canonical binding
+    needs only its `id` and absolute `repo`; an optional safe `orca_binding` adds its Orca
+    workspace tree as another route boundary.
     """
     root = instance_dir(instance or selected_instance())
     directory = root / "projects"
@@ -84,20 +85,23 @@ def project_bindings(instance: Path | None = None) -> list[dict]:
             continue
         if not isinstance(binding, dict):
             continue
-        project_id, repo, orca_binding = (
-            binding.get("id"),
-            binding.get("repo"),
-            binding.get("orca_binding"),
-        )
+        project_id, repo = binding.get("id"), binding.get("repo")
         if (
-            not all(isinstance(value, str) and value for value in (project_id, repo, orca_binding))
+            not all(isinstance(value, str) and value for value in (project_id, repo))
             or not _PROJECT_ID.fullmatch(project_id)
             or not Path(repo).is_absolute()
-            or Path(orca_binding).name != orca_binding
-            or orca_binding in {".", ".."}
         ):
             continue
-        result.append({"id": project_id, "repo": repo, "orca_binding": orca_binding})
+        route = {"id": project_id, "repo": repo}
+        orca_binding = binding.get("orca_binding")
+        if (
+            isinstance(orca_binding, str)
+            and orca_binding
+            and Path(orca_binding).name == orca_binding
+            and orca_binding not in {".", ".."}
+        ):
+            route["orca_binding"] = orca_binding
+        result.append(route)
     return result
 
 
@@ -129,7 +133,7 @@ def _observer_reference(cwd: Path) -> str | None:
     name = relative.parts[0]
     if not name.startswith("sprint-") or len(name) == len("sprint-"):
         return None
-    return name[len("sprint-") :]
+    return f"{SPRINT_REFERENCE_PREFIX}{name[len('sprint-') :]}"
 
 
 def _observer_route(reference: str, instance: Path, known_ids: set[str]) -> str:
@@ -171,7 +175,8 @@ def resolve_route(cwd: str, *, instance: Path | None = None, global_source: bool
     matches = []
     for binding in bindings:
         repo = _normalized_directory(binding["repo"], strict=True)
-        workspace = _normalized_directory(root / binding["orca_binding"], strict=False) if root else None
+        orca_binding = binding.get("orca_binding")
+        workspace = _normalized_directory(root / orca_binding, strict=False) if root and orca_binding else None
         if (repo and _within(candidate, repo)) or (workspace and _within(candidate, workspace)):
             matches.append(binding["id"])
     return matches[0] if len(matches) == 1 else ROUTE_UNKNOWN

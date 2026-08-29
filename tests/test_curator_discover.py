@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from secretary.dispatcher_state import request_token
 from triggered_agents.agents.curator import discover
 
 
@@ -76,11 +77,11 @@ class CuratorProjectRoutingTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
-    def _binding(self, project: str, repo: Path, binding: str | None = None) -> None:
-        (self.instance / "projects" / f"{project}.yaml").write_text(
-            f"id: {project}\nrepo: {repo}\norca_binding: {binding or project}\n",
-            encoding="utf-8",
-        )
+    def _binding(self, project: str, repo: Path, binding: str | None = None, *, include_binding: bool = True) -> None:
+        content = f"id: {project}\nrepo: {repo}\n"
+        if include_binding:
+            content += f"orca_binding: {binding or project}\n"
+        (self.instance / "projects" / f"{project}.yaml").write_text(content, encoding="utf-8")
 
     def test_checkout_and_binding_workspace_routes_are_boundary_safe(self) -> None:
         repo_a, repo_ab = self.root / "repo-a", self.root / "repo-ab"
@@ -107,16 +108,37 @@ class CuratorProjectRoutingTests(unittest.TestCase):
         self.assertEqual(discover.resolve_route(str(repo), instance=self.instance), "unknown")
         self.assertEqual(discover.resolve_route(str(self.root / "missing"), instance=self.instance), "unknown")
 
-    def test_observer_uses_exactly_one_structured_sprint_reservation(self) -> None:
+    def test_binding_without_orca_name_routes_checkout_and_remains_selectable(self) -> None:
+        repo = self.root / "repo"
+        repo.mkdir()
+        self._binding("ready-for-traffic", repo, include_binding=False)
+        (self.workspaces / "ready-for-traffic" / "worker").mkdir(parents=True)
+        with mock.patch.dict("os.environ", {"TA_WORKSPACES_ROOT": str(self.workspaces)}):
+            self.assertEqual(discover.registered_project_ids(self.instance), {"ready-for-traffic"})
+            self.assertEqual(discover.resolve_route(str(repo), instance=self.instance), "ready-for-traffic")
+            self.assertEqual(
+                discover.resolve_route(str(self.workspaces / "ready-for-traffic" / "worker"), instance=self.instance),
+                "unknown",
+            )
+
+    def test_observer_uses_dispatcher_token_and_exactly_one_structured_sprint_reservation(self) -> None:
         repo = self.root / "repo"
         repo.mkdir()
         self._binding("alpha", repo)
-        observer = self.workspaces / "observers" / "sprint-sprint:one" / "head"
+        reference = "sprint:1412"
+        token = request_token(reference)
+        self.assertEqual(token, "sprint-1412")
+        observer = self.workspaces / "observers" / token / "head"
         observer.mkdir(parents=True)
         with mock.patch.dict("os.environ", {"TA_WORKSPACES_ROOT": str(self.workspaces)}), mock.patch.object(
             discover, "SprintReader"
         ) as reader, mock.patch.object(discover.KanboardClient, "for_instance"):
             reader.return_value.show.return_value = {"reservations": ["alpha"]}
             self.assertEqual(discover.resolve_route(str(observer), instance=self.instance), "alpha")
+            reader.return_value.show.assert_called_once_with(
+                reference, include_cards=False, include_resume_freshness=False
+            )
             reader.return_value.show.return_value = {"reservations": ["alpha", "other"]}
+            self.assertEqual(discover.resolve_route(str(observer), instance=self.instance), "unknown")
+            reader.return_value.show.side_effect = OSError("board unavailable")
             self.assertEqual(discover.resolve_route(str(observer), instance=self.instance), "unknown")

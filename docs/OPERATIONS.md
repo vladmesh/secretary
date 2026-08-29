@@ -1608,10 +1608,13 @@ Curator harvest is bounded before either Markdown or JSON output. Its environmen
 turns, input bytes and sources (TA_CURATOR_MAX_TURNS, TA_CURATOR_MAX_INPUT_BYTES,
 TA_CURATOR_MAX_SOURCES), with record/row and personal-memory caps for source reads. Discovery decorates every
 transcript and personal-memory source with a route from the selected instance's canonical project registry:
-the resolved registered `repo` and its `<workspaces root>/<orca_binding>/` tree route to that binding's `id`.
+every valid `id` plus absolute `repo` binding routes its resolved checkout to that `id`; a safe optional
+`orca_binding` additionally routes its `<workspaces root>/<orca_binding>/` tree. A missing binding name never
+invents a workspace route.
 Directory boundaries are exact after path normalization, so a prefix, unreadable binding, missing checkout,
-ambiguous match or unregistered cwd is `unknown`, never guessed. Observer workspaces under
-`workspaces/observers/sprint-<ref>` route only when that readable sprint has exactly one structured reservation;
+ambiguous match or unregistered cwd is `unknown`, never guessed. Dispatcher tokens a reference such as
+`sprint:1412` as `sprint-1412`, so observer workspaces under `workspaces/observers/sprint-<token>` restore the
+canonical `sprint:` prefix and route only when that readable sprint has exactly one structured reservation;
 installation-wide sources are explicitly `global`. `curator harvest --project <canonical-id>` filters those routes
 before budget selection; no selector is the explicit all-backlog mode. Its pending record signs that selector, so
 neither replay nor advance can cross from a selected project to another project or all-backlog invocation.

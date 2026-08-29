@@ -90,9 +90,10 @@ Scope follows the source's displayed route, not a guessed path or a directory na
 - `unknown` is not a project scope. Do not assign an unknown source by default; skip it unless the fact itself
   establishes an owner through independently reliable context.
 
-The route is authoritative only when discovery found one normalized registry match: a binding checkout or its
-`orca_binding` workspace tree. Prefixes, unregistered paths and ambiguous routes stay `unknown`. Observer workspaces
-route only through a readable sprint with exactly one reservation.
+The route is authoritative only when discovery found one normalized registry match: every valid binding's checkout,
+or its workspace tree when it has a safe optional `orca_binding`. Prefixes, unregistered paths and ambiguous routes
+stay `unknown`; a missing `orca_binding` never invents a workspace route. Observer workspace tokens restore the
+canonical `sprint:` prefix before they route only through a readable sprint with exactly one reservation.
 
 **Personal memory of the runtimes** (the second kind of source) is read through the same barrier and the
 same durability bar as transcripts: the file is already one head's distillate, but it is not yours, so
