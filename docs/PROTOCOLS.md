@@ -1702,12 +1702,22 @@ Facts are stored flat as `memory/facts/global/<slug>.md` or `memory/facts/<proje
 fact is one distilled markdown record. The curator is the writer role; every other agent reads through
 `memory_search`, `memory_get` and `memory_list`.
 
-Curator input is a bounded, two-phase batch protocol. Harvest, precheck and advance enter the same
-cursor-settlement transaction: a curator-local advisory flock serializes watermark.json and pending.json without
-owning the dispatcher lifecycle. It first replays a valid identity-bound pending batch, otherwise selects a deterministic prefix of transcript
-records and changed personal-memory files before rendering. Its configured turn, byte and source limits
-bound the read as well as the prompt. A selected batch with turns or memory is written as a versioned pending
-record bound to the current curator workspace/run/session identity; a retry replays it exactly. A fresh scan
+Curator input is a bounded, two-phase batch protocol. Before selection, each source receives a route from the
+selected instance's project registry: a normalized descendant of one registered `repo` is its canonical `id`; a
+safe optional `orca_binding` additionally supplies that binding's Orca workspace tree
+(`<workspaces root>/<orca_binding>/...`). Exact directory boundaries and an unambiguous route are required. Empty,
+missing, unreadable, malformed, unregistered or ambiguous paths are
+`unknown`; installation-wide sources are `global`. An observer workspace named
+`workspaces/observers/sprint-<token>` restores the `sprint:` prefix removed by the dispatcher's token before it
+consults the board. It has no inferred owner: it is project-routed only when its readable sprint record has exactly
+one structured reservation. Harvest, precheck and advance enter the same cursor-settlement
+transaction: a curator-local advisory flock serializes watermark.json and pending.json without owning the dispatcher
+lifecycle. `harvest --project <canonical-id>` filters routes before taking the deterministic bounded prefix; omitted
+`--project` explicitly means all backlog. A pending batch records and signs this selector, so a retry or advance
+with a different selected project or all-backlog mode fails closed. `curator backlog [--project <canonical-id>]
+[--json]` only reports deterministic aggregate route/head metadata (session, signal-turn and memory-file counts plus
+timestamp bounds), creates no pending record and changes no cursor. A selected batch with turns or memory is written
+as a versioned pending record bound to the current curator workspace/run/session identity and selector; a retry replays it exactly. A fresh scan
 that classified only complete non-emitting records advances those precise cursors atomically instead, and
 never writes pending.json. Advance accepts only the fact-bearing pending form, verifies its identity and each
 source's starting cursor, then moves only the listed cursors. Legacy line-based watermarks remain readable

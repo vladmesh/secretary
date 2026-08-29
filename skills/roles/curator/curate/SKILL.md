@@ -16,7 +16,7 @@ The canon is markdown facts in a Git journal. The index is derived. One fact is 
 ### 1. Take the fresh batch
 
 ```
-python3 -P -m triggered_agents curator harvest
+python3 -P -m triggered_agents curator harvest [--project <canonical-id>]
 ```
 
 Run it from your own workspace (the run's starting working directory is the curator worktree). **Do not
@@ -34,9 +34,13 @@ sources still settle. The helper reports that partial source and retries it from
 the writer finishes; it is never a role-wide clean skip.
 
 The first fact-bearing harvest writes an identity-bound pending record. Repeating harvest before advance
-returns that same batch even if sources have grown. Do not alter the state directory or pending file. Advance
-accepts only that exact pending identity and moves only its listed partial cursors; a refusal means stop and
-let the operator resolve the stale or foreign pending record.
+returns that same batch even if sources have grown. The selector is part of that identity: use the same
+`--project <canonical-id>` for harvest and advance, and do not switch between a selected project and the
+explicit all-backlog mode. Do not alter the state directory or pending file. Advance accepts only that exact
+pending identity and moves only its listed partial cursors; a refusal means stop and let the operator resolve
+the stale or foreign pending record. To inspect work without changing state, use
+`python3 -P -m triggered_agents curator backlog [--project <canonical-id>] [--json]`; it emits aggregate
+metadata only, never source text.
 
 The batch comes from two kinds of source:
 
@@ -78,13 +82,18 @@ Fact format:
 - Size roughly 80–200 tokens. One fact is one thought. Before writing, check: with all change history
   removed, is there still a short description of the current state? If not, do not write it.
 
-Scope follows the system the fact belongs to:
+Scope follows the source's displayed route, not a guessed path or a directory name:
 
-- `project:<dir>` — a project checkout (the directory name) or a system repository. A fact about the task
-  pipeline (board, runtime, curator, secretary) belongs to the product's own project scope, a fact about
-  the session manager to its scope, and so on.
-- `global` — only genuinely cross-system material: the user, the VPS, conventions. If a fact has an
-  obvious repository owner, it is NOT global.
+- `project:<canonical-id>` — a source routed through one registered binding's canonical `id`. A fact about
+  the task pipeline (board, runtime, curator, secretary) belongs to `project:secretary`.
+- `global` — only material explicitly marked `global`, such as a runtime's installation-wide memory.
+- `unknown` is not a project scope. Do not assign an unknown source by default; skip it unless the fact itself
+  establishes an owner through independently reliable context.
+
+The route is authoritative only when discovery found one normalized registry match: every valid binding's checkout,
+or its workspace tree when it has a safe optional `orca_binding`. Prefixes, unregistered paths and ambiguous routes
+stay `unknown`; a missing `orca_binding` never invents a workspace route. Observer workspace tokens restore the
+canonical `sprint:` prefix before they route only through a readable sprint with exactly one reservation.
 
 **Personal memory of the runtimes** (the second kind of source) is read through the same barrier and the
 same durability bar as transcripts: the file is already one head's distillate, but it is not yours, so
@@ -92,9 +101,8 @@ anything doubtful is still skipped. Conversion rules:
 
 - the source file's own type field is not carried over as is: it is an axis of "what kind of fact this
   is", not a canon tag. Use it as a hint when choosing scope and wording.
-- Scope follows the working directory of the file (the project directory the head wrote it in), by the
-  same rule as above. For a runtime whose memory is installation-wide and has no working directory,
-  treat its entries as `global` by default unless the text itself names an owning project.
+- Scope follows the file's displayed canonical route by the same rule. A runtime's installation-wide memory
+  is explicitly `global`; an `unknown` file is not assigned by default.
 - Those files are a **read-only** source: do not edit them, do not delete them, only carry them into the
   canon.
 
@@ -163,7 +171,7 @@ carry it over — refer to it by name and location instead.
 ### 5. Move the watermark
 
 ```
-python3 -P -m triggered_agents curator advance
+python3 -P -m triggered_agents curator advance [--project <canonical-id>]
 ```
 
 Order matters: move the watermark ONLY after every fact has been written through `memory-write`. If the

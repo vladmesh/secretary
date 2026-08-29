@@ -1,17 +1,18 @@
 """curator agent — deterministic helpers the curator skill drives via Bash.
 
 Flow the agent follows each run:
-  1. `python3 -m triggered_agents curator harvest`  -> redacted batch (markdown) of new
+  1. `python3 -m triggered_agents curator harvest [--project <canonical-id>]`  -> redacted batch (markdown) of new
                                      Claude/Hermes/Codex session turns and changed
                                      personal-memory files on stdout, and a fact-bearing,
                                      identity-bound pending batch cached on disk. Cursor-only
                                      scans advance before the command returns.
   2. agent extracts durable facts, dedups via memory_search, writes each accepted fact
      through `python3 -m triggered_agents curator memory-write`.
-  3. `python3 -m triggered_agents curator advance`  -> moves the watermark past step 1.
+  3. `python3 -m triggered_agents curator advance [--project <canonical-id>]`  -> moves the watermark past step 1.
 
 Two-phase so a crash before the memory commit re-harvests instead of dropping turns.
-`harvest --json` emits the structured batch; `sessions` lists discovered sources;
+`harvest --json` emits the structured batch; `backlog [--project <canonical-id>] [--json]`
+reports metadata only without changing state; `sessions` lists discovered sources;
 `status` shows the watermark; `precheck` exits PRECHECK_SKIP (100) when there is nothing new, so
 the systemd gate can skip the run without spinning up a head.
 """
@@ -73,7 +74,7 @@ def _write_pending(record: dict) -> None:
     tmp.replace(STATE.pending_file)
 
 
-def _prepare_batch(*, nonblocking: bool = False) -> dict:
+def _prepare_batch(*, nonblocking: bool = False, project: str | None = None) -> dict:
     """Replay fact work or atomically settle a fresh bounded scan in one transaction.
 
     Every complete source record the scan classified leaves this function either in an
@@ -81,9 +82,10 @@ def _prepare_batch(*, nonblocking: bool = False) -> dict:
     a supported batch because no curator step can consume it, so it fails closed.
     """
     with cursor_settlement_transaction(nonblocking=nonblocking):
+        project = harvest.validate_project(project)
         identity = harvest.current_identity()
         if STATE.pending_file.is_file():
-            record = harvest.read_pending(STATE, identity)
+            record = harvest.read_pending(STATE, identity, project)
             # A stale record must win over new discovery, but cannot be replayed or
             # advanced as though it belonged to the current watermark.
             for source, expected in record["base"].items():
@@ -91,22 +93,22 @@ def _prepare_batch(*, nonblocking: bool = False) -> dict:
                     raise harvest.PendingError(f"curator pending record is stale for {source}")
             return {**record["batch"], "batch_id": record["batch_id"]}
 
-        batch = harvest.harvest(STATE, identity)
+        batch = harvest.harvest(STATE, identity, project=project)
         if batch["sessions"] or batch["memory"]:
             base = {key: STATE.load_watermark().get(key) for key in batch["pending"]}
-            _write_pending(harvest.pending_record(batch, identity, base))
+            _write_pending(harvest.pending_record(batch, identity, base, project))
         elif batch["pending"]:
             # These are complete non-emitting records.  Persist their precise scan
             # cursor now, not as a pending batch that the zero-input skill will exit
             # without advancing.
             base = {key: STATE.load_watermark().get(key) for key in batch["pending"]}
-            harvest.advance(STATE, harvest.pending_record(batch, identity, base), identity)
+            harvest.advance(STATE, harvest.pending_record(batch, identity, base, project), identity, project)
         return batch
 
 
-def cmd_harvest(as_json: bool) -> int:
+def cmd_harvest(as_json: bool, project: str | None = None) -> int:
     try:
-        batch = _prepare_batch()
+        batch = _prepare_batch(project=project)
     except harvest.PendingError as exc:
         print(f"curator: {exc}", file=sys.stderr)
         return 1
@@ -117,14 +119,15 @@ def cmd_harvest(as_json: bool) -> int:
     return 0
 
 
-def cmd_advance() -> int:
+def cmd_advance(project: str | None = None) -> int:
     try:
         with cursor_settlement_transaction():
+            project = harvest.validate_project(project)
             if not STATE.pending_file.is_file():
                 raise harvest.PendingError("nothing to advance (run harvest first)")
             identity = harvest.current_identity()
-            pending = harvest.read_pending(STATE, identity)
-            harvest.advance(STATE, pending, identity)
+            pending = harvest.read_pending(STATE, identity, project)
+            harvest.advance(STATE, pending, identity, project)
             STATE.pending_file.unlink()
     except harvest.PendingError as exc:
         print(f"curator: {exc}", file=sys.stderr)
@@ -159,6 +162,27 @@ def cmd_precheck() -> int:
 def cmd_sessions() -> int:
     for s in discover.all_sessions():
         print(f"{s['head']:8} {s['session_id']}  {s['cwd']}  {s['path']}")
+    return 0
+
+
+def cmd_backlog(as_json: bool, project: str | None = None) -> int:
+    try:
+        summary = harvest.backlog(STATE, project)
+    except harvest.PendingError as exc:
+        print(f"curator: {exc}", file=sys.stderr)
+        return 1
+    if as_json:
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+        return 0
+    if not summary["groups"]:
+        print(f"curator: no unadvanced backlog for {summary['project']}")
+        return 0
+    print("project head sessions signal-turns memory-files oldest newest")
+    for group in summary["groups"]:
+        print(
+            f"{group['project']} {group['head']} {group['session_count']} {group['signal_turn_count']} "
+            f"{group['memory_file_count']} {group['oldest'] or '-'} {group['newest'] or '-'}"
+        )
     return 0
 
 
@@ -235,10 +259,19 @@ def cmd_memory_write(argv: list[str]) -> int:
 def main(argv=None) -> int:
     argv = list(argv or [])
     cmd = argv[0] if argv else "help"
-    if cmd == "harvest":
-        return cmd_harvest("--json" in argv)
-    if cmd == "advance":
-        return cmd_advance()
+    if cmd in {"harvest", "advance", "backlog"}:
+        import argparse
+
+        parser = argparse.ArgumentParser(prog=f"python3 -m triggered_agents curator {cmd}")
+        parser.add_argument("--project")
+        if cmd in {"harvest", "backlog"}:
+            parser.add_argument("--json", action="store_true")
+        ns = parser.parse_args(argv[1:])
+        if cmd == "harvest":
+            return cmd_harvest(ns.json, ns.project)
+        if cmd == "advance":
+            return cmd_advance(ns.project)
+        return cmd_backlog(ns.json, ns.project)
     if cmd == "precheck":
         return cmd_precheck()
     if cmd == "sessions":

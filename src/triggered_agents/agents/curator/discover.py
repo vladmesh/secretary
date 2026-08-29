@@ -18,6 +18,11 @@ import re
 import sqlite3
 from pathlib import Path
 
+from secretary.config import ConfigError, load_config
+from secretary.sprints import SPRINT_REFERENCE_PREFIX, SprintReader
+from secretary.tasks import KanboardClient
+from triggered_agents.runtime.paths import default_instance_path, instance_dir
+
 # Claude project-dir naming: every non-alphanumeric cwd character becomes "-".
 # Overridable via TA_CLAUDE_PROJECTS_DIR so a run (e.g. an e2e on fixtures) can point the
 # scan at a synthetic tree instead of the live ~/.claude/projects.
@@ -41,6 +46,144 @@ CODEX_SESSIONS = Path(
         str(Path.home() / ".config" / "orca" / "codex-runtime-home" / "home" / "sessions"),
     )
 )
+
+ROUTE_UNKNOWN = "unknown"
+ROUTE_GLOBAL = "global"
+_PROJECT_ID = re.compile(r"[a-z0-9][a-z0-9-]*\Z")
+
+
+def selected_instance() -> Path:
+    """The installation whose registry is authoritative for curator routing."""
+    return Path(os.environ.get("SECRETARY_INSTANCE", str(default_instance_path()))).expanduser()
+
+
+def _normalized_directory(value: str | Path, *, strict: bool) -> Path | None:
+    """Return a resolved directory, never treating a missing or unreadable path as a route."""
+    try:
+        path = Path(value).expanduser().resolve(strict=strict)
+        return path if path.is_dir() else None
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def project_bindings(instance: Path | None = None) -> list[dict]:
+    """Read usable canonical bindings from the selected instance registry.
+
+    A malformed or unreadable entry is deliberately not a partial route.  A canonical binding
+    needs only its `id` and absolute `repo`; an optional safe `orca_binding` adds its Orca
+    workspace tree as another route boundary.
+    """
+    root = instance_dir(instance or selected_instance())
+    directory = root / "projects"
+    if not directory.is_dir():
+        return []
+    result = []
+    for path in sorted(directory.glob("*.yaml")):
+        try:
+            binding = load_config(path)
+        except ConfigError:
+            continue
+        if not isinstance(binding, dict):
+            continue
+        project_id, repo = binding.get("id"), binding.get("repo")
+        if (
+            not all(isinstance(value, str) and value for value in (project_id, repo))
+            or not _PROJECT_ID.fullmatch(project_id)
+            or not Path(repo).is_absolute()
+        ):
+            continue
+        route = {"id": project_id, "repo": repo}
+        orca_binding = binding.get("orca_binding")
+        if (
+            isinstance(orca_binding, str)
+            and orca_binding
+            and Path(orca_binding).name == orca_binding
+            and orca_binding not in {".", ".."}
+        ):
+            route["orca_binding"] = orca_binding
+        result.append(route)
+    return result
+
+
+def registered_project_ids(instance: Path | None = None) -> set[str]:
+    """Canonical ids which a curator selector may name, without deriving ids from paths."""
+    return {binding["id"] for binding in project_bindings(instance)}
+
+
+def _within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _workspace_root() -> Path:
+    return Path(os.environ.get("TA_WORKSPACES_ROOT") or Path.home() / "orca" / "workspaces")
+
+
+def _observer_reference(cwd: Path) -> str | None:
+    """Extract an observer's sprint reference only from its canonical workspace shape."""
+    root = _normalized_directory(_workspace_root() / "observers", strict=False)
+    if root is None or not _within(cwd, root):
+        return None
+    relative = cwd.relative_to(root)
+    if not relative.parts:
+        return None
+    name = relative.parts[0]
+    if not name.startswith("sprint-") or len(name) == len("sprint-"):
+        return None
+    return f"{SPRINT_REFERENCE_PREFIX}{name[len('sprint-') :]}"
+
+
+def _observer_route(reference: str, instance: Path, known_ids: set[str]) -> str:
+    """Resolve an observer only from its sprint's single structured reservation."""
+    try:
+        sprint = SprintReader(KanboardClient.for_instance(instance)).show(
+            reference, include_cards=False, include_resume_freshness=False
+        )
+    # Board reachability is not curator work.  A failure to read the structured record is
+    # deliberately an unknown route, never an exception that suppresses other discovery.
+    except Exception:
+        return ROUTE_UNKNOWN
+    reservations = sprint.get("reservations") if isinstance(sprint, dict) else None
+    if not isinstance(reservations, list) or len(reservations) != 1 or not isinstance(reservations[0], str):
+        return ROUTE_UNKNOWN
+    return reservations[0] if reservations[0] in known_ids else ROUTE_UNKNOWN
+
+
+def resolve_route(cwd: str, *, instance: Path | None = None, global_source: bool = False) -> str:
+    """Return a canonical project id, or the explicit `unknown`/`global` route.
+
+    Registered checkout descendants and the corresponding Orca workspace descendants are valid
+    routes.  The candidate must match exactly one resolved boundary, so prefixes, duplicate
+    bindings, missing repositories, and symlink spellings cannot produce a guessed owner.
+    """
+    if global_source:
+        return ROUTE_GLOBAL
+    candidate = _normalized_directory(cwd, strict=False) if cwd else None
+    if candidate is None:
+        return ROUTE_UNKNOWN
+    instance = instance_dir(instance or selected_instance())
+    bindings = project_bindings(instance)
+    known_ids = {binding["id"] for binding in bindings}
+    reference = _observer_reference(candidate)
+    if reference is not None:
+        return _observer_route(reference, instance, known_ids)
+
+    root = _normalized_directory(_workspace_root(), strict=False)
+    matches = []
+    for binding in bindings:
+        repo = _normalized_directory(binding["repo"], strict=True)
+        orca_binding = binding.get("orca_binding")
+        workspace = _normalized_directory(root / orca_binding, strict=False) if root and orca_binding else None
+        if (repo and _within(candidate, repo)) or (workspace and _within(candidate, workspace)):
+            matches.append(binding["id"])
+    return matches[0] if len(matches) == 1 else ROUTE_UNKNOWN
+
+
+def _with_route(source: dict, *, global_source: bool = False) -> dict:
+    return {**source, "route": resolve_route(source.get("cwd", ""), global_source=global_source)}
 
 def curator_workspace() -> Path:
     """The one workspace this curator run must not feed back into itself."""
@@ -108,7 +251,7 @@ def claude_sessions() -> list[dict]:
             cwd = _cwd_from_file(f, fallback)
             if _excluded(cwd, f.stem):
                 continue
-            out.append({"head": "claude", "path": str(f), "session_id": f.stem, "cwd": cwd})
+            out.append(_with_route({"head": "claude", "path": str(f), "session_id": f.stem, "cwd": cwd}))
     return out
 
 
@@ -146,7 +289,7 @@ def hermes_sessions() -> list[dict]:
         cwd = cwd or ""
         if _excluded(cwd, session_id):
             continue
-        out.append({"head": "hermes", "path": str(HERMES_STATE_DB), "session_id": session_id, "cwd": cwd})
+        out.append(_with_route({"head": "hermes", "path": str(HERMES_STATE_DB), "session_id": session_id, "cwd": cwd}))
     return out
 
 
@@ -184,7 +327,7 @@ def codex_sessions() -> list[dict]:
         cwd = meta["cwd"]
         if _excluded(cwd, meta["session_id"]):
             continue
-        out.append({"head": "codex", "path": str(f), "session_id": meta["session_id"], "cwd": cwd})
+        out.append(_with_route({"head": "codex", "path": str(f), "session_id": meta["session_id"], "cwd": cwd}))
     return out
 
 
@@ -245,7 +388,7 @@ def claude_memory_files() -> list[dict]:
         for f in sorted(mem_dir.glob("*.md")):
             if f.name == "MEMORY.md":
                 continue
-            out.append({"head": "claude", "path": str(f), "cwd": cwd})
+            out.append(_with_route({"head": "claude", "path": str(f), "cwd": cwd}))
     return out
 
 
@@ -265,7 +408,7 @@ def hermes_memory_files() -> list[dict]:
     for name in ("MEMORY.md", "USER.md"):
         f = HERMES_MEMORY_DIR / name
         if f.is_file():
-            out.append({"head": "hermes", "path": str(f), "cwd": ""})
+            out.append(_with_route({"head": "hermes", "path": str(f), "cwd": ""}, global_source=True))
     return out
 
 
