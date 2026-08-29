@@ -256,6 +256,67 @@ class CuratorHarvestTests(unittest.TestCase):
             harvest.harvest(self.state, self.identity, self.limits)
         self.assertEqual(json.loads(self.state.pending_file.read_text(encoding="utf-8")), {"old": {"lines": 3}})
 
+    def test_project_filter_precedes_budget_and_retains_routes_in_output(self) -> None:
+        alpha, beta = self.root / "alpha.jsonl", self.root / "beta.jsonl"
+        alpha.write_text(claude("alpha"), encoding="utf-8")
+        beta.write_text(claude("beta"), encoding="utf-8")
+        sessions = [
+            {"head": "claude", "path": str(beta), "session_id": "b", "cwd": "/beta", "route": "beta"},
+            {"head": "claude", "path": str(alpha), "session_id": "a", "cwd": "/alpha", "route": "alpha"},
+        ]
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=sessions), mock.patch(
+            "triggered_agents.agents.curator.discover.registered_project_ids", return_value={"alpha", "beta"}
+        ):
+            selected = harvest.harvest(self.state, self.identity, self.limits, project="alpha")
+            all_backlog = harvest.harvest(self.state, self.identity, self.limits)
+        self.assertEqual([entry["route"] for entry in selected["sessions"]], ["alpha"])
+        self.assertEqual(selected["project"], "alpha")
+        self.assertEqual({entry["route"] for entry in all_backlog["sessions"]}, {"alpha", "beta"})
+
+    def test_project_selector_is_signed_into_pending_replay_and_advance(self) -> None:
+        path = self.root / "alpha.jsonl"
+        path.write_text(claude("alpha"), encoding="utf-8")
+        session = {"head": "claude", "path": str(path), "session_id": "a", "cwd": "/alpha", "route": "alpha"}
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[session]), mock.patch(
+            "triggered_agents.agents.curator.discover.registered_project_ids", return_value={"alpha"}
+        ):
+            batch = harvest.harvest(self.state, self.identity, self.limits, project="alpha")
+            record = harvest.pending_record(batch, self.identity, {str(path): None}, project="alpha")
+            self.state.ensure_dir()
+            self.state.pending_file.write_text(json.dumps(record), encoding="utf-8")
+            with self.assertRaisesRegex(harvest.PendingError, "selector"):
+                harvest.harvest(self.state, self.identity, self.limits)
+            with self.assertRaisesRegex(harvest.PendingError, "selector"):
+                harvest.advance(self.state, record, self.identity)
+            harvest.advance(self.state, record, self.identity, project="alpha")
+        self.assertIn(str(path), self.state.load_watermark())
+
+    def test_backlog_summary_is_metadata_only_and_state_free(self) -> None:
+        transcript, beta, memory = self.root / "alpha.jsonl", self.root / "beta.jsonl", self.root / "memory.md"
+        transcript.write_text(claude("a secret transcript"), encoding="utf-8")
+        beta.write_text(codex("a separate secret transcript"), encoding="utf-8")
+        memory.write_text("a secret personal memory", encoding="utf-8")
+        sessions = [
+            {"head": "claude", "path": str(transcript), "session_id": "a", "cwd": "/alpha", "route": "alpha"},
+            {"head": "codex", "path": str(beta), "session_id": "b", "cwd": "/beta", "route": "beta"},
+        ]
+        memories = [{"head": "claude", "path": str(memory), "cwd": "/alpha", "route": "alpha"}]
+        before = self.state.load_watermark()
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[sessions[0]]), mock.patch(
+            "triggered_agents.agents.curator.discover.codex_sessions", return_value=[sessions[1]]
+        ), mock.patch(
+            "triggered_agents.agents.curator.discover.all_memory_files", return_value=memories
+        ), mock.patch("triggered_agents.agents.curator.discover.registered_project_ids", return_value={"alpha", "beta"}):
+            summary = harvest.backlog(self.state, project="alpha", limits=self.limits)
+            all_summary = harvest.backlog(self.state, limits=self.limits)
+        self.assertEqual(summary["groups"][0]["project"], "alpha")
+        self.assertEqual(summary["groups"][0]["signal_turn_count"], 1)
+        self.assertEqual(summary["groups"][0]["memory_file_count"], 1)
+        self.assertEqual([group["project"] for group in all_summary["groups"]], ["alpha", "beta"])
+        self.assertNotIn("secret", json.dumps(summary))
+        self.assertEqual(self.state.load_watermark(), before)
+        self.assertFalse(self.state.pending_file.exists())
+
 
 class CuratorCliPreparationTests(unittest.TestCase):
     def setUp(self) -> None:

@@ -36,9 +36,17 @@ LEGACY_FLAT_MODULES = frozenset(
     """.split()
 )
 
-# This historical telemetry reader is the one known back edge. Holding the exact edge here prevents
-# another one while a later migration removes it.
-LEGACY_TRIGGERED_AGENTS_IMPORTS = frozenset({("runtime/production_telemetry.py", "secretary.config")})
+# These are the only approved product edges.  Production telemetry reads the installation config;
+# curator discovery reads the canonical project registry and SprintReader rather than copying either
+# protocol into the triggered-agent package. Holding the exact set prevents another back edge.
+LEGACY_TRIGGERED_AGENTS_IMPORTS = frozenset(
+    {
+        ("runtime/production_telemetry.py", "secretary.config"),
+        ("agents/curator/discover.py", "secretary.config"),
+        ("agents/curator/discover.py", "secretary.sprints"),
+        ("agents/curator/discover.py", "secretary.tasks"),
+    }
+)
 
 
 class SourceLayoutTests(unittest.TestCase):

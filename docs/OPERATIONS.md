@@ -1606,10 +1606,20 @@ The sources are the live data plane, not a checkout:
 
 Curator harvest is bounded before either Markdown or JSON output. Its environment controls maximum signal
 turns, input bytes and sources (TA_CURATOR_MAX_TURNS, TA_CURATOR_MAX_INPUT_BYTES,
-TA_CURATOR_MAX_SOURCES), with record/row and personal-memory caps for source reads. Harvest, precheck and
-advance share one cursor-settlement transaction: a curator-local advisory flock serializes watermark.json and
-pending.json without taking the agent lifecycle lock. A selected fact-bearing batch is stored as versioned, identity-bound pending.json
-and replayed exactly until advance checks its identity and starting cursors. A scan with only complete
+TA_CURATOR_MAX_SOURCES), with record/row and personal-memory caps for source reads. Discovery decorates every
+transcript and personal-memory source with a route from the selected instance's canonical project registry:
+the resolved registered `repo` and its `<workspaces root>/<orca_binding>/` tree route to that binding's `id`.
+Directory boundaries are exact after path normalization, so a prefix, unreadable binding, missing checkout,
+ambiguous match or unregistered cwd is `unknown`, never guessed. Observer workspaces under
+`workspaces/observers/sprint-<ref>` route only when that readable sprint has exactly one structured reservation;
+installation-wide sources are explicitly `global`. `curator harvest --project <canonical-id>` filters those routes
+before budget selection; no selector is the explicit all-backlog mode. Its pending record signs that selector, so
+neither replay nor advance can cross from a selected project to another project or all-backlog invocation.
+`curator backlog [--project <canonical-id>] [--json]` is read-only metadata: deterministic route/head groups with
+source counts and timestamp bounds, never transcript or personal-memory text. Harvest, precheck and advance share
+one cursor-settlement transaction: a curator-local advisory flock serializes watermark.json and pending.json without
+taking the agent lifecycle lock. A selected fact-bearing batch is stored as versioned, identity-bound pending.json
+and replayed exactly until advance checks its identity, selector and starting cursors. A scan with only complete
 non-emitting rows advances its cursors immediately under that lock and writes no pending.json, so a zero-input
 prompt has nothing to advance. A legacy line-based watermark.json from the disabled installation remains a
 supported read input and converts a source to its byte cursor only after that source is selected and advanced.

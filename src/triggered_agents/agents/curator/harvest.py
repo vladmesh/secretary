@@ -20,13 +20,32 @@ from typing import Callable
 from ...runtime.redact import redact
 from . import discover
 
-PENDING_VERSION = 2
+PENDING_VERSION = 3
 _SCAFFOLD = re.compile(r"<(local-command|command-name|command-message|command-args)[\s>]")
 _CODEX_CONTEXT_PREFIXES = ("# AGENTS.md instructions for ", "<environment_context>")
 
 
 class PendingError(ValueError):
     pass
+
+
+def selector(project: str | None) -> str:
+    """Normalize the explicit all-backlog selector used in signed pending records."""
+    return project or "all"
+
+
+def validate_project(project: str | None) -> str | None:
+    """Reject a selector that is not a canonical id in the selected instance registry."""
+    if project is None:
+        return None
+    if project not in discover.registered_project_ids():
+        raise PendingError(f"unknown curator project {project!r}")
+    return project
+
+
+def _selected(sources: list[dict], project: str | None) -> list[dict]:
+    """Filter before ordering and budget selection; all-backlog retains unknown and global."""
+    return [source for source in sources if project is None or source.get("route", discover.ROUTE_UNKNOWN) == project]
 
 
 @dataclass(frozen=True)
@@ -256,9 +275,9 @@ def _jsonl_sessions(mark, sessions, parser, budget):
     return output, pending, False, partial_sources
 
 
-def _hermes_sessions(mark, budget):
+def _hermes_sessions(mark, budget, sessions=None):
     output, pending = [], {}
-    for sess in sorted(discover.hermes_sessions(), key=lambda s: (s["head"], s["path"], s["session_id"])):
+    for sess in sorted(sessions if sessions is not None else discover.hermes_sessions(), key=lambda s: (s["head"], s["path"], s["session_id"])):
         key = f"hermes:{sess['session_id']}"
         rows = discover.hermes_messages(
             sess["session_id"], mark.get(key, {}).get("last_id", 0), budget.limits.max_rows_per_source,
@@ -290,9 +309,9 @@ def _hermes_sessions(mark, budget):
     return output, pending, False
 
 
-def harvest_memory_files(mark, budget):
+def harvest_memory_files(mark, budget, files=None):
     entries, pending, rejected = [], {}, []
-    for mem in sorted(discover.all_memory_files(), key=lambda m: (m["head"], m["path"])):
+    for mem in sorted(files if files is not None else discover.all_memory_files(), key=lambda m: (m["head"], m["path"])):
         path = Path(mem["path"])
         try:
             stat = path.stat()
@@ -316,24 +335,29 @@ def harvest_memory_files(mark, budget):
     return entries, pending, rejected, False
 
 
-def _batch_id(identity, batch, base):
-    payload = json.dumps({"identity": identity, "batch": batch, "base": base}, sort_keys=True, separators=(",", ":")).encode()
+def _batch_id(identity, batch, base, selected_project):
+    payload = json.dumps(
+        {"identity": identity, "batch": batch, "base": base, "selector": selector(selected_project)},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
     return hashlib.sha256(payload).hexdigest()
 
 
-def pending_record(batch, identity, base):
+def pending_record(batch, identity, base, project=None):
     payload = copy.deepcopy(batch)
     payload.pop("batch_id", None)
     return {
         "version": PENDING_VERSION,
         "identity": copy.deepcopy(identity),
         "base": copy.deepcopy(base),
+        "selector": selector(project),
         "batch": payload,
-        "batch_id": _batch_id(identity, payload, base),
+        "batch_id": _batch_id(identity, payload, base, project),
     }
 
 
-def read_pending(st, identity=None):
+def read_pending(st, identity=None, project=None):
     identity = identity or current_identity()
     try:
         record = json.loads(st.pending_file.read_text(encoding="utf-8"))
@@ -346,7 +370,9 @@ def read_pending(st, identity=None):
     batch, base = record.get("batch"), record.get("base")
     if not isinstance(batch, dict) or not isinstance(base, dict) or not isinstance(batch.get("pending"), dict):
         raise PendingError("curator pending record has an invalid batch")
-    if record.get("batch_id") != _batch_id(identity, batch, base):
+    if record.get("selector") != selector(project):
+        raise PendingError("curator pending record belongs to a different project selector")
+    if record.get("batch_id") != _batch_id(identity, batch, base, project):
         raise PendingError("curator pending record identity does not match its contents")
     if not batch.get("sessions") and not batch.get("memory"):
         raise PendingError("curator pending record has no fact-bearing input")
@@ -355,30 +381,31 @@ def read_pending(st, identity=None):
     return record
 
 
-def harvest(st, identity=None, limits=None):
+def harvest(st, identity=None, limits=None, project=None):
     identity = identity or current_identity()
+    project = validate_project(project)
     if st.pending_file.is_file():
-        record = read_pending(st, identity)
+        record = read_pending(st, identity, project)
         return {**copy.deepcopy(record["batch"]), "batch_id": record["batch_id"]}
     mark, budget = st.load_watermark(), _Budget(limits or Limits.from_env())
     claude, cp, stopped, cpartial = _jsonl_sessions(
-        mark, discover.claude_sessions(), parse_claude_lines, budget
+        mark, _selected(discover.claude_sessions(), project), parse_claude_lines, budget
     )
     if stopped:
         codex, xp, xstop, xpartial = [], {}, True, []
     else:
         codex, xp, xstop, xpartial = _jsonl_sessions(
-            mark, discover.codex_sessions(), parse_codex_lines, budget
+            mark, _selected(discover.codex_sessions(), project), parse_codex_lines, budget
         )
     hermes, hp, hstop = (
         ([], {}, True)
         if stopped or xstop
-        else _hermes_sessions(mark, budget)
+        else _hermes_sessions(mark, budget, _selected(discover.hermes_sessions(), project))
     )
     memory, mp, rejected, _ = (
         ([], {}, [], True)
         if stopped or xstop or hstop
-        else harvest_memory_files(mark, budget)
+        else harvest_memory_files(mark, budget, _selected(discover.all_memory_files(), project))
     )
     pending = {**cp, **xp, **hp, **mp}
     base = {key: copy.deepcopy(mark.get(key)) for key in pending}
@@ -390,12 +417,13 @@ def harvest(st, identity=None, limits=None):
         # This is observability only.  It does not invalidate safe records or
         # cursors from this or later sources.
         "partial_sources": cpartial + xpartial,
+        "project": selector(project),
     }
-    batch["batch_id"] = _batch_id(identity, batch, base)
+    batch["batch_id"] = _batch_id(identity, batch, base, project)
     return batch
 
 
-def advance(st, record, identity=None):
+def advance(st, record, identity=None, project=None):
     identity = identity or current_identity()
     if not isinstance(record, dict) or record.get("version") != PENDING_VERSION:
         raise PendingError("curator advance requires the versioned pending record")
@@ -404,7 +432,9 @@ def advance(st, record, identity=None):
     batch, base = record.get("batch"), record.get("base")
     if not isinstance(batch, dict) or not isinstance(base, dict) or not isinstance(batch.get("pending"), dict):
         raise PendingError("curator pending record has an invalid batch")
-    if record.get("batch_id") != _batch_id(identity, batch, base):
+    if record.get("selector") != selector(project):
+        raise PendingError("curator pending record belongs to a different project selector")
+    if record.get("batch_id") != _batch_id(identity, batch, base, project):
         raise PendingError("curator pending record identity does not match its contents")
     if batch.get("incomplete"):
         raise PendingError("curator pending record has incomplete input")
@@ -414,6 +444,111 @@ def advance(st, record, identity=None):
             raise PendingError(f"curator pending record is stale for {source}")
     mark.update(copy.deepcopy(batch["pending"]))
     st.save_watermark(mark)
+
+
+def _timestamp(value) -> str | None:
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _stat_timestamp(stat) -> str:
+    return datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat()
+
+
+def _jsonl_backlog(path: Path, previous: dict, parser, limits: Limits) -> tuple[bool, int, list[str]]:
+    """Metadata about complete unadvanced JSONL records, without returning their text."""
+    try:
+        stat = path.stat()
+        start = _legacy_start(path, previous, stat, limits)
+    except (OSError, ValueError):
+        return False, 0, []
+    if start is None:
+        return False, 0, []
+    records, turns, timestamps = False, 0, []
+    try:
+        with path.open("rb") as fh:
+            fh.seek(start)
+            while True:
+                _end, data, _oversized, incomplete = _read_record(fh, limits)
+                if data is None:
+                    if incomplete:
+                        break
+                    # At EOF, `_read_record` has no data and is not an oversized record.
+                    if not _oversized:
+                        break
+                    records = True
+                    continue
+                records = True
+                for turn in parser([data.decode("utf-8", errors="replace")]):
+                    turns += 1
+                    if timestamp := _timestamp(turn.get("ts")):
+                        timestamps.append(timestamp)
+    except OSError:
+        return False, 0, []
+    return records, turns, timestamps or ([_stat_timestamp(stat)] if records else [])
+
+
+def _add_backlog_group(groups: dict, route: str, head: str, *, sessions=0, turns=0, memory=0, timestamps=()):
+    group = groups.setdefault(
+        (route, head),
+        {"project": route, "head": head, "session_count": 0, "signal_turn_count": 0, "memory_file_count": 0, "timestamps": []},
+    )
+    group["session_count"] += sessions
+    group["signal_turn_count"] += turns
+    group["memory_file_count"] += memory
+    group["timestamps"].extend(timestamp for timestamp in timestamps if timestamp)
+
+
+def backlog(st, project: str | None = None, limits: Limits | None = None) -> dict:
+    """Summarize unadvanced sources without creating pending work or changing state.
+
+    This intentionally returns only aggregate metadata.  It reads enough source structure to count
+    signal turns, but neither renders nor retains transcript or personal-memory text.
+    """
+    project = validate_project(project)
+    mark, limits, groups = st.load_watermark(), limits or Limits.from_env(), {}
+    for sess, parser in (
+        *((source, parse_claude_lines) for source in _selected(discover.claude_sessions(), project)),
+        *((source, parse_codex_lines) for source in _selected(discover.codex_sessions(), project)),
+    ):
+        records, turns, timestamps = _jsonl_backlog(Path(sess["path"]), mark.get(sess["path"], {}), parser, limits)
+        if records:
+            _add_backlog_group(
+                groups, sess.get("route", discover.ROUTE_UNKNOWN), sess["head"], sessions=1, turns=turns, timestamps=timestamps
+            )
+    for sess in _selected(discover.hermes_sessions(), project):
+        key = f"hermes:{sess['session_id']}"
+        rows = discover.hermes_messages(sess["session_id"], mark.get(key, {}).get("last_id", 0), 2**31 - 1, limits.max_record_bytes)
+        if not rows:
+            continue
+        turns = parse_hermes_rows(rows)
+        timestamps = [_timestamp(turn.get("ts")) for turn in turns]
+        _add_backlog_group(
+            groups, sess.get("route", discover.ROUTE_UNKNOWN), sess["head"], sessions=1, turns=len(turns), timestamps=timestamps
+        )
+    for mem in _selected(discover.all_memory_files(), project):
+        try:
+            stat = Path(mem["path"]).stat()
+        except OSError:
+            continue
+        previous = mark.get(mem["path"], {})
+        if previous.get("mtime") == stat.st_mtime and previous.get("size") == stat.st_size:
+            continue
+        _add_backlog_group(
+            groups,
+            mem.get("route", discover.ROUTE_UNKNOWN),
+            mem["head"],
+            memory=1,
+            timestamps=[_stat_timestamp(stat)],
+        )
+    result = []
+    for group in groups.values():
+        timestamps = sorted(group.pop("timestamps"))
+        group["oldest"] = timestamps[0] if timestamps else None
+        group["newest"] = timestamps[-1] if timestamps else None
+        result.append(group)
+    return {"project": selector(project), "groups": sorted(result, key=lambda group: (group["project"], group["head"]))}
 
 
 def render_markdown(batch):
@@ -430,7 +565,9 @@ def render_markdown(batch):
         return "# No new turns since the previous run.\n"
     lines = ["# Transcript batch for the curator", ""]
     for sess in sessions:
-        lines.extend([f"## {sess['head']} · {sess['cwd']} · session {sess['session_id'][:8]}", ""])
+        lines.extend(
+            [f"## {sess['head']} · {sess.get('route', discover.ROUTE_UNKNOWN)} · {sess['cwd']} · session {sess['session_id'][:8]}", ""]
+        )
         for turn in sess["turns"]:
             who = "**User**" if turn["role"] == "user" else "**Agent**"
             stamp = f" _{turn['ts']}_" if turn.get("ts") else ""
@@ -438,7 +575,9 @@ def render_markdown(batch):
     if memory:
         lines.extend(["# Personal memory of the heads (new or changed)", ""])
         for mem in memory:
-            lines.extend([f"## {mem['head']} · {mem['cwd']} · {Path(mem['path']).name}", "", mem["text"], ""])
+            lines.extend(
+                [f"## {mem['head']} · {mem.get('route', discover.ROUTE_UNKNOWN)} · {mem['cwd']} · {Path(mem['path']).name}", "", mem["text"], ""]
+            )
     if partial_sources:
         lines.extend(["## Source-local partial JSONL tails", ""])
         lines.extend(
