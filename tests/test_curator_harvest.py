@@ -435,8 +435,8 @@ class CuratorBaselineTests(unittest.TestCase):
             self.baseline()
         self.assertFalse(self.state.baseline_audit_file.exists())
 
-    def test_claude_control_tail_retains_safe_prefix_without_crossing_later_rows(self) -> None:
-        path = self.root / "claude-control-tail.jsonl"
+    def test_middle_claude_control_is_bracketed_only_by_a_later_safe_timestamp(self) -> None:
+        path = self.root / "claude-control-middle.jsonl"
         before = timestamped_claude("before control", "2024-01-01T00:00:00Z")
         control = json.dumps({"type": "mode", "mode": "default"}) + "\n"
         after_control = timestamped_claude("after control", "2024-01-01T00:01:00Z")
@@ -446,27 +446,59 @@ class CuratorBaselineTests(unittest.TestCase):
         with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[source]):
             result = self.baseline()
         self.assertEqual(result["affected_source_count"], 1)
-        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(before))
+        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(before + control + after_control))
         audit = [json.loads(line) for line in self.state.baseline_audit_file.read_text(encoding="utf-8").splitlines()][-1]
         affected = audit["affected_sources"][0]
-        self.assertEqual(affected["record_count"], 1)
-        self.assertEqual(affected["reason"], "complete-prefix-at-or-before-cutoff; missing-or-invalid-timestamp-tail-retained")
-        self.assertEqual(path.read_bytes()[affected["target"]["offset"]:], (control + after_control + post_cutoff).encode())
+        self.assertEqual(affected["record_count"], 2)
+        self.assertEqual(affected["reason"], "complete-prefix-at-or-before-cutoff; missing-or-invalid-timestamp-barrier-bracketed")
+        self.assertEqual(path.read_bytes()[affected["target"]["offset"]:], post_cutoff.encode())
 
-    def test_first_claude_control_record_is_audited_unselected_without_advancing_source(self) -> None:
-        path = self.root / "missing-timestamp.jsonl"
+    def test_leading_claude_control_is_bracketed_by_the_first_safe_timestamp(self) -> None:
+        path = self.root / "claude-control-leading.jsonl"
         control = json.dumps({"type": "last-prompt", "content": "resume"}) + "\n"
-        path.write_text(control + timestamped_claude("not reached", "2024-01-01T00:00:00Z"), encoding="utf-8")
+        safe = timestamped_claude("reached", "2024-01-01T00:00:00Z")
+        path.write_text(control + safe, encoding="utf-8")
         source = {"head": "claude", "path": str(path), "session_id": "a", "cwd": "/alpha", "route": "alpha"}
         with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[source]):
             result = self.baseline()
-        self.assertNotIn(str(path), self.state.load_watermark())
-        self.assertEqual(result["affected_source_count"], 0)
+        self.assertEqual(result["affected_source_count"], 1)
+        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(control + safe))
         audit = [json.loads(line) for line in self.state.baseline_audit_file.read_text(encoding="utf-8").splitlines()][-1]
-        self.assertEqual(audit["unselected_sources"][0]["reason"], "missing-or-invalid-timestamp")
+        self.assertEqual(
+            audit["affected_sources"][0]["reason"],
+            "complete-prefix-at-or-before-cutoff; missing-or-invalid-timestamp-barrier-bracketed",
+        )
 
-    def test_unparseable_tail_retains_an_earlier_safe_prefix(self) -> None:
-        path = self.root / "unparseable-tail.jsonl"
+    def test_trailing_control_retains_the_proved_prefix(self) -> None:
+        path = self.root / "claude-control-trailing.jsonl"
+        before = timestamped_claude("before control", "2024-01-01T00:00:00Z")
+        control = json.dumps({"type": "mode", "mode": "default"}) + "\n"
+        path.write_text(before + control, encoding="utf-8")
+        source = {"head": "claude", "path": str(path), "session_id": "a", "cwd": "/alpha", "route": "alpha"}
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[source]):
+            self.baseline()
+        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(before))
+        audit = [json.loads(line) for line in self.state.baseline_audit_file.read_text(encoding="utf-8").splitlines()][-1]
+        self.assertEqual(
+            audit["affected_sources"][0]["reason"],
+            "complete-prefix-at-or-before-cutoff; missing-or-invalid-timestamp-barrier-tail-retained",
+        )
+        self.assertEqual(path.read_bytes()[len(before):], control.encode())
+
+    def test_post_cutoff_timestamp_does_not_bracket_a_control_row(self) -> None:
+        path = self.root / "control-before-post-cutoff.jsonl"
+        before = timestamped_claude("before control", "2024-01-01T00:00:00Z")
+        control = json.dumps({"type": "mode", "mode": "default"}) + "\n"
+        post_cutoff = timestamped_claude("after cutoff", "2026-01-01T00:00:00Z")
+        path.write_text(before + control + post_cutoff, encoding="utf-8")
+        source = {"head": "claude", "path": str(path), "session_id": "a", "cwd": "/alpha", "route": "alpha"}
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[source]):
+            self.baseline()
+        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(before))
+        self.assertEqual(path.read_bytes()[len(before):], (control + post_cutoff).encode())
+
+    def test_unparseable_record_is_bracketed_by_a_later_safe_timestamp(self) -> None:
+        path = self.root / "unparseable-middle.jsonl"
         before = timestamped_codex("before malformed row", "2024-01-01T00:00:00Z")
         malformed = '{"timestamp":\n'
         after = timestamped_codex("after malformed row", "2024-01-01T00:01:00Z")
@@ -474,9 +506,42 @@ class CuratorBaselineTests(unittest.TestCase):
         source = {"head": "codex", "path": str(path), "session_id": "a", "cwd": "/alpha", "route": "alpha"}
         with mock.patch("triggered_agents.agents.curator.discover.codex_sessions", return_value=[source]):
             self.baseline()
-        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(before))
+        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(before + malformed + after))
         audit = [json.loads(line) for line in self.state.baseline_audit_file.read_text(encoding="utf-8").splitlines()][-1]
-        self.assertEqual(audit["affected_sources"][0]["reason"], "complete-prefix-at-or-before-cutoff; unparseable-record-tail-retained")
+        self.assertEqual(
+            audit["affected_sources"][0]["reason"],
+            "complete-prefix-at-or-before-cutoff; unparseable-record-barrier-bracketed",
+        )
+
+    def test_oversized_record_uses_the_same_bracketing_rule(self) -> None:
+        path = self.root / "oversized-middle.jsonl"
+        before = timestamped_codex("before oversized row", "2024-01-01T00:00:00Z")
+        oversized = ("x" * (self.limits.max_record_bytes + 1)) + "\n"
+        after = timestamped_codex("after oversized row", "2024-01-01T00:01:00Z")
+        post_cutoff = timestamped_codex("after cutoff", "2026-01-01T00:00:00Z")
+        path.write_text(before + oversized + after + post_cutoff, encoding="utf-8")
+        source = {"head": "codex", "path": str(path), "session_id": "a", "cwd": "/alpha", "route": "alpha"}
+        with mock.patch("triggered_agents.agents.curator.discover.codex_sessions", return_value=[source]):
+            self.baseline()
+        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(before + oversized + after))
+        audit = [json.loads(line) for line in self.state.baseline_audit_file.read_text(encoding="utf-8").splitlines()][-1]
+        self.assertEqual(
+            audit["affected_sources"][0]["reason"],
+            "complete-prefix-at-or-before-cutoff; oversized-record-barrier-bracketed",
+        )
+
+    def test_retry_from_the_prefix_before_a_barrier_can_settle_its_proved_bracket(self) -> None:
+        path = self.root / "retry-before-barrier.jsonl"
+        before = timestamped_claude("already retired", "2024-01-01T00:00:00Z")
+        control = json.dumps({"type": "mode", "mode": "default"}) + "\n"
+        after = timestamped_claude("brackets control", "2024-01-01T00:01:00Z")
+        path.write_text(before + control + after, encoding="utf-8")
+        stat = path.stat()
+        self.state.save_watermark({str(path): {"offset": len(before), "mtime": stat.st_mtime, "size": stat.st_size}})
+        source = {"head": "claude", "path": str(path), "session_id": "a", "cwd": "/alpha", "route": "alpha"}
+        with mock.patch("triggered_agents.agents.curator.discover.claude_sessions", return_value=[source]):
+            self.baseline()
+        self.assertEqual(self.state.load_watermark()[str(path)]["offset"], len(before + control + after))
 
     def test_baseline_legacy_lines_watermark_advances_to_exact_safe_offset(self) -> None:
         path = self.root / "legacy-lines.jsonl"

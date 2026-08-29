@@ -638,20 +638,11 @@ def _baseline_jsonl_source(source: dict, mark: dict, parser, cutoff: datetime, l
         if start is None:
             return _baseline_source_metadata(source, outcome="unselected", reason="no-unadvanced-records", base=base)
         last, records, incomplete_tail = None, 0, False
+        barriers, bracketed = [], []
 
-        def undecidable_tail(reason: str) -> dict:
-            """Keep a proved prefix, but never cross an undecidable JSONL record."""
-            if last is None:
-                return _baseline_source_metadata(source, outcome="unselected", reason=reason, base=base)
-            target = {"offset": last, "mtime": stat.st_mtime, "size": stat.st_size}
-            return _baseline_source_metadata(
-                source,
-                outcome="affected",
-                reason=f"complete-prefix-at-or-before-cutoff; {reason}-tail-retained",
-                base=base,
-                target=target,
-                records=records,
-            )
+        def barrier_note(reasons: list[str], suffix: str) -> str:
+            """Describe complete rows retained or crossed by the append-time proof."""
+            return f"{','.join(sorted(set(reasons)))}-barrier-{suffix}"
 
         with path.open("rb") as fh:
             fh.seek(start)
@@ -664,30 +655,53 @@ def _baseline_jsonl_source(source: dict, mark: dict, parser, cutoff: datetime, l
                         incomplete_tail = True
                         break
                     if oversized:
-                        return _baseline_source_metadata(source, outcome="unselected", reason="oversized-record", base=base)
+                        # A complete oversized row is an undecidable barrier, not a reason to
+                        # discard the preceding proved prefix.  A later at-or-before-cutoff
+                        # timestamp may prove it lies inside the same append-time bracket.
+                        barriers.append("oversized-record")
+                        continue
                     break
                 try:
                     row = json.loads(data)
                 except (TypeError, json.JSONDecodeError):
-                    return undecidable_tail("unparseable-record")
+                    barriers.append("unparseable-record")
+                    continue
                 timestamp = _baseline_timestamp(row.get("timestamp") if isinstance(row, dict) else None)
                 if timestamp is None:
-                    return undecidable_tail("missing-or-invalid-timestamp")
+                    barriers.append("missing-or-invalid-timestamp")
+                    continue
                 if timestamp > cutoff:
+                    # A later post-cutoff timestamp proves nothing about a preceding barrier.
                     break
                 # Reuse the normal parser only as a format guard.  Both emitted and non-emitting
                 # records receive the same timestamp proof and cursor treatment.
                 parser([data.decode("utf-8", errors="replace")])
+                if barriers:
+                    # JSONL source timestamps are append-ordered.  This second timestamp at or
+                    # before the cutoff brackets every complete barrier since `last`.
+                    bracketed.extend(barriers)
+                    barriers.clear()
                 last, records = end, records + 1
     except (OSError, ValueError):
         return _baseline_source_metadata(source, outcome="unselected", reason="unreadable-source", base=base)
     if last is None:
+        if barriers:
+            return _baseline_source_metadata(
+                source, outcome="unselected", reason=barrier_note(barriers, "tail-retained"), base=base
+            )
         return _baseline_source_metadata(source, outcome="unselected", reason="post-cutoff", base=base)
     target = {"offset": last, "mtime": stat.st_mtime, "size": stat.st_size}
+    notes = []
+    if bracketed:
+        notes.append(barrier_note(bracketed, "bracketed"))
+    if barriers:
+        notes.append(barrier_note(barriers, "tail-retained"))
+    if incomplete_tail:
+        notes.append("incomplete-tail-retained")
     return _baseline_source_metadata(
         source,
         outcome="affected",
-        reason="complete-prefix-at-or-before-cutoff; incomplete-tail-retained" if incomplete_tail else "at-or-before-cutoff",
+        reason="complete-prefix-at-or-before-cutoff; " + "; ".join(notes) if notes else "at-or-before-cutoff",
         base=base,
         target=target,
         records=records,

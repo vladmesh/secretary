@@ -1646,9 +1646,13 @@ python3 -P -m triggered_agents curator baseline \
 `baseline` rejects all-backlog, `unknown`, `global`, unregistered projects, blank actor/reason, ambiguous or future
 cutoffs before state changes. It uses the same canonical route boundary as harvest and moves only complete source
 cursors demonstrably at or before the cutoff. A later record, message or changed memory file remains for ordinary
-bounded harvest. An unreadable source, missing or invalid source timestamp, oversized record, partial source, or
-route that cannot be selected is never guessed: it is retained and recorded as unselected metadata. The command
-prints the versioned baseline identity and compact counts, not transcript or personal-memory text.
+bounded harvest. JSONL timestamps are append-ordered: a complete unparseable row, timestamp-less control row, or
+oversized row is a barrier. A later timestamp at or before the cutoff brackets that barrier and permits the cursor
+to cross it; a later post-cutoff timestamp does not. At EOF, an incomplete tail, or a post-cutoff timestamp before
+such proof, the command settles only the earlier proved prefix and records the barrier-tail-retained reason. With no
+proved prefix, that source is unselected with the same reason. An unreadable source, an invalid memory-file
+timestamp, or a route that cannot be selected is never guessed and remains unselected. The command prints the
+versioned baseline identity and compact counts, not transcript or personal-memory text.
 
 The durable audit is `$TA_STATE/curator/baseline-audit.jsonl` (or the curator state directory under the data root).
 Its append-only prepared and settled entries contain the identity, project, normalized cutoff, actor, reason,

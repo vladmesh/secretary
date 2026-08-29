@@ -1738,9 +1738,13 @@ moves only the source targets proved at or before the normalized cutoff and appe
 `baseline-audit.jsonl`. The identity is a hash of the version, canonical project, normalized cutoff and exact target
 cursors. Audit entries contain operator and cursor metadata, never transcript or memory text. A retry of the same
 request recovers its prepared record or returns the settled identity without advancing twice. A different request,
-changed base cursor, fact-bearing pending batch, invalid source timestamp, unreadable source, or unresolved prepared
-baseline fails closed; ordinary harvest and advance also refuse to cross a prepared baseline. The command is only a
-mechanism: a production invocation still requires an authorised per-project operational decision.
+changed base cursor, fact-bearing pending batch, unreadable source, or unresolved prepared baseline fails closed;
+ordinary harvest and advance also refuse to cross a prepared baseline. For append-ordered JSONL sources, complete
+unparseable, timestamp-less, and oversized rows are barriers: a following timestamp at or before the cutoff brackets
+and crosses them, while EOF, an incomplete tail, or a following post-cutoff timestamp settles only the preceding
+proved prefix and records a `*-barrier-tail-retained` audit reason. A source with no such prefix is unselected with
+that reason. The command is only a mechanism: a production invocation still requires an authorised per-project
+operational decision.
 
 ### Memory read identity
 
