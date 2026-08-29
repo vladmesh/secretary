@@ -638,6 +638,21 @@ def _baseline_jsonl_source(source: dict, mark: dict, parser, cutoff: datetime, l
         if start is None:
             return _baseline_source_metadata(source, outcome="unselected", reason="no-unadvanced-records", base=base)
         last, records, incomplete_tail = None, 0, False
+
+        def undecidable_tail(reason: str) -> dict:
+            """Keep a proved prefix, but never cross an undecidable JSONL record."""
+            if last is None:
+                return _baseline_source_metadata(source, outcome="unselected", reason=reason, base=base)
+            target = {"offset": last, "mtime": stat.st_mtime, "size": stat.st_size}
+            return _baseline_source_metadata(
+                source,
+                outcome="affected",
+                reason=f"complete-prefix-at-or-before-cutoff; {reason}-tail-retained",
+                base=base,
+                target=target,
+                records=records,
+            )
+
         with path.open("rb") as fh:
             fh.seek(start)
             while True:
@@ -654,10 +669,10 @@ def _baseline_jsonl_source(source: dict, mark: dict, parser, cutoff: datetime, l
                 try:
                     row = json.loads(data)
                 except (TypeError, json.JSONDecodeError):
-                    return _baseline_source_metadata(source, outcome="unselected", reason="unparseable-record", base=base)
+                    return undecidable_tail("unparseable-record")
                 timestamp = _baseline_timestamp(row.get("timestamp") if isinstance(row, dict) else None)
                 if timestamp is None:
-                    return _baseline_source_metadata(source, outcome="unselected", reason="missing-or-invalid-timestamp", base=base)
+                    return undecidable_tail("missing-or-invalid-timestamp")
                 if timestamp > cutoff:
                     break
                 # Reuse the normal parser only as a format guard.  Both emitted and non-emitting
